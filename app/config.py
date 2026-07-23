@@ -7,7 +7,7 @@ No Omada-specific settings here.
 
 # Server settings
 HOST = "0.0.0.0"
-PORT = 8080
+PORT = 8088
 
 # Debug mode
 DEBUG = False
