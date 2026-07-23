@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#0092CC">
-    <title>Zəfər Park - Wi-Fi</title>
+    <title>Zəfər Parkı - Wi-Fi</title>
     
     <!-- Inline favicon (SVG) -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%230092CC'/%3E%3Ctext x='50' y='65' font-size='50' font-weight='bold' text-anchor='middle' fill='white'%3EZ%3C/text%3E%3C/svg%3E">
@@ -20,7 +20,6 @@
             align-items: center; 
             justify-content: center; 
             padding: 16px; 
-            /* Фон: голубой сверху, красный в середине, зеленый снизу (цвета флага Азербайджана) */
             background: linear-gradient(180deg, #0092CC 0%, #E4002B 50%, #00B140 100%);
             position: relative; 
             overflow-x: hidden; 
@@ -29,11 +28,12 @@
         .portal-page { position: relative; z-index: 1; width: 100%; max-width: 440px; }
         
         .portal-card { 
-            background: rgba(255, 255, 255, 0.98); 
+            background: rgba(255, 255, 255, 0.90); 
             border-radius: 24px; 
             padding: 40px 32px; 
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); 
             text-align: center; 
+            backdrop-filter: blur(10px);
         }
         
         .portal-logo { margin-bottom: 24px; }
@@ -41,7 +41,14 @@
         
         .portal-title { font-size: 32px; font-weight: 700; color: #0092CC; margin-bottom: 8px; letter-spacing: -0.5px; }
         .portal-greeting { font-size: 20px; font-weight: 600; color: #00B140; margin-bottom: 16px; }
-        .portal-description { font-size: 16px; color: #333; line-height: 1.5; margin-bottom: 32px; }
+        .portal-description { 
+            font-size: 20px; 
+            font-weight: 600;
+            color: #0092CC; 
+            line-height: 1.5; 
+            margin-bottom: 32px;
+            text-shadow: 0 2px 4px rgba(0, 146, 204, 0.1);
+        }
         
         .portal-error { 
             display: none; 
@@ -91,6 +98,15 @@
         
         .portal-note { margin-top: 20px; font-size: 13px; color: #666; line-height: 1.4; }
         
+        .designer-credit {
+            margin-top: 24px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(0, 146, 204, 0.2);
+            font-size: 12px;
+            color: #888;
+            font-style: italic;
+        }
+        
         .lang-switcher { 
             position: fixed; 
             top: 16px; right: 16px; 
@@ -119,7 +135,8 @@
         @media (max-width: 360px) { 
             .portal-card { padding: 32px 24px; } 
             .portal-title { font-size: 28px; } 
-            .portal-greeting { font-size: 18px; } 
+            .portal-greeting { font-size: 18px; }
+            .portal-description { font-size: 18px; }
         }
         @media (min-width: 768px) { 
             .portal-card { padding: 48px 40px; } 
@@ -139,13 +156,24 @@
             <div class="portal-logo">
                 <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
                     <defs>
-                        <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#0092CC;stop-opacity:1" />
-                            <stop offset="100%" style="stop-color:#00B140;stop-opacity:1" />
-                        </linearGradient>
+                        <clipPath id="circleClip">
+                            <circle cx="50" cy="50" r="48"/>
+                        </clipPath>
                     </defs>
-                    <circle cx="50" cy="50" r="45" fill="url(#logoGradient)"/>
-                    <text x="50" y="68" font-size="52" font-weight="bold" text-anchor="middle" fill="white" font-family="Arial, sans-serif">Z</text>
+                    <g clip-path="url(#circleClip)">
+                        <!-- Флаг Азербайджана: голубой, красный, зеленый -->
+                        <rect x="0" y="0" width="100" height="33.33" fill="#0092CC"/>
+                        <rect x="0" y="33.33" width="100" height="33.34" fill="#E4002B"/>
+                        <rect x="0" y="66.67" width="100" height="33.33" fill="#00B140"/>
+                        <!-- Полумесяц -->
+                        <circle cx="45" cy="50" r="10" fill="white"/>
+                        <circle cx="47" cy="50" r="8" fill="#E4002B"/>
+                        <!-- Восьмиконечная звезда -->
+                        <g transform="translate(62, 50)">
+                            <path d="M0,-8 L1.5,-2.5 L7,-1 L2.5,2.5 L4,8 L0,5 L-4,8 L-2.5,2.5 L-7,-1 L-1.5,-2.5 Z" fill="white"/>
+                        </g>
+                    </g>
+                    <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="2"/>
                 </svg>
             </div>
 
@@ -172,23 +200,28 @@
             <p class="portal-note" data-i18n="note">
                 Düyməni sıxmaqla, siz şəbəkənin istifadə qaydalarını qəbul edirsiniz.
             </p>
+            
+            <div class="designer-credit">
+                Designer: Zaur Navi<br>
+                Country should know its heroes
+            </div>
         </section>
     </main>
 
     <script>
         const translations = {
             az: { 
-                title: 'Zəfər Park', greeting: 'Xoş gəlmisiniz!', description: 'Parkımızın qonaqları üçün pulsuz Wi-Fi.', 
+                title: 'Zəfər Parkı', greeting: 'Xoş gəlmisiniz!', description: 'Parkımızın qonaqları üçün pulsuz Wi-Fi.', 
                 button: 'Qoşul', buttonLoading: 'Qoşulur...', buttonReady: 'Qoşulmağa hazırdır',
                 note: 'Düyməni sıxmaqla, siz şəbəkənin istifadə qaydalarını qəbul edirsiniz.', error: 'Qoşulma alınmadı. Yenidən cəhd edin.' 
             },
             ru: { 
-                title: 'Zəfər Park', greeting: 'Добро пожаловать!', description: 'Бесплатный Wi-Fi для гостей парка.', 
+                title: 'Zəfər Parkı', greeting: 'Добро пожаловать!', description: 'Бесплатный Wi-Fi для гостей парка.', 
                 button: 'Подключиться', buttonLoading: 'Подключение...', buttonReady: 'Готово к подключению',
                 note: 'Нажимая кнопку, вы принимаете правила использования сети.', error: 'Не удалось подключиться. Попробуйте еще раз.' 
             },
             en: { 
-                title: 'Zəfər Park', greeting: 'Welcome!', description: 'Free Wi-Fi for park guests.', 
+                title: 'Zəfər Parkı', greeting: 'Welcome!', description: 'Free Wi-Fi for park guests.', 
                 button: 'Connect', buttonLoading: 'Connecting...', buttonReady: 'Ready to connect',
                 note: 'By clicking the button, you accept the network usage rules.', error: 'Connection failed. Please try again.' 
             }
@@ -197,7 +230,6 @@
         const langButtons = document.querySelectorAll('.lang-switcher button');
         let currentLang = localStorage.getItem('portalLang') || 'az';
         
-        // Логика таймера строго как в твоем коде: isRetry ? 3 : 13
         const isRetry = {{ 'true' if retry else 'false' }};
         let timeLeft = isRetry ? 3 : 13;
         let timerInterval = null;
