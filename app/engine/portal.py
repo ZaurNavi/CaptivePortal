@@ -60,13 +60,15 @@ class PortalEngine:
         
         # Делегирование вызова контроллеру
         # Engine не анализирует внутреннюю логику ответа, только возвращает Result
+        # Если контроллер вернул ошибку (например, CONTROLLER_OFFLINE), 
+        # она сохраняется без изменений.
         try:
             result = self._controller.authorize(site_id, client_mac)
             return result
         except Exception as e:
-            # Логирование ошибки и возврат стандартизированного результата
-            self._logger.error(f"Authorization failed: {str(e)}")
+            # Логирование критической ошибки выполнения (не бизнес-логики)
+            self._logger.error(f"Authorization failed due to unexpected error: {str(e)}")
             return Result.fail(
-                error="AUTHORIZATION_ERROR",
-                message=f"Failed to authorize client: {str(e)}"
+                error="ENGINE_INTERNAL_ERROR",
+                message=f"Unexpected error during authorization: {str(e)}"
             )
