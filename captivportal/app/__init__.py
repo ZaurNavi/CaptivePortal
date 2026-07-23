@@ -1,1 +1,0 @@
-# Captive Portal Application Package
