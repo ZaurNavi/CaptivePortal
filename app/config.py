@@ -13,7 +13,7 @@ PORT = 8088
 DEBUG = False
 
 # SSL verification
-VERIFY_SSL = True
+VERIFY_SSL = False
 
 # Logging level
 LOG_LEVEL = "INFO"
