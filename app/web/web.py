@@ -53,8 +53,13 @@ def create_app() -> Flask:
                 logger.info("No redirectUrl provided, showing success page")
                 return render_template("success.html")
         else:
+            else:
             logger.error(f"Authorization failed: {result.message}")
-            # Передаем error_message в шаблон, чтобы он отобразился
-            return render_template("portal.html", error_message=result.message), 400
+            # Передаем retry=True, чтобы шаблон знал — это повторная попытка
+            return render_template(
+                "portal.html",
+                error_message=result.message,
+                retry=True
+            ), 400
     
     return app
