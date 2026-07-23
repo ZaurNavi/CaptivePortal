@@ -69,7 +69,6 @@
             font-size: 18px; 
             font-weight: 600; 
             color: white; 
-            /* Серый фон по умолчанию, градиент растёт поверх через background-size */
             background-color: #ccc;
             background-image: linear-gradient(135deg, #0092CC 0%, #00B140 100%);
             background-size: var(--fill-progress, 0%) 100%;
@@ -86,7 +85,13 @@
         }
         .connect-button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 146, 204, 0.4); }
         .connect-button:active:not(:disabled) { transform: translateY(0); }
-        .connect-button:disabled { opacity: 1; cursor: not-allowed; box-shadow: none; transform: none; }
+        .connect-button:disabled { 
+            opacity: 0.6; 
+            cursor: not-allowed; 
+            box-shadow: none; 
+            transform: none; 
+            pointer-events: none;
+        }
         .connect-button.loading { 
             background-size: 100% 100% !important;
             background-image: linear-gradient(135deg, #666 0%, #888 100%) !important;
@@ -244,7 +249,7 @@
         
         const isRetry = {{ 'true' if retry else 'false' }};
         let timeLeft = isRetry ? 3 : 13;
-        const initialTime = timeLeft; // Запоминаем начальное время для расчёта прогресса
+        const initialTime = timeLeft;
         let timerInterval = null;
 
         function updateButtonText(seconds) {
@@ -257,7 +262,6 @@
         }
 
         function updateButtonFill() {
-            // Вычисляем процент заполнения: от 0% до 100%
             const progress = ((initialTime - timeLeft) / initialTime) * 100;
             document.getElementById('connect-button').style.setProperty('--fill-progress', progress + '%');
         }
@@ -301,7 +305,6 @@
                         clearInterval(timerInterval);
                         button.disabled = false;
                         button.textContent = translations[currentLang].buttonReady;
-                        // Заполняем кнопку полностью
                         button.style.setProperty('--fill-progress', '100%');
                         setTimeout(() => {
                             if (!button.classList.contains('loading')) {
@@ -323,7 +326,12 @@
         startTimer();
         setLanguage(currentLang);
 
-        document.getElementById('portal-form').addEventListener('submit', function() {
+        document.getElementById('portal-form').addEventListener('submit', function(e) {
+            // Дополнительная защита: если кнопка disabled, блокируем отправку
+            if (button.disabled) {
+                e.preventDefault();
+                return false;
+            }
             if (timerInterval) clearInterval(timerInterval);
             button.disabled = true;
             button.classList.add('loading');
