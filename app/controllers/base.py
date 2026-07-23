@@ -7,6 +7,7 @@ No implementation details here, only the public API.
 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
+from app.models import Result
 
 
 class ControllerInterface(ABC):
@@ -28,11 +29,11 @@ class ControllerInterface(ABC):
         pass
 
     @abstractmethod
-    def authorize(self, site_id: str, client_mac: str) -> bool:
+    def authorize(self, site_id: str, client_mac: str) -> Result:
         """Authorize a client on the specified site."""
         pass
 
     @abstractmethod
-    def unauthorize(self, site_id: str, client_mac: str) -> bool:
+    def unauthorize(self, site_id: str, client_mac: str) -> Result:
         """Unauthorize (revoke) a client on the specified site."""
         pass
