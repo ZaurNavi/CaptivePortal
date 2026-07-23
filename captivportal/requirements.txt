@@ -1,0 +1,2 @@
+# Captive Portal v1.0 Dependencies
+# No external dependencies required for v1.0
