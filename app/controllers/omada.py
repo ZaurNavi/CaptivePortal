@@ -49,20 +49,18 @@ class OmadaProvider(ControllerInterface):
                 return Result.ok(message=data.get("msg", "Success"), data={"token": token})
             else:
                 logger.warning("Token request failed")
-                return Result.fail(message=data.get("msg", "Unknown token error"))
+                return Result.fail(error="TOKEN_FAILED", message=data.get("msg", "Unknown token error"))
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP Error during token request: {str(e)}")
-            return Result.fail(message=f"HTTP Error: {str(e)}")
+            return Result.fail(error="HTTP_ERROR", message=f"HTTP Error: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error during token request: {str(e)}")
-            return Result.fail(message=f"Unexpected error: {str(e)}")
+            return Result.fail(error="UNEXPECTED_ERROR", message=f"Unexpected error: {str(e)}")
 
     def connect(self) -> None:
         """Establish connection to the Omada controller."""
         logger.info("Connecting to Omada controller...")
-        # В новой архитектуре подключение происходит динамически при каждом запросе,
-        # но метод оставляем для совместимости с интерфейсом.
         logger.info("Omada provider ready (dynamic token per request)")
 
     def get_sites(self) -> List[Dict[str, Any]]:
@@ -98,22 +96,17 @@ class OmadaProvider(ControllerInterface):
     def get_clients(self, site_id: str) -> List[Dict[str, Any]]:
         """Retrieve list of clients for a specific site."""
         logger.debug(f"Fetching clients for site {site_id} (stub)")
-        # Оставляем заглушку, так как в ТЗ v1.5 это не приоритет, 
-        # но контракт интерфейса требует наличия метода.
         return []
 
     def authorize(self, site_id: str, client_mac: str) -> Result:
         """Authorize a client on the specified site."""
         logger.info(f"Authorizing client {client_mac} on site {site_id}")
         
-        # 1. Получаем токен
         token_result = self._get_token()
         if not token_result.success:
-            return token_result  # Возвращаем Result.fail из _get_token
+            return token_result
         
         token = token_result.data.get("token")
-        
-        # 2. Вызываем endpoint авторизации
         url = f"{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id}/hotspot/clients/{client_mac}/auth"
         headers = {"Authorization": f"AccessToken={token}"}
         
@@ -127,14 +120,14 @@ class OmadaProvider(ControllerInterface):
             if data.get("errorCode") == 0:
                 return Result.ok(message=data.get("msg", "Success"))
             else:
-                return Result.fail(message=data.get("msg", "Unknown authorization error"))
+                return Result.fail(error="AUTH_FAILED", message=data.get("msg", "Unknown authorization error"))
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP Error during authorization: {str(e)}")
-            return Result.fail(message=f"HTTP Error: {str(e)}")
+            return Result.fail(error="HTTP_ERROR", message=f"HTTP Error: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error during authorization: {str(e)}")
-            return Result.fail(message=f"Unexpected error: {str(e)}")
+            return Result.fail(error="UNEXPECTED_ERROR", message=f"Unexpected error: {str(e)}")
 
     def unauthorize(self, site_id: str, client_mac: str) -> Result:
         """Unauthorize (revoke) a client on the specified site."""
@@ -145,7 +138,6 @@ class OmadaProvider(ControllerInterface):
             return token_result
         
         token = token_result.data.get("token")
-        
         url = f"{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id}/hotspot/clients/{client_mac}/auth"
         headers = {"Authorization": f"AccessToken={token}"}
         
@@ -159,11 +151,11 @@ class OmadaProvider(ControllerInterface):
             if data.get("errorCode") == 0:
                 return Result.ok(message=data.get("msg", "Success"))
             else:
-                return Result.fail(message=data.get("msg", "Unknown unauthorization error"))
+                return Result.fail(error="UNAUTH_FAILED", message=data.get("msg", "Unknown unauthorization error"))
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP Error during unauthorization: {str(e)}")
-            return Result.fail(message=f"HTTP Error: {str(e)}")
+            return Result.fail(error="HTTP_ERROR", message=f"HTTP Error: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error during unauthorization: {str(e)}")
-            return Result.fail(message=f"Unexpected error: {str(e)}")
+            return Result.fail(error="UNEXPECTED_ERROR", message=f"Unexpected error: {str(e)}")
