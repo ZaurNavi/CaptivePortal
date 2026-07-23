@@ -69,11 +69,16 @@
             font-size: 18px; 
             font-weight: 600; 
             color: white; 
-            background: linear-gradient(135deg, #0092CC 0%, #00B140 100%); 
+            /* Серый фон по умолчанию, градиент растёт поверх через background-size */
+            background-color: #ccc;
+            background-image: linear-gradient(135deg, #0092CC 0%, #00B140 100%);
+            background-size: var(--fill-progress, 0%) 100%;
+            background-repeat: no-repeat;
+            background-position: left center;
             border: none; 
             border-radius: 12px; 
             cursor: pointer; 
-            transition: all 0.3s ease; 
+            transition: background-size 1s linear, transform 0.3s ease, box-shadow 0.3s ease;
             box-shadow: 0 4px 15px rgba(0, 146, 204, 0.3); 
             min-height: 56px; 
             position: relative; 
@@ -81,8 +86,11 @@
         }
         .connect-button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 146, 204, 0.4); }
         .connect-button:active:not(:disabled) { transform: translateY(0); }
-        .connect-button:disabled { opacity: 0.6; cursor: not-allowed; background: #ccc; box-shadow: none; transform: none; }
-        .connect-button.loading { background: linear-gradient(135deg, #666 0%, #888 100%); }
+        .connect-button:disabled { opacity: 1; cursor: not-allowed; box-shadow: none; transform: none; }
+        .connect-button.loading { 
+            background-size: 100% 100% !important;
+            background-image: linear-gradient(135deg, #666 0%, #888 100%) !important;
+        }
         .connect-button.loading::after { 
             content: ''; 
             position: absolute; 
@@ -167,11 +175,11 @@
                         <rect x="0" y="33.33" width="100" height="33.34" fill="#E4002B"/>
                         <rect x="0" y="66.67" width="100" height="33.33" fill="#00B140"/>
                         
-                        <!-- Полумесяц (возвращен к предыдущему варианту - открытый серп) -->
+                        <!-- Полумесяц -->
                         <circle cx="42" cy="50" r="15" fill="white"/>
                         <circle cx="45" cy="50" r="12" fill="#E4002B"/>
                         
-                        <!-- Восьмиконечная звезда (оставлена как есть) -->
+                        <!-- Восьмиконечная звезда (два повернутых квадрата) -->
                         <g transform="translate(58, 50)">
                             <rect x="-5" y="-5" width="10" height="10" fill="white" />
                             <rect x="-5" y="-5" width="10" height="10" fill="white" transform="rotate(45)" />
@@ -236,15 +244,22 @@
         
         const isRetry = {{ 'true' if retry else 'false' }};
         let timeLeft = isRetry ? 3 : 13;
+        const initialTime = timeLeft; // Запоминаем начальное время для расчёта прогресса
         let timerInterval = null;
 
         function updateButtonText(seconds) {
             const texts = {
-                az: `Şəbəkə hazırlanır... (${seconds})`,
-                ru: `Подготовка сети... (${seconds})`,
-                en: `Preparing network... (${seconds})`
+                az: `Qoşulma hazırlanır... ${seconds}`,
+                ru: `Подготовка подключения... ${seconds}`,
+                en: `Preparing connection... ${seconds}`
             };
             document.getElementById('connect-button').textContent = texts[currentLang];
+        }
+
+        function updateButtonFill() {
+            // Вычисляем процент заполнения: от 0% до 100%
+            const progress = ((initialTime - timeLeft) / initialTime) * 100;
+            document.getElementById('connect-button').style.setProperty('--fill-progress', progress + '%');
         }
 
         function setLanguage(lang) {
@@ -279,12 +294,15 @@
         function startTimer() {
             if (timeLeft > 0) {
                 updateButtonText(timeLeft);
+                updateButtonFill();
                 timerInterval = setInterval(() => {
                     timeLeft--;
                     if (timeLeft <= 0) {
                         clearInterval(timerInterval);
                         button.disabled = false;
                         button.textContent = translations[currentLang].buttonReady;
+                        // Заполняем кнопку полностью
+                        button.style.setProperty('--fill-progress', '100%');
                         setTimeout(() => {
                             if (!button.classList.contains('loading')) {
                                 button.textContent = translations[currentLang].button;
@@ -292,11 +310,13 @@
                         }, 2000);
                     } else {
                         updateButtonText(timeLeft);
+                        updateButtonFill();
                     }
                 }, 1000);
             } else {
                 button.disabled = false;
                 button.textContent = translations[currentLang].button;
+                button.style.setProperty('--fill-progress', '100%');
             }
         }
 
