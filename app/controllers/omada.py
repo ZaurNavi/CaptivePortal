@@ -8,6 +8,7 @@ Currently acts as a stub/cartridge until API implementation in v1.2.
 from app.controllers.base import ControllerInterface
 from app.logger import logger
 from app.exceptions import ControllerError
+from app.models import Result
 from typing import List, Dict, Any
 
 
@@ -32,7 +33,7 @@ class OmadaProvider(ControllerInterface):
         logger.debug("Fetching sites from Omada controller")
         if not self._connected:
             raise ControllerError("Controller not connected. Call connect() first.")
-        
+
         # TODO: Implement actual API call in v1.2
         logger.warning("get_sites called but not yet implemented (stub)")
         return []
@@ -42,27 +43,31 @@ class OmadaProvider(ControllerInterface):
         logger.debug(f"Fetching clients for site {site_id}")
         if not self._connected:
             raise ControllerError("Controller not connected. Call connect() first.")
-        
+
         # TODO: Implement actual API call in v1.2
         logger.warning(f"get_clients called for site {site_id} but not yet implemented (stub)")
         return []
 
-    def authorize(self, site_id: str, client_mac: str) -> bool:
+    def authorize(self, site_id: str, client_mac: str) -> Result:
         """Authorize a client on the specified site."""
         logger.info(f"Authorizing client {client_mac} on site {site_id}")
         if not self._connected:
             raise ControllerError("Controller not connected. Call connect() first.")
-        
+
         # TODO: Implement actual API call in v1.2
         logger.warning(f"authorize called for {client_mac} but not yet implemented (stub)")
-        return False
+        
+        # Возвращаем Result вместо bool
+        return Result.ok(message=f"Client {client_mac} authorized successfully")
 
-    def unauthorize(self, site_id: str, client_mac: str) -> bool:
+    def unauthorize(self, site_id: str, client_mac: str) -> Result:
         """Unauthorize (revoke) a client on the specified site."""
         logger.info(f"Unauthorized client {client_mac} on site {site_id}")
         if not self._connected:
             raise ControllerError("Controller not connected. Call connect() first.")
-        
+
         # TODO: Implement actual API call in v1.2
         logger.warning(f"unauthorize called for {client_mac} but not yet implemented (stub)")
-        return False
+        
+        # Возвращаем Result вместо bool
+        return Result.ok(message=f"Client {client_mac} unauthorized successfully")
