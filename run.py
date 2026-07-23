@@ -9,6 +9,7 @@ No other module should be run standalone.
 from app import logger, get_settings, create_controller
 from app.models import Result
 from app.engine import PortalEngine
+from app.web import create_app
 
 
 def main():
@@ -58,6 +59,11 @@ def main():
     logger.info(f"Validation result: {invalid_result.to_dict()}")
     
     logger.info("Platform ready")
+    
+    # Start web application
+    logger.info("Starting web server...")
+    app = create_app()
+    app.run(host="0.0.0.0", port=5000, debug=False)
 
 
 if __name__ == "__main__":
