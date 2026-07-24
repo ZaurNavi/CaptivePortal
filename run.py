@@ -6,66 +6,95 @@ This is the only file that should be executed directly.
 No other module should be run standalone.
 """
 
+import atexit
 import signal
 import sys
-import atexit
+import threading
 
 from app import logger, get_settings
 from app.web.web import create_app, auth_executor
 
 
-def shutdown_handler():
+_shutdown_lock = threading.Lock()
+_shutdown_completed = False
+
+
+def shutdown_handler() -> None:
     """
     Gracefully shut down background workers.
-    wait=True: позволяет текущим задачам авторизации завершиться.
-    cancel_futures=False: не отменяет задачи, которые уже начали выполняться.
+
+    The handler is idempotent: repeated calls from signal handlers,
+    finally blocks and atexit do not stop the executor more than once.
     """
+    global _shutdown_completed
+
+    with _shutdown_lock:
+        if _shutdown_completed:
+            return
+
+        _shutdown_completed = True
+
     logger.info("Shutting down authentication worker executor...")
-    auth_executor.shutdown(wait=True, cancel_futures=False)
-    logger.info("Authentication worker executor stopped successfully.")
+
+    try:
+        auth_executor.shutdown(
+            wait=True,
+            cancel_futures=False
+        )
+        logger.info(
+            "Authentication worker executor stopped successfully."
+        )
+    except Exception:
+        logger.exception(
+            "Unexpected error while shutting down authentication executor."
+        )
 
 
-def signal_handler(signum, frame):
+def signal_handler(signum, frame) -> None:
     """
-    Обработчик сигналов операционной системы (SIGINT / SIGTERM).
-    Гарантирует вызов shutdown_handler при завершении процесса.
+    Handle operating-system termination signals.
     """
-    logger.info(f"Received signal {signum}. Initiating graceful shutdown...")
+    logger.info(
+        f"Received signal {signum}. Initiating graceful shutdown..."
+    )
+
     shutdown_handler()
-    sys.exit(0)
+    raise SystemExit(0)
 
 
-def main():
+def main() -> None:
     """Main application entry point."""
     logger.info("Starting Captive Portal")
 
-    # 1. Регистрируем обработчики корректного завершения
     atexit.register(shutdown_handler)
-    signal.signal(signal.SIGINT, signal_handler)   # Перехват Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # Перехват kill / systemctl stop
 
-    # 2. Load configuration
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     settings = get_settings()
     logger.info("Configuration loaded")
 
-    # 3. Create Flask application
     app = create_app()
     logger.info("Web application created")
 
-    # 4. Run Flask server
-    logger.info(f"Starting server on {settings['host']}:{settings['port']}")
-    
+    host = settings["host"]
+    port = settings["port"]
+    debug = settings["debug"]
+
+    logger.info(
+        f"Starting server on {host}:{port}; debug={debug}"
+    )
+
     try:
         app.run(
-            host=settings["host"],
-            port=settings["port"],
-            debug=settings["debug"]
+            host=host,
+            port=port,
+            debug=debug,
+            use_reloader=False
         )
     except KeyboardInterrupt:
-        # Дополнительная страховка для режима отладки Flask
         logger.info("KeyboardInterrupt caught in main loop.")
     finally:
-        # Гарантированный вызов очистки при любом выходе из app.run()
         shutdown_handler()
 
 
