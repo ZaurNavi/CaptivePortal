@@ -1,8 +1,5 @@
 """
 Base Controller Interface.
-
-Defines the contract for all controller providers.
-No implementation details here, only the public API.
 """
 
 from abc import ABC, abstractmethod
@@ -36,4 +33,9 @@ class ControllerInterface(ABC):
     @abstractmethod
     def unauthorize(self, site_id: str, client_mac: str) -> Result:
         """Unauthorize (revoke) a client on the specified site."""
+        pass
+
+    @abstractmethod
+    def get_client(self, site_id: str, client_mac: str) -> Result:
+        """Get status of a specific client (for authStatus verification)."""
         pass
