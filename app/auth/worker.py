@@ -10,10 +10,10 @@ from .manager import AuthSessionManager
 from .session import AuthSession, AuthStatus
 
 
-INITIAL_AUTH_DELAY_SECONDS = 30.0
+INITIAL_AUTH_DELAY_SECONDS = 13.0
 MAX_AUTH_ATTEMPTS = 3
 VERIFY_DELAY_SECONDS = 3.0
-SLEEP_CHECK_INTERVAL_SECONDS = 0.25
+SLEEP_CHECK_INTERVAL_SECONDS = 2
 
 
 logger = logging.getLogger("captiveportal.auth")
