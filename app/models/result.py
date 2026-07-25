@@ -9,7 +9,7 @@ All modules must exchange results through this object to maintain consistency.
 class Result:
     """
     Unified result object for platform components.
-    
+
     This is a behavior object, not just a data container.
     It encapsulates the result of an operation with success status,
     message, optional data, and optional error information.
@@ -24,7 +24,7 @@ class Result:
     ):
         """
         Initialize a Result object.
-        
+
         Args:
             success: Whether the operation was successful.
             message: Human-readable message describing the result.
@@ -37,40 +37,59 @@ class Result:
         self.error = error
 
     @classmethod
-    def ok(cls, message: str = "", data: dict | None = None) -> "Result":
+    def ok(
+        cls,
+        message: str = "",
+        data: dict | None = None,
+    ) -> "Result":
         """
         Create a successful result.
-        
+
         Args:
             message: Human-readable success message.
             data: Optional dictionary with result data.
-            
+
         Returns:
             A Result instance with success=True.
         """
-        return cls(success=True, message=message, data=data)
+        return cls(
+            success=True,
+            message=message,
+            data=data,
+        )
 
     @classmethod
-    def fail(cls, error: str, message: str = "") -> "Result":
+    def fail(
+        cls,
+        error: str,
+        message: str = "",
+        data: dict | None = None,
+    ) -> "Result":
         """
         Create a failed result.
-        
+
         Args:
             error: Error code or identifier.
             message: Human-readable error message.
-            
+            data: Optional diagnostic data associated with the failure.
+
         Returns:
             A Result instance with success=False.
         """
-        return cls(success=False, message=message, error=error)
+        return cls(
+            success=False,
+            message=message,
+            data=data,
+            error=error,
+        )
 
     def to_dict(self) -> dict:
         """
         Serialize the result to a dictionary.
-        
+
         Always returns a dictionary with all four fields:
         success, message, data, error.
-        
+
         Returns:
             A dictionary representation of the result.
         """
