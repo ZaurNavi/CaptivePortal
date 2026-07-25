@@ -13,10 +13,11 @@ from .session import AuthSession, AuthStatus
 # Минимальная пауза после открытия Portal.
 MIN_INITIAL_DELAY_SECONDS = 5.0
 
-# Максимальное время от открытия Portal до готовности клиента в Omada.
-CLIENT_READY_TIMEOUT_SECONDS = 30.0
+# Если active=true не появился, разрешаем первую /auth
+# после этого времени с момента открытия Portal.
+AUTH_FALLBACK_DELAY_SECONDS = 13.0
 
-# Интервал проверки active/authStatus во время ожидания готовности.
+# Интервал проверки active/authStatus во время адаптивного ожидания.
 CLIENT_READY_POLL_SECONDS = 2.0
 
 MAX_AUTH_ATTEMPTS = 3
@@ -110,7 +111,9 @@ class AuthWorker:
 
         WAITING
         → минимальная стартовая пауза
-        → ожидание active=true в Omada
+        → адаптивное ожидание active=true
+        → принудительный старт /auth на 13-й секунде,
+          если active=true так и не появился
         → до трёх authorize/verify
         → final verify
         → unauthorize только после полного провала авторизации.
@@ -170,9 +173,10 @@ class AuthWorker:
                 session,
             )
 
-            # После минимальной паузы не отправляем /auth вслепую.
-            # Спрашиваем Omada каждые CLIENT_READY_POLL_SECONDS,
-            # пока клиент не станет active=true.
+            # active=true ускоряет начало авторизации.
+            # Но это поле не является обязательным условием:
+            # если оно не появилось, на 13-й секунде всё равно
+            # разрешаем первую /auth.
             ready_state, ready_result = self._wait_for_client_ready(
                 session
             )
@@ -194,26 +198,13 @@ class AuthWorker:
                 )
                 return
 
-            if ready_state != "ready":
-                self._session_manager.update_status(
-                    session,
-                    AuthStatus.FAILED,
-                    error=(
-                        "Client did not become active in Omada "
-                        f"within {CLIENT_READY_TIMEOUT_SECONDS:.0f} seconds."
-                    ),
-                    progress=100,
+            if ready_state not in {"ready", "fallback"}:
+                raise RuntimeError(
+                    f"Unexpected client readiness state: {ready_state}"
                 )
 
-                log_auth_event(
-                    "CLIENT_READY_TIMEOUT",
-                    session,
-                    level=logging.ERROR,
-                    timeout_seconds=CLIENT_READY_TIMEOUT_SECONDS,
-                )
-                return
-
-            # Клиент уже active=true. Только теперь разрешаем /auth.
+            # Разрешаем /auth либо сразу после active=true,
+            # либо по резервному таймеру на 13-й секунде.
             for attempt in range(
                 1,
                 MAX_AUTH_ATTEMPTS + 1,
@@ -520,30 +511,36 @@ class AuthWorker:
         session: AuthSession,
     ) -> tuple[str, Optional[Result]]:
         """
-        Ждёт, пока Omada начнёт возвращать active=true.
+        Адаптивно ожидает готовность клиента.
+
+        active=true используется как ускоритель, но не как
+        обязательное условие. Если active=true не появился,
+        после AUTH_FALLBACK_DELAY_SECONDS с момента открытия
+        Portal всё равно разрешается первая команда /auth.
 
         Возвращает:
-            ("ready", result)       — клиент готов к /auth;
+            ("ready", result)       — active=true, можно /auth;
             ("authorized", result)  — клиент уже authStatus=2;
-            ("timeout", result)     — клиент не стал active=true;
+            ("fallback", result)    — наступила 13-я секунда,
+                                      /auth разрешён без active=true;
             ("expired", result)     — истёк TTL AuthSession.
         """
 
-        remaining_timeout = max(
+        adaptive_wait_seconds = max(
             0.0,
-            CLIENT_READY_TIMEOUT_SECONDS
+            AUTH_FALLBACK_DELAY_SECONDS
             - MIN_INITIAL_DELAY_SECONDS,
         )
 
         started = time.monotonic()
-        deadline = started + remaining_timeout
+        deadline = started + adaptive_wait_seconds
         check_number = 0
         last_result: Optional[Result] = None
 
         log_auth_event(
             "CLIENT_READY_WAIT_STARTED",
             session,
-            timeout_seconds=CLIENT_READY_TIMEOUT_SECONDS,
+            fallback_after_seconds=AUTH_FALLBACK_DELAY_SECONDS,
             poll_seconds=CLIENT_READY_POLL_SECONDS,
         )
 
@@ -573,6 +570,14 @@ class AuthWorker:
                 auth_status,
             )
 
+            elapsed_after_minimum = (
+                time.monotonic() - started
+            )
+            total_waited = (
+                MIN_INITIAL_DELAY_SECONDS
+                + elapsed_after_minimum
+            )
+
             if auth_status == 2:
                 log_auth_event(
                     "CLIENT_ALREADY_AUTHORIZED_DURING_WAIT",
@@ -580,6 +585,7 @@ class AuthWorker:
                     auth_status=auth_status,
                     active=active,
                     check_number=check_number,
+                    waited_seconds=round(total_waited, 2),
                 )
                 return "authorized", result
 
@@ -595,21 +601,43 @@ class AuthWorker:
                     auth_status=auth_status,
                     active=active,
                     check_number=check_number,
-                    waited_seconds=round(
-                        MIN_INITIAL_DELAY_SECONDS
-                        + (time.monotonic() - started),
-                        2,
-                    ),
+                    waited_seconds=round(total_waited, 2),
                 )
                 return "ready", result
 
             now = time.monotonic()
-            elapsed = now - started
 
-            if remaining_timeout > 0:
+            # Поле active иногда остаётся false даже у клиента,
+            # который уже открыл Portal. Поэтому после 13 секунд
+            # не блокируем авторизацию и запускаем обычный цикл /auth.
+            if now >= deadline:
+                self._session_manager.set_progress(
+                    session.session_id,
+                    50,
+                )
+
+                log_auth_event(
+                    "AUTH_FALLBACK_TRIGGERED",
+                    session,
+                    level=logging.WARNING,
+                    auth_status=auth_status,
+                    active=active,
+                    check_number=check_number,
+                    waited_seconds=round(total_waited, 2),
+                    fallback_after_seconds=(
+                        AUTH_FALLBACK_DELAY_SECONDS
+                    ),
+                )
+                return "fallback", result
+
+            if adaptive_wait_seconds > 0:
                 ratio = min(
                     1.0,
-                    max(0.0, elapsed / remaining_timeout),
+                    max(
+                        0.0,
+                        elapsed_after_minimum
+                        / adaptive_wait_seconds,
+                    ),
                 )
                 progress = round(10 + (40 * ratio))
                 self._session_manager.set_progress(
@@ -624,10 +652,11 @@ class AuthWorker:
                 auth_status=auth_status,
                 active=active,
                 check_number=check_number,
+                waited_seconds=round(total_waited, 2),
+                fallback_after_seconds=(
+                    AUTH_FALLBACK_DELAY_SECONDS
+                ),
             )
-
-            if now >= deadline:
-                return "timeout", last_result
 
             sleep_seconds = min(
                 CLIENT_READY_POLL_SECONDS,
