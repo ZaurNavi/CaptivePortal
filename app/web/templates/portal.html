@@ -2,222 +2,511 @@
 <html lang="az">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover"
+    >
     <meta name="theme-color" content="#0092CC">
+
     <title>Zəfər Parkı - Wi-Fi</title>
-    
-    <!-- Inline favicon (SVG) -->
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%230092CC'/%3E%3Ctext x='50' y='65' font-size='50' font-weight='bold' text-anchor='middle' fill='white'%3EZ%3C/text%3E%3C/svg%3E">
-    
+
+    <link
+        rel="icon"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'
+        viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45'
+        fill='%230092CC'/%3E%3Ctext x='50' y='65' font-size='50'
+        font-weight='bold' text-anchor='middle' fill='white'%3EZ%3C/text%3E%3C/svg%3E"
+    >
+
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; 
-            min-height: 100vh; 
-            min-height: 100dvh; 
-            display: flex; 
-            align-items: center; 
-            justify-content: center; 
-            padding: 16px; 
-            background: linear-gradient(180deg, #0092CC 0%, #E4002B 50%, #00B140 100%);
-            position: relative; 
-            overflow-x: hidden; 
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        
-        .portal-page { position: relative; z-index: 1; width: 100%; max-width: 440px; }
-        
-        .portal-card { 
-            background: rgba(255, 255, 255, 0.90); 
-            border-radius: 24px; 
-            padding: 40px 32px; 
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); 
-            text-align: center; 
+
+        body {
+            font-family:
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                Roboto,
+                Arial,
+                sans-serif;
+
+            min-height: 100vh;
+            min-height: 100dvh;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            padding: 16px;
+
+            background:
+                linear-gradient(
+                    180deg,
+                    #0092CC 0%,
+                    #E4002B 50%,
+                    #00B140 100%
+                );
+
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        .portal-page {
+            position: relative;
+            z-index: 1;
+            width: 100%;
+            max-width: 440px;
+        }
+
+        .portal-card {
+            background: rgba(255, 255, 255, 0.90);
+            border-radius: 24px;
+            padding: 40px 32px;
+
+            box-shadow:
+                0 20px 60px rgba(0, 0, 0, 0.3);
+
+            text-align: center;
             backdrop-filter: blur(10px);
         }
-        
-        .portal-logo { margin-bottom: 24px; }
-        .portal-logo svg { width: 100px; height: 100px; }
-        
-        .portal-title { font-size: 32px; font-weight: 700; color: #0092CC; margin-bottom: 8px; letter-spacing: -0.5px; }
-        .portal-greeting { font-size: 20px; font-weight: 600; color: #00B140; margin-bottom: 16px; }
-        .portal-description { 
-            font-size: 20px; 
+
+        .portal-logo {
+            margin-bottom: 24px;
+        }
+
+        .portal-logo svg {
+            width: 100px;
+            height: 100px;
+        }
+
+        .portal-title {
+            font-size: 32px;
+            font-weight: 700;
+            color: #0092CC;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+
+        .portal-greeting {
+            font-size: 20px;
             font-weight: 600;
-            color: #0092CC; 
-            line-height: 1.5; 
-            margin-bottom: 32px;
-            text-shadow: 0 2px 4px rgba(0, 146, 204, 0.1);
+            color: #00B140;
+            margin-bottom: 16px;
         }
-        
-        .portal-error { 
-            display: none; 
-            background: #fee; 
-            border: 1px solid #fcc; 
-            color: #c33; 
-            padding: 12px 16px; 
-            border-radius: 8px; 
-            margin-bottom: 20px; 
-            font-size: 14px; 
-            text-align: left; 
+
+        .portal-description {
+            font-size: 20px;
+            font-weight: 600;
+            color: #0092CC;
+            line-height: 1.5;
+            margin-bottom: 30px;
+
+            text-shadow:
+                0 2px 4px rgba(0, 146, 204, 0.1);
         }
-        .portal-error.show { display: block; }
-        
-        .connect-button { 
-            width: 100%; 
-            padding: 18px 32px; 
-            font-size: 18px; 
-            font-weight: 600; 
-            color: white; 
-            background-color: #ccc;
-            background-image: linear-gradient(135deg, #0092CC 0%, #00B140 100%);
-            background-size: var(--fill-progress, 0%) 100%;
-            background-repeat: no-repeat;
-            background-position: left center;
-            border: none; 
-            border-radius: 12px; 
-            cursor: pointer; 
-            transition: background-size 1s linear, transform 0.3s ease, box-shadow 0.3s ease;
-            box-shadow: 0 4px 15px rgba(0, 146, 204, 0.3); 
-            min-height: 56px; 
-            position: relative; 
-            overflow: hidden; 
+
+        .portal-error {
+            display: none;
+
+            background: #fff0f0;
+            border: 1px solid #f4b7b7;
+            color: #b3261e;
+
+            padding: 12px 16px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+
+            font-size: 14px;
+            line-height: 1.45;
+            text-align: left;
         }
-        .connect-button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 146, 204, 0.4); }
-        .connect-button:active:not(:disabled) { transform: translateY(0); }
-        .connect-button:disabled { 
-            opacity: 0.6; 
-            cursor: not-allowed; 
-            box-shadow: none; 
-            transform: none; 
+
+        .portal-error.show {
+            display: block;
+        }
+
+        .connection-panel {
+            width: 100%;
+        }
+
+        .connection-status {
+            font-size: 17px;
+            font-weight: 700;
+            color: #444;
+
+            min-height: 26px;
+            margin-bottom: 14px;
+        }
+
+        .progress-shell {
+            width: 100%;
+            height: 58px;
+
+            border-radius: 14px;
+            overflow: hidden;
+
+            background: #d7d7d7;
+            box-shadow:
+                0 4px 15px rgba(0, 146, 204, 0.25);
+
+            position: relative;
+        }
+
+        .progress-bar {
+            position: absolute;
+            inset: 0 auto 0 0;
+
+            width: 0%;
+            min-width: 0;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    #0092CC 0%,
+                    #00B140 100%
+                );
+
+            transition:
+                width 0.55s ease,
+                background 0.3s ease;
+        }
+
+        .progress-bar.success {
+            background:
+                linear-gradient(
+                    135deg,
+                    #00A63E 0%,
+                    #00B140 100%
+                );
+        }
+
+        .progress-bar.failed {
+            background:
+                linear-gradient(
+                    135deg,
+                    #c62828 0%,
+                    #E4002B 100%
+                );
+        }
+
+        .progress-bar.reset {
+            background:
+                linear-gradient(
+                    135deg,
+                    #d97706 0%,
+                    #f59e0b 100%
+                );
+        }
+
+        .progress-content {
+            position: absolute;
+            inset: 0;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            color: white;
+            font-size: 18px;
+            font-weight: 700;
+
+            text-shadow:
+                0 1px 3px rgba(0, 0, 0, 0.35);
+
             pointer-events: none;
         }
-        .connect-button.loading { 
-            background-size: 100% 100% !important;
-            background-image: linear-gradient(135deg, #666 0%, #888 100%) !important;
+
+        .progress-spinner {
+            width: 20px;
+            height: 20px;
+
+            margin-right: 10px;
+
+            border: 3px solid rgba(255, 255, 255, 0.35);
+            border-top-color: white;
+            border-radius: 50%;
+
+            animation: spin 0.85s linear infinite;
         }
-        .connect-button.loading::after { 
-            content: ''; 
-            position: absolute; 
-            top: 50%; left: 50%; 
-            width: 20px; height: 20px; 
-            margin: -10px 0 0 -10px; 
-            border: 3px solid rgba(255, 255, 255, 0.3); 
-            border-top-color: white; 
-            border-radius: 50%; 
-            animation: spin 0.8s linear infinite; 
+
+        .progress-spinner.hidden {
+            display: none;
         }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        
-        .portal-note { margin-top: 20px; font-size: 13px; color: #666; line-height: 1.4; }
-        
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .portal-note {
+            margin-top: 20px;
+
+            font-size: 13px;
+            color: #666;
+            line-height: 1.45;
+
+            min-height: 38px;
+        }
+
         .designer-credit {
             margin-top: 24px;
             padding-top: 16px;
-            border-top: 1px solid rgba(0, 146, 204, 0.2);
+
+            border-top:
+                1px solid rgba(0, 146, 204, 0.2);
+
             font-size: 12px;
             color: #888;
             font-style: italic;
         }
-        
-        .lang-switcher { 
-            position: fixed; 
-            top: 16px; right: 16px; 
-            display: flex; 
-            gap: 8px; 
-            background: rgba(255, 255, 255, 0.95); 
-            padding: 6px; 
-            border-radius: 20px; 
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1); 
-            z-index: 100; 
+
+        .lang-switcher {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+
+            display: flex;
+            gap: 8px;
+
+            background: rgba(255, 255, 255, 0.95);
+            padding: 6px;
+
+            border-radius: 20px;
+            box-shadow:
+                0 2px 10px rgba(0, 0, 0, 0.1);
+
+            z-index: 100;
         }
-        .lang-switcher button { 
-            padding: 6px 12px; 
-            font-size: 13px; 
-            font-weight: 600; 
-            color: #666; 
-            background: transparent; 
-            border: none; 
-            border-radius: 14px; 
-            cursor: pointer; 
-            transition: all 0.2s ease; 
+
+        .lang-switcher button {
+            padding: 6px 12px;
+
+            font-size: 13px;
+            font-weight: 600;
+            color: #666;
+
+            background: transparent;
+            border: none;
+            border-radius: 14px;
+
+            cursor: pointer;
+
+            transition:
+                background 0.2s ease,
+                color 0.2s ease;
         }
-        .lang-switcher button.active { background: #0092CC; color: white; }
-        .lang-switcher button:hover:not(.active) { background: rgba(0, 146, 204, 0.1); }
-        
-        @media (max-width: 360px) { 
-            .portal-card { padding: 32px 24px; } 
-            .portal-title { font-size: 28px; } 
-            .portal-greeting { font-size: 18px; }
-            .portal-description { font-size: 18px; }
-            .portal-logo svg { width: 90px; height: 90px; }
+
+        .lang-switcher button.active {
+            background: #0092CC;
+            color: white;
         }
-        @media (min-width: 768px) { 
-            .portal-card { padding: 48px 40px; } 
-            .portal-title { font-size: 36px; } 
+
+        .lang-switcher button:hover:not(.active) {
+            background: rgba(0, 146, 204, 0.1);
+        }
+
+        @media (max-width: 360px) {
+            .portal-card {
+                padding: 32px 24px;
+            }
+
+            .portal-title {
+                font-size: 28px;
+            }
+
+            .portal-greeting {
+                font-size: 18px;
+            }
+
+            .portal-description {
+                font-size: 18px;
+            }
+
+            .portal-logo svg {
+                width: 90px;
+                height: 90px;
+            }
+        }
+
+        @media (min-width: 768px) {
+            .portal-card {
+                padding: 48px 40px;
+            }
+
+            .portal-title {
+                font-size: 36px;
+            }
         }
     </style>
 </head>
+
 <body>
     <div class="lang-switcher">
-        <button data-lang="az" class="active">AZ</button>
-        <button data-lang="ru">RU</button>
-        <button data-lang="en">EN</button>
+        <button type="button" data-lang="az" class="active">AZ</button>
+        <button type="button" data-lang="ru">RU</button>
+        <button type="button" data-lang="en">EN</button>
     </div>
 
     <main class="portal-page">
         <section class="portal-card">
             <div class="portal-logo">
-                <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                <svg
+                    viewBox="0 0 100 100"
+                    xmlns="http://www.w3.org/2000/svg"
+                >
                     <defs>
                         <clipPath id="circleClip">
                             <circle cx="50" cy="50" r="48"/>
                         </clipPath>
                     </defs>
+
                     <g clip-path="url(#circleClip)">
-                        <!-- Флаг Азербайджана: голубой, красный, зеленый -->
-                        <rect x="0" y="0" width="100" height="33.33" fill="#0092CC"/>
-                        <rect x="0" y="33.33" width="100" height="33.34" fill="#E4002B"/>
-                        <rect x="0" y="66.67" width="100" height="33.33" fill="#00B140"/>
-                        
-                        <!-- Полумесяц -->
-                        <circle cx="42" cy="50" r="15" fill="white"/>
-                        <circle cx="45" cy="50" r="12" fill="#E4002B"/>
-                        
-                        <!-- Восьмиконечная звезда (два повернутых квадрата) -->
+                        <rect
+                            x="0"
+                            y="0"
+                            width="100"
+                            height="33.33"
+                            fill="#0092CC"
+                        />
+
+                        <rect
+                            x="0"
+                            y="33.33"
+                            width="100"
+                            height="33.34"
+                            fill="#E4002B"
+                        />
+
+                        <rect
+                            x="0"
+                            y="66.67"
+                            width="100"
+                            height="33.33"
+                            fill="#00B140"
+                        />
+
+                        <circle
+                            cx="42"
+                            cy="50"
+                            r="15"
+                            fill="white"
+                        />
+
+                        <circle
+                            cx="45"
+                            cy="50"
+                            r="12"
+                            fill="#E4002B"
+                        />
+
                         <g transform="translate(58, 50)">
-                            <rect x="-5" y="-5" width="10" height="10" fill="white" />
-                            <rect x="-5" y="-5" width="10" height="10" fill="white" transform="rotate(45)" />
+                            <rect
+                                x="-5"
+                                y="-5"
+                                width="10"
+                                height="10"
+                                fill="white"
+                            />
+
+                            <rect
+                                x="-5"
+                                y="-5"
+                                width="10"
+                                height="10"
+                                fill="white"
+                                transform="rotate(45)"
+                            />
                         </g>
                     </g>
-                    <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="2"/>
+
+                    <circle
+                        cx="50"
+                        cy="50"
+                        r="48"
+                        fill="none"
+                        stroke="rgba(255,255,255,0.3)"
+                        stroke-width="2"
+                    />
                 </svg>
             </div>
 
-            <h1 class="portal-title" data-i18n="title">Zəfər Parkı</h1>
-            <p class="portal-greeting" data-i18n="greeting">Xoş gəlmisiniz!</p>
-            <p class="portal-description" data-i18n="description">Parkımızın qonaqları üçün pulsuz Wi-Fi.</p>
+            <h1
+                class="portal-title"
+                data-i18n="title"
+            >
+                Zəfər Parkı
+            </h1>
 
-            {% if error_message %}
-            <div class="portal-error show" role="alert">
-                {{ error_message }}
-            </div>
-            {% else %}
-            <div class="portal-error" role="alert" data-i18n="error">
-                Qoşulma alınmadı. Yenidən cəhd edin.
-            </div>
-            {% endif %}
-
-            <form method="POST" action="" id="portal-form">
-                <button type="submit" id="connect-button" class="connect-button" disabled>
-                    Qoşul
-                </button>
-            </form>
-
-            <p class="portal-note" data-i18n="note">
-                Düyməni sıxmaqla, siz şəbəkənin istifadə qaydalarını qəbul edirsiniz.
+            <p
+                class="portal-greeting"
+                data-i18n="greeting"
+            >
+                Xoş gəlmisiniz!
             </p>
-            
+
+            <p
+                class="portal-description"
+                data-i18n="description"
+            >
+                Parkımızın qonaqları üçün pulsuz Wi-Fi.
+            </p>
+
+            <div
+                id="portal-error"
+                class="portal-error{% if error_message %} show{% endif %}"
+                role="alert"
+            >
+                {% if error_message %}
+                    {{ error_message }}
+                {% endif %}
+            </div>
+
+            <div class="connection-panel">
+                <div
+                    id="connection-status"
+                    class="connection-status"
+                >
+                    Qoşulma hazırlanır...
+                </div>
+
+                <div
+                    class="progress-shell"
+                    role="progressbar"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    aria-valuenow="{{ initial_progress|default(0) }}"
+                    id="progress-shell"
+                >
+                    <div
+                        id="progress-bar"
+                        class="progress-bar"
+                    ></div>
+
+                    <div class="progress-content">
+                        <span
+                            id="progress-spinner"
+                            class="progress-spinner"
+                        ></span>
+
+                        <span id="progress-text">
+                            {{ initial_progress|default(0) }}%
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <p
+                id="portal-note"
+                class="portal-note"
+            >
+                Zəhmət olmasa, gözləyin.
+            </p>
+
             <div class="designer-credit">
                 Designer: Zaur Navi<br>
                 Country should know its heroes
@@ -226,117 +515,435 @@
     </main>
 
     <script>
+        const sessionId = {{ session_id | tojson }};
+        const redirectUrl = {{ redirect_url | tojson }};
+        const initialStatus = {{ initial_status | default("WAITING") | tojson }};
+        const initialProgress = Number(
+            {{ initial_progress | default(0) | tojson }}
+        );
+
         const translations = {
-            az: { 
-                title: 'Zəfər Parkı', greeting: 'Xoş gəlmisiniz!', description: 'Parkımızın qonaqları üçün pulsuz Wi-Fi.', 
-                button: 'Qoşul', buttonLoading: 'Qoşulur...', buttonReady: 'Qoşulmağa hazırdır',
-                note: 'Düyməni sıxmaqla, siz şəbəkənin istifadə qaydalarını qəbul edirsiniz.', error: 'Qoşulma alınmadı. Yenidən cəhd edin.' 
+            az: {
+                title: "Zəfər Parkı",
+                greeting: "Xoş gəlmisiniz!",
+                description: "Parkımızın qonaqları üçün pulsuz Wi-Fi.",
+
+                WAITING: "Qoşulma hazırlanır...",
+                AUTHORIZING: "Şəbəkəyə qoşulma yerinə yetirilir...",
+                VERIFYING: "Qoşulma yoxlanılır...",
+                RESETTING: "Wi-Fi sessiyası sıfırlanır...",
+                AUTHORIZED: "Qoşulma tamamlandı",
+                RESET: "Qoşulmanı tamamlamaq mümkün olmadı",
+                FAILED: "Qoşulma xətası",
+                EXPIRED: "Qoşulma vaxtı bitdi",
+
+                waitingNote: "Zəhmət olmasa, gözləyin.",
+                authorizedNote: "İnternet bağlantısı aktivdir.",
+                resetNote:
+                    "Wi-Fi sessiyası sıfırlandı. Şəbəkəyə yenidən qoşulun.",
+                failedNote:
+                    "Qoşulmanı tamamlamaq mümkün olmadı.",
+                expiredNote:
+                    "Şəbəkəyə yenidən qoşulub təkrar cəhd edin.",
+                pollingError:
+                    "Serverlə əlaqə müvəqqəti olaraq mümkün deyil."
             },
-            ru: { 
-                title: 'Zəfər Parkı', greeting: 'Добро пожаловать!', description: 'Бесплатный Wi-Fi для гостей парка.', 
-                button: 'Подключиться', buttonLoading: 'Подключение...', buttonReady: 'Готово к подключению',
-                note: 'Нажимая кнопку, вы принимаете правила использования сети.', error: 'Не удалось подключиться. Попробуйте еще раз.' 
+
+            ru: {
+                title: "Zəfər Parkı",
+                greeting: "Добро пожаловать!",
+                description: "Бесплатный Wi-Fi для гостей парка.",
+
+                WAITING: "Подготовка подключения...",
+                AUTHORIZING: "Выполняется подключение к сети...",
+                VERIFYING: "Проверка подключения...",
+                RESETTING: "Сброс Wi-Fi-сессии...",
+                AUTHORIZED: "Подключение выполнено",
+                RESET: "Не удалось завершить подключение",
+                FAILED: "Ошибка подключения",
+                EXPIRED: "Время подключения истекло",
+
+                waitingNote: "Пожалуйста, подождите.",
+                authorizedNote: "Доступ в интернет активирован.",
+                resetNote:
+                    "Wi-Fi-сессия была сброшена. Подключитесь к сети повторно.",
+                failedNote:
+                    "Не удалось завершить авторизацию.",
+                expiredNote:
+                    "Подключитесь к сети повторно и попробуйте ещё раз.",
+                pollingError:
+                    "Временно не удаётся связаться с сервером."
             },
-            en: { 
-                title: 'Zəfər Parkı', greeting: 'Welcome!', description: 'Free Wi-Fi for park guests.', 
-                button: 'Connect', buttonLoading: 'Connecting...', buttonReady: 'Ready to connect',
-                note: 'By clicking the button, you accept the network usage rules.', error: 'Connection failed. Please try again.' 
+
+            en: {
+                title: "Zəfər Parkı",
+                greeting: "Welcome!",
+                description: "Free Wi-Fi for park guests.",
+
+                WAITING: "Preparing connection...",
+                AUTHORIZING: "Connecting to the network...",
+                VERIFYING: "Checking connection...",
+                RESETTING: "Resetting Wi-Fi session...",
+                AUTHORIZED: "Connection completed",
+                RESET: "Unable to complete connection",
+                FAILED: "Connection error",
+                EXPIRED: "Connection session expired",
+
+                waitingNote: "Please wait.",
+                authorizedNote: "Internet access is active.",
+                resetNote:
+                    "The Wi-Fi session was reset. Reconnect to the network.",
+                failedNote:
+                    "Unable to complete authorization.",
+                expiredNote:
+                    "Reconnect to the network and try again.",
+                pollingError:
+                    "The server is temporarily unavailable."
             }
         };
 
-        const langButtons = document.querySelectorAll('.lang-switcher button');
-        let currentLang = localStorage.getItem('portalLang') || 'az';
-        
-        const isRetry = {{ 'true' if retry else 'false' }};
-        let timeLeft = isRetry ? 3 : 10;
-        const initialTime = timeLeft;
-        let timerInterval = null;
+        const terminalStatuses = new Set([
+            "AUTHORIZED",
+            "RESET",
+            "FAILED",
+            "EXPIRED"
+        ]);
 
-        function updateButtonText(seconds) {
-            const texts = {
-                az: `Qoşulma hazırlanır... ${seconds}`,
-                ru: `Подготовка подключения... ${seconds}`,
-                en: `Preparing connection... ${seconds}`
-            };
-            document.getElementById('connect-button').textContent = texts[currentLang];
+        const langButtons = document.querySelectorAll(
+            ".lang-switcher button"
+        );
+
+        const progressShell = document.getElementById(
+            "progress-shell"
+        );
+
+        const progressBar = document.getElementById(
+            "progress-bar"
+        );
+
+        const progressText = document.getElementById(
+            "progress-text"
+        );
+
+        const progressSpinner = document.getElementById(
+            "progress-spinner"
+        );
+
+        const connectionStatus = document.getElementById(
+            "connection-status"
+        );
+
+        const portalNote = document.getElementById(
+            "portal-note"
+        );
+
+        const portalError = document.getElementById(
+            "portal-error"
+        );
+
+        let currentLang =
+            localStorage.getItem("portalLang") || "az";
+
+        let currentState = {
+            status: initialStatus,
+            progress: Number.isFinite(initialProgress)
+                ? initialProgress
+                : 0,
+            authorized: initialStatus === "AUTHORIZED",
+            terminal: terminalStatuses.has(initialStatus),
+            message: null
+        };
+
+        let pollTimer = null;
+        let pollingStopped = false;
+        let consecutivePollingErrors = 0;
+
+        function clampProgress(value) {
+            const number = Number(value);
+
+            if (!Number.isFinite(number)) {
+                return 0;
+            }
+
+            return Math.max(
+                0,
+                Math.min(100, Math.round(number))
+            );
         }
 
-        function updateButtonFill() {
-            const progress = ((initialTime - timeLeft) / initialTime) * 100;
-            document.getElementById('connect-button').style.setProperty('--fill-progress', progress + '%');
+        function getTexts() {
+            return translations[currentLang]
+                || translations.az;
         }
 
         function setLanguage(lang) {
+            if (!translations[lang]) {
+                lang = "az";
+            }
+
             currentLang = lang;
             document.documentElement.lang = lang;
-            localStorage.setItem('portalLang', lang);
-            
-            langButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.lang === lang));
-            
-            const elements = document.querySelectorAll('[data-i18n]');
-            elements.forEach(el => {
-                const key = el.dataset.i18n;
-                if (translations[lang] && translations[lang][key]) {
-                    el.textContent = translations[lang][key];
-                }
+
+            localStorage.setItem(
+                "portalLang",
+                lang
+            );
+
+            langButtons.forEach((button) => {
+                button.classList.toggle(
+                    "active",
+                    button.dataset.lang === lang
+                );
             });
-            
-            const button = document.getElementById('connect-button');
-            if (button.disabled && !button.classList.contains('loading')) {
-                if (timeLeft > 0) {
-                    updateButtonText(timeLeft);
-                } else {
-                    button.textContent = translations[currentLang].button;
+
+            document
+                .querySelectorAll("[data-i18n]")
+                .forEach((element) => {
+                    const key = element.dataset.i18n;
+                    const value = translations[lang][key];
+
+                    if (value) {
+                        element.textContent = value;
+                    }
+                });
+
+            renderState(currentState);
+        }
+
+        function showError(message) {
+            if (!message) {
+                portalError.classList.remove("show");
+                portalError.textContent = "";
+                return;
+            }
+
+            portalError.textContent = message;
+            portalError.classList.add("show");
+        }
+
+        function updateProgress(progress) {
+            const value = clampProgress(progress);
+
+            progressBar.style.width = `${value}%`;
+            progressText.textContent = `${value}%`;
+
+            progressShell.setAttribute(
+                "aria-valuenow",
+                String(value)
+            );
+        }
+
+        function getNoteForStatus(status) {
+            const texts = getTexts();
+
+            switch (status) {
+                case "AUTHORIZED":
+                    return texts.authorizedNote;
+
+                case "RESET":
+                    return texts.resetNote;
+
+                case "FAILED":
+                    return texts.failedNote;
+
+                case "EXPIRED":
+                    return texts.expiredNote;
+
+                default:
+                    return texts.waitingNote;
+            }
+        }
+
+        function renderState(state) {
+            const texts = getTexts();
+            const status = state.status || "WAITING";
+
+            connectionStatus.textContent =
+                texts[status] || texts.WAITING;
+
+            portalNote.textContent =
+                getNoteForStatus(status);
+
+            updateProgress(state.progress);
+
+            progressBar.classList.remove(
+                "success",
+                "failed",
+                "reset"
+            );
+
+            if (status === "AUTHORIZED") {
+                progressBar.classList.add("success");
+                progressSpinner.classList.add("hidden");
+                showError(null);
+                return;
+            }
+
+            if (status === "RESET") {
+                progressBar.classList.add("reset");
+                progressSpinner.classList.add("hidden");
+
+                showError(
+                    state.message || texts.resetNote
+                );
+
+                return;
+            }
+
+            if (
+                status === "FAILED"
+                || status === "EXPIRED"
+            ) {
+                progressBar.classList.add("failed");
+                progressSpinner.classList.add("hidden");
+
+                showError(
+                    state.message
+                    || getNoteForStatus(status)
+                );
+
+                return;
+            }
+
+            progressSpinner.classList.remove("hidden");
+
+            if (!portalError.dataset.serverError) {
+                showError(null);
+            }
+        }
+
+        function stopPolling() {
+            pollingStopped = true;
+
+            if (pollTimer !== null) {
+                clearTimeout(pollTimer);
+                pollTimer = null;
+            }
+        }
+
+        function handleAuthorized() {
+            stopPolling();
+
+            window.setTimeout(() => {
+                try {
+                    window.close();
+                } catch (error) {
+                    console.debug(
+                        "Captive window close was blocked",
+                        error
+                    );
+                }
+
+                if (
+                    redirectUrl
+                    && typeof redirectUrl === "string"
+                ) {
+                    window.setTimeout(() => {
+                        window.location.replace(
+                            redirectUrl
+                        );
+                    }, 500);
+                }
+            }, 900);
+        }
+
+        function applyServerState(state) {
+            consecutivePollingErrors = 0;
+
+            currentState = {
+                status: state.status || "FAILED",
+                progress: clampProgress(state.progress),
+                authorized: Boolean(state.authorized),
+                terminal: Boolean(state.terminal),
+                message: state.message || null
+            };
+
+            renderState(currentState);
+
+            if (
+                currentState.status === "AUTHORIZED"
+                && currentState.authorized
+            ) {
+                handleAuthorized();
+                return;
+            }
+
+            if (currentState.terminal) {
+                stopPolling();
+            }
+        }
+
+        async function pollSession() {
+            if (
+                pollingStopped
+                || !sessionId
+            ) {
+                return;
+            }
+
+            try {
+                const response = await fetch(
+                    `/auth/session/${encodeURIComponent(sessionId)}`,
+                    {
+                        method: "GET",
+                        cache: "no-store",
+                        headers: {
+                            "Accept": "application/json"
+                        }
+                    }
+                );
+
+                const state = await response.json();
+
+                applyServerState(state);
+
+            } catch (error) {
+                consecutivePollingErrors += 1;
+
+                console.debug(
+                    "Session polling failed",
+                    error
+                );
+
+                if (
+                    consecutivePollingErrors >= 3
+                    && !currentState.terminal
+                ) {
+                    portalNote.textContent =
+                        getTexts().pollingError;
                 }
             }
-        }
 
-        langButtons.forEach(btn => btn.addEventListener('click', () => setLanguage(btn.dataset.lang)));
-
-        const button = document.getElementById('connect-button');
-
-        function startTimer() {
-            if (timeLeft > 0) {
-                updateButtonText(timeLeft);
-                updateButtonFill();
-                timerInterval = setInterval(() => {
-                    timeLeft--;
-                    if (timeLeft <= 0) {
-                        clearInterval(timerInterval);
-                        button.disabled = false;
-                        button.textContent = translations[currentLang].buttonReady;
-                        button.style.setProperty('--fill-progress', '100%');
-                        setTimeout(() => {
-                            if (!button.classList.contains('loading')) {
-                                button.textContent = translations[currentLang].button;
-                            }
-                        }, 2000);
-                    } else {
-                        updateButtonText(timeLeft);
-                        updateButtonFill();
-                    }
-                }, 1000);
-            } else {
-                button.disabled = false;
-                button.textContent = translations[currentLang].button;
-                button.style.setProperty('--fill-progress', '100%');
+            if (!pollingStopped) {
+                pollTimer = window.setTimeout(
+                    pollSession,
+                    1000
+                );
             }
         }
 
-        startTimer();
-        setLanguage(currentLang);
-
-        document.getElementById('portal-form').addEventListener('submit', function(e) {
-            // Дополнительная защита: если кнопка disabled, блокируем отправку
-            if (button.disabled) {
-                e.preventDefault();
-                return false;
-            }
-            if (timerInterval) clearInterval(timerInterval);
-            button.disabled = true;
-            button.classList.add('loading');
-            button.textContent = translations[currentLang].buttonLoading;
+        langButtons.forEach((button) => {
+            button.addEventListener(
+                "click",
+                () => setLanguage(
+                    button.dataset.lang
+                )
+            );
         });
+
+        {% if error_message %}
+        portalError.dataset.serverError = "true";
+        {% endif %}
+
+        setLanguage(currentLang);
+        renderState(currentState);
+
+        if (
+            sessionId
+            && !currentState.terminal
+        ) {
+            pollSession();
+        }
     </script>
 </body>
 </html>
