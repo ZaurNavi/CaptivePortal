@@ -30,25 +30,46 @@ class OmadaProvider(ControllerInterface):
             "client_id": self._client_id,
             "client_secret": self._client_secret
         }
-        
+
         try:
-            response = requests.post(url, json=payload, verify=self._verify_ssl, timeout=(5, 10))
+            response = requests.post(
+                url,
+                json=payload,
+                verify=self._verify_ssl,
+                timeout=(5, 10),
+            )
             data = response.json()
+
             if data.get("errorCode") == 0:
                 return Result.ok(
-                    message=data.get("msg", "Success"), 
-                    data={"token": data["result"]["accessToken"], "http_status": response.status_code, "error_code": 0}
+                    message=data.get("msg", "Success"),
+                    data={
+                        "token": data["result"]["accessToken"],
+                        "http_status": response.status_code,
+                        "error_code": 0,
+                    },
                 )
-            else:
-                return Result.fail(
-                    error="TOKEN_FAILED", 
-                    message=data.get("msg", "Unknown token error"),
-                    data={"http_status": response.status_code, "error_code": data.get("errorCode")}
-                )
-        except requests.exceptions.RequestException as e:
-            return Result.fail(error="HTTP_ERROR", message=f"HTTP Error: {str(e)}", data={"http_status": 0, "error_code": 0})
-        except Exception as e:
-            return Result.fail(error="UNEXPECTED_ERROR", message=f"Unexpected error: {str(e)}", data={"http_status": 0, "error_code": 0})
+
+            return Result.fail(
+                error="TOKEN_FAILED",
+                message=data.get("msg", "Unknown token error"),
+                data={
+                    "http_status": response.status_code,
+                    "error_code": data.get("errorCode"),
+                },
+            )
+        except requests.exceptions.RequestException as exc:
+            return Result.fail(
+                error="HTTP_ERROR",
+                message=f"HTTP Error: {str(exc)}",
+                data={"http_status": 0, "error_code": 0},
+            )
+        except Exception as exc:
+            return Result.fail(
+                error="UNEXPECTED_ERROR",
+                message=f"Unexpected error: {str(exc)}",
+                data={"http_status": 0, "error_code": 0},
+            )
 
     def connect(self) -> None:
         logger.info("Omada provider ready (dynamic token per request)")
@@ -57,13 +78,18 @@ class OmadaProvider(ControllerInterface):
         token_result = self._get_token()
         if not token_result.success:
             return []
-        
+
         token = token_result.data.get("token")
         url = f"{self._omada_url}/openapi/v1/{self._omada_id}/sites?page=1&pageSize=100"
         headers = {"Authorization": f"AccessToken={token}"}
-        
+
         try:
-            response = requests.get(url, headers=headers, verify=self._verify_ssl, timeout=(5, 10))
+            response = requests.get(
+                url,
+                headers=headers,
+                verify=self._verify_ssl,
+                timeout=(5, 10),
+            )
             data = response.json()
             if data.get("errorCode") == 0:
                 return data.get("result", {}).get("data", [])
@@ -78,93 +104,183 @@ class OmadaProvider(ControllerInterface):
         token_result = self._get_token()
         if not token_result.success:
             return token_result
-        
-        token = token_result.data.get("token")
-        url = f"{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id}/hotspot/clients/{client_mac}/auth"
-        headers = {"Authorization": f"AccessToken={token}"}
-        
-        try:
-            # В вашем коде не было body, оставляем как есть (Omada принимает пустой POST для этого эндпоинта)
-            response = requests.post(url, headers=headers, verify=self._verify_ssl, timeout=(5, 10))
-            data = response.json()
-            
-            if data.get("errorCode") == 0:
-                return Result.ok(
-                    message=data.get("msg", "Success"),
-                    data={"http_status": response.status_code, "error_code": 0}
-                )
-            else:
-                return Result.fail(
-                    error="AUTH_FAILED", 
-                    message=data.get("msg", "Unknown authorization error"),
-                    data={"http_status": response.status_code, "error_code": data.get("errorCode")}
-                )
-        except requests.exceptions.RequestException as e:
-            return Result.fail(error="HTTP_ERROR", message=f"HTTP Error: {str(e)}", data={"http_status": 0, "error_code": 0})
-        except Exception as e:
-            return Result.fail(error="UNEXPECTED_ERROR", message=f"Unexpected error: {str(e)}", data={"http_status": 0, "error_code": 0})
 
-    def unauthorize(self, site_id: str, client_mac: str) -> Result:
-        """Исправлено: используем POST /unauth согласно ТЗ, а не DELETE /auth"""
-        token_result = self._get_token()
-        if not token_result.success:
-            return token_result
-        
         token = token_result.data.get("token")
-        url = f"{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id}/hotspot/clients/{client_mac}/unauth"
+        url = (
+            f"{self._omada_url}/openapi/v1/{self._omada_id}"
+            f"/sites/{site_id}/hotspot/clients/{client_mac}/auth"
+        )
         headers = {"Authorization": f"AccessToken={token}"}
-        
-        try:
-            response = requests.post(url, headers=headers, verify=self._verify_ssl, timeout=(5, 10))
-            data = response.json()
-            
-            if data.get("errorCode") == 0:
-                return Result.ok(
-                    message=data.get("msg", "Success"),
-                    data={"http_status": response.status_code, "error_code": 0}
-                )
-            else:
-                return Result.fail(
-                    error="UNAUTH_FAILED", 
-                    message=data.get("msg", "Unknown unauthorization error"),
-                    data={"http_status": response.status_code, "error_code": data.get("errorCode")}
-                )
-        except requests.exceptions.RequestException as e:
-            return Result.fail(error="HTTP_ERROR", message=f"HTTP Error: {str(e)}", data={"http_status": 0, "error_code": 0})
-        except Exception as e:
-            return Result.fail(error="UNEXPECTED_ERROR", message=f"Unexpected error: {str(e)}", data={"http_status": 0, "error_code": 0})
 
-    def get_client(self, site_id: str, client_mac: str) -> Result:
-        """Новый метод для проверки статуса клиента (ТЗ v1.6)"""
-        token_result = self._get_token()
-        if not token_result.success:
-            return token_result
-        
-        token = token_result.data.get("token")
-        url = f"{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id}/clients/{client_mac}"
-        headers = {"Authorization": f"AccessToken={token}"}
-        
         try:
-            response = requests.get(url, headers=headers, verify=self._verify_ssl, timeout=(5, 10))
+            response = requests.post(
+                url,
+                headers=headers,
+                verify=self._verify_ssl,
+                timeout=(5, 10),
+            )
             data = response.json()
-            
+
             if data.get("errorCode") == 0:
-                auth_status = data.get("result", {}).get("authStatus", 0)
                 return Result.ok(
                     message=data.get("msg", "Success"),
                     data={
                         "http_status": response.status_code,
                         "error_code": 0,
-                        "authStatus": auth_status
-                    }
+                    },
                 )
-            else:
-                return Result.fail(
-                    error="API_ERROR", 
-                    message=data.get("msg", "Unknown error"),
-                    data={"http_status": response.status_code, "error_code": data.get("errorCode"), "authStatus": 0}
+
+            return Result.fail(
+                error="AUTH_FAILED",
+                message=data.get(
+                    "msg",
+                    "Unknown authorization error",
+                ),
+                data={
+                    "http_status": response.status_code,
+                    "error_code": data.get("errorCode"),
+                },
+            )
+        except requests.exceptions.RequestException as exc:
+            return Result.fail(
+                error="HTTP_ERROR",
+                message=f"HTTP Error: {str(exc)}",
+                data={"http_status": 0, "error_code": 0},
+            )
+        except Exception as exc:
+            return Result.fail(
+                error="UNEXPECTED_ERROR",
+                message=f"Unexpected error: {str(exc)}",
+                data={"http_status": 0, "error_code": 0},
+            )
+
+    def unauthorize(self, site_id: str, client_mac: str) -> Result:
+        """Используем POST /unauth согласно API Omada."""
+        token_result = self._get_token()
+        if not token_result.success:
+            return token_result
+
+        token = token_result.data.get("token")
+        url = (
+            f"{self._omada_url}/openapi/v1/{self._omada_id}"
+            f"/sites/{site_id}/hotspot/clients/{client_mac}/unauth"
+        )
+        headers = {"Authorization": f"AccessToken={token}"}
+
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                verify=self._verify_ssl,
+                timeout=(5, 10),
+            )
+            data = response.json()
+
+            if data.get("errorCode") == 0:
+                return Result.ok(
+                    message=data.get("msg", "Success"),
+                    data={
+                        "http_status": response.status_code,
+                        "error_code": 0,
+                    },
                 )
-        except requests.exceptions.RequestException as e:
-            return Result.fail(error="HTTP_ERROR", message=f"HTTP Error: {str(e)}", data={"http_status": 0, "error_code": 0, "authStatus": 0})
-        except Exception as e:
-            return Result.fail(error="UNEXPECTED_ERROR", message=f"Unexpected error: {str(e)}", data={"http_status": 0, "error_code": 0, "authStatus": 0})
+
+            return Result.fail(
+                error="UNAUTH_FAILED",
+                message=data.get(
+                    "msg",
+                    "Unknown unauthorization error",
+                ),
+                data={
+                    "http_status": response.status_code,
+                    "error_code": data.get("errorCode"),
+                },
+            )
+        except requests.exceptions.RequestException as exc:
+            return Result.fail(
+                error="HTTP_ERROR",
+                message=f"HTTP Error: {str(exc)}",
+                data={"http_status": 0, "error_code": 0},
+            )
+        except Exception as exc:
+            return Result.fail(
+                error="UNEXPECTED_ERROR",
+                message=f"Unexpected error: {str(exc)}",
+                data={"http_status": 0, "error_code": 0},
+            )
+
+    def get_client(self, site_id: str, client_mac: str) -> Result:
+        """
+        Получает состояние клиента.
+
+        Worker использует одновременно:
+        - authStatus == 2: клиент уже авторизован;
+        - active == true: клиент готов принять команду /auth.
+        """
+        token_result = self._get_token()
+        if not token_result.success:
+            return token_result
+
+        token = token_result.data.get("token")
+        url = (
+            f"{self._omada_url}/openapi/v1/{self._omada_id}"
+            f"/sites/{site_id}/clients/{client_mac}"
+        )
+        headers = {"Authorization": f"AccessToken={token}"}
+
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                verify=self._verify_ssl,
+                timeout=(5, 10),
+            )
+            data = response.json()
+
+            if data.get("errorCode") == 0:
+                client_data = data.get("result") or {}
+                auth_status = client_data.get("authStatus")
+                active = client_data.get("active")
+
+                return Result.ok(
+                    message=data.get("msg", "Success"),
+                    data={
+                        "http_status": response.status_code,
+                        "error_code": 0,
+                        "authStatus": auth_status,
+                        "active": active,
+                    },
+                )
+
+            return Result.fail(
+                error="API_ERROR",
+                message=data.get("msg", "Unknown error"),
+                data={
+                    "http_status": response.status_code,
+                    "error_code": data.get("errorCode"),
+                    "authStatus": None,
+                    "active": None,
+                },
+            )
+        except requests.exceptions.RequestException as exc:
+            return Result.fail(
+                error="HTTP_ERROR",
+                message=f"HTTP Error: {str(exc)}",
+                data={
+                    "http_status": 0,
+                    "error_code": 0,
+                    "authStatus": None,
+                    "active": None,
+                },
+            )
+        except Exception as exc:
+            return Result.fail(
+                error="UNEXPECTED_ERROR",
+                message=f"Unexpected error: {str(exc)}",
+                data={
+                    "http_status": 0,
+                    "error_code": 0,
+                    "authStatus": None,
+                    "active": None,
+                },
+            )
