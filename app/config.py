@@ -18,6 +18,12 @@ VERIFY_SSL = False
 # Logging level
 LOG_LEVEL = "INFO"
 
+# Public Portal Open Counter
+PORTAL_COUNTER_ENABLED = True
+PORTAL_COUNTER_DB_PATH = "/opt/CaptivePortal/data/portal_counter.db"
+PORTAL_COUNTER_TIMEZONE = "Asia/Baku"
+PORTAL_COUNTER_API_ENABLED = True
+
 # Omada OpenAPI settings
 OMADA_URL = "https://192.168.0.222:8043"
 OMADA_ID = "fe6867ddf84e4c18c4e280e984e4266d"

@@ -9,16 +9,25 @@ the Omada authorization process.
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
 
-from app import create_controller, logger
+from app import create_controller, get_settings, logger
 from app.auth.manager import AuthSessionManager
 from app.auth.session import AuthStatus
 from app.auth.worker import AuthWorker, log_auth_event
+from app.portal_counter import (
+    PortalCounterRepository,
+    PortalCounterService,
+)
+from app.portal_counter.routes import (
+    create_portal_counter_blueprint,
+)
 
 
 MAX_WORKERS = 4
+_AUTO_COUNTER = object()
 
 
 # Один менеджер и один executor на процесс приложения.
@@ -30,7 +39,9 @@ auth_executor = ThreadPoolExecutor(
 )
 
 
-def create_app() -> Flask:
+def create_app(
+    portal_counter_service=_AUTO_COUNTER,
+) -> Flask:
     """Создать и настроить Flask-приложение."""
 
     template_dir = os.path.abspath(
@@ -45,12 +56,63 @@ def create_app() -> Flask:
         template_folder=template_dir,
     )
 
+    settings = get_settings()
+
+    if portal_counter_service is _AUTO_COUNTER:
+        portal_counter_service = None
+
+        if settings["portal_counter_enabled"]:
+            portal_counter_service = PortalCounterService(
+                repository=PortalCounterRepository(
+                    settings["portal_counter_db_path"]
+                ),
+                timezone_name=(
+                    settings["portal_counter_timezone"]
+                ),
+                logger=logger,
+            )
+            portal_counter_service.initialize()
+
+    counter_configured = (
+        settings["portal_counter_enabled"]
+        and portal_counter_service is not None
+    )
+    counter_recording_enabled = (
+        counter_configured
+        and portal_counter_service.available
+    )
+    counter_api_enabled = (
+        counter_configured
+        and settings["portal_counter_api_enabled"]
+    )
+    counter_visible = (
+        counter_recording_enabled
+        and settings["portal_counter_api_enabled"]
+    )
+    app.extensions["portal_counter_service"] = (
+        portal_counter_service
+    )
+
+    @app.context_processor
+    def inject_portal_counter_settings():
+        return {
+            "portal_counter_visible": counter_visible,
+        }
+
+    if counter_api_enabled:
+        app.register_blueprint(
+            create_portal_counter_blueprint(
+                portal_counter_service
+            )
+        )
+
     controller = create_controller()
 
     auth_worker = AuthWorker(
         provider=controller,
         session_manager=auth_manager,
     )
+    executor = auth_executor
 
     @app.route("/", methods=["GET"])
     def index():
@@ -117,6 +179,19 @@ def create_app() -> Flask:
                 radio_id=radio_id,
             )
 
+            if created and counter_recording_enabled:
+                try:
+                    portal_counter_service.record_open(
+                        session_id=session.session_id,
+                        opened_at=datetime.now(timezone.utc),
+                    )
+                except Exception:
+                    logger.exception(
+                        "portal_counter.write_failed "
+                        "session_id=%s",
+                        session.session_id,
+                    )
+
             if created:
                 log_auth_event(
                     "AUTH_SESSION_CREATED",
@@ -159,7 +234,7 @@ def create_app() -> Flask:
                     ), 500
 
                 try:
-                    auth_executor.submit(
+                    executor.submit(
                         auth_worker.process,
                         session.session_id,
                     )
