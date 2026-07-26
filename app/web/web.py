@@ -17,6 +17,8 @@ from app import create_controller, get_settings, logger
 from app.auth.manager import AuthSessionManager
 from app.auth.session import AuthStatus
 from app.auth.worker import AuthWorker, log_auth_event
+from app.auth_telemetry import configure_auth_telemetry
+from app.auth_telemetry import events as telemetry_events
 from app.portal_counter import (
     PortalCounterRepository,
     PortalCounterService,
@@ -57,6 +59,8 @@ def create_app(
     )
 
     settings = get_settings()
+    auth_telemetry = configure_auth_telemetry(settings)
+    app.extensions["auth_telemetry"] = auth_telemetry
 
     if portal_counter_service is _AUTO_COUNTER:
         portal_counter_service = None
@@ -194,13 +198,27 @@ def create_app(
 
             if created:
                 log_auth_event(
-                    "AUTH_SESSION_CREATED",
+                    telemetry_events.SESSION_CREATED,
                     session,
+                    state=session.status.value,
+                    created_at=session.created_at,
+                    client_mac=session.client_mac,
+                    client_ip=session.client_ip,
+                    site_id=session.site_id,
                 )
             else:
                 log_auth_event(
-                    "AUTH_SESSION_REUSED",
+                    telemetry_events.SESSION_REUSED,
                     session,
+                    state=session.status.value,
+                    client_mac=session.client_mac,
+                    client_ip=session.client_ip,
+                    site_id=session.site_id,
+                    reuse_reason=(
+                        "active_session"
+                        if session.is_active()
+                        else "retry_cooldown"
+                    ),
                 )
 
             if created:
@@ -216,10 +234,18 @@ def create_app(
                         ),
                     )
 
-                    log_auth_event(
-                        "AUTH_WORKER_CLAIM_FAILED",
-                        session,
-                        level=logging.ERROR,
+                    auth_telemetry.safe_emit_once(
+                        telemetry_events.SESSION_FINISHED,
+                        session.session_id,
+                        "error",
+                        site_id=session.site_id,
+                        client_mac=session.client_mac,
+                        client_ip=session.client_ip,
+                        final_state=session.status.value,
+                        final_reason="INTERNAL_ERROR",
+                        duration_ms=0,
+                        readiness_checks=0,
+                        auth_attempts=0,
                     )
 
                     return render_template(
@@ -239,11 +265,6 @@ def create_app(
                         session.session_id,
                     )
 
-                    log_auth_event(
-                        "AUTH_WORKER_SUBMITTED",
-                        session,
-                    )
-
                 except Exception as exc:
                     auth_manager.fail(
                         session,
@@ -256,11 +277,19 @@ def create_app(
                         session
                     )
 
-                    log_auth_event(
-                        "AUTH_WORKER_SUBMISSION_FAILED",
-                        session,
-                        level=logging.ERROR,
-                        message=str(exc),
+                    auth_telemetry.safe_emit_once(
+                        telemetry_events.SESSION_FINISHED,
+                        session.session_id,
+                        "error",
+                        site_id=session.site_id,
+                        client_mac=session.client_mac,
+                        client_ip=session.client_ip,
+                        final_state=session.status.value,
+                        final_reason="INTERNAL_ERROR",
+                        duration_ms=0,
+                        readiness_checks=0,
+                        auth_attempts=0,
+                        error=str(exc),
                     )
 
                     return render_template(
