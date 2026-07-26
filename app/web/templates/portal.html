@@ -343,6 +343,16 @@
             }
         }
     </style>
+    {% if portal_counter_visible %}
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='css/portal_counter.css') }}"
+    >
+    <script
+        src="{{ url_for('static', filename='js/portal_counter.js') }}"
+        defer
+    ></script>
+    {% endif %}
 </head>
 
 <body>
@@ -506,6 +516,10 @@
             >
                 Zəhmət olmasa, gözləyin.
             </p>
+
+            {% if portal_counter_visible %}
+                {% include "components/portal_counter.html" %}
+            {% endif %}
 
             <div class="designer-credit">
                 Designer: Zaur Navi<br>
