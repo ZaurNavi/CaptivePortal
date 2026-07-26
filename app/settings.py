@@ -13,6 +13,11 @@ from app.config import (
     AUTH_TELEMETRY_LEVEL, AUTH_TELEMETRY_SCHEMA_VERSION,
     AUTH_TELEMETRY_ROTATION_MAX_BYTES,
     AUTH_TELEMETRY_ROTATION_BACKUP_COUNT,
+    CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
+    CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
+    CAPPORT_ALLOWED_CLIENT_NETWORKS,
+    CAPPORT_CLIENT_CACHE_TTL_SECONDS,
+    CAPPORT_FAILURE_CACHE_TTL_SECONDS,
     OMADA_URL, OMADA_ID, CLIENT_ID, CLIENT_SECRET
 )
 from app.logger import logger
@@ -45,6 +50,20 @@ def get_settings() -> dict:
         ),
         "auth_telemetry_rotation_backup_count": (
             AUTH_TELEMETRY_ROTATION_BACKUP_COUNT
+        ),
+        "capport_enabled": CAPPORT_ENABLED,
+        "capport_site_id": CAPPORT_SITE_ID,
+        "capport_public_base_url": CAPPORT_PUBLIC_BASE_URL,
+        "capport_api_path": CAPPORT_API_PATH,
+        "capport_login_path": CAPPORT_LOGIN_PATH,
+        "capport_allowed_client_networks": (
+            CAPPORT_ALLOWED_CLIENT_NETWORKS
+        ),
+        "capport_client_cache_ttl_seconds": (
+            CAPPORT_CLIENT_CACHE_TTL_SECONDS
+        ),
+        "capport_failure_cache_ttl_seconds": (
+            CAPPORT_FAILURE_CACHE_TTL_SECONDS
         ),
         "omada_url": OMADA_URL,
         "omada_id": OMADA_ID,

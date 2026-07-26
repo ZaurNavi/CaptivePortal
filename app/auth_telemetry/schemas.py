@@ -3,7 +3,7 @@
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 
 MAX_ERROR_LENGTH = 512
@@ -91,7 +91,7 @@ def sanitize_fields(fields: dict[str, Any]) -> dict[str, Any]:
 
 def build_record(
     event: str,
-    session_id: str,
+    session_id: Optional[str],
     level: str,
     schema_version: int,
     fields: dict[str, Any],
@@ -104,6 +104,7 @@ def build_record(
         "module": "auth_telemetry",
         "event": sanitize_text(event),
         "schema_version": int(schema_version),
-        "session_id": sanitize_text(session_id),
     })
+    if session_id is not None:
+        record["session_id"] = sanitize_text(session_id)
     return record

@@ -174,6 +174,37 @@ class AuthorizationTelemetry:
                 self._once.add(key)
             return emitted
 
+    def safe_emit_system(
+        self,
+        event: str,
+        level: str = "info",
+        **fields: Any,
+    ) -> bool:
+        """Emit a non-session event into the same technical journal."""
+        if not self.enabled or not self.available:
+            return False
+        try:
+            numeric_level = getattr(
+                logging,
+                str(level).upper(),
+                logging.INFO,
+            )
+            if not self._logger.isEnabledFor(numeric_level):
+                return False
+            record = build_record(
+                event=event,
+                session_id=None,
+                level=logging.getLevelName(numeric_level).lower(),
+                schema_version=self.schema_version,
+                fields=fields,
+            )
+            with self._emit_lock:
+                self._logger.log(numeric_level, record)
+            return True
+        except Exception as exc:
+            self._report_failure_once("write", exc)
+            return False
+
     def _report_failure_once(
         self,
         stage: str,
