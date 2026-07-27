@@ -17,6 +17,15 @@ LOGIN_LOOKUP_ATTEMPTS = 5
 LOGIN_LOOKUP_INTERVAL_SECONDS = 1.0
 LOGIN_LOOKUP_MAX_WAIT_SECONDS = 5.0
 IDENTITY_CHANGE_ATTEMPTS = 2
+DETAIL_LOOKUP_FALLBACK_ERROR_CODE = -41011
+
+
+@dataclass(frozen=True)
+class _ListedClient:
+    client_ip: str
+    client_mac: str
+    auth_status: int | None
+    active: bool | None
 
 
 @dataclass(frozen=True)
@@ -24,6 +33,7 @@ class _IdentitySnapshot:
     expires_at: float
     generation: int
     mac_by_ip: dict[str, str]
+    fallback_by_ip: dict[str, _ListedClient]
     ambiguous_ips: frozenset[str]
 
 
@@ -32,6 +42,7 @@ class _CachedClientState:
     expires_at: float
     identity_generation: int
     client: CapportClient
+    detail_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -39,6 +50,7 @@ class _ResolvedClient:
     client: CapportClient | None
     reason: str
     cache_hit: bool
+    detail_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +174,7 @@ class CapportService:
                     client=client,
                     reason=resolved.reason,
                     cache_hit=resolved.cache_hit,
+                    detail_fallback=resolved.detail_fallback,
                 )
             self._emit_state(state)
             return state
@@ -281,6 +294,9 @@ class CapportService:
                     client_ip=client_ip,
                     client_mac=client_mac,
                     identity_generation=identity.generation,
+                    fallback_client=identity.fallback_by_ip.get(
+                        client_ip
+                    ),
                 )
             except _IdentityChanged:
                 continue
@@ -371,7 +387,7 @@ class CapportService:
         *,
         generation: int,
     ) -> _IdentitySnapshot:
-        grouped: dict[str, list[tuple[str, bool | None]]] = {}
+        grouped: dict[str, list[_ListedClient]] = {}
         for raw in raw_clients:
             if not isinstance(raw, dict):
                 continue
@@ -385,15 +401,24 @@ class CapportService:
             if not isinstance(client_mac, str) or not client_mac:
                 continue
             grouped.setdefault(client_ip, []).append(
-                (
-                    client_mac,
-                    self._optional_bool(raw.get("active")),
+                _ListedClient(
+                    client_ip=client_ip,
+                    client_mac=client_mac,
+                    auth_status=self._optional_int(
+                        raw.get("authStatus")
+                    ),
+                    active=self._optional_bool(raw.get("active")),
                 )
             )
 
         mac_by_ip: dict[str, str] = {}
+        fallback_by_ip: dict[str, _ListedClient] = {}
         ambiguous: set[str] = set()
-        for client_ip, identities in grouped.items():
+        for client_ip, listed_clients in grouped.items():
+            identities = [
+                (client.client_mac, client.active)
+                for client in listed_clients
+            ]
             selected = self._select_identity(identities)
             if selected is None:
                 ambiguous.add(client_ip)
@@ -405,6 +430,8 @@ class CapportService:
                 )
             else:
                 mac_by_ip[client_ip] = selected
+                if len(listed_clients) == 1:
+                    fallback_by_ip[client_ip] = listed_clients[0]
 
         refreshed_at = self._monotonic()
         return _IdentitySnapshot(
@@ -413,6 +440,7 @@ class CapportService:
             ),
             generation=generation,
             mac_by_ip=mac_by_ip,
+            fallback_by_ip=fallback_by_ip,
             ambiguous_ips=frozenset(ambiguous),
         )
 
@@ -422,6 +450,7 @@ class CapportService:
         client_ip: str,
         client_mac: str,
         identity_generation: int,
+        fallback_client: _ListedClient | None,
     ) -> _ResolvedClient:
         site_id = self.config.site_id
         lock_key = (site_id, client_ip)
@@ -438,8 +467,12 @@ class CapportService:
             if cached is not None:
                 return _ResolvedClient(
                     client=cached.client,
-                    reason=self._state_reason(cached.client),
+                    reason=self._state_reason(
+                        cached.client,
+                        detail_fallback=cached.detail_fallback,
+                    ),
                     cache_hit=True,
+                    detail_fallback=cached.detail_fallback,
                 )
             failure = self._get_failure(site_id, now)
             if failure is not None:
@@ -471,8 +504,12 @@ class CapportService:
                 if cached is not None:
                     return _ResolvedClient(
                         client=cached.client,
-                        reason=self._state_reason(cached.client),
+                        reason=self._state_reason(
+                            cached.client,
+                            detail_fallback=cached.detail_fallback,
+                        ),
                         cache_hit=True,
+                        detail_fallback=cached.detail_fallback,
                     )
                 failure = self._get_failure(site_id, now)
                 if failure is not None:
@@ -513,37 +550,66 @@ class CapportService:
                 ):
                     raise _IdentityChanged
                 if not result.success:
-                    reason = str(
-                        result.error or "CLIENT_STATE_FAILED"
-                    ).upper()
-                    self._store_failure(reason)
-                    raise _LookupFailure(reason)
-
-            auth_status = self._optional_int(
-                result.data.get("authStatus")
-            )
-            if auth_status is None:
-                with self._cache_lock:
-                    if not self._identity_matches(
-                        site_id,
-                        client_ip,
-                        client_mac,
-                        identity_generation,
+                    detail_error_code = self._optional_int(
+                        result.data.get("error_code")
+                    )
+                    fallback_allowed = (
+                        result.error == "API_ERROR"
+                        and detail_error_code
+                        == DETAIL_LOOKUP_FALLBACK_ERROR_CODE
+                    )
+                    if fallback_allowed and self._fallback_matches(
+                        fallback_client,
+                        client_ip=client_ip,
+                        client_mac=client_mac,
                     ):
-                        raise _IdentityChanged
-                    self._store_failure(
+                        use_fallback = True
+                    else:
+                        reason = str(
+                            result.error
+                            or "CLIENT_STATE_FAILED"
+                        ).upper()
+                        if fallback_allowed:
+                            reason = (
+                                "DETAIL_LOOKUP_FALLBACK_REJECTED"
+                            )
+                        self._store_failure(reason)
+                        raise _LookupFailure(reason)
+                else:
+                    use_fallback = False
+
+            if use_fallback:
+                auth_status = fallback_client.auth_status
+                active = fallback_client.active
+            else:
+                auth_status = self._optional_int(
+                    result.data.get("authStatus")
+                )
+                active = self._optional_bool(
+                    result.data.get("active")
+                )
+                if auth_status is None:
+                    with self._cache_lock:
+                        if not self._identity_matches(
+                            site_id,
+                            client_ip,
+                            client_mac,
+                            identity_generation,
+                        ):
+                            raise _IdentityChanged
+                        self._store_failure(
+                            "MALFORMED_CLIENT_STATE"
+                        )
+                    raise _LookupFailure(
                         "MALFORMED_CLIENT_STATE"
                     )
-                raise _LookupFailure("MALFORMED_CLIENT_STATE")
 
             client = CapportClient(
                 site_id=site_id,
                 client_ip=client_ip,
                 client_mac=client_mac,
                 auth_status=auth_status,
-                active=self._optional_bool(
-                    result.data.get("active")
-                ),
+                active=active,
             )
             cached = _CachedClientState(
                 expires_at=(
@@ -552,6 +618,7 @@ class CapportService:
                 ),
                 identity_generation=identity_generation,
                 client=client,
+                detail_fallback=use_fallback,
             )
             with self._cache_lock:
                 if not self._identity_matches(
@@ -565,10 +632,28 @@ class CapportService:
                     site_id,
                     {},
                 )[client_ip] = cached
+
+            if use_fallback:
+                self._emit(
+                    events.CAPPORT_DETAIL_LOOKUP_FALLBACK,
+                    "warning",
+                    site_id=site_id,
+                    detail_error_code=(
+                        DETAIL_LOOKUP_FALLBACK_ERROR_CODE
+                    ),
+                    auth_status=auth_status,
+                    active=active,
+                    client_ip=client_ip,
+                    client_mac=client_mac,
+                )
             return _ResolvedClient(
                 client=client,
-                reason=self._state_reason(client),
+                reason=self._state_reason(
+                    client,
+                    detail_fallback=use_fallback,
+                ),
                 cache_hit=False,
+                detail_fallback=use_fallback,
             )
 
     def _call_controller(
@@ -703,6 +788,19 @@ class CapportService:
                 self._state_refresh_locks.pop(lock_key, None)
 
     @staticmethod
+    def _fallback_matches(
+        fallback_client: _ListedClient | None,
+        *,
+        client_ip: str,
+        client_mac: str,
+    ) -> bool:
+        return (
+            fallback_client is not None
+            and fallback_client.client_ip == client_ip
+            and fallback_client.client_mac == client_mac
+        )
+
+    @staticmethod
     def _select_identity(
         identities: list[tuple[str, bool | None]],
     ) -> str | None:
@@ -718,10 +816,17 @@ class CapportService:
         return None
 
     @staticmethod
-    def _state_reason(client: CapportClient) -> str:
+    def _state_reason(
+        client: CapportClient,
+        *,
+        detail_fallback: bool = False,
+    ) -> str:
+        authorized = client.auth_status == 2
+        if detail_fallback:
+            authorized = authorized and client.active is True
         return (
             "AUTHORIZED"
-            if client.auth_status == 2
+            if authorized
             else "CAPTIVE"
         )
 
@@ -735,10 +840,17 @@ class CapportService:
         reason: str,
         cache_hit: bool = False,
         lookup_failed: bool = False,
+        detail_fallback: bool = False,
     ) -> CapportState:
         return CapportState(
             allowed=allowed,
-            captive=(client is None or client.auth_status != 2),
+            captive=(
+                client is None
+                or self._state_reason(
+                    client,
+                    detail_fallback=detail_fallback,
+                ) != "AUTHORIZED"
+            ),
             client_found=client is not None,
             client_ip=client_ip,
             client=client,
