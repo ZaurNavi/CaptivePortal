@@ -75,12 +75,35 @@
         }
 
         .portal-logo {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
             margin-bottom: 24px;
         }
 
-        .portal-logo svg {
+        .portal-logo__flag {
+            flex: 0 0 auto;
             width: 100px;
             height: 100px;
+        }
+
+        .portal-logo__wave {
+            width: 54px;
+            height: 54px;
+            opacity: 0.20;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 4;
+            stroke-linecap: round;
+        }
+
+        .portal-logo__wave--left {
+            color: #0092CC;
+        }
+
+        .portal-logo__wave--right {
+            color: #00B140;
         }
 
         .portal-title {
@@ -93,20 +116,22 @@
 
         .portal-greeting {
             font-size: 20px;
-            font-weight: 600;
-            color: #00B140;
+            font-weight: 700;
+            color: #E4002B;
             margin-bottom: 16px;
         }
 
         .portal-description {
             font-size: 20px;
-            font-weight: 600;
-            color: #0092CC;
+            font-weight: 700;
+            color: #00B140;
             line-height: 1.5;
             margin-bottom: 30px;
+            text-align: center;
+            white-space: pre-line;
 
             text-shadow:
-                0 2px 4px rgba(0, 146, 204, 0.1);
+                0 2px 4px rgba(0, 177, 64, 0.1);
         }
 
         .portal-error {
@@ -114,6 +139,7 @@
 
             background: #fff0f0;
             border: 1px solid #f4b7b7;
+            border-left: 4px solid #E4002B;
             color: #b3261e;
 
             padding: 12px 16px;
@@ -253,15 +279,124 @@
             min-height: 38px;
         }
 
-        .designer-credit {
-            margin-top: 24px;
-            padding-top: 16px;
+        .portal-support {
+            margin-top: 20px;
+            padding: 14px 16px;
 
             border-top:
                 1px solid rgba(0, 146, 204, 0.2);
 
-            font-size: 12px;
-            color: #888;
+            text-align: left;
+        }
+
+        .portal-support__title {
+            margin-bottom: 10px;
+            color: #444;
+            font-size: 13px;
+            font-weight: 700;
+            text-align: center;
+        }
+
+        .portal-support__link {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 9px;
+            padding: 5px 0;
+            color: #505050;
+            font-size: 13px;
+            line-height: 1.35;
+            text-decoration: none;
+            overflow-wrap: anywhere;
+        }
+
+        .portal-support__link:hover {
+            color: #0092CC;
+        }
+
+        .portal-support__icon {
+            flex: 0 0 20px;
+            font-size: 15px;
+            text-align: center;
+        }
+
+        .portal-support__socials {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .portal-social-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 38px;
+            height: 38px;
+
+            border: 1px solid currentColor;
+            border-radius: 50%;
+            text-decoration: none;
+
+            transition:
+                transform 0.2s ease,
+                box-shadow 0.2s ease,
+                background 0.2s ease;
+        }
+
+        .portal-social-link:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+        }
+
+        .portal-social-link:focus-visible {
+            outline: 3px solid rgba(0, 146, 204, 0.25);
+            outline-offset: 2px;
+        }
+
+        .portal-social-link svg {
+            width: 21px;
+            height: 21px;
+        }
+
+        .portal-social-link--whatsapp {
+            color: #1FAF5A;
+            background: rgba(37, 211, 102, 0.08);
+        }
+
+        .portal-social-link--whatsapp:hover {
+            background: rgba(37, 211, 102, 0.16);
+        }
+
+        .portal-social-link--telegram {
+            color: #229ED9;
+            background: rgba(34, 158, 217, 0.08);
+        }
+
+        .portal-social-link--telegram:hover {
+            background: rgba(34, 158, 217, 0.16);
+        }
+
+        .portal-social-link--facebook {
+            color: #1877F2;
+            background: rgba(24, 119, 242, 0.08);
+        }
+
+        .portal-social-link--facebook:hover {
+            background: rgba(24, 119, 242, 0.16);
+        }
+
+        .designer-credit {
+            margin-top: 14px;
+            padding-top: 12px;
+
+            border-top:
+                1px solid rgba(0, 146, 204, 0.12);
+
+            font-size: 10px;
+            line-height: 1.35;
+            color: #999;
             font-style: italic;
         }
 
@@ -327,9 +462,18 @@
                 font-size: 18px;
             }
 
-            .portal-logo svg {
+            .portal-logo {
+                gap: 7px;
+            }
+
+            .portal-logo__flag {
                 width: 90px;
                 height: 90px;
+            }
+
+            .portal-logo__wave {
+                width: 42px;
+                height: 42px;
             }
         }
 
@@ -366,6 +510,26 @@
         <section class="portal-card">
             <div class="portal-logo">
                 <svg
+                    class="portal-logo__wave portal-logo__wave--left"
+                    viewBox="0 0 64 64"
+                    xmlns="http://www.w3.org/2000/svg"
+                    aria-hidden="true"
+                    focusable="false"
+                >
+                    <path d="M10 27C22 15 42 15 54 27"/>
+                    <path d="M18 36C26 28 38 28 46 36"/>
+                    <path d="M26 45C30 41 34 41 38 45"/>
+                    <circle
+                        cx="32"
+                        cy="51"
+                        r="2.5"
+                        fill="currentColor"
+                        stroke="none"
+                    />
+                </svg>
+
+                <svg
+                    class="portal-logo__flag"
                     viewBox="0 0 100 100"
                     xmlns="http://www.w3.org/2000/svg"
                 >
@@ -443,6 +607,25 @@
                         stroke-width="2"
                     />
                 </svg>
+
+                <svg
+                    class="portal-logo__wave portal-logo__wave--right"
+                    viewBox="0 0 64 64"
+                    xmlns="http://www.w3.org/2000/svg"
+                    aria-hidden="true"
+                    focusable="false"
+                >
+                    <path d="M10 27C22 15 42 15 54 27"/>
+                    <path d="M18 36C26 28 38 28 46 36"/>
+                    <path d="M26 45C30 41 34 41 38 45"/>
+                    <circle
+                        cx="32"
+                        cy="51"
+                        r="2.5"
+                        fill="currentColor"
+                        stroke="none"
+                    />
+                </svg>
             </div>
 
             <h1
@@ -462,9 +645,8 @@
             <p
                 class="portal-description"
                 data-i18n="description"
-            >
-                Parkımızın qonaqları üçün pulsuz Wi-Fi.
-            </p>
+            >Parkımızın qonaqları üçün pulsuz
+Wi-Fi!!</p>
 
             <div
                 id="portal-error"
@@ -521,10 +703,137 @@
                 {% include "components/portal_counter.html" %}
             {% endif %}
 
-            <div class="designer-credit">
-                Designer: Zaur Navi<br>
-                Country should know its heroes
-            </div>
+            <section
+                class="portal-support"
+                aria-labelledby="portal-support-title"
+            >
+                <h2
+                    id="portal-support-title"
+                    class="portal-support__title"
+                    data-i18n="supportTitle"
+                >
+                    Texniki dəstək
+                </h2>
+
+                <a
+                    class="portal-support__link"
+                    href="tel:+994504174646"
+                >
+                    <span
+                        class="portal-support__icon"
+                        aria-hidden="true"
+                    >📞</span>
+                    <span>+994 50 417 46 46</span>
+                </a>
+
+                <a
+                    class="portal-support__link"
+                    href="mailto:zaur.navi@gmail.com"
+                >
+                    <span
+                        class="portal-support__icon"
+                        aria-hidden="true"
+                    >✉️</span>
+                    <span>zaur.navi@gmail.com</span>
+                </a>
+
+                <div
+                    class="portal-support__socials"
+                    aria-label="Sosial şəbəkələr"
+                >
+                    <a
+                        class="
+                            portal-social-link
+                            portal-social-link--whatsapp
+                        "
+                        href="https://wa.me/994504174646"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label="WhatsApp"
+                        title="WhatsApp"
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            xmlns="http://www.w3.org/2000/svg"
+                            aria-hidden="true"
+                            focusable="false"
+                        >
+                            <circle
+                                cx="12"
+                                cy="11"
+                                r="8"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.8"
+                            />
+                            <path
+                                d="M7 17.2 5.8 21l3.9-1.5"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="1.8"
+                            />
+                            <path
+                                d="M9.1 7.7c.3-.3.7-.3 1 0l1.1 1.5c.2.3.2.7 0 .9l-.7.8c.6 1.4 1.6 2.4 3 3l.8-.7c.3-.2.7-.2.9 0l1.5 1.1c.3.3.3.7 0 1-1 1.1-2.5 1.4-4.5.5-1.4-.6-2.7-1.6-3.7-2.7-1-1-1.7-2.2-2.1-3.3-.4-1.3-.2-2.1.7-3.1Z"
+                                fill="currentColor"
+                            />
+                        </svg>
+                    </a>
+
+                    <a
+                        class="
+                            portal-social-link
+                            portal-social-link--telegram
+                        "
+                        href="https://t.me/ZaurNavi"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label="Telegram"
+                        title="Telegram"
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            xmlns="http://www.w3.org/2000/svg"
+                            aria-hidden="true"
+                            focusable="false"
+                        >
+                            <path
+                                d="M21.2 4.2 18.5 19c-.2 1-1 1.3-1.8.8l-4.1-3-2 1.9c-.2.2-.4.4-.9.4l.3-4.2 7.7-6.9c.3-.3-.1-.5-.5-.2l-9.5 6-4.1-1.3c-.9-.3-.9-.9.2-1.3l16-6.2c.7-.3 1.4.2 1.2 1.2Z"
+                                fill="currentColor"
+                            />
+                        </svg>
+                    </a>
+
+                    <a
+                        class="
+                            portal-social-link
+                            portal-social-link--facebook
+                        "
+                        href="https://www.facebook.com/zaur.navi/?locale=ru_RU"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label="Facebook"
+                        title="Facebook"
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            xmlns="http://www.w3.org/2000/svg"
+                            aria-hidden="true"
+                            focusable="false"
+                        >
+                            <path
+                                d="M13.7 21v-8h2.7l.4-3.1h-3.1v-2c0-.9.3-1.5 1.6-1.5H17V3.6c-.3 0-1.3-.1-2.4-.1-2.4 0-4 1.4-4 4.1v2.3H8V13h2.6v8h3.1Z"
+                                fill="currentColor"
+                            />
+                        </svg>
+                    </a>
+                </div>
+            </section>
+
+            <footer class="designer-credit">
+                © Designer: Zaur Navi | Country should know its heroes.
+            </footer>
         </section>
     </main>
 
@@ -540,7 +849,11 @@
             az: {
                 title: "Zəfər Parkı",
                 greeting: "Xoş gəlmisiniz!",
-                description: "Parkımızın qonaqları üçün pulsuz Wi-Fi.",
+                description: "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!",
+                counterHeading: "Wi-Fi qoşulmaları",
+                counterToday: "Bu gün",
+                counterTotal: "Ümumi",
+                supportTitle: "Texniki dəstək",
 
                 WAITING: "Qoşulma hazırlanır...",
                 AUTHORIZING: "Şəbəkəyə qoşulma yerinə yetirilir...",
@@ -556,7 +869,7 @@
                 resetNote:
                     "Wi-Fi sessiyası sıfırlandı. Şəbəkəyə yenidən qoşulun.",
                 failedNote:
-                    "Qoşulmanı tamamlamaq mümkün olmadı.",
+                    "Qoşulma xətası baş verdi. Zəhmət olmasa, bu Wi-Fi şəbəkəsini 'Unut' (silin) və yenidən qoşulmağa cəhd edin.",
                 expiredNote:
                     "Şəbəkəyə yenidən qoşulub təkrar cəhd edin.",
                 pollingError:
@@ -566,7 +879,11 @@
             ru: {
                 title: "Zəfər Parkı",
                 greeting: "Добро пожаловать!",
-                description: "Бесплатный Wi-Fi для гостей парка.",
+                description: "Бесплатный Wi-Fi\nдля гостей парка!!",
+                counterHeading: "Подключения к Wi-Fi",
+                counterToday: "Сегодня",
+                counterTotal: "Всего",
+                supportTitle: "Техподдержка",
 
                 WAITING: "Подготовка подключения...",
                 AUTHORIZING: "Выполняется подключение к сети...",
@@ -582,7 +899,7 @@
                 resetNote:
                     "Wi-Fi-сессия была сброшена. Подключитесь к сети повторно.",
                 failedNote:
-                    "Не удалось завершить авторизацию.",
+                    "Произошла ошибка подключения. Пожалуйста, 'Забудьте' (удалите) эту Wi-Fi сеть в настройках телефона и попробуйте подключиться снова.",
                 expiredNote:
                     "Подключитесь к сети повторно и попробуйте ещё раз.",
                 pollingError:
@@ -592,7 +909,11 @@
             en: {
                 title: "Zəfər Parkı",
                 greeting: "Welcome!",
-                description: "Free Wi-Fi for park guests.",
+                description: "Free Wi-Fi\nfor park guests!!",
+                counterHeading: "Wi-Fi connections",
+                counterToday: "Today",
+                counterTotal: "Total",
+                supportTitle: "Technical support",
 
                 WAITING: "Preparing connection...",
                 AUTHORIZING: "Connecting to the network...",
@@ -608,7 +929,7 @@
                 resetNote:
                     "The Wi-Fi session was reset. Reconnect to the network.",
                 failedNote:
-                    "Unable to complete authorization.",
+                    "Connection failed. Please 'Forget' this Wi-Fi network in your phone settings and try connecting again.",
                 expiredNote:
                     "Reconnect to the network and try again.",
                 pollingError:
@@ -804,10 +1125,17 @@
                 return;
             }
 
-            if (
-                status === "FAILED"
-                || status === "EXPIRED"
-            ) {
+            if (status === "FAILED") {
+                progressBar.classList.add("failed");
+                progressSpinner.classList.add("hidden");
+                portalNote.textContent = "";
+
+                showError(texts.failedNote);
+
+                return;
+            }
+
+            if (status === "EXPIRED") {
                 progressBar.classList.add("failed");
                 progressSpinner.classList.add("hidden");
 
