@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 from flask import render_template
@@ -9,12 +10,13 @@ from flask import render_template
 from app.auth.worker import log_auth_event
 from app.auth_telemetry import events as telemetry_events
 from app.logger import logger
+from app.web.localization import PORTAL_TRANSLATIONS
 
 
 @dataclass(frozen=True)
 class PortalClientContext:
     site_id: str
-    client_mac: str
+    client_mac: str | None
     client_ip: str | None = None
     ap_mac: str | None = None
     ssid: str | None = None
@@ -108,6 +110,8 @@ class PortalEntryHandler:
                 redirect_url=session.redirect_url,
                 initial_status=snapshot["status"],
                 initial_progress=snapshot["progress"],
+                initial_state=snapshot,
+                portal_translations=PORTAL_TRANSLATIONS,
                 error_message=None,
             )
         except ValueError as exc:
@@ -135,56 +139,141 @@ class PortalEntryHandler:
             )
 
     def _start_worker(self, session):
-        worker_claimed = self._session_manager.claim_worker(session)
-        if not worker_claimed:
-            self._session_manager.fail(
-                session,
-                error="Unable to claim authorization worker.",
-            )
-            self._emit_internal_failure(
-                session,
-                "Unable to claim authorization worker.",
-            )
+        started, reason, error = self.submit_worker(
+            session,
+            session.current_run_number,
+            session.current_run_token,
+        )
+        if started:
+            return None
+
+        if reason == "CONFIGURATION_ERROR":
             return self._error_page(
                 "Не удалось запустить процесс подключения.",
                 500,
                 session=session,
             )
+        return self._error_page(
+            "Системная ошибка запуска подключения.",
+            500,
+            session=session,
+        )
 
-        try:
-            self._executor.submit(
-                self._auth_worker.process,
-                session.session_id,
-            )
-            return None
-        except Exception as exc:
+    def submit_worker(
+        self,
+        session,
+        run_number: int,
+        run_token: str,
+    ) -> tuple[bool, str | None, str | None]:
+        worker_claimed = self._session_manager.claim_worker(
+            session,
+            run_number,
+            run_token,
+        )
+        if not worker_claimed:
+            error = "Unable to claim authorization worker."
             self._session_manager.fail(
                 session,
-                error=f"Worker submission failed: {exc}",
+                error=error,
+                final_reason="CONFIGURATION_ERROR",
+                retryable=False,
+                run_number=run_number,
+                run_token=run_token,
             )
-            self._session_manager.mark_worker_finished(session)
-            self._emit_internal_failure(session, str(exc))
-            return self._error_page(
-                "Системная ошибка запуска подключения.",
-                500,
-                session=session,
+            self._session_manager.mark_worker_finished(
+                session,
+                run_number=run_number,
+                run_token=run_token,
             )
+            self._emit_run_start_failure(
+                session,
+                run_number,
+                "CONFIGURATION_ERROR",
+                False,
+                error,
+            )
+            return False, "CONFIGURATION_ERROR", error
 
-    def _emit_internal_failure(self, session, error: str) -> None:
-        self._auth_telemetry.safe_emit_once(
-            telemetry_events.SESSION_FINISHED,
+        try:
+            guarded_process = partial(
+                self._auth_worker.process,
+                run_number=run_number,
+                run_token=run_token,
+            )
+            self._executor.submit(
+                guarded_process,
+                session.session_id,
+            )
+            return True, None, None
+        except Exception as exc:
+            error = f"Worker submission failed: {exc}"
+            self._session_manager.fail(
+                session,
+                error=error,
+                final_reason="WORKER_START_FAILED",
+                retryable=True,
+                run_number=run_number,
+                run_token=run_token,
+            )
+            self._session_manager.mark_worker_finished(
+                session,
+                run_number=run_number,
+                run_token=run_token,
+            )
+            self._emit_run_start_failure(
+                session,
+                run_number,
+                "WORKER_START_FAILED",
+                True,
+                error,
+            )
+            return False, "WORKER_START_FAILED", error
+
+    def _emit_run_start_failure(
+        self,
+        session,
+        run_number: int,
+        final_reason: str,
+        retryable: bool,
+        error: str,
+    ) -> None:
+        run = self._session_manager.run_snapshot(
+            session,
+            run_number,
+        ) or {}
+        self._auth_telemetry.safe_emit(
+            telemetry_events.RUN_FINISHED,
             session.session_id,
-            "error",
+            "warning" if retryable else "error",
             site_id=session.site_id,
             client_mac=session.client_mac,
             client_ip=session.client_ip,
+            run_number=run_number,
+            auth_attempt=0,
+            retry_request_id=run.get("retry_request_id"),
             final_state=session.status.value,
-            final_reason="INTERNAL_ERROR",
+            final_reason=final_reason,
+            retryable=retryable,
             duration_ms=0,
             readiness_checks=0,
             auth_attempts=0,
             error=error,
         )
+        if not retryable:
+            self._auth_telemetry.safe_emit_once(
+                telemetry_events.SESSION_FINISHED,
+                session.session_id,
+                "error",
+                site_id=session.site_id,
+                client_mac=session.client_mac,
+                client_ip=session.client_ip,
+                run_number=run_number,
+                auth_attempt=0,
+                final_state=session.status.value,
+                final_reason=final_reason,
+                retryable=False,
+                error=error,
+            )
 
     @staticmethod
     def _error_page(
@@ -212,5 +301,17 @@ class PortalEntryHandler:
             initial_progress=(
                 session.progress if session is not None else 100
             ),
+            initial_state=(
+                session.to_dict()
+                if session is not None
+                else {
+                    "state": "FAILED",
+                    "status": "FAILED",
+                    "retryable": False,
+                    "progress": 100,
+                    "terminal": True,
+                }
+            ),
+            portal_translations=PORTAL_TRANSLATIONS,
             error_message=message,
         ), status_code

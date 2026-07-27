@@ -6,15 +6,20 @@ server-side AuthSession/AuthWorker flow.
 """
 
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, jsonify, render_template, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app import create_controller, get_settings, logger
-from app.auth.manager import AuthSessionManager
+from app.auth.manager import (
+    AuthSessionManager,
+    RetryOutcome,
+)
 from app.auth.worker import AuthWorker
 from app.auth_telemetry import configure_auth_telemetry
+from app.auth_telemetry import events as telemetry_events
 from app.capport import (
     CapportConfig,
     CapportService,
@@ -31,6 +36,7 @@ from app.web.portal_entry import (
     PortalClientContext,
     PortalEntryHandler,
 )
+from app.web.localization import PORTAL_TRANSLATIONS
 
 
 MAX_WORKERS = 4
@@ -38,6 +44,8 @@ _AUTO_COUNTER = object()
 
 
 # One manager and one bounded executor per application process.
+# Auth sessions and locks are in memory, so the WSGI process count must
+# remain exactly one. The executor threads below are supported.
 auth_manager = AuthSessionManager()
 auth_executor = ThreadPoolExecutor(
     max_workers=MAX_WORKERS,
@@ -156,12 +164,13 @@ def create_app(
             client_mac,
             client_ip,
         )
-        if not site_id or not client_mac:
+        if not site_id or (not client_mac and not client_ip):
             logger.warning(
-                "GET / - Missing required Omada parameters: "
-                "site=%s, mac=%s",
-                site_id,
-                client_mac,
+                    "GET / - Missing required Omada parameters: "
+                    "site=%s, mac=%s, ip=%s",
+                    site_id,
+                    client_mac,
+                    client_ip,
             )
             return render_template(
                 "portal.html",
@@ -169,6 +178,14 @@ def create_app(
                 redirect_url=redirect_url,
                 initial_status="FAILED",
                 initial_progress=100,
+                initial_state={
+                    "state": "FAILED",
+                    "status": "FAILED",
+                    "retryable": False,
+                    "progress": 100,
+                    "terminal": True,
+                },
+                portal_translations=PORTAL_TRANSLATIONS,
                 error_message=(
                     "Не удалось определить параметры подключения."
                 ),
@@ -193,6 +210,7 @@ def create_app(
         """
         Return AuthSession state without creating or extending a session.
         """
+        was_expired = auth_manager.expire_if_needed(session_id)
         snapshot = auth_manager.snapshot(session_id)
         if snapshot is None:
             return jsonify(
@@ -203,11 +221,30 @@ def create_app(
                     "progress": 100,
                     "authorized": False,
                     "terminal": True,
+                    "retryable": False,
+                    "current_run_number": 0,
+                    "final_reason": "INVALID_SESSION",
+                    "expires_at": None,
                     "message": (
                         "Authorization session not found."
                     ),
                 }
             ), 404
+
+        if was_expired:
+            auth_telemetry.safe_emit_once(
+                telemetry_events.SESSION_FINISHED,
+                session_id,
+                "warning",
+                site_id=auth_manager.get(session_id).site_id,
+                client_ip=auth_manager.get(session_id).client_ip,
+                client_mac=auth_manager.get(session_id).client_mac,
+                run_number=snapshot["current_run_number"],
+                auth_attempt=snapshot["attempt"],
+                final_state="EXPIRED",
+                final_reason="SESSION_EXPIRED",
+                retryable=False,
+            )
 
         response = jsonify(snapshot)
         response.headers["Cache-Control"] = (
@@ -216,6 +253,217 @@ def create_app(
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
         return response
+
+    @app.route(
+        "/auth/session/<session_id>/retry",
+        methods=["POST"],
+    )
+    def retry_auth_session(session_id: str):
+        payload = request.get_json(silent=True)
+        raw_request_id = (
+            payload.get("retry_request_id")
+            if isinstance(payload, dict)
+            else None
+        )
+        try:
+            if not isinstance(raw_request_id, str):
+                raise ValueError
+            retry_request_id = str(uuid.UUID(raw_request_id.strip()))
+        except (ValueError, AttributeError):
+            auth_telemetry.safe_emit(
+                telemetry_events.RETRY_REJECTED,
+                session_id,
+                "warning",
+                client_ip=request.remote_addr,
+                reason="INVALID_REQUEST",
+            )
+            return jsonify({
+                "session_id": session_id,
+                "error": "INVALID_REQUEST",
+                "message": (
+                    "retry_request_id must be a valid UUID."
+                ),
+            }), 400
+
+        session = auth_manager.get(session_id)
+        if session is None:
+            auth_telemetry.safe_emit(
+                telemetry_events.RETRY_REQUESTED,
+                session_id,
+                "warning",
+                retry_request_id=retry_request_id,
+                client_ip=request.remote_addr,
+                run_number=0,
+                auth_attempt=0,
+            )
+            auth_telemetry.safe_emit(
+                telemetry_events.RETRY_REJECTED,
+                session_id,
+                "warning",
+                retry_request_id=retry_request_id,
+                client_ip=request.remote_addr,
+                reason="SESSION_NOT_FOUND",
+                run_number=0,
+                auth_attempt=0,
+            )
+            return jsonify({
+                "session_id": session_id,
+                "error": "SESSION_NOT_FOUND",
+            }), 404
+
+        if not auth_manager.owns_session(
+            session,
+            request.remote_addr,
+        ):
+            auth_telemetry.safe_emit(
+                telemetry_events.RETRY_REJECTED,
+                session_id,
+                "warning",
+                retry_request_id=retry_request_id,
+                client_ip=request.remote_addr,
+                client_mac=session.client_mac,
+                run_number=session.current_run_number,
+                auth_attempt=session.attempt,
+                reason="SESSION_OWNERSHIP_MISMATCH",
+            )
+            return jsonify({
+                "session_id": session_id,
+                "error": "SESSION_OWNERSHIP_MISMATCH",
+            }), 403
+
+        auth_telemetry.safe_emit(
+            telemetry_events.RETRY_REQUESTED,
+            session_id,
+            "info",
+            retry_request_id=retry_request_id,
+            client_ip=session.client_ip,
+            client_mac=session.client_mac,
+            run_number=session.current_run_number,
+            auth_attempt=session.attempt,
+            previous_final_state=session.status.value,
+            previous_final_reason=session.final_reason,
+        )
+
+        preparation = auth_manager.prepare_retry(
+            session_id,
+            retry_request_id,
+        )
+        session = preparation.session or session
+        snapshot = auth_manager.snapshot(session)
+
+        if preparation.outcome == RetryOutcome.DUPLICATE:
+            response = dict(snapshot)
+            response.update({
+                "duplicate": True,
+                "request_run_number": (
+                    preparation.request_run_number
+                ),
+            })
+            return jsonify(response), 200
+
+        if preparation.outcome == RetryOutcome.ACTIVE:
+            auth_telemetry.safe_emit(
+                telemetry_events.RETRY_REJECTED,
+                session_id,
+                "info",
+                retry_request_id=retry_request_id,
+                client_ip=session.client_ip,
+                client_mac=session.client_mac,
+                run_number=session.current_run_number,
+                auth_attempt=session.attempt,
+                reason="RUN_ALREADY_ACTIVE",
+            )
+            response = dict(snapshot)
+            response["duplicate"] = False
+            return jsonify(response), 200
+
+        if preparation.outcome == RetryOutcome.EXPIRED:
+            auth_telemetry.safe_emit(
+                telemetry_events.RETRY_REJECTED,
+                session_id,
+                "warning",
+                retry_request_id=retry_request_id,
+                client_ip=session.client_ip,
+                client_mac=session.client_mac,
+                run_number=session.current_run_number,
+                auth_attempt=session.attempt,
+                reason="SESSION_EXPIRED",
+            )
+            auth_telemetry.safe_emit_once(
+                telemetry_events.SESSION_FINISHED,
+                session_id,
+                "warning",
+                client_ip=session.client_ip,
+                client_mac=session.client_mac,
+                run_number=session.current_run_number,
+                auth_attempt=session.attempt,
+                final_state="EXPIRED",
+                final_reason="SESSION_EXPIRED",
+                retryable=False,
+            )
+            return jsonify(snapshot), 410
+
+        if preparation.outcome == RetryOutcome.NOT_RETRYABLE:
+            reason = (
+                "SESSION_ALREADY_AUTHORIZED"
+                if session.authorized
+                else "STATE_NOT_RETRYABLE"
+            )
+            auth_telemetry.safe_emit(
+                telemetry_events.RETRY_REJECTED,
+                session_id,
+                "warning",
+                retry_request_id=retry_request_id,
+                client_ip=session.client_ip,
+                client_mac=session.client_mac,
+                run_number=session.current_run_number,
+                auth_attempt=session.attempt,
+                reason=reason,
+            )
+            return jsonify(snapshot), 409
+
+        if preparation.outcome == RetryOutcome.NOT_FOUND:
+            return jsonify({
+                "session_id": session_id,
+                "error": "SESSION_NOT_FOUND",
+            }), 404
+
+        started, failure_reason, failure_message = (
+            portal_entry_handler.submit_worker(
+                session,
+                preparation.run_number,
+                preparation.run_token,
+            )
+        )
+        snapshot = auth_manager.snapshot(session)
+        if not started:
+            auth_telemetry.safe_emit(
+                telemetry_events.RETRY_FAILED,
+                session_id,
+                (
+                    "warning"
+                    if snapshot["retryable"]
+                    else "error"
+                ),
+                retry_request_id=retry_request_id,
+                client_ip=session.client_ip,
+                client_mac=session.client_mac,
+                run_number=preparation.run_number,
+                auth_attempt=0,
+                final_state=snapshot["state"],
+                final_reason=failure_reason,
+                retryable=snapshot["retryable"],
+                error=failure_message,
+            )
+            return jsonify(snapshot), (
+                503
+                if failure_reason == "WORKER_START_FAILED"
+                else 500
+            )
+
+        response = dict(snapshot)
+        response["duplicate"] = False
+        return jsonify(response), 202
 
     @app.route("/success", methods=["GET"])
     def success():

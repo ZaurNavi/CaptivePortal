@@ -21,6 +21,7 @@ COUNTER_STYLES = (
     / "css"
     / "portal_counter.css"
 )
+LOCALIZATION = ROOT / "app" / "web" / "localization.py"
 
 
 def read(path: Path) -> str:
@@ -85,21 +86,18 @@ def test_counter_is_one_localized_panel():
 
 
 def test_failed_message_explains_how_to_reconnect():
-    template = read(PORTAL_TEMPLATE)
+    localization = read(LOCALIZATION)
 
     assert (
-        "Qoşulma xətası baş verdi. Zəhmət olmasa, "
-        "bu Wi-Fi şəbəkəsini 'Unut' (silin)"
-        in template
+        "Qoşulmanı tamamlamaq mümkün olmadı. Wi-Fi şəbəkəsinə "
+        in localization
     )
     assert (
-        "Произошла ошибка подключения. Пожалуйста, "
-        "'Забудьте' (удалите) эту Wi-Fi сеть"
-        in template
+        "Не удалось завершить подключение. Переподключитесь "
+        in localization
     )
     assert (
-        "Connection failed. Please 'Forget' this Wi-Fi "
-        "network in your phone settings"
-        in template
+        "We couldn’t complete the connection. Reconnect to Wi-Fi "
+        in localization
     )
-    assert "showError(texts.failedNote);" in template
+    assert "showError(texts.finalFailure);" in read(PORTAL_TEMPLATE)

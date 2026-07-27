@@ -1,5 +1,6 @@
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
 
 from app.controllers.omada import OmadaProvider
@@ -243,6 +244,70 @@ def test_http_timeout_returns_http_error():
 
     assert not result.success
     assert result.error == "HTTP_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("method_name", "request_name"),
+    [
+        ("get_client", "get"),
+        ("authorize", "post"),
+        ("unauthorize", "post"),
+    ],
+)
+def test_detail_and_auth_methods_convert_transport_errors(
+    method_name,
+    request_name,
+):
+    omada = provider()
+    method = getattr(omada, method_name)
+
+    with patch(
+        f"app.controllers.omada.requests.{request_name}",
+        side_effect=requests.exceptions.ConnectionError("offline"),
+    ):
+        result = method("site-1", "AA-BB-CC-DD-EE-FF")
+
+    assert not result.success
+    assert result.error == "HTTP_ERROR"
+    assert result.data["http_status"] == 0
+
+
+def test_get_client_by_ip_preserves_transport_failure():
+    omada = provider()
+    omada.get_clients = Mock(
+        return_value=Result.fail(
+            error="HTTP_ERROR",
+            message="HTTP Error: timeout",
+            data={"http_status": 0, "error_code": 0},
+        )
+    )
+
+    result = omada.get_client_by_ip(
+        "site-1",
+        "192.168.1.10",
+    )
+
+    assert not result.success
+    assert result.error == "HTTP_ERROR"
+
+
+def test_token_login_converts_transport_failure():
+    omada = object.__new__(OmadaProvider)
+    omada._omada_url = "https://controller.example"
+    omada._omada_id = "controller-id"
+    omada._client_id = "client-id"
+    omada._client_secret = "client-secret"
+    omada._verify_ssl = True
+
+    with patch(
+        "app.controllers.omada.requests.post",
+        side_effect=requests.exceptions.ConnectTimeout("slow"),
+    ):
+        result = omada._get_token()
+
+    assert not result.success
+    assert result.error == "HTTP_ERROR"
+    assert result.data["http_status"] == 0
 
 
 def test_nonzero_omada_error_code_returns_api_error():

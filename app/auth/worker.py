@@ -37,7 +37,21 @@ class _RunMetrics:
     last_active: Optional[bool] = None
     last_auth_status: Optional[int] = None
     last_omada_error_code: Optional[Any] = None
+    last_failure_reason: Optional[str] = None
+    last_failure_retryable: bool = False
     final_reason: str = "INTERNAL_ERROR"
+
+
+@dataclass
+class _WorkerRun:
+    session_id: str
+    run_number: int
+    run_token: str
+    stale_reported: bool = False
+
+
+class _StaleRun(RuntimeError):
+    pass
 
 
 def _session_fields(session: AuthSession) -> dict[str, Any]:
@@ -46,6 +60,8 @@ def _session_fields(session: AuthSession) -> dict[str, Any]:
         "client_mac": session.client_mac,
         "client_ip": session.client_ip,
         "state": session.status.value,
+        "run_number": session.current_run_number,
+        "auth_attempt": session.attempt,
     }
 
 
@@ -80,18 +96,66 @@ class AuthWorker:
         self._provider = provider
         self._session_manager = session_manager
 
-    def process(self, session_id: str) -> None:
+    def process(
+        self,
+        session_id: str,
+        run_number: Optional[int] = None,
+        run_token: Optional[str] = None,
+    ) -> None:
         session = self._session_manager.get(session_id)
         if session is None:
             return
+
+        run_number = (
+            session.current_run_number
+            if run_number is None
+            else run_number
+        )
+        run_token = (
+            session.current_run_token
+            if run_token is None
+            else run_token
+        )
+        if run_token is None:
+            return
+        run = _WorkerRun(
+            session_id=session_id,
+            run_number=run_number,
+            run_token=run_token,
+        )
+        if not self._session_manager.current_run_matches(
+            session_id,
+            run.run_number,
+            run.run_token,
+        ):
+            try:
+                self._raise_stale(session, run, "worker_start")
+            except _StaleRun:
+                return
 
         metrics = _RunMetrics(
             started=time.monotonic(),
             worker_id=threading.current_thread().name,
         )
+        try:
+            self._require_update(
+                self._session_manager.set_worker_id(
+                    session,
+                    metrics.worker_id,
+                    run_number=run.run_number,
+                    run_token=run.run_token,
+                ),
+                session,
+                run,
+                "worker_id",
+            )
+        except _StaleRun:
+            return
         log_auth_event(
             events.WORKER_STARTED,
             session,
+            run_number=run.run_number,
+            auth_attempt=0,
             worker_id=metrics.worker_id,
             initial_delay_ms=self._milliseconds(
                 MIN_INITIAL_DELAY_SECONDS
@@ -107,13 +171,53 @@ class AuthWorker:
                 VERIFY_DELAY_SECONDS
             ),
         )
+        if run.run_number >= 2:
+            run_state = self._session_manager.run_snapshot(
+                session,
+                run.run_number,
+            ) or {}
+            previous_run = (
+                session.runs[-2]
+                if len(session.runs) >= 2
+                else None
+            )
+            get_auth_telemetry().safe_emit(
+                events.RETRY_STARTED,
+                session.session_id,
+                "info",
+                site_id=session.site_id,
+                client_ip=session.client_ip,
+                client_mac=session.client_mac,
+                run_number=run.run_number,
+                auth_attempt=0,
+                retry_request_id=run_state.get(
+                    "retry_request_id"
+                ),
+                previous_final_state=(
+                    previous_run.final_state
+                    if previous_run is not None
+                    else None
+                ),
+                previous_final_reason=(
+                    previous_run.final_reason
+                    if previous_run is not None
+                    else None
+                ),
+            )
 
         try:
-            self._session_manager.update_status(
+            self._require_update(
+                self._session_manager.update_status(
+                    session,
+                    AuthStatus.WAITING,
+                    error="",
+                    progress=0,
+                    run_number=run.run_number,
+                    run_token=run.run_token,
+                ),
                 session,
-                AuthStatus.WAITING,
-                error="",
-                progress=0,
+                run,
+                "waiting",
             )
 
             sleep_completed = self._sleep_with_ttl_check(
@@ -121,16 +225,20 @@ class AuthWorker:
                 seconds=MIN_INITIAL_DELAY_SECONDS,
                 start_progress=0,
                 end_progress=10,
+                run=run,
             )
             if not sleep_completed:
+                self._ensure_current(session, run, "initial_delay")
                 metrics.final_reason = "SESSION_EXPIRED"
-                self._expire_session(session)
+                self._expire_session(session, run)
                 return
 
             log_auth_event(
                 events.INITIAL_DELAY_COMPLETED,
                 session,
                 level="debug",
+                run_number=run.run_number,
+                auth_attempt=0,
                 initial_delay_ms=self._milliseconds(
                     MIN_INITIAL_DELAY_SECONDS
                 ),
@@ -140,10 +248,11 @@ class AuthWorker:
             ready_state, ready_result = self._wait_for_client_ready(
                 session,
                 metrics,
+                run,
             )
             if ready_state == "expired":
                 metrics.final_reason = "SESSION_EXPIRED"
-                self._expire_session(session)
+                self._expire_session(session, run)
                 return
             if ready_state == "authorized":
                 if ready_result is None:
@@ -151,7 +260,22 @@ class AuthWorker:
                         "Authorized client result is missing."
                     )
                 metrics.final_reason = "ALREADY_AUTHORIZED"
-                self._mark_authorized(session, ready_result)
+                self._mark_authorized(
+                    session,
+                    ready_result,
+                    run,
+                    final_reason=metrics.final_reason,
+                )
+                return
+            if ready_state == "not_found":
+                metrics.final_reason = "CLIENT_NOT_FOUND"
+                self._finish_failed(
+                    session,
+                    run,
+                    final_reason="CLIENT_NOT_FOUND",
+                    retryable=True,
+                    error="Client was not found in Omada.",
+                )
                 return
             if ready_state not in {"ready", "fallback"}:
                 raise RuntimeError(
@@ -159,20 +283,44 @@ class AuthWorker:
                 )
 
             for attempt in range(1, MAX_AUTH_ATTEMPTS + 1):
-                if self._session_manager.expire_if_needed(session):
+                if self._session_manager.expire_if_needed(
+                    session,
+                    run_number=run.run_number,
+                    run_token=run.run_token,
+                ):
+                    self._ensure_current(session, run, "attempt_expiry")
                     metrics.final_reason = "SESSION_EXPIRED"
                     return
 
                 metrics.auth_attempts = attempt
                 progress = ATTEMPT_PROGRESS[attempt]
-                self._session_manager.begin_attempt(
+                self._require_update(
+                    self._session_manager.begin_attempt(
+                        session,
+                        attempt,
+                        progress=progress["authorizing"],
+                        run_number=run.run_number,
+                        run_token=run.run_token,
+                    ),
                     session,
-                    attempt,
-                    progress=progress["authorizing"],
+                    run,
+                    "authorizing",
+                )
+                self._require_update(
+                    self._session_manager
+                    .mark_authorization_may_have_changed(
+                        session,
+                        run_number=run.run_number,
+                        run_token=run.run_token,
+                    ),
+                    session,
+                    run,
+                    "authorization_flag",
                 )
                 log_auth_event(
                     events.AUTHORIZATION_REQUEST,
                     session,
+                    run_number=run.run_number,
                     auth_attempt=attempt,
                     elapsed_ms=self._elapsed_ms(metrics.started),
                 )
@@ -180,6 +328,20 @@ class AuthWorker:
                 auth_result, auth_ms, auth_exception = (
                     self._authorize_client(session)
                 )
+                self._ensure_current(
+                    session,
+                    run,
+                    "authorization_response",
+                )
+                failure_reason, failure_retryable = (
+                    self._classify_failure(
+                        auth_result,
+                        auth_exception,
+                    )
+                )
+                if failure_reason is not None:
+                    metrics.last_failure_reason = failure_reason
+                    metrics.last_failure_retryable = failure_retryable
                 self._emit_authorization_response(
                     session,
                     auth_result,
@@ -189,15 +351,23 @@ class AuthWorker:
                     metrics,
                 )
 
-                self._session_manager.update_status(
+                self._require_update(
+                    self._session_manager.update_status(
+                        session,
+                        AuthStatus.VERIFYING,
+                        progress=progress["verifying"],
+                        run_number=run.run_number,
+                        run_token=run.run_token,
+                    ),
                     session,
-                    AuthStatus.VERIFYING,
-                    progress=progress["verifying"],
+                    run,
+                    "verifying",
                 )
                 log_auth_event(
                     events.VERIFICATION_STARTED,
                     session,
                     level="debug",
+                    run_number=run.run_number,
                     auth_attempt=attempt,
                     verification_delay_ms=self._milliseconds(
                         VERIFY_DELAY_SECONDS
@@ -210,10 +380,12 @@ class AuthWorker:
                     seconds=VERIFY_DELAY_SECONDS,
                     start_progress=progress["verifying"],
                     end_progress=progress["verified"],
+                    run=run,
                 )
                 if not sleep_completed:
+                    self._ensure_current(session, run, "verification_delay")
                     metrics.final_reason = "SESSION_EXPIRED"
-                    self._expire_session(session)
+                    self._expire_session(session, run)
                     return
 
                 verify_result, response_ms, exception_type = (
@@ -221,14 +393,34 @@ class AuthWorker:
                         session,
                         operation="verify",
                         operation_number=attempt,
+                        run=run,
                     )
+                )
+                self._ensure_current(
+                    session,
+                    run,
+                    "verification_result",
                 )
                 auth_status = self._extract_auth_status(verify_result)
                 active = self._extract_active(verify_result)
                 self._capture_last(metrics, verify_result)
-                self._session_manager.set_auth_status(
+                verify_reason, verify_retryable = self._classify_failure(
+                    verify_result,
+                    exception_type,
+                )
+                if verify_reason is not None:
+                    metrics.last_failure_reason = verify_reason
+                    metrics.last_failure_retryable = verify_retryable
+                self._require_update(
+                    self._session_manager.set_auth_status(
+                        session,
+                        auth_status,
+                        run_number=run.run_number,
+                        run_token=run.run_token,
+                    ),
                     session,
-                    auth_status,
+                    run,
+                    "verification_auth_status",
                 )
                 verified = auth_status == 2
                 self._emit_verification_result(
@@ -243,7 +435,12 @@ class AuthWorker:
                 )
                 if verified:
                     metrics.final_reason = "AUTHORIZED_AFTER_ATTEMPT"
-                    self._mark_authorized(session, verify_result)
+                    self._mark_authorized(
+                        session,
+                        verify_result,
+                        run,
+                        final_reason=metrics.final_reason,
+                    )
                     return
 
                 if attempt < MAX_AUTH_ATTEMPTS:
@@ -251,6 +448,7 @@ class AuthWorker:
                         events.RETRY_SCHEDULED,
                         session,
                         level="warning",
+                        run_number=run.run_number,
                         completed_attempt=attempt,
                         next_attempt=attempt + 1,
                         reason=(
@@ -260,19 +458,32 @@ class AuthWorker:
                         elapsed_ms=self._elapsed_ms(metrics.started),
                     )
 
-            if self._session_manager.expire_if_needed(session):
+            if self._session_manager.expire_if_needed(
+                session,
+                run_number=run.run_number,
+                run_token=run.run_token,
+            ):
+                self._ensure_current(session, run, "final_expiry")
                 metrics.final_reason = "SESSION_EXPIRED"
                 return
 
-            self._session_manager.update_status(
+            self._require_update(
+                self._session_manager.update_status(
+                    session,
+                    AuthStatus.VERIFYING,
+                    progress=95,
+                    run_number=run.run_number,
+                    run_token=run.run_token,
+                ),
                 session,
-                AuthStatus.VERIFYING,
-                progress=95,
+                run,
+                "final_verifying",
             )
             log_auth_event(
                 events.VERIFICATION_STARTED,
                 session,
                 level="debug",
+                run_number=run.run_number,
                 auth_attempt=metrics.auth_attempts,
                 verification_delay_ms=0,
                 verification_phase="final",
@@ -281,12 +492,32 @@ class AuthWorker:
                 session,
                 operation="final_verify",
                 operation_number=metrics.auth_attempts,
+                run=run,
             )
+            self._ensure_current(session, run, "final_verification_result")
             final_auth_status = self._extract_auth_status(final_result)
             self._capture_last(metrics, final_result)
-            self._session_manager.set_auth_status(
+            final_failure_reason, final_failure_retryable = (
+                self._classify_failure(
+                    final_result,
+                    final_exception,
+                )
+            )
+            if final_failure_reason is not None:
+                metrics.last_failure_reason = final_failure_reason
+                metrics.last_failure_retryable = (
+                    final_failure_retryable
+                )
+            self._require_update(
+                self._session_manager.set_auth_status(
+                    session,
+                    final_auth_status,
+                    run_number=run.run_number,
+                    run_token=run.run_token,
+                ),
                 session,
-                final_auth_status,
+                run,
+                "final_auth_status",
             )
             final_verified = final_auth_status == 2
             self._emit_verification_result(
@@ -301,89 +532,150 @@ class AuthWorker:
             )
             if final_verified:
                 metrics.final_reason = "AUTHORIZED_FINAL_VERIFY"
-                self._mark_authorized(session, final_result)
+                self._mark_authorized(
+                    session,
+                    final_result,
+                    run,
+                    final_reason=metrics.final_reason,
+                )
                 return
 
-            self._session_manager.update_status(
-                session,
-                AuthStatus.RESETTING,
-                progress=95,
+            success_reason = (
+                metrics.last_failure_reason
+                or "AUTH_EXHAUSTED_RESET_SUCCEEDED"
             )
-            reset_started = time.monotonic()
-            try:
-                reset_result: Result = self._provider.unauthorize(
-                    site_id=session.site_id,
-                    client_mac=session.client_mac,
-                )
-                reset_exception = None
-            except Exception as exc:
-                reset_exception = type(exc).__name__
-                reset_result = Result.fail(
-                    error="UNAUTH_PROVIDER_EXCEPTION",
-                    message=str(exc),
-                    data={"http_status": 0, "error_code": 0},
-                )
-                self._emit_omada_unavailable(
-                    session,
-                    operation="unauthorize",
-                    result=reset_result,
-                    response_time_ms=self._elapsed_ms(reset_started),
-                    exception_type=reset_exception,
-                )
+            success_retryable = (
+                metrics.last_failure_retryable
+                if metrics.last_failure_reason is not None
+                else True
+            )
+            metrics.final_reason = self._cleanup_and_finish(
+                session,
+                run,
+                success_reason=success_reason,
+                success_retryable=success_retryable,
+            )
 
-            if self._is_token_error(reset_result):
-                self._emit_token_error(
-                    session,
-                    "unauthorize",
-                    reset_result,
-                )
-
-            if reset_result.success:
-                self._session_manager.update_status(
-                    session,
-                    AuthStatus.RESET,
-                    error="Portal session reset. Reconnect to Wi-Fi.",
-                    progress=100,
-                )
-                metrics.final_reason = (
-                    "AUTH_EXHAUSTED_RESET_SUCCEEDED"
-                )
-            else:
-                self._session_manager.update_status(
-                    session,
-                    AuthStatus.FAILED,
-                    error=(
-                        reset_result.message
-                        or "Unable to reset Portal session."
-                    ),
-                    progress=100,
-                )
-                metrics.final_reason = "RESET_REQUEST_FAILED"
-
+        except _StaleRun:
+            return
         except Exception as exc:
-            self._session_manager.fail(session, error=str(exc))
+            try:
+                self._ensure_current(session, run, "worker_exception")
+            except _StaleRun:
+                return
+            self._session_manager.fail(
+                session,
+                error=str(exc),
+                final_reason="WORKER_EXCEPTION",
+                retryable=False,
+                run_number=run.run_number,
+                run_token=run.run_token,
+            )
             metrics.final_reason = "WORKER_EXCEPTION"
             logger.exception(
-                "Authorization worker failed session_id=%s",
+                "Authorization worker failed session_id=%s run_number=%s",
                 session.session_id,
+                run.run_number,
             )
             log_auth_event(
                 events.WORKER_EXCEPTION,
                 session,
                 level="error",
+                run_number=run.run_number,
+                auth_attempt=metrics.auth_attempts,
                 exception_type=type(exc).__name__,
                 error=str(exc),
                 elapsed_ms=self._elapsed_ms(metrics.started),
                 worker_id=metrics.worker_id,
             )
         finally:
-            self._session_manager.mark_worker_finished(session)
-            self._emit_finished(session, metrics)
+            self._session_manager.mark_worker_finished(
+                session,
+                run_number=run.run_number,
+                run_token=run.run_token,
+            )
+            self._emit_finished(session, metrics, run)
+
+    def _cleanup_and_finish(
+        self,
+        session: AuthSession,
+        run: _WorkerRun,
+        *,
+        success_reason: str,
+        success_retryable: bool,
+    ) -> str:
+        self._require_update(
+            self._session_manager.update_status(
+                session,
+                AuthStatus.RESETTING,
+                progress=95,
+                run_number=run.run_number,
+                run_token=run.run_token,
+            ),
+            session,
+            run,
+            "resetting",
+        )
+        reset_started = time.monotonic()
+        try:
+            reset_result: Result = self._provider.unauthorize(
+                site_id=session.site_id,
+                client_mac=session.client_mac,
+            )
+            reset_exception = None
+        except Exception as exc:
+            reset_exception = type(exc).__name__
+            reset_result = Result.fail(
+                error="UNAUTH_PROVIDER_EXCEPTION",
+                message=str(exc),
+                data={"http_status": 0, "error_code": 0},
+            )
+            self._emit_omada_unavailable(
+                session,
+                operation="unauthorize",
+                result=reset_result,
+                response_time_ms=self._elapsed_ms(reset_started),
+                exception_type=reset_exception,
+            )
+
+        self._ensure_current(session, run, "unauthorize_result")
+        if self._is_token_error(reset_result):
+            self._emit_token_error(
+                session,
+                "unauthorize",
+                reset_result,
+            )
+
+        if reset_result.success:
+            self._finish_failed(
+                session,
+                run,
+                final_reason=success_reason,
+                retryable=success_retryable,
+                error=(
+                    "Authorization did not complete. "
+                    "A retry is available."
+                ),
+            )
+            return success_reason
+
+        self._finish_failed(
+            session,
+            run,
+            final_reason="RESET_REQUEST_FAILED",
+            retryable=False,
+            error=(
+                reset_result.message
+                or "Unable to reset Portal session."
+            ),
+        )
+        return "RESET_REQUEST_FAILED"
 
     def _wait_for_client_ready(
         self,
         session: AuthSession,
         metrics: _RunMetrics,
+        run: _WorkerRun,
     ) -> tuple[str, Optional[Result]]:
         adaptive_wait_seconds = max(
             0.0,
@@ -394,7 +686,12 @@ class AuthWorker:
         last_result: Optional[Result] = None
 
         while True:
-            if self._session_manager.expire_if_needed(session):
+            if self._session_manager.expire_if_needed(
+                session,
+                run_number=run.run_number,
+                run_token=run.run_token,
+            ):
+                self._ensure_current(session, run, "readiness_expiry")
                 return "expired", last_result
 
             metrics.readiness_checks += 1
@@ -402,12 +699,32 @@ class AuthWorker:
                 session,
                 operation="readiness",
                 operation_number=metrics.readiness_checks,
+                run=run,
             )
+            self._ensure_current(session, run, "client_readiness")
             last_result = result
             auth_status = self._extract_auth_status(result)
             active = self._extract_active(result)
+            client_found = self._client_found(result)
             self._capture_last(metrics, result)
-            self._session_manager.set_auth_status(session, auth_status)
+            failure_reason, failure_retryable = self._classify_failure(
+                result,
+                exception_type,
+            )
+            if failure_reason is not None:
+                metrics.last_failure_reason = failure_reason
+                metrics.last_failure_retryable = failure_retryable
+            self._require_update(
+                self._session_manager.set_auth_status(
+                    session,
+                    auth_status,
+                    run_number=run.run_number,
+                    run_token=run.run_token,
+                ),
+                session,
+                run,
+                "readiness_auth_status",
+            )
 
             total_waited = (
                 MIN_INITIAL_DELAY_SECONDS
@@ -418,9 +735,11 @@ class AuthWorker:
                 events.CLIENT_CHECK,
                 session,
                 level="debug",
+                run_number=run.run_number,
+                auth_attempt=0,
                 readiness_check=metrics.readiness_checks,
                 elapsed_ms=self._elapsed_ms(metrics.started),
-                client_found=self._client_found(result),
+                client_found=client_found,
                 active=active,
                 auth_status=auth_status,
                 omada_http_status=self._result_value(
@@ -435,12 +754,19 @@ class AuthWorker:
             )
 
             if result.success and active is True:
-                self._session_manager.set_progress(
-                    session.session_id,
-                    50,
+                self._require_update(
+                    self._session_manager.set_progress(
+                        session.session_id,
+                        50,
+                        run_number=run.run_number,
+                        run_token=run.run_token,
+                    ),
+                    session,
+                    run,
+                    "client_ready_progress",
                 )
                 metrics.ready_after_ms = round(total_waited * 1000, 2)
-                get_auth_telemetry().safe_emit_once(
+                get_auth_telemetry().safe_emit(
                     events.CLIENT_READY,
                     session.session_id,
                     "info",
@@ -457,14 +783,25 @@ class AuthWorker:
 
             now = time.monotonic()
             if now >= deadline:
-                self._session_manager.set_progress(
-                    session.session_id,
-                    50,
+                if client_found is False:
+                    return "not_found", result
+                self._require_update(
+                    self._session_manager.set_progress(
+                        session.session_id,
+                        50,
+                        run_number=run.run_number,
+                        run_token=run.run_token,
+                    ),
+                    session,
+                    run,
+                    "fallback_progress",
                 )
                 log_auth_event(
                     events.FALLBACK_TRIGGERED,
                     session,
                     level="warning",
+                    run_number=run.run_number,
+                    auth_attempt=0,
                     readiness_checks=metrics.readiness_checks,
                     elapsed_ms=self._elapsed_ms(metrics.started),
                     fallback_after_ms=self._milliseconds(
@@ -485,9 +822,16 @@ class AuthWorker:
                     max(0.0, (time.monotonic() - started)
                         / adaptive_wait_seconds),
                 )
-                self._session_manager.set_progress(
-                    session.session_id,
-                    round(10 + (40 * ratio)),
+                self._require_update(
+                    self._session_manager.set_progress(
+                        session.session_id,
+                        round(10 + (40 * ratio)),
+                        run_number=run.run_number,
+                        run_token=run.run_token,
+                    ),
+                    session,
+                    run,
+                    "readiness_progress",
                 )
 
             if not self._sleep_with_ttl_check(
@@ -496,7 +840,9 @@ class AuthWorker:
                     CLIENT_READY_POLL_SECONDS,
                     max(0.0, deadline - now),
                 ),
+                run=run,
             ):
+                self._ensure_current(session, run, "readiness_sleep")
                 return "expired", last_result
 
     def _authorize_client(
@@ -504,6 +850,16 @@ class AuthWorker:
         session: AuthSession,
     ) -> tuple[Result, float, Optional[str]]:
         started = time.monotonic()
+        if not session.client_mac:
+            return (
+                Result.fail(
+                    error="CLIENT_NOT_FOUND",
+                    message="Client MAC is not available.",
+                    data={"http_status": 0, "error_code": 0},
+                ),
+                self._elapsed_ms(started),
+                None,
+            )
         try:
             result: Result = self._provider.authorize(
                 site_id=session.site_id,
@@ -524,9 +880,66 @@ class AuthWorker:
         session: AuthSession,
         operation: str,
         operation_number: int,
+        run: _WorkerRun,
     ) -> tuple[Result, float, Optional[str]]:
         started = time.monotonic()
         try:
+            if not session.client_mac:
+                if (
+                    not session.client_ip
+                    or not hasattr(self._provider, "get_client_by_ip")
+                ):
+                    return (
+                        Result.fail(
+                            error="CLIENT_NOT_FOUND",
+                            message="Client MAC is not available.",
+                            data={
+                                "http_status": 0,
+                                "error_code": 0,
+                                "authStatus": None,
+                                "active": None,
+                            },
+                        ),
+                        self._elapsed_ms(started),
+                        None,
+                    )
+                lookup: Result = self._provider.get_client_by_ip(
+                    site_id=session.site_id,
+                    client_ip=session.client_ip,
+                )
+                resolved_mac = (
+                    lookup.data.get("client_mac")
+                    if lookup.success
+                    else None
+                )
+                if not resolved_mac:
+                    if lookup.success:
+                        lookup = Result.fail(
+                            error="CLIENT_NOT_FOUND",
+                            message="Client was not found by IP.",
+                            data={
+                                **lookup.data,
+                                "authStatus": None,
+                                "active": None,
+                            },
+                        )
+                    return (
+                        lookup,
+                        self._elapsed_ms(started),
+                        None,
+                    )
+                self._require_update(
+                    self._session_manager.set_client_mac(
+                        session,
+                        resolved_mac,
+                        run_number=run.run_number,
+                        run_token=run.run_token,
+                    ),
+                    session,
+                    run,
+                    "client_identity",
+                )
+
             result: Result = self._provider.get_client(
                 site_id=session.site_id,
                 client_mac=session.client_mac,
@@ -705,12 +1118,34 @@ class AuthWorker:
         self,
         session: AuthSession,
         metrics: _RunMetrics,
+        run: _WorkerRun,
     ) -> None:
+        run_state = self._session_manager.run_snapshot(
+            session,
+            run.run_number,
+        )
+        if run_state is None or run_state["finished_at"] is None:
+            return
+
         duration_ms = self._elapsed_ms(metrics.started)
+        final_state = (
+            run_state["final_state"]
+            or session.status.value
+        )
+        final_reason = (
+            run_state["final_reason"]
+            or metrics.final_reason
+        )
+        retryable = bool(run_state["retryable"])
         fields = {
             **_session_fields(session),
-            "final_state": session.status.value,
-            "final_reason": metrics.final_reason,
+            "state": final_state,
+            "run_number": run.run_number,
+            "auth_attempt": metrics.auth_attempts,
+            "retry_request_id": run_state["retry_request_id"],
+            "final_state": final_state,
+            "final_reason": final_reason,
+            "retryable": retryable,
             "duration_ms": duration_ms,
             "readiness_checks": metrics.readiness_checks,
             "auth_attempts": metrics.auth_attempts,
@@ -721,27 +1156,66 @@ class AuthWorker:
                 metrics.last_omada_error_code
             ),
         }
-        if session.status == AuthStatus.AUTHORIZED:
+        if final_state == AuthStatus.AUTHORIZED.value:
             level = "info"
-        elif session.status in {
-            AuthStatus.RESET,
-            AuthStatus.EXPIRED,
-        }:
+        elif retryable or final_state == AuthStatus.EXPIRED.value:
             level = "warning"
         else:
             level = "error"
-        get_auth_telemetry().safe_emit_once(
-            events.SESSION_FINISHED,
+
+        telemetry = get_auth_telemetry()
+        telemetry.safe_emit(
+            events.RUN_FINISHED,
             session.session_id,
             level,
             **fields,
         )
+        if run.run_number >= 2:
+            retry_event = (
+                events.RETRY_SUCCEEDED
+                if final_state == AuthStatus.AUTHORIZED.value
+                else events.RETRY_FAILED
+            )
+            telemetry.safe_emit(
+                retry_event,
+                session.session_id,
+                level,
+                **fields,
+            )
+
+        if (
+            self._session_manager.current_run_identity_matches(
+                session,
+                run.run_number,
+                run.run_token,
+            )
+            and (
+                final_state in {
+                    AuthStatus.AUTHORIZED.value,
+                    AuthStatus.EXPIRED.value,
+                }
+                or (
+                    final_state == AuthStatus.FAILED.value
+                    and not retryable
+                )
+            )
+        ):
+            telemetry.safe_emit_once(
+                events.SESSION_FINISHED,
+                session.session_id,
+                level,
+                **fields,
+            )
+
         log_auth_event(
             events.WORKER_COMPLETED,
             session,
+            run_number=run.run_number,
+            auth_attempt=metrics.auth_attempts,
             worker_id=metrics.worker_id,
-            final_state=session.status.value,
-            final_reason=metrics.final_reason,
+            final_state=final_state,
+            final_reason=final_reason,
+            retryable=retryable,
             duration_ms=duration_ms,
         )
 
@@ -751,17 +1225,35 @@ class AuthWorker:
         seconds: float,
         start_progress: Optional[int] = None,
         end_progress: Optional[int] = None,
+        run: Optional[_WorkerRun] = None,
     ) -> bool:
         started = time.monotonic()
         deadline = started + seconds
         while True:
+            if (
+                run is not None
+                and not self._session_manager.current_run_matches(
+                    session_id,
+                    run.run_number,
+                    run.run_token,
+                )
+            ):
+                return False
             now = time.monotonic()
             if now >= deadline:
                 if end_progress is not None:
-                    self._session_manager.set_progress(
+                    kwargs = {}
+                    if run is not None:
+                        kwargs = {
+                            "run_number": run.run_number,
+                            "run_token": run.run_token,
+                        }
+                    if not self._session_manager.set_progress(
                         session_id,
                         end_progress,
-                    )
+                        **kwargs,
+                    ):
+                        return False
                 return True
             if self._session_manager.is_expired(session_id):
                 return False
@@ -771,13 +1263,21 @@ class AuthWorker:
                 and seconds > 0
             ):
                 ratio = min(1.0, max(0.0, (now - started) / seconds))
-                self._session_manager.set_progress(
+                kwargs = {}
+                if run is not None:
+                    kwargs = {
+                        "run_number": run.run_number,
+                        "run_token": run.run_token,
+                    }
+                if not self._session_manager.set_progress(
                     session_id,
                     round(
                         start_progress
                         + (end_progress - start_progress) * ratio
                     ),
-                )
+                    **kwargs,
+                ):
+                    return False
             time.sleep(
                 min(
                     SLEEP_CHECK_INTERVAL_SECONDS,
@@ -785,29 +1285,230 @@ class AuthWorker:
                 )
             )
 
-    def _expire_session(self, session: AuthSession) -> None:
-        self._session_manager.update_status(
+    def _expire_session(
+        self,
+        session: AuthSession,
+        run: _WorkerRun,
+    ) -> None:
+        self._require_update(
+            self._session_manager.finish_run(
+                session,
+                run_number=run.run_number,
+                run_token=run.run_token,
+                final_state=AuthStatus.EXPIRED,
+                final_reason="SESSION_EXPIRED",
+                retryable=False,
+                error="Authorization session expired.",
+                progress=100,
+            ),
             session,
-            AuthStatus.EXPIRED,
-            error="Authorization session expired.",
-            progress=100,
+            run,
+            "expired",
+        )
+
+    def _finish_failed(
+        self,
+        session: AuthSession,
+        run: _WorkerRun,
+        *,
+        final_reason: str,
+        retryable: bool,
+        error: str,
+    ) -> None:
+        self._require_update(
+            self._session_manager.finish_run(
+                session,
+                run_number=run.run_number,
+                run_token=run.run_token,
+                final_state=AuthStatus.FAILED,
+                final_reason=final_reason,
+                retryable=retryable,
+                error=error,
+                progress=100,
+            ),
+            session,
+            run,
+            "failed",
         )
 
     def _mark_authorized(
         self,
         session: AuthSession,
         result: Result,
+        run: _WorkerRun,
+        *,
+        final_reason: str,
     ) -> None:
-        self._session_manager.set_auth_status(
+        self._require_update(
+            self._session_manager.set_auth_status(
+                session,
+                self._extract_auth_status(result),
+                run_number=run.run_number,
+                run_token=run.run_token,
+            ),
             session,
-            self._extract_auth_status(result),
+            run,
+            "authorized_auth_status",
         )
-        self._session_manager.update_status(
+        self._require_update(
+            self._session_manager.finish_run(
+                session,
+                run_number=run.run_number,
+                run_token=run.run_token,
+                final_state=AuthStatus.AUTHORIZED,
+                final_reason=final_reason,
+                retryable=False,
+                error="",
+                progress=100,
+            ),
             session,
-            AuthStatus.AUTHORIZED,
-            error="",
-            progress=100,
+            run,
+            "authorized",
         )
+
+    def _ensure_current(
+        self,
+        session: AuthSession,
+        run: _WorkerRun,
+        operation: str,
+    ) -> None:
+        if self._session_manager.current_run_matches(
+            session,
+            run.run_number,
+            run.run_token,
+        ):
+            return
+        self._raise_stale(session, run, operation)
+
+    def _require_update(
+        self,
+        updated: bool,
+        session: AuthSession,
+        run: _WorkerRun,
+        operation: str,
+    ) -> None:
+        if updated:
+            return
+        self._raise_stale(session, run, operation)
+
+    def _raise_stale(
+        self,
+        session: AuthSession,
+        run: _WorkerRun,
+        operation: str,
+    ) -> None:
+        if not run.stale_reported:
+            run.stale_reported = True
+            run_state = self._session_manager.run_snapshot(
+                session,
+                run.run_number,
+            ) or {}
+            get_auth_telemetry().safe_emit(
+                events.WORKER_RESULT_IGNORED,
+                session.session_id,
+                "warning",
+                site_id=session.site_id,
+                client_ip=session.client_ip,
+                client_mac=session.client_mac,
+                run_number=run.run_number,
+                auth_attempt=run_state.get(
+                    "auth_attempt_count",
+                    0,
+                ),
+                current_run_number=session.current_run_number,
+                reason="STALE_RUN_TOKEN",
+                ignored_operation=operation,
+            )
+        raise _StaleRun("Worker run token is stale.")
+
+    @staticmethod
+    def _classify_failure(
+        result: Optional[Result],
+        exception_type: Optional[str] = None,
+    ) -> tuple[Optional[str], bool]:
+        if result is None or result.success:
+            return None, False
+
+        error = str(result.error or "").upper()
+        message = str(result.message or "").lower()
+        raw_http_status = AuthWorker._result_value(
+            result,
+            "http_status",
+        )
+        try:
+            http_status = int(raw_http_status or 0)
+        except (TypeError, ValueError):
+            http_status = 0
+
+        normalized_exception = str(exception_type or "").strip()
+        if normalized_exception in {
+            "Timeout",
+            "TimeoutError",
+            "ConnectTimeout",
+            "ReadTimeout",
+        }:
+            return "OMADA_REQUEST_TIMEOUT", True
+        if normalized_exception in {
+            "ConnectionError",
+            "ConnectionRefusedError",
+            "ConnectionResetError",
+            "ConnectError",
+            "NewConnectionError",
+            "ProxyError",
+            "SSLError",
+        }:
+            return "OMADA_CONNECTION_ERROR", True
+        if normalized_exception in {
+            "RequestException",
+            "ChunkedEncodingError",
+        }:
+            return "OMADA_UNAVAILABLE", True
+
+        if error == "AUTH_PROVIDER_EXCEPTION":
+            return "AUTH_PROVIDER_EXCEPTION", False
+        if exception_type or error in {
+            "GET_CLIENT_EXCEPTION",
+            "UNAUTH_PROVIDER_EXCEPTION",
+            "UNEXPECTED_ERROR",
+        }:
+            return "WORKER_EXCEPTION", False
+        if error == "TOKEN_FAILED" or http_status == 401:
+            return "AUTH_TOKEN_ERROR", False
+        if http_status == 403:
+            return "OMADA_HTTP_403", False
+        if http_status >= 500:
+            return "OMADA_HTTP_5XX", True
+        if error in {
+            "OMADA_UNAVAILABLE",
+            "OMADA_CONNECTION_ERROR",
+            "OMADA_REQUEST_TIMEOUT",
+            "OMADA_HTTP_5XX",
+            "AUTHORIZATION_TIMEOUT",
+        }:
+            return error, True
+        if error in {
+            "AUTH_TOKEN_ERROR",
+            "INVALID_CREDENTIALS",
+            "OMADA_HTTP_401",
+            "OMADA_HTTP_403",
+            "AUTHORIZATION_REJECTED",
+            "AUTHORIZATION_REJECTED_FINAL",
+            "CONFIGURATION_ERROR",
+            "INVALID_SESSION",
+            "CLIENT_BLOCKED",
+        }:
+            return error, False
+        if error in {"CLIENT_NOT_FOUND", "NOT_FOUND"}:
+            return "CLIENT_NOT_FOUND", True
+        if error == "CLIENT_NOT_READY":
+            return "CLIENT_NOT_READY", True
+        if error == "HTTP_ERROR":
+            if "timeout" in message or "timed out" in message:
+                return "OMADA_REQUEST_TIMEOUT", True
+            return "OMADA_CONNECTION_ERROR", True
+        if error == "AUTH_FAILED":
+            return "AUTHORIZATION_REJECTED", False
+        return "CONFIGURATION_ERROR", False
 
     @staticmethod
     def _capture_last(
@@ -831,11 +1532,16 @@ class AuthWorker:
             result,
             "http_status",
         )
+        error_code = AuthWorker._result_value(
+            result,
+            "error_code",
+        )
         message = str(result.message or "").lower()
 
         if (
             error in {"CLIENT_NOT_FOUND", "NOT_FOUND"}
             or http_status == 404
+            or error_code == -41011
             or "client not found" in message
             or "client does not exist" in message
         ):
@@ -891,6 +1597,10 @@ class AuthWorker:
     def _is_unavailable(result: Result) -> bool:
         return str(result.error or "").upper() in {
             "HTTP_ERROR",
+            "OMADA_UNAVAILABLE",
+            "OMADA_CONNECTION_ERROR",
+            "OMADA_REQUEST_TIMEOUT",
+            "OMADA_HTTP_5XX",
             "UNEXPECTED_ERROR",
             "AUTH_PROVIDER_EXCEPTION",
             "GET_CLIENT_EXCEPTION",

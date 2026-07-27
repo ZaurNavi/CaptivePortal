@@ -561,8 +561,14 @@ class AuthWorkerTelemetryTests(unittest.TestCase):
                 client_result(0, True),
             ])
         session, records = self.run_worker(provider)
-        final = self.final(records)
-        self.assertEqual(session.status, AuthStatus.RESET)
+        run_finals = [
+            record for record in records
+            if record["event"] == events.RUN_FINISHED
+        ]
+        self.assertEqual(len(run_finals), 1)
+        final = run_finals[0]
+        self.assertEqual(session.status, AuthStatus.FAILED)
+        self.assertTrue(session.retryable)
         self.assertEqual(
             final["final_reason"],
             "AUTH_EXHAUSTED_RESET_SUCCEEDED",
@@ -573,6 +579,9 @@ class AuthWorkerTelemetryTests(unittest.TestCase):
         self.assertEqual(provider.authorize_calls, 3)
         self.assertEqual(provider.get_client_calls, 5)
         self.assertEqual(provider.unauthorize_calls, 1)
+        self.assertTrue(
+            session.runs[0].authorization_may_have_changed
+        )
 
     def test_reset_failure_is_failed(self):
         provider = SequenceProvider(
@@ -670,10 +679,19 @@ class AuthWorkerTelemetryTests(unittest.TestCase):
 
     def test_progress_updates_use_session_id_contract(self):
         class IdOnlyManager(AuthSessionManager):
-            def set_progress(self, session_or_id, progress):
+            def set_progress(
+                self,
+                session_or_id,
+                progress,
+                **run_guard,
+            ):
                 if not isinstance(session_or_id, str):
                     raise TypeError("set_progress requires session_id")
-                return super().set_progress(session_or_id, progress)
+                return super().set_progress(
+                    session_or_id,
+                    progress,
+                    **run_guard,
+                )
 
         self.manager = IdOnlyManager()
         session, records = self.run_worker(
@@ -731,7 +749,7 @@ class AuthWorkerTelemetryTests(unittest.TestCase):
         )
         records = self.records()
         self.assertEqual(records[0]["readiness_check"], 2)
-        self.assertNotIn("auth_attempt", records[0])
+        self.assertEqual(records[0]["auth_attempt"], 0)
         self.assertEqual(records[1]["auth_attempt"], 3)
         self.assertNotIn("readiness_check", records[1])
         self.assertNotIn("attempt", records[0])
