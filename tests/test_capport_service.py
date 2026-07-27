@@ -1,9 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from threading import Barrier, Event
 from unittest.mock import Mock, call, patch
 
 import pytest
 
+from app.auth_telemetry import events
 from app.capport.models import CapportConfig
 from app.capport.service import CapportService
 from app.controllers.omada import OmadaProvider
@@ -91,6 +93,35 @@ def controller_with(
             "http_status": 200,
             "error_code": 0,
         }
+    )
+    return controller
+
+
+def fallback_controller(
+    *,
+    auth_status=2,
+    active=True,
+):
+    controller = Mock()
+    controller.get_clients.return_value = Result.ok(
+        data={
+            "clients": [
+                {
+                    "client_ip": "192.168.1.10",
+                    "client_mac": "AA:BB:CC:DD:EE:FF",
+                    "authStatus": auth_status,
+                    "active": active,
+                }
+            ],
+        }
+    )
+    controller.get_client.return_value = Result.fail(
+        error="API_ERROR",
+        data={
+            "error_code": -41011,
+            "authStatus": None,
+            "active": None,
+        },
     )
     return controller
 
@@ -211,6 +242,167 @@ def test_authoritative_state_failure_is_fail_safe():
     assert state.lookup_failed
     assert state.captive
     assert state.reason == "HTTP_ERROR"
+
+
+def test_detail_minus_41011_uses_exact_authorized_list_fallback():
+    controller = fallback_controller(
+        auth_status=2,
+        active=True,
+    )
+    telemetry = CapturingTelemetry()
+    service = CapportService(
+        controller,
+        config(),
+        telemetry,
+    )
+
+    state = service.resolve("192.168.1.10")
+    cached_state = service.resolve("192.168.1.10")
+
+    assert state.client_found
+    assert state.lookup_failed is False
+    assert state.captive is False
+    assert state.client.auth_status == 2
+    assert state.client.active is True
+    assert cached_state.captive is False
+    assert cached_state.cache_hit is True
+    controller.get_clients.assert_called_once()
+    controller.get_client.assert_called_once()
+
+    fallback_events = [
+        (level, fields)
+        for event, level, fields in telemetry.records
+        if event == events.CAPPORT_DETAIL_LOOKUP_FALLBACK
+    ]
+    assert fallback_events == [
+        (
+            "warning",
+            {
+                "site_id": "site-1",
+                "detail_error_code": -41011,
+                "auth_status": 2,
+                "active": True,
+                "client_ip": "192.168.1.10",
+                "client_mac": "AA:BB:CC:DD:EE:FF",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("auth_status", "active"),
+    [
+        (1, True),
+        (0, True),
+        (2, False),
+        (2, None),
+    ],
+)
+def test_detail_minus_41011_list_fallback_remains_captive(
+    auth_status,
+    active,
+):
+    controller = fallback_controller(
+        auth_status=auth_status,
+        active=active,
+    )
+
+    state = service_for(controller).resolve("192.168.1.10")
+
+    assert state.client_found
+    assert state.lookup_failed is False
+    assert state.captive
+    assert state.client.auth_status == auth_status
+    assert state.client.active is active
+
+
+def test_detail_minus_41011_rejects_mismatched_list_identity():
+    controller = fallback_controller()
+    service = service_for(controller)
+    identity = service._build_identity_snapshot(
+        [
+            {
+                "client_ip": "192.168.1.10",
+                "client_mac": "AA:BB:CC:DD:EE:FF",
+                "authStatus": 2,
+                "active": True,
+            }
+        ],
+        generation=0,
+    )
+    identity.fallback_by_ip["192.168.1.10"] = replace(
+        identity.fallback_by_ip["192.168.1.10"],
+        client_mac="AA:BB:CC:DD:EE:00",
+    )
+    service._identity_cache["site-1"] = identity
+
+    state = service.resolve("192.168.1.10")
+
+    assert state.client_found is False
+    assert state.lookup_failed
+    assert state.captive
+    assert state.reason == "DETAIL_LOOKUP_FALLBACK_REJECTED"
+
+
+def test_detail_minus_41011_rejects_duplicate_ip_fallback():
+    controller = fallback_controller()
+    controller.get_clients.return_value = Result.ok(
+        data={
+            "clients": [
+                {
+                    "client_ip": "192.168.1.10",
+                    "client_mac": "AA:BB:CC:DD:EE:01",
+                    "authStatus": 2,
+                    "active": True,
+                },
+                {
+                    "client_ip": "192.168.1.10",
+                    "client_mac": "AA:BB:CC:DD:EE:02",
+                    "authStatus": 2,
+                    "active": False,
+                },
+            ],
+        }
+    )
+
+    state = service_for(controller).resolve("192.168.1.10")
+
+    assert state.client_found is False
+    assert state.lookup_failed
+    assert state.captive
+    assert state.reason == "DETAIL_LOOKUP_FALLBACK_REJECTED"
+    controller.get_client.assert_called_once_with(
+        "site-1",
+        "AA:BB:CC:DD:EE:01",
+    )
+
+
+@pytest.mark.parametrize("detail_error", ["HTTP_ERROR", "TOKEN_FAILED"])
+def test_non_api_detail_error_never_uses_list_fallback(
+    detail_error,
+):
+    controller = fallback_controller()
+    controller.get_client.return_value = Result.fail(
+        error=detail_error,
+        data={"error_code": -41011},
+    )
+    telemetry = CapturingTelemetry()
+    service = CapportService(
+        controller,
+        config(),
+        telemetry,
+    )
+
+    state = service.resolve("192.168.1.10")
+
+    assert state.client_found is False
+    assert state.lookup_failed
+    assert state.captive
+    assert state.reason == detail_error
+    assert all(
+        event != events.CAPPORT_DETAIL_LOOKUP_FALLBACK
+        for event, _level, _fields in telemetry.records
+    )
 
 
 def test_missing_authoritative_auth_status_is_fail_safe():
@@ -380,6 +572,97 @@ def test_slow_old_mac_detail_is_discarded_after_identity_refresh():
     assert controller.get_client.call_args_list.count(
         call("site-1", "AA:BB:CC:DD:EE:02")
     ) == 1
+
+
+def test_slow_old_mac_fallback_is_not_saved_after_identity_change():
+    old_detail_started = Event()
+    identity_refreshed = Event()
+    release_old_detail = Event()
+    identity_calls = 0
+    controller = Mock()
+    telemetry = CapturingTelemetry()
+
+    def load_identity(_site_id):
+        nonlocal identity_calls
+        identity_calls += 1
+        old_identity = identity_calls == 1
+        if not old_identity:
+            identity_refreshed.set()
+        return Result.ok(
+            data={
+                "clients": [
+                    {
+                        "client_ip": "192.168.1.10",
+                        "client_mac": (
+                            "AA:BB:CC:DD:EE:01"
+                            if old_identity
+                            else "AA:BB:CC:DD:EE:02"
+                        ),
+                        "authStatus": 2 if old_identity else 0,
+                        "active": True,
+                    }
+                ]
+            }
+        )
+
+    def load_detail(_site_id, client_mac):
+        if client_mac == "AA:BB:CC:DD:EE:01":
+            old_detail_started.set()
+            assert release_old_detail.wait(timeout=2)
+        return Result.fail(
+            error="API_ERROR",
+            data={"error_code": -41011},
+        )
+
+    controller.get_clients.side_effect = load_identity
+    controller.get_client.side_effect = load_detail
+    service = CapportService(
+        controller,
+        config(),
+        telemetry,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        old_lookup = executor.submit(
+            service.resolve,
+            "192.168.1.10",
+        )
+        assert old_detail_started.wait(timeout=2)
+        refreshed_lookup = executor.submit(
+            service.resolve,
+            "192.168.1.10",
+            force_refresh=True,
+        )
+        assert identity_refreshed.wait(timeout=2)
+        release_old_detail.set()
+        old_result = old_lookup.result(timeout=2)
+        refreshed_result = refreshed_lookup.result(timeout=2)
+
+    cached_result = service.resolve("192.168.1.10")
+
+    assert old_result.client.client_mac == "AA:BB:CC:DD:EE:02"
+    assert refreshed_result.client.client_mac == "AA:BB:CC:DD:EE:02"
+    assert cached_result.client.client_mac == "AA:BB:CC:DD:EE:02"
+    assert old_result.captive
+    assert refreshed_result.captive
+    assert cached_result.captive
+    assert controller.get_client.call_args_list.count(
+        call("site-1", "AA:BB:CC:DD:EE:01")
+    ) == 1
+    assert controller.get_client.call_args_list.count(
+        call("site-1", "AA:BB:CC:DD:EE:02")
+    ) == 1
+
+    fallback_events = [
+        fields
+        for event, _level, fields in telemetry.records
+        if event == events.CAPPORT_DETAIL_LOOKUP_FALLBACK
+    ]
+    assert len(fallback_events) == 1
+    assert fallback_events[0]["client_mac"] == (
+        "AA:BB:CC:DD:EE:02"
+    )
+    assert fallback_events[0]["auth_status"] == 0
 
 
 def test_login_refreshes_cached_not_found_and_finds_new_client():
