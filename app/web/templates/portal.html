@@ -182,6 +182,40 @@
             position: relative;
         }
 
+        .progress-shell.hidden {
+            display: none;
+        }
+
+        .retry-button {
+            width: 100%;
+            min-height: 52px;
+            border: 0;
+            border-radius: 14px;
+            padding: 12px 18px;
+            background:
+                linear-gradient(
+                    135deg,
+                    #0092CC 0%,
+                    #00B140 100%
+                );
+            color: #fff;
+            font: inherit;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+            box-shadow:
+                0 4px 15px rgba(0, 146, 204, 0.25);
+        }
+
+        .retry-button.hidden {
+            display: none;
+        }
+
+        .retry-button:disabled {
+            cursor: wait;
+            opacity: 0.68;
+        }
+
         .progress-bar {
             position: absolute;
             inset: 0 auto 0 0;
@@ -694,6 +728,14 @@ Wi-Fi!!</p>
                         </span>
                     </div>
                 </div>
+
+                <button
+                    id="retry-button"
+                    class="retry-button hidden"
+                    type="button"
+                    data-i18n="retryButton"
+                    disabled
+                ></button>
             </div>
 
             <p
@@ -844,108 +886,14 @@ Wi-Fi!!</p>
     <script>
         const sessionId = {{ session_id | tojson }};
         const redirectUrl = {{ redirect_url | tojson }};
-        const initialStatus = {{ initial_status | default("WAITING") | tojson }};
-        const initialProgress = Number(
-            {{ initial_progress | default(0) | tojson }}
-        );
-
-        const translations = {
-            az: {
-                title: "Zəfər Parkı",
-                greeting: "Xoş gəlmisiniz!",
-                description: "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!",
-                counterHeading: "Wi-Fi qoşulmaları",
-                counterToday: "Bu gün",
-                counterTotal: "Ümumi",
-                supportTitle: "Texniki dəstək",
-
-                WAITING: "Qoşulma hazırlanır...",
-                AUTHORIZING: "Şəbəkəyə qoşulma yerinə yetirilir...",
-                VERIFYING: "Qoşulma yoxlanılır...",
-                RESETTING: "Wi-Fi sessiyası sıfırlanır...",
-                AUTHORIZED: "Qoşulma tamamlandı",
-                RESET: "Qoşulmanı tamamlamaq mümkün olmadı",
-                FAILED: "Qoşulma xətası",
-                EXPIRED: "Qoşulma vaxtı bitdi",
-
-                waitingNote: "Zəhmət olmasa, gözləyin.",
-                authorizedNote: "İnternet bağlantısı aktivdir.",
-                resetNote:
-                    "Wi-Fi sessiyası sıfırlandı. Şəbəkəyə yenidən qoşulun.",
-                failedNote:
-                    "Qoşulma xətası baş verdi. Zəhmət olmasa, bu Wi-Fi şəbəkəsini 'Unut' (silin) və yenidən qoşulmağa cəhd edin.",
-                expiredNote:
-                    "Şəbəkəyə yenidən qoşulub təkrar cəhd edin.",
-                pollingError:
-                    "Serverlə əlaqə müvəqqəti olaraq mümkün deyil."
-            },
-
-            ru: {
-                title: "Zəfər Parkı",
-                greeting: "Добро пожаловать!",
-                description: "Бесплатный Wi-Fi\nдля гостей парка!!",
-                counterHeading: "Подключения к Wi-Fi",
-                counterToday: "Сегодня",
-                counterTotal: "Всего",
-                supportTitle: "Техподдержка",
-
-                WAITING: "Подготовка подключения...",
-                AUTHORIZING: "Выполняется подключение к сети...",
-                VERIFYING: "Проверка подключения...",
-                RESETTING: "Сброс Wi-Fi-сессии...",
-                AUTHORIZED: "Подключение выполнено",
-                RESET: "Не удалось завершить подключение",
-                FAILED: "Ошибка подключения",
-                EXPIRED: "Время подключения истекло",
-
-                waitingNote: "Пожалуйста, подождите.",
-                authorizedNote: "Доступ в интернет активирован.",
-                resetNote:
-                    "Wi-Fi-сессия была сброшена. Подключитесь к сети повторно.",
-                failedNote:
-                    "Произошла ошибка подключения. Пожалуйста, 'Забудьте' (удалите) эту Wi-Fi сеть в настройках телефона и попробуйте подключиться снова.",
-                expiredNote:
-                    "Подключитесь к сети повторно и попробуйте ещё раз.",
-                pollingError:
-                    "Временно не удаётся связаться с сервером."
-            },
-
-            en: {
-                title: "Zəfər Parkı",
-                greeting: "Welcome!",
-                description: "Free Wi-Fi\nfor park guests!!",
-                counterHeading: "Wi-Fi connections",
-                counterToday: "Today",
-                counterTotal: "Total",
-                supportTitle: "Technical support",
-
-                WAITING: "Preparing connection...",
-                AUTHORIZING: "Connecting to the network...",
-                VERIFYING: "Checking connection...",
-                RESETTING: "Resetting Wi-Fi session...",
-                AUTHORIZED: "Connection completed",
-                RESET: "Unable to complete connection",
-                FAILED: "Connection error",
-                EXPIRED: "Connection session expired",
-
-                waitingNote: "Please wait.",
-                authorizedNote: "Internet access is active.",
-                resetNote:
-                    "The Wi-Fi session was reset. Reconnect to the network.",
-                failedNote:
-                    "Connection failed. Please 'Forget' this Wi-Fi network in your phone settings and try connecting again.",
-                expiredNote:
-                    "Reconnect to the network and try again.",
-                pollingError:
-                    "The server is temporarily unavailable."
-            }
-        };
-
-        const terminalStatuses = new Set([
-            "AUTHORIZED",
-            "RESET",
-            "FAILED",
-            "EXPIRED"
+        const initialState = {{ initial_state | default({}) | tojson }};
+        const translations = {{ portal_translations | tojson }};
+        const activeStatuses = new Set([
+            "WAITING",
+            "AUTHORIZING",
+            "VERIFYING",
+            "RESETTING",
+            "RESET"
         ]);
 
         const langButtons = document.querySelectorAll(
@@ -980,21 +928,32 @@ Wi-Fi!!</p>
             "portal-error"
         );
 
+        const retryButton = document.getElementById(
+            "retry-button"
+        );
+
         let currentLang =
             localStorage.getItem("portalLang") || "az";
 
         let currentState = {
-            status: initialStatus,
-            progress: Number.isFinite(initialProgress)
-                ? initialProgress
-                : 0,
-            authorized: initialStatus === "AUTHORIZED",
-            terminal: terminalStatuses.has(initialStatus),
-            message: null
+            status:
+                initialState.state
+                || initialState.status
+                || "WAITING",
+            progress: clampProgress(initialState.progress),
+            authorized: Boolean(initialState.authorized),
+            terminal: Boolean(initialState.terminal),
+            retryable: Boolean(initialState.retryable),
+            currentRunNumber:
+                Number(initialState.current_run_number || 0),
+            finalReason: initialState.final_reason || null,
+            message: initialState.message || null
         };
 
         let pollTimer = null;
-        let pollingStopped = false;
+        let pollInFlight = false;
+        let retryInFlight = false;
+        let activeRetryRequestId = null;
         let consecutivePollingErrors = 0;
 
         function clampProgress(value) {
@@ -1072,86 +1031,71 @@ Wi-Fi!!</p>
             );
         }
 
-        function getNoteForStatus(status) {
-            const texts = getTexts();
-
-            switch (status) {
-                case "AUTHORIZED":
-                    return texts.authorizedNote;
-
-                case "RESET":
-                    return texts.resetNote;
-
-                case "FAILED":
-                    return texts.failedNote;
-
-                case "EXPIRED":
-                    return texts.expiredNote;
-
-                default:
-                    return texts.waitingNote;
-            }
-        }
-
         function renderState(state) {
             const texts = getTexts();
             const status = state.status || "WAITING";
 
             connectionStatus.textContent =
                 texts[status] || texts.WAITING;
-
-            portalNote.textContent =
-                getNoteForStatus(status);
-
             updateProgress(state.progress);
-
             progressBar.classList.remove(
                 "success",
                 "failed",
                 "reset"
             );
+            retryButton.classList.add("hidden");
+            retryButton.disabled = true;
 
             if (status === "AUTHORIZED") {
+                progressShell.classList.remove("hidden");
                 progressBar.classList.add("success");
                 progressSpinner.classList.add("hidden");
+                portalNote.textContent = texts.authorizedNote;
                 showError(null);
                 return;
             }
 
-            if (status === "RESET") {
-                progressBar.classList.add("reset");
-                progressSpinner.classList.add("hidden");
-
-                showError(
-                    state.message || texts.resetNote
-                );
-
+            if (activeStatuses.has(status)) {
+                progressShell.classList.remove("hidden");
+                progressSpinner.classList.remove("hidden");
+                portalNote.textContent = texts.waitingNote;
+                if (!portalError.dataset.serverError) {
+                    showError(null);
+                }
                 return;
             }
 
             if (status === "FAILED") {
-                progressBar.classList.add("failed");
+                progressShell.classList.add("hidden");
                 progressSpinner.classList.add("hidden");
                 portalNote.textContent = "";
 
-                showError(texts.failedNote);
+                if (state.retryable) {
+                    showError(texts.retryableFailure);
+                    retryButton.disabled = retryInFlight;
+                    retryButton.classList.remove("hidden");
+                } else if (
+                    !portalError.dataset.serverError
+                    || sessionId
+                ) {
+                    showError(texts.finalFailure);
+                }
 
                 return;
             }
 
             if (status === "EXPIRED") {
-                progressBar.classList.add("failed");
+                progressShell.classList.add("hidden");
                 progressSpinner.classList.add("hidden");
-
-                showError(
-                    state.message
-                    || getNoteForStatus(status)
-                );
+                portalNote.textContent = "";
+                showError(texts.expiredNote);
 
                 return;
             }
 
+            progressShell.classList.remove("hidden");
             progressSpinner.classList.remove("hidden");
+            portalNote.textContent = texts.waitingNote;
 
             if (!portalError.dataset.serverError) {
                 showError(null);
@@ -1159,8 +1103,6 @@ Wi-Fi!!</p>
         }
 
         function stopPolling() {
-            pollingStopped = true;
-
             if (pollTimer !== null) {
                 clearTimeout(pollTimer);
                 pollTimer = null;
@@ -1197,10 +1139,20 @@ Wi-Fi!!</p>
             consecutivePollingErrors = 0;
 
             currentState = {
-                status: state.status || "FAILED",
+                status:
+                    state.state
+                    || state.status
+                    || "FAILED",
                 progress: clampProgress(state.progress),
                 authorized: Boolean(state.authorized),
                 terminal: Boolean(state.terminal),
+                retryable: Boolean(state.retryable),
+                currentRunNumber: Number(
+                    state.current_run_number
+                    || state.run_number
+                    || 0
+                ),
+                finalReason: state.final_reason || null,
                 message: state.message || null
             };
 
@@ -1214,19 +1166,34 @@ Wi-Fi!!</p>
                 return;
             }
 
-            if (currentState.terminal) {
+            if (!activeStatuses.has(currentState.status)) {
                 stopPolling();
             }
         }
 
+        function schedulePoll(delay = 1000) {
+            stopPolling();
+            if (
+                !sessionId
+                || !activeStatuses.has(currentState.status)
+            ) {
+                return;
+            }
+            pollTimer = window.setTimeout(
+                pollSession,
+                delay
+            );
+        }
+
         async function pollSession() {
             if (
-                pollingStopped
-                || !sessionId
+                !sessionId
+                || pollInFlight
             ) {
                 return;
             }
 
+            pollInFlight = true;
             try {
                 const response = await fetch(
                     `/auth/session/${encodeURIComponent(sessionId)}`,
@@ -1238,11 +1205,8 @@ Wi-Fi!!</p>
                         }
                     }
                 );
-
                 const state = await response.json();
-
                 applyServerState(state);
-
             } catch (error) {
                 consecutivePollingErrors += 1;
 
@@ -1253,20 +1217,138 @@ Wi-Fi!!</p>
 
                 if (
                     consecutivePollingErrors >= 3
-                    && !currentState.terminal
+                    && activeStatuses.has(currentState.status)
                 ) {
                     portalNote.textContent =
                         getTexts().pollingError;
                 }
+            } finally {
+                pollInFlight = false;
             }
 
-            if (!pollingStopped) {
-                pollTimer = window.setTimeout(
-                    pollSession,
-                    1000
-                );
+            if (activeStatuses.has(currentState.status)) {
+                schedulePoll();
             }
         }
+
+        function createRetryRequestId() {
+            if (
+                window.crypto
+                && typeof window.crypto.randomUUID === "function"
+            ) {
+                return window.crypto.randomUUID();
+            }
+            const bytes = new Uint8Array(16);
+            window.crypto.getRandomValues(bytes);
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            const hex = Array.from(
+                bytes,
+                (value) => value.toString(16).padStart(2, "0")
+            ).join("");
+            return [
+                hex.slice(0, 8),
+                hex.slice(8, 12),
+                hex.slice(12, 16),
+                hex.slice(16, 20),
+                hex.slice(20)
+            ].join("-");
+        }
+
+        async function reconcileRetryState() {
+            const response = await fetch(
+                `/auth/session/${encodeURIComponent(sessionId)}`,
+                {
+                    method: "GET",
+                    cache: "no-store",
+                    headers: {
+                        "Accept": "application/json"
+                    }
+                }
+            );
+            const state = await response.json();
+            applyServerState(state);
+            if (activeStatuses.has(currentState.status)) {
+                schedulePoll(0);
+            }
+        }
+
+        async function requestRetry() {
+            if (
+                retryInFlight
+                || !sessionId
+                || currentState.status !== "FAILED"
+                || !currentState.retryable
+            ) {
+                return;
+            }
+
+            retryInFlight = true;
+            activeRetryRequestId = createRetryRequestId();
+            retryButton.disabled = true;
+            retryButton.classList.add("hidden");
+            showError(null);
+            currentState = {
+                ...currentState,
+                status: "WAITING",
+                progress: 0,
+                retryable: false,
+                terminal: false,
+                message: null
+            };
+            renderState(currentState);
+
+            try {
+                const response = await fetch(
+                    `/auth/session/${encodeURIComponent(sessionId)}/retry`,
+                    {
+                        method: "POST",
+                        cache: "no-store",
+                        headers: {
+                            "Accept": "application/json",
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            retry_request_id: activeRetryRequestId
+                        })
+                    }
+                );
+                const state = await response.json();
+                applyServerState(state);
+                if (activeStatuses.has(currentState.status)) {
+                    schedulePoll(0);
+                }
+            } catch (error) {
+                console.debug(
+                    "Retry request failed; reconciling state",
+                    error
+                );
+                try {
+                    await reconcileRetryState();
+                } catch (stateError) {
+                    console.debug(
+                        "Retry state reconciliation failed",
+                        stateError
+                    );
+                    portalNote.textContent =
+                        getTexts().retryCheckError;
+                    schedulePoll();
+                }
+            } finally {
+                retryInFlight = false;
+                if (
+                    currentState.status === "FAILED"
+                    && currentState.retryable
+                ) {
+                    renderState(currentState);
+                }
+            }
+        }
+
+        retryButton.addEventListener(
+            "click",
+            requestRetry
+        );
 
         langButtons.forEach((button) => {
             button.addEventListener(
@@ -1286,7 +1368,7 @@ Wi-Fi!!</p>
 
         if (
             sessionId
-            && !currentState.terminal
+            && activeStatuses.has(currentState.status)
         ) {
             pollSession();
         }

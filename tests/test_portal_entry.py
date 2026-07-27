@@ -46,5 +46,7 @@ def test_worker_submit_failure_finishes_session_safely():
     assert status_code == 500
     assert "Системная ошибка" in response
     assert session.status == AuthStatus.FAILED
+    assert session.retryable is True
+    assert session.final_reason == "WORKER_START_FAILED"
     assert session._worker_finished is True
-    telemetry.safe_emit_once.assert_called_once()
+    telemetry.safe_emit.assert_called_once()
