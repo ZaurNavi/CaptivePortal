@@ -2,8 +2,10 @@
 Omada Controller Provider.
 """
 
+import ipaddress
+import re
 import requests
-from typing import List, Dict, Any
+from typing import Any, Optional
 
 from app.controllers.base import ControllerInterface
 from app.logger import logger
@@ -13,6 +15,9 @@ from app import get_settings
 
 class OmadaProvider(ControllerInterface):
     """Omada SDN Controller Provider."""
+
+    CLIENT_PAGE_SIZE = 100
+    CLIENT_MAX_PAGES = 100
 
     def __init__(self):
         logger.debug("Initializing OmadaProvider")
@@ -74,7 +79,7 @@ class OmadaProvider(ControllerInterface):
     def connect(self) -> None:
         logger.info("Omada provider ready (dynamic token per request)")
 
-    def get_sites(self) -> List[Dict[str, Any]]:
+    def get_sites(self) -> list[dict[str, Any]]:
         token_result = self._get_token()
         if not token_result.success:
             return []
@@ -97,8 +102,346 @@ class OmadaProvider(ControllerInterface):
         except Exception:
             return []
 
-    def get_clients(self, site_id: str) -> List[Dict[str, Any]]:
-        return []
+    def get_clients(self, site_id: str) -> Result:
+        """
+        Return one normalized snapshot of all clients in a site.
+
+        Omada transport details and response-shape handling stay in this
+        provider. Callers receive only the stable ``clients`` contract.
+        """
+        if not isinstance(site_id, str) or not site_id.strip():
+            return Result.fail(
+                error="INVALID_SITE_ID",
+                message="site_id is required",
+                data={"http_status": 0, "error_code": 0},
+            )
+
+        token_result = self._get_token()
+        if not token_result.success:
+            return token_result
+
+        token = token_result.data.get("token")
+        url = (
+            f"{self._omada_url}/openapi/v1/{self._omada_id}"
+            f"/sites/{site_id.strip()}/clients"
+        )
+        headers = {"Authorization": f"AccessToken={token}"}
+        clients: list[dict[str, Any]] = []
+        last_http_status = 0
+        total_rows: Optional[int] = None
+
+        for page in range(1, self.CLIENT_MAX_PAGES + 1):
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params={
+                        "page": page,
+                        "pageSize": self.CLIENT_PAGE_SIZE,
+                    },
+                    verify=self._verify_ssl,
+                    timeout=(5, 10),
+                )
+                last_http_status = response.status_code
+            except requests.exceptions.RequestException as exc:
+                return Result.fail(
+                    error="HTTP_ERROR",
+                    message=f"HTTP Error: {str(exc)}",
+                    data={
+                        "http_status": 0,
+                        "error_code": 0,
+                    },
+                )
+
+            try:
+                payload = response.json()
+            except (TypeError, ValueError) as exc:
+                return Result.fail(
+                    error="MALFORMED_RESPONSE",
+                    message=f"Invalid Omada JSON: {str(exc)}",
+                    data={
+                        "http_status": response.status_code,
+                        "error_code": None,
+                    },
+                )
+
+            if not isinstance(payload, dict):
+                return Result.fail(
+                    error="MALFORMED_RESPONSE",
+                    message="Omada response must be an object",
+                    data={
+                        "http_status": response.status_code,
+                        "error_code": None,
+                    },
+                )
+
+            error_code = payload.get("errorCode")
+            if error_code != 0:
+                return Result.fail(
+                    error="API_ERROR",
+                    message=payload.get("msg", "Unknown client-list error"),
+                    data={
+                        "http_status": response.status_code,
+                        "error_code": error_code,
+                    },
+                )
+
+            if not 200 <= response.status_code < 300:
+                return Result.fail(
+                    error="HTTP_ERROR",
+                    message="Omada client-list HTTP error",
+                    data={
+                        "http_status": response.status_code,
+                        "error_code": 0,
+                    },
+                )
+
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                return Result.fail(
+                    error="MALFORMED_RESPONSE",
+                    message="Omada result must be an object",
+                    data={
+                        "http_status": response.status_code,
+                        "error_code": 0,
+                    },
+                )
+
+            page_data = result.get("data")
+            if not isinstance(page_data, list):
+                return Result.fail(
+                    error="MALFORMED_RESPONSE",
+                    message="Omada client data must be a list",
+                    data={
+                        "http_status": response.status_code,
+                        "error_code": 0,
+                    },
+                )
+
+            if total_rows is None:
+                total_rows = self._extract_total_rows(result)
+
+            for item in page_data:
+                normalized = self._normalize_client(item)
+                if normalized is not None:
+                    clients.append(normalized)
+
+            if not page_data:
+                break
+            if total_rows is not None and len(clients) >= total_rows:
+                break
+            if len(page_data) < self.CLIENT_PAGE_SIZE:
+                break
+        else:
+            return Result.fail(
+                error="PAGINATION_LIMIT",
+                message="Omada client pagination limit reached",
+                data={
+                    "http_status": last_http_status,
+                    "error_code": 0,
+                },
+            )
+
+        return Result.ok(
+            message="Success",
+            data={
+                "clients": clients,
+                "http_status": last_http_status,
+                "error_code": 0,
+            },
+        )
+
+    def get_client_by_ip(
+        self,
+        site_id: str,
+        client_ip: str,
+    ) -> Result:
+        try:
+            normalized_ip = str(ipaddress.ip_address(client_ip))
+        except (TypeError, ValueError):
+            return Result.fail(
+                error="INVALID_CLIENT_IP",
+                message="Invalid client IP address",
+                data={"http_status": 0, "error_code": 0},
+            )
+
+        clients_result = self.get_clients(site_id)
+        if not clients_result.success:
+            return clients_result
+
+        matches = [
+            client
+            for client in clients_result.data.get("clients", [])
+            if client.get("client_ip") == normalized_ip
+        ]
+        selected = self._select_duplicate_safe(matches)
+        if selected is None and len(matches) > 1:
+            logger.warning(
+                "omada.duplicate_client_ip site_id=%s client_ip=%s",
+                site_id,
+                normalized_ip,
+            )
+            return Result.fail(
+                error="DUPLICATE_CLIENT_IP",
+                message="Ambiguous Omada client IP",
+                data={
+                    "http_status": clients_result.data.get(
+                        "http_status",
+                        0,
+                    ),
+                    "error_code": 0,
+                },
+            )
+
+        if selected is None:
+            return Result.ok(
+                message="Client not found",
+                data={
+                    "found": False,
+                    "site_id": site_id,
+                    "client_ip": normalized_ip,
+                    "client_mac": None,
+                    "list_auth_status": None,
+                    "list_active": None,
+                    "http_status": clients_result.data.get(
+                        "http_status",
+                        0,
+                    ),
+                    "error_code": 0,
+                },
+            )
+
+        return Result.ok(
+            message="Success",
+            data={
+                "found": True,
+                "site_id": site_id,
+                "client_ip": normalized_ip,
+                "client_mac": selected["client_mac"],
+                # Informational only; CAPPORT state must use get_client().
+                "list_auth_status": selected["authStatus"],
+                "list_active": selected["active"],
+                "http_status": clients_result.data.get(
+                    "http_status",
+                    0,
+                ),
+                "error_code": 0,
+            },
+        )
+
+    @staticmethod
+    def _extract_total_rows(result: dict[str, Any]) -> Optional[int]:
+        for key in ("totalRows", "total", "totalNum"):
+            value = result.get(key)
+            if value is None:
+                continue
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed >= 0:
+                return parsed
+        return None
+
+    @classmethod
+    def _normalize_client(
+        cls,
+        item: Any,
+    ) -> Optional[dict[str, Any]]:
+        if not isinstance(item, dict):
+            return None
+
+        raw_ip = cls._first_value(
+            item,
+            "ip",
+            "clientIp",
+            "client_ip",
+        )
+        raw_mac = cls._first_value(
+            item,
+            "mac",
+            "clientMac",
+            "client_mac",
+        )
+        try:
+            client_ip = str(ipaddress.ip_address(raw_ip))
+            client_mac = cls._normalize_mac(raw_mac)
+        except (TypeError, ValueError):
+            return None
+
+        return {
+            "client_ip": client_ip,
+            "client_mac": client_mac,
+            "authStatus": cls._optional_int(
+                item.get("authStatus")
+            ),
+            "active": cls._optional_bool(item.get("active")),
+        }
+
+    @staticmethod
+    def _first_value(
+        item: dict[str, Any],
+        *keys: str,
+    ) -> Any:
+        for key in keys:
+            value = item.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    @staticmethod
+    def _normalize_mac(value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("MAC address is required")
+        clean = re.sub(r"[:.\-\s]", "", value).upper()
+        if not re.fullmatch(r"[0-9A-F]{12}", clean):
+            raise ValueError("Invalid MAC address")
+        return ":".join(
+            clean[index:index + 2]
+            for index in range(0, 12, 2)
+        )
+
+    @staticmethod
+    def _optional_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_bool(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes"}:
+                return True
+            if normalized in {"false", "0", "no"}:
+                return False
+        return None
+
+    @staticmethod
+    def _select_duplicate_safe(
+        matches: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            return None
+        active = [
+            client
+            for client in matches
+            if client.get("active") is True
+        ]
+        if len(active) == 1:
+            return active[0]
+        return None
 
     def authorize(self, site_id: str, client_mac: str) -> Result:
         token_result = self._get_token()

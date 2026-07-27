@@ -21,8 +21,17 @@ class ControllerInterface(ABC):
         pass
 
     @abstractmethod
-    def get_clients(self, site_id: str) -> List[Dict[str, Any]]:
-        """Retrieve list of clients for a specific site."""
+    def get_clients(self, site_id: str) -> Result:
+        """Retrieve a normalized client snapshot for a specific site."""
+        pass
+
+    @abstractmethod
+    def get_client_by_ip(
+        self,
+        site_id: str,
+        client_ip: str,
+    ) -> Result:
+        """Find one unambiguous client by its normalized IP address."""
         pass
 
     @abstractmethod
