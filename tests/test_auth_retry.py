@@ -156,6 +156,37 @@ class BlockingCleanupProvider:
         return Result.ok()
 
 
+class ExplicitRejectionInactiveProvider:
+    def __init__(self):
+        self.get_client_calls = 0
+        self.authorize_calls = 0
+        self.unauthorize_calls = 0
+
+    def get_client(self, **_kwargs):
+        self.get_client_calls += 1
+        return Result.ok(data={
+            "http_status": 200,
+            "error_code": 0,
+            "authStatus": 0,
+            "active": False,
+        })
+
+    def authorize(self, **_kwargs):
+        self.authorize_calls += 1
+        return Result.fail(
+            error="AUTH_FAILED",
+            message="Failed to authorize this client.",
+            data={
+                "http_status": 200,
+                "error_code": -1,
+            },
+        )
+
+    def unauthorize(self, **_kwargs):
+        self.unauthorize_calls += 1
+        return Result.ok()
+
+
 class CapturingTelemetry:
     def __init__(self):
         self.records = []
@@ -285,6 +316,52 @@ def post_retry(client, session_id, request_id=None, ip=CLIENT_IP):
         },
         environ_base={"REMOTE_ADDR": ip},
     )
+
+
+def test_explicit_rejection_with_inactive_client_can_retry_same_session():
+    provider = ExplicitRejectionInactiveProvider()
+    client, manager, executor, temp_dir = create_client(
+        controller=provider
+    )
+    try:
+        session = open_session(client, manager)
+        worker, submitted_session_id = executor.submissions[0]
+
+        with fast_worker():
+            worker(submitted_session_id)
+
+        assert provider.authorize_calls == 3
+        assert provider.get_client_calls == 5
+        assert provider.unauthorize_calls == 0
+        assert session.status == AuthStatus.FAILED
+        assert session.final_reason == "AUTHORIZATION_REJECTED"
+        assert session.retryable is True
+
+        status_response = client.get(
+            f"/auth/session/{session.session_id}",
+            environ_base={"REMOTE_ADDR": CLIENT_IP},
+        )
+        status_payload = status_response.get_json()
+
+        assert status_response.status_code == 200
+        assert status_payload["session_id"] == session.session_id
+        assert status_payload["state"] == "FAILED"
+        assert status_payload["final_reason"] == (
+            "AUTHORIZATION_REJECTED"
+        )
+        assert status_payload["retryable"] is True
+
+        retry_response = post_retry(client, session.session_id)
+        retry_payload = retry_response.get_json()
+
+        assert retry_response.status_code == 202
+        assert retry_payload["session_id"] == session.session_id
+        assert retry_payload["state"] == "WAITING"
+        assert retry_payload["current_run_number"] == 2
+        assert len(session.runs) == 2
+        assert len(executor.submissions) == 2
+    finally:
+        temp_dir.cleanup()
 
 
 def test_first_run_has_token_number_and_original_expiry():
