@@ -1,5 +1,6 @@
 """Configuration and transport models for Omada webhook deliveries."""
 
+import os
 from dataclasses import asdict, dataclass
 from ipaddress import ip_address
 from typing import Any
@@ -59,6 +60,7 @@ class OmadaWebhookConfig:
     header_token: str
     max_body_bytes: int
     log_file: str
+    normalized_log_file: str
 
     @classmethod
     def from_settings(
@@ -137,6 +139,30 @@ class OmadaWebhookConfig:
         if not log_file:
             raise ValueError("OMADA_WEBHOOK_LOG_FILE must not be empty")
 
+        raw_normalized_log_file = settings.get(
+            "omada_webhook_normalized_log_file",
+            (
+                "/opt/CaptivePortal/logs/"
+                "omada_webhook_normalized.log"
+            ),
+        )
+        normalized_log_file = (
+            ""
+            if raw_normalized_log_file is None
+            else str(raw_normalized_log_file).strip()
+        )
+        if not normalized_log_file:
+            raise ValueError(
+                "OMADA_WEBHOOK_NORMALIZED_LOG_FILE must not be empty"
+            )
+        if os.path.normcase(os.path.abspath(log_file)) == (
+            os.path.normcase(os.path.abspath(normalized_log_file))
+        ):
+            raise ValueError(
+                "OMADA_WEBHOOK_NORMALIZED_LOG_FILE must be different "
+                "from OMADA_WEBHOOK_LOG_FILE"
+            )
+
         return cls(
             enabled=enabled,
             allowed_ips=_parse_allowed_ips(
@@ -150,6 +176,7 @@ class OmadaWebhookConfig:
             header_token=header_token,
             max_body_bytes=max_body_bytes,
             log_file=log_file,
+            normalized_log_file=normalized_log_file,
         )
 
 

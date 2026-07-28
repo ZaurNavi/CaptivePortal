@@ -1,0 +1,69 @@
+// Omada normalized webhook JSONL -> existing Loki destination.
+// Replace `default` only if the installed loki.write component has
+// another Alloy label.
+
+loki.source.file "omada_webhook_normalized" {
+  targets = [
+    {
+      __path__ = "/opt/CaptivePortal/logs/omada_webhook_normalized.log",
+    },
+  ]
+
+  encoding   = "UTF-8"
+  forward_to = [loki.process.omada_webhook_normalized.receiver]
+
+  file_match {
+    enabled     = true
+    sync_period = "10s"
+  }
+}
+
+loki.process "omada_webhook_normalized" {
+  forward_to = [loki.write.default.receiver]
+
+  stage.json {
+    expressions = {
+      event_timestamp      = "timestamp",
+      event_name           = "event",
+      event_level          = "level",
+      parse_status_value   = "parse_status",
+      schema_version_value = "schema_version",
+    }
+  }
+
+  stage.timestamp {
+    source                        = "event_timestamp"
+    format                        = "RFC3339Nano"
+    action_on_failure             = "skip"
+    action_on_duplicate_timestamp = "fudge"
+  }
+
+  stage.static_labels {
+    values = {
+      job     = "omada_webhook_normalized",
+      service = "captive_portal",
+      module  = "omada_webhook_normalizer",
+    }
+  }
+
+  stage.labels {
+    values = {
+      event          = "event_name",
+      level          = "event_level",
+      parse_status   = "parse_status_value",
+      schema_version = "schema_version_value",
+    }
+  }
+
+  stage.label_keep {
+    values = [
+      "job",
+      "service",
+      "module",
+      "event",
+      "level",
+      "parse_status",
+      "schema_version",
+    ]
+  }
+}

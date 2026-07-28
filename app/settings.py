@@ -21,7 +21,7 @@ from app.config import (
     OMADA_WEBHOOK_ENABLED, OMADA_WEBHOOK_ALLOWED_IPS,
     OMADA_WEBHOOK_AUTH_MODE, OMADA_WEBHOOK_SHARED_SECRET,
     OMADA_WEBHOOK_HEADER_TOKEN, OMADA_WEBHOOK_MAX_BODY_BYTES,
-    OMADA_WEBHOOK_LOG_FILE,
+    OMADA_WEBHOOK_LOG_FILE, OMADA_WEBHOOK_NORMALIZED_LOG_FILE,
     OMADA_URL, OMADA_ID, CLIENT_ID, CLIENT_SECRET
 )
 from app.logger import logger
@@ -82,6 +82,9 @@ def get_settings() -> dict:
             OMADA_WEBHOOK_MAX_BODY_BYTES
         ),
         "omada_webhook_log_file": OMADA_WEBHOOK_LOG_FILE,
+        "omada_webhook_normalized_log_file": (
+            OMADA_WEBHOOK_NORMALIZED_LOG_FILE
+        ),
         "omada_url": OMADA_URL,
         "omada_id": OMADA_ID,
         "client_id": CLIENT_ID,

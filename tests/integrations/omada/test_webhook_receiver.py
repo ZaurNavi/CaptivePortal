@@ -36,6 +36,11 @@ def settings(log_path: Path, **overrides):
         "omada_webhook_header_token": "",
         "omada_webhook_max_body_bytes": 1_048_576,
         "omada_webhook_log_file": str(log_path),
+        "omada_webhook_normalized_log_file": str(
+            log_path.with_name(
+                f"{log_path.stem}_normalized{log_path.suffix}"
+            )
+        ),
     }
     values.update(overrides)
     return values
@@ -1034,6 +1039,7 @@ def test_enabled_webhook_is_isolated_from_existing_routes(tmp_path):
     import app.web.web as web_module
 
     log_path = tmp_path / "integrated.log"
+    normalized_path = tmp_path / "integrated_normalized.log"
     with (
         patch.object(
             web_module,
@@ -1071,6 +1077,11 @@ def test_enabled_webhook_is_isolated_from_existing_routes(tmp_path):
     assert missing_session_response.status_code == 404
     assert retry_response.status_code == 404
     assert len(records(log_path)) == 1
+    assert len(records(normalized_path)) == 1
+    assert records(normalized_path)[0]["event"] == (
+        "omada.webhook_unclassified"
+    )
+    assert records(normalized_path)[0]["parse_reason"] == "TEXT_MISSING"
 
 
 def test_persist_failure_leaves_portal_and_auth_routes_available(
@@ -1136,6 +1147,37 @@ def test_default_configuration_has_no_hardcoded_allowed_ip():
 
     assert config.enabled is False
     assert config.allowed_ips == frozenset()
+    assert config.normalized_log_file.endswith(
+        "omada_webhook_normalized.log"
+    )
+
+
+def test_empty_normalized_log_path_is_configuration_error(tmp_path):
+    with pytest.raises(
+        ValueError,
+        match="OMADA_WEBHOOK_NORMALIZED_LOG_FILE",
+    ):
+        OmadaWebhookConfig.from_settings(
+            settings(
+                tmp_path / "unused.log",
+                omada_webhook_normalized_log_file="",
+            )
+        )
+
+
+def test_raw_and_normalized_log_paths_must_be_different(tmp_path):
+    log_path = tmp_path / "same.log"
+
+    with pytest.raises(
+        ValueError,
+        match="must be different",
+    ):
+        OmadaWebhookConfig.from_settings(
+            settings(
+                log_path,
+                omada_webhook_normalized_log_file=str(log_path),
+            )
+        )
 
 
 @pytest.mark.parametrize(

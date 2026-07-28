@@ -28,6 +28,8 @@ from app.capport import (
 from app.integrations.omada import (
     OmadaWebhookConfig,
     OmadaWebhookJournal,
+    OmadaWebhookNormalizedJournal,
+    OmadaWebhookProcessor,
     OmadaWebhookReceiver,
     create_omada_webhook_blueprint,
 )
@@ -88,12 +90,25 @@ def create_app(
         webhook_journal = OmadaWebhookJournal(
             webhook_config.log_file
         )
+        normalized_journal = OmadaWebhookNormalizedJournal(
+            webhook_config.normalized_log_file
+        )
+        webhook_processor = OmadaWebhookProcessor(
+            normalized_journal
+        )
         webhook_receiver = OmadaWebhookReceiver(
             config=webhook_config,
             journal=webhook_journal,
             logger=logger,
+            processor=webhook_processor,
         )
         app.extensions["omada_webhook_journal"] = webhook_journal
+        app.extensions[
+            "omada_webhook_normalized_journal"
+        ] = normalized_journal
+        app.extensions[
+            "omada_webhook_processor"
+        ] = webhook_processor
         app.extensions["omada_webhook_receiver"] = webhook_receiver
     app.register_blueprint(
         create_omada_webhook_blueprint(
