@@ -49,6 +49,14 @@ BLOCKED_CONNECTION = (
     "MAC block/MAC Filter/Lock To AP."
     "(6 times in the last minute)"
 )
+WRONG_PASSWORD = (
+    "[client:76-4B-5C-A6-30-6F:76-4B-5C-A6-30-6F] "
+    "failed to connect to "
+    "[ap:EC-75-0C-18-6F-F8:EC-75-0C-18-6F-F8] "
+    'with SSID "Welcome" on channel 64 '
+    "because the password was wrong."
+    "(1 time in the last minute)"
+)
 
 COMMON_KEYS = {
     "timestamp",
@@ -455,6 +463,163 @@ def test_blocked_connection_preserves_real_client_name():
     assert event["client_mac"] == "38:77:07:91:13:FF"
 
 
+@pytest.mark.parametrize("channel", [11, 64])
+def test_wrong_password_live_event_has_fixed_schema(channel):
+    text = WRONG_PASSWORD.replace("channel 64", f"channel {channel}")
+
+    event = single(raw_record(text))
+
+    assert set(event) == COMMON_KEYS | FAILED_CONNECTION_KEYS
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["level"] == "info"
+    assert event["parse_status"] == "parsed"
+    assert event["parse_reason"] is None
+    assert event["parse_warnings"] == []
+    assert event["client_name"] is None
+    assert event["client_name_raw"] == "76-4B-5C-A6-30-6F"
+    assert event["client_name_available"] is False
+    assert event["client_name_fallback"] == "mac"
+    assert event["client_mac"] == "76:4B:5C:A6:30:6F"
+    assert event["client_mac_raw"] == "76-4B-5C-A6-30-6F"
+    assert event["ssid"] == "Welcome"
+    assert event["ap_name"] is None
+    assert event["ap_name_raw"] == "EC-75-0C-18-6F-F8"
+    assert event["ap_name_available"] is False
+    assert event["ap_name_fallback"] == "mac"
+    assert event["ap_mac"] == "EC:75:0C:18:6F:F8"
+    assert event["ap_mac_raw"] == "EC-75-0C-18-6F-F8"
+    assert event["channel"] == channel
+    assert event["failure_reason"] == "WRONG_PASSWORD"
+    assert event["failure_source"] == "omada_controller"
+    assert event["controller_reason_raw"] == "password was wrong"
+    assert event["occurrence_count"] == 1
+    assert event["occurrence_window_seconds"] == 60
+
+
+@pytest.mark.parametrize(
+    ("count", "noun"),
+    [
+        (1, "time"),
+        (1, "times"),
+        (2, "time"),
+        (2, "times"),
+    ],
+)
+def test_connection_failure_accepts_time_or_times_for_any_count(
+    count,
+    noun,
+):
+    text = WRONG_PASSWORD.replace(
+        "1 time",
+        f"{count} {noun}",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "parsed"
+    assert event["occurrence_count"] == count
+    assert event["occurrence_window_seconds"] == 60
+
+
+@pytest.mark.parametrize(
+    ("source_reason", "expected_failure_reason"),
+    [
+        ("Password   was Wrong", "WRONG_PASSWORD"),
+        (
+            "MAC   block / MAC Filter / Lock To AP",
+            "ACCESS_POLICY_BLOCKED",
+        ),
+    ],
+)
+def test_connection_failure_preserves_controller_reason_text(
+    source_reason,
+    expected_failure_reason,
+):
+    if expected_failure_reason == "WRONG_PASSWORD":
+        text = WRONG_PASSWORD.replace(
+            "password was wrong",
+            source_reason,
+        )
+    else:
+        text = BLOCKED_CONNECTION.replace(
+            "MAC block/MAC Filter/Lock To AP",
+            source_reason,
+        )
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "parsed"
+    assert event["failure_reason"] == expected_failure_reason
+    assert event["controller_reason_raw"] == source_reason
+
+
+@pytest.mark.parametrize(
+    ("occurrence", "count", "window", "warnings"),
+    [
+        (
+            "",
+            None,
+            None,
+            [
+                "OCCURRENCE_COUNT_MISSING",
+                "OCCURRENCE_WINDOW_MISSING",
+            ],
+        ),
+        (
+            "(abc times in the last minute)",
+            None,
+            60,
+            ["OCCURRENCE_COUNT_INVALID"],
+        ),
+        (
+            "(6 times)",
+            6,
+            None,
+            ["OCCURRENCE_WINDOW_MISSING"],
+        ),
+    ],
+)
+def test_wrong_password_occurrence_errors_remain_partial(
+    occurrence,
+    count,
+    window,
+    warnings,
+):
+    text = WRONG_PASSWORD.replace(
+        "(1 time in the last minute)",
+        occurrence,
+    )
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "partial"
+    assert event["failure_reason"] == "WRONG_PASSWORD"
+    assert event["occurrence_count"] == count
+    assert event["occurrence_window_seconds"] == window
+    assert event["parse_warnings"] == warnings
+
+
+def test_wrong_password_legacy_attempts_recently_remains_partial():
+    text = WRONG_PASSWORD.replace(
+        "(1 time in the last minute)",
+        "(6 attempts recently)",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "partial"
+    assert event["failure_reason"] == "WRONG_PASSWORD"
+    assert event["occurrence_count"] == 6
+    assert event["occurrence_window_seconds"] is None
+    assert event["parse_warnings"] == [
+        "OCCURRENCE_WINDOW_INVALID",
+    ]
+
+
 @pytest.mark.parametrize(
     ("text", "warning"),
     [
@@ -607,6 +772,44 @@ def test_unknown_failed_to_connect_reason_is_unclassified():
 
 
 @pytest.mark.parametrize(
+    "raw_text",
+    [
+        WRONG_PASSWORD.replace(
+            "the password was wrong",
+            "the supplied password was rejected",
+        ),
+        WRONG_PASSWORD.replace(
+            "password was wrong.",
+            "password was wrong due to client configuration.",
+        ),
+        WRONG_PASSWORD.replace(
+            "(1 time in the last minute)",
+            "(1 time in the last minute "
+            "due to client configuration)",
+        ),
+        (
+            WRONG_PASSWORD
+            + " due to client configuration"
+        ),
+        WRONG_PASSWORD.replace(
+            "(1 time in the last minute)",
+            "(123 bananas due to client configuration)",
+        ),
+    ],
+)
+def test_unconfirmed_or_extended_password_reason_is_unclassified(
+    raw_text,
+):
+    event = single(raw_record(raw_text))
+
+    assert set(event) == UNCLASSIFIED_KEYS
+    assert event["event"] == "omada.webhook_unclassified"
+    assert event["parse_status"] == "unclassified"
+    assert event["parse_reason"] == "UNKNOWN_TEXT_FORMAT"
+    assert event["raw_text"] == raw_text
+
+
+@pytest.mark.parametrize(
     ("raw_text", "event_name"),
     [
         (ONLINE, "omada.client_online"),
@@ -614,6 +817,10 @@ def test_unknown_failed_to_connect_reason_is_unclassified():
         (UNAUTHORIZED, "omada.client_unauthorized"),
         (
             BLOCKED_CONNECTION,
+            "omada.client_connection_failed",
+        ),
+        (
+            WRONG_PASSWORD,
             "omada.client_connection_failed",
         ),
     ],
@@ -814,6 +1021,40 @@ def test_multiple_event_types_share_webhook_and_have_stable_ids():
         f"{WEBHOOK_ID}:1",
         f"{WEBHOOK_ID}:2",
         f"{WEBHOOK_ID}:3",
+    ]
+    assert [
+        event["normalized_event_id"] for event in first
+    ] == [
+        event["normalized_event_id"] for event in second
+    ]
+
+
+def test_wrong_password_items_in_one_webhook_are_independent():
+    channel_11 = WRONG_PASSWORD.replace("channel 64", "channel 11")
+    record = raw_record([WRONG_PASSWORD, channel_11])
+
+    first = normalize_webhook(record)
+    second = normalize_webhook(record)
+
+    assert len(first) == 2
+    assert [event["event"] for event in first] == [
+        "omada.client_connection_failed",
+        "omada.client_connection_failed",
+    ]
+    assert [event["failure_reason"] for event in first] == [
+        "WRONG_PASSWORD",
+        "WRONG_PASSWORD",
+    ]
+    assert [event["text_index"] for event in first] == [0, 1]
+    assert [event["text_count"] for event in first] == [2, 2]
+    assert [event["channel"] for event in first] == [64, 11]
+    assert [event["raw_text"] for event in first] == [
+        WRONG_PASSWORD,
+        channel_11,
+    ]
+    assert [event["normalized_event_id"] for event in first] == [
+        f"{WEBHOOK_ID}:0",
+        f"{WEBHOOK_ID}:1",
     ]
     assert [
         event["normalized_event_id"] for event in first
