@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import (
     Decimal,
@@ -12,7 +13,7 @@ from decimal import (
     localcontext,
 )
 from ipaddress import ip_address
-from typing import Any
+from typing import Any, NamedTuple
 
 
 SCHEMA_VERSION = 1
@@ -22,6 +23,7 @@ MIN_CONTROLLER_TIMESTAMP_MS = 946_684_800_000
 MAX_CONTROLLER_TIMESTAMP_MS = 4_102_444_800_000
 MAX_DURATION_COMPONENT_DIGITS = 12
 MAX_TRAFFIC_NUMBER_DIGITS = 24
+MAX_OCCURRENCE_COUNT = 999_999
 
 MAC_PATTERN = r"(?:[0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}"
 MAC_RE = re.compile(rf"^{MAC_PATTERN}$")
@@ -45,6 +47,14 @@ OFFLINE_RE = re.compile(r"\bwent\s+offline\b", re.IGNORECASE)
 UNAUTHORIZED_RE = re.compile(
     r"\bwas\s+unauthorized\s+by\s+Main\s+Administrator\b",
     re.IGNORECASE,
+)
+BLOCKED_CONNECTION_RE = re.compile(
+    r"\bfailed\s+to\s+connect\b.*?"
+    r"\bbecause\s+the\s+user\s+was\s+blocked\s+by\s+"
+    r"(?P<reason>"
+    r"MAC\s+block\s*/\s*MAC\s+Filter\s*/\s*Lock\s+To\s+AP"
+    r")\b",
+    re.IGNORECASE | re.DOTALL,
 )
 ONLINE_SSID_RE = re.compile(
     r'\bwith\s+SSID\s+"(?P<ssid>[^"]*)"',
@@ -82,6 +92,12 @@ ADMINISTRATOR_RE = re.compile(
     r"\s+(?P<administrator>.+?)\s*\.\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+OCCURRENCE_RE = re.compile(
+    r"^(?:(?P<count>\S+)\s+)?"
+    r"times\s+in\s+the"
+    r"(?:\s+(?P<window>.*?))?$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 TRAFFIC_MULTIPLIERS = {
     "B": 1,
@@ -90,6 +106,22 @@ TRAFFIC_MULTIPLIERS = {
     "GB": 1024**3,
     "TB": 1024**4,
 }
+
+EventParser = Callable[
+    [str],
+    tuple[dict[str, Any], list[str]],
+]
+
+
+class EventHandler(NamedTuple):
+    """One deterministic text classifier and its parser."""
+
+    event_name: str
+    pattern: re.Pattern[str]
+    parser: EventParser
+
+    def matches(self, raw_text: str) -> bool:
+        return self.pattern.search(raw_text) is not None
 
 
 def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -186,8 +218,15 @@ def _normalize_text_item(
     text_index: int,
     text_count: int,
 ) -> dict[str, Any]:
-    event_name = _classify_event(raw_text)
-    if event_name is None:
+    handler = next(
+        (
+            candidate
+            for candidate in EVENT_HANDLERS
+            if candidate.matches(raw_text)
+        ),
+        None,
+    )
+    if handler is None:
         return _diagnostic_event(
             raw_record,
             reason="UNKNOWN_TEXT_FORMAT",
@@ -196,19 +235,14 @@ def _normalize_text_item(
             raw_text=raw_text,
         )
 
-    if event_name == "omada.client_online":
-        fields, warnings = _parse_online(raw_text)
-    elif event_name == "omada.client_offline":
-        fields, warnings = _parse_offline(raw_text)
-    else:
-        fields, warnings = _parse_unauthorized(raw_text)
+    fields, warnings = handler.parser(raw_text)
 
     time_fields, time_warnings = _controller_time_fields(raw_record)
     warnings = _unique(warnings + time_warnings)
     parse_status = "partial" if warnings else "parsed"
     event = _common_event(
         raw_record,
-        event_name=event_name,
+        event_name=handler.event_name,
         text_index=text_index,
         text_count=text_count,
         raw_text=raw_text,
@@ -219,16 +253,6 @@ def _normalize_text_item(
     )
     event.update(fields)
     return event
-
-
-def _classify_event(raw_text: str) -> str | None:
-    if UNAUTHORIZED_RE.search(raw_text):
-        return "omada.client_unauthorized"
-    if ONLINE_RE.search(raw_text):
-        return "omada.client_online"
-    if OFFLINE_RE.search(raw_text):
-        return "omada.client_offline"
-    return None
 
 
 def _parse_online(raw_text: str) -> tuple[dict[str, Any], list[str]]:
@@ -244,14 +268,7 @@ def _parse_online(raw_text: str) -> tuple[dict[str, Any], list[str]]:
     else:
         fields["ssid"] = ssid_match.group("ssid")
 
-    channel_match = CHANNEL_RE.search(raw_text)
-    if channel_match is None:
-        warnings.append("CHANNEL_MISSING")
-    else:
-        try:
-            fields["channel"] = int(channel_match.group("channel"))
-        except (TypeError, ValueError):
-            warnings.append("CHANNEL_INVALID")
+    _apply_channel(fields, warnings, raw_text)
     return fields, warnings
 
 
@@ -318,6 +335,62 @@ def _parse_unauthorized(
     }, warnings
 
 
+def _parse_blocked_connection(
+    raw_text: str,
+) -> tuple[dict[str, Any], list[str]]:
+    warnings: list[str] = []
+    fields = _empty_failed_connection_fields()
+    _apply_client(fields, warnings, raw_text)
+    _apply_ap(fields, warnings, raw_text)
+
+    ssid_match = ONLINE_SSID_RE.search(raw_text)
+    if ssid_match is None:
+        warnings.append("SSID_MISSING")
+    else:
+        fields["ssid"] = ssid_match.group("ssid")
+
+    _apply_channel(fields, warnings, raw_text)
+
+    reason_match = BLOCKED_CONNECTION_RE.search(raw_text)
+    assert reason_match is not None
+    fields["controller_reason_raw"] = reason_match.group(
+        "reason"
+    ).strip()
+    _apply_occurrence(
+        fields,
+        warnings,
+        raw_text[reason_match.end():],
+    )
+    return fields, warnings
+
+
+# Registry order is classification priority. Keep this tuple explicit:
+# adding a future Omada event requires only its parser, pattern, and one
+# local registry entry; the central dispatch remains unchanged.
+EVENT_HANDLERS: tuple[EventHandler, ...] = (
+    EventHandler(
+        "omada.client_unauthorized",
+        UNAUTHORIZED_RE,
+        _parse_unauthorized,
+    ),
+    EventHandler(
+        "omada.client_online",
+        ONLINE_RE,
+        _parse_online,
+    ),
+    EventHandler(
+        "omada.client_offline",
+        OFFLINE_RE,
+        _parse_offline,
+    ),
+    EventHandler(
+        "omada.client_connection_failed",
+        BLOCKED_CONNECTION_RE,
+        _parse_blocked_connection,
+    ),
+)
+
+
 def _apply_client(
     fields: dict[str, Any],
     warnings: list[str],
@@ -362,6 +435,97 @@ def _apply_ip(
         fields["client_ip"] = str(ip_address(candidate))
     except ValueError:
         warnings.append("INVALID_CLIENT_IP")
+
+
+def _apply_channel(
+    fields: dict[str, Any],
+    warnings: list[str],
+    raw_text: str,
+) -> None:
+    match = CHANNEL_RE.search(raw_text)
+    if match is None:
+        warnings.append("CHANNEL_MISSING")
+        return
+    try:
+        fields["channel"] = int(match.group("channel"))
+    except (TypeError, ValueError):
+        warnings.append("CHANNEL_INVALID")
+
+
+def _apply_occurrence(
+    fields: dict[str, Any],
+    warnings: list[str],
+    raw_tail: str,
+) -> None:
+    block = _occurrence_block(raw_tail)
+    if block is None:
+        warnings.extend([
+            "OCCURRENCE_COUNT_MISSING",
+            "OCCURRENCE_WINDOW_MISSING",
+        ])
+        return
+
+    match = OCCURRENCE_RE.fullmatch(block)
+    if match is not None:
+        count_raw = match.group("count")
+        window_raw = match.group("window")
+    else:
+        parts = block.split(maxsplit=1)
+        count_raw = parts[0] if parts else None
+        window_raw = parts[1] if len(parts) == 2 else None
+
+    _apply_occurrence_count(
+        fields,
+        warnings,
+        count_raw,
+    )
+    if window_raw is None or not window_raw.strip():
+        warnings.append("OCCURRENCE_WINDOW_MISSING")
+    elif re.fullmatch(
+        r"last\s+minute",
+        window_raw.strip(),
+        re.IGNORECASE,
+    ):
+        fields["occurrence_window_seconds"] = 60
+    else:
+        warnings.append("OCCURRENCE_WINDOW_INVALID")
+
+
+def _occurrence_block(raw_tail: str) -> str | None:
+    candidate = raw_tail.strip()
+    candidate = candidate.lstrip(".").strip()
+    candidate = candidate.rstrip(".").strip()
+    if not candidate:
+        return None
+    if candidate.startswith("(") and candidate.endswith(")"):
+        candidate = candidate[1:-1].strip()
+    return candidate or None
+
+
+def _apply_occurrence_count(
+    fields: dict[str, Any],
+    warnings: list[str],
+    raw_value: str | None,
+) -> None:
+    if raw_value is None or not raw_value.strip():
+        warnings.append("OCCURRENCE_COUNT_MISSING")
+        return
+    candidate = raw_value.strip()
+    if (
+        len(candidate) > len(str(MAX_OCCURRENCE_COUNT))
+        or re.fullmatch(r"[0-9]+", candidate) is None
+    ):
+        warnings.append("OCCURRENCE_COUNT_INVALID")
+        return
+    try:
+        value = int(candidate)
+    except (ValueError, OverflowError):
+        warnings.append("OCCURRENCE_COUNT_INVALID")
+        return
+    if not 1 <= value <= MAX_OCCURRENCE_COUNT:
+        warnings.append("OCCURRENCE_COUNT_INVALID")
+        return
+    fields["occurrence_count"] = value
 
 
 def _parse_named_mac(
@@ -699,6 +863,30 @@ def _empty_reported_fields() -> dict[str, Any]:
         "reported_traffic_value": None,
         "reported_traffic_unit": None,
         "reported_traffic_bytes_estimate": None,
+    }
+
+
+def _empty_failed_connection_fields() -> dict[str, Any]:
+    return {
+        "client_name": None,
+        "client_name_raw": None,
+        "client_name_available": False,
+        "client_name_fallback": None,
+        "client_mac": None,
+        "client_mac_raw": None,
+        "ssid": None,
+        "ap_name": None,
+        "ap_name_raw": None,
+        "ap_name_available": False,
+        "ap_name_fallback": None,
+        "ap_mac": None,
+        "ap_mac_raw": None,
+        "channel": None,
+        "failure_reason": "ACCESS_POLICY_BLOCKED",
+        "failure_source": "omada_controller",
+        "controller_reason_raw": None,
+        "occurrence_count": None,
+        "occurrence_window_seconds": None,
     }
 
 

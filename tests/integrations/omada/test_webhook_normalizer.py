@@ -10,6 +10,7 @@ from app.integrations.omada.webhook_normalized_journal import (
     OmadaWebhookNormalizedJournal,
 )
 from app.integrations.omada.webhook_normalizer import (
+    EVENT_HANDLERS,
     normalize_mac,
     normalize_webhook,
 )
@@ -38,6 +39,15 @@ UNAUTHORIZED = (
     "[client:12-4E-9B-DE-22-A7]\n"
     "was unauthorized by Main Administrator "
     "z******vi@gmail.com."
+)
+BLOCKED_CONNECTION = (
+    "[client:38-77-07-91-13-FF:38-77-07-91-13-FF] "
+    "failed to connect to "
+    "[ap:EC-75-0C-18-6F-F8:EC-75-0C-18-6F-F8] "
+    'with SSID "Zefer_Parki" on channel 11 '
+    "because the user was blocked by "
+    "MAC block/MAC Filter/Lock To AP."
+    "(6 times in the last minute)"
 )
 
 COMMON_KEYS = {
@@ -93,6 +103,27 @@ REPORTED_KEYS = {
     "reported_traffic_value",
     "reported_traffic_unit",
     "reported_traffic_bytes_estimate",
+}
+FAILED_CONNECTION_KEYS = {
+    "client_name",
+    "client_name_raw",
+    "client_name_available",
+    "client_name_fallback",
+    "client_mac",
+    "client_mac_raw",
+    "ssid",
+    "ap_name",
+    "ap_name_raw",
+    "ap_name_available",
+    "ap_name_fallback",
+    "ap_mac",
+    "ap_mac_raw",
+    "channel",
+    "failure_reason",
+    "failure_source",
+    "controller_reason_raw",
+    "occurrence_count",
+    "occurrence_window_seconds",
 }
 
 
@@ -369,6 +400,274 @@ def test_administrative_unauthorized_fixed_schema():
     assert event["action_source"] == "omada_controller"
 
 
+@pytest.mark.parametrize(
+    "occurrence_count",
+    [1, 3, 6, 999_999],
+)
+def test_blocked_connection_has_fixed_schema(occurrence_count):
+    text = BLOCKED_CONNECTION.replace(
+        "6 times",
+        f"{occurrence_count} times",
+    )
+
+    event = single(raw_record(text))
+
+    assert set(event) == COMMON_KEYS | FAILED_CONNECTION_KEYS
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "parsed"
+    assert event["parse_reason"] is None
+    assert event["parse_warnings"] == []
+    assert event["client_name"] is None
+    assert event["client_name_raw"] == "38-77-07-91-13-FF"
+    assert event["client_name_available"] is False
+    assert event["client_name_fallback"] == "mac"
+    assert event["client_mac"] == "38:77:07:91:13:FF"
+    assert event["ssid"] == "Zefer_Parki"
+    assert event["ap_name"] is None
+    assert event["ap_name_raw"] == "EC-75-0C-18-6F-F8"
+    assert event["ap_name_available"] is False
+    assert event["ap_name_fallback"] == "mac"
+    assert event["ap_mac"] == "EC:75:0C:18:6F:F8"
+    assert event["channel"] == 11
+    assert event["failure_reason"] == "ACCESS_POLICY_BLOCKED"
+    assert event["failure_source"] == "omada_controller"
+    assert event["controller_reason_raw"] == (
+        "MAC block/MAC Filter/Lock To AP"
+    )
+    assert event["occurrence_count"] == occurrence_count
+    assert event["occurrence_window_seconds"] == 60
+
+
+def test_blocked_connection_preserves_real_client_name():
+    text = BLOCKED_CONNECTION.replace(
+        "38-77-07-91-13-FF:38-77-07-91-13-FF",
+        "Park-Guest:38-77-07-91-13-FF",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "parsed"
+    assert event["client_name"] == "Park-Guest"
+    assert event["client_name_raw"] == "Park-Guest"
+    assert event["client_name_available"] is True
+    assert event["client_name_fallback"] is None
+    assert event["client_mac"] == "38:77:07:91:13:FF"
+
+
+@pytest.mark.parametrize(
+    ("text", "warning"),
+    [
+        (
+            BLOCKED_CONNECTION.replace(" on channel 11", ""),
+            "CHANNEL_MISSING",
+        ),
+        (
+            BLOCKED_CONNECTION.replace(
+                "on channel 11",
+                "on channel eleven",
+            ),
+            "CHANNEL_INVALID",
+        ),
+    ],
+)
+def test_blocked_connection_invalid_channel_is_partial(
+    text,
+    warning,
+):
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "partial"
+    assert event["channel"] is None
+    assert event["parse_warnings"] == [warning]
+
+
+@pytest.mark.parametrize(
+    "raw_count",
+    [
+        "0",
+        "-1",
+        "abc",
+        "1000000",
+        "9" * 5000,
+    ],
+)
+def test_blocked_connection_invalid_occurrence_count_is_partial(
+    raw_count,
+):
+    text = BLOCKED_CONNECTION.replace("6 times", f"{raw_count} times")
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "partial"
+    assert event["occurrence_count"] is None
+    assert event["occurrence_window_seconds"] == 60
+    assert event["parse_warnings"] == [
+        "OCCURRENCE_COUNT_INVALID",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "count", "window", "warnings"),
+    [
+        (
+            BLOCKED_CONNECTION.replace(
+                ".(6 times in the last minute)",
+                ".",
+            ),
+            None,
+            None,
+            [
+                "OCCURRENCE_COUNT_MISSING",
+                "OCCURRENCE_WINDOW_MISSING",
+            ],
+        ),
+        (
+            BLOCKED_CONNECTION.replace(
+                "6 times",
+                "times",
+            ),
+            None,
+            60,
+            ["OCCURRENCE_COUNT_MISSING"],
+        ),
+        (
+            BLOCKED_CONNECTION.replace(
+                "last minute",
+                "",
+            ),
+            6,
+            None,
+            ["OCCURRENCE_WINDOW_MISSING"],
+        ),
+        (
+            BLOCKED_CONNECTION.replace(
+                "last minute",
+                "last 5 minutes",
+            ),
+            6,
+            None,
+            ["OCCURRENCE_WINDOW_INVALID"],
+        ),
+        (
+            BLOCKED_CONNECTION.replace(
+                "times in the last minute",
+                "attempts recently",
+            ),
+            6,
+            None,
+            ["OCCURRENCE_WINDOW_INVALID"],
+        ),
+    ],
+)
+def test_blocked_connection_occurrence_partial_contract(
+    text,
+    count,
+    window,
+    warnings,
+):
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_connection_failed"
+    assert event["parse_status"] == "partial"
+    assert event["occurrence_count"] == count
+    assert event["occurrence_window_seconds"] == window
+    assert event["parse_warnings"] == warnings
+
+
+def test_blocked_occurrence_tolerates_case_spacing_and_punctuation():
+    text = BLOCKED_CONNECTION.replace(
+        ".(6 times in the last minute)",
+        " ( 6   TIMES   IN THE   LAST MINUTE ) .",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["parse_status"] == "parsed"
+    assert event["occurrence_count"] == 6
+    assert event["occurrence_window_seconds"] == 60
+
+
+def test_unknown_failed_to_connect_reason_is_unclassified():
+    raw_text = BLOCKED_CONNECTION.replace(
+        "the user was blocked by "
+        "MAC block/MAC Filter/Lock To AP",
+        "the supplied password was rejected",
+    )
+
+    event = single(raw_record(raw_text))
+
+    assert set(event) == UNCLASSIFIED_KEYS
+    assert event["event"] == "omada.webhook_unclassified"
+    assert event["parse_status"] == "unclassified"
+    assert event["parse_reason"] == "UNKNOWN_TEXT_FORMAT"
+    assert event["raw_text"] == raw_text
+
+
+@pytest.mark.parametrize(
+    ("raw_text", "event_name"),
+    [
+        (ONLINE, "omada.client_online"),
+        (OFFLINE, "omada.client_offline"),
+        (UNAUTHORIZED, "omada.client_unauthorized"),
+        (
+            BLOCKED_CONNECTION,
+            "omada.client_connection_failed",
+        ),
+    ],
+)
+def test_registry_fixtures_have_one_unambiguous_handler(
+    raw_text,
+    event_name,
+):
+    matches = [
+        handler.event_name
+        for handler in EVENT_HANDLERS
+        if handler.matches(raw_text)
+    ]
+
+    assert matches == [event_name]
+
+
+def test_registry_order_defines_overlapping_pattern_priority():
+    raw_text = (
+        "[client:12-4E-9B-DE-22-A7]\n"
+        "went online\n"
+        "was unauthorized by Main Administrator admin."
+    )
+
+    matches = [
+        handler.event_name
+        for handler in EVENT_HANDLERS
+        if handler.matches(raw_text)
+    ]
+    event = single(raw_record(raw_text))
+
+    assert matches == [
+        "omada.client_unauthorized",
+        "omada.client_online",
+    ]
+    assert event["event"] == "omada.client_unauthorized"
+    assert event["parse_status"] == "parsed"
+
+
+def test_event_handler_registry_is_ordered_and_unique():
+    event_names = tuple(
+        handler.event_name for handler in EVENT_HANDLERS
+    )
+
+    assert isinstance(EVENT_HANDLERS, tuple)
+    assert event_names == (
+        "omada.client_unauthorized",
+        "omada.client_online",
+        "omada.client_offline",
+        "omada.client_connection_failed",
+    )
+    assert len(event_names) == len(set(event_names))
+
+
 def test_unknown_text_is_preserved_as_unclassified():
     raw_text = "future Omada event with unknown syntax"
 
@@ -483,20 +782,38 @@ def test_invalid_and_blank_text_items_each_get_diagnostic():
     }) == 8
 
 
-def test_multiple_messages_share_webhook_id_and_have_stable_ids():
-    record = raw_record([OFFLINE, UNAUTHORIZED])
+def test_multiple_event_types_share_webhook_and_have_stable_ids():
+    record = raw_record([
+        ONLINE,
+        BLOCKED_CONNECTION,
+        OFFLINE,
+        UNAUTHORIZED,
+    ])
 
     first = normalize_webhook(record)
     second = normalize_webhook(record)
 
+    assert [event["event"] for event in first] == [
+        "omada.client_online",
+        "omada.client_connection_failed",
+        "omada.client_offline",
+        "omada.client_unauthorized",
+    ]
     assert [event["webhook_id"] for event in first] == [
         WEBHOOK_ID,
-        WEBHOOK_ID,
+    ] * 4
+    assert [event["text_index"] for event in first] == [
+        0,
+        1,
+        2,
+        3,
     ]
-    assert [event["text_index"] for event in first] == [0, 1]
+    assert all(event["text_count"] == 4 for event in first)
     assert [event["normalized_event_id"] for event in first] == [
         f"{WEBHOOK_ID}:0",
         f"{WEBHOOK_ID}:1",
+        f"{WEBHOOK_ID}:2",
+        f"{WEBHOOK_ID}:3",
     ]
     assert [
         event["normalized_event_id"] for event in first
