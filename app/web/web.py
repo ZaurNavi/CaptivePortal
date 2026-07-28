@@ -25,6 +25,12 @@ from app.capport import (
     CapportService,
     create_capport_blueprint,
 )
+from app.integrations.omada import (
+    OmadaWebhookConfig,
+    OmadaWebhookJournal,
+    OmadaWebhookReceiver,
+    create_omada_webhook_blueprint,
+)
 from app.portal_counter import (
     PortalCounterRepository,
     PortalCounterService,
@@ -74,6 +80,28 @@ def create_app(
     settings = get_settings()
     auth_telemetry = configure_auth_telemetry(settings)
     app.extensions["auth_telemetry"] = auth_telemetry
+
+    webhook_config = OmadaWebhookConfig.from_settings(settings)
+    app.extensions["omada_webhook_config"] = webhook_config
+    webhook_receiver = None
+    if webhook_config.enabled:
+        webhook_journal = OmadaWebhookJournal(
+            webhook_config.log_file
+        )
+        webhook_receiver = OmadaWebhookReceiver(
+            config=webhook_config,
+            journal=webhook_journal,
+            logger=logger,
+        )
+        app.extensions["omada_webhook_journal"] = webhook_journal
+        app.extensions["omada_webhook_receiver"] = webhook_receiver
+    app.register_blueprint(
+        create_omada_webhook_blueprint(
+            config=webhook_config,
+            receiver=webhook_receiver,
+            logger=logger,
+        )
+    )
 
     if portal_counter_service is _AUTO_COUNTER:
         portal_counter_service = None

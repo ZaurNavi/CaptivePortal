@@ -2,8 +2,9 @@
 Application configuration defaults.
 
 This module stores default values for the application.
-No Omada-specific settings here.
 """
+
+import os
 
 # Server settings
 HOST = "127.0.0.1"
@@ -41,6 +42,36 @@ CAPPORT_LOGIN_PATH = "/capport/login"
 CAPPORT_ALLOWED_CLIENT_NETWORKS = ("192.168.1.0/24",)
 CAPPORT_CLIENT_CACHE_TTL_SECONDS = 2
 CAPPORT_FAILURE_CACHE_TTL_SECONDS = 2
+
+# Omada webhook receiver
+OMADA_WEBHOOK_ENABLED = os.getenv(
+    "OMADA_WEBHOOK_ENABLED",
+    "false",
+)
+OMADA_WEBHOOK_ALLOWED_IPS = os.getenv(
+    "OMADA_WEBHOOK_ALLOWED_IPS",
+    "",
+)
+OMADA_WEBHOOK_AUTH_MODE = os.getenv(
+    "OMADA_WEBHOOK_AUTH_MODE",
+    "ip_only",
+)
+OMADA_WEBHOOK_SHARED_SECRET = os.getenv(
+    "OMADA_WEBHOOK_SHARED_SECRET",
+    "",
+)
+OMADA_WEBHOOK_HEADER_TOKEN = os.getenv(
+    "OMADA_WEBHOOK_HEADER_TOKEN",
+    "",
+)
+OMADA_WEBHOOK_MAX_BODY_BYTES = os.getenv(
+    "OMADA_WEBHOOK_MAX_BODY_BYTES",
+    "1048576",
+)
+OMADA_WEBHOOK_LOG_FILE = os.getenv(
+    "OMADA_WEBHOOK_LOG_FILE",
+    "/opt/CaptivePortal/logs/omada_webhook.log",
+)
 
 # Omada OpenAPI settings
 OMADA_URL = "https://192.168.0.222:8043"
