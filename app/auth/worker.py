@@ -549,6 +549,24 @@ class AuthWorker:
                 if metrics.last_failure_reason is not None
                 else True
             )
+            if (
+                success_reason == "AUTHORIZATION_REJECTED"
+                and final_result.success
+                and metrics.last_active is False
+                and final_auth_status != 2
+            ):
+                self._finish_failed(
+                    session,
+                    run,
+                    final_reason=success_reason,
+                    retryable=True,
+                    error=(
+                        "Authorization was rejected and the client "
+                        "remains inactive. A retry is available."
+                    ),
+                )
+                metrics.final_reason = success_reason
+                return
             metrics.final_reason = self._cleanup_and_finish(
                 session,
                 run,

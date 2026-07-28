@@ -328,6 +328,62 @@ assert(
     )
 
 
+def test_polling_rejection_result_shows_retry_and_stops_final_overwrite():
+    run_frontend_scenario(
+        {
+            "state": "FAILED",
+            "progress": 100,
+            "retryable": False,
+            "terminal": True,
+            "authorized": False,
+            "current_run_number": 1,
+        },
+        r"""
+applyServerState({
+    state: "VERIFYING",
+    progress: 95,
+    retryable: false,
+    terminal: false,
+    authorized: false,
+    current_run_number: 1
+});
+pollTimer = window.setTimeout(() => {}, 1000);
+fetchImpl = async () => makeResponse({
+    state: "FAILED",
+    status: "FAILED",
+    progress: 100,
+    retryable: true,
+    terminal: false,
+    authorized: false,
+    current_run_number: 1,
+    final_reason: "AUTHORIZATION_REJECTED"
+});
+
+await pollSession();
+
+assert(currentState.status === "FAILED", "failure state must be kept");
+assert(
+    currentState.finalReason === "AUTHORIZATION_REJECTED",
+    "explicit rejection reason must be kept"
+);
+assert(currentState.retryable === true, "failure must stay retryable");
+assert(
+    !elements["retry-button"].classList.contains("hidden"),
+    "retry button must replace the completed progress indicator"
+);
+assert(
+    elements["retry-button"].disabled === false,
+    "retry button must be enabled"
+);
+assert(
+    elements["portal-error"].textContent === getTexts().retryableFailure,
+    "retryable message must not be replaced by final failure text"
+);
+assert(pollTimer === null, "terminal polling cycle must stop");
+""",
+    )
+
+
 def test_lost_retry_response_reconciles_active_run():
     run_frontend_scenario(
         {

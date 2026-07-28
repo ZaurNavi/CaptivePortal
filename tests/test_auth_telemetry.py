@@ -583,6 +583,62 @@ class AuthWorkerTelemetryTests(unittest.TestCase):
             session.runs[0].authorization_may_have_changed
         )
 
+    def test_explicit_rejection_inactive_is_retryable_and_emitted_once(
+        self,
+    ):
+        rejection = Result.fail(
+            error="AUTH_FAILED",
+            message="Failed to authorize this client.",
+            data={"http_status": 200, "error_code": -1},
+        )
+        provider = SequenceProvider(
+            [client_result(0, False)] * 5,
+            auth_results=[rejection] * 3,
+        )
+
+        session, records = self.run_worker(provider)
+        run_finals = [
+            record
+            for record in records
+            if record["event"] == events.RUN_FINISHED
+        ]
+        verifications = [
+            record
+            for record in records
+            if record["event"] == events.VERIFICATION_RESULT
+        ]
+
+        self.assertEqual(session.status, AuthStatus.FAILED)
+        self.assertEqual(
+            session.final_reason,
+            "AUTHORIZATION_REJECTED",
+        )
+        self.assertTrue(session.retryable)
+        self.assertEqual(provider.authorize_calls, 3)
+        self.assertEqual(provider.get_client_calls, 5)
+        self.assertEqual(provider.unauthorize_calls, 0)
+        self.assertEqual(len(run_finals), 1)
+        self.assertEqual(run_finals[0]["final_state"], "FAILED")
+        self.assertEqual(
+            run_finals[0]["final_reason"],
+            "AUTHORIZATION_REJECTED",
+        )
+        self.assertTrue(run_finals[0]["retryable"])
+        self.assertEqual(len(verifications), 4)
+        self.assertEqual(
+            [
+                record["verification_phase"]
+                for record in verifications
+            ],
+            ["attempt", "attempt", "attempt", "final"],
+        )
+        self.assertFalse(
+            any(
+                record["event"] == events.SESSION_FINISHED
+                for record in records
+            )
+        )
+
     def test_reset_failure_is_failed(self):
         provider = SequenceProvider(
             [
