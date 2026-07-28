@@ -1,14 +1,15 @@
 # Omada webhook receiver
 
-Stage 1 is a permanent capture-only endpoint embedded in the existing
-CaptivePortal Flask process:
+The permanent receiver is embedded in the existing CaptivePortal Flask
+process:
 
 ```text
 POST /api/integrations/omada/webhook
 ```
 
-It does not classify events, call Omada OpenAPI, change authorization
-sessions, calculate traffic, or alter CAPPORT and portal behavior.
+It first persists an unchanged secret-safe raw record. A separate
+processor then normalizes supported event strings without calling Omada
+OpenAPI or changing authorization, retry, CAPPORT, and portal behavior.
 
 ## Configuration
 
@@ -23,6 +24,7 @@ OMADA_WEBHOOK_SHARED_SECRET=
 OMADA_WEBHOOK_HEADER_TOKEN=
 OMADA_WEBHOOK_MAX_BODY_BYTES=1048576
 OMADA_WEBHOOK_LOG_FILE=/opt/CaptivePortal/logs/omada_webhook.log
+OMADA_WEBHOOK_NORMALIZED_LOG_FILE=/opt/CaptivePortal/logs/omada_webhook_normalized.log
 ```
 
 `OMADA_WEBHOOK_ALLOWED_IPS` is a comma-separated list of exact IPv4 or
@@ -121,13 +123,18 @@ sudo systemctl show captive-portal.service \
 ```
 
 If the service runs as the current `admin:telemetry` identity, prepare
-the existing log directory and file with that same ownership:
+the existing log directory and files with that same ownership:
 
 ```bash
 sudo test -d /opt/CaptivePortal/logs
 sudo -u admin touch /opt/CaptivePortal/logs/omada_webhook.log
-sudo chown admin:telemetry /opt/CaptivePortal/logs/omada_webhook.log
-sudo chmod 0640 /opt/CaptivePortal/logs/omada_webhook.log
+sudo -u admin touch /opt/CaptivePortal/logs/omada_webhook_normalized.log
+sudo chown admin:telemetry \
+  /opt/CaptivePortal/logs/omada_webhook.log \
+  /opt/CaptivePortal/logs/omada_webhook_normalized.log
+sudo chmod 0640 \
+  /opt/CaptivePortal/logs/omada_webhook.log \
+  /opt/CaptivePortal/logs/omada_webhook_normalized.log
 ```
 
 If `systemctl show` reports a different user or group, substitute those

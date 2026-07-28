@@ -72,6 +72,10 @@ OMADA_WEBHOOK_LOG_FILE = os.getenv(
     "OMADA_WEBHOOK_LOG_FILE",
     "/opt/CaptivePortal/logs/omada_webhook.log",
 )
+OMADA_WEBHOOK_NORMALIZED_LOG_FILE = os.getenv(
+    "OMADA_WEBHOOK_NORMALIZED_LOG_FILE",
+    "/opt/CaptivePortal/logs/omada_webhook_normalized.log",
+)
 
 # Omada OpenAPI settings
 OMADA_URL = "https://192.168.0.222:8043"

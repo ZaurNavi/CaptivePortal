@@ -18,6 +18,10 @@ from .webhook_redaction import (
     redact_query_parameters,
     safe_json_body,
 )
+from .webhook_processor import (
+    WebhookNormalizationError,
+    WebhookNormalizedWriteError,
+)
 from .webhook_security import authentication_failure_reason
 
 
@@ -103,6 +107,25 @@ class OmadaWebhookReceiver:
 
         try:
             self.processor(envelope)
+        except WebhookNormalizationError as exc:
+            self._log_system_event(
+                "omada.webhook_normalization_failed",
+                "error",
+                webhook_id=exc.webhook_id,
+                payload_sha256=exc.payload_sha256,
+                exception_type=exc.exception_type,
+                error_code=exc.error_code,
+            )
+        except WebhookNormalizedWriteError as exc:
+            self._log_system_event(
+                "omada.webhook_normalized_write_failed",
+                "error",
+                webhook_id=exc.webhook_id,
+                normalized_event_id=exc.normalized_event_id,
+                target_path=exc.target_path,
+                exception_type=exc.exception_type,
+                error_code=exc.error_code,
+            )
         except Exception as exc:
             self._log_system_event(
                 "omada.webhook_processing_failed",
