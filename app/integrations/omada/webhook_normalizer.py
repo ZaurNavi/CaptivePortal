@@ -48,12 +48,20 @@ UNAUTHORIZED_RE = re.compile(
     r"\bwas\s+unauthorized\s+by\s+Main\s+Administrator\b",
     re.IGNORECASE,
 )
-BLOCKED_CONNECTION_RE = re.compile(
-    r"\bfailed\s+to\s+connect\b.*?"
+FAILED_TO_CONNECT_RE = re.compile(
+    r"\bfailed\s+to\s+connect\b",
+    re.IGNORECASE,
+)
+ACCESS_POLICY_BLOCKED_RE = re.compile(
     r"\bbecause\s+the\s+user\s+was\s+blocked\s+by\s+"
     r"(?P<reason>"
     r"MAC\s+block\s*/\s*MAC\s+Filter\s*/\s*Lock\s+To\s+AP"
     r")\b",
+    re.IGNORECASE | re.DOTALL,
+)
+WRONG_PASSWORD_RE = re.compile(
+    r"\bbecause\s+the\s+"
+    r"(?P<reason>password\s+was\s+wrong)\b",
     re.IGNORECASE | re.DOTALL,
 )
 ONLINE_SSID_RE = re.compile(
@@ -94,8 +102,18 @@ ADMINISTRATOR_RE = re.compile(
 )
 OCCURRENCE_RE = re.compile(
     r"^(?:(?P<count>\S+)\s+)?"
-    r"times\s+in\s+the"
-    r"(?:\s+(?P<window>.*?))?$",
+    r"times?"
+    r"(?:\s+in\s+the(?:\s+(?P<window>.*?))?)?$",
+    re.IGNORECASE | re.DOTALL,
+)
+TECHNICAL_OCCURRENCE_TAIL_RE = re.compile(
+    r"^(?:\S+\s+)?times?"
+    r"(?:\s+in\s+the(?:\s+last\s+"
+    r"(?:minute|hour|\d+\s+(?:minutes?|hours?)))?)?$",
+    re.IGNORECASE | re.DOTALL,
+)
+LEGACY_ATTEMPTS_RECENTLY_RE = re.compile(
+    r"^[+-]?\d+\s+attempts?\s+recently$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -111,17 +129,47 @@ EventParser = Callable[
     [str],
     tuple[dict[str, Any], list[str]],
 ]
+EventMatcher = Callable[[str], bool]
+
+
+class ConnectionFailureReason(NamedTuple):
+    """One exact controller reason and its normalized meaning."""
+
+    failure_reason: str
+    pattern: re.Pattern[str]
 
 
 class EventHandler(NamedTuple):
     """One deterministic text classifier and its parser."""
 
     event_name: str
-    pattern: re.Pattern[str]
+    matcher: EventMatcher
     parser: EventParser
 
     def matches(self, raw_text: str) -> bool:
-        return self.pattern.search(raw_text) is not None
+        return self.matcher(raw_text)
+
+
+def _regex_matcher(pattern: re.Pattern[str]) -> EventMatcher:
+    def matches(raw_text: str) -> bool:
+        return pattern.search(raw_text) is not None
+
+    return matches
+
+
+CONNECTION_FAILURE_REASONS: tuple[
+    ConnectionFailureReason,
+    ...,
+] = (
+    ConnectionFailureReason(
+        "ACCESS_POLICY_BLOCKED",
+        ACCESS_POLICY_BLOCKED_RE,
+    ),
+    ConnectionFailureReason(
+        "WRONG_PASSWORD",
+        WRONG_PASSWORD_RE,
+    ),
+)
 
 
 def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -335,7 +383,7 @@ def _parse_unauthorized(
     }, warnings
 
 
-def _parse_blocked_connection(
+def _parse_connection_failed(
     raw_text: str,
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
@@ -351,8 +399,11 @@ def _parse_blocked_connection(
 
     _apply_channel(fields, warnings, raw_text)
 
-    reason_match = BLOCKED_CONNECTION_RE.search(raw_text)
-    assert reason_match is not None
+    reason_definition, reason_match = (
+        _match_connection_failure_reason(raw_text)
+    )
+    fields["failure_reason"] = reason_definition.failure_reason
+    fields["failure_source"] = "omada_controller"
     fields["controller_reason_raw"] = reason_match.group(
         "reason"
     ).strip()
@@ -364,29 +415,65 @@ def _parse_blocked_connection(
     return fields, warnings
 
 
+def _match_connection_failure_reason(
+    raw_text: str,
+) -> tuple[ConnectionFailureReason, re.Match[str]]:
+    failed_match = FAILED_TO_CONNECT_RE.search(raw_text)
+    if failed_match is None:
+        raise ValueError("not a failed-to-connect event")
+    for definition in CONNECTION_FAILURE_REASONS:
+        reason_match = definition.pattern.search(
+            raw_text,
+            failed_match.end(),
+        )
+        if reason_match is not None:
+            return definition, reason_match
+    raise ValueError("unknown connection failure reason")
+
+
+def _matches_connection_failed(raw_text: str) -> bool:
+    try:
+        _, reason_match = _match_connection_failure_reason(raw_text)
+    except ValueError:
+        return False
+    return _is_technical_occurrence_tail(
+        raw_text[reason_match.end():],
+    )
+
+
+def _is_technical_occurrence_tail(raw_tail: str) -> bool:
+    block = _occurrence_block(raw_tail)
+    if block is None:
+        return True
+    return (
+        TECHNICAL_OCCURRENCE_TAIL_RE.fullmatch(block) is not None
+        or LEGACY_ATTEMPTS_RECENTLY_RE.fullmatch(block) is not None
+    )
+
+
 # Registry order is classification priority. Keep this tuple explicit:
-# adding a future Omada event requires only its parser, pattern, and one
-# local registry entry; the central dispatch remains unchanged.
+# adding a future Omada event requires only its parser, matcher, and
+# one local registry entry; the central dispatch remains unchanged.
 EVENT_HANDLERS: tuple[EventHandler, ...] = (
     EventHandler(
         "omada.client_unauthorized",
-        UNAUTHORIZED_RE,
+        _regex_matcher(UNAUTHORIZED_RE),
         _parse_unauthorized,
     ),
     EventHandler(
         "omada.client_online",
-        ONLINE_RE,
+        _regex_matcher(ONLINE_RE),
         _parse_online,
     ),
     EventHandler(
         "omada.client_offline",
-        OFFLINE_RE,
+        _regex_matcher(OFFLINE_RE),
         _parse_offline,
     ),
     EventHandler(
         "omada.client_connection_failed",
-        BLOCKED_CONNECTION_RE,
-        _parse_blocked_connection,
+        _matches_connection_failed,
+        _parse_connection_failed,
     ),
 )
 
@@ -882,8 +969,8 @@ def _empty_failed_connection_fields() -> dict[str, Any]:
         "ap_mac": None,
         "ap_mac_raw": None,
         "channel": None,
-        "failure_reason": "ACCESS_POLICY_BLOCKED",
-        "failure_source": "omada_controller",
+        "failure_reason": None,
+        "failure_source": None,
         "controller_reason_raw": None,
         "occurrence_count": None,
         "occurrence_window_seconds": None,

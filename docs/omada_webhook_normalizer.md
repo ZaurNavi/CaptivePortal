@@ -116,45 +116,60 @@ Present but invalid duration or traffic is partial.
 
 Recognized controller text is dispatched through the ordered Python
 tuple `EVENT_HANDLERS`. Every registry entry contains an `event_name`,
-a compiled pattern, and a parser. The first matching entry wins.
+a matcher, and a parser. The first matching entry wins. A matcher may
+be a compiled-pattern adapter or a local match function when an event
+has a stricter structural contract.
 
-Adding another Omada event requires a local pattern, parser, and
+Adding another Omada event requires a local matcher, parser, and
 registry entry. The central normalization flow does not contain
 event-specific `if`/`elif` dispatch and does not load external YAML,
 JSON, or plugin code.
 
-## Blocked connection failures
+## Connection failures
 
-The observed controller reason:
+The normalizer supports two exact reasons observed in controller
+messages:
 
 ```text
-MAC block/MAC Filter/Lock To AP
+MAC block/MAC Filter/Lock To AP -> ACCESS_POLICY_BLOCKED
+password was wrong             -> WRONG_PASSWORD
 ```
 
-is normalized as:
+Both are normalized under the existing event:
 
 ```text
 event=omada.client_connection_failed
-failure_reason=ACCESS_POLICY_BLOCKED
 failure_source=omada_controller
 ```
 
-The controller text does not identify which individual Omada policy
-caused the rejection, so the normalizer does not claim a more specific
-reason such as `MAC_FILTER_BLOCKED`.
+The reason comes directly from Omada Controller. The normalizer does
+not infer why a password was wrong or which individual Omada policy
+caused a blocked connection, and therefore does not claim broader or
+more specific reasons. `controller_reason_raw` preserves the extracted
+controller text, including its original case and internal spacing.
+Matching is case-insensitive and whitespace-tolerant.
 
-Version 4.1 supports only this occurrence form:
+The supported occurrence form accepts either `time` or `times`,
+independently of the count:
 
 ```text
+N time in the last minute
 N times in the last minute
 ```
 
 It maps to `occurrence_count=N` and
 `occurrence_window_seconds=60`. The supported count range is
-`1..999999`. A recognized blocked reason remains a
+`1..999999`. A recognized reason remains a
 `omada.client_connection_failed` partial event when the channel,
-count, or window is missing or invalid. A `failed to connect` message
-with any other reason remains `omada.webhook_unclassified`.
+count, or window is missing or invalid.
+
+Unconfirmed reason variants remain `omada.webhook_unclassified`.
+Additional semantic words after a recognized reason also prevent
+classification. After the reason, only whitespace, punctuation around
+the technical occurrence block, or a missing/damaged occurrence block
+are accepted. The previously supported structural fallback
+`N attempts recently` remains a partial event; arbitrary text merely
+starting with a number is not treated as an occurrence block.
 
 Traffic is reported by Omada for the Wi-Fi connection at disconnect.
 It is stored as the original value plus
