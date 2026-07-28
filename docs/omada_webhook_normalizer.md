@@ -72,6 +72,7 @@ Supported event names are:
 - `omada.client_online`
 - `omada.client_offline`
 - `omada.client_unauthorized`
+- `omada.client_connection_failed`
 - `omada.webhook_unclassified`
 
 Each supported event type has a fixed type-specific schema. Missing
@@ -110,6 +111,50 @@ warnings. A missing client IP is allowed but creates
 `CLIENT_IP_MISSING`, because it reduces future correlation quality.
 Offline channel, duration, and traffic can be absent without warnings.
 Present but invalid duration or traffic is partial.
+
+## Event handler registry
+
+Recognized controller text is dispatched through the ordered Python
+tuple `EVENT_HANDLERS`. Every registry entry contains an `event_name`,
+a compiled pattern, and a parser. The first matching entry wins.
+
+Adding another Omada event requires a local pattern, parser, and
+registry entry. The central normalization flow does not contain
+event-specific `if`/`elif` dispatch and does not load external YAML,
+JSON, or plugin code.
+
+## Blocked connection failures
+
+The observed controller reason:
+
+```text
+MAC block/MAC Filter/Lock To AP
+```
+
+is normalized as:
+
+```text
+event=omada.client_connection_failed
+failure_reason=ACCESS_POLICY_BLOCKED
+failure_source=omada_controller
+```
+
+The controller text does not identify which individual Omada policy
+caused the rejection, so the normalizer does not claim a more specific
+reason such as `MAC_FILTER_BLOCKED`.
+
+Version 4.1 supports only this occurrence form:
+
+```text
+N times in the last minute
+```
+
+It maps to `occurrence_count=N` and
+`occurrence_window_seconds=60`. The supported count range is
+`1..999999`. A recognized blocked reason remains a
+`omada.client_connection_failed` partial event when the channel,
+count, or window is missing or invalid. A `failed to connect` message
+with any other reason remains `omada.webhook_unclassified`.
 
 Traffic is reported by Omada for the Wi-Fi connection at disconnect.
 It is stored as the original value plus
