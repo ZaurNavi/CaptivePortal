@@ -83,6 +83,8 @@ def test_counter_is_one_localized_panel():
         ".portal-counter__item + .portal-counter__item"
         in styles
     )
+    assert "padding: 6px 8px;" in styles
+    assert "grid-template-columns: 1fr;" not in styles
 
 
 def test_failed_message_explains_how_to_reconnect():
