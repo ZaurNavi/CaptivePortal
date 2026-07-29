@@ -34,13 +34,40 @@ updates.
   "opened_today": 15,
   "opened_total": 824,
   "day": "2026-07-26",
-  "timezone": "Asia/Baku"
+  "timezone": "Asia/Baku",
+  "traffic": {
+    "available": true,
+    "ssid": "Zefer_Parki",
+    "today_bytes": 104857600,
+    "today_display": "100 MB",
+    "total_bytes": 2147483648,
+    "total_display": "2 GB",
+    "completed_sessions_today": 4,
+    "completed_sessions_total": 83,
+    "updated_at": "2026-07-29T08:00:00.000Z"
+  }
 }
 ```
 
 If storage is unavailable, the API returns HTTP 503 with
 `{"error":"counter_unavailable"}`. Counter failures are fail-open: the portal
 page, authentication worker and existing authorization flow continue normally.
+
+Traffic availability is independent from the existing open counter. If the
+traffic component is disabled, misconfigured, or its storage cannot be read,
+the endpoint keeps the open-counter response and returns:
+
+```json
+{
+  "traffic": {
+    "available": false,
+    "ssid": ""
+  }
+}
+```
+
+See `docs/public_traffic.md` for traffic aggregation, reconciliation, reset,
+and deployment details.
 
 ## Storage
 

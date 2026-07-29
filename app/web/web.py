@@ -40,6 +40,15 @@ from app.portal_counter import (
 from app.portal_counter.routes import (
     create_portal_counter_blueprint,
 )
+from app.public_traffic import (
+    PublicTrafficConfig,
+    PublicTrafficConfigError,
+    PublicTrafficRepository,
+    PublicTrafficService,
+    PublicTrafficWorker,
+    UnavailablePublicTrafficService,
+)
+from app.public_traffic.reader import PublicTrafficReader
 from app.web.portal_entry import (
     PortalClientContext,
     PortalEntryHandler,
@@ -49,6 +58,7 @@ from app.web.localization import PORTAL_TRANSLATIONS
 
 MAX_WORKERS = 4
 _AUTO_COUNTER = object()
+_AUTO_TRAFFIC = object()
 
 
 # One manager and one bounded executor per application process.
@@ -63,6 +73,9 @@ auth_executor = ThreadPoolExecutor(
 
 def create_app(
     portal_counter_service=_AUTO_COUNTER,
+    *,
+    public_traffic_service=_AUTO_TRAFFIC,
+    public_traffic_worker=_AUTO_TRAFFIC,
 ) -> Flask:
     """Create and configure the Flask application."""
     template_dir = os.path.abspath(
@@ -147,14 +160,93 @@ def create_app(
     )
     app.extensions["portal_counter_service"] = portal_counter_service
 
+    traffic_config = None
+    if public_traffic_service is _AUTO_TRAFFIC:
+        try:
+            traffic_config = PublicTrafficConfig.from_settings(
+                settings
+            )
+        except PublicTrafficConfigError:
+            logger.exception("public_traffic_configuration_error")
+            public_traffic_service = (
+                UnavailablePublicTrafficService(
+                    ssid=_safe_public_traffic_ssid(settings)
+                )
+            )
+            public_traffic_worker = None
+        else:
+            if not traffic_config.enabled:
+                public_traffic_service = (
+                    UnavailablePublicTrafficService(
+                        ssid=traffic_config.ssid,
+                        frontend_refresh_seconds=(
+                            traffic_config.frontend_refresh_seconds
+                        ),
+                    )
+                )
+                public_traffic_worker = None
+            else:
+                repository = PublicTrafficRepository(
+                    traffic_config.db_path
+                )
+                service = PublicTrafficService(
+                    config=traffic_config,
+                    repository=repository,
+                    logger=logger,
+                )
+                public_traffic_service = service
+                if service.initialize():
+                    if public_traffic_worker is _AUTO_TRAFFIC:
+                        public_traffic_worker = PublicTrafficWorker(
+                            reader=PublicTrafficReader(
+                                source_path=(
+                                    traffic_config.source_log_path
+                                ),
+                                repository=repository,
+                                service=service,
+                                logger=logger,
+                            ),
+                            repository=repository,
+                            service=service,
+                            logger=logger,
+                            scan_interval_seconds=(
+                                traffic_config.scan_interval_seconds
+                            ),
+                        )
+                else:
+                    public_traffic_worker = None
+    elif public_traffic_service is None:
+        public_traffic_service = UnavailablePublicTrafficService()
+        public_traffic_worker = None
+    elif public_traffic_worker is _AUTO_TRAFFIC:
+        public_traffic_worker = None
+
+    app.extensions[
+        "public_traffic_service"
+    ] = public_traffic_service
+    app.extensions[
+        "public_traffic_worker"
+    ] = public_traffic_worker
+    traffic_refresh_seconds = getattr(
+        public_traffic_service,
+        "frontend_refresh_seconds",
+        60,
+    )
+
     @app.context_processor
     def inject_portal_counter_settings():
-        return {"portal_counter_visible": counter_visible}
+        return {
+            "portal_counter_visible": counter_visible,
+            "public_traffic_frontend_refresh_seconds": (
+                traffic_refresh_seconds
+            ),
+        }
 
     if counter_api_enabled:
         app.register_blueprint(
             create_portal_counter_blueprint(
-                portal_counter_service
+                portal_counter_service,
+                public_traffic_service,
             )
         )
 
@@ -513,3 +605,8 @@ def create_app(
         return render_template("success.html")
 
     return app
+
+
+def _safe_public_traffic_ssid(settings: dict) -> str:
+    value = settings.get("public_traffic_ssid", "")
+    return value.strip() if isinstance(value, str) else ""
