@@ -48,6 +48,30 @@
     font-size: 22px;
 }
 
+.portal-traffic {
+    margin-top: 10px;
+    padding-top: 9px;
+    border-top: 1px solid rgba(0, 146, 204, 0.14);
+}
+
+.portal-traffic[hidden] {
+    display: none;
+}
+
+.portal-traffic__title {
+    color: #00a341;
+}
+
+.portal-counter--traffic {
+    border-color: rgba(0, 177, 64, 0.20);
+    background: rgba(0, 177, 64, 0.06);
+}
+
+.portal-counter--traffic .portal-counter__value {
+    color: #008f36;
+    font-size: 19px;
+}
+
 @media (max-width: 360px) {
     .portal-counter {
         grid-template-columns: 1fr;

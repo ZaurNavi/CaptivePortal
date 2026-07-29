@@ -7,6 +7,7 @@ from .service import PortalCounterService
 
 def create_portal_counter_blueprint(
     service: PortalCounterService,
+    public_traffic_service=None,
 ) -> Blueprint:
     blueprint = Blueprint(
         "portal_counter",
@@ -30,14 +31,31 @@ def create_portal_counter_blueprint(
             response.headers["Cache-Control"] = "no-store"
             return response
 
-        response = jsonify(
-            {
-                "opened_today": snapshot.opened_today,
-                "opened_total": snapshot.opened_total,
-                "day": snapshot.day,
-                "timezone": snapshot.timezone,
-            }
-        )
+        traffic_payload = {
+            "available": False,
+            "ssid": getattr(
+                public_traffic_service,
+                "ssid",
+                "",
+            ),
+        }
+        if public_traffic_service is not None:
+            try:
+                traffic_payload = (
+                    public_traffic_service.snapshot_payload()
+                )
+            except Exception:
+                service.logger.exception(
+                    "public_traffic_database_error"
+                )
+
+        response = jsonify({
+            "opened_today": snapshot.opened_today,
+            "opened_total": snapshot.opened_total,
+            "day": snapshot.day,
+            "timezone": snapshot.timezone,
+            "traffic": traffic_payload,
+        })
         response.headers["Cache-Control"] = "no-store"
         return response
 

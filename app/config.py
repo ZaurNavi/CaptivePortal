@@ -25,6 +25,28 @@ PORTAL_COUNTER_DB_PATH = "/opt/CaptivePortal/data/portal_counter.db"
 PORTAL_COUNTER_TIMEZONE = "Asia/Baku"
 PORTAL_COUNTER_API_ENABLED = True
 
+# Public completed-session traffic counter
+PUBLIC_TRAFFIC_COUNTER_ENABLED = os.getenv(
+    "PUBLIC_TRAFFIC_COUNTER_ENABLED",
+    "true",
+)
+PUBLIC_TRAFFIC_SSID = os.getenv(
+    "PUBLIC_TRAFFIC_SSID",
+    "Zefer_Parki",
+)
+PUBLIC_TRAFFIC_DB_PATH = os.getenv(
+    "PUBLIC_TRAFFIC_DB_PATH",
+    "/opt/CaptivePortal/data/public_traffic.sqlite3",
+)
+PUBLIC_TRAFFIC_SCAN_INTERVAL_SECONDS = os.getenv(
+    "PUBLIC_TRAFFIC_SCAN_INTERVAL_SECONDS",
+    "10",
+)
+PUBLIC_TRAFFIC_FRONTEND_REFRESH_SECONDS = os.getenv(
+    "PUBLIC_TRAFFIC_FRONTEND_REFRESH_SECONDS",
+    "60",
+)
+
 # Authorization Technical Logging
 AUTH_TELEMETRY_ENABLED = True
 AUTH_TELEMETRY_LOG_PATH = "/opt/CaptivePortal/logs/auth_telemetry.log"

@@ -1,6 +1,7 @@
 <section
     class="portal-counter-block"
     data-portal-counter
+    data-refresh-seconds="{{ public_traffic_frontend_refresh_seconds }}"
     hidden
     aria-live="polite"
 >
@@ -31,6 +32,42 @@
                 class="portal-counter__value"
                 data-portal-counter-total
             >—</strong>
+        </div>
+    </div>
+
+    <div
+        class="portal-traffic"
+        data-public-traffic
+        hidden
+    >
+        <p
+            class="portal-counter__title portal-traffic__title"
+            data-i18n="trafficHeading"
+        >
+            İnternet istifadəsi
+        </p>
+
+        <div class="portal-counter portal-counter--traffic">
+            <div class="portal-counter__item">
+                <span
+                    class="portal-counter__label"
+                    data-i18n="trafficToday"
+                >Bu gün</span>
+                <strong
+                    class="portal-counter__value"
+                    data-public-traffic-today
+                >—</strong>
+            </div>
+            <div class="portal-counter__item">
+                <span
+                    class="portal-counter__label"
+                    data-i18n="trafficTotal"
+                >Ümumi</span>
+                <strong
+                    class="portal-counter__value"
+                    data-public-traffic-total
+                >—</strong>
+            </div>
         </div>
     </div>
 </section>

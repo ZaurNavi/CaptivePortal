@@ -17,6 +17,7 @@ from app.web.web import create_app, auth_executor
 
 _shutdown_lock = threading.Lock()
 _shutdown_completed = False
+_public_traffic_worker = None
 
 
 def shutdown_handler() -> None:
@@ -35,6 +36,14 @@ def shutdown_handler() -> None:
         _shutdown_completed = True
 
     logger.info("Shutting down authentication worker executor...")
+
+    if _public_traffic_worker is not None:
+        try:
+            _public_traffic_worker.stop()
+        except Exception:
+            logger.exception(
+                "Unexpected error while stopping public traffic worker."
+            )
 
     try:
         auth_executor.shutdown(
@@ -62,6 +71,31 @@ def signal_handler(signum, frame) -> None:
     raise SystemExit(0)
 
 
+def _start_public_traffic_worker(app) -> None:
+    global _public_traffic_worker
+
+    _public_traffic_worker = app.extensions.get(
+        "public_traffic_worker"
+    )
+    if _public_traffic_worker is None:
+        return
+    try:
+        _public_traffic_worker.start()
+    except Exception:
+        logger.exception("public_traffic_counter_start_failed")
+        traffic_service = app.extensions.get(
+            "public_traffic_service"
+        )
+        if traffic_service is not None:
+            try:
+                traffic_service.available = False
+            except Exception:
+                logger.exception(
+                    "public_traffic_counter_disable_failed"
+                )
+        _public_traffic_worker = None
+
+
 def main() -> None:
     """Main application entry point."""
     logger.info("Starting Captive Portal")
@@ -76,6 +110,7 @@ def main() -> None:
 
     app = create_app()
     logger.info("Web application created")
+    _start_public_traffic_worker(app)
 
     host = settings["host"]
     port = settings["port"]

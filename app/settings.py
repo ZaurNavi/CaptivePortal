@@ -9,6 +9,9 @@ from app.config import (
     HOST, PORT, DEBUG, VERIFY_SSL, LOG_LEVEL,
     PORTAL_COUNTER_ENABLED, PORTAL_COUNTER_DB_PATH,
     PORTAL_COUNTER_TIMEZONE, PORTAL_COUNTER_API_ENABLED,
+    PUBLIC_TRAFFIC_COUNTER_ENABLED, PUBLIC_TRAFFIC_SSID,
+    PUBLIC_TRAFFIC_DB_PATH, PUBLIC_TRAFFIC_SCAN_INTERVAL_SECONDS,
+    PUBLIC_TRAFFIC_FRONTEND_REFRESH_SECONDS,
     AUTH_TELEMETRY_ENABLED, AUTH_TELEMETRY_LOG_PATH,
     AUTH_TELEMETRY_LEVEL, AUTH_TELEMETRY_SCHEMA_VERSION,
     AUTH_TELEMETRY_ROTATION_MAX_BYTES,
@@ -45,6 +48,17 @@ def get_settings() -> dict:
         "portal_counter_db_path": PORTAL_COUNTER_DB_PATH,
         "portal_counter_timezone": PORTAL_COUNTER_TIMEZONE,
         "portal_counter_api_enabled": PORTAL_COUNTER_API_ENABLED,
+        "public_traffic_counter_enabled": (
+            PUBLIC_TRAFFIC_COUNTER_ENABLED
+        ),
+        "public_traffic_ssid": PUBLIC_TRAFFIC_SSID,
+        "public_traffic_db_path": PUBLIC_TRAFFIC_DB_PATH,
+        "public_traffic_scan_interval_seconds": (
+            PUBLIC_TRAFFIC_SCAN_INTERVAL_SECONDS
+        ),
+        "public_traffic_frontend_refresh_seconds": (
+            PUBLIC_TRAFFIC_FRONTEND_REFRESH_SECONDS
+        ),
         "auth_telemetry_enabled": AUTH_TELEMETRY_ENABLED,
         "auth_telemetry_log_path": AUTH_TELEMETRY_LOG_PATH,
         "auth_telemetry_level": AUTH_TELEMETRY_LEVEL,
