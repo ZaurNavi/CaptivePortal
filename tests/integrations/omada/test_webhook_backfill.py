@@ -34,6 +34,10 @@ UNAUTHORIZED = (
     "was unauthorized by Main Administrator "
     "z******vi@gmail.com."
 )
+AUTHENTICATION_EXPIRED = (
+    "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+    'authentication on SSID "YuksekSuret" expired.'
+)
 WRONG_PASSWORD = (
     "[client:76-4B-5C-A6-30-6F:76-4B-5C-A6-30-6F] "
     "failed to connect to "
@@ -145,6 +149,46 @@ def test_backfill_normalizes_wrong_password_raw_record(tmp_path):
     )
     assert events[0]["occurrence_count"] == 1
     assert events[0]["occurrence_window_seconds"] == 60
+
+
+def test_backfill_normalizes_authentication_expired_raw_record(
+    tmp_path,
+):
+    input_path = tmp_path / "raw.log"
+    output_path = tmp_path / "normalized.log"
+    write_raw_lines(
+        input_path,
+        [
+            raw_record(
+                "authentication-expired-webhook",
+                [AUTHENTICATION_EXPIRED],
+            )
+        ],
+    )
+
+    stats = normalize_log(
+        input_path=input_path,
+        output_path=output_path,
+    )
+    events = read_events(output_path)
+
+    assert stats.raw_records_processed == 1
+    assert stats.text_items_processed == 1
+    assert stats.normalized_events == 1
+    assert stats.partial_events == 0
+    assert stats.unclassified_events == 0
+    assert stats.invalid_raw_lines == 0
+    assert stats.normalization_failures == 0
+    assert len(events) == 1
+    assert events[0]["event"] == (
+        "omada.client_authentication_expired"
+    )
+    assert events[0]["parse_status"] == "parsed"
+    assert events[0]["client_name"] == "Galaxy-A12"
+    assert events[0]["client_mac"] == "3E:69:8B:CE:B8:43"
+    assert events[0]["ssid"] == "YuksekSuret"
+    assert events[0]["authentication_state"] == "expired"
+    assert events[0]["expiration_source"] == "omada_controller"
 
 
 def test_backfill_continues_after_invalid_line_and_is_secret_safe(

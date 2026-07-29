@@ -40,6 +40,10 @@ UNAUTHORIZED = (
     "was unauthorized by Main Administrator "
     "z******vi@gmail.com."
 )
+AUTHENTICATION_EXPIRED = (
+    "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+    'authentication on SSID "YuksekSuret" expired.'
+)
 BLOCKED_CONNECTION = (
     "[client:38-77-07-91-13-FF:38-77-07-91-13-FF] "
     "failed to connect to "
@@ -132,6 +136,17 @@ FAILED_CONNECTION_KEYS = {
     "controller_reason_raw",
     "occurrence_count",
     "occurrence_window_seconds",
+}
+AUTHENTICATION_EXPIRED_KEYS = {
+    "client_name",
+    "client_name_raw",
+    "client_name_available",
+    "client_name_fallback",
+    "client_mac",
+    "client_mac_raw",
+    "ssid",
+    "authentication_state",
+    "expiration_source",
 }
 
 
@@ -406,6 +421,256 @@ def test_administrative_unauthorized_fixed_schema():
     assert event["administrator"] == "z******vi@gmail.com"
     assert event["action"] == "unauthorize"
     assert event["action_source"] == "omada_controller"
+
+
+def test_authentication_expired_named_client_has_fixed_schema():
+    record = raw_record(AUTHENTICATION_EXPIRED)
+    record["parsed_payload"]["shardSecret"] = "must-not-be-copied"
+    record["raw_body_base64"] = "must-not-be-copied"
+
+    event = single(record)
+
+    assert set(event) == COMMON_KEYS | AUTHENTICATION_EXPIRED_KEYS
+    assert event["event"] == "omada.client_authentication_expired"
+    assert event["parse_status"] == "parsed"
+    assert event["parse_reason"] is None
+    assert event["parse_warnings"] == []
+    assert event["level"] == "info"
+    assert event["client_name"] == "Galaxy-A12"
+    assert event["client_name_raw"] == "Galaxy-A12"
+    assert event["client_name_available"] is True
+    assert event["client_name_fallback"] is None
+    assert event["client_mac"] == "3E:69:8B:CE:B8:43"
+    assert event["client_mac_raw"] == "3E-69-8B-CE-B8-43"
+    assert event["ssid"] == "YuksekSuret"
+    assert event["authentication_state"] == "expired"
+    assert event["expiration_source"] == "omada_controller"
+    assert event["normalized_event_id"] == f"{WEBHOOK_ID}:0"
+    assert event["webhook_id"] == WEBHOOK_ID
+    assert event["text_index"] == 0
+    assert event["text_count"] == 1
+    assert event["received_at"] == RECEIVED_AT
+    assert event["controller_timestamp_ms"] == (
+        CONTROLLER_TIMESTAMP_MS
+    )
+    assert event["source_ip"] == "192.168.0.222"
+    assert event["site"] == "Home"
+    assert event["controller_name"] == "Omada Controller_051C41"
+    assert event["payload_sha256"] == "a" * 64
+    assert event["raw_text"] == AUTHENTICATION_EXPIRED
+    serialized = json.dumps(event)
+    for secret_key in (
+        "raw_body",
+        "raw_body_base64",
+        "headers",
+        "Authorization",
+        "shardSecret",
+    ):
+        assert secret_key not in serialized
+
+
+def test_authentication_expired_mac_as_name_uses_fallback():
+    text = AUTHENTICATION_EXPIRED.replace(
+        "Galaxy-A12:3E-69-8B-CE-B8-43",
+        "E2-B3-44-FC-9A-DD:E2-B3-44-FC-9A-DD",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["parse_status"] == "parsed"
+    assert event["parse_warnings"] == []
+    assert event["client_name"] is None
+    assert event["client_name_raw"] == "E2-B3-44-FC-9A-DD"
+    assert event["client_name_available"] is False
+    assert event["client_name_fallback"] == "mac"
+    assert event["client_mac"] == "E2:B3:44:FC:9A:DD"
+    assert event["client_mac_raw"] == "E2-B3-44-FC-9A-DD"
+
+
+def test_authentication_expired_mac_only_uses_fallback():
+    text = AUTHENTICATION_EXPIRED.replace(
+        "Galaxy-A12:3E-69-8B-CE-B8-43",
+        "E2-B3-44-FC-9A-DD",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["parse_status"] == "parsed"
+    assert event["parse_warnings"] == []
+    assert event["client_name"] is None
+    assert event["client_name_raw"] is None
+    assert event["client_name_available"] is False
+    assert event["client_name_fallback"] == "mac_only"
+    assert event["client_mac"] == "E2:B3:44:FC:9A:DD"
+    assert event["client_mac_raw"] == "E2-B3-44-FC-9A-DD"
+
+
+def test_authentication_expired_preserves_unicode():
+    text = (
+        "[client:Qonaq-Əli:3E-69-8B-CE-B8-43]'s "
+        'authentication on SSID "Zəfər Parkı – Qonaq" expired.'
+    )
+
+    event = single(raw_record(text))
+
+    assert event["parse_status"] == "parsed"
+    assert event["client_name"] == "Qonaq-Əli"
+    assert event["client_name_raw"] == "Qonaq-Əli"
+    assert event["ssid"] == "Zəfər Parkı – Qonaq"
+    assert event["raw_text"] == text
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        AUTHENTICATION_EXPIRED.removesuffix("."),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]\n"
+            "’s\nAUTHENTICATION   ON\nSSID "
+            '"YuksekSuret"\nEXPIRED.\n'
+        ),
+    ],
+)
+def test_authentication_expired_accepts_confirmed_format_variants(
+    raw_text,
+):
+    event = single(raw_record(raw_text))
+
+    assert event["event"] == "omada.client_authentication_expired"
+    assert event["parse_status"] == "parsed"
+    assert event["ssid"] == "YuksekSuret"
+    assert event["raw_text"] == raw_text
+
+
+@pytest.mark.parametrize(
+    (
+        "client_body",
+        "client_name",
+        "client_name_raw",
+        "client_mac_raw",
+    ),
+    [
+        (
+            "Galaxy-A12:not-a-mac",
+            "Galaxy-A12",
+            "Galaxy-A12",
+            "not-a-mac",
+        ),
+        ("", None, None, None),
+    ],
+)
+def test_authentication_expired_invalid_client_is_partial(
+    client_body,
+    client_name,
+    client_name_raw,
+    client_mac_raw,
+):
+    text = AUTHENTICATION_EXPIRED.replace(
+        "Galaxy-A12:3E-69-8B-CE-B8-43",
+        client_body,
+    )
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_authentication_expired"
+    assert event["parse_status"] == "partial"
+    assert event["parse_reason"] is None
+    assert event["level"] == "warning"
+    assert event["parse_warnings"] == ["INVALID_CLIENT_MAC"]
+    assert event["client_name"] == client_name
+    assert event["client_name_raw"] == client_name_raw
+    assert event["client_mac"] is None
+    assert event["client_mac_raw"] == client_mac_raw
+
+
+@pytest.mark.parametrize("ssid_raw", ["", "   ", "\n\t"])
+def test_authentication_expired_empty_ssid_is_partial(ssid_raw):
+    text = AUTHENTICATION_EXPIRED.replace(
+        "YuksekSuret",
+        ssid_raw,
+    )
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_authentication_expired"
+    assert event["parse_status"] == "partial"
+    assert event["level"] == "warning"
+    assert event["ssid"] is None
+    assert event["parse_warnings"] == ["SSID_MISSING"]
+
+
+def test_authentication_expired_strips_only_outer_ssid_whitespace():
+    text = AUTHENTICATION_EXPIRED.replace(
+        "YuksekSuret",
+        "  Zəfər   Parkı  ",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["parse_status"] == "parsed"
+    assert event["ssid"] == "Zəfər   Parkı"
+    assert event["raw_text"] == text
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        'authentication on SSID "YuksekSuret" expired.',
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43"
+            "'s authentication on SSID "
+            '"YuksekSuret" expired.'
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            "authentication expired."
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            "authentication on SSID YuksekSuret expired."
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            'authentication on SSID "YuksekSuret expired.'
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            'authentication on network "YuksekSuret" expired.'
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            "authentication failed."
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            'authorization on SSID "YuksekSuret" expired.'
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            'authentication on SSID "YuksekSuret" changed.'
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            'authentication on SSID "YuksekSuret" '
+            "expired because of unknown reason."
+        ),
+        (
+            "[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s "
+            'authentication on SSID "YuksekSuret" '
+            "expired unexpectedly."
+        ),
+    ],
+)
+def test_authentication_expired_near_matches_are_unclassified(
+    raw_text,
+):
+    event = single(raw_record(raw_text))
+
+    assert set(event) == UNCLASSIFIED_KEYS
+    assert event["event"] == "omada.webhook_unclassified"
+    assert event["parse_status"] == "unclassified"
+    assert event["parse_reason"] == "UNKNOWN_TEXT_FORMAT"
+    assert event["raw_text"] == raw_text
 
 
 @pytest.mark.parametrize(
@@ -816,6 +1081,10 @@ def test_unconfirmed_or_extended_password_reason_is_unclassified(
         (OFFLINE, "omada.client_offline"),
         (UNAUTHORIZED, "omada.client_unauthorized"),
         (
+            AUTHENTICATION_EXPIRED,
+            "omada.client_authentication_expired",
+        ),
+        (
             BLOCKED_CONNECTION,
             "omada.client_connection_failed",
         ),
@@ -868,6 +1137,7 @@ def test_event_handler_registry_is_ordered_and_unique():
     assert isinstance(EVENT_HANDLERS, tuple)
     assert event_names == (
         "omada.client_unauthorized",
+        "omada.client_authentication_expired",
         "omada.client_online",
         "omada.client_offline",
         "omada.client_connection_failed",
@@ -992,6 +1262,7 @@ def test_invalid_and_blank_text_items_each_get_diagnostic():
 def test_multiple_event_types_share_webhook_and_have_stable_ids():
     record = raw_record([
         ONLINE,
+        AUTHENTICATION_EXPIRED,
         BLOCKED_CONNECTION,
         OFFLINE,
         UNAUTHORIZED,
@@ -1002,25 +1273,28 @@ def test_multiple_event_types_share_webhook_and_have_stable_ids():
 
     assert [event["event"] for event in first] == [
         "omada.client_online",
+        "omada.client_authentication_expired",
         "omada.client_connection_failed",
         "omada.client_offline",
         "omada.client_unauthorized",
     ]
     assert [event["webhook_id"] for event in first] == [
         WEBHOOK_ID,
-    ] * 4
+    ] * 5
     assert [event["text_index"] for event in first] == [
         0,
         1,
         2,
         3,
+        4,
     ]
-    assert all(event["text_count"] == 4 for event in first)
+    assert all(event["text_count"] == 5 for event in first)
     assert [event["normalized_event_id"] for event in first] == [
         f"{WEBHOOK_ID}:0",
         f"{WEBHOOK_ID}:1",
         f"{WEBHOOK_ID}:2",
         f"{WEBHOOK_ID}:3",
+        f"{WEBHOOK_ID}:4",
     ]
     assert [
         event["normalized_event_id"] for event in first

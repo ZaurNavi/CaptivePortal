@@ -300,13 +300,23 @@ def test_duplicate_does_not_change_totals_but_advances_new_inode(
     assert len(table_rows(repository.db_path, "processed_events")) == 1
 
 
-def test_non_target_events_advance_without_processed_event(tmp_path):
+@pytest.mark.parametrize(
+    "event_name",
+    [
+        "omada.client_online",
+        "omada.client_authentication_expired",
+    ],
+)
+def test_non_target_events_advance_without_processed_event(
+    tmp_path,
+    event_name,
+):
     selected, repository, _, _, worker, _ = stack(tmp_path)
     append_lines(
         selected.source_log_path,
         [{
-            "event": "omada.client_online",
-            "normalized_event_id": "online-1",
+            "event": event_name,
+            "normalized_event_id": "ignored-1",
         }],
     )
 

@@ -72,6 +72,7 @@ Supported event names are:
 - `omada.client_online`
 - `omada.client_offline`
 - `omada.client_unauthorized`
+- `omada.client_authentication_expired`
 - `omada.client_connection_failed`
 - `omada.webhook_unclassified`
 
@@ -124,6 +125,57 @@ Adding another Omada event requires a local matcher, parser, and
 registry entry. The central normalization flow does not contain
 event-specific `if`/`elif` dispatch and does not load external YAML,
 JSON, or plugin code.
+
+## Authentication expiration
+
+The confirmed Omada Controller format is:
+
+```text
+[client:Galaxy-A12:3E-69-8B-CE-B8-43]'s authentication on SSID "YuksekSuret" expired.
+```
+
+The final period is optional. Matching is case-insensitive, accepts
+reasonable whitespace between structural parts, and supports ASCII or
+typographic apostrophes. Only whitespace may follow `expired` or
+`expired.`; additional semantic text keeps the message unclassified.
+
+The normalized event is:
+
+```text
+event=omada.client_authentication_expired
+authentication_state=expired
+expiration_source=omada_controller
+```
+
+Its fixed type-specific fields are:
+
+```text
+client_name
+client_name_raw
+client_name_available
+client_name_fallback
+client_mac
+client_mac_raw
+ssid
+authentication_state
+expiration_source
+```
+
+A complete client block with an invalid MAC remains a partial event
+with `INVALID_CLIENT_MAC`. MAC-as-name and MAC-only blocks use the
+existing `mac` and `mac_only` fallbacks without warnings. A quoted SSID
+that is empty after trimming is `null` and adds `SSID_MISSING`;
+missing or structurally broken client and SSID blocks remain
+unclassified.
+
+Authentication expiration means only that Omada reported the
+authentication lifetime ended for that client and SSID. It is not
+`omada.client_offline`, does not prove a physical Wi-Fi disconnect or
+close a traffic session, and is not counted by Public Traffic Counter.
+
+Existing normalized logs are not rewritten or reclassified
+automatically. Backfill of a raw journal with the current code uses the
+new handler and must write to a separate backfill output as usual.
 
 ## Connection failures
 
