@@ -11,7 +11,9 @@ import pytest
 
 from app.auth.manager import (
     AuthSessionManager,
+    FINISHED_SESSION_RETENTION_SECONDS,
     RetryOutcome,
+    SESSION_TTL_SECONDS,
 )
 from app.auth.session import AuthStatus
 from app.auth.worker import AuthWorker
@@ -306,6 +308,26 @@ def finish_retryable(manager, session, reason="CLIENT_NOT_FOUND"):
     )
 
 
+def finish_nonretryable(manager, session):
+    assert manager.finish_run(
+        session,
+        run_number=session.current_run_number,
+        run_token=session.current_run_token,
+        final_state=AuthStatus.AUTHORIZED,
+        final_reason="ALREADY_AUTHORIZED",
+        retryable=False,
+    )
+    assert manager.mark_worker_finished(
+        session,
+        run_number=session.current_run_number,
+        run_token=session.current_run_token,
+    )
+
+
+def expire_by_age(session):
+    session._created_monotonic -= SESSION_TTL_SECONDS + 1
+
+
 def post_retry(client, session_id, request_id=None, ip=CLIENT_IP):
     return client.post(
         f"/auth/session/{session_id}/retry",
@@ -378,6 +400,226 @@ def test_first_run_has_token_number_and_original_expiry():
     assert len(session.runs) == 1
     assert session.runs[0].retry_request_id is None
     assert session.expires_at > session.created_at
+
+
+def test_expired_session_creates_new_session_and_retains_old_by_id():
+    manager = AuthSessionManager()
+    old_session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    old_run = old_session.current_run()
+    expire_by_age(old_session)
+
+    new_session, created = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+
+    assert created is True
+    assert new_session.session_id != old_session.session_id
+    assert new_session.current_run_token != old_session.current_run_token
+    assert new_session.status == AuthStatus.WAITING
+    assert new_session.current_run_number == 1
+    assert manager.get(old_session.session_id) is old_session
+    assert manager.snapshot(old_session.session_id)["state"] == "EXPIRED"
+    assert old_session.status == AuthStatus.EXPIRED
+    assert old_session.final_reason == "SESSION_EXPIRED"
+    assert old_session.retryable is False
+    assert old_run.finished_at is not None
+    assert old_run.final_state == "EXPIRED"
+    assert old_run.final_reason == "SESSION_EXPIRED"
+    assert old_run.retryable is False
+
+
+def test_expired_session_reentry_is_not_blocked_by_cooldown():
+    manager = AuthSessionManager()
+    old_session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    finish_nonretryable(manager, old_session)
+    expire_by_age(old_session)
+
+    new_session, created = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+
+    assert created is True
+    assert new_session is not old_session
+    assert old_session.status == AuthStatus.EXPIRED
+
+
+def test_expired_session_with_unfinished_worker_does_not_block_reentry():
+    manager = AuthSessionManager()
+    old_session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    assert old_session._worker_finished is False
+    expire_by_age(old_session)
+
+    new_session, created = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+
+    assert created is True
+    assert new_session is not old_session
+    assert old_session.status == AuthStatus.EXPIRED
+
+
+def test_expired_session_reentry_moves_mac_and_ip_aliases():
+    manager = AuthSessionManager()
+    old_session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    expire_by_age(old_session)
+
+    new_session, created = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    by_ip, ip_created = manager.create_or_get(
+        SITE_ID,
+        None,
+        CLIENT_IP,
+    )
+
+    assert created is True
+    assert manager.get_by_client(SITE_ID, CLIENT_MAC) is new_session
+    assert ip_created is False
+    assert by_ip is new_session
+    assert all(
+        mapped is not old_session
+        for mapped in manager._sessions_by_key.values()
+    )
+
+
+def test_concurrent_expired_reentry_creates_exactly_one_new_session():
+    manager = AuthSessionManager()
+    old_session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    expire_by_age(old_session)
+    start_barrier = threading.Barrier(2)
+
+    def reenter(_index):
+        start_barrier.wait(timeout=5)
+        return manager.create_or_get(
+            SITE_ID,
+            CLIENT_MAC,
+            CLIENT_IP,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                reenter,
+                range(2),
+            )
+        )
+
+    session_ids = [session.session_id for session, _created in results]
+    created_values = [created for _session, created in results]
+    assert created_values.count(True) == 1
+    assert created_values.count(False) == 1
+    assert len(set(session_ids)) == 1
+    assert session_ids[0] != old_session.session_id
+
+
+def test_nonexpired_active_session_reuse_is_unchanged():
+    manager = AuthSessionManager()
+    session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+
+    reused, created = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+
+    assert created is False
+    assert reused is session
+
+
+def test_nonexpired_retryable_failed_session_reuse_is_unchanged():
+    manager = AuthSessionManager()
+    session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    finish_retryable(manager, session)
+
+    reused, created = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+
+    assert created is False
+    assert reused is session
+
+
+def test_nonexpired_finished_session_cooldown_is_unchanged():
+    manager = AuthSessionManager()
+    session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    finish_nonretryable(manager, session)
+
+    reused, created = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+
+    assert created is False
+    assert reused is session
+
+
+def test_detached_expired_session_is_removed_after_retention():
+    manager = AuthSessionManager()
+    old_session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+    expire_by_age(old_session)
+    new_session, _ = manager.create_or_get(
+        SITE_ID,
+        CLIENT_MAC,
+        CLIENT_IP,
+    )
+
+    assert manager.get(old_session.session_id) is old_session
+    assert old_session.session_id in manager._session_locks
+    old_session._last_activity_monotonic -= (
+        FINISHED_SESSION_RETENTION_SECONDS + 1
+    )
+
+    assert manager.cleanup() == 1
+    assert manager.get(old_session.session_id) is None
+    assert old_session.session_id not in manager._session_locks
+    assert manager.get_by_client(SITE_ID, CLIENT_MAC) is new_session
 
 
 def test_retry_reuses_session_preserves_history_and_resets_attempt():

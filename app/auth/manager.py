@@ -122,10 +122,16 @@ class AuthSessionManager:
 
             existing = self._sessions_by_key.get(session_key)
 
+            if (
+                existing is not None
+                and self._is_expired_locked(existing)
+            ):
+                self._expire_locked(existing)
+                self._detach_session_keys_locked(existing)
+                existing = None
+
             if existing is not None:
-                if self._is_expired_locked(existing):
-                    self._expire_locked(existing)
-                elif (
+                if (
                     existing.is_active()
                     or (
                         existing.status == AuthStatus.FAILED
@@ -812,13 +818,18 @@ class AuthSessionManager:
 
         return len(expired_sessions)
 
-    def _remove_session_locked(self, session: AuthSession) -> None:
+    def _detach_session_keys_locked(
+        self,
+        session: AuthSession,
+    ) -> None:
         for session_key, mapped in list(
             self._sessions_by_key.items()
         ):
             if mapped is session:
                 self._sessions_by_key.pop(session_key, None)
 
+    def _remove_session_locked(self, session: AuthSession) -> None:
+        self._detach_session_keys_locked(session)
         self._sessions_by_id.pop(session.session_id, None)
         self._session_locks.pop(session.session_id, None)
 
