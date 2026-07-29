@@ -48,6 +48,16 @@ UNAUTHORIZED_RE = re.compile(
     r"\bwas\s+unauthorized\s+by\s+Main\s+Administrator\b",
     re.IGNORECASE,
 )
+AUTHENTICATION_EXPIRED_RE = re.compile(
+    r"^\s*"
+    r"\[client:(?P<client_body>[^\]]*)\]"
+    r"\s*['’]s"
+    r"\s+authentication\s+on\s+SSID\s+"
+    r'"(?P<ssid>[^"]*)"'
+    r"\s+expired\.?"
+    r"\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 FAILED_TO_CONNECT_RE = re.compile(
     r"\bfailed\s+to\s+connect\b",
     re.IGNORECASE,
@@ -383,6 +393,29 @@ def _parse_unauthorized(
     }, warnings
 
 
+def _parse_authentication_expired(
+    raw_text: str,
+) -> tuple[dict[str, Any], list[str]]:
+    match = AUTHENTICATION_EXPIRED_RE.fullmatch(raw_text)
+    if match is None:
+        raise ValueError("not an authentication-expired event")
+
+    warnings: list[str] = []
+    fields = _empty_authentication_expired_fields()
+    _apply_client(fields, warnings, raw_text)
+
+    ssid = match.group("ssid").strip()
+    if ssid:
+        fields["ssid"] = ssid
+    else:
+        warnings.append("SSID_MISSING")
+    return fields, warnings
+
+
+def _matches_authentication_expired(raw_text: str) -> bool:
+    return AUTHENTICATION_EXPIRED_RE.fullmatch(raw_text) is not None
+
+
 def _parse_connection_failed(
     raw_text: str,
 ) -> tuple[dict[str, Any], list[str]]:
@@ -459,6 +492,11 @@ EVENT_HANDLERS: tuple[EventHandler, ...] = (
         "omada.client_unauthorized",
         _regex_matcher(UNAUTHORIZED_RE),
         _parse_unauthorized,
+    ),
+    EventHandler(
+        "omada.client_authentication_expired",
+        _matches_authentication_expired,
+        _parse_authentication_expired,
     ),
     EventHandler(
         "omada.client_online",
@@ -950,6 +988,20 @@ def _empty_reported_fields() -> dict[str, Any]:
         "reported_traffic_value": None,
         "reported_traffic_unit": None,
         "reported_traffic_bytes_estimate": None,
+    }
+
+
+def _empty_authentication_expired_fields() -> dict[str, Any]:
+    return {
+        "client_name": None,
+        "client_name_raw": None,
+        "client_name_available": False,
+        "client_name_fallback": None,
+        "client_mac": None,
+        "client_mac_raw": None,
+        "ssid": None,
+        "authentication_state": "expired",
+        "expiration_source": "omada_controller",
     }
 
 
