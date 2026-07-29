@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 from .session import AuthRun, AuthSession, AuthStatus
 
 
-SESSION_TTL_SECONDS = 60.0
+SESSION_TTL_SECONDS = 35.0
 SESSION_RETRY_COOLDOWN_SECONDS = 5.0
 FINISHED_SESSION_RETENTION_SECONDS = 300.0
 

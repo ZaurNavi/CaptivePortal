@@ -399,7 +399,10 @@ def test_first_run_has_token_number_and_original_expiry():
     assert uuid.UUID(session.current_run_token)
     assert len(session.runs) == 1
     assert session.runs[0].retry_request_id is None
-    assert session.expires_at > session.created_at
+    assert SESSION_TTL_SECONDS == 35.0
+    assert (
+        session.expires_at - session.created_at
+    ).total_seconds() == SESSION_TTL_SECONDS
 
 
 def test_expired_session_creates_new_session_and_retains_old_by_id():
@@ -806,7 +809,7 @@ def test_expired_final_and_missing_sessions_are_rejected():
         session = open_session(client, manager)
         finish_retryable(manager, session)
         original_expiry = session.expires_at
-        session._created_monotonic -= 61
+        session._created_monotonic -= SESSION_TTL_SECONDS + 1
 
         expired = post_retry(client, session.session_id)
         missing = post_retry(client, str(uuid.uuid4()))
@@ -1200,7 +1203,7 @@ def test_expiry_during_verification_ignores_late_worker_result():
         worker_thread.start()
         assert provider.verification_started.wait(timeout=5)
         assert session.status == AuthStatus.VERIFYING
-        session._created_monotonic -= 61
+        session._created_monotonic -= SESSION_TTL_SECONDS + 1
         assert manager.expire_if_needed(session) is True
         assert manager.current_run_matches(
             session,
@@ -1253,7 +1256,7 @@ def test_expiry_during_resetting_ignores_late_cleanup_result():
         worker_thread.start()
         assert provider.cleanup_started.wait(timeout=5)
         assert session.status == AuthStatus.RESETTING
-        session._created_monotonic -= 61
+        session._created_monotonic -= SESSION_TTL_SECONDS + 1
         assert manager.expire_if_needed(session) is True
         provider.release_cleanup.set()
         worker_thread.join(timeout=5)
