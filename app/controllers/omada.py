@@ -2,11 +2,13 @@
 Omada Controller Provider.
 """
 
+import copy
 import ipaddress
-import re
+import math
 import requests
 from typing import Any, Optional
 
+from app.common.mac import format_mac_colon, format_mac_hyphen
 from app.controllers.base import ControllerInterface
 from app.logger import logger
 from app.models import Result
@@ -43,38 +45,140 @@ class OmadaProvider(ControllerInterface):
                 verify=self._verify_ssl,
                 timeout=(5, 10),
             )
-            data = response.json()
-
-            if data.get("errorCode") == 0:
-                return Result.ok(
-                    message=data.get("msg", "Success"),
-                    data={
-                        "token": data["result"]["accessToken"],
-                        "http_status": response.status_code,
-                        "error_code": 0,
-                    },
-                )
-
+        except requests.exceptions.Timeout as exc:
             return Result.fail(
-                error="TOKEN_FAILED",
-                message=data.get("msg", "Unknown token error"),
+                error="HTTP_ERROR",
+                message=f"HTTP Error: {str(exc)}",
                 data={
-                    "http_status": response.status_code,
-                    "error_code": data.get("errorCode"),
+                    "http_status": 0,
+                    "error_code": 0,
+                    "failure_category": "timeout",
+                    "retryable": True,
+                },
+            )
+        except requests.exceptions.ConnectionError as exc:
+            return Result.fail(
+                error="HTTP_ERROR",
+                message=f"HTTP Error: {str(exc)}",
+                data={
+                    "http_status": 0,
+                    "error_code": 0,
+                    "failure_category": "network_error",
+                    "retryable": True,
                 },
             )
         except requests.exceptions.RequestException as exc:
             return Result.fail(
                 error="HTTP_ERROR",
                 message=f"HTTP Error: {str(exc)}",
-                data={"http_status": 0, "error_code": 0},
+                data={
+                    "http_status": 0,
+                    "error_code": 0,
+                    "failure_category": "network_error",
+                    "retryable": True,
+                },
             )
         except Exception as exc:
             return Result.fail(
                 error="UNEXPECTED_ERROR",
                 message=f"Unexpected error: {str(exc)}",
-                data={"http_status": 0, "error_code": 0},
+                data={
+                    "http_status": 0,
+                    "error_code": 0,
+                    "failure_category": "token_error",
+                    "retryable": False,
+                },
             )
+
+        http_status = response.status_code
+        if not 200 <= http_status <= 299:
+            data = self._response_json_object(response)
+            error_code = (
+                data.get("errorCode")
+                if data is not None
+                else None
+            )
+            category, retryable = self._http_failure(http_status)
+            return Result.fail(
+                error="TOKEN_FAILED",
+                message="Token endpoint returned an HTTP error",
+                data={
+                    "http_status": http_status,
+                    "error_code": error_code,
+                    "failure_category": category,
+                    "retryable": retryable,
+                },
+            )
+
+        data = self._response_json_object(response)
+        if data is None:
+            return Result.fail(
+                error="TOKEN_FAILED",
+                message="Token endpoint returned a malformed response",
+                data={
+                    "http_status": http_status,
+                    "error_code": None,
+                    "failure_category": "malformed_response",
+                    "retryable": True,
+                },
+            )
+
+        error_code = data.get("errorCode")
+        if (
+            isinstance(error_code, bool)
+            or not isinstance(error_code, (int, str))
+        ):
+            return Result.fail(
+                error="TOKEN_FAILED",
+                message="Token endpoint response has no valid errorCode",
+                data={
+                    "http_status": http_status,
+                    "error_code": None,
+                    "failure_category": "malformed_response",
+                    "retryable": True,
+                },
+            )
+        if not self._is_success_error_code(error_code):
+            return Result.fail(
+                error="TOKEN_FAILED",
+                message=self._response_message(
+                    data,
+                    "Unknown token error",
+                ),
+                data={
+                    "http_status": http_status,
+                    "error_code": error_code,
+                    "failure_category": "token_error",
+                    "retryable": False,
+                },
+            )
+
+        result = data.get("result")
+        token = (
+            result.get("accessToken")
+            if isinstance(result, dict)
+            else None
+        )
+        if not isinstance(token, str) or not token:
+            return Result.fail(
+                error="TOKEN_FAILED",
+                message="Token endpoint response has no access token",
+                data={
+                    "http_status": http_status,
+                    "error_code": error_code,
+                    "failure_category": "malformed_response",
+                    "retryable": True,
+                },
+            )
+
+        return Result.ok(
+            message=self._response_message(data, "Success"),
+            data={
+                "token": token,
+                "http_status": http_status,
+                "error_code": 0,
+            },
+        )
 
     def connect(self) -> None:
         logger.info("Omada provider ready (dynamic token per request)")
@@ -391,15 +495,7 @@ class OmadaProvider(ControllerInterface):
 
     @staticmethod
     def _normalize_mac(value: Any) -> str:
-        if not isinstance(value, str):
-            raise ValueError("MAC address is required")
-        clean = re.sub(r"[:.\-\s]", "", value).upper()
-        if not re.fullmatch(r"[0-9A-F]{12}", clean):
-            raise ValueError("Invalid MAC address")
-        return ":".join(
-            clean[index:index + 2]
-            for index in range(0, 12, 2)
-        )
+        return format_mac_colon(value)
 
     @staticmethod
     def _optional_int(value: Any) -> Optional[int]:
@@ -627,3 +723,290 @@ class OmadaProvider(ControllerInterface):
                     "active": None,
                 },
             )
+
+    def get_client_snapshot(
+        self,
+        site_id: str,
+        client_mac: str,
+        timeout_seconds: float,
+    ) -> Result:
+        """Return the complete Omada client result for Visitor Snapshot."""
+        if not isinstance(site_id, str) or not site_id.strip():
+            return self._snapshot_failure(
+                category="invalid_request",
+                retryable=False,
+                message="site_id is required",
+            )
+        try:
+            endpoint_mac = format_mac_hyphen(client_mac)
+        except ValueError:
+            return self._snapshot_failure(
+                category="invalid_request",
+                retryable=False,
+                message="client_mac is invalid",
+            )
+        if isinstance(timeout_seconds, bool):
+            return self._snapshot_failure(
+                category="invalid_request",
+                retryable=False,
+                message="timeout_seconds must be positive",
+            )
+        try:
+            request_timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            return self._snapshot_failure(
+                category="invalid_request",
+                retryable=False,
+                message="timeout_seconds must be positive",
+            )
+        if request_timeout <= 0 or not math.isfinite(
+            request_timeout
+        ):
+            return self._snapshot_failure(
+                category="invalid_request",
+                retryable=False,
+                message="timeout_seconds must be positive",
+            )
+
+        token_result = self._get_token()
+        if not token_result.success:
+            token_data = (
+                token_result.data
+                if isinstance(token_result.data, dict)
+                else {}
+            )
+            failure_category = str(
+                token_data.get(
+                    "failure_category",
+                    "token_error",
+                )
+            )
+            transport_failure = failure_category in {
+                "timeout",
+                "network_error",
+            }
+            return self._snapshot_failure(
+                category=failure_category,
+                retryable=bool(
+                    token_data.get("retryable", False)
+                ),
+                message=token_result.message or "Token request failed",
+                http_status=(
+                    None
+                    if transport_failure
+                    else self._optional_http_status(
+                        token_data.get("http_status")
+                    )
+                ),
+                error_code=(
+                    None
+                    if transport_failure
+                    else self._optional_error_code(
+                        token_data.get("error_code")
+                    )
+                ),
+            )
+
+        token = token_result.data.get("token")
+        url = (
+            f"{self._omada_url}/openapi/v1/{self._omada_id}"
+            f"/sites/{site_id.strip()}/clients/{endpoint_mac}"
+        )
+        headers = {
+            "Authorization": f"AccessToken={token}",
+            "Accept": "application/json",
+        }
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                verify=self._verify_ssl,
+                timeout=(request_timeout, request_timeout),
+            )
+        except requests.exceptions.Timeout as exc:
+            return self._snapshot_failure(
+                category="timeout",
+                retryable=True,
+                message=f"Client snapshot request timed out: {exc}",
+            )
+        except requests.exceptions.ConnectionError as exc:
+            return self._snapshot_failure(
+                category="network_error",
+                retryable=True,
+                message=f"Client snapshot network error: {exc}",
+            )
+        except requests.exceptions.RequestException as exc:
+            return self._snapshot_failure(
+                category="network_error",
+                retryable=True,
+                message=f"Client snapshot request failed: {exc}",
+            )
+
+        http_status = response.status_code
+        if not 200 <= http_status <= 299:
+            data = self._response_json_object(response)
+            error_code = (
+                data.get("errorCode")
+                if data is not None
+                else None
+            )
+            category, retryable = self._http_failure(http_status)
+            return self._snapshot_failure(
+                category=category,
+                retryable=retryable,
+                message="Client endpoint returned an HTTP error",
+                http_status=http_status,
+                error_code=self._optional_error_code(error_code),
+            )
+
+        data = self._response_json_object(response)
+        if data is None:
+            return self._snapshot_failure(
+                category="malformed_response",
+                retryable=True,
+                message="Client endpoint returned malformed JSON",
+                http_status=http_status,
+            )
+
+        error_code = data.get("errorCode")
+        if (
+            isinstance(error_code, bool)
+            or not isinstance(error_code, (int, str))
+        ):
+            return self._snapshot_failure(
+                category="malformed_response",
+                retryable=True,
+                message=(
+                    "Client endpoint response has no valid errorCode"
+                ),
+                http_status=http_status,
+            )
+        if error_code in {-41011, "-41011"}:
+            return self._snapshot_failure(
+                category="client_not_available",
+                retryable=True,
+                message=self._response_message(
+                    data,
+                    "Client snapshot is not available",
+                ),
+                http_status=http_status,
+                error_code=error_code,
+            )
+        if not self._is_success_error_code(error_code):
+            return self._snapshot_failure(
+                category="controller_error",
+                retryable=False,
+                message=self._response_message(
+                    data,
+                    "Controller rejected client snapshot request",
+                ),
+                http_status=http_status,
+                error_code=self._optional_error_code(error_code),
+            )
+
+        raw_result = data.get("result")
+        if raw_result is None:
+            return self._snapshot_failure(
+                category="client_not_available",
+                retryable=True,
+                message="Client snapshot result is not available",
+                http_status=http_status,
+                error_code=0,
+            )
+        if not isinstance(raw_result, dict):
+            return self._snapshot_failure(
+                category="malformed_response",
+                retryable=True,
+                message="Client snapshot result must be an object",
+                http_status=http_status,
+                error_code=0,
+            )
+        try:
+            format_mac_colon(raw_result.get("mac"))
+        except ValueError:
+            return self._snapshot_failure(
+                category="client_not_available",
+                retryable=True,
+                message="Client snapshot result has no valid MAC",
+                http_status=http_status,
+                error_code=0,
+            )
+        try:
+            raw_copy = copy.deepcopy(raw_result)
+        except Exception:
+            return self._snapshot_failure(
+                category="malformed_response",
+                retryable=True,
+                message="Client snapshot result could not be copied",
+                http_status=http_status,
+                error_code=0,
+            )
+        return Result.ok(
+            message=self._response_message(data, "Success."),
+            data={
+                "http_status": http_status,
+                "error_code": 0,
+                "raw_result": raw_copy,
+            },
+        )
+
+    @staticmethod
+    def _response_json_object(response: Any) -> Optional[dict[str, Any]]:
+        try:
+            data = response.json()
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _response_message(
+        data: dict[str, Any],
+        default: str,
+    ) -> str:
+        message = data.get("msg")
+        return message if isinstance(message, str) else default
+
+    @staticmethod
+    def _http_failure(status: int) -> tuple[str, bool]:
+        if status == 408:
+            return "timeout", True
+        if status == 429 or 500 <= status <= 599:
+            return "http_error", True
+        return "http_error", False
+
+    @staticmethod
+    def _is_success_error_code(value: Any) -> bool:
+        return value in {0, "0"} and not isinstance(value, bool)
+
+    @staticmethod
+    def _optional_http_status(value: Any) -> Optional[int]:
+        return value if type(value) is int and value > 0 else None
+
+    @staticmethod
+    def _optional_error_code(value: Any) -> Any:
+        if isinstance(value, bool):
+            return None
+        return value if isinstance(value, (int, str)) else None
+
+    @classmethod
+    def _snapshot_failure(
+        cls,
+        *,
+        category: str,
+        retryable: bool,
+        message: str,
+        http_status: Optional[int] = None,
+        error_code: Any = None,
+        raw_result: Optional[dict[str, Any]] = None,
+    ) -> Result:
+        return Result.fail(
+            error="SNAPSHOT_REQUEST_FAILED",
+            message=message,
+            data={
+                "http_status": http_status,
+                "error_code": error_code,
+                "failure_category": category,
+                "retryable": bool(retryable),
+                "raw_result": raw_result,
+            },
+        )

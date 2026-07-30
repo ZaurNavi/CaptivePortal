@@ -1,0 +1,64 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "id": "test-client-id-001",
+    "mac": "02-11-22-33-44-55",
+    "name": "test-android-device",
+    "hostName": "test-android-device",
+    "deviceType": "android",
+    "ip": "192.0.2.27",
+    "ipv6List": [],
+    "connectType": 1,
+    "connectDevType": "ap",
+    "connectedToWirelessRouter": false,
+    "wireless": true,
+    "ssid": "Zefer_Parki",
+    "signalLevel": 55,
+    "signalRank": 3,
+    "wifiMode": 4,
+    "apName": "Test-AP",
+    "apMac": "02-AA-BB-CC-DD-EE",
+    "radioId": 0,
+    "channel": 11,
+    "rxRate": 6000,
+    "txRate": 1000,
+    "powerSave": true,
+    "rssi": -68,
+    "snr": 27,
+    "vid": 0,
+    "dot1xIdentity": "",
+    "activity": 0,
+    "trafficDown": 2591757,
+    "trafficUp": 409150,
+    "uptime": 3176,
+    "lastSeen": 1785353153815,
+    "authStatus": 0,
+    "blocked": false,
+    "guest": false,
+    "active": true,
+    "manager": false,
+    "ipSetting": {
+      "useFixedAddr": false
+    },
+    "downPacket": 2762,
+    "upPacket": 2115,
+    "rateLimit": {
+      "enable": false,
+      "upEnable": false,
+      "upUnit": 1,
+      "upLimit": 0,
+      "downEnable": false,
+      "downUnit": 1,
+      "downLimit": 0
+    },
+    "clientLockToApSetting": {
+      "enable": false
+    },
+    "multiLink": [],
+    "systemName": "test-android-device",
+    "futureUnknownField": {
+      "preserved": true
+    }
+  }
+}

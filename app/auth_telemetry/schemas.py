@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
+from app.common.mac import format_mac_colon
+
 
 MAX_ERROR_LENGTH = 512
 _DENIED_KEY_PARTS = (
@@ -28,12 +30,10 @@ def utc_timestamp() -> str:
 
 
 def normalize_mac(value: Any) -> Any:
-    if not isinstance(value, str):
+    try:
+        return format_mac_colon(value)
+    except ValueError:
         return value
-    clean = re.sub(r"[:.\-\s]", "", value).upper()
-    if not re.fullmatch(r"[0-9A-F]{12}", clean):
-        return value
-    return ":".join(clean[index:index + 2] for index in range(0, 12, 2))
 
 
 def sanitize_text(value: Any, limit: int | None = None) -> str:

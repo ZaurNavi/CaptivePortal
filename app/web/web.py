@@ -49,6 +49,7 @@ from app.public_traffic import (
     UnavailablePublicTrafficService,
 )
 from app.public_traffic.reader import PublicTrafficReader
+from app.visitor_registry import DISABLED_VISITOR_SNAPSHOT_COLLECTOR
 from app.web.portal_entry import (
     PortalClientContext,
     PortalEntryHandler,
@@ -76,6 +77,8 @@ def create_app(
     *,
     public_traffic_service=_AUTO_TRAFFIC,
     public_traffic_worker=_AUTO_TRAFFIC,
+    controller=None,
+    visitor_snapshot_collector=None,
 ) -> Flask:
     """Create and configure the Flask application."""
     template_dir = os.path.abspath(
@@ -250,10 +253,19 @@ def create_app(
             )
         )
 
-    controller = create_controller()
+    if controller is None:
+        controller = create_controller()
+    if visitor_snapshot_collector is None:
+        visitor_snapshot_collector = (
+            DISABLED_VISITOR_SNAPSHOT_COLLECTOR
+        )
+    app.extensions[
+        "visitor_snapshot_collector"
+    ] = visitor_snapshot_collector
     auth_worker = AuthWorker(
         provider=controller,
         session_manager=auth_manager,
+        snapshot_collector=visitor_snapshot_collector,
     )
     portal_entry_handler = PortalEntryHandler(
         session_manager=auth_manager,

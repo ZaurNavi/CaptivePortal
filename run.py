@@ -11,13 +11,15 @@ import signal
 import sys
 import threading
 
-from app import logger, get_settings
+from app import create_controller, logger, get_settings
+from app.visitor_registry import create_visitor_snapshot_collector
 from app.web.web import create_app, auth_executor
 
 
 _shutdown_lock = threading.Lock()
 _shutdown_completed = False
 _public_traffic_worker = None
+_visitor_snapshot_collector = None
 
 
 def shutdown_handler() -> None:
@@ -57,6 +59,25 @@ def shutdown_handler() -> None:
         logger.exception(
             "Unexpected error while shutting down authentication executor."
         )
+
+    if _visitor_snapshot_collector is not None:
+        try:
+            _visitor_snapshot_collector.stop_accepting()
+            config = getattr(
+                _visitor_snapshot_collector,
+                "config",
+                None,
+            )
+            timeout_seconds = getattr(
+                config,
+                "shutdown_timeout_seconds",
+                90.0,
+            )
+            _visitor_snapshot_collector.drain_and_stop(
+                timeout_seconds
+            )
+        except Exception:
+            logger.exception("visitor_snapshot_stop_failed")
 
 
 def signal_handler(signum, frame) -> None:
@@ -98,6 +119,8 @@ def _start_public_traffic_worker(app) -> None:
 
 def main() -> None:
     """Main application entry point."""
+    global _visitor_snapshot_collector
+
     logger.info("Starting Captive Portal")
 
     atexit.register(shutdown_handler)
@@ -108,8 +131,22 @@ def main() -> None:
     settings = get_settings()
     logger.info("Configuration loaded")
 
-    app = create_app()
+    controller = create_controller()
+    _visitor_snapshot_collector = create_visitor_snapshot_collector(
+        settings=settings,
+        provider=controller,
+    )
+    app = create_app(
+        controller=controller,
+        visitor_snapshot_collector=(
+            _visitor_snapshot_collector
+        ),
+    )
     logger.info("Web application created")
+    try:
+        _visitor_snapshot_collector.start()
+    except Exception:
+        logger.exception("visitor_snapshot_start_failed")
     _start_public_traffic_worker(app)
 
     host = settings["host"]

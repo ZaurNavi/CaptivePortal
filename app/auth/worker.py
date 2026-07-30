@@ -2,11 +2,20 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 from app.auth_telemetry import get_auth_telemetry
 from app.auth_telemetry import events
 from app.models import Result
+from app.visitor_registry.snapshot_collector import (
+    DISABLED_VISITOR_SNAPSHOT_COLLECTOR,
+)
+from app.visitor_registry.snapshot_models import (
+    AuthorizedClientAuthContext,
+    AuthorizedClientSnapshotRequest,
+)
+from app.visitor_registry.protocols import VisitorSnapshotSubmitter
 from .manager import AuthSessionManager
 from .session import AuthSession, AuthStatus
 
@@ -92,9 +101,17 @@ class AuthWorker:
         self,
         provider: Any,
         session_manager: AuthSessionManager,
+        snapshot_collector: Optional[
+            VisitorSnapshotSubmitter
+        ] = None,
     ):
         self._provider = provider
         self._session_manager = session_manager
+        self._snapshot_collector = (
+            snapshot_collector
+            if snapshot_collector is not None
+            else DISABLED_VISITOR_SNAPSHOT_COLLECTOR
+        )
 
     def process(
         self,
@@ -1383,6 +1400,54 @@ class AuthWorker:
             run,
             "authorized",
         )
+        self._submit_authorized_snapshot(session, run)
+
+    def _submit_authorized_snapshot(
+        self,
+        session: AuthSession,
+        run: _WorkerRun,
+    ) -> None:
+        try:
+            run_state = self._session_manager.run_snapshot(
+                session,
+                run.run_number,
+            )
+            if (
+                run_state is None
+                or run_state.get("final_state")
+                != AuthStatus.AUTHORIZED.value
+            ):
+                return
+            finished_at = run_state.get("finished_at")
+            if not isinstance(finished_at, str):
+                raise ValueError(
+                    "completed AuthRun has no finished_at"
+                )
+            request = AuthorizedClientSnapshotRequest(
+                auth_session_id=session.session_id,
+                site_id=session.site_id,
+                requested_mac=session.client_mac or "",
+                authorized_at=datetime.fromisoformat(finished_at),
+                auth_context=AuthorizedClientAuthContext(
+                    client_ip=session.client_ip,
+                    portal_ssid=session.ssid,
+                    portal_ap_mac=session.ap_mac,
+                    portal_radio_id=session.radio_id,
+                    auth_run_number=run_state["run_number"],
+                    authorization_attempt=run_state[
+                        "auth_attempt_count"
+                    ],
+                    auth_final_reason=(
+                        run_state.get("final_reason") or ""
+                    ),
+                    retry_request_id=run_state.get(
+                        "retry_request_id"
+                    ),
+                ),
+            )
+            self._snapshot_collector.submit(request)
+        except Exception:
+            logger.exception("visitor_snapshot_submission_failed")
 
     def _ensure_current(
         self,
