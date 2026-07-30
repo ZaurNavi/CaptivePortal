@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "event": "visitor.client_snapshot.captured",
+  "snapshot_id": "a6f4cda1-62c6-52af-8959-0e903abcf51d",
+  "captured_at": "2026-07-30T11:00:01.000Z",
+  "authorized_at": "2026-07-30T11:00:00.000Z",
+  "auth_session_id": "prod-anon-session-001",
+  "site_id": "prod-anon-site-001",
+  "requested_mac": "02:11:22:33:44:55",
+  "attempts": 1,
+  "queue_delay_ms": 4,
+  "request_duration_ms": 23,
+  "snapshot_lag_ms": 1000,
+  "auth_context": {
+    "client_ip": "192.0.2.27",
+    "portal_ssid": null,
+    "portal_ap_mac": null,
+    "portal_radio_id": null,
+    "auth_run_number": 1,
+    "authorization_attempt": 1,
+    "auth_final_reason": "AUTHORIZED_AFTER_ATTEMPT",
+    "retry_request_id": null
+  },
+  "client": {
+    "mac": "02:11:22:33:44:55",
+    "controller_client_id": "prod-anon-client-001",
+    "name": "prod-anon-android",
+    "hostname": "fixture-android",
+    "system_name": "prod-anon-android",
+    "device_type": "android",
+    "ip": "192.0.2.27",
+    "ssid": "Zefer_Parki",
+    "ap_name": "Prod-Anon-AP",
+    "ap_mac": "02:AA:BB:CC:DD:EE",
+    "radio_id": 0,
+    "channel": 11,
+    "rssi": -68,
+    "snr": 27,
+    "traffic_down": 2591757,
+    "traffic_up": 409150,
+    "uptime": 3176,
+    "last_seen": 1785353153815,
+    "active": true,
+    "auth_status": 2,
+    "future_unknown_field": {
+      "preserved": true
+    }
+  },
+  "raw_controller_snapshot": {
+    "id": "prod-anon-client-001",
+    "mac": "02-11-22-33-44-55",
+    "hostName": "fixture-android",
+    "futureUnknownField": {
+      "preserved": true
+    }
+  }
+}

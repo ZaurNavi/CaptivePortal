@@ -24,6 +24,10 @@ from app.config import (
     VISITOR_SNAPSHOT_ROTATION_MAX_BYTES,
     VISITOR_SNAPSHOT_ROTATION_BACKUP_COUNT,
     VISITOR_SNAPSHOT_SHUTDOWN_TIMEOUT_SECONDS,
+    VISITOR_REGISTRY_ENABLED, VISITOR_REGISTRY_DB_PATH,
+    VISITOR_REGISTRY_SCAN_INTERVAL_SECONDS,
+    VISITOR_REGISTRY_SHUTDOWN_TIMEOUT_SECONDS,
+    VISITOR_REGISTRY_MAX_LINE_BYTES,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -102,6 +106,17 @@ def get_settings() -> dict:
         ),
         "visitor_snapshot_shutdown_timeout_seconds": (
             VISITOR_SNAPSHOT_SHUTDOWN_TIMEOUT_SECONDS
+        ),
+        "visitor_registry_enabled": VISITOR_REGISTRY_ENABLED,
+        "visitor_registry_db_path": VISITOR_REGISTRY_DB_PATH,
+        "visitor_registry_scan_interval_seconds": (
+            VISITOR_REGISTRY_SCAN_INTERVAL_SECONDS
+        ),
+        "visitor_registry_shutdown_timeout_seconds": (
+            VISITOR_REGISTRY_SHUTDOWN_TIMEOUT_SECONDS
+        ),
+        "visitor_registry_max_line_bytes": (
+            VISITOR_REGISTRY_MAX_LINE_BYTES
         ),
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,

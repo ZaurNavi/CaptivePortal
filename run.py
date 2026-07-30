@@ -12,7 +12,11 @@ import sys
 import threading
 
 from app import create_controller, logger, get_settings
-from app.visitor_registry import create_visitor_snapshot_collector
+from app.visitor_registry import (
+    UnavailableVisitorRegistry,
+    create_visitor_registry,
+    create_visitor_snapshot_collector,
+)
 from app.web.web import create_app, auth_executor
 
 
@@ -20,6 +24,7 @@ _shutdown_lock = threading.Lock()
 _shutdown_completed = False
 _public_traffic_worker = None
 _visitor_snapshot_collector = None
+_visitor_registry = None
 
 
 def shutdown_handler() -> None:
@@ -79,6 +84,21 @@ def shutdown_handler() -> None:
         except Exception:
             logger.exception("visitor_snapshot_stop_failed")
 
+    if _visitor_registry is not None:
+        try:
+            config = getattr(_visitor_registry, "config", None)
+            timeout_seconds = getattr(
+                config,
+                "shutdown_timeout_seconds",
+                10.0,
+            )
+            _visitor_registry.stop(
+                timeout_seconds,
+                final_scan=True,
+            )
+        except Exception:
+            logger.exception("visitor_registry_stop_failed")
+
 
 def signal_handler(signum, frame) -> None:
     """
@@ -119,7 +139,7 @@ def _start_public_traffic_worker(app) -> None:
 
 def main() -> None:
     """Main application entry point."""
-    global _visitor_snapshot_collector
+    global _visitor_snapshot_collector, _visitor_registry
 
     logger.info("Starting Captive Portal")
 
@@ -147,6 +167,15 @@ def main() -> None:
         _visitor_snapshot_collector.start()
     except Exception:
         logger.exception("visitor_snapshot_start_failed")
+    try:
+        _visitor_registry = create_visitor_registry(settings)
+    except Exception:
+        logger.exception("visitor_registry_create_failed")
+        _visitor_registry = UnavailableVisitorRegistry()
+    try:
+        _visitor_registry.start()
+    except Exception:
+        logger.exception("visitor_registry_start_failed")
     _start_public_traffic_worker(app)
 
     host = settings["host"]

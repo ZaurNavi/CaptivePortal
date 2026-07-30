@@ -97,6 +97,30 @@ VISITOR_SNAPSHOT_SHUTDOWN_TIMEOUT_SECONDS = os.getenv(
     "90",
 )
 
+# Visitor Device Registry
+#
+# Disabled until a separate production activation is approved.
+VISITOR_REGISTRY_ENABLED = os.getenv(
+    "VISITOR_REGISTRY_ENABLED",
+    "false",
+)
+VISITOR_REGISTRY_DB_PATH = os.getenv(
+    "VISITOR_REGISTRY_DB_PATH",
+    "/opt/CaptivePortal/data/visitor_registry.sqlite3",
+)
+VISITOR_REGISTRY_SCAN_INTERVAL_SECONDS = os.getenv(
+    "VISITOR_REGISTRY_SCAN_INTERVAL_SECONDS",
+    "5",
+)
+VISITOR_REGISTRY_SHUTDOWN_TIMEOUT_SECONDS = os.getenv(
+    "VISITOR_REGISTRY_SHUTDOWN_TIMEOUT_SECONDS",
+    "10",
+)
+VISITOR_REGISTRY_MAX_LINE_BYTES = os.getenv(
+    "VISITOR_REGISTRY_MAX_LINE_BYTES",
+    "4194304",
+)
+
 # RFC 8908/8910 CAPPORT
 CAPPORT_ENABLED = True
 CAPPORT_SITE_ID = "6a64f17630da7c70d232187a"
