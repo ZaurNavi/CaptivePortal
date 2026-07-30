@@ -15,6 +15,8 @@ from decimal import (
 from ipaddress import ip_address
 from typing import Any, NamedTuple
 
+from app.common.mac import format_mac_colon
+
 
 SCHEMA_VERSION = 1
 MODULE_NAME = "omada_webhook_normalizer"
@@ -704,12 +706,15 @@ def _parse_named_mac(
 
 def normalize_mac(value: Any) -> str | None:
     """Return an upper-case colon-delimited MAC or ``None``."""
-    if not isinstance(value, str):
+    if (
+        not isinstance(value, str)
+        or MAC_RE.fullmatch(value.strip()) is None
+    ):
         return None
-    candidate = value.strip()
-    if MAC_RE.fullmatch(candidate) is None:
+    try:
+        return format_mac_colon(value)
+    except ValueError:
         return None
-    return candidate.replace("-", ":").upper()
 
 
 def _parse_duration(value: str) -> int | None:

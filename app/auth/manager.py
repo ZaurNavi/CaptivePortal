@@ -1,5 +1,4 @@
 import ipaddress
-import re
 import threading
 import time
 import uuid
@@ -7,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional, Tuple
+
+from app.common.mac import format_mac_hyphen
 
 from .session import AuthRun, AuthSession, AuthStatus
 
@@ -48,18 +49,7 @@ class AuthSessionManager:
     @staticmethod
     def normalize_mac(mac: str) -> str:
         """Нормализует MAC к формату AA-BB-CC-DD-EE-FF."""
-        if not isinstance(mac, str) or not mac.strip():
-            raise ValueError("MAC address is required")
-
-        clean = re.sub(r"[:.\-\s]", "", mac).upper()
-
-        if not re.fullmatch(r"[0-9A-F]{12}", clean):
-            raise ValueError(f"Invalid MAC address format: {mac}")
-
-        return "-".join(
-            clean[index:index + 2]
-            for index in range(0, 12, 2)
-        )
+        return format_mac_hyphen(mac)
 
     @staticmethod
     def normalize_ip(client_ip: str) -> str:

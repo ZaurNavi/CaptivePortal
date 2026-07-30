@@ -16,6 +16,14 @@ from app.config import (
     AUTH_TELEMETRY_LEVEL, AUTH_TELEMETRY_SCHEMA_VERSION,
     AUTH_TELEMETRY_ROTATION_MAX_BYTES,
     AUTH_TELEMETRY_ROTATION_BACKUP_COUNT,
+    VISITOR_SNAPSHOT_ENABLED, VISITOR_SNAPSHOT_LOG_FILE,
+    VISITOR_SNAPSHOT_MAX_WORKERS, VISITOR_SNAPSHOT_MAX_PENDING,
+    VISITOR_SNAPSHOT_MAX_JOB_AGE_SECONDS,
+    VISITOR_SNAPSHOT_REQUEST_TIMEOUT_SECONDS,
+    VISITOR_SNAPSHOT_RETRY_DELAYS_SECONDS,
+    VISITOR_SNAPSHOT_ROTATION_MAX_BYTES,
+    VISITOR_SNAPSHOT_ROTATION_BACKUP_COUNT,
+    VISITOR_SNAPSHOT_SHUTDOWN_TIMEOUT_SECONDS,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -68,6 +76,32 @@ def get_settings() -> dict:
         ),
         "auth_telemetry_rotation_backup_count": (
             AUTH_TELEMETRY_ROTATION_BACKUP_COUNT
+        ),
+        "visitor_snapshot_enabled": VISITOR_SNAPSHOT_ENABLED,
+        "visitor_snapshot_log_file": VISITOR_SNAPSHOT_LOG_FILE,
+        "visitor_snapshot_max_workers": (
+            VISITOR_SNAPSHOT_MAX_WORKERS
+        ),
+        "visitor_snapshot_max_pending": (
+            VISITOR_SNAPSHOT_MAX_PENDING
+        ),
+        "visitor_snapshot_max_job_age_seconds": (
+            VISITOR_SNAPSHOT_MAX_JOB_AGE_SECONDS
+        ),
+        "visitor_snapshot_request_timeout_seconds": (
+            VISITOR_SNAPSHOT_REQUEST_TIMEOUT_SECONDS
+        ),
+        "visitor_snapshot_retry_delays_seconds": (
+            VISITOR_SNAPSHOT_RETRY_DELAYS_SECONDS
+        ),
+        "visitor_snapshot_rotation_max_bytes": (
+            VISITOR_SNAPSHOT_ROTATION_MAX_BYTES
+        ),
+        "visitor_snapshot_rotation_backup_count": (
+            VISITOR_SNAPSHOT_ROTATION_BACKUP_COUNT
+        ),
+        "visitor_snapshot_shutdown_timeout_seconds": (
+            VISITOR_SNAPSHOT_SHUTDOWN_TIMEOUT_SECONDS
         ),
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,
