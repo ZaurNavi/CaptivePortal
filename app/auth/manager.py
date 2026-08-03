@@ -1,6 +1,7 @@
 import ipaddress
 import threading
 import time
+import types
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -196,6 +197,40 @@ class AuthSessionManager:
 
         with self._lock:
             return self._sessions_by_key.get(session_key)
+
+    def pending_session_protection_snapshot(
+        self,
+        site_id: str,
+        client_mac: str,
+    ):
+        # Immutable read-only data for Cleaner local protection.
+        session_key = self.get_session_key(site_id, client_mac)
+        with self._lock:
+            self._cleanup_locked()
+            session = self._sessions_by_key.get(session_key)
+            if session is None:
+                return None
+            run = session.current_run()
+            snapshot = {
+                "site_id": session.site_id,
+                "client_mac": session.client_mac,
+                "status": session.status.value,
+                "updated_at": session.updated_at,
+                "activity_age_seconds": max(
+                    0.0,
+                    time.monotonic()
+                    - session._last_activity_monotonic,
+                ),
+                "session_active": session.is_active(),
+                "retryable": bool(session.retryable),
+                "run_active": bool(run is not None and run.active),
+                "worker_active": bool(
+                    run is not None
+                    and run.worker_started
+                    and not run.worker_finished
+                ),
+            }
+            return types.MappingProxyType(snapshot)
 
     def snapshot(self, session_or_id) -> Optional[dict]:
         """Возвращает публичное состояние AuthSession."""

@@ -5,6 +5,8 @@ Omada Controller Provider.
 import copy
 import ipaddress
 import math
+import threading
+import time
 import requests
 from typing import Any, Optional
 
@@ -29,8 +31,14 @@ class OmadaProvider(ControllerInterface):
         self._client_id = settings["client_id"]
         self._client_secret = settings["client_secret"]
         self._verify_ssl = settings["verify_ssl"]
+        self._token_condition = threading.Condition(
+            threading.RLock()
+        )
+        self._cached_token = None
+        self._cached_token_expires_at = 0.0
+        self._token_refreshing = False
 
-    def _get_token(self) -> Result:
+    def _request_token_uncached(self) -> Result:
         url = f"{self._omada_url}/openapi/authorize/token?grant_type=client_credentials"
         payload = {
             "omadacId": self._omada_id,
@@ -180,8 +188,71 @@ class OmadaProvider(ControllerInterface):
             },
         )
 
+    def _ensure_token_cache_state(self) -> None:
+        # Support normal construction and tests using __new__.
+        if hasattr(self, "_token_condition"):
+            return
+        self._token_condition = threading.Condition(
+            threading.RLock()
+        )
+        self._cached_token = None
+        self._cached_token_expires_at = 0.0
+        self._token_refreshing = False
+
+    def _get_token(self, *, force_refresh: bool = False) -> Result:
+        # One atomic cache shared by AuthWorker and Cleaner threads.
+        self._ensure_token_cache_state()
+        while True:
+            with self._token_condition:
+                now = time.monotonic()
+                if (
+                    not force_refresh
+                    and isinstance(self._cached_token, str)
+                    and self._cached_token
+                    and now + 30.0 < self._cached_token_expires_at
+                ):
+                    return Result.ok(
+                        message="Success",
+                        data={
+                            "token": self._cached_token,
+                            "http_status": 200,
+                            "error_code": 0,
+                        },
+                    )
+                if self._token_refreshing:
+                    self._token_condition.wait()
+                    force_refresh = False
+                    continue
+                self._token_refreshing = True
+                break
+
+        result = None
+        try:
+            result = self._request_token_uncached()
+            return result
+        finally:
+            with self._token_condition:
+                if result is not None and result.success:
+                    token = result.data.get("token")
+                    if isinstance(token, str) and token:
+                        self._cached_token = token
+                        # Token lifetime is two hours; refresh early.
+                        self._cached_token_expires_at = (
+                            time.monotonic() + 6600.0
+                        )
+                self._token_refreshing = False
+                self._token_condition.notify_all()
+
+    def _invalidate_cached_token(self, token=None) -> None:
+        self._ensure_token_cache_state()
+        with self._token_condition:
+            if token is None or token == self._cached_token:
+                self._cached_token = None
+                self._cached_token_expires_at = 0.0
+            self._token_condition.notify_all()
+
     def connect(self) -> None:
-        logger.info("Omada provider ready (dynamic token per request)")
+        logger.info("Omada provider ready (shared token cache)")
 
     def get_sites(self) -> list[dict[str, Any]]:
         token_result = self._get_token()

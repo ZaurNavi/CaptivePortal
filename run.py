@@ -17,7 +17,8 @@ from app.visitor_registry import (
     create_visitor_registry,
     create_visitor_snapshot_collector,
 )
-from app.web.web import create_app, auth_executor
+from app.pending_sessions import create_pending_session_cleaner
+from app.web.web import create_app, auth_executor, auth_manager
 
 
 _shutdown_lock = threading.Lock()
@@ -25,6 +26,7 @@ _shutdown_completed = False
 _public_traffic_worker = None
 _visitor_snapshot_collector = None
 _visitor_registry = None
+_pending_session_cleaner = None
 
 
 def shutdown_handler() -> None:
@@ -43,6 +45,22 @@ def shutdown_handler() -> None:
         _shutdown_completed = True
 
     logger.info("Shutting down authentication worker executor...")
+
+    if _pending_session_cleaner is not None:
+        try:
+            config = getattr(
+                _pending_session_cleaner,
+                "config",
+                None,
+            )
+            timeout_seconds = getattr(
+                config,
+                "shutdown_timeout_seconds",
+                20.0,
+            )
+            _pending_session_cleaner.stop(timeout_seconds)
+        except Exception:
+            logger.exception("pending_session_cleaner_stop_failed")
 
     if _public_traffic_worker is not None:
         try:
@@ -140,6 +158,7 @@ def _start_public_traffic_worker(app) -> None:
 def main() -> None:
     """Main application entry point."""
     global _visitor_snapshot_collector, _visitor_registry
+    global _pending_session_cleaner
 
     logger.info("Starting Captive Portal")
 
@@ -163,6 +182,16 @@ def main() -> None:
         ),
     )
     logger.info("Web application created")
+    _pending_session_cleaner = create_pending_session_cleaner(
+        settings=settings,
+        provider=controller,
+        auth_manager=auth_manager,
+        telemetry=app.extensions.get("auth_telemetry"),
+    )
+    try:
+        _pending_session_cleaner.start()
+    except Exception:
+        logger.exception("pending_session_cleaner_start_failed")
     try:
         _visitor_snapshot_collector.start()
     except Exception:
