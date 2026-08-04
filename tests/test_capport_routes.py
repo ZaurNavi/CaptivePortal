@@ -1,4 +1,7 @@
+import json
+import re
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 from unittest.mock import Mock, patch
 
 from flask import Flask
@@ -97,6 +100,26 @@ def app_for(service, handler=None):
     )
     app.config["TESTING"] = True
     return app, handler
+
+
+def javascript_constant(page, name):
+    match = re.search(
+        rf"const {re.escape(name)}\s*=\s*(.*?);",
+        page,
+        re.DOTALL,
+    )
+    assert match is not None, f"Missing JavaScript constant: {name}"
+    return json.loads(match.group(1).strip())
+
+
+def discovery_remaining_seconds(page):
+    match = re.search(
+        r"const discoveryInitialRemainingSeconds = Math\.max\("
+        r"\s*0,\s*Number\(\s*(\d+)\s*\)",
+        page,
+    )
+    assert match is not None
+    return int(match.group(1))
 
 
 def test_unauthorized_api_response_has_rfc_media_and_no_store():
@@ -394,21 +417,108 @@ def test_login_uses_new_mac_after_identity_snapshot_expires():
     )
 
 
-def test_login_not_found_is_controlled_and_starts_no_worker():
+def test_login_not_found_renders_discovery_and_starts_no_worker():
     service = Mock()
     service.resolve_for_login.return_value = state(found=False)
     handler = Mock()
     app, _ = app_for(service, handler)
 
-    response = app.test_client().get(
-        "/capport/login",
-        environ_base={"REMOTE_ADDR": "192.168.1.10"},
+    with patch("app.capport.routes.time.time", return_value=1000):
+        response = app.test_client().get(
+            "/capport/login",
+            environ_base={"REMOTE_ADDR": "192.168.1.10"},
+        )
+
+    page = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "<html" in page
+    assert "CAPPORT_DISCOVERY" in page
+    assert "DISCOVERING_CLIENT" in page
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert response.headers["Pragma"] == "no-cache"
+    assert javascript_constant(
+        page,
+        "discoveryAutoRetry",
+    ) is True
+    assert discovery_remaining_seconds(page) == 60
+    handler.open_portal.assert_not_called()
+
+
+def test_login_expired_discovery_deadline_stops_auto_retry():
+    service = Mock()
+    service.resolve_for_login.return_value = state(found=False)
+    handler = Mock()
+    app, _ = app_for(service, handler)
+
+    with patch("app.capport.routes.time.time", return_value=1000):
+        response = app.test_client().get(
+            "/capport/login?source=capport&wait_until=990",
+            environ_base={"REMOTE_ADDR": "192.168.1.10"},
+        )
+
+    page = response.get_data(as_text=True)
+    retry_url = javascript_constant(page, "discoveryRetryUrl")
+    restart_url = javascript_constant(page, "discoveryRestartUrl")
+
+    assert response.status_code == 200
+    assert javascript_constant(
+        page,
+        "discoveryAutoRetry",
+    ) is False
+    assert discovery_remaining_seconds(page) == 0
+    assert ("wait_until", "990") in parse_qsl(
+        urlsplit(retry_url).query,
+        keep_blank_values=True,
+    )
+    assert ("source", "capport") in parse_qsl(
+        urlsplit(restart_url).query,
+        keep_blank_values=True,
+    )
+    assert "wait_until" not in urlsplit(restart_url).query
+    handler.open_portal.assert_not_called()
+
+
+def test_login_preserves_or_clamps_discovery_deadline():
+    service = Mock()
+    service.resolve_for_login.return_value = state(found=False)
+    app, handler = app_for(service, Mock())
+    client = app.test_client()
+
+    with patch("app.capport.routes.time.time", return_value=1000):
+        future = client.get(
+            "/capport/login?tag=a&tag=b&wait_until=1030",
+            environ_base={"REMOTE_ADDR": "192.168.1.10"},
+        )
+        excessive = client.get(
+            "/capport/login?wait_until=4600",
+            environ_base={"REMOTE_ADDR": "192.168.1.10"},
+        )
+
+    future_page = future.get_data(as_text=True)
+    future_retry_url = javascript_constant(
+        future_page,
+        "discoveryRetryUrl",
+    )
+    future_query = parse_qsl(
+        urlsplit(future_retry_url).query,
+        keep_blank_values=True,
+    )
+    excessive_page = excessive.get_data(as_text=True)
+    excessive_retry_url = javascript_constant(
+        excessive_page,
+        "discoveryRetryUrl",
     )
 
-    assert response.status_code == 404
-    assert "Не удалось определить устройство" in response.get_data(
-        as_text=True
-    )
+    assert future_query == [
+        ("tag", "a"),
+        ("tag", "b"),
+        ("wait_until", "1030"),
+    ]
+    assert discovery_remaining_seconds(future_page) == 30
+    assert parse_qsl(urlsplit(excessive_retry_url).query) == [
+        ("wait_until", "1060")
+    ]
+    assert discovery_remaining_seconds(excessive_page) == 60
     handler.open_portal.assert_not_called()
 
 
@@ -427,7 +537,11 @@ def test_login_controller_failure_returns_controlled_503():
     )
 
     assert response.status_code == 503
-    assert "временно недоступен" in response.get_data(as_text=True)
+    page = response.get_data(as_text=True)
+    assert "<html" in page
+    assert "временно недоступен" in page
+    assert "const initialState" in page
+    assert javascript_constant(page, "initialState")["state"] == "FAILED"
     handler.open_portal.assert_not_called()
 
 

@@ -17,11 +17,15 @@ PORTAL_TRANSLATIONS = {
         "AUTHORIZING": "Qoşulur…",
         "VERIFYING": "Qoşulur…",
         "RESETTING": "Qoşulur…",
+        "DISCOVERING_CLIENT": "Qoşulma hazırlanır…",
         "AUTHORIZED": "Qoşulma tamamlandı",
         "RESET": "Qoşulma sıfırlanır",
         "FAILED": "Qoşulma xətası",
         "EXPIRED": "Qoşulma vaxtı bitdi",
         "waitingNote": "Zəhmət olmasa, gözləyin.",
+        "discoveryNote": (
+            "Cihazın şəbəkədə görünməsini gözləyirik."
+        ),
         "authorizedNote": "İnternet bağlantısı aktivdir.",
         "retryButton": "Yenidən cəhd et",
         "retryableFailure": (
@@ -59,11 +63,13 @@ PORTAL_TRANSLATIONS = {
         "AUTHORIZING": "Подключаем…",
         "VERIFYING": "Подключаем…",
         "RESETTING": "Подключаем…",
+        "DISCOVERING_CLIENT": "Подготавливаем подключение…",
         "AUTHORIZED": "Подключение выполнено",
         "RESET": "Сброс подключения",
         "FAILED": "Ошибка подключения",
         "EXPIRED": "Время подключения истекло",
         "waitingNote": "Пожалуйста, подождите.",
+        "discoveryNote": "Ожидаем появления устройства в сети.",
         "authorizedNote": "Доступ в интернет активирован.",
         "retryButton": "Повторить",
         "retryableFailure": (
@@ -100,11 +106,15 @@ PORTAL_TRANSLATIONS = {
         "AUTHORIZING": "Connecting…",
         "VERIFYING": "Connecting…",
         "RESETTING": "Connecting…",
+        "DISCOVERING_CLIENT": "Preparing your connection…",
         "AUTHORIZED": "Connection completed",
         "RESET": "Resetting connection",
         "FAILED": "Connection error",
         "EXPIRED": "Connection session expired",
         "waitingNote": "Please wait.",
+        "discoveryNote": (
+            "Waiting for your device to appear on the network."
+        ),
         "authorizedNote": "Internet access is active.",
         "retryButton": "Try again",
         "retryableFailure": (

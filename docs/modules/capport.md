@@ -23,6 +23,14 @@ Guest source IP, configured site, CAPPORT API/login request.
 
 application/captive+json state, redirect/login response или controlled error.
 
+Если `/capport/login` временно не может определить client, endpoint
+возвращает HTTP 200 с режимом `CAPPORT_DISCOVERY`, не создавая AuthSession и
+не запуская AuthWorker. Страница повторяет lookup полной навигацией через
+`window.location.replace()` каждые две секунды в пределах server-bounded
+deadline до 60 секунд; после истечения доступен ручной retry. После обнаружения
+client запрос входит в штатный `PortalClientContext → AuthSessionManager →
+AuthWorker` flow.
+
 ## 6. Основные модели
 
 CapportConfig, CapportClient, CapportState, CapportService.
@@ -54,6 +62,9 @@ capport.api_request, client_resolved/not_found, lookup_failed, state_response, p
 ## 13. Lifecycle
 
 Service/blueprint создаются в create_app() с общим controller.
+
+Бесшовный discovery на одной открытой странице через `fetch()` не входит в
+текущий контракт и отложен до оценки production-эффекта текущей реализации.
 
 ## 14. Тесты
 
