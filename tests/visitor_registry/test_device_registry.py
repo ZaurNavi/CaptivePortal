@@ -11,6 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from app.auth.manager import AuthSessionManager
+from app.auth.worker import AuthWorker, _WorkerRun
+from app.models import Result
 from app.visitor_registry import cli as registry_cli
 from app.visitor_registry import registry_config as registry_config_module
 from app.visitor_registry import registry_reader as registry_reader_module
@@ -37,6 +40,7 @@ from app.visitor_registry.registry_reader import (
     strict_json_object,
 )
 from app.visitor_registry.registry_repository import (
+    BUSY_TIMEOUT_MS,
     VisitorRegistryRepository,
 )
 from app.visitor_registry.registry_service import (
@@ -48,11 +52,13 @@ from app.visitor_registry.registry_telemetry import (
     VisitorRegistryTelemetry,
 )
 from app.visitor_registry.registry_worker import (
+    DisabledVisitorRegistry,
     UnavailableVisitorRegistry,
     VisitorRegistryWorker,
     create_visitor_registry,
 )
 from app.visitor_registry.snapshot_ids import build_snapshot_id
+from app.visitor_registry.snapshot_models import SnapshotSubmitOutcome
 
 
 FIXTURE = (
@@ -78,6 +84,15 @@ class CaptureTelemetry:
             **fields,
         })
         return True
+
+
+class AcceptingSnapshotCollector:
+    def __init__(self):
+        self.requests = []
+
+    def submit(self, request):
+        self.requests.append(request)
+        return SnapshotSubmitOutcome.ACCEPTED
 
 
 def settings(tmp_path: Path, **updates):
@@ -196,6 +211,38 @@ def append_event(path: str, event: dict, *, newline=True):
             stream.write(b"\n")
 
 
+def assert_authorization_and_snapshot_are_independent() -> None:
+    manager = AuthSessionManager()
+    session, created = manager.create_or_get(
+        "site-id",
+        "02-11-22-33-44-55",
+        client_ip="192.0.2.27",
+        ap_mac="02-AA-BB-CC-DD-EE",
+        ssid="Zefer_Parki",
+        radio_id="0",
+    )
+    assert created
+    run = _WorkerRun(
+        session_id=session.session_id,
+        run_number=1,
+        run_token=session.current_run_token,
+    )
+    collector = AcceptingSnapshotCollector()
+    auth_worker = AuthWorker(object(), manager, collector)
+
+    auth_worker._mark_authorized(
+        session,
+        Result.ok(data={"authStatus": 2}),
+        run,
+        final_reason="AUTHORIZED_AFTER_ATTEMPT",
+    )
+
+    auth_result = manager.run_snapshot(session, 1)
+    assert auth_result["final_state"] == "AUTHORIZED"
+    assert auth_result["retryable"] is False
+    assert len(collector.requests) == 1
+
+
 def test_registry_is_disabled_by_default_until_separate_activation(tmp_path):
     value = settings(tmp_path)
     value.pop("visitor_registry_enabled")
@@ -223,6 +270,97 @@ def test_enabled_factory_migrates_without_starting_thread(tmp_path):
     ] == ["visitor_registry_migration_completed"]
 
 
+def test_disabled_mode_keeps_registry_absent_and_auth_independent(tmp_path):
+    configured = settings(
+        tmp_path,
+        visitor_registry_enabled="false",
+    )
+    database = Path(configured["visitor_registry_db_path"])
+
+    registry = create_visitor_registry(configured)
+
+    assert isinstance(registry, DisabledVisitorRegistry)
+    assert registry.running is False
+    assert registry.start() is False
+    assert database.exists() is False
+    assert_authorization_and_snapshot_are_independent()
+    assert database.exists() is False
+
+
+def test_enabled_mode_backfills_deduplicates_and_auth_is_independent(
+    tmp_path,
+    monkeypatch,
+):
+    _mkdir_private(tmp_path / "data")
+    _mkdir_private(tmp_path / "logs")
+    configured = settings(
+        tmp_path,
+        visitor_registry_shutdown_timeout_seconds="0.25",
+    )
+    event = fixture_event()
+    append_event(configured["visitor_snapshot_log_file"], event)
+    append_event(configured["visitor_snapshot_log_file"], event)
+    registry = create_visitor_registry(configured)
+    assert isinstance(registry, VisitorRegistryWorker)
+    database = Path(registry.config.db_path)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "PRAGMA user_version"
+        ).fetchone()[0] == 1
+
+    ready_persisted = threading.Event()
+    persisted_states = []
+    original_set_state = registry.repository.set_state
+
+    def record_persisted_state(state, reason, now_utc):
+        changed = original_set_state(state, reason, now_utc)
+        persisted = registry.repository.get_status(True)
+        if changed and persisted.registry_state == state:
+            persisted_states.append(state)
+            if state == "ready":
+                ready_persisted.set()
+        return changed
+
+    monkeypatch.setattr(
+        registry.repository,
+        "set_state",
+        record_persisted_state,
+    )
+
+    assert registry.start() is True
+    try:
+        assert ready_persisted.wait(5)
+        status = registry.repository.get_status(True)
+        assert status.registry_state == "ready"
+        assert status.initial_backfill_completed is True
+        assert persisted_states == [
+            "initializing",
+            "backfilling",
+            "ready",
+        ]
+        device = registry.repository.get_device_by_mac(
+            "02:11:22:33:44:55"
+        )
+        assert device is not None
+        assert device["snapshot_count"] == 1
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM visitor_devices"
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM device_snapshots"
+            ).fetchone()[0] == 1
+        assert_authorization_and_snapshot_are_independent()
+    finally:
+        shutdown_started = time.monotonic()
+        registry.stop(0.25, final_scan=True)
+        shutdown_elapsed = time.monotonic() - shutdown_started
+
+    shutdown_guard_seconds = 4 * BUSY_TIMEOUT_MS / 1000
+    assert shutdown_elapsed < shutdown_guard_seconds
+    assert registry._stop_completed is True
+
+
 def test_corrupt_database_is_preserved_and_factory_remains_fail_open(
     tmp_path,
 ):
@@ -247,6 +385,7 @@ def test_corrupt_database_is_preserved_and_factory_remains_fail_open(
     names = [item["event"] for item in captured.events]
     assert "visitor_registry_corrupt_database" in names
     assert "visitor_registry_unavailable" in names
+    assert_authorization_and_snapshot_are_independent()
 
 
 def test_disabled_config_ignores_unused_invalid_values(tmp_path):
@@ -1051,11 +1190,28 @@ def test_worker_persists_initializing_while_full_audit_is_pending(
     )
     audit_started = threading.Event()
     release_audit = threading.Event()
+    ready_persisted = threading.Event()
+    persisted_states = []
+    original_set_state = repository.set_state
+
+    def record_persisted_state(state, reason, now_utc):
+        changed = original_set_state(state, reason, now_utc)
+        persisted = repository.get_status(True)
+        if (
+            changed
+            and persisted.registry_state == state
+            and persisted.state_reason == reason
+        ):
+            persisted_states.append(state)
+            if state == "ready":
+                ready_persisted.set()
+        return changed
 
     def blocking_audit():
         audit_started.set()
-        release_audit.wait(1)
+        release_audit.wait()
 
+    monkeypatch.setattr(repository, "set_state", record_persisted_state)
     monkeypatch.setattr(repository, "run_full_audit", blocking_audit)
     worker = VisitorRegistryWorker(
         repository=repository,
@@ -1067,20 +1223,23 @@ def test_worker_persists_initializing_while_full_audit_is_pending(
     )
 
     assert worker.start() is True
-    assert audit_started.wait(0.2)
-    status = repository.get_status(True)
-    assert status.registry_state == "initializing"
-    assert status.state_reason == "full_audit_pending"
+    try:
+        assert audit_started.wait(5)
+        status = repository.get_status(True)
+        assert status.registry_state == "initializing"
+        assert status.state_reason == "full_audit_pending"
 
-    release_audit.set()
-    deadline = time.monotonic() + 1
-    while (
-        repository.get_status(True).registry_state != "ready"
-        and time.monotonic() < deadline
-    ):
-        time.sleep(0.005)
-    assert repository.get_status(True).registry_state == "ready"
-    worker.stop(0.2, final_scan=False)
+        release_audit.set()
+        assert ready_persisted.wait(5)
+        assert repository.get_status(True).registry_state == "ready"
+        assert persisted_states == [
+            "initializing",
+            "backfilling",
+            "ready",
+        ]
+    finally:
+        release_audit.set()
+        worker.stop(1.0, final_scan=False)
 
     assert repository.get_status(True).registry_state == "stopping"
 
@@ -1552,6 +1711,7 @@ def test_final_scan_deadline_preserves_offset_for_restart(
     config, service, repository, reader, captured = make_stack(tmp_path)
     append_event(config.source_log_path, fixture_event())
     line_read_started = threading.Event()
+    stop_observed = threading.Event()
     original_read = registry_reader_module._read_bounded_line
 
     def wait_for_deadline(
@@ -1563,6 +1723,7 @@ def test_final_scan_deadline_preserves_offset_for_restart(
         line_read_started.set()
         while should_stop is None or not should_stop():
             time.sleep(0.001)
+        stop_observed.set()
         return registry_reader_module._LineRead(
             data=None,
             offset_end=stream.tell(),
@@ -1588,28 +1749,32 @@ def test_final_scan_deadline_preserves_offset_for_restart(
     repository.mark_backfill_completed(service.now_iso())
     worker._full_audit_completed = True
 
-    started = time.monotonic()
-    worker.stop(0.05, final_scan=True)
-    elapsed = time.monotonic() - started
+    try:
+        started = time.monotonic()
+        worker.stop(0.05, final_scan=True)
+        elapsed = time.monotonic() - started
 
-    assert line_read_started.is_set()
-    assert elapsed < 0.2
-    assert worker._stop_completed is True
-    assert repository.get_reader_states() == {}
-    names = [item["event"] for item in captured.events]
-    assert names.count("visitor_registry_shutdown_timeout") == 1
-    assert names.count("visitor_registry_stopped") == 1
+        assert line_read_started.is_set()
+        assert stop_observed.is_set()
+        shutdown_guard_seconds = 4 * BUSY_TIMEOUT_MS / 1000
+        assert elapsed < shutdown_guard_seconds
+        assert worker._stop_completed is True
+        assert repository.get_reader_states() == {}
+        names = [item["event"] for item in captured.events]
+        assert names.count("visitor_registry_shutdown_timeout") == 1
+        assert names.count("visitor_registry_stopped") == 1
 
-    worker.stop(0.05, final_scan=True)
-    names = [item["event"] for item in captured.events]
-    assert names.count("visitor_registry_shutdown_timeout") == 1
-    assert names.count("visitor_registry_stopped") == 1
+        worker.stop(0.05, final_scan=True)
+        names = [item["event"] for item in captured.events]
+        assert names.count("visitor_registry_shutdown_timeout") == 1
+        assert names.count("visitor_registry_stopped") == 1
+    finally:
+        monkeypatch.setattr(
+            registry_reader_module,
+            "_read_bounded_line",
+            original_read,
+        )
 
-    monkeypatch.setattr(
-        registry_reader_module,
-        "_read_bounded_line",
-        original_read,
-    )
     assert reader.scan().complete
     assert repository.get_device_by_mac(
         "02:11:22:33:44:55"

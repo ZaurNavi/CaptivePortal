@@ -15,7 +15,10 @@ from app.visitor_registry.registry_worker import (
     DisabledVisitorRegistry,
     UnavailableVisitorRegistry,
     VisitorRegistryWorker,
+    _is_sqlite_corruption,
     _sqlite_category,
+    _sqlite_message_category,
+    _sqlite_primary_code,
     create_visitor_registry,
 )
 
@@ -246,6 +249,34 @@ def test_recoverable_io_error_is_degraded_after_successful_health_check(
     assert repository.states[-1][0] == "degraded"
 
 
+def test_unknown_sqlite_error_keeps_worker_available_but_degraded():
+    error = sqlite3.OperationalError("future sqlite failure")
+    worker, repository, _, telemetry = make_worker([error])
+
+    worker.run_once()
+
+    assert worker.available
+    assert repository.states[-1][0] == "degraded"
+    assert any(
+        item["event"] == "visitor_registry_database_error"
+        for item in telemetry.events
+    )
+
+
+def test_corruption_message_without_errorcode_is_unavailable():
+    error = sqlite3.DatabaseError("file is not a database")
+    worker, repository, _, telemetry = make_worker([error])
+
+    assert _sqlite_primary_code(error) is None
+    worker.run_once()
+
+    assert not worker.available
+    assert repository.states[-1][0] == "unavailable"
+    names = [item["event"] for item in telemetry.events]
+    assert "visitor_registry_corrupt_database" in names
+    assert "visitor_registry_unavailable" in names
+
+
 def test_shutdown_timeout_is_bounded_and_emitted_once():
     worker, _, _, telemetry = make_worker([], backfill=True)
     release = threading.Event()
@@ -443,32 +474,53 @@ def _sqlite_error(code):
     return error
 
 
-def test_sqlite_primary_error_classification():
-    assert _sqlite_category(sqlite3.OperationalError("plain")) == (
-        "degraded"
-    )
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        (5, "locked"),
+        (6, "locked"),
+        (13, "degraded"),
+        (10, "io_error"),
+        (11, "unavailable"),
+        (26, "unavailable"),
+        (8, "unavailable"),
+        (14, "unavailable"),
+        (5 | (3 << 8), "locked"),
+        (11 | (7 << 8), "unavailable"),
+    ],
+)
+def test_sqlite_numeric_error_classification(code, expected):
+    error = _sqlite_error(code)
+
+    assert _sqlite_primary_code(error) == (code & 0xFF)
+    assert _sqlite_category(error) == expected
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("database is locked", "locked"),
+        ("database table is locked", "locked"),
+        ("database disk image is malformed", "unavailable"),
+        ("file is not a database", "unavailable"),
+        ("attempt to write a readonly database", "unavailable"),
+        ("unable to open database file", "unavailable"),
+        ("disk I/O error", "io_error"),
+    ],
+)
+def test_sqlite_message_fallback_without_errorcode(message, expected):
+    error = sqlite3.OperationalError(message)
+
+    assert _sqlite_primary_code(error) is None
+    assert _sqlite_message_category(error) == expected
+    assert _sqlite_category(error) == expected
+
+
+def test_unknown_sqlite_error_is_not_classified_as_known():
+    error = sqlite3.OperationalError("future sqlite failure")
+
+    assert _sqlite_primary_code(error) is None
+    assert _sqlite_message_category(error) is None
+    assert _is_sqlite_corruption(error) is False
+    assert _sqlite_category(error) == "degraded"
     assert _sqlite_category(ValueError("not sqlite")) == "degraded"
-    assert _sqlite_category(
-        _sqlite_error(sqlite3.SQLITE_BUSY)
-    ) == "locked"
-    assert _sqlite_category(
-        _sqlite_error(sqlite3.SQLITE_LOCKED)
-    ) == "locked"
-    assert _sqlite_category(
-        _sqlite_error(sqlite3.SQLITE_FULL)
-    ) == "degraded"
-    assert _sqlite_category(
-        _sqlite_error(sqlite3.SQLITE_IOERR)
-    ) == "io_error"
-    assert _sqlite_category(
-        _sqlite_error(sqlite3.SQLITE_CORRUPT)
-    ) == "unavailable"
-    assert _sqlite_category(
-        _sqlite_error(sqlite3.SQLITE_NOTADB)
-    ) == "unavailable"
-    assert _sqlite_category(
-        _sqlite_error(sqlite3.SQLITE_READONLY)
-    ) == "unavailable"
-    assert _sqlite_category(
-        _sqlite_error(sqlite3.SQLITE_CANTOPEN)
-    ) == "unavailable"
