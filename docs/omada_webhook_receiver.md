@@ -1,5 +1,9 @@
 # Omada webhook receiver
 
+Status: superseded as normative contract
+Current contract: [modules/omada-webhook-receiver.md](modules/omada-webhook-receiver.md)
+Historical implementation details below are retained for reference.
+
 The permanent receiver is embedded in the existing CaptivePortal Flask
 process:
 

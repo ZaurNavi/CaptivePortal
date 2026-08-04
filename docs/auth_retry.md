@@ -1,5 +1,9 @@
 # Auth session retry
 
+Status: superseded as normative contract
+Current contract: [modules/authorization.md](modules/authorization.md)
+Historical implementation details below are retained for reference.
+
 The portal keeps one `session_id` for the original authorization and all
 manual retries. Each worker execution has its own `run_number` and internal
 `run_token`; each manual retry also has a client-generated

@@ -1,5 +1,9 @@
 # Authorized Client Snapshot Collector
 
+Status: superseded as normative contract
+Current contract: [modules/authorized-client-snapshot.md](modules/authorized-client-snapshot.md)
+Historical implementation details below are retained for reference.
+
 Visitor Snapshot is a fail-open background subsystem. After an AuthRun
 has been committed as `AUTHORIZED`, AuthWorker submits one immutable
 request. The authorization result is never changed by submission,

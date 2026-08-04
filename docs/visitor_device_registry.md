@@ -1,5 +1,9 @@
 # Visitor Device Registry
 
+Status: superseded as normative contract
+Current contract: [modules/visitor-registry.md](modules/visitor-registry.md)
+Historical implementation details below are retained for reference.
+
 Visitor Device Registry is a fail-open, local persistence layer for
 successful Authorized Client Snapshot events. It reads the existing
 `visitor_snapshots.log` journal and its rotations; it never calls Omada

@@ -1,5 +1,9 @@
 # Omada webhook normalizer
 
+Status: superseded as normative contract
+Current contract: [modules/omada-webhook-normalizer.md](modules/omada-webhook-normalizer.md)
+Historical implementation details below are retained for reference.
+
 The normalizer is the second stage of the permanent Omada webhook
 integration:
 

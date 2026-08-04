@@ -1,5 +1,9 @@
 # Public Traffic Counter v1
 
+Status: superseded as normative contract
+Current contract: [modules/public-traffic-counter.md](modules/public-traffic-counter.md)
+Historical implementation details below are retained for reference.
+
 Public Traffic Counter reads completed Wi-Fi sessions from the existing
 Omada normalized JSONL journal and maintains per-SSID traffic totals in
 a local SQLite database. It does not call Omada OpenAPI, Loki, Grafana

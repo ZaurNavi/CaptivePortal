@@ -30,6 +30,12 @@ The project is intended for environments such as:
 
 The platform separates the user-facing portal from controller-specific authorization logic. This allows the portal, session model, telemetry, and monitoring components to remain reusable when integrating with another Wi-Fi controller or network access platform.
 
+## Project knowledge base
+
+- Architecture, module status and operations: [docs/README.md](docs/README.md)
+- Instructions for developers and coding agents: [AGENTS.md](AGENTS.md)
+- Current main snapshot: [docs/project-inventory.md](docs/project-inventory.md)
+
 ---
 
 ## Current Integration
@@ -234,27 +240,9 @@ Reserved for incoming events and external systems, including:
 
 ## Repository Structure
 
-The exact structure may evolve as the project grows.
+The repository changes frequently as modules are added. The verified structure, entrypoints, feature flags, persistence paths and test groups are maintained in [docs/project-inventory.md](docs/project-inventory.md).
 
-```text
-CaptivePortal/
-├── app/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── exceptions.py
-│   ├── logger.py
-│   ├── settings.py
-│   └── integrations/
-│       └── omada/
-├── logs/
-├── tests/
-├── run.py
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
-Controller-specific functionality should remain inside the corresponding integration module rather than being mixed with the core portal logic.
+Controller-specific functionality remains inside the corresponding integration module rather than being mixed with the core portal logic. See [docs/architecture.md](docs/architecture.md) for the dependency boundaries.
 
 ---
 
