@@ -1,5 +1,9 @@
 # Authorization Technical Logging v1.0
 
+Status: superseded as normative contract
+Current contract: [modules/auth-telemetry.md](modules/auth-telemetry.md)
+Historical implementation details below are retained for reference.
+
 ## Назначение
 
 Модуль пишет независимый технический журнал жизненного цикла `AuthSession`.

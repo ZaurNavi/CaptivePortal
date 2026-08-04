@@ -1,5 +1,9 @@
 # CAPPORT API
 
+Status: superseded as normative contract
+Current contract: [modules/capport.md](modules/capport.md)
+Historical implementation details below are retained for reference.
+
 This module adds RFC 8908 captive-state discovery while preserving the
 existing Omada External Portal authorization flow.
 

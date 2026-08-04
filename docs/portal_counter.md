@@ -1,5 +1,9 @@
 # Public Portal Open Counter v1.0
 
+Status: superseded as normative contract
+Current contract: [modules/public-authorization-counter.md](modules/public-authorization-counter.md)
+Historical implementation details below are retained for reference.
+
 The module counts newly created server-side `AuthSession` objects. A valid
 `GET /` records one event only when `AuthSessionManager.create_or_get()`
 returns `created=True`. Authorization outcomes, Omada state, polling and API
