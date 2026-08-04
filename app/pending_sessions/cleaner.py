@@ -409,13 +409,10 @@ class PendingClientSessionCleaner:
         candidate: PendingClientCandidate,
         deadline: float,
     ) -> PendingClientObservation | None:
-        invalidate = getattr(
-            self.provider,
-            "_invalidate_cached_token",
-            None,
-        )
-        if callable(invalidate):
-            invalidate()
+        # reconnect_client() already performs compare-and-invalidate
+        # for the token that received TOKEN_EXPIRED. Do not invalidate
+        # the current cache here: another thread may have published a
+        # fresh token before recovery starts.
         result = self._retry_get(
             lambda: self.provider.get_pending_client_state(
                 site_id=str(self.config.site_id),
