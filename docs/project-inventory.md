@@ -137,5 +137,6 @@ Shutdown:
 3. `outputs/omada-webhook-normalized.alloy` — infrastructure artifact; ownership подтверждается отдельным TASK.
 4. GitHub commit `227ebe9` не имеет attached Actions workflow runs/status checks; test evidence хранится вне GitHub CI и требует повторяемого Linux gate.
 5. В Cleaner token-expiry recovery после compare-and-invalidate выполняется дополнительная no-argument invalidation; concurrent refresh window и запрет очистки свежего AuthWorker token отдельным test не покрыты.
+6. CAPPORT client discovery каждые две секунды выполняет полную навигацию через `window.location.replace()`; бесшовный переход на одной открытой странице через `fetch()` требует отдельного TASK. До следующего сбора долгов сохраняется текущая реализация и наблюдается её влияние на число неавторизованных пользователей.
 
 Эти пункты не исправляются documentation TASK без отдельного разрешения.

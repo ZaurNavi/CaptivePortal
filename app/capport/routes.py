@@ -1,11 +1,21 @@
 """HTTP routes for RFC 8908 CAPPORT state and portal entry."""
 
 import json
+import time
+from urllib.parse import urlencode
 
-from flask import Blueprint, current_app, jsonify, render_template, request
+from flask import (
+    Blueprint,
+    current_app,
+    jsonify,
+    render_template,
+    request,
+    url_for,
+)
 
 from app.auth_telemetry import events
 from app.logger import logger
+from app.web.localization import PORTAL_TRANSLATIONS
 from app.web.portal_entry import PortalClientContext
 
 from .models import CapportConfig
@@ -62,11 +72,82 @@ def create_capport_blueprint(
                 503,
             )
         if not state.client_found or state.client is None:
-            return _controlled_error(
-                "Не удалось определить устройство. "
-                "Отключитесь от Wi-Fi и подключитесь повторно.",
-                404,
+            raw_deadline = request.args.get("wait_until")
+            try:
+                parsed_deadline = (
+                    int(raw_deadline)
+                    if raw_deadline is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                parsed_deadline = None
+
+            now_seconds = int(time.time())
+            maximum_deadline = now_seconds + 60
+            if parsed_deadline is None:
+                wait_until = maximum_deadline
+                auto_retry = True
+            elif parsed_deadline > maximum_deadline:
+                wait_until = maximum_deadline
+                auto_retry = True
+            elif parsed_deadline > now_seconds:
+                wait_until = parsed_deadline
+                auto_retry = True
+            else:
+                wait_until = parsed_deadline
+                auto_retry = False
+
+            original_query = [
+                (key, value)
+                for key, value in request.args.items(multi=True)
+                if key != "wait_until"
+            ]
+            retry_query = urlencode(
+                original_query
+                + [("wait_until", str(wait_until))]
             )
+            restart_query = urlencode(original_query)
+            login_path = url_for("capport.login")
+            retry_url = f"{login_path}?{retry_query}"
+            restart_url = login_path
+            if restart_query:
+                restart_url = f"{login_path}?{restart_query}"
+
+            initial_state = {
+                "state": "DISCOVERING_CLIENT",
+                "status": "DISCOVERING_CLIENT",
+                "mode": "CAPPORT_DISCOVERY",
+                "progress": 5,
+                "terminal": False,
+                "retryable": True,
+            }
+            rendered = render_template(
+                "portal.html",
+                session_id=None,
+                redirect_url=None,
+                initial_status="DISCOVERING_CLIENT",
+                initial_progress=5,
+                error_message=None,
+                initial_state=initial_state,
+                portal_translations=PORTAL_TRANSLATIONS,
+                retry_url=retry_url,
+                restart_url=restart_url,
+                auto_retry=auto_retry,
+                retry_interval_ms=2000,
+                remaining_seconds=(
+                    max(0, wait_until - now_seconds)
+                    if auto_retry
+                    else 0
+                ),
+            )
+            response = current_app.response_class(
+                rendered,
+                status=200,
+                mimetype="text/html",
+            )
+            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["Pragma"] = "no-cache"
+            return response
 
         telemetry.safe_emit_system(
             events.CAPPORT_PORTAL_OPENED,
@@ -101,14 +182,26 @@ def create_capport_blueprint(
 
 def _controlled_error(message: str, status_code: int):
     try:
-        return render_template(
-            "portal.html",
-            session_id=None,
-            redirect_url=None,
-            initial_status="FAILED",
-            initial_progress=100,
-            error_message=message,
-        ), status_code
+        initial_state = {
+            "state": "FAILED",
+            "status": "FAILED",
+            "retryable": False,
+            "progress": 100,
+            "terminal": True,
+        }
+        return (
+            render_template(
+                "portal.html",
+                session_id=None,
+                redirect_url=None,
+                initial_status="FAILED",
+                initial_progress=100,
+                error_message=message,
+                initial_state=initial_state,
+                portal_translations=PORTAL_TRANSLATIONS,
+            ),
+            status_code,
+        )
     except Exception:
         logger.exception("capport.error_page_failed")
         return message, status_code

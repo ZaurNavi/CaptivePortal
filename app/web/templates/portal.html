@@ -884,10 +884,25 @@ Wi-Fi!!</p>
     </main>
 
     <script>
-        const sessionId = {{ session_id | tojson }};
-        const redirectUrl = {{ redirect_url | tojson }};
+        const sessionId = {{ session_id | default(none) | tojson }};
+        const redirectUrl = {{ redirect_url | default(none) | tojson }};
         const initialState = {{ initial_state | default({}) | tojson }};
-        const translations = {{ portal_translations | tojson }};
+        const translations = {{ portal_translations | default({}) | tojson }};
+        const discoveryRetryUrl =
+            {{ retry_url | default(none) | tojson }};
+        const discoveryRestartUrl =
+            {{ restart_url | default(none) | tojson }};
+        const discoveryAutoRetry =
+            {{ auto_retry | default(false) | tojson }};
+        const discoveryRetryIntervalMs = Number(
+            {{ retry_interval_ms | default(2000) | tojson }}
+        );
+        const discoveryInitialRemainingSeconds = Math.max(
+            0,
+            Number(
+                {{ remaining_seconds | default(0) | tojson }}
+            ) || 0
+        );
         const activeStatuses = new Set([
             "WAITING",
             "AUTHORIZING",
@@ -955,6 +970,18 @@ Wi-Fi!!</p>
         let retryInFlight = false;
         let activeRetryRequestId = null;
         let consecutivePollingErrors = 0;
+        let discoveryStartedAt = null;
+        let discoveryCountdownTimer = null;
+        let discoveryNavigationTimer = null;
+
+        const isDiscoveryMode = (
+            (sessionId === null || sessionId === undefined)
+            && (
+                initialState.mode === "CAPPORT_DISCOVERY"
+                || initialState.state === "DISCOVERING_CLIENT"
+                || initialState.status === "DISCOVERING_CLIENT"
+            )
+        );
 
         function clampProgress(value) {
             const number = Number(value);
@@ -1031,6 +1058,25 @@ Wi-Fi!!</p>
             );
         }
 
+        function getDiscoverySecondsLeft() {
+            if (discoveryStartedAt === null) {
+                return Math.ceil(
+                    discoveryInitialRemainingSeconds
+                );
+            }
+
+            const elapsedSeconds = (
+                performance.now() - discoveryStartedAt
+            ) / 1000;
+            return Math.max(
+                0,
+                Math.ceil(
+                    discoveryInitialRemainingSeconds
+                    - elapsedSeconds
+                )
+            );
+        }
+
         function renderState(state) {
             const texts = getTexts();
             const status = state.status || "WAITING";
@@ -1045,6 +1091,22 @@ Wi-Fi!!</p>
             );
             retryButton.classList.add("hidden");
             retryButton.disabled = true;
+
+            if (status === "DISCOVERING_CLIENT") {
+                const secondsLeft = getDiscoverySecondsLeft();
+
+                progressShell.classList.remove("hidden");
+                progressSpinner.classList.remove("hidden");
+                portalNote.textContent = texts.discoveryNote;
+                progressText.textContent = `${secondsLeft}s`;
+                showError(null);
+
+                if (!discoveryAutoRetry || secondsLeft <= 0) {
+                    retryButton.classList.remove("hidden");
+                    retryButton.disabled = false;
+                }
+                return;
+            }
 
             if (status === "AUTHORIZED") {
                 progressShell.classList.remove("hidden");
@@ -1107,6 +1169,53 @@ Wi-Fi!!</p>
                 clearTimeout(pollTimer);
                 pollTimer = null;
             }
+        }
+
+        function stopDiscoveryTimers() {
+            if (discoveryCountdownTimer !== null) {
+                clearInterval(discoveryCountdownTimer);
+                discoveryCountdownTimer = null;
+            }
+            if (discoveryNavigationTimer !== null) {
+                clearTimeout(discoveryNavigationTimer);
+                discoveryNavigationTimer = null;
+            }
+        }
+
+        function startDiscovery() {
+            discoveryStartedAt = performance.now();
+            renderState(currentState);
+
+            if (
+                !discoveryAutoRetry
+                || discoveryInitialRemainingSeconds <= 0
+                || !discoveryRetryUrl
+            ) {
+                return;
+            }
+
+            const configuredInterval = (
+                Number.isFinite(discoveryRetryIntervalMs)
+                && discoveryRetryIntervalMs > 0
+            )
+                ? discoveryRetryIntervalMs
+                : 2000;
+            const navigationDelay = Math.min(
+                configuredInterval,
+                discoveryInitialRemainingSeconds * 1000
+            );
+
+            discoveryCountdownTimer = window.setInterval(
+                () => renderState(currentState),
+                250
+            );
+            discoveryNavigationTimer = window.setTimeout(
+                () => {
+                    stopDiscoveryTimers();
+                    window.location.replace(discoveryRetryUrl);
+                },
+                navigationDelay
+            );
         }
 
         function handleAuthorized() {
@@ -1345,10 +1454,17 @@ Wi-Fi!!</p>
             }
         }
 
-        retryButton.addEventListener(
-            "click",
-            requestRetry
-        );
+        retryButton.addEventListener("click", () => {
+            if (isDiscoveryMode) {
+                stopDiscoveryTimers();
+                window.location.replace(
+                    discoveryRestartUrl
+                    || window.location.pathname
+                );
+                return;
+            }
+            requestRetry();
+        });
 
         langButtons.forEach((button) => {
             button.addEventListener(
@@ -1364,9 +1480,10 @@ Wi-Fi!!</p>
         {% endif %}
 
         setLanguage(currentLang);
-        renderState(currentState);
 
-        if (
+        if (isDiscoveryMode) {
+            startDiscovery();
+        } else if (
             sessionId
             && activeStatuses.has(currentState.status)
         ) {
