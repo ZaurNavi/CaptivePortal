@@ -2,474 +2,343 @@
 
 **English** | [Русский](README_RU.md)
 
-A standards-based, controller-integrated captive portal platform for managed guest Wi-Fi networks.
-
+A standards-based, controller-integrated captive portal platform for managed guest Wi‑Fi networks.
 
 CaptivePortal provides a complete guest access flow: network discovery, portal presentation, client authorization, session tracking, structured telemetry, and operational monitoring.
-
-The platform is currently developed and tested with **TP-Link Omada Software Controller**, while the internal architecture is designed to support additional network controllers and authorization backends in the future.
 
 > **Project status:** Active development and field testing.
 
 ---
 
+## Table of contents
+
+- [Overview](#overview)
+- [Current Integration](#current-integration)
+- [How it works](#how-it-works)
+- [Implemented features](#implemented-features)
+- [Architecture](#architecture)
+  - [High-level diagram](#high-level-diagram)
+  - [Cleaner sequence](#cleaner-sequence)
+  - [Token expiry race (problem & fix)](#token-expiry-race-problem--fix)
+- [Observability](#observability)
+- [Development setup](#development-setup)
+- [Roadmap & Direction](#roadmap--direction)
+- [Development principles & Security](#development-principles--security)
+- [Testing strategy](#testing-strategy)
+- [License](#license)
+
+---
+
 ## Overview
 
-CaptivePortal started as a custom portal for a guest Wi-Fi network and has evolved into a modular platform that can be adapted for organizations providing managed public or corporate wireless access.
+CaptivePortal started as a custom portal for a guest Wi‑Fi network and has evolved into a modular platform adaptable to organizations that provide managed public or corporate wireless access.
 
-The project is intended for environments such as:
+Targeted deployments include:
 
-* parks and public spaces;
-* hotels and hospitality;
-* offices and business centers;
-* educational institutions;
-* clinics and service locations;
-* retail spaces;
-* event venues;
-* municipal guest networks.
+- parks and public spaces
+- hotels and hospitality
+- offices and business centers
+- educational institutions
+- clinics and service locations
+- retail spaces and event venues
+- municipal guest networks
 
-The platform separates the user-facing portal from controller-specific authorization logic. This allows the portal, session model, telemetry, and monitoring components to remain reusable when integrating with another Wi-Fi controller or network access platform.
+The architecture separates the user-facing portal from controller-specific authorization logic, keeping portal, session model, telemetry, and monitoring reusable across controller adapters.
 
-## Project knowledge base
-
-- Architecture, module status and operations: [docs/README.md](docs/README.md)
-- Instructions for developers and coding agents: [AGENTS.md](AGENTS.md)
-- Current main snapshot: [docs/project-inventory.md](docs/project-inventory.md)
+See also:
+- Architecture and module status: `docs/README.md`
+- Developer instructions: `AGENTS.md`
+- Project inventory and feature map: `docs/project-inventory.md`
 
 ---
 
 ## Current Integration
 
-The first supported controller integration is:
+First supported adapter: **TP‑Link Omada Software Controller** (tested on 5.14.x release line).
 
-**TP-Link Omada Software Controller**
+Validated in test environment:
+- client discovery via Omada Open API
+- guest authorization via Omada Open API
+- controller-enforced access
+- CAPPORT-compatible portal discovery
+- structured authorization telemetry
+- integration with Grafana Alloy → Loki → Grafana dashboards
 
-The current test environment validates:
-
-* client discovery through Omada Open API;
-* guest authorization through Omada Open API;
-* controller-based access enforcement;
-* CAPPORT-compatible portal discovery;
-* structured authorization telemetry;
-* integration with Grafana Loki through Grafana Alloy.
-
-The current implementation is tested against an Omada Software Controller from the **5.14.x** release line.
-
-Omada is the first controller adapter, not a permanent architectural limitation of the platform.
+Omada is an adapter — the core supports adding other controllers later.
 
 ---
 
-## Main Goals
+## How it works (high level)
 
-CaptivePortal is designed around the following principles:
-
-* standards-based captive portal discovery;
-* clean separation between portal logic and controller integration;
-* observable authorization flows;
-* predictable error handling;
-* reusable session management;
-* vendor-neutral extension points;
-* gradual development without temporary throwaway components;
-* deployment suitable for real guest networks.
-
----
-
-## How It Works
-
-The current authorization flow is:
-
-```text
-Guest device connects to Wi-Fi
+```
+Guest device connects to Wi‑Fi
         ↓
-DHCP provides CAPPORT information through Option 114
+DHCP provides CAPPORT info (Option 114)
         ↓
-Client requests the CAPPORT API
+Client queries CAPPORT API
         ↓
-Operating system opens the captive portal
+OS opens captive portal
         ↓
-CaptivePortal creates or restores a session
+CaptivePortal creates/restores session
         ↓
-Backend locates the client in Omada
+Backend locates client via controller adapter
         ↓
-CaptivePortal requests client authorization
+CaptivePortal requests controller to authorize client
         ↓
-Omada grants network access
+Controller grants network access
         ↓
-Authorization result is written to structured telemetry
+Authorization is logged to structured telemetry
 ```
 
-CAPPORT is responsible for portal discovery and captive-state communication.
-
-Actual network authorization is performed by the configured controller integration.
+Actual network enforcement is performed by the configured controller adapter (Omada for reference).
 
 ---
 
-## Implemented Features
+## Implemented features
 
-The project currently includes:
-
-* CAPPORT discovery through DHCP Option 114;
-* CAPPORT API support;
-* responsive captive portal page;
-* guest authorization through Omada Open API;
-* client lookup using controller data;
-* portal session management;
-* authorization status tracking;
-* structured JSON telemetry;
-* complete MAC address logging for technical diagnostics;
-* isolated error handling;
-* Grafana Alloy log collection;
-* Loki log storage;
-* Grafana-based operational analysis;
-* deployment and testing in a dedicated guest VLAN.
-
----
-
-## Observability
-
-CaptivePortal treats observability as a core platform feature.
-
-Authorization events are written as structured JSON records and can include:
-
-* session identifier;
-* client IP address;
-* client MAC address;
-* authorization attempt number;
-* controller lookup result;
-* authorization result;
-* execution duration;
-* failure reason;
-* module and event names;
-* schema version;
-* server timestamp.
-
-Example:
-
-```json
-{
-  "timestamp": "2026-07-28T08:30:15Z",
-  "level": "info",
-  "service": "captive_portal",
-  "module": "auth_telemetry",
-  "event": "authorization_succeeded",
-  "schema_version": 1,
-  "session_id": "example-session-id",
-  "client_ip": "192.168.50.24",
-  "client_mac": "AA:BB:CC:DD:EE:FF",
-  "attempt_number": 1
-}
-```
-
-The current telemetry pipeline is:
-
-```text
-CaptivePortal
-        ↓
-Structured JSON log files
-        ↓
-Grafana Alloy
-        ↓
-Grafana Loki
-        ↓
-Grafana
-```
-
-Grafana configuration and dashboard development are maintained separately from the application code.
+- CAPPORT discovery (DHCP Option 114)
+- CAPPORT API endpoint
+- Responsive portal UI (single‑page portal.html)
+- Omada Open API adapter for authorization & lookup
+- Portal session management and retry flows
+- ActionGuard, retry limits and auditing
+- Structured JSON telemetry and journaled events
+- Grafana Alloy / Loki integration for logs and dashboards
+- Tests and CI targets (unit tests in `tests/`)
 
 ---
 
 ## Architecture
 
-The project is divided into several logical layers.
+The system is logically layered:
 
-### Portal Layer
+- Portal layer — renders portal.html, handles client-side retry and discovery
+- Session layer — creates/restores session state, avoids conflicting workers
+- Controller integration layer — controller authentication, client discovery, authorization
+- Telemetry layer — structured events, diagnostics, failure classification
+- Integration layer — webhooks, controller events, traffic statistics
 
-Responsible for:
+### High-level diagram
 
-* rendering the captive portal;
-* presenting connection progress;
-* displaying authorization results;
-* communicating with backend API endpoints;
-* handling retry actions.
+```mermaid
+flowchart LR
+  subgraph Network
+    Client["Visitor device / browser"]
+  end
 
-### Session Layer
+  subgraph App ["CaptivePortal service"]
+    A[Routes: /capport/api, /capport/login]
+    B[portal.html (UI)]
+    C[PortalEntryHandler -> PortalClientContext]
+    D[AuthSessionManager / AuthWorker]
+    E[Pending Session Cleaner (background)]
+    F[OmadaProvider (shared token cache)]
+    G[Journal & Telemetry]
+    H[ActionGuard]
+  end
 
-Responsible for:
+  Client -->|GET /capport/login| A
+  A -->|resolve_for_login(ip)| F
+  F -->|state (client_found?)| A
 
-* creating portal sessions;
-* restoring active sessions;
-* tracking authorization attempts;
-* maintaining session state;
-* preventing conflicting operations.
+  A -->|client found → open_portal()| C
+  C -->|creates AuthSession| D
+  D -->|calls Omada| F
+  D -->|audit| G
 
-### Controller Integration Layer
+  A -->|client not found → DISCOVERING_CLIENT (200)| B
+  B -->|auto-retry (server-bounded)| A
 
-Responsible for:
-
-* controller authentication;
-* client discovery;
-* client authorization;
-* controller-specific API communication;
-* normalization of controller responses.
-
-The first adapter targets TP-Link Omada.
-
-Future adapters may support other controllers or access-control systems without replacing the portal and session layers.
-
-### Telemetry Layer
-
-Responsible for:
-
-* structured application events;
-* authorization diagnostics;
-* performance measurements;
-* failure classification;
-* integration with the existing logging pipeline.
-
-### Integration Layer
-
-Reserved for incoming events and external systems, including:
-
-* Omada webhooks;
-* controller lifecycle events;
-* client disconnect events;
-* traffic statistics;
-* additional infrastructure integrations.
-
----
-
-## Repository Structure
-
-The repository changes frequently as modules are added. The verified structure, entrypoints, feature flags, persistence paths and test groups are maintained in [docs/project-inventory.md](docs/project-inventory.md).
-
-Controller-specific functionality remains inside the corresponding integration module rather than being mixed with the core portal logic. See [docs/architecture.md](docs/architecture.md) for the dependency boundaries.
-
----
-
-## Development Setup
-
-### Requirements
-
-* Linux server or development environment;
-* Python 3;
-* access to the target network controller;
-* network connectivity between CaptivePortal and the controller;
-* DHCP server capable of providing Option 114 for CAPPORT discovery.
-
-### Installation
-
-Clone the repository:
-
-```bash
-git clone <repository-url>
-cd CaptivePortal
+  E -->|scans inventory| F
+  E -->|classify -> decide reconnect| H
+  E -->|reconnect_client| F
+  E -->|log actions| G
 ```
 
-Create a virtual environment:
+### Cleaner sequence (single candidate)
+
+```mermaid
+sequenceDiagram
+  participant Cleaner
+  participant Provider
+  participant Omada
+  participant Protection
+  participant Journal
+  participant ActionGuard
+
+  Cleaner->>Provider: list_active_clients(page=1)
+  Provider->>Omada: GET /sites/{site}/clients?page=1
+  Omada-->>Provider: 200 + clients
+  Provider-->>Cleaner: Result {clients, total_rows}
+  Cleaner->>Cleaner: classify candidates
+  Cleaner->>Protection: check(local protection)
+  alt allowed
+    Cleaner->>Provider: get_pending_client_state(client_mac)
+    Provider->>Omada: GET /sites/{site}/clients/{mac}
+    Omada-->>Provider: client record
+    Provider-->>Cleaner: client
+    Cleaner->>ActionGuard: check(rate limits)
+    Cleaner->>Journal: write planned event
+    Cleaner->>Provider: reconnect_client(client_mac)
+    alt TOKEN_EXPIRED (-44112)
+      Provider->>Provider: invalidate_cached_token(old_token)  /* compare-and-invalidate */
+      Cleaner->>Provider: get_pending_client_state (fresh GET via _retry_get)
+      Cleaner->>Protection: re-check
+      Cleaner->>Provider: reconnect_client (retry once)
+    end
+    Cleaner->>Provider: get_pending_client_state (verify)
+    Cleaner->>Journal: write completed event
+  else protected
+    Cleaner->>Journal: write completed without post
+  end
+```
+
+### Token expiry race — problem & fix
+
+```mermaid
+sequenceDiagram
+  participant Cleaner
+  participant Provider (token cache)
+  participant AuthWorker
+  participant Omada
+
+  Cleaner->>Provider: reconnect_client(token=A) -> POST
+  Provider->>Omada: POST ... Authorization: AccessToken=A
+  Omada-->>Provider: 401 / errorCode=-44112 (TOKEN_EXPIRED)
+  Provider->>Provider: invalidate_cached_token(A)   <-- compare-and-invalidate (OK)
+  par concurrent
+    AuthWorker->>Provider: _get_token() -> refresh -> publish token=B
+  and
+    Cleaner->>Provider: _recover_expired_token() -> (bad impl) invalidate()  --X deletes token B
+  end
+
+  Note right of Provider: Bad: unconditional invalidate() can remove B
+  Note right of Provider: Fix: remove unconditional invalidate() from Cleaner; rely on compare-and-invalidate(old_token)
+```
+
+---
+
+## Observability
+
+All important events are recorded as structured JSON records in a journal and emitted to the telemetry pipeline:
+
+- session id, client IP, client MAC
+- attempt number, controller lookup result, auth result
+- duration, error classification, module/event names, schema version, timestamp
+
+Pipeline:
+
+```
+App -> JSONL journal -> Grafana Alloy -> Grafana Loki -> Grafana dashboards
+```
+
+Keep credentials out of logs — telemetry does not include secrets.
+
+---
+
+## Development setup
+
+Requirements:
+
+- Linux (or WSL/macOS), Python 3.10+
+- Access to controller for integration testing
+- DHCP server with CAPPORT Option 114 for discovery tests
+
+Quick start:
 
 ```bash
+git clone <repo>
+cd CaptivePortal
 python3 -m venv venv
 source venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
 pip install -r requirements.txt
-```
-
-Configure the application using the existing settings system in:
-
-```text
-app/settings.py
-app/config.py
-```
-
-Run the application:
-
-```bash
+# configure app/settings.py and environment
 python run.py
 ```
 
-Deployment-specific controller credentials, secrets, addresses, and tokens must not be committed to the repository.
+Configuration is environment-driven — see `app/config.py` and `app/settings.py`.
 
 ---
 
-## Current Development Roadmap
+## Testing
 
-### Portal Reliability
+Unit tests are in `tests/`. To run specific groups:
 
-* manual retry without reloading the page;
-* reuse of the existing session during retry;
-* prevention of parallel authorization workers;
-* improved handling of delayed DHCP and unstable Wi-Fi connectivity.
+```bash
+# run all tests
+python -m pytest -q
 
-### Client-Side Telemetry
+# run pending_sessions tests
+python -m pytest -q tests/pending_sessions
+```
 
-Planned events include:
-
-* portal request received;
-* frontend script started;
-* page fully loaded;
-* page visible;
-* authorization UI started;
-* retry requested.
-
-This will make it possible to distinguish:
-
-* portal loading failures;
-* frontend failures;
-* DHCP delays;
-* controller discovery delays;
-* authorization failures.
-
-### Omada Webhook Integration
-
-A permanent Omada webhook receiver is planned as a dedicated integration module.
-
-Initial responsibilities:
-
-* accept webhook requests;
-* verify the source;
-* preserve the original payload;
-* write structured webhook logs;
-* provide real controller data for further development.
-
-Later stages may include:
-
-* client connection events;
-* client disconnect events;
-* traffic counter collection;
-* session completion events;
-* correlation with CaptivePortal sessions.
-
-### Guest Traffic Accounting
-
-The intended model is to obtain traffic statistics from the network controller rather than estimate them from portal HTTP traffic.
-
-Potential session metrics:
-
-* downloaded bytes;
-* uploaded bytes;
-* total traffic;
-* session duration;
-* connection and disconnect time;
-* access point;
-* SSID;
-* controller-reported termination reason.
-
-Implementation will be based on verified Omada webhook and Open API data collected during live testing.
-
-### Additional Controller Support
-
-The long-term architecture may support:
-
-* other wireless controllers;
-* router-based authorization;
-* RADIUS or CoA integrations;
-* firewall or ACL-based access control;
-* custom authorization adapters.
+(If CI environment is not available, tests cannot be executed locally here — run on your developer machine or CI.)
 
 ---
 
-## Development Principles
+## Roadmap & direction
 
-The project follows several practical engineering rules:
+Priorities:
 
-1. Real controller behavior is verified through live testing before architecture is finalized.
-2. Permanent modules are developed incrementally instead of being replaced by temporary prototypes.
-3. Controller-specific logic must not leak into the universal portal core.
-4. Telemetry failure must never become an authorization failure.
-5. Secrets and credentials must never be written to logs.
-6. Every development stage must leave the system in a working state.
-7. Operational decisions should be based on collected telemetry rather than assumptions.
+- portal reliability: non-blocking retry UX, reuse session during retry, avoid parallel workers
+- client-side telemetry (page load, retry, visible)
+- webhook receiver to enrich controller data
+- traffic accounting via controller APIs
+- adapter framework for other controllers (RADIUS, CoA, ACLs)
 
 ---
 
-## Security Considerations
+## Development principles & security
 
-The project should be deployed only after reviewing environment-specific security requirements.
-
-Expected security controls include:
-
-* secrets stored outside source code;
-* controller credentials excluded from Git;
-* validation of incoming webhook sources;
-* token or signature validation where supported;
-* request body size limits;
-* rate limiting;
-* structured security logging;
-* protection against duplicate and parallel operations;
-* strict separation of frontend data and trusted backend state.
-
-Frontend-provided values must not be treated as authoritative for:
-
-* client authorization state;
-* MAC address ownership;
-* controller results;
-* traffic totals;
-* final session status.
+- Verify controller behavior with live testing before encoding assumptions
+- Develop permanent modules incrementally (avoid throwaway prototypes)
+- Controller logic must not leak into portal core
+- Telemetry failures must not break authorization
+- No secrets in source or logs
+- Defensive programming around controller responses and timeouts
 
 ---
 
-## Testing Strategy
+## Testing strategy (notes)
 
-Development is validated in a dedicated guest VLAN to keep experiments isolated from the primary network.
-
-Testing includes:
-
-* normal client authorization;
-* delayed client appearance in Omada;
-* unstable wireless connectivity;
-* DHCP delays;
-* portal page reloads;
-* repeated authorization attempts;
-* controller API errors;
-* logging and telemetry delivery;
-* application restart behavior.
-
-Live tests are used to define controller behavior before implementing dependent features.
-
----
-
-## Product Direction
-
-CaptivePortal is being developed as more than a single-purpose login page.
-
-The long-term direction is a reusable captive access platform providing:
-
-* configurable portal experiences;
-* controller-independent authorization workflows;
-* session lifecycle management;
-* real-time operational telemetry;
-* guest traffic analytics;
-* failure diagnostics;
-* external integration support;
-* deployment across different organizations and network environments.
-
-The current Omada deployment serves as the first production-style reference implementation.
-
----
-
-## Project Status
-
-The platform is currently operational in a controlled test environment.
-
-Working components include:
-
-* CAPPORT-based discovery;
-* portal delivery;
-* Omada client authorization;
-* structured telemetry;
-* centralized log collection;
-* Grafana-based monitoring.
-
-The project remains under active development and should not yet be considered a finished general-availability release.
+- Validate delayed client appearances (discovery mode)
+- Simulate controller errors and token expiry cases
+- Replay JSONL telemetry in Grafana
+- Keep live tests isolated in dedicated test VLAN
 
 ---
 
 ## License
 
-No public license has been assigned to the project yet.
+No public license yet. Treat repository as private until a license is added.
 
-Until a license is explicitly added, the source code should be treated as proprietary and not redistributed or reused outside the project without permission.
+---
+
+## Diagrams to SVG/PNG
+
+If you want PNG/SVG assets for the diagrams inside `docs/diagrams/`:
+
+- Install mermaid-cli (or use the online editor):
+
+```bash
+npm install -g @mermaid-js/mermaid-cli
+# save mermaid block to file.mmd and render:
+mmdc -i file.mmd -o file.svg
+mmdc -i file.mmd -o file.png
+```
+
+Alternatively, use the Mermaid Live Editor (https://mermaid.live/) for quick export.
+
+---
+
+## What I changed (summary)
+
+- Reflowed README sections and added TOC
+- Added clear Quick Start and Development Setup
+- Inserted three Mermaid diagrams to explain architecture and key flows
+- Emphasized observability & security guidance
+- Kept links to docs and Russian README
+
+---
+
+If you want SVG exports for the three diagrams, tell me which format you prefer (SVG or PNG) and I will provide the SVG text for each diagram so you can save them as files (e.g. `docs/diagrams/arch.svg`) and include them in the repo.
