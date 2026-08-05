@@ -18,6 +18,41 @@ from .registry_service import VisitorRegistryService
 from .registry_telemetry import VisitorRegistryTelemetry
 
 
+_SQLITE_BUSY = 5
+_SQLITE_LOCKED = 6
+_SQLITE_READONLY = 8
+_SQLITE_IOERR = 10
+_SQLITE_CORRUPT = 11
+_SQLITE_FULL = 13
+_SQLITE_CANTOPEN = 14
+_SQLITE_NOTADB = 26
+
+_SQLITE_LOCKED_CODES = frozenset({_SQLITE_BUSY, _SQLITE_LOCKED})
+_SQLITE_UNAVAILABLE_CODES = frozenset({
+    _SQLITE_CORRUPT,
+    _SQLITE_NOTADB,
+    _SQLITE_READONLY,
+    _SQLITE_CANTOPEN,
+})
+_SQLITE_CORRUPTION_CODES = frozenset({
+    _SQLITE_CORRUPT,
+    _SQLITE_NOTADB,
+})
+_SQLITE_MESSAGE_CATEGORIES = (
+    ("database is locked", "locked"),
+    ("database table is locked", "locked"),
+    ("database disk image is malformed", "unavailable"),
+    ("file is not a database", "unavailable"),
+    ("attempt to write a readonly database", "unavailable"),
+    ("unable to open database file", "unavailable"),
+    ("disk i/o error", "io_error"),
+)
+_SQLITE_CORRUPTION_MESSAGES = (
+    "database disk image is malformed",
+    "file is not a database",
+)
+
+
 class DisabledVisitorRegistry:
     enabled = False
     available = False
@@ -365,10 +400,7 @@ class VisitorRegistryWorker:
                 pass
             if isinstance(exc, RegistrySchemaError):
                 diagnostic_event = "visitor_registry_schema_invalid"
-            elif _sqlite_primary_code(exc) in {
-                sqlite3.SQLITE_CORRUPT,
-                sqlite3.SQLITE_NOTADB,
-            }:
+            elif _is_sqlite_corruption(exc):
                 diagnostic_event = "visitor_registry_corrupt_database"
             else:
                 diagnostic_event = "visitor_registry_database_error"
@@ -447,10 +479,7 @@ def create_visitor_registry(
     except Exception as exc:
         if isinstance(exc, RegistrySchemaError):
             diagnostic_event = "visitor_registry_schema_invalid"
-        elif _sqlite_primary_code(exc) in {
-            sqlite3.SQLITE_CORRUPT,
-            sqlite3.SQLITE_NOTADB,
-        }:
+        elif _is_sqlite_corruption(exc):
             diagnostic_event = "visitor_registry_corrupt_database"
         else:
             diagnostic_event = "visitor_registry_database_error"
@@ -492,18 +521,16 @@ def _sqlite_category(exc: Exception) -> str:
         return "degraded"
     primary = _sqlite_primary_code(exc)
     if primary is not None:
-        if primary in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        if primary in _SQLITE_LOCKED_CODES:
             return "locked"
-        if primary in {
-            sqlite3.SQLITE_CORRUPT,
-            sqlite3.SQLITE_NOTADB,
-            sqlite3.SQLITE_READONLY,
-            sqlite3.SQLITE_CANTOPEN,
-        }:
+        if primary in _SQLITE_UNAVAILABLE_CODES:
             return "unavailable"
-        if primary == sqlite3.SQLITE_IOERR:
+        if primary == _SQLITE_IOERR:
             return "io_error"
-    return "degraded"
+        if primary == _SQLITE_FULL:
+            return "degraded"
+        return "degraded"
+    return _sqlite_message_category(exc) or "degraded"
 
 
 def _sqlite_primary_code(exc: Exception) -> int | None:
@@ -511,3 +538,26 @@ def _sqlite_primary_code(exc: Exception) -> int | None:
         return None
     code = getattr(exc, "sqlite_errorcode", None)
     return (code & 0xFF) if isinstance(code, int) else None
+
+
+def _sqlite_message_category(exc: Exception) -> str | None:
+    if not isinstance(exc, sqlite3.Error):
+        return None
+    message = str(exc).strip().lower()
+    for fragment, category in _SQLITE_MESSAGE_CATEGORIES:
+        if fragment in message:
+            return category
+    return None
+
+
+def _is_sqlite_corruption(exc: Exception) -> bool:
+    primary = _sqlite_primary_code(exc)
+    if primary is not None:
+        return primary in _SQLITE_CORRUPTION_CODES
+    if not isinstance(exc, sqlite3.Error):
+        return False
+    message = str(exc).strip().lower()
+    return any(
+        fragment in message
+        for fragment in _SQLITE_CORRUPTION_MESSAGES
+    )
