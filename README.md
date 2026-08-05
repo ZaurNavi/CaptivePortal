@@ -1,12 +1,12 @@
 # CaptivePortal
 
-**English** | [Русский](README_RU.md)
+**English** · **Русский**
 
 A standards-based, controller-integrated captive portal platform for managed guest Wi‑Fi networks.
 
 CaptivePortal provides a complete guest access flow: network discovery, portal presentation, client authorization, session tracking, structured telemetry, and operational monitoring.
 
-> **Project status:** Active development and field testing.
+**Project status:** Active development and field testing.
 
 ---
 
@@ -57,6 +57,7 @@ See also:
 First supported adapter: **TP‑Link Omada Software Controller** (tested on 5.14.x release line).
 
 Validated in test environment:
+
 - client discovery via Omada Open API
 - guest authorization via Omada Open API
 - controller-enforced access
@@ -98,13 +99,13 @@ Actual network enforcement is performed by the configured controller adapter (Om
 
 - CAPPORT discovery (DHCP Option 114)
 - CAPPORT API endpoint
-- Responsive portal UI (single‑page portal.html)
+- Responsive portal UI (`portal.html`)
 - Omada Open API adapter for authorization & lookup
 - Portal session management and retry flows
 - ActionGuard, retry limits and auditing
 - Structured JSON telemetry and journaled events
 - Grafana Alloy / Loki integration for logs and dashboards
-- Tests and CI targets (unit tests in `tests/`)
+- Unit tests and CI targets (see `tests/`)
 
 ---
 
@@ -127,41 +128,43 @@ flowchart LR
   end
 
   subgraph App ["CaptivePortal service"]
-    A[Routes: /capport/api, /capport/login]
-    B[portal.html (UI)]
-    C[PortalEntryHandler -> PortalClientContext]
-    D[AuthSessionManager / AuthWorker]
-    E[Pending Session Cleaner (background)]
-    F[OmadaProvider (shared token cache)]
-    G[Journal & Telemetry]
-    H[ActionGuard]
+    A["Routes: /capport/api, /capport/login"]
+    B["portal.html (UI)"]
+    C["PortalEntryHandler → PortalClientContext"]
+    D["AuthSessionManager / AuthWorker"]
+    E["Pending Session Cleaner (background)"]
+    F["OmadaProvider (shared token cache)"]
+    G["Journal & Telemetry"]
+    H["ActionGuard"]
   end
 
   Client -->|GET /capport/login| A
   A -->|resolve_for_login(ip)| F
-  F -->|state (client_found?)| A
+  F -->|state: client_found?| A
 
   A -->|client found → open_portal()| C
   C -->|creates AuthSession| D
   D -->|calls Omada| F
-  D -->|audit| G
+  D -->|writes audit| G
 
   A -->|client not found → DISCOVERING_CLIENT (200)| B
   B -->|auto-retry (server-bounded)| A
 
   E -->|scans inventory| F
-  E -->|classify -> decide reconnect| H
+  E -->|classify → decide reconnect| H
   E -->|reconnect_client| F
   E -->|log actions| G
 ```
+
+---
 
 ### Cleaner sequence (single candidate)
 
 ```mermaid
 sequenceDiagram
   participant Cleaner
-  participant Provider
-  participant Omada
+  participant Provider as "Provider (controller adapter)"
+  participant Omada as "Omada Controller"
   participant Protection
   participant Journal
   participant ActionGuard
@@ -181,7 +184,7 @@ sequenceDiagram
     Cleaner->>Journal: write planned event
     Cleaner->>Provider: reconnect_client(client_mac)
     alt TOKEN_EXPIRED (-44112)
-      Provider->>Provider: invalidate_cached_token(old_token)  /* compare-and-invalidate */
+      Provider->>Provider: invalidate_cached_token(old_token)  %% compare-and-invalidate
       Cleaner->>Provider: get_pending_client_state (fresh GET via _retry_get)
       Cleaner->>Protection: re-check
       Cleaner->>Provider: reconnect_client (retry once)
@@ -193,27 +196,29 @@ sequenceDiagram
   end
 ```
 
+---
+
 ### Token expiry race — problem & fix
 
 ```mermaid
 sequenceDiagram
   participant Cleaner
-  participant Provider (token cache)
+  participant Provider as "Provider (token cache)"
   participant AuthWorker
-  participant Omada
+  participant Omada as "Omada Controller"
 
-  Cleaner->>Provider: reconnect_client(token=A) -> POST
+  Cleaner->>Provider: reconnect_client(token=A)  %% POST using token A
   Provider->>Omada: POST ... Authorization: AccessToken=A
   Omada-->>Provider: 401 / errorCode=-44112 (TOKEN_EXPIRED)
-  Provider->>Provider: invalidate_cached_token(A)   <-- compare-and-invalidate (OK)
+  Provider->>Provider: invalidate_cached_token(A)  %% compare-and-invalidate
   par concurrent
     AuthWorker->>Provider: _get_token() -> refresh -> publish token=B
   and
-    Cleaner->>Provider: _recover_expired_token() -> (bad impl) invalidate()  --X deletes token B
+    Cleaner->>Provider: _recover_expired_token() does fresh GET (must NOT call unconditional invalidate)
   end
 
-  Note right of Provider: Bad: unconditional invalidate() can remove B
-  Note right of Provider: Fix: remove unconditional invalidate() from Cleaner; rely on compare-and-invalidate(old_token)
+  Note right of Provider: Bug: unconditional invalidate() in Cleaner removes fresh token B.
+  Note right of Provider: Fix: remove unconditional invalidate() from Cleaner; rely only on compare-and-invalidate(old_token).
 ```
 
 ---
@@ -232,7 +237,7 @@ Pipeline:
 App -> JSONL journal -> Grafana Alloy -> Grafana Loki -> Grafana dashboards
 ```
 
-Keep credentials out of logs — telemetry does not include secrets.
+Telemetry MUST exclude secrets and credentials.
 
 ---
 
@@ -242,17 +247,17 @@ Requirements:
 
 - Linux (or WSL/macOS), Python 3.10+
 - Access to controller for integration testing
-- DHCP server with CAPPORT Option 114 for discovery tests
+- DHCP server capable of CAPPORT Option 114 for discovery tests
 
 Quick start:
 
 ```bash
-git clone <repo>
+git clone <repository-url>
 cd CaptivePortal
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-# configure app/settings.py and environment
+# configure settings in app/config.py / environment variables
 python run.py
 ```
 
@@ -262,7 +267,7 @@ Configuration is environment-driven — see `app/config.py` and `app/settings.py
 
 ## Testing
 
-Unit tests are in `tests/`. To run specific groups:
+Unit tests are under `tests/`. Example commands:
 
 ```bash
 # run all tests
@@ -272,73 +277,90 @@ python -m pytest -q
 python -m pytest -q tests/pending_sessions
 ```
 
-(If CI environment is not available, tests cannot be executed locally here — run on your developer machine or CI.)
+If CI environment isn't available locally, run tests on the developer machine or CI.
 
 ---
 
-## Roadmap & direction
+## Roadmap & Direction
 
-Priorities:
+Planned priorities:
 
 - portal reliability: non-blocking retry UX, reuse session during retry, avoid parallel workers
-- client-side telemetry (page load, retry, visible)
-- webhook receiver to enrich controller data
+- client-side telemetry (page load, retry, visibility)
+- Omada webhook receiver to enrich controller data
 - traffic accounting via controller APIs
 - adapter framework for other controllers (RADIUS, CoA, ACLs)
 
 ---
 
-## Development principles & security
+## Development principles & Security
 
-- Verify controller behavior with live testing before encoding assumptions
-- Develop permanent modules incrementally (avoid throwaway prototypes)
-- Controller logic must not leak into portal core
+- Verify controller behavior with live tests before encoding assumptions
+- Build permanent modules incrementally (avoid throwaway prototypes)
+- Keep controller-specific logic isolated from portal core
 - Telemetry failures must not break authorization
-- No secrets in source or logs
-- Defensive programming around controller responses and timeouts
+- Never log secrets or credentials
+- Defensive handling for controller responses and timeouts
 
 ---
 
 ## Testing strategy (notes)
 
 - Validate delayed client appearances (discovery mode)
-- Simulate controller errors and token expiry cases
+- Simulate token expiry and recovery paths
 - Replay JSONL telemetry in Grafana
-- Keep live tests isolated in dedicated test VLAN
+- Keep live tests isolated (dedicated guest VLAN)
 
 ---
 
 ## License
 
-No public license yet. Treat repository as private until a license is added.
+No public license yet. Treat repository as proprietary until a license is added.
 
 ---
 
-## Diagrams to SVG/PNG
+## Diagrams export (optional)
 
-If you want PNG/SVG assets for the diagrams inside `docs/diagrams/`:
-
-- Install mermaid-cli (or use the online editor):
+To export Mermaid diagrams into SVG/PNG (local):
 
 ```bash
 npm install -g @mermaid-js/mermaid-cli
-# save mermaid block to file.mmd and render:
+# save a mermaid block into file.mmd and render:
 mmdc -i file.mmd -o file.svg
 mmdc -i file.mmd -o file.png
 ```
 
-Alternatively, use the Mermaid Live Editor (https://mermaid.live/) for quick export.
+Or use the Mermaid Live Editor: https://mermaid.live/
 
 ---
 
-## What I changed (summary)
+## What changed (summary)
 
-- Reflowed README sections and added TOC
-- Added clear Quick Start and Development Setup
-- Inserted three Mermaid diagrams to explain architecture and key flows
-- Emphasized observability & security guidance
-- Kept links to docs and Russian README
+- Reflowed content and added TOC
+- Added Quick Start and Development Setup
+- Inserted three Mermaid diagrams explaining architecture, cleaner flow, and token race
+- Emphasized observability and security
 
 ---
 
-If you want SVG exports for the three diagrams, tell me which format you prefer (SVG or PNG) and I will provide the SVG text for each diagram so you can save them as files (e.g. `docs/diagrams/arch.svg`) and include them in the repo.
+## Русская версия (сокращённо)
+
+Ниже сокращённая русская версия основных разделов — полный перевод можно поместить в `README_RU.md`.
+
+### Обзор
+
+CaptivePortal — модульная платформа для гостевых Wi‑Fi сетей: обнаружение, портал, авторизация, учёт сессий и телеметрия. Адаптирована под контроллер TP‑Link Omada; архитектура позволяет добавлять другие адаптеры.
+
+### Как это работает (коротко)
+
+Гость подключается → DHCP CAPPORT → браузер запрашивает /capport/login → backend ищет клиента в контроллере → при успехе запускается портал/авторизация → результат журналируется.
+
+### Надёжность и наблюдаемость
+
+События авторизации и технические данные пишутся в структурированные JSON‑журналы и передаются в Grafana Alloy → Loki → Grafana.
+
+### Важные принципы
+
+- не логировать секреты;
+- модульность контроллерных адаптеров;
+- телеметрия не должна ломать авторизацию.
