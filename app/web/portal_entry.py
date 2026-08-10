@@ -24,6 +24,18 @@ class PortalClientContext:
     radio_id: str | None = None
 
 
+@dataclass(frozen=True)
+class PortalEntryResult:
+    """Structured result shared by HTML and JSON portal entry paths."""
+
+    session_id: str | None
+    redirect_url: str | None
+    initial_state: dict[str, Any]
+    status_code: int = 200
+    error_message: str | None = None
+    error_code: str | None = None
+
+
 class PortalEntryHandler:
     def __init__(
         self,
@@ -43,6 +55,30 @@ class PortalEntryHandler:
         self._counter_recording_enabled = counter_recording_enabled
 
     def open_portal(self, context: PortalClientContext):
+        result = self.prepare_portal(context)
+        rendered = render_template(
+            "portal.html",
+            session_id=result.session_id,
+            redirect_url=result.redirect_url,
+            initial_status=(
+                result.initial_state.get("status")
+                or result.initial_state.get("state")
+                or "FAILED"
+            ),
+            initial_progress=result.initial_state.get("progress", 100),
+            initial_state=result.initial_state,
+            portal_translations=PORTAL_TRANSLATIONS,
+            error_message=result.error_message,
+        )
+        if result.status_code == 200:
+            return rendered
+        return rendered, result.status_code
+
+    def prepare_portal(
+        self,
+        context: PortalClientContext,
+    ) -> PortalEntryResult:
+        """Create/reuse one session and return its authoritative state."""
         try:
             session, created = self._session_manager.create_or_get(
                 site_id=context.site_id,
@@ -92,27 +128,40 @@ class PortalEntryHandler:
                 )
 
             if created:
-                response = self._start_worker(session)
-                if response is not None:
-                    return response
+                started, reason, _error = self.submit_worker(
+                    session,
+                    session.current_run_number,
+                    session.current_run_token,
+                )
+                if not started:
+                    return self._session_result(
+                        session,
+                        status_code=500,
+                        error_message=(
+                            "Не удалось запустить процесс подключения."
+                            if reason == "CONFIGURATION_ERROR"
+                            else "Системная ошибка запуска подключения."
+                        ),
+                        error_code=(
+                            "configuration_error"
+                            if reason == "CONFIGURATION_ERROR"
+                            else "worker_start_failed"
+                        ),
+                    )
 
             snapshot = self._session_manager.snapshot(session)
             if snapshot is None:
-                return self._error_page(
+                return self._failure_result(
                     "Сессия подключения не найдена.",
                     500,
                     redirect_url=context.redirect_url,
+                    error_code="session_not_found",
                 )
 
-            return render_template(
-                "portal.html",
+            return PortalEntryResult(
                 session_id=session.session_id,
                 redirect_url=session.redirect_url,
-                initial_status=snapshot["status"],
-                initial_progress=snapshot["progress"],
-                initial_state=snapshot,
-                portal_translations=PORTAL_TRANSLATIONS,
-                error_message=None,
+                initial_state=dict(snapshot),
             )
         except ValueError as exc:
             logger.warning(
@@ -121,10 +170,11 @@ class PortalEntryHandler:
                 context.client_mac,
                 exc,
             )
-            return self._error_page(
+            return self._failure_result(
                 "Неверные данные клиента.",
                 400,
                 redirect_url=context.redirect_url,
+                error_code="invalid_context",
             )
         except Exception:
             logger.exception(
@@ -132,32 +182,12 @@ class PortalEntryHandler:
                 context.site_id,
                 context.client_mac,
             )
-            return self._error_page(
+            return self._failure_result(
                 "Внутренняя ошибка сервера.",
                 500,
                 redirect_url=context.redirect_url,
+                error_code="internal_error",
             )
-
-    def _start_worker(self, session):
-        started, reason, error = self.submit_worker(
-            session,
-            session.current_run_number,
-            session.current_run_token,
-        )
-        if started:
-            return None
-
-        if reason == "CONFIGURATION_ERROR":
-            return self._error_page(
-                "Не удалось запустить процесс подключения.",
-                500,
-                session=session,
-            )
-        return self._error_page(
-            "Системная ошибка запуска подключения.",
-            500,
-            session=session,
-        )
 
     def submit_worker(
         self,
@@ -275,43 +305,45 @@ class PortalEntryHandler:
                 error=error,
             )
 
+    def _session_result(
+        self,
+        session,
+        *,
+        status_code: int,
+        error_message: str,
+        error_code: str,
+    ) -> PortalEntryResult:
+        snapshot = self._session_manager.snapshot(session)
+        if snapshot is None:
+            snapshot = session.to_dict()
+        return PortalEntryResult(
+            session_id=session.session_id,
+            redirect_url=session.redirect_url,
+            initial_state=dict(snapshot),
+            status_code=status_code,
+            error_message=error_message,
+            error_code=error_code,
+        )
+
     @staticmethod
-    def _error_page(
+    def _failure_result(
         message: str,
         status_code: int,
         *,
         redirect_url: str | None = None,
-        session=None,
-    ):
-        return render_template(
-            "portal.html",
-            session_id=(
-                session.session_id if session is not None else None
-            ),
-            redirect_url=(
-                session.redirect_url
-                if session is not None
-                else redirect_url
-            ),
-            initial_status=(
-                session.status.value
-                if session is not None
-                else "FAILED"
-            ),
-            initial_progress=(
-                session.progress if session is not None else 100
-            ),
-            initial_state=(
-                session.to_dict()
-                if session is not None
-                else {
-                    "state": "FAILED",
-                    "status": "FAILED",
-                    "retryable": False,
-                    "progress": 100,
-                    "terminal": True,
-                }
-            ),
-            portal_translations=PORTAL_TRANSLATIONS,
+        error_code: str,
+    ) -> PortalEntryResult:
+        return PortalEntryResult(
+            session_id=None,
+            redirect_url=redirect_url,
+            initial_state={
+                "state": "FAILED",
+                "status": "FAILED",
+                "retryable": False,
+                "progress": 100,
+                "terminal": True,
+            },
+            status_code=status_code,
             error_message=message,
-        ), status_code
+            error_code=error_code,
+        )
