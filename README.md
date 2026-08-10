@@ -1,583 +1,354 @@
-# CaptivePortal Core Platform
+# CaptivPortal Core Platform
+
+[Русская версия](README_RU.md)
+
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/)
-[![Status](https://img.shields.io/badge/status-production-ready-brightgreen)]()
-Professional guest access management platform (Captive Portal) for TP-Link Omada controllers. Built on clean architecture principles, modularity, and scalability.
-## 📖 Table of Contents
+[![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://www.python.org/)
+[![Status](https://img.shields.io/badge/status-production%20deployed-blue.svg)]()
+
+CaptivPortal is a Python platform for an external captive portal and related operational services for **TP-Link Omada Controller**.
+
+The project uses one shared authorization flow, a shared `OmadaProvider`, background operational modules, structured telemetry, and persistent visitor data. Independent background components are designed to fail open: their failure must not break the core captive-portal authorization path.
+
+## Contents
+
 - [Overview](#overview)
-- [System Architecture](#system-architecture)
-- [Platform Modules](#platform-modules)
-- [Workflows](#workflows)
-- [Installation & Quick Start](#installation--quick-start)
+- [Architecture](#architecture)
+- [Main modules](#main-modules)
+- [Authorization flow](#authorization-flow)
+- [Pending Session Cleaner](#pending-session-cleaner)
+- [Installation](#installation)
 - [Configuration](#configuration)
-- [Feature Status](#feature-status)
+- [Testing](#testing)
+- [Project knowledge base](#project-knowledge-base)
+- [Current module status](#current-module-status)
+- [Security notes](#security-notes)
+- [License](#license)
+
 ---
-## 🌟 Overview
-CaptivePortal is an enterprise-grade solution for organizing secure guest Wi-Fi access. The platform abstracts business logic from specific hardware, allowing easy feature scaling and new integrations.
-### Key Features
-- ✅ Integration with **TP-Link Omada Controller** (API v1/v2)
-- ✅ Automatic client authorization via portal
-- ✅ Monitoring and cleanup of "stuck" sessions (**Pending Session Cleaner**)
-- ✅ Visitor device registry (**Visitor Device Registry**)
-- ✅ Modular architecture (Clean Architecture)
-- ✅ Strict typing and data validation
-- ✅ Asynchronous background task processing
+
+## Overview
+
+Current platform capabilities include:
+
+- integration with **Omada Software Controller 5.14.31** through Open API;
+- external captive-portal authorization;
+- RFC 8908 CAPPORT support;
+- bounded client discovery before authorization;
+- one shared `AuthSession` / `AuthWorker` authorization flow;
+- cleanup of stale unauthorized sessions through **Pending Session Cleaner**;
+- authorized-client snapshots;
+- persistent **Visitor Registry** storage;
+- public authorization counters;
+- normalized Omada webhook processing;
+- structured JSONL telemetry and journals;
+- observability through Alloy, Loki, and Grafana in the production environment.
+
+Omada API handling follows an important rule:
+
+> HTTP 200 is not sufficient to declare success. The application also validates the JSON `errorCode` and endpoint-specific response structure.
+
 ---
-## 🏗 System Architecture
-The platform is built on the principle of separation of concerns. Each layer knows only about the layer directly beneath it.
-```mermaid
-graph TD
-    subgraph "Web Interface Layer"
-        A[Flask App] -->|HTTP Request| B(Web Routes)
-        B -->|Calls| C(Portal Engine)
-    end
-    subgraph "Business Logic Layer (Engine)"
-        C -->|Delegates| D{Controller Provider}
-        C -->|Session Protection| E[Session Protection]
-        C -->|Session Cleanup| F[Session Cleaner]
-    end
-    subgraph "Data Access Layer"
-        D -->|Omada API| G[Omada Provider]
-        D -->|Mock API| H[Mock Provider]
-        G -->|HTTPS| I[(Omada Controller)]
-    end
-    subgraph "Background Workers"
-        F -->|Scan & Reconnect| G
-        J[Visitor Registry] -->|Snapshot| G
-        K[Traffic Counter] -->|Stats| G
-    end
-    style C fill:#f9f,stroke:#333,stroke-width:2px
-    style D fill:#bbf,stroke:#333,stroke-width:2px
-    style G fill:#bfb,stroke:#333,stroke-width:2px
-```
-### Design Principles
-1.  **Loose Coupling:** Modules interact through interfaces.
-2.  **Dependency Injection (DI):** Dependencies are passed from outside, not created internally.
-3.  **Single Source of Truth:** Configuration and state are stored centrally.
-4.  **Fail-Open:** Errors in secondary modules (Cleaner) should not break core authorization.
----
-## 🧩 Platform Modules
-### 1. Core Platform (`app/core`)
-System foundation. Handles basic functions:
-- Configuration loading
-- Unified logging system
-- Exception handling
-- Entry point (`run.py`)
-### 2. Controller Providers (`app/controllers`)
-Adapters for hardware interaction.
-- **OmadaProvider:** API implementation for TP-Link Omada controllers.
-- **Interface:** Base contract for future providers (UniFi, MikroTik).
-### 3. Portal Engine (`app/engine`)
-Central brain of the system. Handles authorization business logic:
-- Request validation
-- Session state management
-- Coordination between Web and Controller
-### 4. Web Interface (`app/web`)
-Flask-based HTTP server.
-- Serving portal pages (HTML/CSS)
-- Handling CAPPORT requests (RFC 8908)
-- REST API for external systems
-### 5. Pending Session Cleaner (`app/pending_sessions`) ⚡
-Background service for network hygiene.
-- Scanning active clients
-- Detecting unauthorized "stuck" sessions
-- Automatic reconnect (disconnect) of problematic clients
-- Audit logging of all actions
-### 6. Visitor Registry (`app/visitor_registry`)
-Device and visit history registry.
-- Client state snapshots
-- MAC address to device binding
-- Connection history storage
----
-## 🔄 Workflows
-### Client Authorization Flow
-```mermaid
-sequenceDiagram
-    participant Client as Client (Wi-Fi)
-    participant Web as Web Portal
-    participant Engine as Portal Engine
-    participant Omada as Omada Controller
-    Client->>Web: GET / (Portal Intercept)
-    Web->>Client: HTML Login Form
-    
-    Client->>Web: POST /login (MAC, SiteID)
-    Web->>Engine: authorize_client(mac, site)
-    
-    Engine->>Omada: POST /reconnect (or auth)
-    Omada-->>Engine: Result (Success/Fail)
-    
-    Engine-->>Web: Response
-    Web->>Client: Redirect / Success Page
-    Client->>Omada: Internet Access Granted
-```
-### Session Cleaner Algorithm
+
+## Architecture
+
+`run.py` is the composition root: it loads settings, creates the shared `OmadaProvider`, builds the Flask application, wires authorization services and background components, and controls startup/shutdown.
+
 ```mermaid
 flowchart TD
-    Start[Start Scan] --> GetList[Get Client List]
-    GetList --> Validate{List Complete?}
-    Validate -- No --> StopScan[Abort Scan]
-    Validate -- Yes --> Classify[Classify Clients]
-    
-    Classify --> Filter{Active & Unauthorized?}
-    Filter -- No --> NextClient[Next Client]
-    Filter -- Yes --> CheckProtect{Protected by Session?}
-    
-    CheckProtect -- Yes --> Skip[Skip]
-    CheckProtect -- No --> Preflight[Preflight GET]
-    
-    Preflight --> CheckAgain{State Changed?}
-    CheckAgain -- Yes --> Skip
-    CheckAgain -- No --> Audit[Record Action Planned]
-    
-    Audit --> PostReconnect[POST Reconnect]
-    PostReconnect --> Verify[Verify Result]
-    Verify --> LogResult[Record Action Completed]
-    
-    LogResult --> NextClient
-    NextClient --> More{More Clients?}
-    More -- Yes --> Filter
-    More -- No --> Finish[End Scan]
+    Client[Wi-Fi client] --> Entry{Portal entry}
+
+    Entry -->|Omada External Portal| Portal[Portal entry handler]
+    Entry -->|RFC 8908 CAPPORT| Capport[CAPPORT discovery / login]
+    Capport --> Portal
+
+    Portal --> Context[PortalClientContext]
+    Context --> Sessions[AuthSessionManager]
+    Sessions --> Worker[AuthWorker]
+    Worker --> Provider[Shared OmadaProvider]
+    Provider --> Controller[(Omada Controller)]
+
+    Provider --> Cleaner[Pending Session Cleaner]
+    Provider --> Snapshots[Authorized Client Snapshot Collector]
+
+    Snapshots --> Registry[Visitor Registry]
+    Registry --> SQLite[(SQLite)]
+
+    Worker --> Telemetry[Authorization telemetry]
+    Cleaner --> CleanerJournal[Cleaner JSONL journal]
+    Snapshots --> SnapshotJournal[Visitor snapshots JSONL]
+
+    Telemetry --> Observability[Alloy / Loki / Grafana]
+    SnapshotJournal --> Observability
+    CleanerJournal --> Observability
 ```
+
+### Core architectural rules
+
+- Use the existing shared `OmadaProvider`.
+- Do not create a second OAuth/token manager without a separate architectural decision.
+- CAPPORT does not implement a second authorization mechanism.
+- Background modules must not make a failure of an optional subsystem become a portal failure.
+- Runtime configuration follows the existing `app/config.py` → `app/settings.py` → `get_settings()` pipeline.
+- The current production design is **single-process**; process-local session/guard state is an accepted limitation until a future scaling/HA design is approved.
+
 ---
-## 🚀 Installation & Quick Start
-### Requirements
-- Python 3.10+
-- Linux OS (Ubuntu 22.04+ recommended)
-- Access to Omada Controller (API v1/v2)
-### Quick Start
-1.  **Clone repository:**
-    ```bash
-    git clone https://github.com/ZaurNavi/CaptivePortal.git
-    cd CaptivePortal
-    ```
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-3.  **Configure environment:**
-    Copy `.env.example` to `.env` and fill with your controller parameters:
-    ```bash
-    cp .env.example .env
-    nano .env
-    ```
-4.  **Run:**
-    ```bash
-    python3 run.py
-    ```
----
-## ⚙️ Configuration
-Main parameters are configured via environment variables or `.env` file.
-| Parameter | Description | Default |
-| :--- | :--- | :--- |
-| `OMADA_HOST` | Omada controller IP or domain | `localhost` |
-| `OMADA_PORT` | Controller API port | `8043` |
-| `OMADA_USER` | API username | `admin` |
-| `OMADA_PASSWORD` | API user password | - |
-| `CAPPORT_SITE_ID` | Site ID in Omada | - |
-| `PENDING_SESSION_CLEANER_ENABLED` | Enable session cleaner | `false` |
-| `PENDING_SESSION_CLEANER_SSIDS` | SSIDs list for monitoring | `Zefer_Parki` |
-| `LOG_LEVEL` | Logging level | `INFO` |
----
-## 📊 Feature Status
-| Module | Status | Version | Description |
-| :--- | :---: | :---: | :--- |
-| **Core Platform** | ✅ Ready | v1.0 | Foundation, logs, config |
-| **Controller Provider** | ✅ Ready | v1.1 | Interface & Omada implementation |
-| **Result Model** | ✅ Ready | v1.2 | Unified responses |
-| **Portal Engine** | ✅ Ready | v1.0 | Authorization business logic |
-| **Web Interface** | ✅ Ready | v1.0 | Minimal portal |
-| **Session Cleaner** | ✅ Ready | v1.0 | Stuck session cleanup |
-| **Visitor Registry** | 🚧 WIP | v0.9 | Device registry |
----
-## 📄 License
-MIT License. See [LICENSE](LICENSE) file for details.
----
-*Documentation is current as of August 2026 project version.*
-EOF
-echo "README.md (English) created successfully."
-cat > /workspace/README.md << 'EOF'
-# CaptivePortal Core Platform
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/)
-[![Status](https://img.shields.io/badge/status-production-ready-brightgreen)]()
-Professional guest access management platform (Captive Portal) for TP-Link Omada controllers. Built on clean architecture principles, modularity, and scalability.
-## 📖 Table of Contents
-- [Overview](#overview)
-- [System Architecture](#system-architecture)
-- [Platform Modules](#platform-modules)
-- [Workflows](#workflows)
-- [Installation & Quick Start](#installation--quick-start)
-- [Configuration](#configuration)
-- [Feature Status](#feature-status)
----
-## 🌟 Overview
-CaptivePortal is an enterprise-grade solution for organizing secure guest Wi-Fi access. The platform abstracts business logic from specific hardware, allowing easy feature scaling and new integrations.
-### Key Features
-- ✅ Integration with **TP-Link Omada Controller** (API v1/v2)
-- ✅ Automatic client authorization via portal
-- ✅ Monitoring and cleanup of "stuck" sessions (**Pending Session Cleaner**)
-- ✅ Visitor device registry (**Visitor Device Registry**)
-- ✅ Modular architecture (Clean Architecture)
-- ✅ Strict typing and data validation
-- ✅ Asynchronous background task processing
----
-## 🏗 System Architecture
-The platform is built on the principle of separation of concerns. Each layer knows only about the layer directly beneath it.
-```mermaid
-graph TD
-    subgraph "Web Interface Layer"
-        A[Flask App] -->|HTTP Request| B(Web Routes)
-        B -->|Calls| C(Portal Engine)
-    end
-    subgraph "Business Logic Layer (Engine)"
-        C -->|Delegates| D{Controller Provider}
-        C -->|Session Protection| E[Session Protection]
-        C -->|Session Cleanup| F[Session Cleaner]
-    end
-    subgraph "Data Access Layer"
-        D -->|Omada API| G[Omada Provider]
-        D -->|Mock API| H[Mock Provider]
-        G -->|HTTPS| I[(Omada Controller)]
-    end
-    subgraph "Background Workers"
-        F -->|Scan & Reconnect| G
-        J[Visitor Registry] -->|Snapshot| G
-        K[Traffic Counter] -->|Stats| G
-    end
-    style C fill:#f9f,stroke:#333,stroke-width:2px
-    style D fill:#bbf,stroke:#333,stroke-width:2px
-    style G fill:#bfb,stroke:#333,stroke-width:2px
+
+## Main modules
+
+### Authorization
+
+The core authorization path uses `AuthSessionManager` and `AuthWorker`.
+
+Responsibilities include:
+
+- creating and tracking authorization sessions;
+- checking Omada readiness;
+- performing authorization through the shared provider;
+- bounded retry/verification;
+- final session states such as `AUTHORIZED`, `FAILED`, `RESET`, and `EXPIRED`;
+- structured authorization telemetry.
+
+### CAPPORT
+
+CAPPORT provides RFC 8908 integration and captive-portal client discovery.
+
+Current behavior includes:
+
+- source-client validation;
+- bounded waiting for a client to appear in Omada;
+- same-page discovery-to-authorization transition;
+- monotonic connection progress;
+- reuse of the common authorization flow.
+
+After confirmed `AUTHORIZED`, the frontend attempts to close the captive window and performs at most one same-page revalidation/reload fallback. The exact behavior of captive WebViews is OS-dependent and is validated separately in production field tests.
+
+### Pending Session Cleaner
+
+`app/pending_sessions` handles stale unauthorized Omada sessions.
+
+A client can be considered for cleanup only after safety checks, including:
+
+- wireless and active client state;
+- `authStatus == 1`;
+- allowed SSID;
+- minimum session uptime;
+- local authorization protection;
+- fresh preflight state;
+- action rate limits;
+- audit-before-action.
+
+The verified Omada operation is:
+
+```text
+POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/reconnect
 ```
-### Design Principles
-1.  **Loose Coupling:** Modules interact through interfaces.
-2.  **Dependency Injection (DI):** Dependencies are passed from outside, not created internally.
-3.  **Single Source of Truth:** Configuration and state are stored centrally.
-4.  **Fail-Open:** Errors in secondary modules (Cleaner) should not break core authorization.
+
+The Cleaner uses bounded verification and does not use `block/unblock` as an automatic fallback.
+
+### Authorized Client Snapshot Collector
+
+Captures structured snapshots of authorized clients for operational history and downstream Visitor Registry processing.
+
+### Visitor Registry
+
+`app/visitor_registry` maintains persistent device/visit information in SQLite.
+
+The production activation and observability stage has been accepted. Visitor snapshot events are also forwarded to Loki through a dedicated Alloy source for Grafana analysis.
+
+A future **Visit Lifecycle** feature is a separate project stage and is not part of the already completed Visitor Registry activation.
+
+### Public Authorization Counter
+
+Maintains public authorization statistics without replacing the core authorization flow.
+
+### Omada Webhook Normalizer
+
+Normalizes Omada webhook events into the project's structured event model.
+
 ---
-## 🧩 Platform Modules
-### 1. Core Platform (`app/core`)
-System foundation. Handles basic functions:
-- Configuration loading
-- Unified logging system
-- Exception handling
-- Entry point (`run.py`)
-### 2. Controller Providers (`app/controllers`)
-Adapters for hardware interaction.
-- **OmadaProvider:** API implementation for TP-Link Omada controllers.
-- **Interface:** Base contract for future providers (UniFi, MikroTik).
-### 3. Portal Engine (`app/engine`)
-Central brain of the system. Handles authorization business logic:
-- Request validation
-- Session state management
-- Coordination between Web and Controller
-### 4. Web Interface (`app/web`)
-Flask-based HTTP server.
-- Serving portal pages (HTML/CSS)
-- Handling CAPPORT requests (RFC 8908)
-- REST API for external systems
-### 5. Pending Session Cleaner (`app/pending_sessions`) ⚡
-Background service for network hygiene.
-- Scanning active clients
-- Detecting unauthorized "stuck" sessions
-- Automatic reconnect (disconnect) of problematic clients
-- Audit logging of all actions
-### 6. Visitor Registry (`app/visitor_registry`)
-Device and visit history registry.
-- Client state snapshots
-- MAC address to device binding
-- Connection history storage
----
-## 🔄 Workflows
-### Client Authorization Flow
+
+## Authorization flow
+
 ```mermaid
 sequenceDiagram
-    participant Client as Client (Wi-Fi)
-    participant Web as Web Portal
-    participant Engine as Portal Engine
+    participant Client as Wi-Fi Client
+    participant Portal as CaptivPortal
+    participant Sessions as AuthSessionManager
+    participant Worker as AuthWorker
     participant Omada as Omada Controller
-    Client->>Web: GET / (Portal Intercept)
-    Web->>Client: HTML Login Form
-    
-    Client->>Web: POST /login (MAC, SiteID)
-    Web->>Engine: authorize_client(mac, site)
-    
-    Engine->>Omada: POST /reconnect (or auth)
-    Omada-->>Engine: Result (Success/Fail)
-    
-    Engine-->>Web: Response
-    Web->>Client: Redirect / Success Page
-    Client->>Omada: Internet Access Granted
+
+    Client->>Portal: Open captive portal
+    Portal->>Portal: Resolve PortalClientContext
+    Portal->>Sessions: Create/reuse AuthSession
+    Sessions->>Worker: Start authorization work
+    Worker->>Omada: Read client state
+    Omada-->>Worker: active/authStatus/client data
+    Worker->>Omada: Authorize client
+    Omada-->>Worker: HTTP + JSON errorCode/result
+    Worker->>Omada: Final verification
+    Omada-->>Worker: Authorized state
+    Worker-->>Sessions: AUTHORIZED
+    Sessions-->>Portal: Final state / progress 100%
+    Portal-->>Client: Close attempt + bounded same-page revalidation fallback
 ```
-### Session Cleaner Algorithm
+
+---
+
+## Pending Session Cleaner
+
+High-level flow:
+
 ```mermaid
 flowchart TD
-    Start[Start Scan] --> GetList[Get Client List]
-    GetList --> Validate{List Complete?}
-    Validate -- No --> StopScan[Abort Scan]
-    Validate -- Yes --> Classify[Classify Clients]
-    
-    Classify --> Filter{Active & Unauthorized?}
-    Filter -- No --> NextClient[Next Client]
-    Filter -- Yes --> CheckProtect{Protected by Session?}
-    
-    CheckProtect -- Yes --> Skip[Skip]
-    CheckProtect -- No --> Preflight[Preflight GET]
-    
-    Preflight --> CheckAgain{State Changed?}
-    CheckAgain -- Yes --> Skip
-    CheckAgain -- No --> Audit[Record Action Planned]
-    
-    Audit --> PostReconnect[POST Reconnect]
-    PostReconnect --> Verify[Verify Result]
-    Verify --> LogResult[Record Action Completed]
-    
-    LogResult --> NextClient
-    NextClient --> More{More Clients?}
-    More -- Yes --> Filter
-    More -- No --> Finish[End Scan]
+    Start[Start scan] --> List[Read all active clients]
+    List --> Complete{Inventory complete?}
+    Complete -- No --> Partial[Finish partial scan; no reconnect]
+    Complete -- Yes --> Classify[Classify candidates]
+
+    Classify --> Protect1{Local auth protected?}
+    Protect1 -- Yes --> Skip[Skip]
+    Protect1 -- No --> Preflight[Fresh client GET]
+
+    Preflight --> Eligible{Still eligible?}
+    Eligible -- No --> Skip
+    Eligible -- Yes --> Protect2{Protected now?}
+
+    Protect2 -- Yes --> Skip
+    Protect2 -- No --> Audit[Write and flush action.planned]
+    Audit --> Guard{Action guard allows POST?}
+    Guard -- No --> Skip
+    Guard -- Yes --> Reconnect[POST reconnect]
+    Reconnect --> Verify[Bounded verification]
+    Verify --> CompleteAction[Write action.completed]
 ```
+
 ---
-## 🚀 Installation & Quick Start
+
+## Installation
+
 ### Requirements
+
 - Python 3.10+
-- Linux OS (Ubuntu 22.04+ recommended)
-- Access to Omada Controller (API v1/v2)
-### Quick Start
-1.  **Clone repository:**
-    ```bash
-    git clone https://github.com/ZaurNavi/CaptivePortal.git
-    cd CaptivePortal
-    ```
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-3.  **Configure environment:**
-    Copy `.env.example` to `.env` and fill with your controller parameters:
-    ```bash
-    cp .env.example .env
-    nano .env
-    ```
-4.  **Run:**
-    ```bash
-    python3 run.py
-    ```
----
-## ⚙️ Configuration
-Main parameters are configured via environment variables or `.env` file.
-| Parameter | Description | Default |
-| :--- | :--- | :--- |
-| `OMADA_HOST` | Omada controller IP or domain | `localhost` |
-| `OMADA_PORT` | Controller API port | `8043` |
-| `OMADA_USER` | API username | `admin` |
-| `OMADA_PASSWORD` | API user password | - |
-| `CAPPORT_SITE_ID` | Site ID in Omada | - |
-| `PENDING_SESSION_CLEANER_ENABLED` | Enable session cleaner | `false` |
-| `PENDING_SESSION_CLEANER_SSIDS` | SSIDs list for monitoring | `Zefer_Parki` |
-| `LOG_LEVEL` | Logging level | `INFO` |
----
-## 📊 Feature Status
-| Module | Status | Version | Description |
-| :--- | :---: | :---: | :--- |
-| **Core Platform** | ✅ Ready | v1.0 | Foundation, logs, config |
-| **Controller Provider** | ✅ Ready | v1.1 | Interface & Omada implementation |
-| **Result Model** | ✅ Ready | v1.2 | Unified responses |
-| **Portal Engine** | ✅ Ready | v1.0 | Authorization business logic |
-| **Web Interface** | ✅ Ready | v1.0 | Minimal portal |
-| **Session Cleaner** | ✅ Ready | v1.0 | Stuck session cleanup |
-| **Visitor Registry** | 🚧 WIP | v0.9 | Device registry |
----
-## 📄 License
-MIT License. See [LICENSE](LICENSE) file for details.
----
-*Documentation is current as of August 2026 project version.*
-EOF
-echo "README.md (English) created successfully."
-cat > /workspace/README.md << 'EOF'
-# CaptivePortal Core Platform
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10+-green.svg)](https://www.python.org/)
-[![Status](https://img.shields.io/badge/status-production-ready-brightgreen)]()
-Professional guest access management platform (Captive Portal) for TP-Link Omada controllers. Built on clean architecture principles, modularity, and scalability.
-## 📖 Table of Contents
-- [Overview](#overview)
-- [System Architecture](#system-architecture)
-- [Platform Modules](#platform-modules)
-- [Workflows](#workflows)
-- [Installation & Quick Start](#installation--quick-start)
-- [Configuration](#configuration)
-- [Feature Status](#feature-status)
----
-## 🌟 Overview
-CaptivePortal is an enterprise-grade solution for organizing secure guest Wi-Fi access. The platform abstracts business logic from specific hardware, allowing easy feature scaling and new integrations.
-### Key Features
-- ✅ Integration with **TP-Link Omada Controller** (API v1/v2)
-- ✅ Automatic client authorization via portal
-- ✅ Monitoring and cleanup of "stuck" sessions (**Pending Session Cleaner**)
-- ✅ Visitor device registry (**Visitor Device Registry**)
-- ✅ Modular architecture (Clean Architecture)
-- ✅ Strict typing and data validation
-- ✅ Asynchronous background task processing
----
-## 🏗 System Architecture
-The platform is built on the principle of separation of concerns. Each layer knows only about the layer directly beneath it.
-```mermaid
-graph TD
-    subgraph "Web Interface Layer"
-        A[Flask App] -->|HTTP Request| B(Web Routes)
-        B -->|Calls| C(Portal Engine)
-    end
-    subgraph "Business Logic Layer (Engine)"
-        C -->|Delegates| D{Controller Provider}
-        C -->|Session Protection| E[Session Protection]
-        C -->|Session Cleanup| F[Session Cleaner]
-    end
-    subgraph "Data Access Layer"
-        D -->|Omada API| G[Omada Provider]
-        D -->|Mock API| H[Mock Provider]
-        G -->|HTTPS| I[(Omada Controller)]
-    end
-    subgraph "Background Workers"
-        F -->|Scan & Reconnect| G
-i        J[Visitor Registry] -->|Snapshot| G
-        K[Traffic Counter] -->|Stats| G
-    end
-o    style C fill:#f9f,stroke:#333,stroke-width:2px
-    style D fill:#bbf,stroke:#333,stroke-width:2px
-    style G fill:#bfb,stroke:#333,stroke-width:2px
+- Linux (Ubuntu 22.04 is the current production family)
+- network access to an Omada Controller
+- project dependencies from `requirements.txt`
+
+### Clone and install
+
+```bash
+git clone https://github.com/ZaurNavi/CaptivePortal.git
+cd CaptivePortal
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
-### Design Principles
-1.  **Loose Coupling:** Modules interact through interfaces.
-2.  **Dependency Injection (DI):** Dependencies are passed from outside, not created internally.
-3.  **Single Source of Truth:** Configuration and state are stored centrally.
-4.  **Fail-Open:** Errors in secondary modules (Cleaner) should not break core authorization.
----
-## 🧩 Platform Modules
-### 1. Core Platform (`app/core`)
-System foundation. Handles basic functions:
-- Configuration loading
-- Unified logging system
-- Exception handling
-- Entry point (`run.py`)
-### 2. Controller Providers (`app/controllers`)
-Adapters for hardware interaction.
-- **OmadaProvider:** API implementation for TP-Link Omada controllers.
-- **Interface:** Base contract for future providers (UniFi, MikroTik).
-### 3. Portal Engine (`app/engine`)
-Central brain of the system. Handles authorization business logic:
-- Request validation
-- Session state management
-- Coordination between Web and Controller
-### 4. Web Interface (`app/web`)
-Flask-based HTTP server.
-- Serving portal pages (HTML/CSS)
-- Handling CAPPORT requests (RFC 8908)
-- REST API for external systems
-### 5. Pending Session Cleaner (`app/pending_sessions`) ⚡
-Background service for network hygiene.
-- Scanning active clients
-- Detecting unauthorized "stuck" sessions
-- Automatic reconnect (disconnect) of problematic clients
-- Audit logging of all actions
-### 6. Visitor Registry (`app/visitor_registry`)
-Device and visit history registry.
-- Client state snapshots
-- MAC address to device binding
-- Connection history storage
----
-## 🔄 Workflows
-### Client Authorization Flow
-```mermaid
-sequenceDiagram
-    participant Client as Client (Wi-Fi)
-    participant Web as Web Portal
-    participant Engine as Portal Engine
-    participant Omada as Omada Controller
-    Client->>Web: GET / (Portal Intercept)
-    Web->>Client: HTML Login Form
-    Client->>Web: POST /login (MAC, SiteID)
-    Web->>Engine: authorize_client(mac, site)
-    Engine->>Omada: POST /reconnect (or auth)
-    Omada-->>Engine: Result (Success/Fail)
-    Engine-->>Web: Response
-    Web->>Client: Redirect / Success Page
-    Client->>Omada: Internet Access Granted
+
+### Run locally
+
+Prepare the required process environment first, then run:
+
+```bash
+python3 run.py
 ```
-### Session Cleaner Algorithm
-```mermaid
-flowchart TD
-    Start[Start Scan] --> GetList[Get Client List]
-    GetList --> Validate{List Complete?}
-    Validate -- No --> StopScan[Abort Scan]
-    Validate -- Yes --> Classify[Classify Clients]
-    Classify --> Filter{Active & Unauthorized?}
-    Filter -- No --> NextClient[Next Client]
-    Filter -- Yes --> CheckProtect{Protected by Session?}
-    CheckProtect -- Yes --> Skip[Skip]
-    CheckProtect -- No --> Preflight[Preflight GET]
-    Preflight --> CheckAgain{State Changed?}
-    CheckAgain -- Yes --> Skip
-    CheckAgain -- No --> Audit[Record Action Planned]
-    Audit --> PostReconnect[POST Reconnect]
-    PostReconnect --> Verify[Verify Result]
-    Verify --> LogResult[Record Action Completed]
-    LogResult --> NextClient
-    NextClient --> More{More Clients?}
-    More -- Yes --> Filter
-    More -- No --> Finish[End Scan]
+
+Production uses the system service `captive-portal.service` and deployment-specific environment configuration.
+
+---
+
+## Configuration
+
+Production Omada credentials are **not stored as literals in the current Git tree**.
+
+The core Omada configuration contract uses these environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `OMADA_URL` | Omada Controller base URL |
+| `OMADA_ID` | Omada Controller ID (`omadacId`) |
+| `OMADA_CLIENT_ID` | Open API client ID |
+| `OMADA_CLIENT_SECRET` | Open API client secret |
+| `CAPPORT_SITE_ID` | Omada site used by CAPPORT/application flows |
+
+Additional module settings are documented in `.env.example` and the module documentation.
+
+> `.env.example` is a reference template. The application does **not** automatically load a local `.env` file; production configuration is supplied by the process environment / approved deployment mechanism.
+
+Examples must use placeholders only. Never commit real controller credentials.
+
+---
+
+## Testing
+
+Run targeted tests for the module being changed first.
+
+The repository-level gate is:
+
+```bash
+python -m pytest -q -rs
+python -m compileall -q app
+git diff --check
 ```
+
+A historical green Linux baseline exists, but release-quality status must always be tied to the exact commit being tested. Do not claim a current full gate is green unless it was actually executed on that revision.
+
+Tests must not depend on real production Omada credentials or a real controller.
+
 ---
-## 🚀 Installation & Quick Start
-### Requirements
-- Python 3.10+
-- Linux OS (Ubuntu 22.04+ recommended)
-- Access to Omada Controller (API v1/v2)
-### Quick Start
-1.  **Clone repository:**
-    ```bash
-    git clone https://github.com/ZaurNavi/CaptivePortal.git
-    cd CaptivePortal
-    ```
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-3.  **Configure environment:**
-    Copy `.env.example` to `.env` and fill with your controller parameters:
-    ```bash
-    cp .env.example .env
-    nano .env
-    ```
-4.  **Run:**
-    ```bash
-    python3 run.py
-    ```
+
+## Project knowledge base
+
+The repository contains a permanent knowledge base for developers and coding agents.
+
+Start with:
+
+- [`AGENTS.md`](AGENTS.md) — universal repository rules;
+- [`docs/README.md`](docs/README.md) — documentation index;
+- [`docs/architecture.md`](docs/architecture.md) — current architecture;
+- [`docs/module-index.md`](docs/module-index.md) — module map and status;
+- [`docs/testing.md`](docs/testing.md) — test strategy;
+- [`docs/deployment.md`](docs/deployment.md) — deployment contract;
+- [`docs/security.md`](docs/security.md) — security rules.
+
+The current TASK defines scope. Historical reports and old specifications are evidence/history, not a replacement for current code, tests, and module contracts.
+
 ---
-## ⚙️ Configuration
-Main parameters are configured via environment variables or `.env` file.
-| Parameter | Description | Default |
-| :--- | :--- | :--- |
-| `OMADA_HOST` | Omada controller IP or domain | `localhost` |
-| `OMADA_PORT` | Controller API port | `8043` |
-| `OMADA_USER` | API username | `admin` |
-| `OMADA_PASSWORD` | API user password | - |
-| `CAPPORT_SITE_ID` | Site ID in Omada | - |
-| `PENDING_SESSION_CLEANER_ENABLED` | Enable session cleaner | `false` |
-| `PENDING_SESSION_CLEANER_SSIDS` | SSIDs list for monitoring | `Zefer_Parki` |
-| `LOG_LEVEL` | Logging level | `INFO` |
+
+## Current module status
+
+| Area | Status | Notes |
+|---|---|---|
+| Core Flask platform | ✅ Active | Production service is deployed |
+| Shared OmadaProvider | ✅ Active | OAuth `client_credentials`, shared token lifecycle |
+| Authorization / AuthSession / AuthWorker | ✅ Active | Common authorization path |
+| CAPPORT | ✅ Active | Bounded discovery and same-page transition |
+| Pending Session Cleaner | ✅ Active | Production cleanup with safety guards and audit |
+| Authorized Client Snapshot Collector | ✅ Active | Produces structured visitor snapshots |
+| Visitor Registry | ✅ Active | Production/observability stage accepted |
+| Public Authorization Counter | ✅ Active | Operational counter module |
+| Omada Webhook Normalizer | ✅ Implemented | Structured webhook normalization |
+| Visit Lifecycle | ⏳ Planned | Separate future functional stage |
+| GitHub CI | ⚠️ Not yet implemented | Full gate is currently a manual Linux operation |
+
+Operational debts and accepted limitations are tracked separately from this stable README.
+
 ---
-## 📊 Feature Status
-| Module | Status | Version | Description |
-| :--- | :---: | :---: | :--- |
-| **Core Platform** | ✅ Ready | v1.0 | Foundation, logs, config |
-| **Controller Provider** | ✅ Ready | v1.1 | Interface & Omada implementation |
-| **Result Model** | ✅ Ready | v1.2 | Unified responses |
-| **Portal Engine** | ✅ Ready | v1.0 | Authorization business logic |
-| **Web Interface** | ✅ Ready | v1.0 | Minimal portal |
-| **Session Cleaner** | ✅ Ready | v1.0 | Stuck session cleanup |
-| **Visitor Registry** | 🚧 WIP | v0.9 | Device registry |
+
+## Security notes
+
+- Never commit `OMADA_CLIENT_SECRET`, access tokens, cookies, or Authorization headers.
+- Never log Wi-Fi passwords or complete sensitive Omada `/override` responses.
+- Full MAC addresses are intentionally preserved in technical logs and operational data.
+- Omada HTTP status and JSON `errorCode` are validated separately.
+- The previous Omada Client Secret was removed from the current tree, but secret rotation is a separate owner-controlled security action because historical Git content may still contain old values.
+- TLS verification toward Omada remains an operations/security item until a trusted certificate model is deployed.
+
 ---
-## 📄 License
-MIT License. See [LICENSE](LICENSE) file for details.
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
+
 ---
-*Documentation is current as of August 2026 project version.*
+
+*README synchronized with the CaptivPortal project state documented in August 2026.*
