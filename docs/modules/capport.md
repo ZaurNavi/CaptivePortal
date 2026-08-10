@@ -1,7 +1,7 @@
 # CAPPORT
 
 Status: active
-Updated: 2026-08-04
+Updated: 2026-08-10
 
 ## 1. Назначение
 
@@ -21,15 +21,34 @@ Guest source IP, configured site, CAPPORT API/login request.
 
 ## 5. Выходные данные
 
-application/captive+json state, redirect/login response или controlled error.
+application/captive+json state, HTML portal, discovery JSON envelope,
+`AUTH_SESSION` JSON envelope или controlled error.
 
 Если `/capport/login` временно не может определить client, endpoint
 возвращает HTTP 200 с режимом `CAPPORT_DISCOVERY`, не создавая AuthSession и
-не запуская AuthWorker. Страница повторяет lookup полной навигацией через
-`window.location.replace()` каждые две секунды в пределах server-bounded
-deadline до 60 секунд; после истечения доступен ручной retry. После обнаружения
-client запрос входит в штатный `PortalClientContext → AuthSessionManager →
-AuthWorker` flow.
+не запуская AuthWorker. Открытая страница повторяет lookup последовательными
+`fetch()`-запросами без reload и без параллельных запросов в пределах текущего
+server-bounded deadline до 60 секунд. После истечения автоматический polling
+останавливается, а ручной retry через `restart_url` начинает новый bounded
+cycle на той же странице.
+
+JSON negotiation для `/capport/login` строгий: JSON включается только явным
+media range `application/json` с `q>0`. Wildcard, отсутствующий `Accept`,
+обычный browser `Accept` и `application/json;q=0` сохраняют HTML-ответ.
+
+Discovery JSON всегда содержит `mode`, `state/status`, `terminal`, `retryable`,
+`auto_retry`, `remaining_seconds`, `retry_interval_ms`, `retry_url` и
+`restart_url`. До фактического создания AuthSession поле `session_id` не
+возвращается. Not-found возвращает 200; lookup failure — 503 с
+`error=lookup_failed`; invalid context и source IP вне allowlist — терминальные
+400/403. Все login-ответы запрещают кэширование.
+
+После обнаружения client тот же запрос входит в штатный
+`PortalClientContext → AuthSessionManager → AuthWorker` flow и возвращает
+`AUTH_SESSION` envelope с authoritative `initial_state`. Валидный controlled
+500 после worker-start failure также сохраняет `session_id` и фактический
+snapshot, поэтому frontend окончательно прекращает discovery и использует
+существующий retry/final UI.
 
 ## 6. Основные модели
 
@@ -63,12 +82,10 @@ capport.api_request, client_resolved/not_found, lookup_failed, state_response, p
 
 Service/blueprint создаются в create_app() с общим controller.
 
-Бесшовный discovery на одной открытой странице через `fetch()` не входит в
-текущий контракт и отложен до оценки production-эффекта текущей реализации.
-
 ## 14. Тесты
 
-tests/test_capport_routes.py, test_capport_service.py, test_capport_telemetry.py, test_proxy_headers.py.
+tests/test_capport_routes.py, test_capport_discovery_frontend.py,
+test_capport_service.py, test_capport_telemetry.py, test_proxy_headers.py.
 
 ## 15. Запрещённые изменения
 

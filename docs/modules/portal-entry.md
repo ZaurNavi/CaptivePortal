@@ -1,7 +1,7 @@
 # Portal entry
 
 Status: active
-Updated: 2026-08-04
+Updated: 2026-08-10
 
 ## 1. Назначение
 
@@ -21,11 +21,12 @@ site, clientMac или clientIp, apMac, ssid, redirectUrl, radioId.
 
 ## 5. Выходные данные
 
-portal.html, JSON session state, retry response или controlled 4xx/5xx.
+portal.html, structured `PortalEntryResult`, JSON session state, retry response
+или controlled 4xx/5xx.
 
 ## 6. Основные модели
 
-PortalClientContext, PortalEntryHandler, AuthSession.
+PortalClientContext, PortalEntryResult, PortalEntryHandler, AuthSession.
 
 ## 7. Зависимости
 
@@ -55,9 +56,21 @@ Portal request, auth session и worker events.
 
 Routes создаются в create_app(); worker submit идёт в shared executor.
 
+`PortalEntryHandler.prepare_portal()` является единственной точкой
+create/reuse, counter, telemetry и worker submit. HTML wrapper
+`open_portal()` только рендерит полученный structured result; CAPPORT JSON
+wrapper сериализует тот же результат. Поэтому один HTTP-запрос не может
+повторно создать session, увеличить portal counter или запустить второй worker.
+
+При worker-start failure authoritative snapshot менеджера возвращается вместе
+с уже созданным `session_id`: `WORKER_START_FAILED` остаётся retryable, а
+`CONFIGURATION_ERROR` terminal/non-retryable. Wrapper не подменяет эти признаки
+собственными значениями.
+
 ## 14. Тесты
 
-tests/test_portal_entry.py, test_portal_design.py, test_proxy_headers.py, auth retry frontend.
+tests/test_portal_entry.py, test_portal_design.py, test_proxy_headers.py,
+test_capport_discovery_frontend.py, auth retry frontend.
 
 ## 15. Запрещённые изменения
 

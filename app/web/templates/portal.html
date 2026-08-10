@@ -884,31 +884,39 @@ Wi-Fi!!</p>
     </main>
 
     <script>
-        const sessionId = {{ session_id | default(none) | tojson }};
-        const redirectUrl = {{ redirect_url | default(none) | tojson }};
+        let sessionId = {{ session_id | default(none) | tojson }};
+        let redirectUrl = {{ redirect_url | default(none) | tojson }};
         const initialState = {{ initial_state | default({}) | tojson }};
         const translations = {{ portal_translations | default({}) | tojson }};
-        const discoveryRetryUrl =
-            {{ retry_url | default(none) | tojson }};
-        const discoveryRestartUrl =
-            {{ restart_url | default(none) | tojson }};
-        const discoveryAutoRetry =
-            {{ auto_retry | default(false) | tojson }};
-        const discoveryRetryIntervalMs = Number(
-            {{ retry_interval_ms | default(2000) | tojson }}
-        );
-        const discoveryInitialRemainingSeconds = Math.max(
-            0,
-            Number(
-                {{ remaining_seconds | default(0) | tojson }}
-            ) || 0
-        );
+        const discoveryInitial = {
+            "retry_url": {{ retry_url | default(none) | tojson }},
+            "restart_url": {{ restart_url | default(none) | tojson }},
+            "auto_retry": {{ auto_retry | default(false) | tojson }},
+            "retry_interval_ms": {{ retry_interval_ms | default(2000) | tojson }},
+            "remaining_seconds": {{ remaining_seconds | default(0) | tojson }}
+        };
+        let discoveryRuntime = {
+            retryUrl: discoveryInitial.retry_url,
+            restartUrl: discoveryInitial.restart_url,
+            autoRetry: discoveryInitial.auto_retry,
+            retryIntervalMs: Number(discoveryInitial.retry_interval_ms),
+            remainingSeconds: Math.max(
+                0,
+                Number(discoveryInitial.remaining_seconds) || 0
+            )
+        };
         const activeStatuses = new Set([
             "WAITING",
             "AUTHORIZING",
             "VERIFYING",
             "RESETTING",
             "RESET"
+        ]);
+        const recognizedSessionStatuses = new Set([
+            ...activeStatuses,
+            "AUTHORIZED",
+            "FAILED",
+            "EXPIRED"
         ]);
 
         const langButtons = document.querySelectorAll(
@@ -972,9 +980,13 @@ Wi-Fi!!</p>
         let consecutivePollingErrors = 0;
         let discoveryStartedAt = null;
         let discoveryCountdownTimer = null;
-        let discoveryNavigationTimer = null;
+        let discoveryRequestTimer = null;
+        let discoveryRequestInFlight = false;
+        let discoveryGeneration = 0;
+        let pageActive = true;
+        let discoveryHasLookupError = false;
 
-        const isDiscoveryMode = (
+        let isDiscoveryMode = (
             (sessionId === null || sessionId === undefined)
             && (
                 initialState.mode === "CAPPORT_DISCOVERY"
@@ -1061,7 +1073,7 @@ Wi-Fi!!</p>
         function getDiscoverySecondsLeft() {
             if (discoveryStartedAt === null) {
                 return Math.ceil(
-                    discoveryInitialRemainingSeconds
+                    discoveryRuntime.remainingSeconds
                 );
             }
 
@@ -1071,7 +1083,7 @@ Wi-Fi!!</p>
             return Math.max(
                 0,
                 Math.ceil(
-                    discoveryInitialRemainingSeconds
+                    discoveryRuntime.remainingSeconds
                     - elapsedSeconds
                 )
             );
@@ -1097,13 +1109,15 @@ Wi-Fi!!</p>
 
                 progressShell.classList.remove("hidden");
                 progressSpinner.classList.remove("hidden");
-                portalNote.textContent = texts.discoveryNote;
+                portalNote.textContent = discoveryHasLookupError
+                    ? texts.pollingError
+                    : texts.discoveryNote;
                 progressText.textContent = `${secondsLeft}s`;
                 showError(null);
 
-                if (!discoveryAutoRetry || secondsLeft <= 0) {
+                if (!discoveryRuntime.autoRetry || secondsLeft <= 0) {
                     retryButton.classList.remove("hidden");
-                    retryButton.disabled = false;
+                    retryButton.disabled = discoveryRequestInFlight;
                 }
                 return;
             }
@@ -1176,46 +1190,297 @@ Wi-Fi!!</p>
                 clearInterval(discoveryCountdownTimer);
                 discoveryCountdownTimer = null;
             }
-            if (discoveryNavigationTimer !== null) {
-                clearTimeout(discoveryNavigationTimer);
-                discoveryNavigationTimer = null;
+            if (discoveryRequestTimer !== null) {
+                clearTimeout(discoveryRequestTimer);
+                discoveryRequestTimer = null;
             }
         }
 
-        function startDiscovery() {
+        function resetDiscoveryClock(remainingSeconds) {
+            discoveryRuntime.remainingSeconds = Math.max(
+                0,
+                Number(remainingSeconds) || 0
+            );
             discoveryStartedAt = performance.now();
+        }
+
+        function startDiscoveryCountdown() {
+            if (discoveryCountdownTimer !== null) {
+                clearInterval(discoveryCountdownTimer);
+            }
+            discoveryCountdownTimer = window.setInterval(
+                () => renderState(currentState),
+                250
+            );
+        }
+
+        function scheduleDiscoveryRequest(delay) {
+            if (
+                !pageActive
+                || !isDiscoveryMode
+                || discoveryRequestInFlight
+                || !discoveryRuntime.autoRetry
+                || !discoveryRuntime.retryUrl
+            ) {
+                return;
+            }
+            const secondsLeft = getDiscoverySecondsLeft();
+            if (secondsLeft <= 0) {
+                discoveryRuntime.autoRetry = false;
+                renderState(currentState);
+                return;
+            }
+            if (discoveryRequestTimer !== null) {
+                clearTimeout(discoveryRequestTimer);
+            }
+            discoveryRequestTimer = window.setTimeout(
+                () => {
+                    discoveryRequestTimer = null;
+                    requestDiscovery(discoveryRuntime.retryUrl, false);
+                },
+                Math.min(delay, secondsLeft * 1000)
+            );
+        }
+
+        function startDiscovery() {
+            resetDiscoveryClock(discoveryRuntime.remainingSeconds);
             renderState(currentState);
 
             if (
-                !discoveryAutoRetry
-                || discoveryInitialRemainingSeconds <= 0
-                || !discoveryRetryUrl
+                !discoveryRuntime.autoRetry
+                || discoveryRuntime.remainingSeconds <= 0
+                || !discoveryRuntime.retryUrl
             ) {
                 return;
             }
 
             const configuredInterval = (
-                Number.isFinite(discoveryRetryIntervalMs)
-                && discoveryRetryIntervalMs > 0
+                Number.isFinite(discoveryRuntime.retryIntervalMs)
+                && discoveryRuntime.retryIntervalMs > 0
             )
-                ? discoveryRetryIntervalMs
+                ? discoveryRuntime.retryIntervalMs
                 : 2000;
-            const navigationDelay = Math.min(
-                configuredInterval,
-                discoveryInitialRemainingSeconds * 1000
-            );
+            startDiscoveryCountdown();
+            scheduleDiscoveryRequest(configuredInterval);
+        }
 
-            discoveryCountdownTimer = window.setInterval(
-                () => renderState(currentState),
-                250
+        function isObject(value) {
+            return (
+                value !== null
+                && typeof value === "object"
+                && !Array.isArray(value)
             );
-            discoveryNavigationTimer = window.setTimeout(
-                () => {
-                    stopDiscoveryTimers();
-                    window.location.replace(discoveryRetryUrl);
-                },
-                navigationDelay
+        }
+
+        function sessionStatus(state) {
+            if (!isObject(state)) {
+                return null;
+            }
+            const status = state.state || state.status;
+            return (
+                typeof status === "string"
+                && recognizedSessionStatuses.has(status)
+            )
+                ? status
+                : null;
+        }
+
+        function isValidAuthEnvelope(payload) {
+            if (
+                !isObject(payload)
+                || payload.mode !== "AUTH_SESSION"
+                || typeof payload.session_id !== "string"
+                || payload.session_id.trim().length === 0
+                || !isObject(payload.initial_state)
+                || sessionStatus(payload.initial_state) === null
+                || !(
+                    payload.redirect_url === null
+                    || typeof payload.redirect_url === "string"
+                )
+            ) {
+                return false;
+            }
+            const nestedSessionId = payload.initial_state.session_id;
+            return (
+                nestedSessionId === undefined
+                || nestedSessionId === payload.session_id
             );
+        }
+
+        function isValidDiscoveryEnvelope(payload, statusCode) {
+            if (
+                !isObject(payload)
+                || payload.mode !== "CAPPORT_DISCOVERY"
+                || Object.prototype.hasOwnProperty.call(
+                    payload,
+                    "session_id"
+                )
+            ) {
+                return false;
+            }
+            const status = payload.state || payload.status;
+            if (status === "FAILED") {
+                return (
+                    (statusCode === 400 || statusCode === 403)
+                    && payload.terminal === true
+                    && payload.retryable === false
+                    && payload.auto_retry === false
+                    && payload.retry_url === null
+                    && payload.restart_url === null
+                    && Number(payload.remaining_seconds) === 0
+                );
+            }
+            return (
+                status === "DISCOVERING_CLIENT"
+                && (statusCode === 200 || statusCode === 503)
+                && payload.terminal === false
+                && payload.retryable === true
+                && typeof payload.auto_retry === "boolean"
+                && Number.isFinite(Number(payload.remaining_seconds))
+                && Number(payload.remaining_seconds) >= 0
+                && Number.isFinite(Number(payload.retry_interval_ms))
+                && Number(payload.retry_interval_ms) > 0
+                && typeof payload.retry_url === "string"
+                && payload.retry_url.length > 0
+                && typeof payload.restart_url === "string"
+                && payload.restart_url.length > 0
+                && (
+                    statusCode !== 503
+                    || payload.error === "lookup_failed"
+                )
+            );
+        }
+
+        function applyDiscoveryEnvelope(payload) {
+            discoveryRuntime = {
+                retryUrl: payload.retry_url,
+                restartUrl: payload.restart_url,
+                autoRetry: payload.auto_retry,
+                retryIntervalMs: Number(payload.retry_interval_ms),
+                remainingSeconds: Number(payload.remaining_seconds)
+            };
+            discoveryHasLookupError = payload.error === "lookup_failed";
+            currentState = {
+                ...currentState,
+                status: "DISCOVERING_CLIENT",
+                progress: clampProgress(payload.progress),
+                terminal: false,
+                retryable: true
+            };
+            resetDiscoveryClock(discoveryRuntime.remainingSeconds);
+            if (
+                discoveryRuntime.autoRetry
+                && discoveryRuntime.remainingSeconds > 0
+            ) {
+                startDiscoveryCountdown();
+            } else {
+                stopDiscoveryTimers();
+            }
+            renderState(currentState);
+        }
+
+        function applyTerminalDiscoveryEnvelope(payload) {
+            stopDiscoveryTimers();
+            discoveryGeneration += 1;
+            isDiscoveryMode = false;
+            discoveryHasLookupError = false;
+            currentState = {
+                ...currentState,
+                status: "FAILED",
+                progress: clampProgress(payload.progress),
+                terminal: true,
+                retryable: false
+            };
+            renderState(currentState);
+        }
+
+        function transitionToAuth(payload) {
+            stopDiscoveryTimers();
+            discoveryGeneration += 1;
+            isDiscoveryMode = false;
+            discoveryHasLookupError = false;
+            sessionId = payload.session_id;
+            redirectUrl = payload.redirect_url;
+            applyServerState(payload.initial_state);
+            if (activeStatuses.has(currentState.status)) {
+                schedulePoll(0);
+            }
+        }
+
+        async function requestDiscovery(url, restarting) {
+            if (
+                !pageActive
+                || !isDiscoveryMode
+                || discoveryRequestInFlight
+                || typeof url !== "string"
+                || url.length === 0
+            ) {
+                return;
+            }
+
+            discoveryRequestInFlight = true;
+            retryButton.disabled = true;
+            retryButton.classList.add("hidden");
+            const requestGeneration = discoveryGeneration;
+            let scheduleNext = false;
+
+            try {
+                const response = await fetch(url, {
+                    method: "GET",
+                    cache: "no-store",
+                    headers: {
+                        "Accept": "application/json"
+                    }
+                });
+                const payload = await response.json();
+                if (
+                    !pageActive
+                    || requestGeneration !== discoveryGeneration
+                ) {
+                    return;
+                }
+                if (
+                    (response.status === 200 || response.status === 500)
+                    && isValidAuthEnvelope(payload)
+                ) {
+                    transitionToAuth(payload);
+                    return;
+                }
+                if (!isValidDiscoveryEnvelope(payload, response.status)) {
+                    throw new Error("Invalid discovery response");
+                }
+                if ((payload.state || payload.status) === "FAILED") {
+                    applyTerminalDiscoveryEnvelope(payload);
+                    return;
+                }
+                applyDiscoveryEnvelope(payload);
+                scheduleNext = payload.auto_retry;
+            } catch (error) {
+                console.debug("Client discovery failed", error);
+                discoveryHasLookupError = true;
+                if (restarting) {
+                    discoveryRuntime.autoRetry = false;
+                }
+                scheduleNext = (
+                    !restarting
+                    && discoveryRuntime.autoRetry
+                    && getDiscoverySecondsLeft() > 0
+                );
+            } finally {
+                discoveryRequestInFlight = false;
+                if (
+                    pageActive
+                    && isDiscoveryMode
+                    && requestGeneration === discoveryGeneration
+                ) {
+                    renderState(currentState);
+                    if (scheduleNext) {
+                        scheduleDiscoveryRequest(
+                            discoveryRuntime.retryIntervalMs
+                        );
+                    }
+                }
+            }
         }
 
         function handleAuthorized() {
@@ -1457,9 +1722,9 @@ Wi-Fi!!</p>
         retryButton.addEventListener("click", () => {
             if (isDiscoveryMode) {
                 stopDiscoveryTimers();
-                window.location.replace(
-                    discoveryRestartUrl
-                    || window.location.pathname
+                requestDiscovery(
+                    discoveryRuntime.restartUrl,
+                    true
                 );
                 return;
             }
@@ -1474,6 +1739,15 @@ Wi-Fi!!</p>
                 )
             );
         });
+
+        if (typeof window.addEventListener === "function") {
+            window.addEventListener("pagehide", () => {
+                pageActive = false;
+                discoveryGeneration += 1;
+                stopDiscoveryTimers();
+                stopPolling();
+            });
+        }
 
         {% if error_message %}
         portalError.dataset.serverError = "true";

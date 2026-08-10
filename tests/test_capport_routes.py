@@ -18,7 +18,7 @@ from app.capport.routes import (
 from app.capport.service import CapportService
 from app.controllers.omada import OmadaProvider
 from app.models import Result
-from app.web.portal_entry import PortalClientContext
+from app.web.portal_entry import PortalClientContext, PortalEntryResult
 
 
 class NoopTelemetry:
@@ -113,13 +113,10 @@ def javascript_constant(page, name):
 
 
 def discovery_remaining_seconds(page):
-    match = re.search(
-        r"const discoveryInitialRemainingSeconds = Math\.max\("
-        r"\s*0,\s*Number\(\s*(\d+)\s*\)",
+    return javascript_constant(
         page,
-    )
-    assert match is not None
-    return int(match.group(1))
+        "discoveryInitial",
+    )["remaining_seconds"]
 
 
 def test_unauthorized_api_response_has_rfc_media_and_no_store():
@@ -438,10 +435,92 @@ def test_login_not_found_renders_discovery_and_starts_no_worker():
     assert response.headers["Pragma"] == "no-cache"
     assert javascript_constant(
         page,
-        "discoveryAutoRetry",
-    ) is True
+        "discoveryInitial",
+    )["auto_retry"] is True
     assert discovery_remaining_seconds(page) == 60
     handler.open_portal.assert_not_called()
+
+
+def test_json_login_not_found_returns_bounded_discovery_contract():
+    service = Mock()
+    service.resolve_for_login.return_value = state(found=False)
+    handler = Mock()
+    app, _ = app_for(service, handler)
+
+    with patch("app.capport.routes.time.time", return_value=1000):
+        response = app.test_client().get(
+            "/capport/login?source=capport",
+            headers={"Accept": "application/json"},
+            environ_base={"REMOTE_ADDR": "192.168.1.10"},
+        )
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["mode"] == "CAPPORT_DISCOVERY"
+    assert payload["state"] == "DISCOVERING_CLIENT"
+    assert payload["terminal"] is False
+    assert payload["retryable"] is True
+    assert payload["auto_retry"] is True
+    assert payload["remaining_seconds"] == 60
+    assert payload["retry_interval_ms"] == 2000
+    assert "wait_until=1060" in payload["retry_url"]
+    assert "wait_until" not in payload["restart_url"]
+    assert "session_id" not in payload
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert response.headers["Pragma"] == "no-cache"
+    handler.prepare_portal.assert_not_called()
+    handler.open_portal.assert_not_called()
+
+
+def test_json_expired_deadline_stops_auto_retry_but_keeps_restart():
+    service = Mock()
+    service.resolve_for_login.return_value = state(found=False)
+    handler = Mock()
+    app, _ = app_for(service, handler)
+
+    with patch("app.capport.routes.time.time", return_value=1000):
+        response = app.test_client().get(
+            "/capport/login?source=capport&wait_until=990",
+            headers={"Accept": "application/json"},
+            environ_base={"REMOTE_ADDR": "192.168.1.10"},
+        )
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["auto_retry"] is False
+    assert payload["retryable"] is True
+    assert payload["remaining_seconds"] == 0
+    assert "wait_until=990" in payload["retry_url"]
+    assert "source=capport" in payload["restart_url"]
+    assert "wait_until" not in payload["restart_url"]
+    handler.prepare_portal.assert_not_called()
+
+
+def test_explicit_application_json_is_required_for_json_mode():
+    service = Mock()
+    service.resolve_for_login.return_value = state(found=False)
+    app, _ = app_for(service, Mock())
+    client = app.test_client()
+
+    explicit = client.get(
+        "/capport/login",
+        headers={"Accept": "application/json, */*"},
+        environ_base={"REMOTE_ADDR": "192.168.1.10"},
+    )
+    wildcard = client.get(
+        "/capport/login",
+        headers={"Accept": "*/*"},
+        environ_base={"REMOTE_ADDR": "192.168.1.10"},
+    )
+    disabled = client.get(
+        "/capport/login",
+        headers={"Accept": "application/json;q=0"},
+        environ_base={"REMOTE_ADDR": "192.168.1.10"},
+    )
+
+    assert explicit.is_json
+    assert "<html" in wildcard.get_data(as_text=True)
+    assert "<html" in disabled.get_data(as_text=True)
 
 
 def test_login_expired_discovery_deadline_stops_auto_retry():
@@ -457,14 +536,12 @@ def test_login_expired_discovery_deadline_stops_auto_retry():
         )
 
     page = response.get_data(as_text=True)
-    retry_url = javascript_constant(page, "discoveryRetryUrl")
-    restart_url = javascript_constant(page, "discoveryRestartUrl")
+    discovery = javascript_constant(page, "discoveryInitial")
+    retry_url = discovery["retry_url"]
+    restart_url = discovery["restart_url"]
 
     assert response.status_code == 200
-    assert javascript_constant(
-        page,
-        "discoveryAutoRetry",
-    ) is False
+    assert discovery["auto_retry"] is False
     assert discovery_remaining_seconds(page) == 0
     assert ("wait_until", "990") in parse_qsl(
         urlsplit(retry_url).query,
@@ -497,8 +574,8 @@ def test_login_preserves_or_clamps_discovery_deadline():
     future_page = future.get_data(as_text=True)
     future_retry_url = javascript_constant(
         future_page,
-        "discoveryRetryUrl",
-    )
+        "discoveryInitial",
+    )["retry_url"]
     future_query = parse_qsl(
         urlsplit(future_retry_url).query,
         keep_blank_values=True,
@@ -506,8 +583,8 @@ def test_login_preserves_or_clamps_discovery_deadline():
     excessive_page = excessive.get_data(as_text=True)
     excessive_retry_url = javascript_constant(
         excessive_page,
-        "discoveryRetryUrl",
-    )
+        "discoveryInitial",
+    )["retry_url"]
 
     assert future_query == [
         ("tag", "a"),
@@ -545,6 +622,44 @@ def test_login_controller_failure_returns_controlled_503():
     handler.open_portal.assert_not_called()
 
 
+def test_json_lookup_failure_preserves_deadline_and_is_retryable():
+    service = Mock()
+    service.resolve_for_login.return_value = state(
+        found=False,
+        lookup_failed=True,
+    )
+    handler = Mock()
+    app, _ = app_for(service, handler)
+
+    with patch("app.capport.routes.time.time", return_value=1000):
+        active = app.test_client().get(
+            "/capport/login?wait_until=1030",
+            headers={"Accept": "application/json"},
+            environ_base={"REMOTE_ADDR": "192.168.1.10"},
+        )
+        expired = app.test_client().get(
+            "/capport/login?wait_until=990",
+            headers={"Accept": "application/json"},
+            environ_base={"REMOTE_ADDR": "192.168.1.10"},
+        )
+
+    active_payload = active.get_json()
+    expired_payload = expired.get_json()
+    assert active.status_code == 503
+    assert active_payload["error"] == "lookup_failed"
+    assert active_payload["state"] == "DISCOVERING_CLIENT"
+    assert active_payload["auto_retry"] is True
+    assert active_payload["remaining_seconds"] == 30
+    assert "wait_until=1030" in active_payload["retry_url"]
+    assert expired.status_code == 503
+    assert expired_payload["auto_retry"] is False
+    assert expired_payload["remaining_seconds"] == 0
+    assert expired_payload["restart_url"] == "/capport/login"
+    assert "session_id" not in active_payload
+    assert "session_id" not in expired_payload
+    handler.prepare_portal.assert_not_called()
+
+
 def test_login_outside_network_returns_403():
     service = Mock()
     service.resolve_for_login.return_value = state(
@@ -561,6 +676,150 @@ def test_login_outside_network_returns_403():
 
     assert response.status_code == 403
     handler.open_portal.assert_not_called()
+
+
+def test_json_login_outside_network_is_terminal_discovery_error():
+    service = Mock()
+    service.resolve_for_login.return_value = state(
+        found=False,
+        allowed=False,
+    )
+    handler = Mock()
+    app, _ = app_for(service, handler)
+
+    response = app.test_client().get(
+        "/capport/login",
+        headers={"Accept": "application/json"},
+        environ_base={"REMOTE_ADDR": "10.0.0.1"},
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 403
+    assert payload == {
+        "mode": "CAPPORT_DISCOVERY",
+        "state": "FAILED",
+        "status": "FAILED",
+        "progress": 100,
+        "terminal": True,
+        "retryable": False,
+        "auto_retry": False,
+        "remaining_seconds": 0,
+        "retry_interval_ms": 2000,
+        "retry_url": None,
+        "restart_url": None,
+        "error": "client_not_allowed",
+    }
+    assert "session_id" not in payload
+    handler.prepare_portal.assert_not_called()
+
+
+def test_json_found_client_returns_authoritative_entry_result_once():
+    service = Mock()
+    service.resolve_for_login.return_value = state(found=True)
+    handler = Mock()
+    snapshot = {
+        "session_id": "session-1",
+        "state": "WAITING",
+        "status": "WAITING",
+        "progress": 0,
+        "terminal": False,
+    }
+    handler.prepare_portal.return_value = PortalEntryResult(
+        session_id="session-1",
+        redirect_url=None,
+        initial_state=snapshot,
+    )
+    app, _ = app_for(service, handler)
+
+    response = app.test_client().get(
+        "/capport/login",
+        headers={"Accept": "application/json"},
+        environ_base={"REMOTE_ADDR": "192.168.1.10"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "mode": "AUTH_SESSION",
+        "session_id": "session-1",
+        "redirect_url": None,
+        "initial_state": snapshot,
+    }
+    handler.prepare_portal.assert_called_once_with(
+        PortalClientContext(
+            site_id="site-1",
+            client_mac="AA:BB:CC:DD:EE:FF",
+            client_ip="192.168.1.10",
+        )
+    )
+    handler.open_portal.assert_not_called()
+    assert response.headers["Cache-Control"] == "private, no-store"
+
+
+def test_json_worker_failure_keeps_authoritative_session_envelope():
+    service = Mock()
+    service.resolve_for_login.return_value = state(found=True)
+    handler = Mock()
+    snapshot = {
+        "session_id": "session-1",
+        "state": "FAILED",
+        "status": "FAILED",
+        "progress": 100,
+        "retryable": True,
+        "terminal": False,
+    }
+    handler.prepare_portal.return_value = PortalEntryResult(
+        session_id="session-1",
+        redirect_url=None,
+        initial_state=snapshot,
+        status_code=500,
+        error_code="worker_start_failed",
+    )
+    app, _ = app_for(service, handler)
+
+    response = app.test_client().get(
+        "/capport/login",
+        headers={"Accept": "application/json"},
+        environ_base={"REMOTE_ADDR": "192.168.1.10"},
+    )
+
+    assert response.status_code == 500
+    payload = response.get_json()
+    assert payload["mode"] == "AUTH_SESSION"
+    assert payload["session_id"] == "session-1"
+    assert payload["initial_state"] == snapshot
+    assert payload["error"] == "worker_start_failed"
+
+
+def test_json_invalid_context_has_no_session_id():
+    service = Mock()
+    service.resolve_for_login.return_value = state(found=True)
+    handler = Mock()
+    handler.prepare_portal.return_value = PortalEntryResult(
+        session_id=None,
+        redirect_url=None,
+        initial_state={
+            "state": "FAILED",
+            "status": "FAILED",
+            "terminal": True,
+            "retryable": False,
+        },
+        status_code=400,
+        error_code="invalid_context",
+    )
+    app, _ = app_for(service, handler)
+
+    response = app.test_client().get(
+        "/capport/login",
+        headers={"Accept": "application/json"},
+        environ_base={"REMOTE_ADDR": "192.168.1.10"},
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["error"] == "invalid_context"
+    assert payload["state"] == "FAILED"
+    assert payload["terminal"] is True
+    assert "session_id" not in payload
 
 
 def test_already_authorized_login_enters_shared_handler_once():

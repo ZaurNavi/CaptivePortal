@@ -65,6 +65,88 @@ def test_worker_submit_failure_finishes_session_safely():
     telemetry.safe_emit.assert_called_once()
 
 
+def test_prepare_portal_returns_retryable_worker_failure_snapshot():
+    manager = AuthSessionManager()
+    telemetry = Mock()
+    handler = PortalEntryHandler(
+        session_manager=manager,
+        auth_worker=Mock(),
+        executor=FailingExecutor(),
+        auth_telemetry=telemetry,
+    )
+
+    result = handler.prepare_portal(PortalClientContext(
+        site_id="site-1",
+        client_mac="AA:BB:CC:DD:EE:FF",
+        client_ip="192.168.1.10",
+    ))
+
+    assert result.status_code == 500
+    assert result.session_id
+    assert result.error_code == "worker_start_failed"
+    assert result.initial_state["state"] == "FAILED"
+    assert result.initial_state["retryable"] is True
+    assert result.initial_state["terminal"] is False
+
+
+def test_prepare_portal_claim_failure_is_terminal_configuration_error():
+    class ClaimFailureManager(AuthSessionManager):
+        def claim_worker(self, *args, **kwargs):
+            return False
+
+    manager = ClaimFailureManager()
+    handler = PortalEntryHandler(
+        session_manager=manager,
+        auth_worker=Mock(),
+        executor=CapturingExecutor(),
+        auth_telemetry=Mock(),
+    )
+
+    result = handler.prepare_portal(PortalClientContext(
+        site_id="site-1",
+        client_mac="AA:BB:CC:DD:EE:FF",
+        client_ip="192.168.1.10",
+    ))
+
+    assert result.status_code == 500
+    assert result.session_id
+    assert result.error_code == "configuration_error"
+    assert result.initial_state["state"] == "FAILED"
+    assert result.initial_state["retryable"] is False
+    assert result.initial_state["terminal"] is True
+
+
+def test_repeated_prepare_reuses_session_and_starts_one_worker():
+    manager = AuthSessionManager()
+    executor = CapturingExecutor()
+    counter = Mock()
+    handler = PortalEntryHandler(
+        session_manager=manager,
+        auth_worker=Mock(),
+        executor=executor,
+        auth_telemetry=Mock(),
+        portal_counter_service=counter,
+        counter_recording_enabled=True,
+    )
+    context = PortalClientContext(
+        site_id="site-1",
+        client_mac="AA:BB:CC:DD:EE:FF",
+        client_ip="192.168.1.10",
+    )
+
+    with patch("app.web.portal_entry.log_auth_event") as emit:
+        first = handler.prepare_portal(context)
+        second = handler.prepare_portal(context)
+
+    assert first.session_id == second.session_id
+    assert len(executor.submissions) == 1
+    counter.record_open.assert_called_once()
+    assert [call.args[0] for call in emit.call_args_list] == [
+        telemetry_events.SESSION_CREATED,
+        telemetry_events.SESSION_REUSED,
+    ]
+
+
 def test_expired_portal_entry_starts_new_session_without_expired_page():
     manager = AuthSessionManager()
     executor = CapturingExecutor()
