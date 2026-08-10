@@ -22,6 +22,7 @@ The project uses one shared authorization flow, a shared `OmadaProvider`, backgr
 - [Testing](#testing)
 - [Project knowledge base](#project-knowledge-base)
 - [Current module status](#current-module-status)
+- [Future direction](#future-direction)
 - [Security notes](#security-notes)
 - [License](#license)
 
@@ -323,14 +324,154 @@ The current TASK defines scope. Historical reports and old specifications are ev
 | Authorization / AuthSession / AuthWorker | ✅ Active | Common authorization path |
 | CAPPORT | ✅ Active | Bounded discovery and same-page transition |
 | Pending Session Cleaner | ✅ Active | Production cleanup with safety guards and audit |
-| Authorized Client Snapshot Collector | ✅ Active | Produces structured visitor snapshots |
+| Authorized Client Snapshot Collector | ✅ Active | Start-of-history snapshot after successful authorization |
 | Visitor Registry | ✅ Active | Production/observability stage accepted |
 | Public Authorization Counter | ✅ Active | Operational counter module |
 | Omada Webhook Normalizer | ✅ Implemented | Structured webhook normalization |
-| Visit Lifecycle | ⏳ Planned | Separate future functional stage |
+| Observation Foundation v1 | ⏳ Planned next | Periodic client/AP observations and persistent history |
+| Visit Lifecycle v1 | ⏳ Planned | Links devices, snapshots, observations, start and finalization |
+| Analytics Foundation | ⏳ Planned | Reads stored history; does not collect from Omada itself |
+| Web Foundation / Admin Console | ⏳ Planned | Product-facing application/API layer after data foundations |
 | GitHub CI | ⚠️ Not yet implemented | Full gate is currently a manual Linux operation |
 
 Operational debts and accepted limitations are tracked separately from this stable README.
+
+---
+
+
+## Future direction
+
+CaptivPortal is being developed toward a **data-driven managed captive-portal platform**, not only an authorization page.
+
+The next stages deliberately build the data foundation before a large customer-facing UI:
+
+```mermaid
+flowchart TD
+    Authorized[Successful authorization] --> Snapshot[Existing Authorized Client Snapshot]
+    Snapshot --> Observations[Observation Foundation v1]
+
+    Omada[(Omada Controller)] --> ClientObs[Client Observation Collector]
+    Omada --> APObs[AP Observation Collector]
+    ClientObs --> Observations
+    APObs --> Observations
+
+    Observations --> Store[(Persistent Observation Storage)]
+    Store --> Visits[Visit Lifecycle v1]
+    Visits --> Analytics[Analytics Foundation]
+    Store --> Analytics
+    Analytics --> Web[Web Foundation]
+    Web --> Console[CaptivPortal Admin Console]
+
+    Console --> MultiSite[Multi-Site]
+    MultiSite --> Tenant[Tenant / customer isolation]
+    Tenant --> RBAC[Customer accounts / RBAC]
+    RBAC --> Entitlements[Plans / entitlements]
+    Entitlements --> Managed[Managed Captive Portal Service]
+```
+
+### Observation Foundation v1
+
+The next planned functional stage is a persistent observation layer for **Wi-Fi clients and access points**.
+
+The existing **Authorized Client Snapshot Collector is not replaced**. It keeps its current role: capture a detailed start-of-history snapshot immediately after successful authorization.
+
+Observation Foundation then adds periodic, normalized observations while clients and APs remain active.
+
+Research against the current Omada Open API has already confirmed useful data sources for planned collection, including:
+
+- client context such as site, SSID, AP, radio/band, channel and session state;
+- client RSSI, SNR, RX/TX rates and traffic counters when available;
+- AP model, firmware, uptime, CPU and memory;
+- AP radio channel, width, TX power and Wi-Fi mode;
+- 2.4/5 GHz traffic counters;
+- radio TX/RX/busy/interference utilization;
+- packet errors, drops and retries;
+- Ethernet/LAN uplink counters and link information;
+- selected slowly changing capabilities such as channels and OFDMA state.
+
+The intended rule is:
+
+> **Collect facts now; analyze them later.**
+
+Collectors should store normalized facts and timestamps, not hard-code product conclusions such as "weak signal", "bad AP placement" or "needs a second AP".
+
+Periodic observation data is planned to use its own persistence/repository boundary rather than turning Visitor Registry into a generic time-series database.
+
+### Visit Lifecycle and analytics
+
+After enough observation history is being collected, **Visit Lifecycle v1** will connect:
+
+```text
+Device
+→ successful authorization
+→ initial snapshot
+→ open visit
+→ client/AP observations
+→ offline/finalization
+→ closed visit
+```
+
+A separate **Analytics Foundation** will then work from stored data. Analytics is expected to query Visitor Registry, Visit Lifecycle and Observation Storage instead of collecting historical data from Omada on demand.
+
+Future analysis can include, for example:
+
+- visitor-device and visit trends;
+- new vs. returning devices;
+- visit duration and repeat visits;
+- RSSI/SNR distributions;
+- weak-signal ratios and radio-quality trends;
+- client distribution by AP and band;
+- AP load, utilization, retries and errors;
+- traffic trends;
+- correlations between client radio quality and AP load;
+- evidence useful for deciding whether an AP should be relocated or an additional AP may be justified.
+
+RSSI is treated as a radio-quality signal, **not as an exact physical distance measurement**.
+
+### Web Foundation and Admin Console
+
+A small **Web Foundation** is planned before a full commercial Admin Console. It will establish stable application/query APIs, site-aware context, administrative security boundaries, and initial read-only views.
+
+The later **CaptivPortal Admin Console** is the product/customer interface. It is intentionally separate from Grafana.
+
+```text
+Grafana
+= internal engineering observability
+
+CaptivPortal Admin Console
+= product/customer interface
+```
+
+Grafana remains an internal tool for diagnostics, telemetry, collector validation, investigation and platform-wide engineering visibility.
+
+Customer-facing metrics should be exposed through CaptivPortal application services and APIs, not by making Grafana/Loki the product backend.
+
+### Site-aware commercial evolution
+
+Near-term development follows a **site-aware, single-tenant** model:
+
+- keep `site_id` where data naturally belongs to an Omada Site;
+- do not hard-code the platform as permanently single-site;
+- do not introduce a premature `tenant_id`;
+- do not assume `Tenant == Site`;
+- continue using the shared `OmadaProvider` and token lifecycle.
+
+When a real second site or external customer appears, the planned evolution is:
+
+```text
+Site-aware platform
+→ Multi-Site
+→ Tenant model
+→ customer accounts / RBAC
+→ subscription entitlements
+→ commercial managed service
+```
+
+One future tenant may own multiple sites.
+
+Commercial plans are expected to use one Admin Console with **server-enforced entitlements**, rather than separate Basic/Standard/Professional forks of the application.
+
+The long-term goal is a managed service in which customers use only their own CaptivPortal interface, see only their permitted sites/data/features, and do not receive direct access to internal Grafana or platform infrastructure.
 
 ---
 
@@ -351,4 +492,4 @@ MIT License. See [LICENSE](LICENSE).
 
 ---
 
-*README synchronized with the CaptivPortal project state documented in August 2026.*
+*README synchronized with the CaptivPortal production state and current project direction documented in August 2026.*
