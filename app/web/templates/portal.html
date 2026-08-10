@@ -994,6 +994,26 @@ Wi-Fi!!</p>
                 || initialState.status === "DISCOVERING_CLIENT"
             )
         );
+        let discoveryCycleTotalSeconds = Math.max(
+            0,
+            Number(discoveryRuntime.remainingSeconds) || 0
+        );
+        let discoveryCycleStarted = discoveryCycleTotalSeconds > 0;
+        let discoveryDeadlineReached = (
+            isDiscoveryMode
+            && !discoveryRuntime.autoRetry
+            && discoveryRuntime.remainingSeconds <= 0
+        );
+        let displayedProgress = isDiscoveryMode
+            ? (discoveryDeadlineReached ? 9 : 0)
+            : (
+                sessionId
+                    ? authDisplayProgress(
+                        currentState.progress,
+                        currentState.status
+                    )
+                    : clampProgress(currentState.progress)
+            );
 
         function clampProgress(value) {
             const number = Number(value);
@@ -1058,15 +1078,73 @@ Wi-Fi!!</p>
             portalError.classList.add("show");
         }
 
-        function updateProgress(progress) {
-            const value = clampProgress(progress);
+        function authDisplayProgress(progress, status) {
+            if (status === "AUTHORIZED") {
+                return 100;
+            }
+            return 10 + Math.round(
+                clampProgress(progress) * 0.9
+            );
+        }
 
-            progressBar.style.width = `${value}%`;
-            progressText.textContent = `${value}%`;
+        function writeDisplayedProgress() {
+            progressBar.style.width = `${displayedProgress}%`;
+            progressText.textContent = `${displayedProgress}%`;
 
             progressShell.setAttribute(
                 "aria-valuenow",
-                String(value)
+                String(displayedProgress)
+            );
+        }
+
+        function updateProgress(progress, reset = false) {
+            const value = clampProgress(progress);
+            displayedProgress = reset
+                ? value
+                : Math.max(displayedProgress, value);
+            writeDisplayedProgress();
+        }
+
+        function resetDisplayedProgress(progress) {
+            updateProgress(progress, true);
+        }
+
+        function displayProgressForState(state) {
+            const status = state.status || "WAITING";
+            if (
+                isDiscoveryMode
+                && status === "DISCOVERING_CLIENT"
+            ) {
+                return discoveryDisplayProgress();
+            }
+            if (sessionId) {
+                return authDisplayProgress(
+                    state.progress,
+                    status
+                );
+            }
+            return clampProgress(state.progress);
+        }
+
+        function beginDiscoveryCycle() {
+            discoveryCycleTotalSeconds = 0;
+            discoveryCycleStarted = false;
+            discoveryDeadlineReached = false;
+            resetDisplayedProgress(0);
+        }
+
+        function observeDiscoveryCycle(remainingSeconds, restarting) {
+            const remaining = Math.max(
+                0,
+                Number(remainingSeconds) || 0
+            );
+            if (restarting || !discoveryCycleStarted) {
+                discoveryCycleTotalSeconds = remaining;
+                discoveryCycleStarted = true;
+            }
+            discoveryDeadlineReached = (
+                !discoveryRuntime.autoRetry
+                && remaining <= 0
             );
         }
 
@@ -1089,13 +1167,41 @@ Wi-Fi!!</p>
             );
         }
 
+        function discoveryDisplayProgress() {
+            if (discoveryDeadlineReached) {
+                return 9;
+            }
+            if (
+                !discoveryCycleStarted
+                || discoveryCycleTotalSeconds <= 0
+            ) {
+                return 0;
+            }
+            const secondsLeft = Math.min(
+                discoveryCycleTotalSeconds,
+                getDiscoverySecondsLeft()
+            );
+            const elapsedSeconds = Math.max(
+                0,
+                discoveryCycleTotalSeconds - secondsLeft
+            );
+            return Math.min(
+                9,
+                Math.round(
+                    elapsedSeconds
+                    / discoveryCycleTotalSeconds
+                    * 9
+                )
+            );
+        }
+
         function renderState(state) {
             const texts = getTexts();
             const status = state.status || "WAITING";
 
             connectionStatus.textContent =
                 texts[status] || texts.WAITING;
-            updateProgress(state.progress);
+            updateProgress(displayProgressForState(state));
             progressBar.classList.remove(
                 "success",
                 "failed",
@@ -1112,7 +1218,6 @@ Wi-Fi!!</p>
                 portalNote.textContent = discoveryHasLookupError
                     ? texts.pollingError
                     : texts.discoveryNote;
-                progressText.textContent = `${secondsLeft}s`;
                 showError(null);
 
                 if (!discoveryRuntime.autoRetry || secondsLeft <= 0) {
@@ -1227,6 +1332,7 @@ Wi-Fi!!</p>
             const secondsLeft = getDiscoverySecondsLeft();
             if (secondsLeft <= 0) {
                 discoveryRuntime.autoRetry = false;
+                discoveryDeadlineReached = true;
                 renderState(currentState);
                 return;
             }
@@ -1351,7 +1457,7 @@ Wi-Fi!!</p>
             );
         }
 
-        function applyDiscoveryEnvelope(payload) {
+        function applyDiscoveryEnvelope(payload, restarting = false) {
             discoveryRuntime = {
                 retryUrl: payload.retry_url,
                 restartUrl: payload.restart_url,
@@ -1360,6 +1466,10 @@ Wi-Fi!!</p>
                 remainingSeconds: Number(payload.remaining_seconds)
             };
             discoveryHasLookupError = payload.error === "lookup_failed";
+            observeDiscoveryCycle(
+                discoveryRuntime.remainingSeconds,
+                restarting
+            );
             currentState = {
                 ...currentState,
                 status: "DISCOVERING_CLIENT",
@@ -1453,7 +1563,7 @@ Wi-Fi!!</p>
                     applyTerminalDiscoveryEnvelope(payload);
                     return;
                 }
-                applyDiscoveryEnvelope(payload);
+                applyDiscoveryEnvelope(payload, restarting);
                 scheduleNext = payload.auto_retry;
             } catch (error) {
                 console.debug("Client discovery failed", error);
@@ -1662,6 +1772,7 @@ Wi-Fi!!</p>
             retryButton.disabled = true;
             retryButton.classList.add("hidden");
             showError(null);
+            resetDisplayedProgress(10);
             currentState = {
                 ...currentState,
                 status: "WAITING",
@@ -1722,6 +1833,7 @@ Wi-Fi!!</p>
         retryButton.addEventListener("click", () => {
             if (isDiscoveryMode) {
                 stopDiscoveryTimers();
+                beginDiscoveryCycle();
                 requestDiscovery(
                     discoveryRuntime.restartUrl,
                     true

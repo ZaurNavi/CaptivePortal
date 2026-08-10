@@ -308,8 +308,8 @@ assert(
     "retry button must be hidden immediately"
 );
 assert(
-    elements["progress-bar"].style.width === "0%",
-    "retry must reset progress to zero"
+    elements["progress-bar"].style.width === "10%",
+    "retry must reset progress to ten"
 );
 assert(fetchCalls.length === 1, "click must issue exactly one request");
 assert(

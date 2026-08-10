@@ -195,6 +195,22 @@ function runTimeoutWithDelay(delay) {
 function assert(condition, message) {
     if (!condition) { throw new Error(message); }
 }
+function assertProgress(expected, message) {
+    const expectedText = `${expected}%`;
+    assert(
+        elements["progress-text"].textContent === expectedText,
+        `${message}: text=${elements["progress-text"].textContent}`
+    );
+    assert(
+        elements["progress-bar"].style.width === expectedText,
+        `${message}: width=${elements["progress-bar"].style.width}`
+    );
+    assert(
+        elements["progress-shell"].attributes["aria-valuenow"]
+            === String(expected),
+        `${message}: aria=${elements["progress-shell"].attributes["aria-valuenow"]}`
+    );
+}
 """
     source = (
         harness
@@ -246,6 +262,31 @@ assert(locationCalls.length === 0, "discovery performed navigation");
 """)
 
 
+def test_discovery_progress_is_percent_monotonic_and_bounded():
+    run_scenario(r"""
+assertProgress(0, "new discovery cycle must start at zero");
+assert(!elements["progress-text"].textContent.endsWith("s"),
+    "discovery displayed seconds");
+
+now = 30000;
+renderState(currentState);
+assertProgress(5, "half elapsed discovery cycle");
+assert(displayedProgress >= 0 && displayedProgress <= 9,
+    "discovery progress escaped its range");
+
+applyDiscoveryEnvelope(discoveryPayload({remaining_seconds: 55}));
+assertProgress(5, "later envelope moved discovery backwards");
+
+now = 90000;
+renderState(currentState);
+assertProgress(9, "discovery deadline");
+assert(displayedProgress <= 9, "discovery exceeded nine percent");
+
+languageButtons[1].listeners.click();
+assertProgress(9, "language change reset progress");
+""")
+
+
 def test_auth_session_response_updates_runtime_and_starts_polling():
     run_scenario(r"""
 fetchImpl = async () => makeResponse({
@@ -265,10 +306,57 @@ await requestDiscovery(discoveryRuntime.retryUrl, false);
 assert(sessionId === "session-1", "session id was not stored");
 assert(!isDiscoveryMode, "discovery mode remained active");
 assert(currentState.status === "WAITING", "initial state was not applied");
+assertProgress(10, "auth transition with backend zero");
 assert(discoveryRequestTimer === null, "discovery timer was not stopped");
 assert(discoveryCountdownTimer === null, "countdown timer was not stopped");
 assert(pollTimer !== null, "session polling was not scheduled");
 assert(locationCalls.length === 0, "auth transition navigated the page");
+""")
+
+
+def test_auth_progress_mapping_is_monotonic_and_authorized_is_100():
+    run_scenario(r"""
+assert(authDisplayProgress(0, "WAITING") === 10, "0 must map to 10");
+assert(authDisplayProgress(25, "AUTHORIZING") === 33,
+    "25 must map to 33");
+assert(authDisplayProgress(50, "VERIFYING") === 55,
+    "50 must map to 55");
+assert(authDisplayProgress(75, "VERIFYING") === 78,
+    "75 must map to 78");
+assert(authDisplayProgress(100, "VERIFYING") === 100,
+    "100 must map to 100");
+
+transitionToAuth({
+    mode: "AUTH_SESSION",
+    session_id: "session-1",
+    redirect_url: null,
+    initial_state: {
+        session_id: "session-1",
+        state: "WAITING",
+        status: "WAITING",
+        progress: 0,
+        terminal: false,
+        retryable: false
+    }
+});
+assertProgress(10, "initial auth progress");
+
+applyServerState({state: "AUTHORIZING", progress: 25});
+assertProgress(33, "quarter auth progress");
+applyServerState({state: "VERIFYING", progress: 50});
+assertProgress(55, "half auth progress");
+applyServerState({state: "VERIFYING", progress: 75});
+assertProgress(78, "three-quarter auth progress");
+applyServerState({state: "VERIFYING", progress: 25});
+assertProgress(78, "lower polling result moved progress backwards");
+
+applyServerState({
+    state: "AUTHORIZED",
+    progress: 1,
+    authorized: true,
+    terminal: true
+});
+assertProgress(100, "authorized progress");
 """)
 
 
@@ -315,6 +403,7 @@ fetchImpl = async () => makeResponse({
 });
 await requestDiscovery(discoveryRuntime.retryUrl, false);
 assert(currentState.status === "AUTHORIZED", "authorized state was not applied");
+assertProgress(100, "fast authorized response");
 assert(locationCalls.length === 0, "redirect happened before success delay");
 runTimeoutWithDelay(900);
 runTimeoutWithDelay(500);
@@ -325,19 +414,53 @@ assert(locationCalls[0] === "https://example.test/after",
 
 def test_manual_retry_starts_new_fetch_cycle_without_navigation():
     run_scenario(r"""
-fetchImpl = async () => makeResponse(discoveryPayload({
+let resolveRestart;
+fetchImpl = () => new Promise((resolve) => { resolveRestart = resolve; });
+elements["retry-button"].listeners.click();
+assertProgress(0, "manual discovery restart");
+assert(fetchCalls.length === 1, "manual retry did not fetch");
+assert(fetchCalls[0].url === "/capport/login", "restart URL was not used");
+assert(discoveryRequestInFlight, "manual retry request is not active");
+assert(locationCalls.length === 0, "manual retry navigated the page");
+
+resolveRestart(makeResponse(discoveryPayload({
     remaining_seconds: 60,
     auto_retry: true,
     retry_url: "/capport/login?wait_until=1120"
-}));
-elements["retry-button"].listeners.click();
+})));
 await flushPromises();
 await flushPromises();
-assert(fetchCalls.length === 1, "manual retry did not fetch");
-assert(fetchCalls[0].url === "/capport/login", "restart URL was not used");
 assert(discoveryRuntime.autoRetry, "new bounded cycle was not started");
+assertProgress(0, "new server discovery cycle");
 assert(locationCalls.length === 0, "manual retry navigated the page");
 """, auto_retry=False, remaining_seconds=0)
+
+
+def test_auth_retry_resets_displayed_progress_to_10():
+    run_scenario(r"""
+transitionToAuth({
+    mode: "AUTH_SESSION",
+    session_id: "session-1",
+    redirect_url: null,
+    initial_state: {
+        session_id: "session-1",
+        state: "FAILED",
+        status: "FAILED",
+        progress: 100,
+        terminal: false,
+        retryable: true
+    }
+});
+assertProgress(100, "failed auth progress");
+
+fetchImpl = () => new Promise(() => {});
+elements["retry-button"].listeners.click();
+assert(currentState.status === "WAITING", "retry did not enter waiting");
+assertProgress(10, "auth retry reset");
+assert(fetchCalls.length === 1, "auth retry request was not sent");
+assert(fetchCalls[0].options.method === "POST", "auth retry is not POST");
+assert(locationCalls.length === 0, "auth retry navigated the page");
+""")
 
 
 def test_invalid_response_keeps_current_document_and_discovery_mode():
