@@ -1,8 +1,8 @@
 # Pending Client Session Cleaner
 
-Status: implemented-disabled (repository default); production activation owner-confirmed
-Updated: 2026-08-04
-Runtime baseline: main `227ebe93831447d16b78f277ee3052ddd06e15a3`
+Status: implemented; repository default disabled; production active (owner-confirmed)
+Updated: 2026-08-10
+Runtime baseline: main `ab776af3fc58dc090e17ecd20534abddc1f33ad3`
 
 ## 1. Назначение
 
@@ -12,7 +12,7 @@ Runtime baseline: main `227ebe93831447d16b78f277ee3052ddd06e15a3`
 
 Final module merged через PR #27; временные probe-костыли удалены PR #28. Код находится в `app/pending_sessions/`, Omada adapter — в `app/controllers/omada_pending_sessions.py`, lifecycle подключён в `run.py`.
 
-Repository default: `PENDING_SESSION_CLEANER_ENABLED=false`. При `false` worker, journal и Omada calls не создаются. В production включение и живая работа подтверждены владельцем проекта 2026-08-04; точное состояние process environment не выводится из Git.
+Repository default: `PENDING_SESSION_CLEANER_ENABLED=false`. При `false` worker, journal и Omada calls не создаются. В production включение и живая работа подтверждены владельцем проекта 2026-08-04; точное состояние process environment не выводится из Git. Отдельное post-restart evidence worker/events после deployment 2026-08-10 пока не предоставлено.
 
 ## 3. Граница ответственности
 
@@ -65,7 +65,7 @@ Controller dictionaries копируются defensive-copy; parsed observations
 
 Pending-session методы подключаются к тому же классу через `install_pending_session_methods(OmadaProvider)`. Второй OAuth client, provider или token manager отсутствует и запрещён без отдельного TASK/ADR.
 
-Known limitation runtime baseline: reconnect adapter при `-44112` делает compare-and-invalidate по использованному token, после чего Cleaner recovery повторно вызывает no-argument invalidation. В узком concurrent refresh window это может очистить уже обновлённый cache и вызвать лишний refresh. Partial token state не публикуется, но требование «Cleaner не очищает свежий token другого thread» нуждается в отдельном code fix и focused concurrency regression test.
+При точном Omada `-44112` reconnect adapter выполняет compare-and-invalidate только для token, использованного неуспешным запросом. Cleaner recovery не выполняет повторную безусловную invalidation: thread со старым ответом не должен очистить свежий token, уже опубликованный другим thread. После этого выполняются fresh GET и две повторные local-protection checks до единственного разрешённого recovery POST.
 
 ## 8. Fail-open
 
@@ -117,7 +117,7 @@ Multiple application processes с одновременно активным Clea
 
 ## 14. Тесты
 
-`tests/pending_sessions/` содержит 11 файлов и 52 test functions для provider contracts, reconnect, token-cache concurrency, config, pagination, classification, double protection, pipeline, action guard, journal/telemetry и factory modes. Текущие tests проверяют compare-and-invalidate в reconnect adapter и общий concurrent refresh, но не моделируют no-argument invalidation после конкурентного refresh в Cleaner recovery.
+`tests/pending_sessions/` содержит 11 файлов и 53 test functions для provider contracts, reconnect, token-cache concurrency, config, pagination, classification, double protection, pipeline, action guard, journal/telemetry и factory modes. Focused concurrency regression моделирует Cleaner recovery после token expiry и подтверждает отсутствие invalidation свежего current token.
 
 Targeted gate:
 
@@ -137,6 +137,8 @@ Targeted gate:
 ## 16. Связанные TASK
 
 `Pending Client Session Cleaner v1.0` — исходный change-intent contract. После merge current-state truth определяется кодом, тестами и этим документом; временные probe-материалы source of truth не являются.
+
+История исправления token recovery: PR #30, commit `a9d2f6a`. Это related change, а не текущий active defect.
 
 ## 17. Связанные ADR
 

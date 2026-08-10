@@ -1,23 +1,23 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-08-04
+Updated: 2026-08-10
 Branch: main
-Runtime commit: `227ebe93831447d16b78f277ee3052ddd06e15a3`
-Commit date: 2026-08-04T09:38:50+04:00
+Runtime commit: `ab776af3fc58dc090e17ecd20534abddc1f33ad3`
+Commit date: 2026-08-10T04:52:20-07:00
 
-Документ описывает runtime-код указанного commit. Knowledge-base PR добавляет только documentation, instructions, templates и test discovery config; production environment state отмечается отдельно и не выводится из Git.
+Документ описывает runtime-код указанного commit. Repository defaults, фактическое production state и historical acceptance evidence разделены явно. Значения production environment и secrets из Git не выводятся.
 
 ## Runtime и composition
 
 - Единственный прямой entrypoint и верхнеуровневый lifecycle: `run.py`.
 - Flask composition factory: `app/web/web.py:create_app()`.
-- Configuration pipeline: `app/config.py` → `app/settings.py:get_settings()`.
+- Configuration pipeline: process environment → `app/config.py` → `app/settings.py:get_settings()`.
 - Controller factory: `app/controllers/factory.py:create_controller()`.
 - Реализация controller: `app/controllers/omada.py:OmadaProvider`.
 - Pending-session API adapter: `app/controllers/omada_pending_sessions.py`; методы устанавливаются на тот же `OmadaProvider` в `app/controllers/__init__.py`.
 - `run.py` создаёт один provider и передаёт его web/auth, snapshot collector и Pending Session Cleaner.
-- `OmadaProvider` содержит единый thread-safe token cache на `Condition(RLock)` с одним concurrent refresh, early refresh и guarded invalidation.
+- `OmadaProvider` содержит единый thread-safe token cache на `Condition(RLock)` с одним concurrent refresh, early refresh и compare-and-invalidate.
 - `AuthSessionManager` и `ThreadPoolExecutor(max_workers=4)` создаются один раз на process в `app/web/web.py`.
 - In-memory sessions, locks, action limits и workers предполагают один application process.
 
@@ -28,7 +28,7 @@ Commit date: 2026-08-04T09:38:50+04:00
 | Portal entry | `app/web/portal_entry.py`, `app/web/web.py` |
 | AuthSession/AuthWorker | `app/auth/` |
 | Omada provider | `app/controllers/omada.py`, `app/controllers/omada_pending_sessions.py` |
-| CAPPORT | `app/capport/` |
+| CAPPORT | `app/capport/`, `app/web/templates/portal.html` |
 | Auth telemetry | `app/auth_telemetry/` |
 | Public Authorization Counter | `app/portal_counter/` |
 | Completed-session traffic counter | `app/public_traffic/` |
@@ -36,6 +36,21 @@ Commit date: 2026-08-04T09:38:50+04:00
 | Visitor Device Registry | `app/visitor_registry/registry_*` |
 | Pending Client Session Cleaner | `app/pending_sessions/` |
 | Omada Webhook Receiver/Normalizer | `app/integrations/omada/` |
+
+## Configuration
+
+Omada core configuration не содержит production literals в current Git tree. Обязательный внешний contract:
+
+| Environment variable | Назначение |
+|---|---|
+| `OMADA_URL` | базовый HTTP(S)-адрес controller |
+| `OMADA_ID` | Omada controller identifier |
+| `OMADA_CLIENT_ID` | OpenAPI client identifier |
+| `OMADA_CLIENT_SECRET` | OpenAPI client secret |
+
+Значения передаются process manager или approved secret mechanism и проходят через `app/config.py` → `app/settings.py` → `get_settings()`. Приложение не загружает `.env` автоматически. При отсутствии или некорректности обязательного значения создание `OmadaProvider` завершается fail-closed до сетевого запроса.
+
+`VERIFY_SSL=false` остаётся repository default и открытым security/operations debt; изменение требует отдельного TASK и доверенной certificate model.
 
 ## Feature flags по repository default
 
@@ -45,12 +60,32 @@ Commit date: 2026-08-04T09:38:50+04:00
 | `PORTAL_COUNTER_ENABLED` | true | реализован и включён |
 | `PUBLIC_TRAFFIC_COUNTER_ENABLED` | true | реализован и включён |
 | `AUTH_TELEMETRY_ENABLED` | true | реализован и включён |
-| `VISITOR_SNAPSHOT_ENABLED` | false | implemented-disabled |
-| `VISITOR_REGISTRY_ENABLED` | false | implemented-disabled |
-| `OMADA_WEBHOOK_ENABLED` | false | receiver/normalizer implemented-disabled |
-| `PENDING_SESSION_CLEANER_ENABLED` | false | implemented-disabled by default |
+| `VISITOR_SNAPSHOT_ENABLED` | false | реализован; по умолчанию выключен |
+| `VISITOR_REGISTRY_ENABLED` | false | реализован; по умолчанию выключен |
+| `OMADA_WEBHOOK_ENABLED` | false | receiver/normalizer реализованы; по умолчанию выключены |
+| `PENDING_SESSION_CLEANER_ENABLED` | false | реализован; по умолчанию выключен |
 
-Repository defaults не подтверждают process environment. Владелец проекта подтвердил production activation и работу Cleaner 2026-08-04; секреты и фактический EnvironmentFile в Git не фиксируются.
+Repository defaults не подтверждают значения production EnvironmentFile или systemd drop-ins.
+
+## Production evidence
+
+- `main@ab776af` доставлен на production 2026-08-10 обычным fast-forward; `captive-portal.service` после restart подтверждён как active (running).
+- Cleaner был включён и подтверждён в production владельцем 2026-08-04. Отдельное post-restart доказательство его worker/events после деплоя 2026-08-10 в status report отсутствует.
+- Visitor Snapshot и Visitor Registry ранее прошли production/observability acceptance: `state=ready`, `initial_backfill_completed=true`, `partial=false`, SQLite integrity PASS; historical snapshot содержал 455 device cards и 696 snapshots. Эти числа не являются постоянными текущими counters.
+- Цепочка `visitor_snapshots.log` → Alloy → Loki → Grafana ранее подтверждена с PASS. Production dashboard v40 сохранил UID `captive-portal-auth-v3-fixed`, содержит 104 панели и использует `client.ssid` для успешных snapshot-фильтров.
+- CAPPORT изменения PR #35–#37 развёрнуты. Реальный Android captive-window live acceptance same-page revalidation на момент status report остаётся отдельным незакрытым gate.
+
+## CAPPORT и frontend flow
+
+Текущий путь:
+
+    client discovery
+    → bounded same-page fetch polling
+    → общий PortalClientContext / portal entry flow
+    → AuthSessionManager
+    → AuthWorker
+
+Discovery не создаёт отдельный authorization worker или provider. После разрешения client текущая страница переходит в существующий auth flow. Отображаемый progress монотонен между discovery/auth phases. После подтверждённого `AUTHORIZED` frontend один раз пытается закрыть captive window; при отсутствии redirect допускается максимум одна revalidation/reload текущей страницы, а marker в `sessionStorage` блокирует reload-loop.
 
 ## Journals и persistence
 
@@ -70,15 +105,14 @@ Cleaner не использует SQLite. Его cooldown/hourly action state н
 ## Tests и tooling
 
 - Основной и единственный test root: `tests/`.
-- В runtime snapshot: 38 `test_*.py`; 11 файлов и 52 test functions относятся к `tests/pending_sessions/`.
-- Группы: auth/retry, CAPPORT, telemetry, counters, portal, Omada webhook, visitor registry и pending sessions.
-- После PR #28 временные `omada_pending_cleanup_test.py` и `tools/pending_session_probe*` отсутствуют в main.
-- Штатных test modules вне `tests/` нет.
+- В runtime snapshot: 40 файлов `test_*.py`; 11 файлов и 53 test functions относятся к `tests/pending_sessions/`.
+- Группы: auth/retry, CAPPORT/discovery/frontend, telemetry, counters, portal, Omada configuration/webhook, visitor registry и pending sessions.
+- Временные pending-session probe scripts отсутствуют в main.
 - `requirements.txt`: Flask, requests, tzdata; `requirements-dev.txt` добавляет pytest.
-- Knowledge-base PR добавляет `pytest.ini` с `testpaths = tests`, чтобы test root оставался явным и устойчивым.
-- `pyproject.toml`, Makefile, setup.cfg, tox.ini, lint config и type-check config отсутствуют.
+- `pytest.ini` фиксирует `testpaths = tests`.
+- `.github/workflows` отсутствует; воспроизводимого GitHub CI release gate нет.
 
-Integration environment 2026-08-04 не содержит runtime/dev packages и блокирует network install, поэтому pytest здесь не объявляется пройденным. `PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app` и `git diff --check` проходят; full suite обязателен в нормальном project environment.
+Последний известный historical green baseline — `894 passed, 10 skipped, 0 failed`, но он предшествует PR #34–#37. Для exact `main@ab776af` полный Linux pytest с `0 failed` не подтверждён. В среде TASK-KB-UPDATE-01 pytest отсутствует, поэтому release gate остаётся открытым; детали находятся в `docs/testing.md`.
 
 ## Fail-open boundaries
 
@@ -90,13 +124,13 @@ Integration environment 2026-08-04 не содержит runtime/dev packages и
 - visitor registry;
 - pending session cleaner.
 
-Отказ независимого компонента не должен останавливать основной portal authorization flow. Для Cleaner неопределённость трактуется ещё строже: reconnect запрещается.
+Отказ независимого компонента не должен останавливать основной portal authorization flow. Для Cleaner неопределённость трактуется строже: reconnect запрещается.
 
 ## Token lifecycle
 
-Прежнее расхождение `token per request` vs Cleaner TASK разрешено merged implementation. `OmadaProvider._get_token()` использует общий cache и condition; `_request_token_uncached()` выполняет реальный refresh. `_invalidate_cached_token(token)` очищает cache только при совпадении, а вызов без аргумента очищает текущий cache без сравнения. Concurrency tests проверяют один refresh и отсутствие partial state после failure.
+`OmadaProvider._get_token()` использует общий cache и condition; `_request_token_uncached()` выполняет реальный refresh. `_invalidate_cached_token(token)` очищает cache только если переданный использованный token всё ещё является текущим. Cleaner recovery после `-44112` не выполняет повторную безусловную invalidation, поэтому thread со старым ответом не очищает свежий token, опубликованный другим thread.
 
-Новый provider, token manager или второй cache запрещён без отдельного TASK/ADR. Изменение текущего lifecycle требует regression и concurrency tests для AuthWorker и Cleaner.
+Новый provider, token manager или второй cache запрещён без отдельного TASK/ADR. Изменение lifecycle требует regression и concurrency tests для AuthWorker и Cleaner.
 
 ## Startup и shutdown
 
@@ -119,24 +153,42 @@ Shutdown:
 4. snapshot collector stop-accepting/drain;
 5. visitor registry final scan/stop.
 
+## Repository hygiene
+
+Current Git tree не содержит tracked `__pycache__`, `*.pyc`, `app/config.py.bak-*` или `app/web/web.py.bak-*`. `.gitignore` блокирует повторное добавление Python cache, local environment, logs, pytest cache и runtime database artifacts.
+
+Cleanup выполнен PR #34, commit `96f7794`; это historical related change, а не current debt.
+
 ## Existing documentation
 
 `README.md` и `README_RU.md` — public overview. `docs/README.md` — единая навигация. Модульные contracts являются текущими техническими источниками; прежние специализированные документы маршрутизируются по `docs/archive/migration-plan.md` и не удаляются автоматически.
 
 ## Подтверждённый deployment metadata
 
-- Deployment path `/opt/CaptivePortal` подтверждается repository docs.
-- Service name `captive-portal.service` подтверждается repository docs.
-- Systemd unit отсутствует в repository; точные `ExecStart`, user/group и EnvironmentFile проверяются на target host.
-- Python не загружает `.env` автоматически; значения должны поступать через process environment.
+- Deployment path: `/opt/CaptivePortal`.
+- Service: `captive-portal.service`.
+- Systemd unit отсутствует в repository; точные `ExecStart`, user/group, EnvironmentFile и drop-ins проверяются на target host.
+- Production environment не копируется в Git или handoff.
 
-## Риски и технический долг
+## Открытые риски и технический долг
 
-1. В Git отслеживаются `__pycache__` и `.pyc`; обычный import может создавать шумный binary diff.
-2. В Git отслеживаются backup-файлы `app/config.py.bak-*` и `app/web/web.py.bak-*`.
-3. `outputs/omada-webhook-normalized.alloy` — infrastructure artifact; ownership подтверждается отдельным TASK.
-4. GitHub commit `227ebe9` не имеет attached Actions workflow runs/status checks; test evidence хранится вне GitHub CI и требует повторяемого Linux gate.
-5. В Cleaner token-expiry recovery после compare-and-invalidate выполняется дополнительная no-argument invalidation; concurrent refresh window и запрет очистки свежего AuthWorker token отдельным test не покрыты.
-6. CAPPORT client discovery каждые две секунды выполняет полную навигацию через `window.location.replace()`; бесшовный переход на одной открытой странице через `fetch()` требует отдельного TASK. До следующего сбора долгов сохраняется текущая реализация и наблюдается её влияние на число неавторизованных пользователей.
+### P0
 
-Эти пункты не исправляются documentation TASK без отдельного разрешения.
+1. Live acceptance same-page captive-window revalidation на реальном Android устройстве.
+2. Полный Linux regression gate с `0 failed` на exact current main.
+
+### P1
+
+1. Post-restart verification Cleaner, Snapshot Collector и Visitor Registry после деплоя 2026-08-10.
+2. Owner-controlled rotation старого Omada Client Secret, который остаётся в Git history.
+3. TLS verification к Omada при repository default `VERIFY_SSL=false`.
+
+### P2
+
+1. GitHub CI отсутствует.
+2. Нужен отдельный cleanup decision для legacy `/success` route/template.
+3. Ownership `outputs/omada-webhook-normalized.alloy` не зафиксирован.
+
+### Accepted limitation
+
+Process-local AuthSession, retry guards, Cleaner action limits и workers рассчитаны на один application process. Multi-process/HA требует отдельного ADR для shared state и leader election/inter-process locking.
