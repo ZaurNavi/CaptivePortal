@@ -10,6 +10,18 @@ Updated: 2026-08-04
 - Сам unit file отсутствует в repository, поэтому точный ExecStart и user/group требуют проверки на target host.
 - Код не загружает .env автоматически. Environment должен передаваться process manager, например systemd EnvironmentFile.
 
+## Обязательная конфигурация Omada OpenAPI
+
+До deployment и restart процесса необходимо подготовить четыре обязательные
+переменные environment: `OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID` и
+`OMADA_CLIENT_SECRET`. `OMADA_URL` содержит только базовый HTTP(S)-адрес
+контроллера. Без полного и корректного набора приложение завершит создание
+`OmadaProvider` с `ConfigurationError` до сетевого запроса.
+
+Код с этим контрактом запрещено перезапускать на production до проверки, что
+все четыре имени уже передаются процессу. Значения и их фрагменты в вывод
+проверки, deploy-отчёт и журналы не включаются.
+
 ## Обязательный deploy TASK
 
 Deploy требует target environment, owner, backup, feature flag, разрешённых команд, health checks и rollback. Coding TASK без deploy mode production не меняет.

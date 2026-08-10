@@ -166,10 +166,10 @@ OMADA_WEBHOOK_NORMALIZED_LOG_FILE = os.getenv(
 )
 
 # Omada OpenAPI settings
-OMADA_URL = "https://192.168.0.222:8043"
-OMADA_ID = "fe6867ddf84e4c18c4e280e984e4266d"
-CLIENT_ID = "b121eeea3488478f84e2ad0c8e5bb851"       # <-- ЗАМЕНИ НА РЕАЛЬНЫЙ
-CLIENT_SECRET = "4c94248473cb40c1b399d2732bdbcbe9" # <-- ЗАМЕНИ НА РЕАЛЬНЫЙ
+OMADA_URL = os.getenv("OMADA_URL", "").strip()
+OMADA_ID = os.getenv("OMADA_ID", "").strip()
+CLIENT_ID = os.getenv("OMADA_CLIENT_ID", "").strip()
+CLIENT_SECRET = os.getenv("OMADA_CLIENT_SECRET", "").strip()
 
 # Pending Session Cleaner defaults (strings / env-driven)
 PENDING_SESSION_CLEANER_ENABLED = os.getenv("PENDING_SESSION_CLEANER_ENABLED", "false")
