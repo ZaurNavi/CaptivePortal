@@ -22,6 +22,7 @@ CaptivPortal — Python-платформа внешнего Captive Portal и с
 - [Тестирование](#тестирование)
 - [База знаний проекта](#база-знаний-проекта)
 - [Текущий статус модулей](#текущий-статус-модулей)
+- [Будущее направление](#будущее-направление)
 - [Безопасность](#безопасность)
 - [Лицензия](#лицензия)
 
@@ -323,14 +324,154 @@ git diff --check
 | Authorization / AuthSession / AuthWorker | ✅ Active | Единый путь авторизации |
 | CAPPORT | ✅ Active | Bounded discovery и same-page transition |
 | Pending Session Cleaner | ✅ Active | Production cleanup с защитами и аудитом |
-| Authorized Client Snapshot Collector | ✅ Active | Формирует structured visitor snapshots |
+| Authorized Client Snapshot Collector | ✅ Active | Стартовая фиксация клиента после успешной авторизации |
 | Visitor Registry | ✅ Active | Production/observability stage принят |
 | Public Authorization Counter | ✅ Active | Operational counter module |
 | Omada Webhook Normalizer | ✅ Implemented | Структурированная нормализация webhook |
-| Visit Lifecycle | ⏳ Planned | Отдельный будущий функциональный этап |
+| Observation Foundation v1 | ⏳ Следующий этап | Периодические client/AP observations и постоянная история |
+| Visit Lifecycle v1 | ⏳ Planned | Связывает device, snapshot, observations, начало и завершение визита |
+| Analytics Foundation | ⏳ Planned | Читает сохранённую историю и сама не собирает данные из Omada |
+| Web Foundation / Admin Console | ⏳ Planned | Product/API слой после формирования data foundations |
 | GitHub CI | ⚠️ Не реализован | Full gate пока выполняется вручную на Linux |
 
 Operational debts и принятые ограничения ведутся отдельно и не смешиваются со стабильным README.
+
+---
+
+
+## Будущее направление
+
+CaptivPortal развивается в сторону **data-driven managed Captive Portal платформы**, а не только страницы авторизации.
+
+Следующие этапы специально строят сначала фундамент данных, а уже потом большой клиентский интерфейс:
+
+```mermaid
+flowchart TD
+    Authorized[Успешная авторизация] --> Snapshot[Существующий Authorized Client Snapshot]
+    Snapshot --> Observations[Observation Foundation v1]
+
+    Omada[(Omada Controller)] --> ClientObs[Client Observation Collector]
+    Omada --> APObs[AP Observation Collector]
+    ClientObs --> Observations
+    APObs --> Observations
+
+    Observations --> Store[(Persistent Observation Storage)]
+    Store --> Visits[Visit Lifecycle v1]
+    Visits --> Analytics[Analytics Foundation]
+    Store --> Analytics
+    Analytics --> Web[Web Foundation]
+    Web --> Console[CaptivPortal Admin Console]
+
+    Console --> MultiSite[Multi-Site]
+    MultiSite --> Tenant[Tenant / изоляция клиентов]
+    Tenant --> RBAC[Customer accounts / RBAC]
+    RBAC --> Entitlements[Тарифы / entitlements]
+    Entitlements --> Managed[Managed Captive Portal Service]
+```
+
+### Observation Foundation v1
+
+Следующий планируемый функциональный этап — постоянный слой наблюдений за **Wi-Fi-клиентами и точками доступа**.
+
+Существующий **Authorized Client Snapshot Collector не заменяется и не переделывается**. Он сохраняет свою текущую роль: сразу после успешной авторизации фиксирует подробную стартовую фотографию клиента.
+
+После этого Observation Foundation добавляет периодические нормализованные observations, пока клиенты и AP активны.
+
+Уже проведённое исследование текущего Omada Open API подтвердило полезные источники данных для будущего сбора, включая:
+
+- client context: Site, SSID, AP, radio/band, channel и состояние сессии;
+- RSSI, SNR, RX/TX rates и traffic counters клиента, когда поля доступны;
+- model, firmware, uptime, CPU и memory точки доступа;
+- channel, width, TX power и Wi-Fi mode радиомодулей AP;
+- traffic counters отдельно для 2.4/5 GHz;
+- radio TX/RX/busy/interference utilization;
+- packet errors, drops и retries;
+- Ethernet/LAN uplink counters и параметры линка;
+- отдельные slow-changing capabilities, например доступные каналы и состояние OFDMA.
+
+Основной принцип:
+
+> **Собираем факты сейчас — анализируем их потом.**
+
+Коллекторы должны сохранять нормализованные факты и timestamps, а не зашивать продуктовые выводы вроде «слабый сигнал», «точка стоит плохо» или «нужна вторая AP».
+
+Для периодической истории observations планируется отдельная persistence/repository boundary, чтобы Visitor Registry не превращался в универсальную time-series базу.
+
+### Visit Lifecycle и аналитика
+
+После того как начнёт накапливаться история observations, **Visit Lifecycle v1** свяжет:
+
+```text
+Device
+→ успешная авторизация
+→ initial snapshot
+→ открытый visit
+→ client/AP observations
+→ offline/finalization
+→ закрытый visit
+```
+
+После этого отдельная **Analytics Foundation** будет работать по уже сохранённым данным. Аналитика должна читать Visitor Registry, Visit Lifecycle и Observation Storage, а не собирать исторические данные из Omada по требованию.
+
+В будущем можно будет анализировать, например:
+
+- динамику visitor devices и visits;
+- новые и повторные устройства;
+- длительность и повторяемость посещений;
+- распределение RSSI/SNR;
+- долю наблюдений со слабым сигналом и изменение radio quality;
+- распределение клиентов по AP и диапазонам;
+- загрузку AP, utilization, retries и errors;
+- traffic trends;
+- корреляцию качества сигнала клиентов с нагрузкой точки;
+- признаки, помогающие решить, стоит ли переставить AP или добавить ещё одну точку.
+
+RSSI рассматривается как показатель качества радиосвязи, **а не как точное измерение расстояния в метрах**.
+
+### Web Foundation и Admin Console
+
+Перед полноценной коммерческой Admin Console планируется небольшой **Web Foundation**. Он сформирует стабильные application/query APIs, Site-aware context, административную security boundary и первые read-only представления.
+
+Позже **CaptivPortal Admin Console** станет product/customer interface. Он намеренно отделён от Grafana.
+
+```text
+Grafana
+= внутренний инженерный observability-инструмент
+
+CaptivPortal Admin Console
+= продуктовый / клиентский интерфейс
+```
+
+Grafana остаётся нашим внутренним инструментом для диагностики, telemetry, проверки collectors, расследований и общей инженерной наблюдаемости платформы.
+
+Customer-facing метрики должны предоставляться через application services/API CaptivPortal, а не через превращение Grafana/Loki в backend продукта.
+
+### Site-aware коммерческое развитие
+
+Ближайшее развитие строится в режиме **site-aware, single-tenant**:
+
+- сохранять `site_id` там, где данные естественно относятся к Omada Site;
+- не хардкодить платформу так, будто Site навсегда один;
+- не вводить преждевременно `tenant_id`;
+- не считать `Tenant == Site`;
+- сохранять общий `OmadaProvider` и единый token lifecycle.
+
+Когда появится реальный второй Site или внешний клиент, планируемая эволюция:
+
+```text
+Site-aware platform
+→ Multi-Site
+→ Tenant model
+→ customer accounts / RBAC
+→ subscription entitlements
+→ commercial managed service
+```
+
+Один будущий Tenant может владеть несколькими Sites.
+
+Коммерческие тарифы планируется реализовывать через одну Admin Console и **server-enforced entitlements**, а не через отдельные forks Basic/Standard/Professional.
+
+Долгосрочная цель — managed service, в котором клиент работает только через собственный интерфейс CaptivPortal, видит только разрешённые ему Sites/данные/функции и не получает прямого доступа к внутренней Grafana или инфраструктуре платформы.
 
 ---
 
@@ -351,4 +492,4 @@ MIT License. См. [LICENSE](LICENSE).
 
 ---
 
-*README синхронизирован с состоянием проекта CaptivPortal, зафиксированным в августе 2026 года.*
+*README синхронизирован с production-состоянием CaptivPortal и текущим направлением развития проекта, зафиксированными в августе 2026 года.*
