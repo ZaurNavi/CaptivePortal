@@ -9,9 +9,11 @@ import threading
 import time
 import requests
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from app.common.mac import format_mac_colon, format_mac_hyphen
 from app.controllers.base import ControllerInterface
+from app.exceptions import ConfigurationError
 from app.logger import logger
 from app.models import Result
 from app import get_settings
@@ -22,14 +24,70 @@ class OmadaProvider(ControllerInterface):
 
     CLIENT_PAGE_SIZE = 100
     CLIENT_MAX_PAGES = 100
+    _REQUIRED_CONFIGURATION = (
+        ("OMADA_URL", "omada_url"),
+        ("OMADA_ID", "omada_id"),
+        ("OMADA_CLIENT_ID", "client_id"),
+        ("OMADA_CLIENT_SECRET", "client_secret"),
+    )
+
+    @staticmethod
+    def _is_valid_base_url(value: str) -> bool:
+        if any(character.isspace() for character in value):
+            return False
+        if "?" in value or "#" in value:
+            return False
+
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError:
+            return False
+
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        if not parsed.netloc or parsed.hostname is None:
+            return False
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        if parsed.path not in {"", "/"}:
+            return False
+        if parsed.netloc.endswith(":"):
+            return False
+        if port is not None and port == 0:
+            return False
+        return True
 
     def __init__(self):
         logger.debug("Initializing OmadaProvider")
         settings = get_settings()
-        self._omada_url = settings["omada_url"].rstrip("/")
-        self._omada_id = settings["omada_id"]
-        self._client_id = settings["client_id"]
-        self._client_secret = settings["client_secret"]
+        missing = [
+            external_name
+            for external_name, internal_name in self._REQUIRED_CONFIGURATION
+            if (
+                not isinstance(settings.get(internal_name), str)
+                or not settings[internal_name].strip()
+            )
+        ]
+        if missing:
+            raise ConfigurationError(
+                "Missing required configuration: " + ", ".join(missing)
+            )
+
+        normalized = {
+            internal_name: settings[internal_name].strip()
+            for _, internal_name in self._REQUIRED_CONFIGURATION
+        }
+        omada_url = normalized["omada_url"]
+        if not self._is_valid_base_url(omada_url):
+            raise ConfigurationError("Invalid configuration: OMADA_URL")
+
+        self._omada_url = (
+            omada_url[:-1] if omada_url.endswith("/") else omada_url
+        )
+        self._omada_id = normalized["omada_id"]
+        self._client_id = normalized["client_id"]
+        self._client_secret = normalized["client_secret"]
         self._verify_ssl = settings["verify_ssl"]
         self._token_condition = threading.Condition(
             threading.RLock()

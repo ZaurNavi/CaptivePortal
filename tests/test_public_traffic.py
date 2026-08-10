@@ -1028,6 +1028,11 @@ def test_worker_start_failure_does_not_prevent_flask_start(
     }
     with (
         patch.object(run_module, "create_app", return_value=app),
+        patch.object(
+            run_module,
+            "create_controller",
+            return_value=object(),
+        ),
         patch.object(run_module, "get_settings", return_value=settings),
         patch.object(run_module.atexit, "register"),
         patch.object(run_module.signal, "signal"),

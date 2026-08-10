@@ -10,6 +10,11 @@ Updated: 2026-08-04
 - Access Token, Client Secret, cookie, Authorization header и SSID password не логируются.
 - Agent не запрашивает production secret без прямой необходимости.
 - Exception и raw response очищаются до journal/telemetry.
+- Omada Client Secret передаётся только через process environment или другой
+  утверждённый secret mechanism; fallback-значение в repository запрещено.
+- Если Omada Client Secret когда-либо попал в Git history, его необходимо
+  заменить и отозвать в рамках owner-controlled rotation независимо от решения
+  о переписывании history.
 
 ## Identifiers и network boundary
 
