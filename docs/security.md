@@ -1,7 +1,7 @@
 # Security
 
 Status: current
-Updated: 2026-08-04
+Updated: 2026-08-10
 
 ## Secrets
 
@@ -15,6 +15,22 @@ Updated: 2026-08-04
 - Если Omada Client Secret когда-либо попал в Git history, его необходимо
   заменить и отозвать в рамках owner-controlled rotation независимо от решения
   о переписывании history.
+
+## Current findings на `main@ab776af`
+
+- Production Omada credentials отсутствуют в current Git tree. `OMADA_URL`,
+  `OMADA_ID`, `OMADA_CLIENT_ID` и `OMADA_CLIENT_SECRET` читаются из process
+  environment и не имеют repository fallback values.
+- Tracked Python cache и backup-файлы удалены; `.gitignore` блокирует их
+  повторное добавление.
+- Старый Omada Client Secret остаётся в Git history. Owner-controlled rotation
+  и отзыв старого значения остаются OPEN независимо от решения о переписывании
+  history.
+- `VERIFY_SSL=false` остаётся current repository contract и открытым
+  security/operations debt. Включение TLS verification требует отдельного TASK,
+  выбранной доверенной certificate model и focused deployment/tests.
+
+Secret values, fingerprints, длина и фрагменты в findings не фиксируются.
 
 ## Identifiers и network boundary
 

@@ -1,8 +1,8 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-08-04
-Runtime baseline: main commit `227ebe93831447d16b78f277ee3052ddd06e15a3`
+Updated: 2026-08-10
+Runtime baseline: main commit `ab776af3fc58dc090e17ecd20534abddc1f33ad3`
 
 ## Назначение
 
@@ -19,7 +19,7 @@ flowchart TD
     E --> F["AUTHORIZED / FAILED / RESET"]
 ~~~
 
-CAPPORT разрешает client identity и направляет login в PortalEntryHandler. Независимый CAPPORT authorization worker или второй provider запрещены.
+CAPPORT разрешает client identity через bounded same-page discovery requests и направляет найденного client в PortalEntryHandler. Независимый CAPPORT authorization worker или второй provider запрещены. Frontend сохраняет монотонный progress между discovery/auth phases и после `AUTHORIZED` использует guarded one-time same-page revalidation без reload-loop.
 
 ## Composition root
 

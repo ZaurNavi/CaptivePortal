@@ -1,8 +1,8 @@
 # Omada Open API: уровни подтверждения
 
 Status: current
-Updated: 2026-08-04
-Sources: runtime baseline `227ebe9…`, local Swagger research и переданные live-test reports для Omada Controller 5.14.31
+Updated: 2026-08-10
+Sources: runtime baseline `ab776af…`, local Swagger research и переданные live-test reports для Omada Controller 5.14.31
 
 Этот документ разделяет доказательства, а не объединяет их словом «confirmed». Один endpoint может одновременно находиться в разделе live-tested, быть описан Swagger и использоваться текущим кодом. Наличие endpoint в Swagger без live-выполнения не подтверждает его runtime behavior и не разрешает новую mutation.
 
@@ -79,7 +79,7 @@ Live-tested означает, что запрос был выполнен про
 
 ## 3. Endpoints used by current code
 
-Runtime baseline `227ebe9…` использует `app/controllers/omada.py` и pending-session adapter `app/controllers/omada_pending_sessions.py`. Один `OmadaProvider` вызывает:
+Runtime baseline `ab776af…` использует `app/controllers/omada.py` и pending-session adapter `app/controllers/omada_pending_sessions.py`. Один `OmadaProvider` вызывает:
 
     POST /openapi/authorize/token?grant_type=client_credentials
     GET  /openapi/v1/{omadacId}/sites

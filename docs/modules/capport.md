@@ -2,6 +2,7 @@
 
 Status: active
 Updated: 2026-08-10
+Runtime baseline: main `ab776af3fc58dc090e17ecd20534abddc1f33ad3`
 
 ## 1. Назначение
 
@@ -9,7 +10,7 @@ RFC 8908/8910 captive portal API и login bridge в общий authorization flo
 
 ## 2. Статус
 
-app/capport реализован; CAPPORT_ENABLED=true в snapshot default.
+`app/capport` реализован; `CAPPORT_ENABLED=true` в repository default. Изменения bounded discovery и frontend PR #31/#35–#37 находятся в deployed `main@ab776af`. Android captive-window live acceptance post-`AUTHORIZED` revalidation пока не подтверждён и остаётся отдельным gate.
 
 ## 3. Граница ответственности
 
@@ -50,6 +51,18 @@ Discovery JSON всегда содержит `mode`, `state/status`, `terminal`,
 snapshot, поэтому frontend окончательно прекращает discovery и использует
 существующий retry/final UI.
 
+Отображаемый progress не уменьшается при переходе discovery → auth и при более
+низком результате последующего poll. Начало явного нового retry является
+отдельным cycle и может сбросить progress по retry contract.
+
+После подтверждённого `AUTHORIZED` frontend ровно один раз запускает completion
+flow: останавливает polling и пытается выполнить `window.close()`. Если окно
+осталось открыто, при наличии `redirect_url` сохраняется существующий redirect
+contract; без redirect допускается максимум один reload текущей страницы для
+revalidation. Marker `captivePortalRevalidated:<session_id>` в
+`sessionStorage` блокирует reload-loop. Если marker недоступен, reload не
+выполняется.
+
 ## 6. Основные модели
 
 CapportConfig, CapportClient, CapportState, CapportService.
@@ -84,8 +97,14 @@ Service/blueprint создаются в create_app() с общим controller.
 
 ## 14. Тесты
 
-tests/test_capport_routes.py, test_capport_discovery_frontend.py,
-test_capport_service.py, test_capport_telemetry.py, test_proxy_headers.py.
+`tests/test_capport_routes.py`, `test_capport_discovery_frontend.py`,
+`test_capport_service.py`, `test_capport_telemetry.py`, `test_proxy_headers.py`
+и `test_auth_retry_frontend.py`.
+
+Tests подтверждают static/Node contract, но не поведение конкретного Android
+captive WebView. Live acceptance требует не менее пяти реальных подключений без
+ручного refresh, с максимум одним same-page reload и без повторной авторизации
+или reload-loop.
 
 ## 15. Запрещённые изменения
 
@@ -93,7 +112,9 @@ test_capport_service.py, test_capport_telemetry.py, test_proxy_headers.py.
 
 ## 16. Связанные TASK
 
-Historical docs/CAPPORT.md мигрируется в этот contract.
+Historical `docs/CAPPORT.md` мигрируется в этот contract. Related changes:
+bounded discovery PR #31, same-page discovery PR #35, monotonic progress PR #36
+и guarded revalidation PR #37. Это history, а не отдельные current contracts.
 
 ## 17. Связанные ADR
 
