@@ -136,6 +136,17 @@ const localStorage = {
         storage.set(key, String(value));
     }
 };
+const sessionStorageData = new Map();
+const sessionStorage = {
+    getItem(key) {
+        return sessionStorageData.has(key)
+            ? sessionStorageData.get(key)
+            : null;
+    },
+    setItem(key, value) {
+        sessionStorageData.set(key, String(value));
+    }
+};
 
 let nextTimerId = 1;
 const scheduledTimers = new Map();
@@ -148,11 +159,18 @@ function fakeClearTimeout(id) {
     scheduledTimers.delete(id);
 }
 
+const closeCalls = [];
+const locationCalls = [];
+const reloadCalls = [];
 const window = {
     setTimeout: fakeSetTimeout,
     clearTimeout: fakeClearTimeout,
-    close() {},
-    location: {replace() {}},
+    close() { closeCalls.push(true); },
+    sessionStorage,
+    location: {
+        replace(url) { locationCalls.push(url); },
+        reload() { reloadCalls.push(true); }
+    },
     crypto: {
         randomUUID() {
             return "11111111-1111-4111-8111-111111111111";
@@ -251,7 +269,7 @@ def test_retry_ui_uses_one_post_and_state_reconciliation():
         in template
     )
     assert "await reconcileRetryState();" in template
-    assert "location.reload()" not in template
+    assert "window.location.reload();" in template
     assert "retryInFlight" in template
 
 
@@ -262,6 +280,74 @@ def test_retryable_and_final_failures_are_rendered_separately():
     assert "showError(texts.retryableFailure);" in template
     assert "showError(texts.finalFailure);" in template
     assert '"RESETTING"' in template
+
+
+def test_authorized_without_redirect_reloads_same_page_once():
+    run_frontend_scenario(
+        {
+            "state": "WAITING",
+            "progress": 0,
+            "retryable": False,
+            "terminal": False,
+            "authorized": False,
+            "current_run_number": 1,
+        },
+        r"""
+applyServerState({
+    state: "AUTHORIZED",
+    progress: 100,
+    retryable: false,
+    terminal: true,
+    authorized: true,
+    current_run_number: 1
+});
+
+const closeTimer = Array.from(scheduledTimers.entries()).find(
+    ([_id, timer]) => timer.delay === 900
+);
+assert(closeTimer, "authorized close timer was not scheduled");
+scheduledTimers.delete(closeTimer[0]);
+closeTimer[1].callback();
+assert(closeCalls.length === 1, "window close must be attempted once");
+
+const revalidationTimer = Array.from(scheduledTimers.entries()).find(
+    ([_id, timer]) => timer.delay === 500
+);
+assert(revalidationTimer, "revalidation timer was not scheduled");
+scheduledTimers.delete(revalidationTimer[0]);
+revalidationTimer[1].callback();
+assert(
+    reloadCalls.length === 1,
+    "missing redirect must reload the current page once"
+);
+assert(locationCalls.length === 0, "revalidation navigated to another page");
+
+authorizedCompletionStarted = false;
+applyServerState({
+    state: "AUTHORIZED",
+    progress: 100,
+    retryable: false,
+    terminal: true,
+    authorized: true,
+    current_run_number: 1
+});
+const secondCloseTimer = Array.from(scheduledTimers.entries()).find(
+    ([_id, timer]) => timer.delay === 900
+);
+assert(secondCloseTimer, "reloaded page did not retry window close");
+scheduledTimers.delete(secondCloseTimer[0]);
+secondCloseTimer[1].callback();
+assert(closeCalls.length === 2, "reloaded page did not retry window close");
+const secondRevalidationTimer = Array.from(scheduledTimers.entries()).find(
+    ([_id, timer]) => timer.delay === 500
+);
+assert(secondRevalidationTimer, "second completion timer was not scheduled");
+scheduledTimers.delete(secondRevalidationTimer[0]);
+secondRevalidationTimer[1].callback();
+assert(reloadCalls.length === 1, "revalidation reload entered a loop");
+assert(locationCalls.length === 0, "reloaded page navigated elsewhere");
+""",
+    )
 
 
 def test_retryable_failure_button_and_click_transition():

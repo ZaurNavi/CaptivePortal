@@ -985,6 +985,9 @@ Wi-Fi!!</p>
         let discoveryGeneration = 0;
         let pageActive = true;
         let discoveryHasLookupError = false;
+        let authorizedCompletionStarted = false;
+        const authorizedRevalidationKeyPrefix =
+            "captivePortalRevalidated:";
 
         let isDiscoveryMode = (
             (sessionId === null || sessionId === undefined)
@@ -1594,6 +1597,10 @@ Wi-Fi!!</p>
         }
 
         function handleAuthorized() {
+            if (authorizedCompletionStarted) {
+                return;
+            }
+            authorizedCompletionStarted = true;
             stopPolling();
 
             window.setTimeout(() => {
@@ -1606,16 +1613,48 @@ Wi-Fi!!</p>
                     );
                 }
 
-                if (
-                    redirectUrl
-                    && typeof redirectUrl === "string"
-                ) {
-                    window.setTimeout(() => {
-                        window.location.replace(
-                            redirectUrl
+                window.setTimeout(() => {
+                    if (
+                        redirectUrl
+                        && typeof redirectUrl === "string"
+                    ) {
+                        window.location.replace(redirectUrl);
+                        return;
+                    }
+
+                    if (
+                        typeof sessionId !== "string"
+                        || sessionId.length === 0
+                    ) {
+                        return;
+                    }
+
+                    const revalidationKey = (
+                        authorizedRevalidationKeyPrefix
+                        + sessionId
+                    );
+                    try {
+                        if (
+                            window.sessionStorage.getItem(
+                                revalidationKey
+                            ) === "1"
+                        ) {
+                            return;
+                        }
+                        window.sessionStorage.setItem(
+                            revalidationKey,
+                            "1"
                         );
-                    }, 500);
-                }
+                    } catch (error) {
+                        console.debug(
+                            "Captive revalidation marker unavailable",
+                            error
+                        );
+                        return;
+                    }
+
+                    window.location.reload();
+                }, 500);
             }, 900);
         }
 
