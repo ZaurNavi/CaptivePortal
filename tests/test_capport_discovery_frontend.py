@@ -111,6 +111,17 @@ const localStorage = {
     getItem(key) { return storage.has(key) ? storage.get(key) : null; },
     setItem(key, value) { storage.set(key, String(value)); }
 };
+const sessionStorageData = new Map();
+const sessionStorage = {
+    getItem(key) {
+        return sessionStorageData.has(key)
+            ? sessionStorageData.get(key)
+            : null;
+    },
+    setItem(key, value) {
+        sessionStorageData.set(key, String(value));
+    }
+};
 
 let now = 0;
 const performance = {now() { return now; }};
@@ -133,6 +144,8 @@ const clearTimeout = fakeClearTimeout;
 const clearInterval = fakeClearInterval;
 
 const locationCalls = [];
+const closeCalls = [];
+const reloadCalls = [];
 const windowEvents = {};
 const window = {
     setTimeout: fakeSetTimeout,
@@ -140,10 +153,12 @@ const window = {
     setInterval: fakeSetInterval,
     clearInterval: fakeClearInterval,
     addEventListener(name, callback) { windowEvents[name] = callback; },
-    close() {},
+    close() { closeCalls.push(true); },
+    sessionStorage,
     location: {
         pathname: "/capport/login",
-        replace(url) { locationCalls.push(url); }
+        replace(url) { locationCalls.push(url); },
+        reload() { reloadCalls.push(true); }
     },
     crypto: {
         randomUUID() { return "11111111-1111-4111-8111-111111111111"; },
@@ -406,9 +421,38 @@ assert(currentState.status === "AUTHORIZED", "authorized state was not applied")
 assertProgress(100, "fast authorized response");
 assert(locationCalls.length === 0, "redirect happened before success delay");
 runTimeoutWithDelay(900);
+assert(closeCalls.length === 1, "window close was not attempted once");
 runTimeoutWithDelay(500);
 assert(locationCalls[0] === "https://example.test/after",
     "existing authorized redirect was not preserved");
+""")
+
+
+def test_fast_authorized_without_redirect_reloads_current_page():
+    run_scenario(r"""
+fetchImpl = async () => makeResponse({
+    mode: "AUTH_SESSION",
+    session_id: "session-1",
+    redirect_url: null,
+    initial_state: {
+        session_id: "session-1",
+        state: "AUTHORIZED",
+        status: "AUTHORIZED",
+        progress: 100,
+        authorized: true,
+        terminal: true,
+        retryable: false
+    }
+});
+await requestDiscovery(discoveryRuntime.retryUrl, false);
+assertProgress(100, "fast authorized response");
+runTimeoutWithDelay(900);
+assert(closeCalls.length === 1, "window close was not attempted once");
+runTimeoutWithDelay(500);
+assert(reloadCalls.length === 1,
+    "CAPPORT success did not reload the current page");
+assert(locationCalls.length === 0,
+    "CAPPORT success navigated to another page");
 """)
 
 
