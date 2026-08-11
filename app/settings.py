@@ -28,6 +28,14 @@ from app.config import (
     VISITOR_REGISTRY_SCAN_INTERVAL_SECONDS,
     VISITOR_REGISTRY_SHUTDOWN_TIMEOUT_SECONDS,
     VISITOR_REGISTRY_MAX_LINE_BYTES,
+    OBSERVATION_FOUNDATION_ENABLED, OBSERVATION_DB_PATH,
+    OBSERVATION_DYNAMIC_RETENTION_DAYS,
+    OBSERVATION_CONFIG_RETENTION_DAYS,
+    OBSERVATION_CLEANUP_INITIAL_DELAY_SECONDS,
+    OBSERVATION_CLEANUP_INTERVAL_SECONDS,
+    OBSERVATION_CLEANUP_BATCH_SIZE,
+    OBSERVATION_CLEANUP_MAX_DURATION_SECONDS,
+    OBSERVATION_SHUTDOWN_TIMEOUT_SECONDS,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -139,6 +147,31 @@ def get_settings() -> dict:
         ),
         "visitor_registry_max_line_bytes": (
             VISITOR_REGISTRY_MAX_LINE_BYTES
+        ),
+        "observation_foundation_enabled": (
+            OBSERVATION_FOUNDATION_ENABLED
+        ),
+        "observation_db_path": OBSERVATION_DB_PATH,
+        "observation_dynamic_retention_days": (
+            OBSERVATION_DYNAMIC_RETENTION_DAYS
+        ),
+        "observation_config_retention_days": (
+            OBSERVATION_CONFIG_RETENTION_DAYS
+        ),
+        "observation_cleanup_initial_delay_seconds": (
+            OBSERVATION_CLEANUP_INITIAL_DELAY_SECONDS
+        ),
+        "observation_cleanup_interval_seconds": (
+            OBSERVATION_CLEANUP_INTERVAL_SECONDS
+        ),
+        "observation_cleanup_batch_size": (
+            OBSERVATION_CLEANUP_BATCH_SIZE
+        ),
+        "observation_cleanup_max_duration_seconds": (
+            OBSERVATION_CLEANUP_MAX_DURATION_SECONDS
+        ),
+        "observation_shutdown_timeout_seconds": (
+            OBSERVATION_SHUTDOWN_TIMEOUT_SECONDS
         ),
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,
