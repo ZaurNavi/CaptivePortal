@@ -5,6 +5,7 @@ Importing it performs no I/O, starts no worker, and makes no Omada call.
 """
 
 from .cleanup import ObservationCleanup, ObservationCleanupWorker
+from .client_worker import ClientCycleOutcome, ClientObservationWorker
 from .config import observation_config_from_settings
 from .models import (
     ApConfigSnapshot,
@@ -30,6 +31,8 @@ __all__ = [
     "ApRadioObservation",
     "CleanupResult",
     "ClientObservation",
+    "ClientCycleOutcome",
+    "ClientObservationWorker",
     "ObservationCleanup",
     "ObservationCleanupWorker",
     "ObservationConfig",

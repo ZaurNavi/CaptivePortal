@@ -68,6 +68,15 @@ class ObservationConfig:
     cleanup_batch_size: int
     cleanup_max_duration_seconds: float
     shutdown_timeout_seconds: float
+    client_enabled: bool = False
+    site_ids: tuple[str, ...] = ()
+    client_ssids: tuple[str, ...] = ()
+    client_initial_delay_seconds: float = 15.0
+    client_interval_seconds: float = 60.0
+    request_timeout_seconds: float = 5.0
+    client_page_size: int = 500
+    client_max_pages: int = 20
+    client_max_rows: int = 10_000
 
 
 @dataclass(frozen=True, slots=True)
