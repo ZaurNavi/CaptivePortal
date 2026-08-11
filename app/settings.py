@@ -36,6 +36,13 @@ from app.config import (
     OBSERVATION_CLEANUP_BATCH_SIZE,
     OBSERVATION_CLEANUP_MAX_DURATION_SECONDS,
     OBSERVATION_SHUTDOWN_TIMEOUT_SECONDS,
+    OBSERVATION_CLIENT_ENABLED, OBSERVATION_SITE_IDS,
+    OBSERVATION_CLIENT_SSIDS,
+    OBSERVATION_CLIENT_INITIAL_DELAY_SECONDS,
+    OBSERVATION_CLIENT_INTERVAL_SECONDS,
+    OBSERVATION_REQUEST_TIMEOUT_SECONDS,
+    OBSERVATION_CLIENT_PAGE_SIZE, OBSERVATION_CLIENT_MAX_PAGES,
+    OBSERVATION_CLIENT_MAX_ROWS,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -173,6 +180,21 @@ def get_settings() -> dict:
         "observation_shutdown_timeout_seconds": (
             OBSERVATION_SHUTDOWN_TIMEOUT_SECONDS
         ),
+        "observation_client_enabled": OBSERVATION_CLIENT_ENABLED,
+        "observation_site_ids": OBSERVATION_SITE_IDS,
+        "observation_client_ssids": OBSERVATION_CLIENT_SSIDS,
+        "observation_client_initial_delay_seconds": (
+            OBSERVATION_CLIENT_INITIAL_DELAY_SECONDS
+        ),
+        "observation_client_interval_seconds": (
+            OBSERVATION_CLIENT_INTERVAL_SECONDS
+        ),
+        "observation_request_timeout_seconds": (
+            OBSERVATION_REQUEST_TIMEOUT_SECONDS
+        ),
+        "observation_client_page_size": OBSERVATION_CLIENT_PAGE_SIZE,
+        "observation_client_max_pages": OBSERVATION_CLIENT_MAX_PAGES,
+        "observation_client_max_rows": OBSERVATION_CLIENT_MAX_ROWS,
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,
         "capport_public_base_url": CAPPORT_PUBLIC_BASE_URL,
