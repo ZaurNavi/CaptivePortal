@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import requests
@@ -12,6 +13,11 @@ from app.models import Result
 
 ACCESS_MARKER = "TEST_ACCESS_TOKEN_SHOULD_NOT_LEAK"
 SECRET_MARKER = "TEST_CLIENT_SECRET_SHOULD_NOT_LEAK"
+FIXTURES = Path(__file__).parent / "observations" / "fixtures" / "omada"
+
+
+def fixture(name):
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
 class FakeProvider:
@@ -52,6 +58,21 @@ def success_payload(rows=None, total=0, **updates):
 
 def test_method_is_installed_on_shared_provider_class():
     assert OmadaProvider.list_observation_clients is subject.list_observation_clients
+    for name in (
+        "list_observation_access_points",
+        "get_observation_ap_overview",
+        "get_observation_ap_wired_uplink",
+        "get_observation_ap_lan_traffic",
+        "get_observation_ap_radios",
+        "get_observation_ap_general_config",
+        "get_observation_ap_ip_setting",
+        "get_observation_ap_radio_config",
+        "get_observation_ap_ofdma",
+        "get_observation_ap_available_channels",
+        "get_observation_ap_safe_overrides",
+        "get_observation_ap_rf_scan_state",
+    ):
+        assert getattr(OmadaProvider, name) is getattr(subject, name)
 
 
 def test_success_is_bounded_and_defensively_copied(monkeypatch):
@@ -209,3 +230,108 @@ def test_invalid_arguments_make_no_request(monkeypatch, args):
     result = subject.list_observation_clients(FakeProvider(), *args)
     assert result.success is False
     assert result.data["failure_category"] == "invalid_argument"
+
+
+def test_ap_inventory_uses_devices_endpoint_and_fixture_shape(monkeypatch):
+    captured = {}
+
+    def get(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse(fixture("01_devices.json"))
+
+    monkeypatch.setattr(subject.requests, "get", get)
+    result = subject.list_observation_access_points(
+        FakeProvider(), "site-a", 1, 100, 5
+    )
+
+    assert result.success is True
+    assert result.data["total_rows"] == 1
+    assert result.data["access_points"][0]["type"] == "ap"
+    assert captured["url"].endswith("/sites/site-a/devices")
+    assert captured["params"] == {"page": 1, "pageSize": 100}
+
+
+@pytest.mark.parametrize(
+    ("method", "fixture_name", "url_suffix"),
+    [
+        ("get_observation_ap_overview", "02_ap_overview.json", "/aps/02-00-00-00-00-01"),
+        ("get_observation_ap_wired_uplink", "03_wired_uplink.json", "/wired-uplink"),
+        ("get_observation_ap_lan_traffic", "04_lan_traffic_info.json", "/lan-traffic-info"),
+        ("get_observation_ap_radios", "05_radios.json", "/radios"),
+        ("get_observation_ap_general_config", "06_general_config.json", "/general-config"),
+        ("get_observation_ap_ip_setting", "07_ip_setting.json", "/ip-setting"),
+        ("get_observation_ap_radio_config", "08_radio_config.json", "/radio-config"),
+        ("get_observation_ap_ofdma", "09_ofdma.json", "/ofdma"),
+        ("get_observation_ap_available_channels", "10_available_channel.json", "/available-channel"),
+        ("get_observation_ap_rf_scan_state", "12_rf_scan_result_v2.json", "/rf-scan-result"),
+    ],
+)
+def test_ap_methods_accept_authoritative_fixtures(
+    monkeypatch, method, fixture_name, url_suffix
+):
+    captured = {}
+
+    def get(url, **kwargs):
+        captured["url"] = url
+        return FakeResponse(fixture(fixture_name))
+
+    monkeypatch.setattr(subject.requests, "get", get)
+    result = getattr(subject, method)(
+        FakeProvider(), "site-a", "02:00:00:00:00:01", 5
+    )
+    assert result.success is True
+    assert captured["url"].endswith(url_suffix)
+    if method == "get_observation_ap_rf_scan_state":
+        assert "/openapi/v2/" in captured["url"]
+
+
+def test_override_password_is_removed_before_result(monkeypatch):
+    monkeypatch.setattr(
+        subject.requests,
+        "get",
+        lambda *a, **k: FakeResponse(fixture("11_override_v2.json")),
+    )
+    result = subject.get_observation_ap_safe_overrides(
+        FakeProvider(), "site-a", "02:00:00:00:00:01", 5
+    )
+    serialized = json.dumps(result.to_dict())
+    assert result.success is True
+    assert "TEST_WIFI_PASSWORD_SHOULD_NOT_LEAK" not in serialized
+    assert "ssidPassword" not in serialized
+
+
+def test_ap_method_retries_exact_token_expiry_only_once(monkeypatch):
+    provider = FakeProvider()
+    provider.tokens = [ACCESS_MARKER, "fresh-token"]
+    responses = [
+        FakeResponse({"errorCode": -44112}),
+        FakeResponse(fixture("02_ap_overview.json")),
+    ]
+    monkeypatch.setattr(subject.requests, "get", lambda *a, **k: responses.pop(0))
+    result = subject.get_observation_ap_overview(
+        provider, "site", "02:00:00:00:00:01", 5
+    )
+    assert result.success is True
+    assert provider.token_calls == [False, True]
+    assert provider.invalidated == [ACCESS_MARKER]
+
+
+def test_ap_result_recursively_removes_sensitive_controller_fields(monkeypatch):
+    payload = fixture("02_ap_overview.json")
+    payload["result"]["nested"] = {
+        "accessToken": ACCESS_MARKER,
+        "clientSecret": SECRET_MARKER,
+        "safe": "kept",
+    }
+    monkeypatch.setattr(
+        subject.requests, "get", lambda *a, **k: FakeResponse(payload)
+    )
+    result = subject.get_observation_ap_overview(
+        FakeProvider(), "site", "02:00:00:00:00:01", 5
+    )
+    serialized = json.dumps(result.to_dict())
+    assert result.success is True
+    assert ACCESS_MARKER not in serialized
+    assert SECRET_MARKER not in serialized
+    assert result.data["result"]["nested"] == {"safe": "kept"}

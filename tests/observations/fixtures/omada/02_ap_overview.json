@@ -1,0 +1,16 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "type": "ap",
+    "mac": "02-00-00-00-00-01",
+    "name": "TEST_AP_1",
+    "ip": "192.0.2.11",
+    "wlanId": "000000000000000000000001",
+    "showModel": "EAP613(EU) v1.0",
+    "firmwareVersion": "1.8.3 Build 20260617 Rel. 36045",
+    "cpuUtil": 1,
+    "memUtil": 42,
+    "uptimeLong": 1570998
+  }
+}

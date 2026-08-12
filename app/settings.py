@@ -43,6 +43,18 @@ from app.config import (
     OBSERVATION_REQUEST_TIMEOUT_SECONDS,
     OBSERVATION_CLIENT_PAGE_SIZE, OBSERVATION_CLIENT_MAX_PAGES,
     OBSERVATION_CLIENT_MAX_ROWS,
+    OBSERVATION_AP_ENABLED, OBSERVATION_AP_INITIAL_DELAY_SECONDS,
+    OBSERVATION_AP_INTERVAL_SECONDS,
+    OBSERVATION_AP_INVENTORY_INTERVAL_SECONDS,
+    OBSERVATION_AP_INVENTORY_MAX_STALE_SECONDS,
+    OBSERVATION_AP_CONFIG_INTERVAL_SECONDS,
+    OBSERVATION_AP_PAGE_SIZE, OBSERVATION_AP_MAX_PAGES,
+    OBSERVATION_AP_MAX_ROWS,
+    OBSERVATION_AP_DYNAMIC_MAX_REQUESTS_PER_CYCLE,
+    OBSERVATION_AP_CONFIG_MAX_REQUESTS_PER_CYCLE,
+    OBSERVATION_AP_CYCLE_MAX_DURATION_SECONDS,
+    OBSERVATION_AP_CONFIG_CYCLE_MAX_DURATION_SECONDS,
+    OBSERVATION_RATE_MAX_GAP_SECONDS,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -195,6 +207,36 @@ def get_settings() -> dict:
         "observation_client_page_size": OBSERVATION_CLIENT_PAGE_SIZE,
         "observation_client_max_pages": OBSERVATION_CLIENT_MAX_PAGES,
         "observation_client_max_rows": OBSERVATION_CLIENT_MAX_ROWS,
+        "observation_ap_enabled": OBSERVATION_AP_ENABLED,
+        "observation_ap_initial_delay_seconds": (
+            OBSERVATION_AP_INITIAL_DELAY_SECONDS
+        ),
+        "observation_ap_interval_seconds": OBSERVATION_AP_INTERVAL_SECONDS,
+        "observation_ap_inventory_interval_seconds": (
+            OBSERVATION_AP_INVENTORY_INTERVAL_SECONDS
+        ),
+        "observation_ap_inventory_max_stale_seconds": (
+            OBSERVATION_AP_INVENTORY_MAX_STALE_SECONDS
+        ),
+        "observation_ap_config_interval_seconds": (
+            OBSERVATION_AP_CONFIG_INTERVAL_SECONDS
+        ),
+        "observation_ap_page_size": OBSERVATION_AP_PAGE_SIZE,
+        "observation_ap_max_pages": OBSERVATION_AP_MAX_PAGES,
+        "observation_ap_max_rows": OBSERVATION_AP_MAX_ROWS,
+        "observation_ap_dynamic_max_requests_per_cycle": (
+            OBSERVATION_AP_DYNAMIC_MAX_REQUESTS_PER_CYCLE
+        ),
+        "observation_ap_config_max_requests_per_cycle": (
+            OBSERVATION_AP_CONFIG_MAX_REQUESTS_PER_CYCLE
+        ),
+        "observation_ap_cycle_max_duration_seconds": (
+            OBSERVATION_AP_CYCLE_MAX_DURATION_SECONDS
+        ),
+        "observation_ap_config_cycle_max_duration_seconds": (
+            OBSERVATION_AP_CONFIG_CYCLE_MAX_DURATION_SECONDS
+        ),
+        "observation_rate_max_gap_seconds": OBSERVATION_RATE_MAX_GAP_SECONDS,
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,
         "capport_public_base_url": CAPPORT_PUBLIC_BASE_URL,

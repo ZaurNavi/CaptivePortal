@@ -1,0 +1,15 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "wiredUplink": {
+      "rate": "1000",
+      "duplex": 2,
+      "upBytes": 88075922342,
+      "downBytes": 245897982444,
+      "upPackets": 168357931,
+      "downPackets": 238322404,
+      "activity": 722793
+    }
+  }
+}

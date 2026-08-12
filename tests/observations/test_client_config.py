@@ -62,7 +62,9 @@ def test_empty_ssid_means_all_and_disabled_client_needs_no_sites(tmp_path):
 
     disabled = observation_config_from_settings(settings(
         tmp_path,
+        observation_foundation_enabled="false",
         observation_client_enabled="false",
+        observation_ap_enabled="false",
         observation_site_ids="",
         observation_client_page_size="invalid-while-disabled",
     ))

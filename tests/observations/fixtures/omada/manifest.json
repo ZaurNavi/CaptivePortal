@@ -1,0 +1,23 @@
+{
+  "fixture_count": 12,
+  "controller_version": "5.14.31",
+  "ap_model": "EAP613(EU) v1.0",
+  "all_fixture_requests_are_get": true,
+  "authorization_request_is_post": true,
+  "raw_responses_written_to_disk": false,
+  "password_replacement": "TEST_WIFI_PASSWORD_SHOULD_NOT_LEAK",
+  "files": [
+    "01_devices.json",
+    "02_ap_overview.json",
+    "03_wired_uplink.json",
+    "04_lan_traffic_info.json",
+    "05_radios.json",
+    "06_general_config.json",
+    "07_ip_setting.json",
+    "08_radio_config.json",
+    "09_ofdma.json",
+    "10_available_channel.json",
+    "11_override_v2.json",
+    "12_rf_scan_result_v2.json"
+  ]
+}

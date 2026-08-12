@@ -1,0 +1,21 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "mode": "static",
+    "dhcpIpSetting": {
+      "fallback": true,
+      "fallbackIp": "192.0.2.12",
+      "fallbackMask": "192.0.2.13",
+      "fallbackGate": "",
+      "useFixedAddr": false
+    },
+    "staticIpSetting": {
+      "configIp": "192.0.2.11",
+      "configMask": "192.0.2.13",
+      "configGate": "192.0.2.14",
+      "preferredDNS": "192.0.2.14",
+      "alternateDNS": "192.0.2.15"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "ofdmaEnable2g": true,
+    "ofdmaEnable5g": false,
+    "supportOfdma2g": true,
+    "supportOfdma5g": true,
+    "supportOfdma5g2": false,
+    "supportOfdma6g": false
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "radioTraffic2g": {
+      "rxPkts": 122378621,
+      "txPkts": 150122677,
+      "rx": 55258732921,
+      "tx": 161419911372,
+      "rxDropPkts": 219890,
+      "txDropPkts": 56840,
+      "rxErrPkts": 219834,
+      "txErrPkts": 0,
+      "rxRetryPkts": 53970382,
+      "txRetryPkts": 0
+    },
+    "radioTraffic5g": {
+      "rxPkts": 57604421,
+      "txPkts": 71696204,
+      "rx": 34373478600,
+      "tx": 82129029659,
+      "rxDropPkts": 24477,
+      "txDropPkts": 3045,
+      "rxErrPkts": 23981,
+      "txErrPkts": 0,
+      "rxRetryPkts": 13317978,
+      "txRetryPkts": 0
+    },
+    "wp2g": {
+      "actualChannel": "11  / 2462MHz",
+      "maxTxRate": 286,
+      "txPower": 20,
+      "region": 276,
+      "bandWidth": "20MHz",
+      "rdMode": "b/g/n/ax mixed",
+      "txUtil": 6,
+      "rxUtil": 29,
+      "interUtil": 0,
+      "busyUtil": 35
+    },
+    "wp5g": {
+      "actualChannel": "64  / 5320MHz",
+      "maxTxRate": 1201,
+      "txPower": 27,
+      "region": 276,
+      "bandWidth": "80MHz",
+      "rdMode": "a/n/ac/ax mixed",
+      "txUtil": 0,
+      "rxUtil": 0,
+      "interUtil": 0,
+      "busyUtil": 0
+    }
+  }
+}

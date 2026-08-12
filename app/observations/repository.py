@@ -194,7 +194,7 @@ _TIMESTAMP_COLUMNS = frozenset({
     "lan_observed_at", "radio_observed_at", "captured_at",
 })
 _REAL_COLUMNS = frozenset({
-    "cpu_util", "mem_util", "wired_activity_raw",
+    "cpu_util", "mem_util", "wired_rate_raw", "wired_activity_raw",
     "wired_download_mbps", "wired_upload_mbps", "lan_rx_mbps",
     "lan_tx_mbps", "max_tx_rate", "tx_power", "tx_util", "rx_util",
     "interference_util", "busy_util", "radio_rx_mbps",
@@ -205,7 +205,7 @@ _INTEGER_COLUMNS = frozenset({
     "tx_rate", "rssi", "snr", "vid", "uptime", "last_seen_ms",
     "auth_status", "activity", "traffic_down", "traffic_up",
     "down_packet", "up_packet", "wlan_id", "uptime_seconds",
-    "wired_rate_raw", "wired_up_bytes", "wired_down_bytes",
+    "wired_up_bytes", "wired_down_bytes",
     "wired_up_packets", "wired_down_packets", "lan_rx_bytes",
     "lan_tx_bytes", "lan_rx_packets", "lan_tx_packets",
     "lan_rx_drop_packets", "lan_tx_drop_packets", "lan_rx_error_packets",
@@ -338,7 +338,7 @@ def _schema_sql() -> str:
             cpu_util REAL,
             mem_util REAL,
             uptime_seconds INTEGER,
-            wired_rate_raw INTEGER,
+            wired_rate_raw REAL,
             wired_duplex_code TEXT,
             wired_up_bytes INTEGER,
             wired_down_bytes INTEGER,
@@ -801,6 +801,104 @@ class ObservationRepository:
             return inserted
 
         return int(self._write(operation))
+
+    def get_latest_ap_rate_sample(
+        self,
+        *,
+        site_id: str,
+        ap_mac: str,
+        timestamp_column: str,
+        counter_column: str,
+    ) -> tuple[str, int] | None:
+        """Return one bounded completed-cycle AP counter baseline."""
+        allowed = {
+            "wired_observed_at": {"wired_up_bytes", "wired_down_bytes"},
+            "lan_observed_at": {"lan_rx_bytes", "lan_tx_bytes"},
+        }
+        if counter_column not in allowed.get(timestamp_column, set()):
+            raise ObservationValidationError("Unsupported AP rate baseline")
+        site = require_text(site_id, "site_id")
+        mac = require_mac(ap_mac, "ap_mac")
+        try:
+            with self.read_connection() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT o.{timestamp_column}, o.{counter_column}
+                    FROM ap_observations AS o
+                    JOIN observation_cycles AS c ON c.cycle_id = o.cycle_id
+                    WHERE o.site_id = ? AND o.ap_mac = ?
+                      AND c.state = 'completed'
+                      AND o.{timestamp_column} IS NOT NULL
+                      AND o.{counter_column} IS NOT NULL
+                    ORDER BY o.{timestamp_column} DESC, o.row_id DESC
+                    LIMIT 1
+                    """,
+                    (site, mac),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+        return None if row is None else (str(row[0]), int(row[1]))
+
+    def get_latest_radio_rate_sample(
+        self,
+        *,
+        site_id: str,
+        ap_mac: str,
+        band: str,
+        counter_column: str,
+    ) -> tuple[str, int] | None:
+        """Return one bounded completed-cycle radio counter baseline."""
+        if counter_column not in {"rx_bytes", "tx_bytes"}:
+            raise ObservationValidationError("Unsupported radio rate baseline")
+        site = require_text(site_id, "site_id")
+        mac = require_mac(ap_mac, "ap_mac")
+        canonical_band = require_text(band, "band")
+        try:
+            with self.read_connection() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT o.radio_observed_at, o.{counter_column}
+                    FROM ap_radio_observations AS o
+                    JOIN observation_cycles AS c ON c.cycle_id = o.cycle_id
+                    WHERE o.site_id = ? AND o.ap_mac = ? AND o.band = ?
+                      AND c.state = 'completed'
+                      AND o.radio_observed_at IS NOT NULL
+                      AND o.{counter_column} IS NOT NULL
+                    ORDER BY o.radio_observed_at DESC, o.row_id DESC
+                    LIMIT 1
+                    """,
+                    (site, mac, canonical_band),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+        return None if row is None else (str(row[0]), int(row[1]))
+
+    def get_latest_complete_config_hash(
+        self,
+        *,
+        site_id: str,
+        ap_mac: str,
+    ) -> str | None:
+        """Return the newest complete configuration hash for one AP."""
+        site = require_text(site_id, "site_id")
+        mac = require_mac(ap_mac, "ap_mac")
+        try:
+            with self.read_connection() as connection:
+                row = connection.execute(
+                    """
+                    SELECT s.config_sha256
+                    FROM ap_config_snapshots AS s
+                    JOIN observation_cycles AS c ON c.cycle_id = s.cycle_id
+                    WHERE s.site_id = ? AND s.ap_mac = ?
+                      AND c.state = 'completed' AND c.complete = 1
+                    ORDER BY s.captured_at DESC, s.row_id DESC
+                    LIMIT 1
+                    """,
+                    (site, mac),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+        return None if row is None else str(row[0])
 
     def delete_expired_cycles(
         self,

@@ -1,0 +1,16 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "lanTraffic": {
+      "rxPkts": 238322404,
+      "txPkts": 168357931,
+      "rx": 245897982444,
+      "tx": 88075922342,
+      "rxDropPkts": 0,
+      "txDropPkts": 0,
+      "rxErrPkts": 1,
+      "txErrPkts": 0
+    }
+  }
+}
