@@ -1,0 +1,34 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "ssidOverrides": [
+      {
+        "ssidId": "000000000000000000000002",
+        "ssidEntryId": 100000001,
+        "ssidName": "TEST_SSID_1",
+        "ssidPassword": "TEST_WIFI_PASSWORD_SHOULD_NOT_LEAK",
+        "band": [
+          0
+        ],
+        "security": 3,
+        "vlanEnable": false,
+        "vlanId": 1,
+        "ssidEnable": true
+      },
+      {
+        "ssidId": "000000000000000000000003",
+        "ssidEntryId": 100000002,
+        "ssidName": "TEST_SSID_2",
+        "band": [
+          0,
+          1
+        ],
+        "security": 0,
+        "vlanEnable": false,
+        "vlanId": 1,
+        "ssidEnable": true
+      }
+    ]
+  }
+}

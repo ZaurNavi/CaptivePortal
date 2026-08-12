@@ -14,6 +14,10 @@ MAX_CLIENT_PAGE_SIZE = 500
 MAX_CLIENT_PAGES = 20
 MAX_CLIENT_ROWS = 10_000
 MAX_REQUEST_TIMEOUT_SECONDS = 60.0
+MAX_AP_PAGE_SIZE = 100
+MAX_AP_PAGES = 100
+MAX_AP_ROWS = 10_000
+MAX_AP_REQUESTS_PER_CYCLE = 10_000
 
 
 def observation_config_from_settings(
@@ -38,9 +42,17 @@ def observation_config_from_settings(
         )
 
     client_enabled = _strict_bool(
-        settings.get("observation_client_enabled", False),
+        settings.get("observation_client_enabled", True),
         "OBSERVATION_CLIENT_ENABLED",
     )
+    ap_enabled = _strict_bool(
+        settings.get("observation_ap_enabled", True),
+        "OBSERVATION_AP_ENABLED",
+    )
+    if not client_enabled and not ap_enabled:
+        raise ObservationConfigError(
+            "At least one Observation collector must be enabled"
+        )
     site_ids = ()
     client_ssids = ()
     client_initial_delay_seconds = 15.0
@@ -49,12 +61,13 @@ def observation_config_from_settings(
     client_page_size = 500
     client_max_pages = 20
     client_max_rows = 10_000
-    if client_enabled:
+    if client_enabled or ap_enabled:
         site_ids = _csv_values(
             settings.get("observation_site_ids", ""),
             "OBSERVATION_SITE_IDS",
             required=True,
         )
+    if client_enabled:
         client_ssids = _csv_values(
             settings.get("observation_client_ssids", ""),
             "OBSERVATION_CLIENT_SSIDS",
@@ -67,11 +80,6 @@ def observation_config_from_settings(
         client_interval_seconds = _positive_number(
             settings.get("observation_client_interval_seconds", 60),
             "OBSERVATION_CLIENT_INTERVAL_SECONDS",
-        )
-        request_timeout_seconds = _positive_number(
-            settings.get("observation_request_timeout_seconds", 5),
-            "OBSERVATION_REQUEST_TIMEOUT_SECONDS",
-            maximum=MAX_REQUEST_TIMEOUT_SECONDS,
         )
         client_page_size = _positive_int(
             settings.get("observation_client_page_size", 500),
@@ -87,6 +95,91 @@ def observation_config_from_settings(
             settings.get("observation_client_max_rows", 10_000),
             "OBSERVATION_CLIENT_MAX_ROWS",
             maximum=MAX_CLIENT_ROWS,
+        )
+
+    request_timeout_seconds = _positive_number(
+        settings.get("observation_request_timeout_seconds", 5),
+        "OBSERVATION_REQUEST_TIMEOUT_SECONDS",
+        maximum=MAX_REQUEST_TIMEOUT_SECONDS,
+    )
+    ap_initial_delay_seconds = 10.0
+    ap_interval_seconds = 30.0
+    ap_inventory_interval_seconds = 300.0
+    ap_inventory_max_stale_seconds = 900.0
+    ap_config_interval_seconds = 21600.0
+    ap_cycle_max_duration_seconds = 120.0
+    ap_config_cycle_max_duration_seconds = 180.0
+    rate_max_gap_seconds = 180.0
+    ap_page_size = 100
+    ap_max_pages = 10
+    ap_max_rows = 500
+    ap_dynamic_max_requests = 200
+    ap_config_max_requests = 200
+    if ap_enabled:
+        ap_initial_delay_seconds = _positive_number(
+            settings.get("observation_ap_initial_delay_seconds", 10),
+            "OBSERVATION_AP_INITIAL_DELAY_SECONDS",
+        )
+        ap_interval_seconds = _positive_number(
+            settings.get("observation_ap_interval_seconds", 30),
+            "OBSERVATION_AP_INTERVAL_SECONDS",
+        )
+        ap_inventory_interval_seconds = _positive_number(
+            settings.get("observation_ap_inventory_interval_seconds", 300),
+            "OBSERVATION_AP_INVENTORY_INTERVAL_SECONDS",
+        )
+        ap_inventory_max_stale_seconds = _positive_number(
+            settings.get("observation_ap_inventory_max_stale_seconds", 900),
+            "OBSERVATION_AP_INVENTORY_MAX_STALE_SECONDS",
+        )
+        if ap_inventory_max_stale_seconds < ap_inventory_interval_seconds:
+            raise ObservationConfigError(
+                "OBSERVATION_AP_INVENTORY_MAX_STALE_SECONDS must not be shorter than refresh interval"
+            )
+        ap_config_interval_seconds = _positive_number(
+            settings.get("observation_ap_config_interval_seconds", 21600),
+            "OBSERVATION_AP_CONFIG_INTERVAL_SECONDS",
+        )
+        ap_cycle_max_duration_seconds = _positive_number(
+            settings.get("observation_ap_cycle_max_duration_seconds", 120),
+            "OBSERVATION_AP_CYCLE_MAX_DURATION_SECONDS",
+        )
+        ap_config_cycle_max_duration_seconds = _positive_number(
+            settings.get("observation_ap_config_cycle_max_duration_seconds", 180),
+            "OBSERVATION_AP_CONFIG_CYCLE_MAX_DURATION_SECONDS",
+        )
+        rate_max_gap_seconds = _positive_number(
+            settings.get("observation_rate_max_gap_seconds", 180),
+            "OBSERVATION_RATE_MAX_GAP_SECONDS",
+        )
+        if ap_cycle_max_duration_seconds + ap_interval_seconds > rate_max_gap_seconds:
+            raise ObservationConfigError(
+                "OBSERVATION_RATE_MAX_GAP_SECONDS is below the bounded AP cadence"
+            )
+        ap_page_size = _positive_int(
+            settings.get("observation_ap_page_size", 100),
+            "OBSERVATION_AP_PAGE_SIZE",
+            maximum=MAX_AP_PAGE_SIZE,
+        )
+        ap_max_pages = _positive_int(
+            settings.get("observation_ap_max_pages", 10),
+            "OBSERVATION_AP_MAX_PAGES",
+            maximum=MAX_AP_PAGES,
+        )
+        ap_max_rows = _positive_int(
+            settings.get("observation_ap_max_rows", 500),
+            "OBSERVATION_AP_MAX_ROWS",
+            maximum=MAX_AP_ROWS,
+        )
+        ap_dynamic_max_requests = _positive_int(
+            settings.get("observation_ap_dynamic_max_requests_per_cycle", 200),
+            "OBSERVATION_AP_DYNAMIC_MAX_REQUESTS_PER_CYCLE",
+            maximum=MAX_AP_REQUESTS_PER_CYCLE,
+        )
+        ap_config_max_requests = _positive_int(
+            settings.get("observation_ap_config_max_requests_per_cycle", 200),
+            "OBSERVATION_AP_CONFIG_MAX_REQUESTS_PER_CYCLE",
+            maximum=MAX_AP_REQUESTS_PER_CYCLE,
         )
 
     db_path = _absolute_path(
@@ -140,6 +233,20 @@ def observation_config_from_settings(
         client_page_size=client_page_size,
         client_max_pages=client_max_pages,
         client_max_rows=client_max_rows,
+        ap_enabled=ap_enabled,
+        ap_initial_delay_seconds=ap_initial_delay_seconds,
+        ap_interval_seconds=ap_interval_seconds,
+        ap_inventory_interval_seconds=ap_inventory_interval_seconds,
+        ap_inventory_max_stale_seconds=ap_inventory_max_stale_seconds,
+        ap_config_interval_seconds=ap_config_interval_seconds,
+        ap_page_size=ap_page_size,
+        ap_max_pages=ap_max_pages,
+        ap_max_rows=ap_max_rows,
+        ap_dynamic_max_requests_per_cycle=ap_dynamic_max_requests,
+        ap_config_max_requests_per_cycle=ap_config_max_requests,
+        ap_cycle_max_duration_seconds=ap_cycle_max_duration_seconds,
+        ap_config_cycle_max_duration_seconds=ap_config_cycle_max_duration_seconds,
+        rate_max_gap_seconds=rate_max_gap_seconds,
     )
 
 

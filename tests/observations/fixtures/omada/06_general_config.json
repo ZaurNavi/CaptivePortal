@@ -1,0 +1,10 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "name": "TEST_AP_1",
+    "ledSetting": 2,
+    "tagIds": [],
+    "location": {}
+  }
+}

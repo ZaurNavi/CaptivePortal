@@ -20,6 +20,9 @@ def enabled_settings(tmp_path: Path, **updates) -> dict:
         "observation_cleanup_batch_size": "5000",
         "observation_cleanup_max_duration_seconds": "30",
         "observation_shutdown_timeout_seconds": "20",
+        "observation_client_enabled": "true",
+        "observation_ap_enabled": "false",
+        "observation_site_ids": "site-a",
     }
     values.update(updates)
     return values
@@ -76,10 +79,10 @@ def test_invalid_enabled_config_is_localized(
         )
 
 
-def test_env_example_keeps_foundation_disabled_and_has_no_site_values():
+def test_env_example_keeps_foundation_disabled_and_has_empty_site_values():
     example = (Path(__file__).parents[2] / ".env.example").read_text(
         encoding="utf-8"
     )
     assert "OBSERVATION_FOUNDATION_ENABLED=false" in example
-    assert "OBSERVATION_SITE_IDS=" not in example
-    assert "OBSERVATION_CLIENT_SSIDS=" not in example
+    assert "OBSERVATION_SITE_IDS=\n" in example
+    assert "OBSERVATION_CLIENT_SSIDS=\n" in example

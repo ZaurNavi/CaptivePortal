@@ -361,6 +361,89 @@ def test_strict_fixed_width_utc_and_nonfinite_values_are_rejected(repository):
         )])
 
 
+def test_rate_baselines_use_latest_completed_partial_cycle_and_ignore_running(repository):
+    repository.create_cycle(
+        kind="ap_dynamic", site_id="site-a",
+        started_at="2026-01-01T00:00:00.000Z", cycle_id="baseline",
+    )
+    repository.insert_ap_batch([(
+        ap_row(
+            "baseline", "2026-01-01T00:00:10.000Z",
+            wired_observed_at="2026-01-01T00:00:10.000Z",
+            wired_down_bytes=100,
+        ),
+        [radio_row("2026-01-01T00:00:11.000Z", band="5g", rx_bytes=200)],
+    )])
+    repository.finalize_cycle(
+        "baseline", finished_at="2026-01-01T00:00:12.000Z",
+        complete=False, result="partial",
+    )
+    repository.create_cycle(
+        kind="ap_dynamic", site_id="site-a",
+        started_at="2026-01-01T00:01:00.000Z", cycle_id="running",
+    )
+    repository.insert_ap_batch([(
+        ap_row(
+            "running", "2026-01-01T00:01:10.000Z",
+            wired_observed_at="2026-01-01T00:01:10.000Z",
+            wired_down_bytes=999,
+        ),
+        [radio_row("2026-01-01T00:01:11.000Z", band="5g", rx_bytes=999)],
+    )])
+
+    assert repository.get_latest_ap_rate_sample(
+        site_id="site-a", ap_mac="10:20:30:40:50:60",
+        timestamp_column="wired_observed_at", counter_column="wired_down_bytes",
+    ) == ("2026-01-01T00:00:10.000Z", 100)
+    assert repository.get_latest_radio_rate_sample(
+        site_id="site-a", ap_mac="10:20:30:40:50:60",
+        band="5g", counter_column="rx_bytes",
+    ) == ("2026-01-01T00:00:11.000Z", 200)
+
+
+def test_latest_config_hash_requires_completed_and_complete_cycle(repository):
+    def insert_config(cycle_id, captured_at, payload):
+        digest = hashlib.sha256(payload.encode()).hexdigest()
+        repository.insert_ap_config_batch([{
+            "cycle_id": cycle_id,
+            "captured_at": captured_at,
+            "site_id": "site-a",
+            "ap_mac": "10:20:30:40:50:60",
+            "config_sha256": digest,
+            "schema_version": 1,
+            "config_json": payload,
+        }])
+        return digest
+
+    repository.create_cycle(
+        kind="ap_config", site_id="site-a",
+        started_at="2026-01-01T00:00:00.000Z", cycle_id="partial-config",
+    )
+    insert_config("partial-config", "2026-01-01T00:00:01.000Z", '{"value":1}')
+    repository.finalize_cycle(
+        "partial-config", finished_at="2026-01-01T00:00:02.000Z",
+        complete=False, result="partial",
+    )
+    assert repository.get_latest_complete_config_hash(
+        site_id="site-a", ap_mac="10:20:30:40:50:60"
+    ) is None
+
+    repository.create_cycle(
+        kind="ap_config", site_id="site-a",
+        started_at="2026-01-01T00:01:00.000Z", cycle_id="complete-config",
+    )
+    expected = insert_config(
+        "complete-config", "2026-01-01T00:01:01.000Z", '{"value":2}'
+    )
+    repository.finalize_cycle(
+        "complete-config", finished_at="2026-01-01T00:01:02.000Z",
+        complete=True, result="success",
+    )
+    assert repository.get_latest_complete_config_hash(
+        site_id="site-a", ap_mac="10:20:30:40:50:60"
+    ) == expected
+
+
 class ErrorWithCode(sqlite3.OperationalError):
     def __init__(self, code: int):
         super().__init__("sanitized")

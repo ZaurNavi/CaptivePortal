@@ -1,11 +1,8 @@
-"""Site-aware Observation Storage Foundation v1.
-
-The package is deliberately not wired into ``run.py`` in TASK 01A.
-Importing it performs no I/O, starts no worker, and makes no Omada call.
-"""
+"""Site-aware Observation Foundation v1; imports perform no I/O."""
 
 from .cleanup import ObservationCleanup, ObservationCleanupWorker
 from .client_worker import ClientCycleOutcome, ClientObservationWorker
+from .ap_worker import APCycleOutcome, APObservationWorker
 from .config import observation_config_from_settings
 from .models import (
     ApConfigSnapshot,
@@ -24,9 +21,17 @@ from .models import (
 )
 from .read_service import ObservationReadService
 from .repository import ObservationRepository
+from .runtime import (
+    DisabledObservationFoundation,
+    ObservationFoundationRuntime,
+    UnavailableObservationFoundation,
+    create_observation_foundation,
+)
 
 __all__ = [
     "ApConfigSnapshot",
+    "APCycleOutcome",
+    "APObservationWorker",
     "ApObservation",
     "ApRadioObservation",
     "CleanupResult",
@@ -41,9 +46,13 @@ __all__ = [
     "ObservationPage",
     "ObservationReadService",
     "ObservationRepository",
+    "ObservationFoundationRuntime",
     "ObservationSchemaError",
     "ObservationStorageError",
     "ObservationValidationError",
     "StorageFailureCategory",
+    "DisabledObservationFoundation",
+    "UnavailableObservationFoundation",
+    "create_observation_foundation",
     "observation_config_from_settings",
 ]

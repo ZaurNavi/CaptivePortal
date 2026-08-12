@@ -1,0 +1,44 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "radioSetting2g": {
+      "radioEnable": true,
+      "channelWidth": "4",
+      "channel": "0",
+      "txPower": 20,
+      "txPowerLevel": 2,
+      "wirelessMode": -2
+    },
+    "radioSetting5g": {
+      "radioEnable": true,
+      "channelRange": [
+        5180,
+        5200,
+        5220,
+        5240,
+        5260,
+        5280,
+        5300,
+        5320,
+        5500,
+        5520,
+        5540,
+        5560,
+        5580,
+        5600,
+        5620,
+        5640,
+        5660,
+        5680,
+        5700
+      ],
+      "channelWidth": "6",
+      "channel": "0",
+      "txPower": 27,
+      "txPowerLevel": 3,
+      "channelLimitEnable": true,
+      "wirelessMode": -2
+    }
+  }
+}

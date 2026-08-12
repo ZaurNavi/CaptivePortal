@@ -1,0 +1,287 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": [
+    {
+      "radioId": 0,
+      "apChannelDetailList": [
+        {
+          "channel": 1,
+          "freq": 2412,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 2,
+          "freq": 2417,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 3,
+          "freq": 2422,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 4,
+          "freq": 2427,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 5,
+          "freq": 2432,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 6,
+          "freq": 2437,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 7,
+          "freq": 2442,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 8,
+          "freq": 2447,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 9,
+          "freq": 2452,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 10,
+          "freq": 2457,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 11,
+          "freq": 2462,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 12,
+          "freq": 2467,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 13,
+          "freq": 2472,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        }
+      ]
+    },
+    {
+      "radioId": 1,
+      "apChannelDetailList": [
+        {
+          "channel": 36,
+          "freq": 5180,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 40,
+          "freq": 5200,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 44,
+          "freq": 5220,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 48,
+          "freq": 5240,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 52,
+          "freq": 5260,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 56,
+          "freq": 5280,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 60,
+          "freq": 5300,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 64,
+          "freq": 5320,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 100,
+          "freq": 5500,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 104,
+          "freq": 5520,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 108,
+          "freq": 5540,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 112,
+          "freq": 5560,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 116,
+          "freq": 5580,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 120,
+          "freq": 5600,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 124,
+          "freq": 5620,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 128,
+          "freq": 5640,
+          "availableChannelWidthList": [
+            20,
+            40,
+            80
+          ]
+        },
+        {
+          "channel": 132,
+          "freq": 5660,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 136,
+          "freq": 5680,
+          "availableChannelWidthList": [
+            20,
+            40
+          ]
+        },
+        {
+          "channel": 140,
+          "freq": 5700,
+          "availableChannelWidthList": [
+            20
+          ]
+        }
+      ]
+    }
+  ]
+}

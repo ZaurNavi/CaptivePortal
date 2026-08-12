@@ -18,6 +18,7 @@ from app.visitor_registry import (
     create_visitor_snapshot_collector,
 )
 from app.pending_sessions import create_pending_session_cleaner
+from app.observations import create_observation_foundation
 from app.web.web import create_app, auth_executor, auth_manager
 
 
@@ -27,6 +28,7 @@ _public_traffic_worker = None
 _visitor_snapshot_collector = None
 _visitor_registry = None
 _pending_session_cleaner = None
+_observation_foundation = None
 
 
 def shutdown_handler() -> None:
@@ -61,6 +63,12 @@ def shutdown_handler() -> None:
             _pending_session_cleaner.stop(timeout_seconds)
         except Exception:
             logger.exception("pending_session_cleaner_stop_failed")
+
+    if _observation_foundation is not None:
+        try:
+            _observation_foundation.stop()
+        except Exception:
+            logger.exception("observation_foundation_stop_failed")
 
     if _public_traffic_worker is not None:
         try:
@@ -158,7 +166,7 @@ def _start_public_traffic_worker(app) -> None:
 def main() -> None:
     """Main application entry point."""
     global _visitor_snapshot_collector, _visitor_registry
-    global _pending_session_cleaner
+    global _pending_session_cleaner, _observation_foundation
 
     logger.info("Starting Captive Portal")
 
@@ -182,6 +190,12 @@ def main() -> None:
         ),
     )
     logger.info("Web application created")
+    _observation_foundation = create_observation_foundation(
+        settings=settings,
+        provider=controller,
+        telemetry=app.extensions.get("auth_telemetry"),
+        logger=logger,
+    )
     _pending_session_cleaner = create_pending_session_cleaner(
         settings=settings,
         provider=controller,
@@ -192,6 +206,10 @@ def main() -> None:
         _pending_session_cleaner.start()
     except Exception:
         logger.exception("pending_session_cleaner_start_failed")
+    try:
+        _observation_foundation.start()
+    except Exception:
+        logger.exception("observation_foundation_start_failed")
     try:
         _visitor_snapshot_collector.start()
     except Exception:

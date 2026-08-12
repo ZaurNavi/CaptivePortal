@@ -1,0 +1,12 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "time": 1786535605258,
+    "status": 1,
+    "status2g": 1,
+    "status5g": 1,
+    "status5g2": 1,
+    "status6g": 1
+  }
+}

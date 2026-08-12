@@ -9,6 +9,7 @@ from typing import Callable
 
 from .models import CleanupResult, ObservationConfig, format_utc, parse_utc, utc_now
 from .repository import ObservationRepository
+from .telemetry import ObservationTelemetry
 
 
 class ObservationCleanup:
@@ -93,10 +94,12 @@ class ObservationCleanupWorker:
         config: ObservationConfig,
         *,
         now_factory: Callable[[], str] = utc_now,
+        telemetry: ObservationTelemetry | None = None,
     ):
         self._cleanup = cleanup
         self._config = config
         self._now_factory = now_factory
+        self._telemetry = telemetry
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -140,10 +143,37 @@ class ObservationCleanupWorker:
         return stopped
 
     def run_once(self) -> CleanupResult:
-        return self._cleanup.run_once(
-            now_utc=self._now_factory(),
-            shutdown_event=self._stop_event,
-        )
+        try:
+            result = self._cleanup.run_once(
+                now_utc=self._now_factory(),
+                shutdown_event=self._stop_event,
+            )
+        except Exception as exc:
+            self.last_error = exc
+            if self._telemetry is not None:
+                self._telemetry.emit(
+                    "observation.cleanup_failed",
+                    "error",
+                    failure_category="storage_error",
+                )
+            raise
+        self.last_error = None
+        if self._telemetry is not None:
+            event = (
+                "observation.cleanup_partial"
+                if result.interrupted or result.duration_exhausted
+                else "observation.cleanup_completed"
+            )
+            self._telemetry.emit(
+                event,
+                "warning" if event.endswith("partial") else "info",
+                deleted_dynamic_cycles=result.deleted_dynamic_cycles,
+                deleted_config_cycles=result.deleted_config_cycles,
+                batches=result.batches,
+                interrupted=result.interrupted,
+                duration_exhausted=result.duration_exhausted,
+            )
+        return result
 
     def _run(self) -> None:
         if self._stop_event.wait(

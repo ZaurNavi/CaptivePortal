@@ -1,0 +1,28 @@
+{
+  "errorCode": 0,
+  "msg": "Success.",
+  "result": {
+    "totalRows": 1,
+    "currentPage": 1,
+    "currentSize": 1000,
+    "data": [
+      {
+        "mac": "02-00-00-00-00-01",
+        "name": "TEST_AP_1",
+        "type": "ap",
+        "deviceSeriesType": 0,
+        "model": "EAP613(EU) v1.0",
+        "ip": "192.0.2.11",
+        "uptime": "18day(s) 4h 23m 18s",
+        "status": 1,
+        "lastSeen": 1786535595972,
+        "cpuUtil": 1,
+        "memUtil": 42,
+        "sn": "TEST_SERIAL_NUMBER",
+        "switchConsistent": true,
+        "publicIp": "192.0.2.11",
+        "firmwareVersion": "1.8.3 Build 20260617 Rel. 36045"
+      }
+    ]
+  }
+}

@@ -77,6 +77,20 @@ class ObservationConfig:
     client_page_size: int = 500
     client_max_pages: int = 20
     client_max_rows: int = 10_000
+    ap_enabled: bool = False
+    ap_initial_delay_seconds: float = 10.0
+    ap_interval_seconds: float = 30.0
+    ap_inventory_interval_seconds: float = 300.0
+    ap_inventory_max_stale_seconds: float = 900.0
+    ap_config_interval_seconds: float = 21600.0
+    ap_page_size: int = 100
+    ap_max_pages: int = 10
+    ap_max_rows: int = 500
+    ap_dynamic_max_requests_per_cycle: int = 200
+    ap_config_max_requests_per_cycle: int = 200
+    ap_cycle_max_duration_seconds: float = 120.0
+    ap_config_cycle_max_duration_seconds: float = 180.0
+    rate_max_gap_seconds: float = 180.0
 
 
 @dataclass(frozen=True, slots=True)
