@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Generic, Mapping, TypeVar
@@ -12,6 +12,7 @@ from typing import Any, Generic, Mapping, TypeVar
 from app.common.mac import format_mac_colon
 
 
+UTC = timezone.utc
 SCHEMA_VERSION = 1
 DEFAULT_QUERY_LIMIT = 500
 MAX_QUERY_LIMIT = 2000
