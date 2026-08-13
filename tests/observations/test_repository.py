@@ -453,12 +453,40 @@ class ErrorWithCode(sqlite3.OperationalError):
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
-        (sqlite3.SQLITE_BUSY, StorageFailureCategory.BUSY),
-        (sqlite3.SQLITE_LOCKED, StorageFailureCategory.BUSY),
-        (sqlite3.SQLITE_FULL, StorageFailureCategory.FULL),
-        (sqlite3.SQLITE_IOERR, StorageFailureCategory.IO_ERROR),
-        (sqlite3.SQLITE_CORRUPT, StorageFailureCategory.CORRUPT),
+        (5, StorageFailureCategory.BUSY),
+        (6, StorageFailureCategory.BUSY),
+        (261, StorageFailureCategory.BUSY),
+        (13, StorageFailureCategory.FULL),
+        (10, StorageFailureCategory.IO_ERROR),
+        (11, StorageFailureCategory.CORRUPT),
+        (26, StorageFailureCategory.CORRUPT),
+        (8, StorageFailureCategory.UNAVAILABLE),
+        (14, StorageFailureCategory.UNAVAILABLE),
+        (19, StorageFailureCategory.CONSTRAINT),
     ],
 )
-def test_busy_full_and_io_classification(code, expected):
+def test_sqlite_primary_code_classification(code, expected):
     assert classify_sqlite_error(ErrorWithCode(code)) == expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("database is locked", StorageFailureCategory.BUSY),
+        ("database or disk is full", StorageFailureCategory.FULL),
+        ("disk I/O error", StorageFailureCategory.IO_ERROR),
+        (
+            "database disk image is malformed",
+            StorageFailureCategory.CORRUPT,
+        ),
+        (
+            "attempt to write a readonly database",
+            StorageFailureCategory.UNAVAILABLE,
+        ),
+        ("constraint failed", StorageFailureCategory.CONSTRAINT),
+    ],
+)
+def test_classification_without_python311_error_code(message, expected):
+    error = sqlite3.OperationalError(message)
+    assert getattr(error, "sqlite_errorcode", None) is None
+    assert classify_sqlite_error(error) == expected

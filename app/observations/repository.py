@@ -34,6 +34,19 @@ from .models import (
 BUSY_TIMEOUT_MS = 500
 ALLOWED_AUTO_CREATE_ROOT = Path("/opt/CaptivePortal/data")
 
+# Stable primary result codes from the SQLite C API. Python's sqlite3 module
+# exposes symbolic result-code constants starting with 3.11, while the
+# application supports Python 3.10.
+_SQLITE_BUSY = 5
+_SQLITE_LOCKED = 6
+_SQLITE_READONLY = 8
+_SQLITE_IOERR = 10
+_SQLITE_CORRUPT = 11
+_SQLITE_FULL = 13
+_SQLITE_CANTOPEN = 14
+_SQLITE_CONSTRAINT = 19
+_SQLITE_NOTADB = 26
+
 CYCLE_KINDS = frozenset({"client", "ap_dynamic", "ap_config"})
 CYCLE_STATES = frozenset({"running", "completed", "abandoned"})
 CYCLE_RESULTS = frozenset({"success", "partial", "failed", "shutdown"})
@@ -1174,17 +1187,17 @@ def classify_sqlite_error(exc: sqlite3.Error) -> StorageFailureCategory:
     """Classify SQLite without exposing controller or client payloads."""
     code = getattr(exc, "sqlite_errorcode", None)
     primary = (code & 0xFF) if isinstance(code, int) else None
-    if primary in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+    if primary in {_SQLITE_BUSY, _SQLITE_LOCKED}:
         return StorageFailureCategory.BUSY
-    if primary == sqlite3.SQLITE_FULL:
+    if primary == _SQLITE_FULL:
         return StorageFailureCategory.FULL
-    if primary == sqlite3.SQLITE_IOERR:
+    if primary == _SQLITE_IOERR:
         return StorageFailureCategory.IO_ERROR
-    if primary in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+    if primary in {_SQLITE_CORRUPT, _SQLITE_NOTADB}:
         return StorageFailureCategory.CORRUPT
-    if primary in {sqlite3.SQLITE_READONLY, sqlite3.SQLITE_CANTOPEN}:
+    if primary in {_SQLITE_READONLY, _SQLITE_CANTOPEN}:
         return StorageFailureCategory.UNAVAILABLE
-    if primary == sqlite3.SQLITE_CONSTRAINT:
+    if primary == _SQLITE_CONSTRAINT:
         return StorageFailureCategory.CONSTRAINT
     message = str(exc).lower()
     for fragment, category in (
