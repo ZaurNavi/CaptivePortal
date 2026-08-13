@@ -13,7 +13,7 @@ import json
 import sqlite3
 import tempfile
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.observations.cleanup import ObservationCleanup
@@ -22,6 +22,7 @@ from app.observations.read_service import ObservationReadService
 from app.observations.repository import ObservationRepository
 
 
+UTC = timezone.utc
 SITE_ID = "capacity-site"
 AP_MACS = tuple(f"02:00:00:00:10:{index:02X}" for index in range(10))
 CLIENT_MACS = tuple(
