@@ -484,6 +484,10 @@ def test_sqlite_primary_code_classification(code, expected):
             StorageFailureCategory.UNAVAILABLE,
         ),
         ("constraint failed", StorageFailureCategory.CONSTRAINT),
+        ("client cycle identity mismatch", StorageFailureCategory.CONSTRAINT),
+        ("ap cycle identity mismatch", StorageFailureCategory.CONSTRAINT),
+        ("radio parent identity mismatch", StorageFailureCategory.CONSTRAINT),
+        ("config cycle identity mismatch", StorageFailureCategory.CONSTRAINT),
     ],
 )
 def test_classification_without_python311_error_code(message, expected):

@@ -1210,6 +1210,7 @@ def classify_sqlite_error(exc: sqlite3.Error) -> StorageFailureCategory:
         ("readonly database", StorageFailureCategory.UNAVAILABLE),
         ("unable to open database file", StorageFailureCategory.UNAVAILABLE),
         ("constraint failed", StorageFailureCategory.CONSTRAINT),
+        ("identity mismatch", StorageFailureCategory.CONSTRAINT),
     ):
         if fragment in message:
             return category
