@@ -79,6 +79,7 @@ from app.config import (
     OMADA_WEBHOOK_AUTH_MODE, OMADA_WEBHOOK_SHARED_SECRET,
     OMADA_WEBHOOK_HEADER_TOKEN, OMADA_WEBHOOK_MAX_BODY_BYTES,
     OMADA_WEBHOOK_LOG_FILE, OMADA_WEBHOOK_NORMALIZED_LOG_FILE,
+    OMADA_WEBHOOK_SITE_ID_MAP_JSON,
     OMADA_URL, OMADA_ID, CLIENT_ID, CLIENT_SECRET,
     # pending session cleaner constants
     PENDING_SESSION_CLEANER_ENABLED,
@@ -325,6 +326,9 @@ def get_settings() -> dict:
         "omada_webhook_log_file": OMADA_WEBHOOK_LOG_FILE,
         "omada_webhook_normalized_log_file": (
             OMADA_WEBHOOK_NORMALIZED_LOG_FILE
+        ),
+        "omada_webhook_site_id_map_json": (
+            OMADA_WEBHOOK_SITE_ID_MAP_JSON
         ),
         "omada_url": OMADA_URL,
         "omada_id": OMADA_ID,

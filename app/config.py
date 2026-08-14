@@ -318,6 +318,10 @@ OMADA_WEBHOOK_NORMALIZED_LOG_FILE = os.getenv(
     "OMADA_WEBHOOK_NORMALIZED_LOG_FILE",
     "/opt/CaptivePortal/logs/omada_webhook_normalized.log",
 )
+OMADA_WEBHOOK_SITE_ID_MAP_JSON = os.getenv(
+    "OMADA_WEBHOOK_SITE_ID_MAP_JSON",
+    "{}",
+)
 
 # Omada OpenAPI settings
 OMADA_URL = os.getenv("OMADA_URL", "").strip()

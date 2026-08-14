@@ -10,6 +10,10 @@ from .webhook_normalized_journal import (
     OmadaWebhookNormalizedJournal,
 )
 from .webhook_normalizer import normalize_webhook
+from .webhook_site_mapping import (
+    EMPTY_WEBHOOK_SITE_ID_MAPPING,
+    WebhookSiteIdMapping,
+)
 
 
 class WebhookNormalizationError(Exception):
@@ -56,12 +60,20 @@ class OmadaWebhookProcessor:
     def __init__(
         self,
         journal: OmadaWebhookNormalizedJournal,
+        *,
+        site_id_mapping: WebhookSiteIdMapping = (
+            EMPTY_WEBHOOK_SITE_ID_MAPPING
+        ),
     ):
         self.journal = journal
+        self.site_id_mapping = site_id_mapping
 
     def __call__(self, envelope: WebhookEnvelope) -> None:
         try:
-            normalized = normalize_webhook(envelope.to_dict())
+            normalized = normalize_webhook(
+                envelope.to_dict(),
+                site_id_mapping=self.site_id_mapping,
+            )
         except Exception as exc:
             raise WebhookNormalizationError(
                 webhook_id=envelope.webhook_id,
