@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any
 
 from .config import visit_config_from_settings
@@ -18,6 +19,7 @@ from .start_sink import (
     LocalVisitStartSubmitter,
 )
 from .telemetry import VisitTelemetry
+from .webhook_reader import VisitLifecycleWebhookReader
 
 
 class DisabledVisitLifecycleRuntime:
@@ -29,6 +31,9 @@ class DisabledVisitLifecycleRuntime:
     config = None
 
     def start_reconciliation(self, registry_read_service: Any) -> bool:
+        return False
+
+    def start(self, registry_read_service: Any) -> bool:
         return False
 
     def stop_scheduling(self) -> bool:
@@ -74,17 +79,56 @@ class VisitLifecycleRuntime:
         self.state = "starting"
         self._state_lock = threading.RLock()
         self._reconciler: VisitLinkReconciler | None = None
+        self._reader_healthy = True
+        self._started_emitted = False
+        self.webhook_reader = VisitLifecycleWebhookReader(
+            config=config,
+            repository=repository,
+            service=self.service,
+            telemetry=telemetry,
+            health_callback=self._reader_health_changed,
+        )
 
     def start_reconciliation(self, registry_read_service: Any) -> bool:
-        if registry_read_service is None:
-            with self._state_lock:
-                self.state = "degraded"
+        return self.start(registry_read_service)
+
+    def start(self, registry_read_service: Any) -> bool:
+        reader_started = self.webhook_reader.start()
+        reconciler_started = False
+        registry_available = registry_read_service is not None
+        if not registry_available:
             self.telemetry.emit(
                 "visit.runtime_unavailable",
                 "warning",
                 stage="registry_read_service",
             )
-            return False
+        else:
+            reconciler_started = self._start_reconciler(
+                registry_read_service
+            )
+        with self._state_lock:
+            reader_running = self.webhook_reader.running
+            reconciler_running = (
+                self._reconciler is not None
+                and self._reconciler.running
+            )
+            self.state = (
+                "active"
+                if reader_running
+                and reconciler_running
+                and self._reader_healthy
+                else "degraded"
+            )
+            should_emit = not self._started_emitted and reader_running
+            self._started_emitted = self._started_emitted or should_emit
+        if should_emit:
+            self.telemetry.emit(
+                "visit.runtime_started",
+                schema_version=2,
+            )
+        return reader_started or reconciler_started
+
+    def _start_reconciler(self, registry_read_service: Any) -> bool:
         with self._state_lock:
             if self._reconciler is not None and self._reconciler.running:
                 return False
@@ -96,23 +140,30 @@ class VisitLifecycleRuntime:
             )
             self._reconciler = reconciler
         started = reconciler.start()
-        with self._state_lock:
-            self.state = "active" if started else "degraded"
-        if started:
-            self.telemetry.emit(
-                "visit.runtime_started",
-                schema_version=1,
-            )
         return started
 
     def stop_scheduling(self) -> bool:
         with self._state_lock:
             self.state = "stopping"
             reconciler = self._reconciler
-        if reconciler is None:
-            return True
-        stopped = reconciler.stop(self.config.shutdown_timeout_seconds)
-        if not stopped:
+        deadline = time.monotonic() + self.config.shutdown_timeout_seconds
+        reader_stopped = self.webhook_reader.stop(
+            max(0.0, deadline - time.monotonic())
+        )
+        reconciler_stopped = (
+            True
+            if reconciler is None
+            else reconciler.stop(max(0.0, deadline - time.monotonic()))
+        )
+        stopped = reader_stopped and reconciler_stopped
+        if not reader_stopped:
+            self.telemetry.emit(
+                "visit.runtime_unavailable",
+                "error",
+                stage="reader_shutdown_timeout",
+                timeout_seconds=self.config.shutdown_timeout_seconds,
+            )
+        if not reconciler_stopped:
             self.telemetry.emit(
                 "visit.runtime_unavailable",
                 "error",
@@ -138,6 +189,23 @@ class VisitLifecycleRuntime:
             idle=idle,
         )
         return idle
+
+    def _reader_health_changed(self, healthy: bool) -> None:
+        with self._state_lock:
+            self._reader_healthy = healthy
+            if self.state in {"stopping", "unavailable"}:
+                return
+            reconciler_running = (
+                self._reconciler is not None
+                and self._reconciler.running
+            )
+            self.state = (
+                "active"
+                if healthy
+                and self.webhook_reader.running
+                and reconciler_running
+                else "degraded"
+            )
 
 
 def create_visit_lifecycle(
