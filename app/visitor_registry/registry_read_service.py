@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+from contextlib import closing
 from datetime import date, datetime
 from typing import Any
 
@@ -154,3 +155,35 @@ class VisitorRegistryReadService:
             limit=limit,
             offset=offset,
         )
+
+    def get_snapshot_by_auth_session(
+        self,
+        auth_session_id: str,
+        *,
+        site_id: str,
+        client_mac: str,
+    ) -> dict[str, Any] | None:
+        """Return one exact safe snapshot link without exposing raw JSON."""
+        session_id = canonical_uuid(auth_session_id)
+        if not isinstance(site_id, str) or not site_id.strip():
+            raise ValueError("site_id must be a non-empty string")
+        mac = format_mac_colon(client_mac)
+        with closing(
+            self.repository._connect(readonly=True)  # noqa: SLF001
+        ) as connection:
+            row = connection.execute(
+                """
+                SELECT snapshot_id, device_id, auth_session_id,
+                       site_id, requested_mac, authorized_at, captured_at
+                FROM device_snapshots
+                WHERE auth_session_id = ?
+                  AND site_id = ?
+                  AND requested_mac = ?
+                ORDER BY authorized_at DESC,
+                         captured_at DESC,
+                         snapshot_id DESC
+                LIMIT 1
+                """,
+                (session_id, site_id.strip(), mac),
+            ).fetchone()
+        return dict(row) if row is not None else None

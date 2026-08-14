@@ -79,6 +79,7 @@ def create_app(
     public_traffic_worker=_AUTO_TRAFFIC,
     controller=None,
     visitor_snapshot_collector=None,
+    visit_start_submitter=None,
 ) -> Flask:
     """Create and configure the Flask application."""
     template_dir = os.path.abspath(
@@ -266,6 +267,7 @@ def create_app(
         provider=controller,
         session_manager=auth_manager,
         snapshot_collector=visitor_snapshot_collector,
+        visit_start_submitter=visit_start_submitter,
     )
     portal_entry_handler = PortalEntryHandler(
         session_manager=auth_manager,

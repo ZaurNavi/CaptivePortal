@@ -8,6 +8,11 @@ from typing import Any, Optional
 from app.auth_telemetry import get_auth_telemetry
 from app.auth_telemetry import events
 from app.models import Result
+from app.visit_lifecycle import (
+    DISABLED_VISIT_START_SUBMITTER,
+    VisitStartRequest,
+    VisitStartSubmitter,
+)
 from app.visitor_registry.snapshot_collector import (
     DISABLED_VISITOR_SNAPSHOT_COLLECTOR,
 )
@@ -104,6 +109,7 @@ class AuthWorker:
         snapshot_collector: Optional[
             VisitorSnapshotSubmitter
         ] = None,
+        visit_start_submitter: Optional[VisitStartSubmitter] = None,
     ):
         self._provider = provider
         self._session_manager = session_manager
@@ -111,6 +117,11 @@ class AuthWorker:
             snapshot_collector
             if snapshot_collector is not None
             else DISABLED_VISITOR_SNAPSHOT_COLLECTOR
+        )
+        self._visit_start_submitter = (
+            visit_start_submitter
+            if visit_start_submitter is not None
+            else DISABLED_VISIT_START_SUBMITTER
         )
 
     def process(
@@ -1401,6 +1412,7 @@ class AuthWorker:
             "authorized",
         )
         self._submit_authorized_snapshot(session, run)
+        self._submit_authorized_visit(session, run)
 
     def _submit_authorized_snapshot(
         self,
@@ -1448,6 +1460,45 @@ class AuthWorker:
             self._snapshot_collector.submit(request)
         except Exception:
             logger.exception("visitor_snapshot_submission_failed")
+
+    def _submit_authorized_visit(
+        self,
+        session: AuthSession,
+        run: _WorkerRun,
+    ) -> None:
+        try:
+            run_state = self._session_manager.run_snapshot(
+                session,
+                run.run_number,
+            )
+            if (
+                run_state is None
+                or run_state.get("final_state")
+                != AuthStatus.AUTHORIZED.value
+            ):
+                return
+            finished_at = run_state.get("finished_at")
+            if not isinstance(finished_at, str):
+                raise ValueError("completed AuthRun has no finished_at")
+            self._visit_start_submitter.submit_authorized(
+                VisitStartRequest(
+                    auth_session_id=session.session_id,
+                    site_id=session.site_id,
+                    client_mac=session.client_mac or "",
+                    authorized_at=datetime.fromisoformat(finished_at),
+                    auth_run_number=run_state["run_number"],
+                    authorization_attempt=run_state[
+                        "auth_attempt_count"
+                    ],
+                    final_reason=run_state.get("final_reason") or "",
+                    client_ip=session.client_ip,
+                    portal_ssid=session.ssid,
+                    portal_ap_mac=session.ap_mac,
+                    portal_radio_id=session.radio_id,
+                )
+            )
+        except Exception:
+            logger.exception("visit_start_submission_failed")
 
     def _ensure_current(
         self,
