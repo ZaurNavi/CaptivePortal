@@ -6,8 +6,11 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 import uuid
+from collections import deque
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -41,6 +44,11 @@ _SQLITE_FULL = 13
 _SQLITE_CANTOPEN = 14
 _SQLITE_CONSTRAINT = 19
 _SQLITE_NOTADB = 26
+
+WRITE_OPERATION_START = "start"
+WRITE_OPERATION_READER = "reader"
+WRITE_OPERATION_RECONCILIATION = "reconciliation"
+WRITE_OPERATION_STARTUP = "startup"
 
 REQUIRED_TABLES = frozenset({
     "visits",
@@ -93,6 +101,95 @@ REQUIRED_INDEXES: Mapping[str, tuple[str, ...]] = {
         "link_reconcile_next_at", "started_at", "visit_id",
     ),
 }
+
+
+@dataclass(frozen=True)
+class _WriteLease:
+    lock_wait_ms: int
+
+
+class PriorityWriteCoordinator:
+    """Single foreground-priority, FIFO-background writer gate."""
+
+    def __init__(self, *, monotonic=time.monotonic):
+        self._condition = threading.Condition()
+        self._monotonic = monotonic
+        self._active = False
+        self._foreground: deque[object] = deque()
+        self._background: deque[object] = deque()
+
+    @contextmanager
+    def acquire(
+        self,
+        operation: str,
+        *,
+        timeout_ms: int,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ):
+        started = self._monotonic()
+        local_deadline = started + max(0, timeout_ms) / 1000
+        if deadline is not None:
+            local_deadline = min(local_deadline, deadline)
+        foreground = operation == WRITE_OPERATION_START
+        queue = self._foreground if foreground else self._background
+        waiter = object()
+        acquired = False
+        with self._condition:
+            queue.append(waiter)
+            try:
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise VisitStorageError(
+                            VisitStorageCategory.UNAVAILABLE,
+                            "Visit write wait was cancelled",
+                            operation=operation,
+                            lock_wait_ms=_elapsed_ms(started, self._monotonic()),
+                        )
+                    is_head = bool(queue) and queue[0] is waiter
+                    priority_allows = foreground or not self._foreground
+                    if not self._active and is_head and priority_allows:
+                        queue.popleft()
+                        self._active = True
+                        acquired = True
+                        break
+                    remaining = local_deadline - self._monotonic()
+                    if remaining <= 0:
+                        raise VisitStorageError(
+                            VisitStorageCategory.BUSY,
+                            "Visit write slot is busy",
+                            operation=operation,
+                            lock_wait_ms=_elapsed_ms(started, self._monotonic()),
+                        )
+                    self._condition.wait(remaining)
+            finally:
+                if not acquired:
+                    try:
+                        queue.remove(waiter)
+                    except ValueError:
+                        pass
+                    self._condition.notify_all()
+        try:
+            yield _WriteLease(
+                lock_wait_ms=_elapsed_ms(started, self._monotonic())
+            )
+        finally:
+            with self._condition:
+                self._active = False
+                self._condition.notify_all()
+
+    def wake_all(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
+
+    def _waiting_counts(self) -> tuple[int, int]:
+        """Return foreground/background queue depths atomically."""
+        with self._condition:
+            return len(self._foreground), len(self._background)
+
+
+def _elapsed_ms(started: float, finished: float) -> int:
+    return max(0, int(round((finished - started) * 1000)))
 
 REQUIRED_TRIGGERS = frozenset({"trg_visits_start_evidence_immutable"})
 
@@ -438,23 +535,31 @@ class VisitRepository:
         config: VisitLifecycleConfig,
         *,
         busy_timeout_ms: int | None = None,
+        write_coordinator: PriorityWriteCoordinator | None = None,
     ):
         self.config = config
         self.db_path = Path(config.db_path)
-        timeout = (
-            config.start_busy_timeout_ms
+        sqlite_timeout = (
+            config.sqlite_busy_timeout_ms
             if busy_timeout_ms is None
             else busy_timeout_ms
         )
-        self.busy_timeout_ms = max(1, min(int(timeout), 60_000))
-        self._write_lock = threading.RLock()
+        self.sqlite_busy_timeout_ms = max(
+            1,
+            min(int(sqlite_timeout), 60_000),
+        )
+        self._write_coordinator = (
+            write_coordinator or PriorityWriteCoordinator()
+        )
 
     def initialize(self) -> bool:
         self._ensure_parent()
         existed = self._database_exists()
         created = False
         try:
-            with self._bounded_write(), closing(self._connect()) as connection:
+            with self._bounded_write(WRITE_OPERATION_STARTUP), closing(
+                self._connect()
+            ) as connection:
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])
                 if version > SCHEMA_VERSION:
                     raise VisitSchemaError("Visit schema is newer than this code")
@@ -477,7 +582,7 @@ class VisitRepository:
         except VisitSchemaError:
             raise
         except sqlite3.Error as exc:
-            raise _storage_error(exc) from exc
+            raise _storage_error(exc, operation=WRITE_OPERATION_STARTUP) from exc
         except OSError as exc:
             raise VisitStorageError(VisitStorageCategory.UNAVAILABLE) from exc
         if not existed and not created:
@@ -521,9 +626,19 @@ class VisitRepository:
         start: NormalizedVisitStart,
         *,
         now_utc: str,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> VisitStartOutcome:
+        lock_wait_ms = 0
         try:
-            with self._bounded_write(), closing(self._connect()) as connection:
+            with self._bounded_write(
+                WRITE_OPERATION_START,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            ) as lease, closing(self._connect(
+                busy_timeout_ms=self._remaining_sqlite_timeout_ms(deadline),
+            )) as connection:
+                lock_wait_ms = lease.lock_wait_ms
                 connection.execute("BEGIN IMMEDIATE")
                 existing = connection.execute(
                     """
@@ -609,7 +724,14 @@ class VisitRepository:
                     authorization_attached=True,
                 )
         except sqlite3.Error as exc:
-            raise _storage_error(exc) from exc
+            raise _storage_error(
+                exc,
+                operation=WRITE_OPERATION_START,
+                lock_wait_ms=lock_wait_ms,
+            ) from exc
+
+    def wake_write_waiters(self) -> None:
+        self._write_coordinator.wake_all()
 
     def get_visit(self, site_id: str, visit_id: str) -> VisitRecord | None:
         with closing(self._connect(readonly=True)) as connection:
@@ -776,7 +898,9 @@ class VisitRepository:
         retry_at: str,
     ) -> tuple[bool, bool]:
         try:
-            with self._bounded_write(), closing(self._connect()) as connection:
+            with self._bounded_write(
+                WRITE_OPERATION_RECONCILIATION
+            ), closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 before = connection.execute(
                     """
@@ -819,7 +943,10 @@ class VisitRepository:
                 connection.commit()
                 return changed, complete
         except sqlite3.Error as exc:
-            raise _storage_error(exc) from exc
+            raise _storage_error(
+                exc,
+                operation=WRITE_OPERATION_RECONCILIATION,
+            ) from exc
 
     def get_reader_states(self) -> dict[str, VisitReaderState]:
         with closing(self._connect(readonly=True)) as connection:
@@ -863,12 +990,14 @@ class VisitRepository:
         now_utc: str,
     ) -> None:
         try:
-            with self._bounded_write(), closing(self._connect()) as connection:
+            with self._bounded_write(
+                WRITE_OPERATION_READER
+            ), closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 self._upsert_reader_progress(connection, progress, now_utc)
                 connection.commit()
         except sqlite3.Error as exc:
-            raise _storage_error(exc) from exc
+            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
 
     def reset_reader_source(
         self,
@@ -885,7 +1014,9 @@ class VisitRepository:
         now_utc: str,
     ) -> None:
         try:
-            with self._bounded_write(), closing(self._connect()) as connection:
+            with self._bounded_write(
+                WRITE_OPERATION_READER
+            ), closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     """
@@ -897,11 +1028,13 @@ class VisitRepository:
                 )
                 connection.commit()
         except sqlite3.Error as exc:
-            raise _storage_error(exc) from exc
+            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
 
     def delete_reader_state(self, source_identity: str) -> None:
         try:
-            with self._bounded_write(), closing(self._connect()) as connection:
+            with self._bounded_write(
+                WRITE_OPERATION_READER
+            ), closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     "DELETE FROM visit_reader_state WHERE source_identity=?",
@@ -909,7 +1042,7 @@ class VisitRepository:
                 )
                 connection.commit()
         except sqlite3.Error as exc:
-            raise _storage_error(exc) from exc
+            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
 
     def apply_journal_line(
         self,
@@ -922,7 +1055,9 @@ class VisitRepository:
         max_duration_drift_seconds: float,
     ) -> OfflineProcessingOutcome | None:
         try:
-            with self._bounded_write(), closing(self._connect()) as connection:
+            with self._bounded_write(
+                WRITE_OPERATION_READER
+            ), closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 outcome = self._apply_journal_line_transaction(
                     connection,
@@ -937,7 +1072,7 @@ class VisitRepository:
                 connection.commit()
                 return outcome
         except sqlite3.Error as exc:
-            raise _storage_error(exc) from exc
+            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
 
     def process_pending_events(
         self,
@@ -948,7 +1083,9 @@ class VisitRepository:
         max_duration_drift_seconds: float,
     ) -> tuple[OfflineProcessingOutcome, ...]:
         try:
-            with self._bounded_write(), closing(self._connect()) as connection:
+            with self._bounded_write(
+                WRITE_OPERATION_READER
+            ), closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 rows = connection.execute(
                     """
@@ -975,7 +1112,7 @@ class VisitRepository:
                 connection.commit()
                 return tuple(outcomes)
         except sqlite3.Error as exc:
-            raise _storage_error(exc) from exc
+            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
 
     def _apply_journal_line_transaction(
         self,
@@ -1512,23 +1649,33 @@ class VisitRepository:
             )
         }
 
-    def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+    def _connect(
+        self,
+        *,
+        readonly: bool = False,
+        busy_timeout_ms: int | None = None,
+    ) -> sqlite3.Connection:
+        timeout_ms = (
+            self.sqlite_busy_timeout_ms
+            if busy_timeout_ms is None
+            else max(1, min(int(busy_timeout_ms), 60_000))
+        )
         self._validate_database_target(require_exists=readonly)
         if readonly:
             uri = f"{self.db_path.resolve(strict=False).as_uri()}?mode=ro"
             connection = sqlite3.connect(
                 uri,
                 uri=True,
-                timeout=self.busy_timeout_ms / 1000,
+                timeout=timeout_ms / 1000,
             )
         else:
             connection = sqlite3.connect(
                 str(self.db_path),
-                timeout=self.busy_timeout_ms / 1000,
+                timeout=timeout_ms / 1000,
             )
         connection.row_factory = sqlite3.Row
         try:
-            connection.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+            connection.execute(f"PRAGMA busy_timeout={timeout_ms}")
             connection.execute("PRAGMA foreign_keys=ON")
             if readonly:
                 connection.execute("PRAGMA query_only=ON")
@@ -1541,19 +1688,40 @@ class VisitRepository:
         return connection
 
     @contextmanager
-    def _bounded_write(self):
-        acquired = self._write_lock.acquire(
-            timeout=self.busy_timeout_ms / 1000
-        )
-        if not acquired:
+    def _bounded_write(
+        self,
+        operation: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ):
+        timeout_ms = {
+            WRITE_OPERATION_START: self.config.start_writer_slot_wait_ms,
+            WRITE_OPERATION_READER: self.config.reader_writer_slot_wait_ms,
+            WRITE_OPERATION_RECONCILIATION: (
+                self.config.reconciliation_writer_slot_wait_ms
+            ),
+            WRITE_OPERATION_STARTUP: self.config.sqlite_busy_timeout_ms,
+        }[operation]
+        with self._write_coordinator.acquire(
+            operation,
+            timeout_ms=timeout_ms,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        ) as lease:
+            yield lease
+
+    def _remaining_sqlite_timeout_ms(self, deadline: float | None) -> int:
+        if deadline is None:
+            return self.sqlite_busy_timeout_ms
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
             raise VisitStorageError(
                 VisitStorageCategory.BUSY,
-                "Visit write slot is busy",
+                "Visit Start latency budget is exhausted",
+                operation=WRITE_OPERATION_START,
             )
-        try:
-            yield
-        finally:
-            self._write_lock.release()
+        return min(self.sqlite_busy_timeout_ms, remaining_ms)
 
     def _ensure_parent(self) -> None:
         parent = self.db_path.parent
@@ -1718,5 +1886,14 @@ def classify_sqlite_error(exc: sqlite3.Error) -> VisitStorageCategory:
     return VisitStorageCategory.UNKNOWN
 
 
-def _storage_error(exc: sqlite3.Error) -> VisitStorageError:
-    return VisitStorageError(classify_sqlite_error(exc))
+def _storage_error(
+    exc: sqlite3.Error,
+    *,
+    operation: str | None = None,
+    lock_wait_ms: int | None = None,
+) -> VisitStorageError:
+    return VisitStorageError(
+        classify_sqlite_error(exc),
+        operation=operation,
+        lock_wait_ms=lock_wait_ms,
+    )

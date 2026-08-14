@@ -73,6 +73,8 @@ class VisitLifecycleRuntime:
         self.start_submitter = LocalVisitStartSubmitter(
             self.service,
             telemetry,
+            max_attempts=config.start_max_attempts,
+            total_budget_ms=config.start_total_budget_ms,
         )
         self.read_service = VisitLifecycleReadService(repository)
         self.available = True

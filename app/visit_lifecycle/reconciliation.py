@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from app.common.mac import format_mac_colon
 
-from .models import VisitLifecycleConfig, utc_now
+from .models import VisitLifecycleConfig, VisitStorageError, utc_now
 from .repository import VisitRepository
 from .telemetry import VisitTelemetry
 
@@ -108,6 +108,10 @@ class VisitLinkReconciler:
                     stage="pass_deadline",
                     max_duration_seconds=self._pass_max_duration_seconds,
                     processed_count=processed,
+                    operation="reconciliation",
+                    attempt=1,
+                    retry_exhausted=False,
+                    wait_ms=int(self._pass_max_duration_seconds * 1000),
                 )
             return True
 
@@ -130,10 +134,20 @@ class VisitLinkReconciler:
                 if self._stop_event.is_set() or deadline_reached():
                     break
             except Exception as exc:
+                fields: dict[str, Any] = {
+                    "error_type": type(exc).__name__,
+                    "operation": "reconciliation",
+                    "attempt": 1,
+                    "retry_exhausted": False,
+                    "wait_ms": 0,
+                }
+                if isinstance(exc, VisitStorageError):
+                    fields["storage_category"] = exc.category.value
+                    fields["lock_wait_ms"] = exc.lock_wait_ms
                 self.telemetry.emit(
                     "visit.reconciliation_degraded",
                     "warning",
-                    error_type=type(exc).__name__,
+                    **fields,
                 )
                 break
             device_id = _safe_device_id(device)
@@ -142,13 +156,29 @@ class VisitLinkReconciler:
                 site_id=candidate.site_id,
                 client_mac=candidate.client_mac,
             )
-            changed, _complete = self.repository.record_reconciliation_attempt(
-                candidate.visit_id,
-                device_id=device_id,
-                initial_snapshot_id=snapshot_id,
-                attempted_at=now,
-                retry_at=retry_at,
-            )
+            try:
+                changed, _complete = (
+                    self.repository.record_reconciliation_attempt(
+                        candidate.visit_id,
+                        device_id=device_id,
+                        initial_snapshot_id=snapshot_id,
+                        attempted_at=now,
+                        retry_at=retry_at,
+                    )
+                )
+            except VisitStorageError as exc:
+                self.telemetry.emit(
+                    "visit.reconciliation_degraded",
+                    "warning",
+                    error_type=type(exc).__name__,
+                    operation="reconciliation",
+                    attempt=1,
+                    retry_exhausted=False,
+                    storage_category=exc.category.value,
+                    lock_wait_ms=exc.lock_wait_ms,
+                    wait_ms=exc.lock_wait_ms,
+                )
+                break
             processed += 1
             if changed:
                 linked += 1
@@ -171,6 +201,10 @@ class VisitLinkReconciler:
                     "visit.reconciliation_degraded",
                     "warning",
                     error_type=type(exc).__name__,
+                    operation="reconciliation",
+                    attempt=1,
+                    retry_exhausted=False,
+                    wait_ms=0,
                 )
             self._stop_event.wait(self.config.reconcile_interval_seconds)
 

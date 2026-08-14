@@ -46,9 +46,14 @@ class VisitStorageError(RuntimeError):
         self,
         category: VisitStorageCategory,
         message: str = "Visit storage operation failed",
+        *,
+        operation: str | None = None,
+        lock_wait_ms: int | None = None,
     ):
         super().__init__(message)
         self.category = category
+        self.operation = operation
+        self.lock_wait_ms = lock_wait_ms
 
 
 @dataclass(frozen=True)
@@ -65,7 +70,12 @@ class VisitLifecycleConfig:
     reconcile_batch_size: int
     pending_offline_batch_size: int
     offline_match_grace_seconds: float
-    start_busy_timeout_ms: int
+    start_writer_slot_wait_ms: int
+    reader_writer_slot_wait_ms: int
+    reconciliation_writer_slot_wait_ms: int
+    sqlite_busy_timeout_ms: int
+    start_max_attempts: int
+    start_total_budget_ms: int
     shutdown_timeout_seconds: float
     max_offline_clock_skew_seconds: float
     max_reported_duration_drift_seconds: float

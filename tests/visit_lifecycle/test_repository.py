@@ -4,7 +4,7 @@ import os
 import sqlite3
 import threading
 import uuid
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -229,16 +229,16 @@ def test_concurrent_start_has_one_open_visit(visit_config):
 
 
 def test_local_write_slot_wait_is_bounded(visit_config):
-    repository = VisitRepository(visit_config, busy_timeout_ms=25)
+    visit_config = replace(visit_config, start_writer_slot_wait_ms=25)
+    repository = VisitRepository(visit_config)
     repository.initialize()
     acquired = threading.Event()
     release = threading.Event()
 
     def hold_write_slot():
-        repository._write_lock.acquire()  # noqa: SLF001
-        acquired.set()
-        release.wait(2)
-        repository._write_lock.release()  # noqa: SLF001
+        with repository._bounded_write("reader"):  # noqa: SLF001
+            acquired.set()
+            release.wait(2)
 
     holder = threading.Thread(target=hold_write_slot)
     holder.start()

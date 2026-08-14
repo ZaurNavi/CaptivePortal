@@ -40,6 +40,12 @@ from app.config import (
     VISIT_LIFECYCLE_PENDING_OFFLINE_BATCH_SIZE,
     VISIT_LIFECYCLE_OFFLINE_MATCH_GRACE_SECONDS,
     VISIT_LIFECYCLE_START_BUSY_TIMEOUT_MS,
+    VISIT_LIFECYCLE_START_WRITER_SLOT_WAIT_MS,
+    VISIT_LIFECYCLE_READER_WRITER_SLOT_WAIT_MS,
+    VISIT_LIFECYCLE_RECONCILIATION_WRITER_SLOT_WAIT_MS,
+    VISIT_LIFECYCLE_SQLITE_BUSY_TIMEOUT_MS,
+    VISIT_LIFECYCLE_START_MAX_ATTEMPTS,
+    VISIT_LIFECYCLE_START_TOTAL_BUDGET_MS,
     VISIT_LIFECYCLE_SHUTDOWN_TIMEOUT_SECONDS,
     VISIT_LIFECYCLE_MAX_OFFLINE_CLOCK_SKEW_SECONDS,
     VISIT_LIFECYCLE_MAX_REPORTED_DURATION_DRIFT_SECONDS,
@@ -217,6 +223,24 @@ def get_settings() -> dict:
         ),
         "visit_lifecycle_start_busy_timeout_ms": (
             VISIT_LIFECYCLE_START_BUSY_TIMEOUT_MS
+        ),
+        "visit_lifecycle_start_writer_slot_wait_ms": (
+            VISIT_LIFECYCLE_START_WRITER_SLOT_WAIT_MS
+        ),
+        "visit_lifecycle_reader_writer_slot_wait_ms": (
+            VISIT_LIFECYCLE_READER_WRITER_SLOT_WAIT_MS
+        ),
+        "visit_lifecycle_reconciliation_writer_slot_wait_ms": (
+            VISIT_LIFECYCLE_RECONCILIATION_WRITER_SLOT_WAIT_MS
+        ),
+        "visit_lifecycle_sqlite_busy_timeout_ms": (
+            VISIT_LIFECYCLE_SQLITE_BUSY_TIMEOUT_MS
+        ),
+        "visit_lifecycle_start_max_attempts": (
+            VISIT_LIFECYCLE_START_MAX_ATTEMPTS
+        ),
+        "visit_lifecycle_start_total_budget_ms": (
+            VISIT_LIFECYCLE_START_TOTAL_BUDGET_MS
         ),
         "visit_lifecycle_shutdown_timeout_seconds": (
             VISIT_LIFECYCLE_SHUTDOWN_TIMEOUT_SECONDS
