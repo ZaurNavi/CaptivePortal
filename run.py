@@ -7,6 +7,7 @@ No other module should be run standalone.
 """
 
 import atexit
+import inspect
 import signal
 import sys
 import threading
@@ -17,6 +18,10 @@ from app.visitor_registry import (
     create_visitor_registry,
     create_visitor_snapshot_collector,
 )
+from app.visitor_registry.registry_read_service import (
+    VisitorRegistryReadService,
+)
+from app.visit_lifecycle import create_visit_lifecycle
 from app.pending_sessions import create_pending_session_cleaner
 from app.observations import create_observation_foundation
 from app.web.web import create_app, auth_executor, auth_manager
@@ -29,6 +34,7 @@ _visitor_snapshot_collector = None
 _visitor_registry = None
 _pending_session_cleaner = None
 _observation_foundation = None
+_visit_lifecycle = None
 
 
 def shutdown_handler() -> None:
@@ -78,6 +84,12 @@ def shutdown_handler() -> None:
                 "Unexpected error while stopping public traffic worker."
             )
 
+    if _visit_lifecycle is not None:
+        try:
+            _visit_lifecycle.stop_scheduling()
+        except Exception:
+            logger.exception("visit_lifecycle_scheduling_stop_failed")
+
     try:
         auth_executor.shutdown(
             wait=True,
@@ -90,6 +102,13 @@ def shutdown_handler() -> None:
         logger.exception(
             "Unexpected error while shutting down authentication executor."
         )
+
+    if _visit_lifecycle is not None:
+        try:
+            _visit_lifecycle.stop_accepting()
+            _visit_lifecycle.close()
+        except Exception:
+            logger.exception("visit_lifecycle_stop_failed")
 
     if _visitor_snapshot_collector is not None:
         try:
@@ -167,6 +186,7 @@ def main() -> None:
     """Main application entry point."""
     global _visitor_snapshot_collector, _visitor_registry
     global _pending_session_cleaner, _observation_foundation
+    global _visit_lifecycle
 
     logger.info("Starting Captive Portal")
 
@@ -183,12 +203,21 @@ def main() -> None:
         settings=settings,
         provider=controller,
     )
-    app = create_app(
-        controller=controller,
-        visitor_snapshot_collector=(
-            _visitor_snapshot_collector
-        ),
+    _visit_lifecycle = create_visit_lifecycle(
+        settings,
+        logger=logger,
     )
+    app_kwargs = {
+        "controller": controller,
+        "visitor_snapshot_collector": _visitor_snapshot_collector,
+    }
+    if "visit_start_submitter" in inspect.signature(
+        create_app
+    ).parameters:
+        app_kwargs["visit_start_submitter"] = (
+            _visit_lifecycle.start_submitter
+        )
+    app = create_app(**app_kwargs)
     logger.info("Web application created")
     _observation_foundation = create_observation_foundation(
         settings=settings,
@@ -223,6 +252,23 @@ def main() -> None:
         _visitor_registry.start()
     except Exception:
         logger.exception("visitor_registry_start_failed")
+    registry_read_service = None
+    if (
+        getattr(_visitor_registry, "available", False)
+        and hasattr(_visitor_registry, "repository")
+        and hasattr(_visitor_registry, "service")
+    ):
+        registry_read_service = VisitorRegistryReadService(
+            _visitor_registry.repository,
+            _visitor_registry.service,
+            configured_enabled=True,
+        )
+    try:
+        _visit_lifecycle.start_reconciliation(
+            registry_read_service
+        )
+    except Exception:
+        logger.exception("visit_lifecycle_reconciliation_start_failed")
     _start_public_traffic_worker(app)
 
     host = settings["host"]

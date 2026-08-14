@@ -28,6 +28,21 @@ from app.config import (
     VISITOR_REGISTRY_SCAN_INTERVAL_SECONDS,
     VISITOR_REGISTRY_SHUTDOWN_TIMEOUT_SECONDS,
     VISITOR_REGISTRY_MAX_LINE_BYTES,
+    VISIT_LIFECYCLE_ENABLED, VISIT_LIFECYCLE_DB_PATH,
+    VISIT_LIFECYCLE_WEBHOOK_SOURCE,
+    VISIT_LIFECYCLE_SCAN_INTERVAL_SECONDS,
+    VISIT_LIFECYCLE_RECONCILE_INTERVAL_SECONDS,
+    VISIT_LIFECYCLE_MAX_LINE_BYTES,
+    VISIT_LIFECYCLE_READER_MAX_LINES_PER_SCAN,
+    VISIT_LIFECYCLE_READER_MAX_BYTES_PER_SCAN,
+    VISIT_LIFECYCLE_READER_MAX_DURATION_SECONDS,
+    VISIT_LIFECYCLE_RECONCILE_BATCH_SIZE,
+    VISIT_LIFECYCLE_PENDING_OFFLINE_BATCH_SIZE,
+    VISIT_LIFECYCLE_OFFLINE_MATCH_GRACE_SECONDS,
+    VISIT_LIFECYCLE_START_BUSY_TIMEOUT_MS,
+    VISIT_LIFECYCLE_SHUTDOWN_TIMEOUT_SECONDS,
+    VISIT_LIFECYCLE_MAX_OFFLINE_CLOCK_SKEW_SECONDS,
+    VISIT_LIFECYCLE_MAX_REPORTED_DURATION_DRIFT_SECONDS,
     OBSERVATION_FOUNDATION_ENABLED, OBSERVATION_DB_PATH,
     OBSERVATION_DYNAMIC_RETENTION_DAYS,
     OBSERVATION_CONFIG_RETENTION_DAYS,
@@ -166,6 +181,50 @@ def get_settings() -> dict:
         ),
         "visitor_registry_max_line_bytes": (
             VISITOR_REGISTRY_MAX_LINE_BYTES
+        ),
+        "visit_lifecycle_enabled": VISIT_LIFECYCLE_ENABLED,
+        "visit_lifecycle_db_path": VISIT_LIFECYCLE_DB_PATH,
+        "visit_lifecycle_webhook_source": (
+            VISIT_LIFECYCLE_WEBHOOK_SOURCE
+        ),
+        "visit_lifecycle_scan_interval_seconds": (
+            VISIT_LIFECYCLE_SCAN_INTERVAL_SECONDS
+        ),
+        "visit_lifecycle_reconcile_interval_seconds": (
+            VISIT_LIFECYCLE_RECONCILE_INTERVAL_SECONDS
+        ),
+        "visit_lifecycle_max_line_bytes": (
+            VISIT_LIFECYCLE_MAX_LINE_BYTES
+        ),
+        "visit_lifecycle_reader_max_lines_per_scan": (
+            VISIT_LIFECYCLE_READER_MAX_LINES_PER_SCAN
+        ),
+        "visit_lifecycle_reader_max_bytes_per_scan": (
+            VISIT_LIFECYCLE_READER_MAX_BYTES_PER_SCAN
+        ),
+        "visit_lifecycle_reader_max_duration_seconds": (
+            VISIT_LIFECYCLE_READER_MAX_DURATION_SECONDS
+        ),
+        "visit_lifecycle_reconcile_batch_size": (
+            VISIT_LIFECYCLE_RECONCILE_BATCH_SIZE
+        ),
+        "visit_lifecycle_pending_offline_batch_size": (
+            VISIT_LIFECYCLE_PENDING_OFFLINE_BATCH_SIZE
+        ),
+        "visit_lifecycle_offline_match_grace_seconds": (
+            VISIT_LIFECYCLE_OFFLINE_MATCH_GRACE_SECONDS
+        ),
+        "visit_lifecycle_start_busy_timeout_ms": (
+            VISIT_LIFECYCLE_START_BUSY_TIMEOUT_MS
+        ),
+        "visit_lifecycle_shutdown_timeout_seconds": (
+            VISIT_LIFECYCLE_SHUTDOWN_TIMEOUT_SECONDS
+        ),
+        "visit_lifecycle_max_offline_clock_skew_seconds": (
+            VISIT_LIFECYCLE_MAX_OFFLINE_CLOCK_SKEW_SECONDS
+        ),
+        "visit_lifecycle_max_reported_duration_drift_seconds": (
+            VISIT_LIFECYCLE_MAX_REPORTED_DURATION_DRIFT_SECONDS
         ),
         "observation_foundation_enabled": (
             OBSERVATION_FOUNDATION_ENABLED
