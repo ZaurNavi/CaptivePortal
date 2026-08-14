@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 
 import pytest
 
-from app.visit_lifecycle import webhook_reader as reader_module
+from app.visit_lifecycle import (
+    VisitLifecycleService,
+    VisitRepository,
+    webhook_reader as reader_module,
+)
+from app.visit_lifecycle.repository import WRITE_OPERATION_READER
 from app.visit_lifecycle.webhook_reader import VisitLifecycleWebhookReader
 
 from .conftest import config_with
@@ -86,6 +92,43 @@ def test_missing_journal_is_safe_and_pending_recheck_still_runs(
         visit_config, visit_repository, visit_service
     ).scan_once() is True
     assert calls == [{"now_utc": NOW}]
+
+
+def test_busy_reader_preserves_checkpoint_and_recovers_next_scan(visit_config):
+    config = config_with(visit_config, reader_writer_slot_wait_ms=25)
+    repository = VisitRepository(config)
+    repository.initialize()
+    telemetry = CapturingTelemetry()
+    service = VisitLifecycleService(repository, telemetry)
+    reader = _reader(config, repository, service, telemetry)
+    _append(config.webhook_source, _offline("event:busy-reader"))
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_writer():
+        with repository._bounded_write(WRITE_OPERATION_READER):  # noqa: SLF001
+            holder_ready.set()
+            release_holder.wait(2)
+
+    holder = threading.Thread(target=hold_writer)
+    holder.start()
+    assert holder_ready.wait(1)
+    assert reader.scan_once() is False
+    assert repository.get_reader_states() == {}
+    assert _event_count(repository) == 0
+    failed = [item for item in telemetry.events if item[0] == "visit.reader_scan_failed"]
+    assert len(failed) == 1
+    assert failed[0][2]["operation"] == "reader"
+    assert failed[0][2]["storage_category"] == "busy"
+    assert failed[0][2]["retry_exhausted"] is False
+    release_holder.set()
+    holder.join(1)
+
+    assert reader.scan_once() is True
+    assert _event_count(repository) == 1
+    assert _state(repository).source_offset == os.path.getsize(
+        config.webhook_source
+    )
 
 
 def test_malformed_unrelated_and_missing_event_id_advance_checkpoint_safely(

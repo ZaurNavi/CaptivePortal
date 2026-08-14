@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from .models import (
     OfflineEvidence,
     OfflineProcessingOutcome,
@@ -27,11 +29,16 @@ class VisitLifecycleService:
     def submit_authorized(
         self,
         request: VisitStartRequest,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> VisitStartOutcome:
         start = normalize_start_request(request)
         outcome = self.repository.create_or_reuse_start(
             start,
             now_utc=utc_now(),
+            deadline=deadline,
+            cancel_event=cancel_event,
         )
         if outcome.status == "opened":
             self.telemetry.emit(
@@ -56,6 +63,9 @@ class VisitLifecycleService:
                 auth_run_number=start.auth_run_number,
             )
         return outcome
+
+    def wake_write_waiters(self) -> None:
+        self.repository.wake_write_waiters()
 
     def process_journal_line(
         self,

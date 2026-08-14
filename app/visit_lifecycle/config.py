@@ -16,6 +16,12 @@ DEFAULT_DB_PATH = "/opt/CaptivePortal/data/visits.sqlite3"
 DEFAULT_WEBHOOK_SOURCE = (
     "/opt/CaptivePortal/logs/omada_webhook_normalized.log"
 )
+DEFAULT_START_WRITER_SLOT_WAIT_MS = 750
+DEFAULT_READER_WRITER_SLOT_WAIT_MS = 250
+DEFAULT_RECONCILIATION_WRITER_SLOT_WAIT_MS = 250
+DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 500
+DEFAULT_START_MAX_ATTEMPTS = 3
+DEFAULT_START_TOTAL_BUDGET_MS = 2_000
 
 
 def visit_config_from_settings(
@@ -42,7 +48,14 @@ def visit_config_from_settings(
             reconcile_batch_size=500,
             pending_offline_batch_size=500,
             offline_match_grace_seconds=30.0,
-            start_busy_timeout_ms=250,
+            start_writer_slot_wait_ms=DEFAULT_START_WRITER_SLOT_WAIT_MS,
+            reader_writer_slot_wait_ms=DEFAULT_READER_WRITER_SLOT_WAIT_MS,
+            reconciliation_writer_slot_wait_ms=(
+                DEFAULT_RECONCILIATION_WRITER_SLOT_WAIT_MS
+            ),
+            sqlite_busy_timeout_ms=DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+            start_max_attempts=DEFAULT_START_MAX_ATTEMPTS,
+            start_total_budget_ms=DEFAULT_START_TOTAL_BUDGET_MS,
             shutdown_timeout_seconds=20.0,
             max_offline_clock_skew_seconds=120.0,
             max_reported_duration_drift_seconds=300.0,
@@ -111,9 +124,54 @@ def visit_config_from_settings(
             ),
             "VISIT_LIFECYCLE_OFFLINE_MATCH_GRACE_SECONDS",
         ),
-        start_busy_timeout_ms=_positive_int(
-            settings.get("visit_lifecycle_start_busy_timeout_ms", 250),
-            "VISIT_LIFECYCLE_START_BUSY_TIMEOUT_MS",
+        start_writer_slot_wait_ms=_positive_int(
+            _preferred_or_legacy(
+                settings,
+                "visit_lifecycle_start_writer_slot_wait_ms",
+                "visit_lifecycle_start_busy_timeout_ms",
+                DEFAULT_START_WRITER_SLOT_WAIT_MS,
+            ),
+            "VISIT_LIFECYCLE_START_WRITER_SLOT_WAIT_MS",
+            maximum=60_000,
+        ),
+        reader_writer_slot_wait_ms=_positive_int(
+            settings.get(
+                "visit_lifecycle_reader_writer_slot_wait_ms",
+                DEFAULT_READER_WRITER_SLOT_WAIT_MS,
+            ),
+            "VISIT_LIFECYCLE_READER_WRITER_SLOT_WAIT_MS",
+            maximum=60_000,
+        ),
+        reconciliation_writer_slot_wait_ms=_positive_int(
+            settings.get(
+                "visit_lifecycle_reconciliation_writer_slot_wait_ms",
+                DEFAULT_RECONCILIATION_WRITER_SLOT_WAIT_MS,
+            ),
+            "VISIT_LIFECYCLE_RECONCILIATION_WRITER_SLOT_WAIT_MS",
+            maximum=60_000,
+        ),
+        sqlite_busy_timeout_ms=_positive_int(
+            settings.get(
+                "visit_lifecycle_sqlite_busy_timeout_ms",
+                DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+            ),
+            "VISIT_LIFECYCLE_SQLITE_BUSY_TIMEOUT_MS",
+            maximum=60_000,
+        ),
+        start_max_attempts=_positive_int(
+            settings.get(
+                "visit_lifecycle_start_max_attempts",
+                DEFAULT_START_MAX_ATTEMPTS,
+            ),
+            "VISIT_LIFECYCLE_START_MAX_ATTEMPTS",
+            maximum=10,
+        ),
+        start_total_budget_ms=_positive_int(
+            settings.get(
+                "visit_lifecycle_start_total_budget_ms",
+                DEFAULT_START_TOTAL_BUDGET_MS,
+            ),
+            "VISIT_LIFECYCLE_START_TOTAL_BUDGET_MS",
             maximum=60_000,
         ),
         shutdown_timeout_seconds=_positive_number(
@@ -135,6 +193,23 @@ def visit_config_from_settings(
             "VISIT_LIFECYCLE_MAX_REPORTED_DURATION_DRIFT_SECONDS",
         ),
     )
+
+
+def _preferred_or_legacy(
+    settings: dict[str, Any],
+    preferred: str,
+    legacy: str,
+    default: int,
+) -> Any:
+    value = settings.get(preferred)
+    if value is not None and (not isinstance(value, str) or value.strip()):
+        return value
+    legacy_value = settings.get(legacy)
+    if legacy_value is not None and (
+        not isinstance(legacy_value, str) or legacy_value.strip()
+    ):
+        return legacy_value
+    return default
 
 
 def _strict_bool(value: Any, name: str) -> bool:

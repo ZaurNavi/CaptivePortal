@@ -27,6 +27,7 @@ from .models import (
     ReaderProgress,
     VisitLifecycleConfig,
     VisitReaderState,
+    VisitStorageError,
     VisitValidationError,
     normalize_utc,
     utc_now,
@@ -157,10 +158,20 @@ class VisitLifecycleWebhookReader:
                 self._health_callback(True)
             return complete
         except Exception as exc:
+            fields: dict[str, Any] = {
+                "error_type": type(exc).__name__,
+                "operation": "reader",
+                "attempt": 1,
+                "retry_exhausted": False,
+                "wait_ms": int((self._monotonic() - started) * 1000),
+            }
+            if isinstance(exc, VisitStorageError):
+                fields["storage_category"] = exc.category.value
+                fields["lock_wait_ms"] = exc.lock_wait_ms
             self.telemetry.emit(
                 "visit.reader_scan_failed",
                 "error",
-                error_type=type(exc).__name__,
+                **fields,
             )
             if self._health_callback is not None:
                 self._health_callback(False)

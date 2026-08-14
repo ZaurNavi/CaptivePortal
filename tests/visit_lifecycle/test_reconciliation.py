@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
+from dataclasses import replace
 
-from app.visit_lifecycle import VisitTelemetry
+from app.visit_lifecycle import (
+    VisitLifecycleService,
+    VisitRepository,
+    VisitTelemetry,
+)
 from app.visit_lifecycle.reconciliation import VisitLinkReconciler
+from app.visit_lifecycle.repository import WRITE_OPERATION_READER
 
 from .conftest import config_with, make_request
 
@@ -101,6 +108,63 @@ def test_registry_links_are_added_outside_start_transaction(
     assert linked.link_reconcile_attempt_count == 1
     assert linked.link_reconcile_attempted_at is not None
     assert linked.link_reconcile_next_at is None
+
+
+def test_busy_reconciliation_defers_and_recovers_next_cycle(visit_config):
+    config = replace(
+        visit_config,
+        reconciliation_writer_slot_wait_ms=25,
+    )
+    repository = VisitRepository(config)
+    repository.initialize()
+    telemetry = CapturingTelemetry()
+    service = VisitLifecycleService(repository, telemetry)
+    request = make_request()
+    opened = service.submit_authorized(request)
+    registry = FakeRegistry()
+    registry.devices[request.client_mac] = {"device_id": str(uuid.uuid4())}
+    registry.snapshots[request.auth_session_id] = {
+        "snapshot_id": str(uuid.uuid4()),
+        "site_id": request.site_id,
+        "requested_mac": request.client_mac,
+    }
+    reconciler = VisitLinkReconciler(
+        config=config,
+        repository=repository,
+        registry_read_service=registry,
+        telemetry=telemetry,
+    )
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_writer():
+        with repository._bounded_write(WRITE_OPERATION_READER):  # noqa: SLF001
+            holder_ready.set()
+            release_holder.wait(2)
+
+    holder = threading.Thread(target=hold_writer)
+    holder.start()
+    assert holder_ready.wait(1)
+    assert reconciler.run_once() == 0
+    before = repository.get_visit("site-a", opened.visit_id)
+    assert before.device_id is None
+    assert before.link_reconcile_attempt_count == 0
+    degraded = [
+        item for item in telemetry.events
+        if item[0] == "visit.reconciliation_degraded"
+    ]
+    assert len(degraded) == 1
+    assert degraded[0][2]["operation"] == "reconciliation"
+    assert degraded[0][2]["storage_category"] == "busy"
+    assert degraded[0][2]["retry_exhausted"] is False
+    release_holder.set()
+    holder.join(1)
+
+    assert reconciler.run_once() == 1
+    linked = repository.get_visit("site-a", opened.visit_id)
+    assert linked.device_id is not None
+    assert linked.initial_snapshot_id is not None
+    assert linked.link_reconcile_attempt_count == 1
 
 
 def test_missing_snapshot_is_retried_and_existing_link_is_not_replaced(
