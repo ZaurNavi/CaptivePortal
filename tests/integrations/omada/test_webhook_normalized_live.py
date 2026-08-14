@@ -19,6 +19,9 @@ from app.integrations.omada.webhook_normalized_journal import (
     NormalizedJournalWriteError,
 )
 from app.integrations.omada.webhook_routes import WEBHOOK_PATH
+from app.integrations.omada.webhook_site_mapping import (
+    load_webhook_site_id_mapping,
+)
 
 
 ALLOWED_IP = "192.168.0.222"
@@ -35,7 +38,13 @@ UNAUTHORIZED = (
 )
 
 
-def build_app(tmp_path, *, normalized_journal=None, logger=None):
+def build_app(
+    tmp_path,
+    *,
+    normalized_journal=None,
+    logger=None,
+    site_id_map_json="{}",
+):
     raw_path = tmp_path / "omada_webhook.log"
     normalized_path = tmp_path / "omada_webhook_normalized.log"
     config = OmadaWebhookConfig.from_settings({
@@ -55,7 +64,12 @@ def build_app(tmp_path, *, normalized_journal=None, logger=None):
         normalized_journal
         or OmadaWebhookNormalizedJournal(str(normalized_path))
     )
-    processor = OmadaWebhookProcessor(normalized_journal)
+    processor = OmadaWebhookProcessor(
+        normalized_journal,
+        site_id_mapping=load_webhook_site_id_mapping(
+            site_id_map_json
+        ),
+    )
     logger = logger or logging.getLogger(
         f"test.omada.normalized.{uuid.uuid4()}"
     )
@@ -139,9 +153,65 @@ def test_live_receiver_writes_raw_first_and_one_normalized_line_per_text(
     assert normalized[0]["webhook_id"] == raw_events[0]["webhook_id"]
     assert normalized[1]["webhook_id"] == raw_events[0]["webhook_id"]
     assert [event["text_index"] for event in normalized] == [0, 1]
+    assert all(event["site"] == "Home" for event in normalized)
+    assert all(event["site_id"] is None for event in normalized)
+    assert all(
+        event["site_resolution_status"] == "site_unresolved"
+        for event in normalized
+    )
     normalized_bytes = normalized_path.read_bytes()
     assert b"live-secret" not in normalized_bytes
     assert b"shardSecret" not in normalized_bytes
+
+
+def test_live_receiver_enriches_all_events_with_resolved_site_id(
+    tmp_path,
+):
+    app, raw_path, normalized_path = build_app(
+        tmp_path,
+        site_id_map_json='{"Home":"technical-site-id"}',
+    )
+
+    response = post(app)
+    raw_events = records(raw_path)
+    normalized = records(normalized_path)
+
+    assert response.status_code == 204
+    assert len(raw_events) == 1
+    assert raw_events[0]["parsed_payload"]["Site"] == "Home"
+    assert [event["site_id"] for event in normalized] == [
+        "technical-site-id",
+        "technical-site-id",
+    ]
+    assert [
+        event["site_resolution_status"] for event in normalized
+    ] == ["resolved", "resolved"]
+
+
+def test_invalid_live_mapping_is_fail_open_for_raw_and_normalized_logs(
+    tmp_path,
+):
+    app, raw_path, normalized_path = build_app(
+        tmp_path,
+        site_id_map_json='{"Home":"one","Home":"two"}',
+    )
+
+    response = post(app)
+    raw_events = records(raw_path)
+    normalized = records(normalized_path)
+
+    assert response.status_code == 204
+    assert len(raw_events) == 1
+    assert len(normalized) == 2
+    assert all(event["site_id"] is None for event in normalized)
+    assert all(
+        event["site_resolution_status"] == "mapping_invalid"
+        for event in normalized
+    )
+    assert [event["parse_status"] for event in normalized] == [
+        "partial",
+        "partial",
+    ]
 
 
 def test_normalization_failure_keeps_raw_and_returns_204(

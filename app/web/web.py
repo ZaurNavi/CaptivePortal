@@ -33,6 +33,10 @@ from app.integrations.omada import (
     OmadaWebhookReceiver,
     create_omada_webhook_blueprint,
 )
+from app.integrations.omada.webhook_site_mapping import (
+    load_webhook_site_id_mapping,
+    log_invalid_webhook_site_id_mapping,
+)
 from app.portal_counter import (
     PortalCounterRepository,
     PortalCounterService,
@@ -110,8 +114,16 @@ def create_app(
         normalized_journal = OmadaWebhookNormalizedJournal(
             webhook_config.normalized_log_file
         )
+        webhook_site_id_mapping = load_webhook_site_id_mapping(
+            settings.get("omada_webhook_site_id_map_json", "{}")
+        )
+        log_invalid_webhook_site_id_mapping(
+            logger,
+            webhook_site_id_mapping,
+        )
         webhook_processor = OmadaWebhookProcessor(
-            normalized_journal
+            normalized_journal,
+            site_id_mapping=webhook_site_id_mapping,
         )
         webhook_receiver = OmadaWebhookReceiver(
             config=webhook_config,

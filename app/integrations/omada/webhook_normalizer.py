@@ -16,6 +16,11 @@ from ipaddress import ip_address
 from typing import Any, NamedTuple
 
 from app.common.mac import format_mac_colon
+from app.integrations.omada.webhook_site_mapping import (
+    EMPTY_WEBHOOK_SITE_ID_MAPPING,
+    SiteResolution,
+    WebhookSiteIdMapping,
+)
 
 
 SCHEMA_VERSION = 1
@@ -184,16 +189,26 @@ CONNECTION_FAILURE_REASONS: tuple[
 )
 
 
-def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
+def normalize_webhook(
+    raw_record: dict[str, Any],
+    *,
+    site_id_mapping: WebhookSiteIdMapping = (
+        EMPTY_WEBHOOK_SITE_ID_MAPPING
+    ),
+) -> list[dict[str, Any]]:
     """Return one normalized event for every item in ``text``."""
     if not isinstance(raw_record, dict):
         raise TypeError("raw_record must be a dictionary")
 
     payload = raw_record.get("parsed_payload")
+    site_resolution = site_id_mapping.resolve(
+        payload.get("Site") if isinstance(payload, dict) else None
+    )
     if not isinstance(payload, dict):
         return [
             _diagnostic_event(
                 raw_record,
+                site_resolution=site_resolution,
                 reason="TEXT_MISSING",
                 text_index=None,
                 text_count=0,
@@ -205,6 +220,7 @@ def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
         return [
             _diagnostic_event(
                 raw_record,
+                site_resolution=site_resolution,
                 reason="TEXT_MISSING",
                 text_index=None,
                 text_count=0,
@@ -217,6 +233,7 @@ def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
         return [
             _diagnostic_event(
                 raw_record,
+                site_resolution=site_resolution,
                 reason="TEXT_INVALID_TYPE",
                 text_index=None,
                 text_count=0,
@@ -228,6 +245,7 @@ def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
         return [
             _diagnostic_event(
                 raw_record,
+                site_resolution=site_resolution,
                 reason="TEXT_EMPTY",
                 text_index=None,
                 text_count=0,
@@ -242,6 +260,7 @@ def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
             normalized.append(
                 _diagnostic_event(
                     raw_record,
+                    site_resolution=site_resolution,
                     reason="TEXT_ITEM_INVALID_TYPE",
                     text_index=text_index,
                     text_count=text_count,
@@ -253,6 +272,7 @@ def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
             normalized.append(
                 _diagnostic_event(
                     raw_record,
+                    site_resolution=site_resolution,
                     reason="TEXT_ITEM_EMPTY",
                     text_index=text_index,
                     text_count=text_count,
@@ -263,6 +283,7 @@ def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
         normalized.append(
             _normalize_text_item(
                 raw_record,
+                site_resolution=site_resolution,
                 raw_text=item,
                 text_index=text_index,
                 text_count=text_count,
@@ -274,6 +295,7 @@ def normalize_webhook(raw_record: dict[str, Any]) -> list[dict[str, Any]]:
 def _normalize_text_item(
     raw_record: dict[str, Any],
     *,
+    site_resolution: SiteResolution,
     raw_text: str,
     text_index: int,
     text_count: int,
@@ -289,6 +311,7 @@ def _normalize_text_item(
     if handler is None:
         return _diagnostic_event(
             raw_record,
+            site_resolution=site_resolution,
             reason="UNKNOWN_TEXT_FORMAT",
             text_index=text_index,
             text_count=text_count,
@@ -302,6 +325,7 @@ def _normalize_text_item(
     parse_status = "partial" if warnings else "parsed"
     event = _common_event(
         raw_record,
+        site_resolution=site_resolution,
         event_name=handler.event_name,
         text_index=text_index,
         text_count=text_count,
@@ -887,6 +911,7 @@ def _canonical_received_at(
 def _diagnostic_event(
     raw_record: dict[str, Any],
     *,
+    site_resolution: SiteResolution,
     reason: str,
     text_index: int | None,
     text_count: int,
@@ -895,6 +920,7 @@ def _diagnostic_event(
     time_fields, time_warnings = _controller_time_fields(raw_record)
     event = _common_event(
         raw_record,
+        site_resolution=site_resolution,
         event_name="omada.webhook_unclassified",
         text_index=text_index,
         text_count=text_count,
@@ -911,6 +937,7 @@ def _diagnostic_event(
 def _common_event(
     raw_record: dict[str, Any],
     *,
+    site_resolution: SiteResolution,
     event_name: str,
     text_index: int | None,
     text_count: int,
@@ -952,6 +979,8 @@ def _common_event(
         ],
         "source_ip": _optional_string(raw_record.get("source_ip")),
         "site": _optional_string(payload.get("Site")),
+        "site_id": site_resolution.site_id,
+        "site_resolution_status": site_resolution.status,
         "controller_name": _optional_string(
             payload.get("Controller")
         ),

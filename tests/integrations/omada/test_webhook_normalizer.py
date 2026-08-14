@@ -14,6 +14,9 @@ from app.integrations.omada.webhook_normalizer import (
     normalize_mac,
     normalize_webhook,
 )
+from app.integrations.omada.webhook_site_mapping import (
+    load_webhook_site_id_mapping,
+)
 
 
 WEBHOOK_ID = "62dc9f43-40c7-4ef9-a886-6639ee29350e"
@@ -79,6 +82,8 @@ COMMON_KEYS = {
     "delivery_latency_ms",
     "source_ip",
     "site",
+    "site_id",
+    "site_resolution_status",
     "controller_name",
     "payload_sha256",
     "parse_status",
@@ -202,9 +207,62 @@ def test_online_event_has_fixed_schema_and_canonical_values():
     )
     assert event["delivery_latency_ms"] == 55
     assert event["normalized_event_id"] == f"{WEBHOOK_ID}:0"
+    assert event["site"] == "Home"
+    assert event["site_id"] is None
+    assert event["site_resolution_status"] == "site_unresolved"
     assert "raw_body" not in event
     assert "headers" not in event
     assert "shardSecret" not in json.dumps(event)
+
+
+def test_site_identity_is_resolved_without_changing_text_contract():
+    mapping = load_webhook_site_id_mapping(
+        '{"Home":"technical-site-id"}'
+    )
+
+    event = normalize_webhook(
+        raw_record(),
+        site_id_mapping=mapping,
+    )[0]
+
+    assert event["site"] == "Home"
+    assert event["site_id"] == "technical-site-id"
+    assert event["site_resolution_status"] == "resolved"
+    assert event["parse_status"] == "parsed"
+    assert event["parse_warnings"] == []
+
+
+def test_mapping_problem_does_not_change_text_parse_status():
+    mapping = load_webhook_site_id_mapping(
+        '{"Home":"first","Home":"second"}'
+    )
+
+    event = normalize_webhook(
+        raw_record(),
+        site_id_mapping=mapping,
+    )[0]
+
+    assert event["site"] == "Home"
+    assert event["site_id"] is None
+    assert event["site_resolution_status"] == "mapping_invalid"
+    assert event["parse_status"] == "parsed"
+    assert event["parse_warnings"] == []
+
+
+def test_whitespace_site_is_preserved_but_resolves_as_missing():
+    mapping = load_webhook_site_id_mapping(
+        '{"Home":"technical-site-id"}'
+    )
+
+    event = normalize_webhook(
+        raw_record(Site="   "),
+        site_id_mapping=mapping,
+    )[0]
+
+    assert event["site"] == "   "
+    assert event["site_id"] is None
+    assert event["site_resolution_status"] == "site_missing"
+    assert event["parse_status"] == "parsed"
 
 
 @pytest.mark.parametrize(
