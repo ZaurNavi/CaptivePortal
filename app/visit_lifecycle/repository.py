@@ -1,4 +1,4 @@
-"""SQLite persistence for Visit Lifecycle schema version 1."""
+"""SQLite persistence for Visit Lifecycle schema version 2."""
 
 from __future__ import annotations
 
@@ -8,10 +8,15 @@ import stat
 import threading
 import uuid
 from contextlib import closing, contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from .models import (
+    OfflineEvidence,
+    OfflineProcessingOutcome,
+    ReaderCheckpoint,
+    ReaderProgress,
     ReconcileCandidate,
     SCHEMA_VERSION,
     VisitLifecycleConfig,
@@ -20,6 +25,7 @@ from .models import (
     VisitStartOutcome,
     VisitStorageCategory,
     VisitStorageError,
+    VisitReaderState,
     NormalizedVisitStart,
 )
 
@@ -124,6 +130,38 @@ REQUIRED_NOT_NULL_COLUMNS: Mapping[str, frozenset[str]] = {
     }),
 }
 
+REQUIRED_V2_SOURCE_COLUMNS = frozenset({
+    "client_ip",
+    "ssid",
+    "ap_mac",
+    "reported_connected_seconds",
+    "reported_traffic_total_bytes",
+})
+
+MIGRATION_V1_TO_V2_STATEMENTS = (
+    "ALTER TABLE visit_source_events ADD COLUMN client_ip TEXT",
+    "ALTER TABLE visit_source_events ADD COLUMN ssid TEXT",
+    """ALTER TABLE visit_source_events ADD COLUMN ap_mac TEXT
+       CHECK (ap_mac IS NULL OR ap_mac GLOB
+           '[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]')""",
+    """ALTER TABLE visit_source_events
+       ADD COLUMN reported_connected_seconds INTEGER
+       CHECK (
+           reported_connected_seconds IS NULL OR (
+               typeof(reported_connected_seconds) = 'integer'
+               AND reported_connected_seconds >= 0
+           )
+       )""",
+    """ALTER TABLE visit_source_events
+       ADD COLUMN reported_traffic_total_bytes INTEGER
+       CHECK (
+           reported_traffic_total_bytes IS NULL OR (
+               typeof(reported_traffic_total_bytes) = 'integer'
+               AND reported_traffic_total_bytes >= 0
+           )
+       )""",
+)
+
 
 def _utc_check(column: str, *, nullable: bool = False) -> str:
     expression = (
@@ -139,7 +177,7 @@ def _utc_check(column: str, *, nullable: bool = False) -> str:
     return f"({column} IS NULL OR {expression})" if nullable else expression
 
 
-def _schema_sql() -> str:
+def _schema_sql_v1() -> str:
     return f"""
         BEGIN IMMEDIATE;
 
@@ -377,8 +415,23 @@ def _schema_sql() -> str:
     """
 
 
+def _schema_sql_v2() -> str:
+    legacy = _schema_sql_v1()
+    final_marker = "        PRAGMA user_version = 1;\n        COMMIT;"
+    if legacy.count(final_marker) != 1:
+        raise RuntimeError("Visit schema v1 final marker is not unique")
+    migration = "\n".join(
+        f"        {statement.strip()};"
+        for statement in MIGRATION_V1_TO_V2_STATEMENTS
+    )
+    return legacy.replace(
+        final_marker,
+        f"{migration}\n        PRAGMA user_version = 2;\n        COMMIT;",
+    )
+
+
 class VisitRepository:
-    """Own Visit schema v1 and short serialized write transactions."""
+    """Own Visit schema v2 and short serialized write transactions."""
 
     def __init__(
         self,
@@ -410,8 +463,10 @@ class VisitRepository:
                         raise VisitSchemaError(
                             "Visit schema version 0 is non-empty"
                         )
-                    connection.executescript(_schema_sql())
+                    connection.executescript(_schema_sql_v2())
                     created = True
+                elif version == 1:
+                    self._migrate_v1_to_v2(connection)
                 elif version != SCHEMA_VERSION:
                     raise VisitSchemaError(
                         f"Unsupported Visit schema version: {version}"
@@ -428,6 +483,38 @@ class VisitRepository:
         if not existed and not created:
             raise VisitSchemaError("Visit database creation did not complete")
         return created
+
+    def _migrate_v1_to_v2(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            quick = connection.execute("PRAGMA quick_check").fetchone()
+            if not quick or str(quick[0]) != "ok":
+                raise VisitSchemaError(
+                    "Visit schema v1 health check failed"
+                )
+            if _schema_signature(connection) != _expected_v1_signature():
+                raise VisitSchemaError(
+                    "Visit schema v1 does not match the exact contract"
+                )
+            pending = int(connection.execute(
+                "SELECT COUNT(*) FROM visit_source_events "
+                "WHERE processing_result='pending_match'"
+            ).fetchone()[0])
+            if pending:
+                raise VisitSchemaError(
+                    "Visit schema v1 contains pending offline evidence"
+                )
+            for statement in MIGRATION_V1_TO_V2_STATEMENTS:
+                connection.execute(statement)
+            connection.execute("PRAGMA user_version = 2")
+            self._startup_check(connection)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
     def create_or_reuse_start(
         self,
@@ -734,6 +821,580 @@ class VisitRepository:
         except sqlite3.Error as exc:
             raise _storage_error(exc) from exc
 
+    def get_reader_states(self) -> dict[str, VisitReaderState]:
+        with closing(self._connect(readonly=True)) as connection:
+            rows = connection.execute(
+                "SELECT * FROM visit_reader_state"
+            ).fetchall()
+        return {
+            str(row["source_identity"]): VisitReaderState(
+                source_identity=str(row["source_identity"]),
+                source_path=str(row["source_path"]),
+                source_offset=int(row["source_offset"]),
+                last_observed_size=(
+                    None
+                    if row["last_observed_size"] is None
+                    else int(row["last_observed_size"])
+                ),
+                checkpoint_offset=(
+                    None
+                    if row["checkpoint_offset"] is None
+                    else int(row["checkpoint_offset"])
+                ),
+                checkpoint_length=(
+                    None
+                    if row["checkpoint_length"] is None
+                    else int(row["checkpoint_length"])
+                ),
+                checkpoint_sha256=row["checkpoint_sha256"],
+                retired_completed=bool(row["retired_completed"]),
+                missing_warning_emitted=bool(
+                    row["missing_warning_emitted"]
+                ),
+                updated_at=str(row["updated_at"]),
+            )
+            for row in rows
+        }
+
+    def observe_reader_progress(
+        self,
+        progress: ReaderProgress,
+        *,
+        now_utc: str,
+    ) -> None:
+        try:
+            with self._bounded_write(), closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._upsert_reader_progress(connection, progress, now_utc)
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+
+    def reset_reader_source(
+        self,
+        progress: ReaderProgress,
+        *,
+        now_utc: str,
+    ) -> None:
+        self.observe_reader_progress(progress, now_utc=now_utc)
+
+    def mark_reader_source_missing(
+        self,
+        source_identity: str,
+        *,
+        now_utc: str,
+    ) -> None:
+        try:
+            with self._bounded_write(), closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    UPDATE visit_reader_state
+                    SET missing_warning_emitted=1, updated_at=?
+                    WHERE source_identity=?
+                    """,
+                    (now_utc, source_identity),
+                )
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+
+    def delete_reader_state(self, source_identity: str) -> None:
+        try:
+            with self._bounded_write(), closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM visit_reader_state WHERE source_identity=?",
+                    (source_identity,),
+                )
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+
+    def apply_journal_line(
+        self,
+        *,
+        progress: ReaderProgress,
+        evidence: OfflineEvidence | None,
+        now_utc: str,
+        grace_seconds: float,
+        max_clock_skew_seconds: float,
+        max_duration_drift_seconds: float,
+    ) -> OfflineProcessingOutcome | None:
+        try:
+            with self._bounded_write(), closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                outcome = self._apply_journal_line_transaction(
+                    connection,
+                    evidence=evidence,
+                    progress=progress,
+                    now_utc=now_utc,
+                    grace_seconds=grace_seconds,
+                    max_clock_skew_seconds=max_clock_skew_seconds,
+                    max_duration_drift_seconds=max_duration_drift_seconds,
+                )
+                self._upsert_reader_progress(connection, progress, now_utc)
+                connection.commit()
+                return outcome
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+
+    def process_pending_events(
+        self,
+        *,
+        now_utc: str,
+        limit: int,
+        max_clock_skew_seconds: float,
+        max_duration_drift_seconds: float,
+    ) -> tuple[OfflineProcessingOutcome, ...]:
+        try:
+            with self._bounded_write(), closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute(
+                    """
+                    SELECT * FROM visit_source_events
+                    WHERE processing_result='pending_match'
+                    ORDER BY pending_until ASC, event_id ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                outcomes: list[OfflineProcessingOutcome] = []
+                for row in rows:
+                    outcomes.append(
+                        self._retry_pending_row(
+                            connection,
+                            row=row,
+                            now_utc=now_utc,
+                            max_clock_skew_seconds=max_clock_skew_seconds,
+                            max_duration_drift_seconds=(
+                                max_duration_drift_seconds
+                            ),
+                        )
+                    )
+                connection.commit()
+                return tuple(outcomes)
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+
+    def _apply_journal_line_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        evidence: OfflineEvidence | None,
+        progress: ReaderProgress,
+        now_utc: str,
+        grace_seconds: float,
+        max_clock_skew_seconds: float,
+        max_duration_drift_seconds: float,
+    ) -> OfflineProcessingOutcome | None:
+        if evidence is None:
+            return None
+        if evidence.event_id is None:
+            return OfflineProcessingOutcome(
+                processing_result="invalid",
+                reason=evidence.invalid_reason or "invalid_event_id",
+            )
+        existing = connection.execute(
+            "SELECT processing_result, visit_id, reason "
+            "FROM visit_source_events WHERE event_id=?",
+            (evidence.event_id,),
+        ).fetchone()
+        if existing is not None:
+            return OfflineProcessingOutcome(
+                processing_result=str(existing["processing_result"]),
+                event_id=evidence.event_id,
+                visit_id=existing["visit_id"],
+                reason=existing["reason"],
+                duplicate=True,
+            )
+        if evidence.invalid_reason is not None:
+            self._insert_source_event(
+                connection,
+                evidence=evidence,
+                progress=progress,
+                processing_result="invalid",
+                visit_id=None,
+                reason=evidence.invalid_reason,
+                now_utc=now_utc,
+                pending_until=None,
+            )
+            return OfflineProcessingOutcome(
+                processing_result="invalid",
+                event_id=evidence.event_id,
+                reason=evidence.invalid_reason,
+            )
+
+        visit = self._open_visit_row(
+            connection,
+            evidence.site_id,
+            evidence.client_mac,
+        )
+        if visit is None:
+            pending_until = _add_seconds(now_utc, grace_seconds)
+            self._insert_source_event(
+                connection,
+                evidence=evidence,
+                progress=progress,
+                processing_result="pending_match",
+                visit_id=None,
+                reason="no_open_visit",
+                now_utc=now_utc,
+                pending_until=pending_until,
+            )
+            return OfflineProcessingOutcome(
+                processing_result="pending_match",
+                event_id=evidence.event_id,
+                reason="no_open_visit",
+            )
+        return self._finalize_or_reject(
+            connection,
+            evidence=evidence,
+            visit=visit,
+            progress=progress,
+            now_utc=now_utc,
+            max_clock_skew_seconds=max_clock_skew_seconds,
+            max_duration_drift_seconds=max_duration_drift_seconds,
+            insert_event=True,
+        )
+
+    def _retry_pending_row(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        now_utc: str,
+        max_clock_skew_seconds: float,
+        max_duration_drift_seconds: float,
+    ) -> OfflineProcessingOutcome:
+        evidence = _evidence_from_row(row)
+        visit = self._open_visit_row(
+            connection,
+            evidence.site_id,
+            evidence.client_mac,
+        )
+        if visit is not None and str(visit["created_at"]) <= str(
+            row["pending_until"]
+        ):
+            return self._finalize_or_reject(
+                connection,
+                evidence=evidence,
+                visit=visit,
+                progress=None,
+                now_utc=now_utc,
+                max_clock_skew_seconds=max_clock_skew_seconds,
+                max_duration_drift_seconds=max_duration_drift_seconds,
+                insert_event=False,
+            )
+        result = (
+            "unmatched"
+            if now_utc >= str(row["pending_until"])
+            else "pending_match"
+        )
+        connection.execute(
+            """
+            UPDATE visit_source_events
+            SET processing_result=?, reason='no_open_visit',
+                processed_at=?, last_match_attempt_at=?
+            WHERE event_id=? AND processing_result='pending_match'
+            """,
+            (result, now_utc, now_utc, evidence.event_id),
+        )
+        return OfflineProcessingOutcome(
+            processing_result=result,
+            event_id=evidence.event_id,
+            reason="no_open_visit",
+        )
+
+    def _finalize_or_reject(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        evidence: OfflineEvidence,
+        visit: sqlite3.Row,
+        progress: ReaderProgress | None,
+        now_utc: str,
+        max_clock_skew_seconds: float,
+        max_duration_drift_seconds: float,
+        insert_event: bool,
+    ) -> OfflineProcessingOutcome:
+        match = self._match_offline(
+            connection,
+            evidence=evidence,
+            visit=visit,
+            max_clock_skew_seconds=max_clock_skew_seconds,
+            max_duration_drift_seconds=max_duration_drift_seconds,
+        )
+        if match[0] is None:
+            reason = match[3]
+            if insert_event:
+                assert progress is not None
+                self._insert_source_event(
+                    connection,
+                    evidence=evidence,
+                    progress=progress,
+                    processing_result="unmatched",
+                    visit_id=None,
+                    reason=reason,
+                    now_utc=now_utc,
+                    pending_until=None,
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE visit_source_events
+                    SET processing_result='unmatched', visit_id=NULL,
+                        reason=?, processed_at=?, last_match_attempt_at=?
+                    WHERE event_id=? AND processing_result='pending_match'
+                    """,
+                    (reason, now_utc, now_utc, evidence.event_id),
+                )
+            return OfflineProcessingOutcome(
+                processing_result="unmatched",
+                event_id=evidence.event_id,
+                reason=reason,
+            )
+
+        closed_at, duration_seconds, close_time_source, _ = match
+        visit_id = str(visit["visit_id"])
+        if insert_event:
+            assert progress is not None
+            self._insert_source_event(
+                connection,
+                evidence=evidence,
+                progress=progress,
+                processing_result="closed",
+                visit_id=visit_id,
+                reason=None,
+                now_utc=now_utc,
+                pending_until=None,
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE visit_source_events
+                SET processing_result='closed', visit_id=?, reason=NULL,
+                    processed_at=?, last_match_attempt_at=?
+                WHERE event_id=? AND processing_result='pending_match'
+                """,
+                (visit_id, now_utc, now_utc, evidence.event_id),
+            )
+        updated = connection.execute(
+            """
+            UPDATE visits
+            SET status='closed', closed_at=?,
+                close_reason='omada_client_offline', close_time_source=?,
+                final_ip=?, final_ssid=?, final_ap_mac=?,
+                reported_connected_seconds=?,
+                reported_traffic_total_bytes=?,
+                reported_traffic_up_bytes=NULL,
+                reported_traffic_down_bytes=NULL,
+                duration_seconds=?, offline_event_id=?, updated_at=?
+            WHERE visit_id=? AND status='open'
+            """,
+            (
+                closed_at,
+                close_time_source,
+                evidence.client_ip,
+                evidence.ssid,
+                evidence.ap_mac,
+                evidence.reported_connected_seconds,
+                evidence.reported_traffic_total_bytes,
+                duration_seconds,
+                evidence.event_id,
+                now_utc,
+                visit_id,
+            ),
+        ).rowcount
+        if updated != 1:
+            raise sqlite3.IntegrityError(
+                "Open Visit changed during finalization"
+            )
+        return OfflineProcessingOutcome(
+            processing_result="closed",
+            event_id=evidence.event_id,
+            visit_id=visit_id,
+        )
+
+    def _match_offline(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        evidence: OfflineEvidence,
+        visit: sqlite3.Row,
+        max_clock_skew_seconds: float,
+        max_duration_drift_seconds: float,
+    ) -> tuple[str | None, int | None, str | None, str | None]:
+        started = _parse_utc(str(visit["started_at"]))
+        controller = _parse_optional_utc(evidence.controller_event_at)
+        received = _parse_optional_utc(evidence.received_at)
+        close_at: datetime | None = None
+        source: str | None = None
+        if controller is not None and controller >= started:
+            close_at = controller
+            source = "controller"
+        elif controller is not None:
+            earliest = started - timedelta(
+                seconds=max_clock_skew_seconds
+            )
+            if (
+                controller >= earliest
+                and received is not None
+                and received >= started
+            ):
+                close_at = received
+                source = "received_clock_fallback"
+            else:
+                return None, None, None, "stale_or_ambiguous"
+        elif received is not None and received >= started:
+            close_at = received
+            source = "received_clock_fallback"
+        else:
+            return None, None, None, "stale_or_ambiguous"
+
+        if (
+            source == "controller"
+            and evidence.reported_connected_seconds is not None
+            and controller is not None
+        ):
+            reported_start = controller - timedelta(
+                seconds=evidence.reported_connected_seconds
+            )
+            if abs((reported_start - started).total_seconds()) > (
+                max_duration_drift_seconds
+            ):
+                return None, None, None, "stale_or_ambiguous"
+
+        known_ssids = {
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT portal_ssid FROM visit_authorizations
+                WHERE visit_id=? AND portal_ssid IS NOT NULL
+                """,
+                (visit["visit_id"],),
+            ).fetchall()
+        }
+        if visit["start_ssid"] is not None:
+            known_ssids.add(str(visit["start_ssid"]))
+        if (
+            evidence.ssid is not None
+            and known_ssids
+            and evidence.ssid not in known_ssids
+        ):
+            return None, None, None, "ssid_changed"
+        duration = int((close_at - started).total_seconds())
+        return _format_utc(close_at), duration, source, None
+
+    @staticmethod
+    def _open_visit_row(
+        connection: sqlite3.Connection,
+        site_id: str | None,
+        client_mac: str | None,
+    ) -> sqlite3.Row | None:
+        if site_id is None or client_mac is None:
+            return None
+        return connection.execute(
+            """
+            SELECT * FROM visits
+            WHERE site_id=? AND client_mac=? AND status='open'
+            """,
+            (site_id, client_mac),
+        ).fetchone()
+
+    @staticmethod
+    def _insert_source_event(
+        connection: sqlite3.Connection,
+        *,
+        evidence: OfflineEvidence,
+        progress: ReaderProgress,
+        processing_result: str,
+        visit_id: str | None,
+        reason: str | None,
+        now_utc: str,
+        pending_until: str | None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO visit_source_events (
+                event_id, event_type, site_id, client_mac,
+                controller_event_at, received_at,
+                client_ip, ssid, ap_mac,
+                reported_connected_seconds,
+                reported_traffic_total_bytes,
+                source_identity, source_offset_start, source_offset_end,
+                processing_result, visit_id, reason,
+                first_processed_at, processed_at, pending_until,
+                last_match_attempt_at
+            ) VALUES (?, 'omada.client_offline', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence.event_id,
+                evidence.site_id,
+                evidence.client_mac,
+                evidence.controller_event_at,
+                evidence.received_at,
+                evidence.client_ip,
+                evidence.ssid,
+                evidence.ap_mac,
+                evidence.reported_connected_seconds,
+                evidence.reported_traffic_total_bytes,
+                progress.source_identity,
+                (
+                    progress.source_offset
+                    if progress.source_offset_start is None
+                    else progress.source_offset_start
+                ),
+                progress.source_offset,
+                processing_result,
+                visit_id,
+                reason,
+                now_utc,
+                now_utc,
+                pending_until,
+                now_utc if processing_result == "pending_match" else None,
+            ),
+        )
+
+    @staticmethod
+    def _upsert_reader_progress(
+        connection: sqlite3.Connection,
+        progress: ReaderProgress,
+        now_utc: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO visit_reader_state (
+                source_identity, source_path, source_offset,
+                last_observed_size, checkpoint_offset,
+                checkpoint_length, checkpoint_sha256,
+                retired_completed, missing_warning_emitted, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            ON CONFLICT(source_identity) DO UPDATE SET
+                source_path=excluded.source_path,
+                source_offset=excluded.source_offset,
+                last_observed_size=excluded.last_observed_size,
+                checkpoint_offset=excluded.checkpoint_offset,
+                checkpoint_length=excluded.checkpoint_length,
+                checkpoint_sha256=excluded.checkpoint_sha256,
+                retired_completed=excluded.retired_completed,
+                missing_warning_emitted=0,
+                updated_at=excluded.updated_at
+            """,
+            (
+                progress.source_identity,
+                progress.source_path,
+                progress.source_offset,
+                progress.last_observed_size,
+                progress.checkpoint.checkpoint_offset,
+                progress.checkpoint.checkpoint_length,
+                progress.checkpoint.checkpoint_sha256,
+                int(progress.retired_completed),
+                now_utc,
+            ),
+        )
+
     def authorization_count(self, visit_id: str) -> int:
         with closing(self._connect(readonly=True)) as connection:
             return int(connection.execute(
@@ -753,6 +1414,16 @@ class VisitRepository:
     def _validate_schema(self, connection: sqlite3.Connection) -> None:
         if not REQUIRED_TABLES.issubset(self._table_names(connection)):
             raise VisitSchemaError("Visit schema is missing required tables")
+        source_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(visit_source_events)"
+            )
+        }
+        if not REQUIRED_V2_SOURCE_COLUMNS.issubset(source_columns):
+            raise VisitSchemaError(
+                "Visit source-event schema is missing v2 columns"
+            )
         indexes = {
             str(row[0])
             for row in connection.execute(
@@ -814,6 +1485,10 @@ class VisitRepository:
         violations = connection.execute("PRAGMA foreign_key_check").fetchone()
         if violations is not None:
             raise VisitSchemaError("Visit foreign key validation failed")
+        if _schema_signature(connection) != _expected_v2_signature():
+            raise VisitSchemaError(
+                "Visit schema v2 does not match the exact contract"
+            )
 
     @staticmethod
     def _table_names(connection: sqlite3.Connection) -> set[str]:
@@ -928,6 +1603,87 @@ class VisitRepository:
 
 def _visit_row(row: sqlite3.Row) -> VisitRecord:
     return VisitRecord(**dict(row))
+
+
+def _schema_signature(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[str, str, str, str], ...]:
+    rows = connection.execute(
+        """
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+          AND sql IS NOT NULL
+        ORDER BY type, name
+        """
+    ).fetchall()
+    return tuple(
+        (
+            str(row[0]),
+            str(row[1]),
+            str(row[2]),
+            " ".join(str(row[3]).split()),
+        )
+        for row in rows
+    )
+
+
+def _expected_v1_signature() -> tuple[tuple[str, str, str, str], ...]:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.executescript(_schema_sql_v1())
+        return _schema_signature(connection)
+    finally:
+        connection.close()
+
+
+def _expected_v2_signature() -> tuple[tuple[str, str, str, str], ...]:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.executescript(_schema_sql_v2())
+        return _schema_signature(connection)
+    finally:
+        connection.close()
+
+
+def _evidence_from_row(row: sqlite3.Row) -> OfflineEvidence:
+    return OfflineEvidence(
+        event_id=str(row["event_id"]),
+        site_id=row["site_id"],
+        client_mac=row["client_mac"],
+        controller_event_at=row["controller_event_at"],
+        received_at=row["received_at"],
+        client_ip=row["client_ip"],
+        ssid=row["ssid"],
+        ap_mac=row["ap_mac"],
+        reported_connected_seconds=row["reported_connected_seconds"],
+        reported_traffic_total_bytes=row[
+            "reported_traffic_total_bytes"
+        ],
+    )
+
+
+def _parse_utc(value: str) -> datetime:
+    return datetime.strptime(
+        value,
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+    ).replace(tzinfo=timezone.utc)
+
+
+def _parse_optional_utc(value: str | None) -> datetime | None:
+    return None if value is None else _parse_utc(value)
+
+
+def _format_utc(value: datetime) -> str:
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _add_seconds(value: str, seconds: float) -> str:
+    return _format_utc(_parse_utc(value) + timedelta(seconds=seconds))
 
 
 def classify_sqlite_error(exc: sqlite3.Error) -> VisitStorageCategory:

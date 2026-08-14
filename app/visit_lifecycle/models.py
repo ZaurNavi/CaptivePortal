@@ -1,4 +1,4 @@
-"""Immutable contracts for Visit Lifecycle schema version 1."""
+"""Immutable contracts for Visit Lifecycle schema version 2."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 from app.common.mac import format_mac_colon
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
 
@@ -152,12 +152,73 @@ class VisitSourceEventRecord:
     client_mac: str | None
     controller_event_at: str | None
     received_at: str | None
+    client_ip: str | None
+    ssid: str | None
+    ap_mac: str | None
+    reported_connected_seconds: int | None
+    reported_traffic_total_bytes: int | None
     processing_result: str
     visit_id: str | None
     reason: str | None
     first_processed_at: str
     processed_at: str
     pending_until: str | None
+
+
+@dataclass(frozen=True)
+class OfflineEvidence:
+    event_id: str | None
+    site_id: str | None
+    client_mac: str | None
+    controller_event_at: str | None
+    received_at: str | None
+    client_ip: str | None
+    ssid: str | None
+    ap_mac: str | None
+    reported_connected_seconds: int | None
+    reported_traffic_total_bytes: int | None
+    invalid_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ReaderCheckpoint:
+    checkpoint_offset: int
+    checkpoint_length: int
+    checkpoint_sha256: str
+
+
+@dataclass(frozen=True)
+class ReaderProgress:
+    source_identity: str
+    source_path: str
+    source_offset: int
+    last_observed_size: int
+    checkpoint: ReaderCheckpoint
+    retired_completed: bool = False
+    source_offset_start: int | None = None
+
+
+@dataclass(frozen=True)
+class VisitReaderState:
+    source_identity: str
+    source_path: str
+    source_offset: int
+    last_observed_size: int | None
+    checkpoint_offset: int | None
+    checkpoint_length: int | None
+    checkpoint_sha256: str | None
+    retired_completed: bool
+    missing_warning_emitted: bool
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class OfflineProcessingOutcome:
+    processing_result: str
+    event_id: str | None = None
+    visit_id: str | None = None
+    reason: str | None = None
+    duplicate: bool = False
 
 
 @dataclass(frozen=True)

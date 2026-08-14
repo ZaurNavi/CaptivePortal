@@ -198,6 +198,15 @@ def _source_event(row: Any) -> VisitSourceEventRecord:
         client_mac=value["client_mac"],
         controller_event_at=value["controller_event_at"],
         received_at=value["received_at"],
+        client_ip=value["client_ip"],
+        ssid=value["ssid"],
+        ap_mac=value["ap_mac"],
+        reported_connected_seconds=value[
+            "reported_connected_seconds"
+        ],
+        reported_traffic_total_bytes=value[
+            "reported_traffic_total_bytes"
+        ],
         processing_result=value["processing_result"],
         visit_id=value["visit_id"],
         reason=value["reason"],
