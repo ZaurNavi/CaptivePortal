@@ -337,6 +337,46 @@ def test_startup_detects_missing_required_index(observation_config):
         repository.initialize("2026-01-02T00:00:00.000Z")
 
 
+def test_initialize_does_not_run_full_integrity_scan(
+    observation_config,
+    monkeypatch,
+):
+    repository = ObservationRepository(observation_config)
+
+    def fail_if_called(connection):
+        raise AssertionError("full integrity scan entered startup path")
+
+    monkeypatch.setattr(repository, "_integrity_check", fail_if_called)
+    initialized = repository.initialize("2026-01-01T00:00:00.000Z")
+
+    assert initialized.created is True
+    with pytest.raises(AssertionError, match="full integrity scan"):
+        repository.validate_runtime_health()
+
+
+def test_runtime_health_scan_honors_interrupt_callback(
+    repository,
+    monkeypatch,
+):
+    def expensive_scan(connection):
+        connection.execute(
+            """
+            WITH RECURSIVE sequence(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < 1000000
+            )
+            SELECT sum(value) FROM sequence
+            """
+        ).fetchone()
+
+    monkeypatch.setattr(repository, "_integrity_check", expensive_scan)
+
+    assert repository.validate_runtime_health(
+        should_interrupt=lambda: True
+    ) is False
+
+
 def test_strict_fixed_width_utc_and_nonfinite_values_are_rejected(repository):
     with pytest.raises(ObservationValidationError):
         repository.create_cycle(

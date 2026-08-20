@@ -11,6 +11,7 @@ from .ap_worker import APObservationWorker
 from .cleanup import ObservationCleanup, ObservationCleanupWorker
 from .client_worker import ClientObservationWorker
 from .config import observation_config_from_settings
+from .integrity import ObservationIntegrityWorker
 from .models import ObservationConfig, ObservationConfigError
 from .repository import ObservationRepository
 from .telemetry import ObservationTelemetry
@@ -70,6 +71,10 @@ class ObservationFoundationRuntime:
             config,
             telemetry=telemetry,
         )
+        self.integrity_worker = ObservationIntegrityWorker(
+            self.repository,
+            telemetry,
+        )
         self._state = "disabled"
         self._lock = threading.RLock()
 
@@ -81,6 +86,8 @@ class ObservationFoundationRuntime:
             self.client_worker.degraded
             or self.ap_worker.degraded
             or self.cleanup_worker.last_error is not None
+            or self.integrity_worker.last_error is not None
+            or self.integrity_worker.timed_out
         ):
             return "degraded"
         return current
@@ -92,13 +99,13 @@ class ObservationFoundationRuntime:
             self._state = "starting"
         try:
             initialized = self.repository.initialize()
-            self.repository.validate_runtime_health()
             started = []
             if self.config.client_enabled:
                 started.append(self.client_worker.start())
             if self.config.ap_enabled:
                 started.append(self.ap_worker.start())
             started.append(self.cleanup_worker.start())
+            started.append(self.integrity_worker.start())
             if not all(started):
                 raise RuntimeError("Observation worker did not start")
         except Exception:
@@ -130,7 +137,12 @@ class ObservationFoundationRuntime:
         timeout = self.config.shutdown_timeout_seconds if timeout_seconds is None else max(0.0, float(timeout_seconds))
         deadline = time.monotonic() + timeout
         success = True
-        for worker in (self.ap_worker, self.client_worker, self.cleanup_worker):
+        for worker in (
+            self.integrity_worker,
+            self.ap_worker,
+            self.client_worker,
+            self.cleanup_worker,
+        ):
             remaining = max(0.0, deadline - time.monotonic())
             try:
                 success = bool(worker.stop(remaining)) and success
@@ -144,7 +156,12 @@ class ObservationFoundationRuntime:
         return False
 
     def _stop_started_workers(self) -> None:
-        for worker in (self.ap_worker, self.client_worker, self.cleanup_worker):
+        for worker in (
+            self.integrity_worker,
+            self.ap_worker,
+            self.client_worker,
+            self.cleanup_worker,
+        ):
             try:
                 worker.stop(0.0)
             except Exception:
