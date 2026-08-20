@@ -403,3 +403,188 @@ class WirelessEvidenceBundle:
             "radio_utilization", "throughput", "correlations",
         ):
             object.__setattr__(self, field, freeze(getattr(self, field)))
+
+
+@dataclass(frozen=True, slots=True)
+class VisitCountSummary:
+    total_visit_count: int
+    open_visit_count: int
+    closed_visit_count: int
+    population_semantics: str = "visit_start_cohort"
+
+
+@dataclass(frozen=True, slots=True)
+class VisitTimeBucket:
+    bucket_start: str
+    bucket_end: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class VisitTimeSeries:
+    granularity: str
+    display_timezone: str
+    population_semantics: str
+    items: tuple[VisitTimeBucket, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceCountSummary:
+    unique_linked_devices: int
+    linked_visit_count: int
+    unlinked_visit_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RepeatDeviceSummary:
+    unique_linked_devices: int
+    repeat_device_count: int
+    repeat_device_ratio: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class NewToSiteDeviceSummary:
+    unique_linked_devices_in_window: int
+    new_to_site_device_count: int
+    known_before_window_device_count: int
+    unlinked_visit_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class VisitDurationSummary:
+    distribution: NumericDistribution
+    excluded_open_count: int
+    excluded_missing_duration_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class VisitAuthorizationSummary:
+    distribution: NumericDistribution
+    visits_with_exactly_one_authorization: int
+    visits_with_multiple_authorizations: int
+    visits_with_zero_authorization: int
+
+
+@dataclass(frozen=True, slots=True)
+class VisitClosureSummary:
+    closed_visit_count: int
+    close_reasons: Mapping[str, int]
+    close_time_sources: Mapping[str, int]
+    duration_difference_seconds: NumericDistribution
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "close_reasons", freeze(self.close_reasons))
+        object.__setattr__(
+            self, "close_time_sources", freeze(self.close_time_sources)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VisitSourceEventQuality:
+    by_processing_result: Mapping[str, int]
+    by_reason: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "by_processing_result", freeze(self.by_processing_result)
+        )
+        object.__setattr__(self, "by_reason", freeze(self.by_reason))
+
+
+@dataclass(frozen=True, slots=True)
+class VisitContextDistributionItem:
+    context: str | None
+    visit_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class VisitContextDistribution:
+    dimension: str
+    items: tuple[VisitContextDistributionItem, ...]
+    null_context_count: int
+    grouping_is_non_exclusive: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
+class VisitContextSummary:
+    start_ssid: VisitContextDistribution
+    final_ssid: VisitContextDistribution
+    start_ap_mac: VisitContextDistribution
+    final_ap_mac: VisitContextDistribution
+    touched_ssid: VisitContextDistribution
+    touched_ap_mac: VisitContextDistribution
+
+
+@dataclass(frozen=True, slots=True)
+class VisitContextTransition:
+    context: str
+    comparable_count: int
+    changed_count: int
+    unchanged_count: int
+    missing_side_count: int
+    interpretation: str
+
+
+@dataclass(frozen=True, slots=True)
+class VisitObservationCoverageSummary:
+    visit_count: int
+    visits_with_zero_client_observations: int
+    visits_with_one_or_more_client_observations: int
+    sample_count_distribution: NumericDistribution
+    observed_span_ratio_distribution: NumericDistribution
+    max_gap_distribution: NumericDistribution
+
+
+@dataclass(frozen=True, slots=True)
+class VisitWirelessSummary:
+    visit_id: str
+    observation_coverage: VisitObservationCoverage
+    signal: Mapping[str, AnalyticsResult[Any]]
+    correlations: Mapping[str, AnalyticsResult[Any]]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "signal", freeze(self.signal))
+        object.__setattr__(self, "correlations", freeze(self.correlations))
+
+
+@dataclass(frozen=True, slots=True)
+class VisitTrafficSummary:
+    reported_total_bytes: int | None
+    reported_up_bytes: int | None
+    reported_down_bytes: int | None
+    reported_missing_total_count: int
+    reported_missing_up_count: int
+    reported_missing_down_count: int
+    observed_counter_delta_down_bytes: int | None
+    observed_counter_delta_up_bytes: int | None
+    observed_delta_coverage: CoverageMetric
+    reconciliation_difference_bytes: int | None
+    reconciliation_ratio: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReturnIntervalSummary:
+    distribution: NumericDistribution
+
+
+@dataclass(frozen=True, slots=True)
+class VisitAnalyticsBundle:
+    counts: AnalyticsResult[Any]
+    devices: AnalyticsResult[Any]
+    repeat_devices: AnalyticsResult[Any]
+    new_to_site_devices: AnalyticsResult[Any]
+    duration: AnalyticsResult[Any]
+    authorizations: AnalyticsResult[Any]
+    closure: AnalyticsResult[Any]
+    source_event_quality: AnalyticsResult[Any]
+    contexts: AnalyticsResult[Any]
+    context_transitions: AnalyticsResult[Any]
+    observation_coverage: AnalyticsResult[Any]
+    traffic: AnalyticsResult[Any]
+    return_intervals: AnalyticsResult[Any]

@@ -148,6 +148,31 @@ def numeric_distribution(
     )
 
 
+def distribution_from_values(
+    values: Iterable[float | int | None],
+    *,
+    min_samples: int,
+) -> NumericDistribution:
+    """Build the shared immutable R-7 distribution from bounded values."""
+    source = tuple(values)
+    materialized = tuple(
+        float(value) for value in source if value is not None
+    )
+    count = len(materialized)
+    sufficient = count >= min_samples
+    return NumericDistribution(
+        sample_count=count,
+        missing_count=len(source) - count,
+        minimum=min(materialized) if sufficient else None,
+        maximum=max(materialized) if sufficient else None,
+        mean=(sum(materialized) / count) if sufficient else None,
+        p10=percentile_r7(materialized, 0.10) if sufficient else None,
+        p50=percentile_r7(materialized, 0.50) if sufficient else None,
+        p90=percentile_r7(materialized, 0.90) if sufficient else None,
+        p95=percentile_r7(materialized, 0.95) if sufficient else None,
+    )
+
+
 def configured_threshold_ratio(
     *,
     threshold: float | None,
