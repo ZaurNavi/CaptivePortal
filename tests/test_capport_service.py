@@ -50,7 +50,10 @@ def settings(**overrides):
         "capport_public_base_url": "https://portal.example",
         "capport_api_path": "/capport/api",
         "capport_login_path": "/capport/login",
-        "capport_allowed_client_networks": ("192.168.1.0/24",),
+        "capport_allowed_client_networks": (
+            "192.168.1.0/24",
+            "192.168.8.0/22",
+        ),
         "capport_client_cache_ttl_seconds": 2,
         "capport_failure_cache_ttl_seconds": 2,
     }
@@ -427,6 +430,33 @@ def test_outside_network_never_calls_controller():
     assert state.reason == "CLIENT_NOT_ALLOWED"
     controller.get_clients.assert_not_called()
     controller.get_client.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "client_ip",
+    [
+        "192.168.1.10",
+        "192.168.8.1",
+        "192.168.9.254",
+        "192.168.10.2",
+        "192.168.11.254",
+    ],
+)
+def test_transition_allowlist_accepts_old_and_new_guest_boundaries(client_ip):
+    assert service_for(Mock()).is_client_allowed(client_ip) is True
+
+
+@pytest.mark.parametrize(
+    "client_ip",
+    [
+        "192.168.7.255",
+        "192.168.12.0",
+        "203.0.113.10",
+        "2001:db8::1",
+    ],
+)
+def test_transition_allowlist_rejects_addresses_outside_both_networks(client_ip):
+    assert service_for(Mock()).is_client_allowed(client_ip) is False
 
 
 def test_invalid_ip_never_calls_controller():

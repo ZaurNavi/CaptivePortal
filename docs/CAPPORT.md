@@ -68,10 +68,24 @@ CAPPORT_SITE_ID = "6a64f17630da7c70d232187a"
 CAPPORT_PUBLIC_BASE_URL = "https://captivportal-navi.duckdns.org"
 CAPPORT_API_PATH = "/capport/api"
 CAPPORT_LOGIN_PATH = "/capport/login"
-CAPPORT_ALLOWED_CLIENT_NETWORKS = ("192.168.1.0/24",)
+CAPPORT_ALLOWED_CLIENT_NETWORKS = (
+    "192.168.1.0/24",
+    "192.168.8.0/22",
+)
 CAPPORT_CLIENT_CACHE_TTL_SECONDS = 2
 CAPPORT_FAILURE_CACHE_TTL_SECONDS = 2
 ```
+
+The two networks above are a temporary VLAN20 migration and rollback
+contract. The old guest network remains `192.168.1.0/24`. The new guest
+network is `192.168.8.0/22` with gateway `192.168.10.1`; its usable client
+range remains bounded by that exact `/22`. Do not remove the old `/24`
+without separate owner approval after the migration has stabilized.
+
+This allowlist change takes effect only after the production repository is
+synchronized and `captive-portal.service` is restarted. It prepares the
+portal only; it does not authorize any Cisco, DHCP, NAT, Omada, Nginx, or
+systemd change.
 
 Startup validation rejects an empty site ID, non-HTTPS public URL,
 relative paths, invalid networks, non-positive cache TTL, or a Flask bind

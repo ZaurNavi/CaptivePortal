@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 from unittest.mock import Mock, patch
 
+import pytest
 from flask import Flask
 
 from app.capport.models import (
@@ -47,6 +48,7 @@ def config():
             "capport_login_path": "/capport/login",
             "capport_allowed_client_networks": (
                 "192.168.1.0/24",
+                "192.168.8.0/22",
             ),
             "capport_client_cache_ttl_seconds": 2,
             "capport_failure_cache_ttl_seconds": 2,
@@ -248,6 +250,39 @@ def test_outside_network_returns_403():
     assert response.status_code == 403
     assert response.get_json() == {"error": "client_not_allowed"}
     handler.open_portal.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["/capport/api", "/capport/login"])
+def test_new_vlan20_client_is_not_rejected_by_api_or_login(path):
+    client_ip = "192.168.10.2"
+    controller = Mock()
+    controller.get_clients.return_value = Result.ok(
+        data={
+            "clients": [
+                {
+                    "client_ip": client_ip,
+                    "client_mac": "AA:BB:CC:DD:EE:FF",
+                }
+            ]
+        }
+    )
+    controller.get_client.return_value = Result.ok(
+        data={"authStatus": 0, "active": True}
+    )
+    service = CapportService(controller, config(), NoopTelemetry())
+    handler = Mock()
+    handler.open_portal.return_value = ("opened", 200)
+    app, _ = app_for(service, handler)
+
+    response = app.test_client().get(
+        path,
+        environ_base={"REMOTE_ADDR": client_ip},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json(silent=True) != {"error": "client_not_allowed"}
+    if path == "/capport/login":
+        handler.open_portal.assert_called_once()
 
 
 def test_api_is_read_only_and_never_enters_authorization_flow():
