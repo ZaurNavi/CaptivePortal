@@ -36,6 +36,36 @@ RADIO_FIELDS = frozenset({
     "rx_drop_packets", "tx_drop_packets",
     "radio_rx_mbps", "radio_tx_mbps",
 })
+WIRELESS_SCALAR_FIELDS = {
+    "client": frozenset({"rssi", "snr"}),
+    "ap": frozenset({"cpu_util", "mem_util"}),
+    "radio": frozenset({
+        "tx_util", "rx_util", "interference_util", "busy_util",
+    }),
+}
+CLIENT_CONTEXT_FIELDS = frozenset({"ap_mac", "ssid", "band", "channel"})
+STORED_RATE_FIELDS = {
+    "wired_download_mbps": ("ap", "wired_download_rate_reason"),
+    "wired_upload_mbps": ("ap", "wired_upload_rate_reason"),
+    "lan_rx_mbps": ("ap", "lan_rx_rate_reason"),
+    "lan_tx_mbps": ("ap", "lan_tx_rate_reason"),
+    "radio_rx_mbps": ("radio", "radio_rx_rate_reason"),
+    "radio_tx_mbps": ("radio", "radio_tx_rate_reason"),
+}
+CLIENT_COUNTER_FIELDS = {
+    "client_download_mbps": "traffic_down",
+    "client_upload_mbps": "traffic_up",
+}
+RADIO_COUNTER_FIELDS = {
+    "rx_retry_delta": ("rx_retry_packets", "rx_packets"),
+    "tx_retry_delta": ("tx_retry_packets", "tx_packets"),
+    "rx_error_delta": ("rx_error_packets", "rx_packets"),
+    "tx_error_delta": ("tx_error_packets", "tx_packets"),
+    "rx_drop_delta": ("rx_drop_packets", "rx_packets"),
+    "tx_drop_delta": ("tx_drop_packets", "tx_packets"),
+    "rx_packet_delta": ("rx_packets", "rx_packets"),
+    "tx_packet_delta": ("tx_packets", "tx_packets"),
+}
 FIELD_ALLOWLIST = {
     "client": CLIENT_FIELDS,
     "ap": AP_FIELDS,
@@ -600,6 +630,914 @@ class AnalyticsSourceGateway:
             )
         return None if row is None else row["watermark"]
 
+    def wireless_scalar_distribution(
+        self,
+        *,
+        site_id: str,
+        source: str,
+        metric: str,
+        from_utc: str,
+        to_utc: str,
+        quality_mode: str,
+        filters: Mapping[str, Any],
+        threshold: float | None,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        if metric not in WIRELESS_SCALAR_FIELDS.get(source, frozenset()):
+            raise ValueError("unsupported wireless scalar metric")
+        spec = _wireless_source_spec(source)
+        filter_sql, filter_parameters = _wireless_filters(
+            source, filters, alias="o"
+        )
+        accepted = (
+            spec["strict"]
+            if quality_mode == "strict_complete"
+            else spec["diagnostic"]
+        )
+        base_sql = f"""
+            SELECT o.row_id, o.cycle_id, o.ap_mac,
+                   {spec['time']} AS observed_at,
+                   o.{metric} AS value,
+                   CASE WHEN ({accepted}) THEN 1 ELSE 0 END AS accepted,
+                   NULL AS reason
+            FROM {spec['from']}
+            WHERE o.site_id=? AND {spec['time']}>=? AND {spec['time']}<?
+              {filter_sql}
+        """
+        with self._connection("observations", deadline) as connection:
+            return self._distribution_from_base(
+                connection,
+                base_sql=base_sql,
+                parameters=(
+                    site_id, from_utc, to_utc, *filter_parameters,
+                ),
+                threshold=threshold,
+                deadline=deadline,
+            )
+
+    def client_context_distribution(
+        self,
+        *,
+        site_id: str,
+        dimension: str,
+        from_utc: str,
+        to_utc: str,
+        quality_mode: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        if dimension not in CLIENT_CONTEXT_FIELDS:
+            raise ValueError("unsupported client context dimension")
+        spec = _wireless_source_spec("client")
+        accepted = (
+            spec["strict"]
+            if quality_mode == "strict_complete"
+            else spec["diagnostic"]
+        )
+        with self._connection("observations", deadline) as connection:
+            rows = self._all(
+                connection,
+                f"""
+                WITH base AS (
+                    SELECT o.{dimension} AS context, o.client_mac,
+                           CASE WHEN ({accepted}) THEN 1 ELSE 0 END accepted,
+                           o.observed_at
+                    FROM {spec['from']}
+                    WHERE o.site_id=? AND o.observed_at>=?
+                      AND o.observed_at<?
+                ), accepted AS (
+                    SELECT * FROM base WHERE accepted=1
+                ), grouped AS (
+                    SELECT context, COUNT(*) observation_count,
+                           COUNT(DISTINCT client_mac) distinct_client_count
+                    FROM accepted GROUP BY context
+                )
+                SELECT context, observation_count, distinct_client_count,
+                       (SELECT COUNT(*) FROM base) rows_examined,
+                       (SELECT COUNT(*) FROM accepted) rows_accepted,
+                       (SELECT COUNT(*) FROM base WHERE accepted=0)
+                           rows_rejected,
+                       (SELECT COUNT(*) FROM accepted WHERE context IS NULL)
+                           missing_context_count,
+                       (SELECT MAX(observed_at) FROM accepted) watermark
+                FROM grouped
+                ORDER BY context IS NOT NULL, context
+                """,
+                (site_id, from_utc, to_utc),
+                deadline,
+            )
+            if rows:
+                first = rows[0]
+                return {
+                    "items": tuple(dict(row) for row in rows),
+                    "rows_examined": int(first["rows_examined"]),
+                    "rows_accepted": int(first["rows_accepted"]),
+                    "rows_rejected": int(first["rows_rejected"]),
+                    "missing_context_count": int(
+                        first["missing_context_count"]
+                    ),
+                    "watermark": first["watermark"],
+                }
+            summary = self._one(
+                connection,
+                f"""
+                SELECT COUNT(*) rows_examined,
+                       COALESCE(SUM(({accepted})), 0) rows_accepted,
+                       COUNT(*)-COALESCE(SUM(({accepted})), 0) rows_rejected,
+                       MAX(CASE WHEN ({accepted}) THEN o.observed_at END)
+                           watermark
+                FROM {spec['from']}
+                WHERE o.site_id=? AND o.observed_at>=? AND o.observed_at<?
+                """,
+                (site_id, from_utc, to_utc),
+                deadline,
+            )
+        return {
+            "items": (),
+            "rows_examined": int(summary["rows_examined"]),
+            "rows_accepted": int(summary["rows_accepted"]),
+            "rows_rejected": int(summary["rows_rejected"]),
+            "missing_context_count": 0,
+            "watermark": summary["watermark"],
+        }
+
+    def concurrent_client_distribution(
+        self,
+        *,
+        site_id: str,
+        from_utc: str,
+        to_utc: str,
+        quality_mode: str,
+        group_by: str | None,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        if group_by is not None and group_by not in {
+            "ap_mac", "ssid", "band"
+        }:
+            raise ValueError("unsupported concurrent-client grouping")
+        cycle_acceptance = (
+            "c.state='completed' AND c.complete=1 AND c.result='success'"
+            if quality_mode == "strict_complete"
+            else "c.state='completed'"
+        )
+        row_acceptance = (
+            "o.source_inventory_complete=1"
+            if quality_mode == "strict_complete" else "1"
+        )
+        with self._connection("observations", deadline) as connection:
+            summary = self._one(
+                connection,
+                f"""
+                SELECT COUNT(*) rows_examined,
+                       COALESCE(SUM({cycle_acceptance}), 0) rows_accepted,
+                       COUNT(*)-COALESCE(SUM({cycle_acceptance}), 0)
+                         rows_rejected,
+                       COALESCE(SUM(c.state='completed'
+                         AND c.result='partial'), 0) partial_cycle_count,
+                       COALESCE(SUM(c.state='completed'
+                         AND c.result='failed'), 0) failed_cycle_count,
+                       COALESCE(SUM(c.state='abandoned'), 0)
+                         abandoned_cycle_count,
+                       MAX(CASE WHEN {cycle_acceptance}
+                         THEN c.started_at END) watermark
+                FROM observation_cycles c
+                WHERE c.site_id=? AND c.kind='client'
+                  AND c.started_at>=? AND c.started_at<?
+                """,
+                (site_id, from_utc, to_utc),
+                deadline,
+            )
+            if group_by is None:
+                samples = f"""
+                    SELECT c.cycle_id, NULL context,
+                           COUNT(o.row_id) value,
+                           c.started_at observed_at
+                    FROM accepted_cycles c
+                    LEFT JOIN client_observations o
+                      ON o.cycle_id=c.cycle_id AND ({row_acceptance})
+                    GROUP BY c.cycle_id
+                """
+            else:
+                # Groups originate only in real accepted observations.  The
+                # cross product then supplies an explicit zero for every
+                # accepted cycle in which that real group was absent.  This
+                # keeps an actual NULL context distinct from an empty cycle.
+                samples = f"""
+                    SELECT c.cycle_id, g.context,
+                           COUNT(o.row_id) value,
+                           c.started_at observed_at
+                    FROM accepted_cycles c
+                    CROSS JOIN (
+                      SELECT DISTINCT o.{group_by} context
+                      FROM accepted_cycles present_cycle
+                      JOIN client_observations o
+                        ON o.cycle_id=present_cycle.cycle_id
+                       AND ({row_acceptance})
+                    ) g
+                    LEFT JOIN client_observations o
+                      ON o.cycle_id=c.cycle_id AND ({row_acceptance})
+                     AND o.{group_by} IS g.context
+                    GROUP BY c.cycle_id, g.context
+                """
+            rows = self._all(
+                connection,
+                f"""
+                WITH accepted_cycles AS MATERIALIZED (
+                    SELECT cycle_id, started_at
+                    FROM observation_cycles c
+                    WHERE c.site_id=? AND c.kind='client'
+                      AND c.started_at>=? AND c.started_at<?
+                      AND ({cycle_acceptance})
+                ), samples AS ({samples}), ranked AS (
+                    SELECT context, value, observed_at,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY context ORDER BY value, cycle_id
+                           )-1 AS rank_index,
+                           COUNT(*) OVER (PARTITION BY context) AS n
+                    FROM samples
+                )
+                SELECT context, MAX(n) cycle_sample_count,
+                       MIN(value) minimum, AVG(value) mean,
+                       MAX(value) maximum,
+                       {_percentile_columns('p50', 0.50)},
+                       {_percentile_columns('p95', 0.95)},
+                       MAX(observed_at) watermark
+                FROM ranked GROUP BY context
+                ORDER BY context IS NOT NULL, context
+                """,
+                (site_id, from_utc, to_utc),
+                deadline,
+            )
+        return {
+            "items": tuple(dict(row) for row in rows),
+            "rows_examined": int(summary["rows_examined"]),
+            "rows_accepted": int(summary["rows_accepted"]),
+            "rows_rejected": int(summary["rows_rejected"]),
+            "partial_cycle_count": int(summary["partial_cycle_count"]),
+            "failed_cycle_count": int(summary["failed_cycle_count"]),
+            "abandoned_cycle_count": int(summary["abandoned_cycle_count"]),
+            "watermark": summary["watermark"],
+        }
+
+    def radio_utilization_distributions(
+        self,
+        *,
+        site_id: str,
+        metric: str,
+        from_utc: str,
+        to_utc: str,
+        quality_mode: str,
+        ap_mac: str | None,
+        band: str | None,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        if metric not in WIRELESS_SCALAR_FIELDS["radio"]:
+            raise ValueError("unsupported radio utilization metric")
+        spec = _wireless_source_spec("radio")
+        accepted = (
+            spec["strict"]
+            if quality_mode == "strict_complete"
+            else spec["diagnostic"]
+        )
+        filter_sql, filter_parameters = _wireless_filters(
+            "radio", {"ap_mac": ap_mac, "band": band}, alias="o"
+        )
+        parameters = (site_id, from_utc, to_utc, *filter_parameters)
+        with self._connection("observations", deadline) as connection:
+            summary = self._one(
+                connection,
+                f"""
+                SELECT COUNT(*) rows_examined,
+                       COALESCE(SUM({accepted}), 0) rows_accepted,
+                       COUNT(*)-COALESCE(SUM({accepted}), 0) rows_rejected,
+                       COUNT(DISTINCT CASE WHEN {accepted}
+                         THEN o.ap_mac END) distinct_ap_count,
+                       COUNT(DISTINCT CASE WHEN NOT ({accepted})
+                         THEN o.cycle_id END) partial_cycle_count,
+                       MAX(CASE WHEN {accepted}
+                         THEN o.radio_observed_at END) watermark
+                FROM {spec['from']}
+                WHERE o.site_id=? AND o.radio_observed_at>=?
+                  AND o.radio_observed_at<? {filter_sql}
+                """,
+                parameters,
+                deadline,
+            )
+            rows = self._all(
+                connection,
+                f"""
+                WITH base AS MATERIALIZED (
+                  SELECT o.ap_mac, o.band, o.{metric} value,
+                         o.radio_observed_at observed_at
+                  FROM {spec['from']}
+                  WHERE o.site_id=? AND o.radio_observed_at>=?
+                    AND o.radio_observed_at<? {filter_sql}
+                    AND ({accepted})
+                ), group_stats AS (
+                  SELECT ap_mac, band, COUNT(*) rows_accepted,
+                         COALESCE(SUM(value IS NULL), 0) missing_count,
+                         MAX(observed_at) watermark
+                  FROM base GROUP BY ap_mac, band
+                ), histogram AS (
+                  SELECT ap_mac, band, value, COUNT(*) frequency
+                  FROM base WHERE value IS NOT NULL
+                  GROUP BY ap_mac, band, value
+                ), ranked AS (
+                  SELECT ap_mac, band, value, frequency,
+                         SUM(frequency) OVER (
+                           PARTITION BY ap_mac, band ORDER BY value
+                           ROWS UNBOUNDED PRECEDING
+                         ) cumulative_count,
+                         SUM(frequency) OVER (
+                           PARTITION BY ap_mac, band
+                         ) n
+                  FROM histogram
+                ), value_stats AS (
+                  SELECT ap_mac, band,
+                         COALESCE(SUM(frequency), 0) sample_count,
+                         MIN(value) minimum, MAX(value) maximum,
+                         SUM(value*frequency)*1.0/SUM(frequency) mean,
+                         {_histogram_percentile_columns('p10', 0.10)},
+                         {_histogram_percentile_columns('p50', 0.50)},
+                         {_histogram_percentile_columns('p90', 0.90)},
+                         {_histogram_percentile_columns('p95', 0.95)}
+                  FROM ranked GROUP BY ap_mac, band
+                )
+                SELECT g.ap_mac, g.band, g.rows_accepted,
+                       g.missing_count, g.watermark,
+                       COALESCE(v.sample_count, 0) sample_count,
+                       v.minimum, v.maximum, v.mean,
+                       v.p10_lower, v.p10_upper,
+                       v.p50_lower, v.p50_upper,
+                       v.p90_lower, v.p90_upper,
+                       v.p95_lower, v.p95_upper
+                FROM group_stats g
+                LEFT JOIN value_stats v
+                  ON v.ap_mac=g.ap_mac AND v.band IS g.band
+                ORDER BY g.ap_mac, g.band
+                """,
+                parameters,
+                deadline,
+            )
+        return {
+            "items": tuple(dict(row) for row in rows),
+            "rows_examined": int(summary["rows_examined"]),
+            "rows_accepted": int(summary["rows_accepted"]),
+            "rows_rejected": int(summary["rows_rejected"]),
+            "distinct_ap_count": int(summary["distinct_ap_count"]),
+            "partial_cycle_count": int(summary["partial_cycle_count"]),
+            "watermark": summary["watermark"],
+        }
+
+    def stored_rate_distribution(
+        self,
+        *,
+        site_id: str,
+        metric: str,
+        from_utc: str,
+        to_utc: str,
+        quality_mode: str,
+        ap_mac: str | None,
+        band: str | None,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        try:
+            source, reason_field = STORED_RATE_FIELDS[metric]
+        except KeyError as exc:
+            raise ValueError("unsupported stored rate metric") from exc
+        spec = _wireless_source_spec(source)
+        filters = {"ap_mac": ap_mac, "band": band}
+        filter_sql, filter_parameters = _wireless_filters(
+            source, filters, alias="o"
+        )
+        accepted_source = (
+            spec["strict"]
+            if quality_mode == "strict_complete"
+            else spec["diagnostic"]
+        )
+        base_sql = f"""
+            SELECT o.row_id, o.cycle_id, o.ap_mac,
+                   {spec['time']} observed_at,
+                   CASE WHEN ({accepted_source})
+                         AND o.{reason_field}='ok'
+                        THEN o.{metric} END value,
+                   CASE WHEN ({accepted_source}) THEN 1 ELSE 0 END accepted,
+                   CASE WHEN ({accepted_source})
+                        THEN COALESCE(o.{reason_field}, 'source_missing')
+                        ELSE 'source_rejected' END reason
+            FROM {spec['from']}
+            WHERE o.site_id=? AND {spec['time']}>=? AND {spec['time']}<?
+              {filter_sql}
+        """
+        parameters = (site_id, from_utc, to_utc, *filter_parameters)
+        with self._connection("observations", deadline) as connection:
+            summary = self._distribution_from_base(
+                connection, base_sql=base_sql, parameters=parameters,
+                threshold=None, deadline=deadline,
+            )
+        result = dict(summary)
+        result["reason_counts"] = _reason_counts(result)
+        result["valid_rate_sample_count"] = int(
+            result["reason_counts"].get("ok", 0)
+        )
+        result["excluded_rate_sample_count"] = (
+            int(result["rows_accepted"])
+            - result["valid_rate_sample_count"]
+        )
+        return result
+
+    def client_counter_rate_distribution(
+        self,
+        *,
+        site_id: str,
+        metric: str,
+        from_utc: str,
+        to_utc: str,
+        quality_mode: str,
+        max_gap_seconds: float,
+        client_mac: str | None,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        try:
+            counter = CLIENT_COUNTER_FIELDS[metric]
+        except KeyError as exc:
+            raise ValueError("unsupported client counter rate") from exc
+        spec = _wireless_source_spec("client")
+        accepted = (
+            spec["strict"]
+            if quality_mode == "strict_complete"
+            else spec["diagnostic"]
+        )
+        client_filter = "" if client_mac is None else "AND o.client_mac=?"
+        parameters: tuple[Any, ...] = (
+            site_id, from_utc, to_utc,
+            *((client_mac,) if client_mac is not None else ()),
+            max_gap_seconds,
+        )
+        base_sql = f"""
+            WITH all_rows AS MATERIALIZED (
+                SELECT o.row_id, o.cycle_id, o.observed_at, o.client_mac,
+                       o.{counter} counter_value,
+                       CASE WHEN ({accepted}) THEN 1 ELSE 0 END
+                         source_accepted
+                FROM {spec['from']}
+                WHERE o.site_id=? AND o.observed_at>=? AND o.observed_at<?
+                  {client_filter}
+            ), accepted_rows AS (
+                SELECT * FROM all_rows WHERE source_accepted=1
+            ), ordered AS (
+                SELECT *,
+                       LAG(counter_value) OVER (
+                         PARTITION BY client_mac
+                         ORDER BY observed_at, row_id
+                       ) previous_value,
+                       LAG(observed_at) OVER (
+                         PARTITION BY client_mac
+                         ORDER BY observed_at, row_id
+                       ) previous_at
+                FROM accepted_rows
+            ), classified AS (
+                SELECT row_id, cycle_id, NULL ap_mac, observed_at, 1 accepted,
+                       CASE
+                         WHEN previous_at IS NULL THEN 'no_baseline'
+                         WHEN counter_value IS NULL OR previous_value IS NULL
+                           THEN 'source_missing'
+                         WHEN ROUND(
+                           (julianday(observed_at)-julianday(previous_at))
+                           *86400.0, 3)<=0 THEN 'invalid_elapsed'
+                         WHEN ROUND(
+                           (julianday(observed_at)-julianday(previous_at))
+                           *86400.0, 3)>? THEN 'gap_too_large'
+                         WHEN counter_value<previous_value THEN 'counter_reset'
+                         ELSE 'ok' END reason,
+                       CASE WHEN previous_at IS NOT NULL
+                         AND counter_value IS NOT NULL
+                         AND previous_value IS NOT NULL
+                         AND counter_value>=previous_value
+                         AND ROUND(
+                           (julianday(observed_at)-julianday(previous_at))
+                           *86400.0, 3)>0
+                         AND ROUND(
+                           (julianday(observed_at)-julianday(previous_at))
+                           *86400.0, 3)<=?
+                       THEN (counter_value-previous_value)*8.0/
+                            ROUND(
+                              (julianday(observed_at)-julianday(previous_at))
+                              *86400.0, 3)/1000000.0 END value
+                FROM ordered
+            )
+            SELECT * FROM classified
+            UNION ALL
+            SELECT row_id, cycle_id, NULL ap_mac, observed_at, 0 accepted,
+                   'source_rejected' reason, NULL value
+            FROM all_rows WHERE source_accepted=0
+        """
+        distribution_parameters = (*parameters, max_gap_seconds)
+        with self._connection("observations", deadline) as connection:
+            summary = self._distribution_from_base(
+                connection, base_sql=base_sql,
+                parameters=distribution_parameters,
+                threshold=None, deadline=deadline,
+            )
+        result = dict(summary)
+        result["reason_counts"] = _reason_counts(result)
+        result["valid_rate_sample_count"] = int(
+            result["reason_counts"].get("ok", 0)
+        )
+        result["excluded_rate_sample_count"] = (
+            int(result["rows_accepted"])
+            - result["valid_rate_sample_count"]
+        )
+        return result
+
+    def radio_counter_quality(
+        self,
+        *,
+        site_id: str,
+        from_utc: str,
+        to_utc: str,
+        quality_mode: str,
+        max_gap_seconds: float,
+        ap_mac: str | None,
+        band: str | None,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        spec = _wireless_source_spec("radio")
+        accepted = (
+            spec["strict"]
+            if quality_mode == "strict_complete"
+            else spec["diagnostic"]
+        )
+        filter_sql, filter_parameters = _wireless_filters(
+            "radio", {"ap_mac": ap_mac, "band": band}, alias="o"
+        )
+        fields = tuple(sorted({
+            field for pair in RADIO_COUNTER_FIELDS.values() for field in pair
+        }))
+        previous_fields = ",\n".join(
+            f"previous.{field} previous_{field}"
+            for field in fields
+        )
+        metric_projections: list[str] = []
+        for output_name, (counter, packet) in RADIO_COUNTER_FIELDS.items():
+            previous_counter = f"previous_{counter}"
+            previous_packet = f"previous_{packet}"
+            valid = (
+                f"previous_at IS NOT NULL AND {counter} IS NOT NULL "
+                f"AND {previous_counter} IS NOT NULL AND elapsed>0 "
+                "AND elapsed<=max_gap "
+                f"AND {counter}>={previous_counter}"
+            )
+            ratio_valid = (
+                f"{valid} AND {packet} IS NOT NULL "
+                f"AND {previous_packet} IS NOT NULL "
+                f"AND {packet}>={previous_packet}"
+            )
+            metric_projections.extend((
+                f"COALESCE(SUM({valid}),0) AS {output_name}_valid_count",
+                "COALESCE(SUM(previous_at IS NOT NULL "
+                f"AND {counter} IS NOT NULL "
+                f"AND {previous_counter} IS NOT NULL "
+                "AND elapsed>0 AND elapsed<=max_gap "
+                f"AND {counter}<{previous_counter}),0) "
+                f"AS {output_name}_reset_count",
+                "COALESCE(SUM(previous_at IS NOT NULL "
+                f"AND elapsed>max_gap),0) AS {output_name}_gap_count",
+                "COALESCE(SUM(previous_at IS NULL "
+                f"OR {counter} IS NULL OR {previous_counter} IS NULL "
+                f"OR elapsed<=0),0) AS {output_name}_missing_count",
+                f"COALESCE(SUM(CASE WHEN {valid} THEN "
+                f"{counter}-{previous_counter} ELSE 0 END),0) "
+                f"AS {output_name}_total_delta",
+                f"COALESCE(SUM(CASE WHEN {ratio_valid} THEN "
+                f"{counter}-{previous_counter} ELSE 0 END),0) "
+                f"AS {output_name}_ratio_event_delta",
+                f"COALESCE(SUM(CASE WHEN {ratio_valid} THEN "
+                f"{packet}-{previous_packet} ELSE 0 END),0) "
+                f"AS {output_name}_packet_delta",
+            ))
+        projections = ",\n".join(metric_projections)
+        with self._connection("observations", deadline) as connection:
+            row = self._one(
+                connection,
+                f"""
+                WITH limits(max_gap) AS (SELECT ?), base_rows AS MATERIALIZED (
+                  SELECT o.row_id, o.radio_observed_at, o.ap_mac, o.band,
+                         o.cycle_id,
+                         {', '.join(f'o.{field}' for field in fields)},
+                         CASE WHEN ({accepted}) THEN 1 ELSE 0 END accepted
+                  FROM {spec['from']}
+                  WHERE o.site_id=? AND o.radio_observed_at>=?
+                    AND o.radio_observed_at<? {filter_sql}
+                ), accepted_rows AS (
+                  SELECT * FROM base_rows WHERE accepted=1
+                ), ordered AS (
+                  SELECT *,
+                    LAG(row_id) OVER (
+                      PARTITION BY ap_mac, band
+                      ORDER BY radio_observed_at, row_id
+                    ) previous_row_id,
+                    LAG(radio_observed_at) OVER (
+                      PARTITION BY ap_mac, band
+                      ORDER BY radio_observed_at, row_id
+                    ) previous_at
+                  FROM accepted_rows
+                ), intervals AS (
+                  SELECT current.*, {previous_fields}, ROUND(
+                    (julianday(current.radio_observed_at)
+                     -julianday(current.previous_at))
+                    *86400.0, 3
+                  ) elapsed, (SELECT max_gap FROM limits) max_gap
+                  FROM ordered current
+                  LEFT JOIN ap_radio_observations previous
+                    ON previous.row_id=current.previous_row_id
+                )
+                SELECT (SELECT COUNT(*) FROM base_rows) rows_examined,
+                       COUNT(*) rows_accepted,
+                       (SELECT COUNT(*) FROM base_rows WHERE accepted=0)
+                         rows_rejected,
+                       (SELECT COUNT(DISTINCT cycle_id) FROM base_rows
+                         WHERE accepted=0) partial_cycle_count,
+                       {projections}, MAX(radio_observed_at) watermark
+                FROM intervals
+                """,
+                (
+                    max_gap_seconds, site_id, from_utc, to_utc,
+                    *filter_parameters,
+                ),
+                deadline,
+            )
+        common = dict(row)
+        metrics = {
+            output_name: {
+                "rows_accepted": int(common["rows_accepted"]),
+                "valid_count": int(common[f"{output_name}_valid_count"]),
+                "reset_count": int(common[f"{output_name}_reset_count"]),
+                "gap_count": int(common[f"{output_name}_gap_count"]),
+                "missing_count": int(common[f"{output_name}_missing_count"]),
+                "total_delta": int(common[f"{output_name}_total_delta"]),
+                "ratio_event_delta": int(
+                    common[f"{output_name}_ratio_event_delta"]
+                ),
+                "packet_delta": int(common[f"{output_name}_packet_delta"]),
+                "watermark": common["watermark"],
+            }
+            for output_name in RADIO_COUNTER_FIELDS
+        }
+        rows_accepted = int(common["rows_accepted"])
+        return {
+            "metrics": metrics,
+            "rows_examined": int(common["rows_examined"]),
+            "rows_accepted": rows_accepted,
+            "rows_rejected": int(common["rows_rejected"]),
+            "partial_cycle_count": int(common["partial_cycle_count"]),
+            "watermark": common["watermark"],
+        }
+
+    def signal_ap_correlation(
+        self,
+        *,
+        site_id: str,
+        signal_metric: str,
+        ap_metric: str,
+        from_utc: str,
+        to_utc: str,
+        quality_mode: str,
+        max_lag_seconds: float,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        if signal_metric not in {"rssi", "snr"}:
+            raise ValueError("unsupported signal correlation metric")
+        if ap_metric not in {"busy_util", "cpu_util"}:
+            raise ValueError("unsupported AP correlation metric")
+        client_spec = _wireless_source_spec("client")
+        target_source = "radio" if ap_metric == "busy_util" else "ap"
+        client_accepted = (
+            client_spec["strict"] if quality_mode == "strict_complete"
+            else client_spec["diagnostic"]
+        )
+        if target_source == "radio":
+            lookup_identity = (
+                "lt.ap_mac=k.ap_mac AND lt.band=k.band"
+            )
+            key_columns = "observed_at, ap_mac, band"
+            key_join = (
+                "ch.observed_at=cg.observed_at AND ch.ap_mac=cg.ap_mac "
+                "AND ch.band IS cg.band"
+            )
+            target_time = "t.radio_observed_at"
+            target_table = "ap_radio_observations"
+            lookup_from = "ap_radio_observations lt"
+            lookup_time = "lt.radio_observed_at"
+            lookup_accepted = (
+                "EXISTS (SELECT 1 FROM ap_observations lp "
+                "JOIN observation_cycles lc ON lc.cycle_id=lt.cycle_id "
+                "WHERE lp.row_id=lt.ap_observation_row_id "
+                "AND lp.radios_ok=1 AND lp.site_id=lt.site_id "
+                "AND lp.ap_mac=lt.ap_mac AND lp.cycle_id=lt.cycle_id"
+            )
+            if quality_mode == "strict_complete":
+                lookup_accepted += (
+                    " AND lc.complete=1 AND lc.result='success' "
+                    "AND lp.partial=0"
+                )
+            lookup_accepted += ")"
+        else:
+            lookup_identity = "lt.ap_mac=k.ap_mac"
+            key_columns = "observed_at, ap_mac"
+            key_join = (
+                "ch.observed_at=cg.observed_at AND ch.ap_mac=cg.ap_mac"
+            )
+            target_time = "t.observed_at"
+            target_table = "ap_observations"
+            lookup_from = "ap_observations lt"
+            lookup_time = "lt.observed_at"
+            lookup_accepted = (
+                "lt.overview_ok=1 AND EXISTS (SELECT 1 "
+                "FROM observation_cycles lc WHERE lc.cycle_id=lt.cycle_id "
+                "AND lc.state='completed'"
+            )
+            if quality_mode == "strict_complete":
+                lookup_accepted += (
+                    " AND lc.complete=1 AND lc.result='success' "
+                    "AND lt.partial=0"
+                )
+            lookup_accepted += ")"
+        with self._connection("observations", deadline) as connection:
+            row = self._one(
+                connection,
+                f"""
+                WITH clients AS MATERIALIZED (
+                  SELECT o.row_id client_row_id, o.observed_at,
+                         o.ap_mac, o.band, o.{signal_metric} signal_value
+                  FROM {client_spec['from']}
+                  WHERE o.site_id=? AND o.observed_at>=? AND o.observed_at<?
+                    AND ({client_accepted}) AND o.ap_mac IS NOT NULL
+                ), client_groups AS MATERIALIZED (
+                  SELECT {key_columns}, signal_value, COUNT(*) weight
+                  FROM clients GROUP BY {key_columns}, signal_value
+                ), client_keys AS MATERIALIZED (
+                  SELECT DISTINCT {key_columns} FROM client_groups
+                ), chosen AS MATERIALIZED (
+                  SELECT k.*,
+                    (SELECT lt.row_id FROM {lookup_from}
+                     WHERE lt.site_id=? AND ({lookup_identity})
+                       AND {lookup_time}<=k.observed_at
+                       AND ({lookup_accepted})
+                     ORDER BY {lookup_time} DESC, lt.row_id DESC
+                     LIMIT 1) target_row_id
+                  FROM client_keys k
+                ), paired AS (
+                  SELECT cg.*, ch.target_row_id
+                  FROM client_groups cg JOIN chosen ch ON {key_join}
+                ), selected AS (
+                  SELECT ch.*, {target_time} target_at,
+                    t.{ap_metric} target_value,
+                    CASE WHEN {target_time} IS NULL THEN NULL ELSE
+                    ROUND(
+                      (julianday(ch.observed_at)-julianday({target_time}))
+                      *86400.0,
+                      3
+                    )
+                    END lag_seconds
+                  FROM paired ch
+                  LEFT JOIN {target_table} t ON t.row_id=ch.target_row_id
+                ), bounded AS (
+                  SELECT *, CASE WHEN target_row_id IS NOT NULL
+                    AND lag_seconds>=0 AND lag_seconds<=?
+                    THEN 1 ELSE 0 END matched
+                  FROM selected
+                ), lag_histogram AS (
+                  SELECT lag_seconds, SUM(weight) frequency
+                  FROM bounded WHERE matched=1 GROUP BY lag_seconds
+                ), lag_ranked AS (
+                  SELECT lag_seconds, frequency,
+                    SUM(frequency) OVER (
+                      ORDER BY lag_seconds ROWS UNBOUNDED PRECEDING
+                    ) cumulative_count,
+                    SUM(frequency) OVER() n
+                  FROM lag_histogram
+                )
+                SELECT (SELECT COALESCE(SUM(weight),0) FROM client_groups)
+                    client_sample_count,
+                  (SELECT COALESCE(SUM(weight*matched),0) FROM bounded)
+                    matched_count,
+                  (SELECT COALESCE(SUM(weight),0) FROM bounded
+                    WHERE matched=1 AND signal_value IS NOT NULL
+                      AND target_value IS NOT NULL) sample_count,
+                  (SELECT COALESCE(SUM(signal_value*weight),0) FROM bounded
+                    WHERE matched=1 AND signal_value IS NOT NULL
+                      AND target_value IS NOT NULL) sum_x,
+                  (SELECT COALESCE(SUM(target_value*weight),0) FROM bounded
+                    WHERE matched=1 AND signal_value IS NOT NULL
+                      AND target_value IS NOT NULL) sum_y,
+                  (SELECT COALESCE(SUM(
+                    signal_value*signal_value*weight),0)
+                    FROM bounded WHERE matched=1
+                      AND signal_value IS NOT NULL AND target_value IS NOT NULL)
+                    sum_xx,
+                  (SELECT COALESCE(SUM(
+                    target_value*target_value*weight),0)
+                    FROM bounded WHERE matched=1
+                      AND signal_value IS NOT NULL AND target_value IS NOT NULL)
+                    sum_yy,
+                  (SELECT COALESCE(SUM(
+                    signal_value*target_value*weight),0)
+                    FROM bounded WHERE matched=1
+                      AND signal_value IS NOT NULL AND target_value IS NOT NULL)
+                    sum_xy,
+                  (SELECT MAX(lag_seconds) FROM lag_ranked) lag_max,
+                  (SELECT MIN(CASE WHEN cumulative_count>
+                    CAST((n-1)*0.50 AS INTEGER) THEN lag_seconds END)
+                    FROM lag_ranked) lag_p50_lower,
+                  (SELECT MIN(CASE WHEN cumulative_count>
+                    CAST((n-1)*0.50+0.999999999999 AS INTEGER)
+                    THEN lag_seconds END) FROM lag_ranked) lag_p50_upper,
+                  (SELECT MIN(CASE WHEN cumulative_count>
+                    CAST((n-1)*0.95 AS INTEGER) THEN lag_seconds END)
+                    FROM lag_ranked) lag_p95_lower,
+                  (SELECT MIN(CASE WHEN cumulative_count>
+                    CAST((n-1)*0.95+0.999999999999 AS INTEGER)
+                    THEN lag_seconds END) FROM lag_ranked) lag_p95_upper,
+                  (SELECT MAX(observed_at) FROM client_groups) watermark
+                """,
+                (site_id, from_utc, to_utc, site_id, max_lag_seconds),
+                deadline,
+            )
+        return dict(row)
+
+    def _distribution_from_base(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        base_sql: str,
+        parameters: Iterable[Any],
+        threshold: float | None,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        row = self._one(
+            connection,
+            f"""
+            WITH base AS MATERIALIZED ({base_sql}),
+            values_only AS (
+              SELECT value FROM base
+              WHERE accepted=1 AND value IS NOT NULL
+            ), histogram AS (
+              SELECT value, COUNT(*) frequency
+              FROM values_only GROUP BY value
+            ), ranked AS (
+              SELECT value, frequency,
+                SUM(frequency) OVER (
+                  ORDER BY value ROWS UNBOUNDED PRECEDING
+                ) cumulative_count,
+                SUM(frequency) OVER () n
+              FROM histogram
+            ), base_stats AS (
+              SELECT COUNT(*) rows_examined,
+                COALESCE(SUM(accepted=1), 0) rows_accepted,
+                COALESCE(SUM(accepted=0), 0) rows_rejected,
+                COUNT(DISTINCT CASE WHEN accepted=1 THEN ap_mac END)
+                  distinct_ap_count,
+                MAX(CASE WHEN accepted=1 THEN observed_at END) watermark,
+                COUNT(DISTINCT CASE WHEN accepted=0 THEN cycle_id END)
+                  partial_cycle_count,
+                COALESCE(SUM(reason='ok'),0) reason_ok,
+                COALESCE(SUM(reason='no_baseline'),0) reason_no_baseline,
+                COALESCE(SUM(reason='counter_reset'),0)
+                  reason_counter_reset,
+                COALESCE(SUM(reason='gap_too_large'),0)
+                  reason_gap_too_large,
+                COALESCE(SUM(reason='invalid_elapsed'),0)
+                  reason_invalid_elapsed,
+                COALESCE(SUM(reason='source_missing'),0)
+                  reason_source_missing,
+                COALESCE(SUM(reason='source_unavailable'),0)
+                  reason_source_unavailable,
+                COALESCE(SUM(reason='source_rejected'),0)
+                  reason_source_rejected
+              FROM base
+            ), value_stats AS (
+              SELECT COALESCE(SUM(frequency),0) sample_count,
+                MIN(value) minimum, MAX(value) maximum,
+                SUM(value*frequency)*1.0/SUM(frequency) mean,
+                {_histogram_percentile_columns('p10', 0.10)},
+                {_histogram_percentile_columns('p50', 0.50)},
+                {_histogram_percentile_columns('p90', 0.90)},
+                {_histogram_percentile_columns('p95', 0.95)},
+                CASE WHEN ? IS NULL THEN NULL ELSE
+                  COALESCE(SUM(
+                    CASE WHEN value<? THEN frequency ELSE 0 END
+                  ), 0) END below_threshold_count
+              FROM ranked
+            )
+            SELECT b.*, v.*,
+              b.rows_accepted-v.sample_count missing_count
+            FROM base_stats b CROSS JOIN value_stats v
+            """,
+            (*tuple(parameters), threshold, threshold),
+            deadline,
+        )
+        return dict(row)
+
     @contextmanager
     def _connection(
         self,
@@ -733,4 +1671,119 @@ def _field_source_spec(source: str) -> Mapping[str, str]:
             "AND p.radios_ok=1 AND p.site_id=o.site_id "
             "AND p.ap_mac=o.ap_mac AND p.cycle_id=o.cycle_id"
         ),
+    }
+
+
+def _wireless_source_spec(source: str) -> Mapping[str, str]:
+    if source == "client":
+        return {
+            "from": (
+                "client_observations o "
+                "JOIN observation_cycles c ON c.cycle_id=o.cycle_id"
+            ),
+            "time": "o.observed_at",
+            "strict": (
+                "c.state='completed' AND c.complete=1 "
+                "AND c.result='success' "
+                "AND o.source_inventory_complete=1"
+            ),
+            "diagnostic": "c.state='completed'",
+        }
+    if source == "ap":
+        return {
+            "from": (
+                "ap_observations o "
+                "JOIN observation_cycles c ON c.cycle_id=o.cycle_id"
+            ),
+            "time": "o.observed_at",
+            "strict": (
+                "c.state='completed' AND c.complete=1 "
+                "AND c.result='success' AND o.partial=0 "
+                "AND o.overview_ok=1"
+            ),
+            "diagnostic": (
+                "c.state='completed' AND o.overview_ok=1"
+            ),
+        }
+    if source == "radio":
+        return {
+            "from": (
+                "ap_radio_observations o "
+                "JOIN ap_observations p ON p.row_id=o.ap_observation_row_id "
+                "JOIN observation_cycles c ON c.cycle_id=o.cycle_id"
+            ),
+            "time": "o.radio_observed_at",
+            "strict": (
+                "c.state='completed' AND c.complete=1 "
+                "AND c.result='success' AND p.partial=0 "
+                "AND p.radios_ok=1 AND p.site_id=o.site_id "
+                "AND p.ap_mac=o.ap_mac AND p.cycle_id=o.cycle_id"
+            ),
+            "diagnostic": (
+                "c.state='completed' AND p.radios_ok=1 "
+                "AND p.site_id=o.site_id AND p.ap_mac=o.ap_mac "
+                "AND p.cycle_id=o.cycle_id"
+            ),
+        }
+    raise ValueError("unsupported wireless source")
+
+
+def _wireless_filters(
+    source: str,
+    filters: Mapping[str, Any],
+    *,
+    alias: str,
+) -> tuple[str, tuple[Any, ...]]:
+    allowed = {
+        "client": frozenset({
+            "client_mac", "ap_mac", "ssid", "band", "channel",
+        }),
+        "ap": frozenset({"ap_mac"}),
+        "radio": frozenset({"ap_mac", "band"}),
+    }[source]
+    clauses: list[str] = []
+    parameters: list[Any] = []
+    for key, value in filters.items():
+        if key not in allowed:
+            if value is not None:
+                raise ValueError("unsupported wireless filter")
+            continue
+        if value is not None:
+            clauses.append(f"AND {alias}.{key}=?")
+            parameters.append(value)
+    return " ".join(clauses), tuple(parameters)
+
+
+def _percentile_columns(prefix: str, probability: float) -> str:
+    return (
+        "MAX(CASE WHEN rank_index="
+        f"CAST((n-1)*{probability:.2f} AS INTEGER) "
+        f"THEN value END) {prefix}_lower, "
+        "MAX(CASE WHEN rank_index="
+        f"CAST((n-1)*{probability:.2f}+0.999999999999 AS INTEGER) "
+        f"THEN value END) {prefix}_upper"
+    )
+
+
+def _histogram_percentile_columns(prefix: str, probability: float) -> str:
+    return (
+        "MIN(CASE WHEN cumulative_count>"
+        f"CAST((n-1)*{probability:.2f} AS INTEGER) "
+        f"THEN value END) {prefix}_lower, "
+        "MIN(CASE WHEN cumulative_count>"
+        f"CAST((n-1)*{probability:.2f}+0.999999999999 AS INTEGER) "
+        f"THEN value END) {prefix}_upper"
+    )
+
+
+def _reason_counts(raw: Mapping[str, Any]) -> Mapping[str, int]:
+    names = (
+        "ok", "no_baseline", "counter_reset", "gap_too_large",
+        "invalid_elapsed", "source_missing", "source_unavailable",
+        "source_rejected",
+    )
+    return {
+        name: int(raw.get(f"reason_{name}") or 0)
+        for name in names
+        if int(raw.get(f"reason_{name}") or 0) > 0
     }

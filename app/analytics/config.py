@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -18,6 +19,13 @@ class AnalyticsConfig:
     max_query_window_days: int = 31
     max_query_duration_seconds: float = 10.0
     quality_gap_threshold_seconds: float = 180.0
+    wireless_enabled: bool = True
+    wireless_min_samples: int = 20
+    wireless_max_window_days: int = 7
+    counter_max_gap_seconds: float = 180.0
+    ap_join_max_lag_seconds: float = 120.0
+    rssi_threshold_dbm: float | None = None
+    snr_threshold_db: float | None = None
 
 
 def analytics_config_from_settings(
@@ -51,6 +59,23 @@ def analytics_config_from_settings(
         raise AnalyticsConfigError(
             "ANALYTICS_MAX_QUERY_WINDOW_DAYS must not exceed 31"
         )
+    wireless_window_days = _positive_int(
+        settings.get("analytics_wireless_max_window_days", 7),
+        "ANALYTICS_WIRELESS_MAX_WINDOW_DAYS",
+    )
+    if wireless_window_days > window_days:
+        raise AnalyticsConfigError(
+            "ANALYTICS_WIRELESS_MAX_WINDOW_DAYS must not exceed "
+            "ANALYTICS_MAX_QUERY_WINDOW_DAYS"
+        )
+    wireless_min_samples = _positive_int(
+        settings.get("analytics_wireless_min_samples", 20),
+        "ANALYTICS_WIRELESS_MIN_SAMPLES",
+    )
+    if wireless_min_samples < 2:
+        raise AnalyticsConfigError(
+            "ANALYTICS_WIRELESS_MIN_SAMPLES must be at least 2"
+        )
     return AnalyticsConfig(
         enabled=enabled,
         default_limit=default_limit,
@@ -63,6 +88,28 @@ def analytics_config_from_settings(
         quality_gap_threshold_seconds=_positive_float(
             settings.get("analytics_quality_gap_threshold_seconds", 180),
             "ANALYTICS_QUALITY_GAP_THRESHOLD_SECONDS",
+        ),
+        wireless_enabled=_exact_bool(
+            settings.get("analytics_wireless_enabled", "true"),
+            "ANALYTICS_WIRELESS_ENABLED",
+        ),
+        wireless_min_samples=wireless_min_samples,
+        wireless_max_window_days=wireless_window_days,
+        counter_max_gap_seconds=_positive_float(
+            settings.get("analytics_counter_max_gap_seconds", 180),
+            "ANALYTICS_COUNTER_MAX_GAP_SECONDS",
+        ),
+        ap_join_max_lag_seconds=_positive_float(
+            settings.get("analytics_ap_join_max_lag_seconds", 120),
+            "ANALYTICS_AP_JOIN_MAX_LAG_SECONDS",
+        ),
+        rssi_threshold_dbm=_optional_finite_float(
+            settings.get("analytics_rssi_threshold_dbm"),
+            "ANALYTICS_RSSI_THRESHOLD_DBM",
+        ),
+        snr_threshold_db=_optional_finite_float(
+            settings.get("analytics_snr_threshold_db"),
+            "ANALYTICS_SNR_THRESHOLD_DB",
         ),
     )
 
@@ -98,4 +145,20 @@ def _positive_float(value: Any, name: str) -> float:
         raise AnalyticsConfigError(f"{name} must be positive") from exc
     if not 0 < parsed < float("inf"):
         raise AnalyticsConfigError(f"{name} must be positive")
+    return parsed
+
+
+def _optional_finite_float(value: Any, name: str) -> float | None:
+    if value is None or value == "":
+        return None
+    if type(value) is bool:
+        raise AnalyticsConfigError(f"{name} must be a finite number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise AnalyticsConfigError(
+            f"{name} must be a finite number"
+        ) from exc
+    if not math.isfinite(parsed):
+        raise AnalyticsConfigError(f"{name} must be a finite number")
     return parsed
