@@ -76,10 +76,22 @@ from app.config import (
     OBSERVATION_AP_CYCLE_MAX_DURATION_SECONDS,
     OBSERVATION_AP_CONFIG_CYCLE_MAX_DURATION_SECONDS,
     OBSERVATION_RATE_MAX_GAP_SECONDS,
-    ANALYTICS_FOUNDATION_ENABLED, ANALYTICS_DEFAULT_LIMIT,
+    ANALYTICS_FOUNDATION_ENABLED, ANALYTICS_WIRELESS_ENABLED,
+    ANALYTICS_VISIT_ENABLED, ANALYTICS_DEFAULT_LIMIT,
     ANALYTICS_MAX_LIMIT, ANALYTICS_MAX_QUERY_WINDOW_DAYS,
     ANALYTICS_MAX_QUERY_DURATION_SECONDS,
     ANALYTICS_QUALITY_GAP_THRESHOLD_SECONDS,
+    ANALYTICS_WIRELESS_MIN_SAMPLES,
+    ANALYTICS_WIRELESS_MAX_WINDOW_DAYS,
+    ANALYTICS_COUNTER_MAX_GAP_SECONDS,
+    ANALYTICS_AP_JOIN_MAX_LAG_SECONDS,
+    ANALYTICS_RSSI_THRESHOLD_DBM, ANALYTICS_SNR_THRESHOLD_DB,
+    ANALYTICS_VISIT_MIN_COHORT_SIZE,
+    ANALYTICS_VISIT_MAX_WINDOW_DAYS,
+    ANALYTICS_API_ENABLED, ANALYTICS_API_BEARER_TOKEN,
+    ANALYTICS_API_ALLOWED_NETWORKS, ANALYTICS_API_ALLOWED_SITE_IDS,
+    ANALYTICS_API_MAX_CONCURRENT_REQUESTS,
+    ANALYTICS_API_MAX_RESPONSE_BYTES,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -326,6 +338,8 @@ def get_settings() -> dict:
         ),
         "observation_rate_max_gap_seconds": OBSERVATION_RATE_MAX_GAP_SECONDS,
         "analytics_foundation_enabled": ANALYTICS_FOUNDATION_ENABLED,
+        "analytics_wireless_enabled": ANALYTICS_WIRELESS_ENABLED,
+        "analytics_visit_enabled": ANALYTICS_VISIT_ENABLED,
         "analytics_default_limit": ANALYTICS_DEFAULT_LIMIT,
         "analytics_max_limit": ANALYTICS_MAX_LIMIT,
         "analytics_max_query_window_days": (
@@ -336,6 +350,40 @@ def get_settings() -> dict:
         ),
         "analytics_quality_gap_threshold_seconds": (
             ANALYTICS_QUALITY_GAP_THRESHOLD_SECONDS
+        ),
+        "analytics_wireless_min_samples": (
+            ANALYTICS_WIRELESS_MIN_SAMPLES
+        ),
+        "analytics_wireless_max_window_days": (
+            ANALYTICS_WIRELESS_MAX_WINDOW_DAYS
+        ),
+        "analytics_counter_max_gap_seconds": (
+            ANALYTICS_COUNTER_MAX_GAP_SECONDS
+        ),
+        "analytics_ap_join_max_lag_seconds": (
+            ANALYTICS_AP_JOIN_MAX_LAG_SECONDS
+        ),
+        "analytics_rssi_threshold_dbm": ANALYTICS_RSSI_THRESHOLD_DBM,
+        "analytics_snr_threshold_db": ANALYTICS_SNR_THRESHOLD_DB,
+        "analytics_visit_min_cohort_size": (
+            ANALYTICS_VISIT_MIN_COHORT_SIZE
+        ),
+        "analytics_visit_max_window_days": (
+            ANALYTICS_VISIT_MAX_WINDOW_DAYS
+        ),
+        "analytics_api_enabled": ANALYTICS_API_ENABLED,
+        "analytics_api_bearer_token": ANALYTICS_API_BEARER_TOKEN,
+        "analytics_api_allowed_networks": (
+            ANALYTICS_API_ALLOWED_NETWORKS
+        ),
+        "analytics_api_allowed_site_ids": (
+            ANALYTICS_API_ALLOWED_SITE_IDS
+        ),
+        "analytics_api_max_concurrent_requests": (
+            ANALYTICS_API_MAX_CONCURRENT_REQUESTS
+        ),
+        "analytics_api_max_response_bytes": (
+            ANALYTICS_API_MAX_RESPONSE_BYTES
         ),
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,
