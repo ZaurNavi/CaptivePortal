@@ -23,6 +23,7 @@ SOURCE_SCHEMA_VERSIONS = {
 MAX_CROSS_SOURCE_IDENTIFIERS = 250_000
 _SQLITE_PROGRESS_OPCODES = 100
 _SNAPSHOT_BATCH_SIZE = 800
+_VISIT_WINDOW_BATCH_SIZE = 100
 
 CLIENT_FIELDS = frozenset({
     "ap_mac", "radio_id", "band", "channel", "rssi", "snr",
@@ -563,6 +564,17 @@ class AnalyticsSourceGateway:
             "by_reason": by_reason,
         }
 
+    def source_event_watermark(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> str | None:
+        with self._connection("visits", deadline) as connection:
+            row = self._one(connection, """
+              SELECT MAX(processed_at) watermark FROM visit_source_events
+              WHERE site_id=? AND processed_at>=? AND processed_at<?
+            """, (site_id, from_utc, to_utc), deadline)
+        return None if row is None else row["watermark"]
+
     def observation_watermarks(
         self,
         *,
@@ -629,6 +641,428 @@ class AnalyticsSourceGateway:
                 deadline,
             )
         return None if row is None else row["watermark"]
+
+    def visit_cohort_summary(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        with self._connection("visits", deadline) as connection:
+            row = self._one(connection, """
+                SELECT COUNT(*) total_visit_count,
+                       COALESCE(SUM(status='open'),0) open_visit_count,
+                       COALESCE(SUM(status='closed'),0) closed_visit_count,
+                       MAX(started_at) watermark
+                FROM visits
+                WHERE site_id=? AND started_at>=? AND started_at<?
+            """, (site_id, from_utc, to_utc), deadline)
+        return dict(row)
+
+    def visit_start_timestamps(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        with self._connection("visits", deadline) as connection:
+            rows = self._all(connection, """
+                SELECT started_at
+                FROM visits
+                WHERE site_id=? AND started_at>=? AND started_at<?
+                ORDER BY started_at, visit_id LIMIT ?
+            """, (site_id, from_utc, to_utc,
+                    MAX_CROSS_SOURCE_IDENTIFIERS + 1), deadline)
+        if len(rows) > MAX_CROSS_SOURCE_IDENTIFIERS:
+            raise AnalyticsPerformanceBudgetExceeded(
+                "Visit time-series cohort exceeds materialization budget")
+        return {"rows": tuple(dict(row) for row in rows),
+                "watermark": (None if not rows
+                              else str(rows[-1]["started_at"]))}
+
+    def visit_device_summary(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        with self._connection("visits", deadline) as connection:
+            row = self._one(connection, """
+                WITH cohort AS (
+                  SELECT device_id, started_at FROM visits
+                  WHERE site_id=? AND started_at>=? AND started_at<?
+                ), grouped AS (
+                  SELECT device_id, COUNT(*) visit_count FROM cohort
+                  WHERE device_id IS NOT NULL GROUP BY device_id
+                )
+                SELECT (SELECT COUNT(DISTINCT device_id) FROM cohort
+                        WHERE device_id IS NOT NULL) unique_linked_devices,
+                       (SELECT COUNT(*) FROM cohort
+                        WHERE device_id IS NOT NULL) linked_visit_count,
+                       (SELECT COUNT(*) FROM cohort
+                        WHERE device_id IS NULL) unlinked_visit_count,
+                       (SELECT COUNT(*) FROM grouped
+                        WHERE visit_count>=2) repeat_device_count,
+                       (SELECT COUNT(*) FROM cohort) rows_examined,
+                       (SELECT MAX(started_at) FROM cohort) watermark
+            """, (site_id, from_utc, to_utc), deadline)
+        return dict(row)
+
+    def visit_new_to_site_summary(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        with self._connection("visits", deadline) as connection:
+            row = self._one(connection, """
+                WITH firsts AS (
+                  SELECT device_id, MIN(started_at) first_started_at
+                  FROM visits WHERE site_id=? AND device_id IS NOT NULL
+                  GROUP BY device_id
+                ), cohort_devices AS (
+                  SELECT DISTINCT device_id FROM visits
+                  WHERE site_id=? AND started_at>=? AND started_at<?
+                    AND device_id IS NOT NULL
+                ), cohort AS (
+                  SELECT device_id, started_at FROM visits
+                  WHERE site_id=? AND started_at>=? AND started_at<?
+                )
+                SELECT COUNT(cd.device_id) unique_linked_devices_in_window,
+                       COALESCE(SUM(f.first_started_at>=?
+                                AND f.first_started_at<?),0)
+                           new_to_site_device_count,
+                       COALESCE(SUM(f.first_started_at<?),0)
+                           known_before_window_device_count,
+                       (SELECT COUNT(*) FROM cohort WHERE device_id IS NULL)
+                           unlinked_visit_count,
+                       (SELECT COUNT(*) FROM cohort) rows_examined,
+                       (SELECT MAX(started_at) FROM cohort) watermark
+                FROM cohort_devices cd JOIN firsts f USING(device_id)
+            """, (site_id, site_id, from_utc, to_utc,
+                    site_id, from_utc, to_utc,
+                    from_utc, to_utc, from_utc), deadline)
+        return dict(row)
+
+    def visit_duration_distribution(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        base = """
+          SELECT rowid row_id, NULL cycle_id, NULL ap_mac,
+                 started_at observed_at, duration_seconds value,
+                 CASE WHEN status='closed' THEN 1 ELSE 0 END accepted,
+                 NULL reason
+          FROM visits WHERE site_id=? AND started_at>=? AND started_at<?
+        """
+        with self._connection("visits", deadline) as connection:
+            result = dict(self._distribution_from_base(
+                connection, base_sql=base,
+                parameters=(site_id, from_utc, to_utc), threshold=None,
+                deadline=deadline))
+            excluded = self._one(connection, """
+              SELECT COALESCE(SUM(status='open'),0) excluded_open_count,
+                     COALESCE(SUM(status='closed' AND duration_seconds IS NULL),0)
+                       excluded_missing_duration_count
+              FROM visits WHERE site_id=? AND started_at>=? AND started_at<?
+            """, (site_id, from_utc, to_utc), deadline)
+        result.update(dict(excluded))
+        return result
+
+    def visit_authorization_distribution(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        base = """
+          SELECT v.rowid row_id, NULL cycle_id, NULL ap_mac,
+                 v.started_at observed_at, COUNT(a.row_id) value,
+                 1 accepted, NULL reason
+          FROM visits v LEFT JOIN visit_authorizations a
+            ON a.visit_id=v.visit_id
+          WHERE v.site_id=? AND v.started_at>=? AND v.started_at<?
+          GROUP BY v.visit_id
+        """
+        with self._connection("visits", deadline) as connection:
+            result = dict(self._distribution_from_base(
+                connection, base_sql=base,
+                parameters=(site_id, from_utc, to_utc), threshold=None,
+                deadline=deadline))
+            counts = self._one(connection, """
+              WITH cohort AS (
+                SELECT v.visit_id, COUNT(a.row_id) n FROM visits v
+                LEFT JOIN visit_authorizations a ON a.visit_id=v.visit_id
+                WHERE v.site_id=? AND v.started_at>=? AND v.started_at<?
+                GROUP BY v.visit_id)
+              SELECT COALESCE(SUM(n=1),0) exactly_one,
+                     COALESCE(SUM(n>1),0) multiple,
+                     COALESCE(SUM(n=0),0) zero FROM cohort
+            """, (site_id, from_utc, to_utc), deadline)
+        result.update(dict(counts))
+        return result
+
+    def visit_closure_summary(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        base = """
+          SELECT rowid row_id, NULL cycle_id, NULL ap_mac,
+                 started_at observed_at,
+                 CASE WHEN reported_connected_seconds IS NOT NULL
+                       AND duration_seconds IS NOT NULL
+                      THEN reported_connected_seconds-duration_seconds END value,
+                 CASE WHEN status='closed' THEN 1 ELSE 0 END accepted,
+                 NULL reason
+          FROM visits WHERE site_id=? AND started_at>=? AND started_at<?
+        """
+        with self._connection("visits", deadline) as connection:
+            groups = self._all(connection, """
+              SELECT close_reason, close_time_source, COUNT(*) count
+              FROM visits WHERE site_id=? AND started_at>=? AND started_at<?
+                AND status='closed'
+              GROUP BY close_reason, close_time_source
+            """, (site_id, from_utc, to_utc), deadline)
+            dist = dict(self._distribution_from_base(
+                connection, base_sql=base,
+                parameters=(site_id, from_utc, to_utc), threshold=None,
+                deadline=deadline))
+        reasons: dict[str, int] = {}
+        sources: dict[str, int] = {}
+        for row in groups:
+            n = int(row["count"])
+            reasons[str(row["close_reason"])] = (
+                reasons.get(str(row["close_reason"]), 0) + n)
+            sources[str(row["close_time_source"])] = (
+                sources.get(str(row["close_time_source"]), 0) + n)
+        return {"close_reasons": reasons, "close_time_sources": sources,
+                "closed_visit_count": sum(reasons.values()),
+                "duration_difference": dist}
+
+    def visit_context_distribution(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        dimension: str, deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        columns = {
+            "start_ssid": ("v.start_ssid", False),
+            "final_ssid": ("v.final_ssid", False),
+            "start_ap_mac": ("v.start_ap_mac", False),
+            "final_ap_mac": ("v.final_ap_mac", False),
+            "touched_ssid": ("a.portal_ssid", True),
+            "touched_ap_mac": ("a.portal_ap_mac", True),
+        }
+        if dimension not in columns:
+            raise ValueError("unsupported Visit context dimension")
+        column, touched = columns[dimension]
+        join = "JOIN visit_authorizations a ON a.visit_id=v.visit_id" if touched else ""
+        count = "COUNT(DISTINCT v.visit_id)" if touched else "COUNT(*)"
+        with self._connection("visits", deadline) as connection:
+            rows = self._all(connection, f"""
+              SELECT {column} context, {count} visit_count
+              FROM visits v {join}
+              WHERE v.site_id=? AND v.started_at>=? AND v.started_at<?
+              GROUP BY {column} ORDER BY visit_count DESC, context
+            """, (site_id, from_utc, to_utc), deadline)
+            meta = self._one(connection, """
+              SELECT COUNT(*) rows_examined, MAX(started_at) watermark
+              FROM visits WHERE site_id=? AND started_at>=? AND started_at<?
+            """, (site_id, from_utc, to_utc), deadline)
+        return {"rows": tuple(dict(row) for row in rows),
+                "rows_examined": int(meta["rows_examined"]),
+                "watermark": meta["watermark"]}
+
+    def visit_context_transitions(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        with self._connection("visits", deadline) as connection:
+            row = self._one(connection, """
+              SELECT COUNT(*) rows_examined, MAX(started_at) watermark,
+                COALESCE(SUM(start_ssid IS NOT NULL AND final_ssid IS NOT NULL),0) ssid_comparable,
+                COALESCE(SUM(start_ssid IS NOT NULL AND final_ssid IS NOT NULL AND start_ssid<>final_ssid),0) ssid_changed,
+                COALESCE(SUM(start_ssid IS NOT NULL AND final_ssid IS NOT NULL AND start_ssid=final_ssid),0) ssid_unchanged,
+                COALESCE(SUM(start_ssid IS NULL OR final_ssid IS NULL),0) ssid_missing,
+                COALESCE(SUM(start_ap_mac IS NOT NULL AND final_ap_mac IS NOT NULL),0) ap_comparable,
+                COALESCE(SUM(start_ap_mac IS NOT NULL AND final_ap_mac IS NOT NULL AND start_ap_mac<>final_ap_mac),0) ap_changed,
+                COALESCE(SUM(start_ap_mac IS NOT NULL AND final_ap_mac IS NOT NULL AND start_ap_mac=final_ap_mac),0) ap_unchanged,
+                COALESCE(SUM(start_ap_mac IS NULL OR final_ap_mac IS NULL),0) ap_missing
+              FROM visits WHERE site_id=? AND started_at>=? AND started_at<?
+            """, (site_id, from_utc, to_utc), deadline)
+        return dict(row)
+
+    def visit_windows(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        evaluation_at_utc: str, deadline: QueryDeadline,
+    ) -> tuple[Mapping[str, Any], ...]:
+        with self._connection("visits", deadline) as connection:
+            rows = self._all(connection, """
+              SELECT visit_id, client_mac, device_id, started_at, closed_at,
+                     CASE WHEN closed_at IS NULL THEN ? ELSE closed_at END
+                       evaluation_end,
+                     reported_traffic_total_bytes,
+                     reported_traffic_up_bytes,
+                     reported_traffic_down_bytes
+              FROM visits
+              WHERE site_id=? AND started_at>=? AND started_at<?
+              ORDER BY started_at, visit_id LIMIT ?
+            """, (evaluation_at_utc, site_id, from_utc, to_utc,
+                    MAX_CROSS_SOURCE_IDENTIFIERS + 1), deadline)
+        if len(rows) > MAX_CROSS_SOURCE_IDENTIFIERS:
+            raise AnalyticsPerformanceBudgetExceeded(
+                "Visit cohort exceeds materialization budget")
+        return tuple(dict(row) for row in rows)
+
+    def visit_observation_coverage_batch(
+        self, *, site_id: str, windows: Sequence[Mapping[str, Any]],
+        gap_threshold_seconds: float, deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        if not windows:
+            return {"rows": (), "rows_examined": 0, "rows_accepted": 0,
+                    "watermark": None}
+        results: list[Mapping[str, Any]] = []
+        examined = 0
+        accepted = 0
+        watermark: str | None = None
+        with self._connection("observations", deadline) as connection:
+            for offset in range(0, len(windows), _VISIT_WINDOW_BATCH_SIZE):
+                deadline.require_remaining()
+                batch = windows[offset:offset + _VISIT_WINDOW_BATCH_SIZE]
+                values = ",".join("(?,?,?,?,?)" for _ in batch)
+                parameters: list[Any] = []
+                for row in batch:
+                    parameters.extend((row["visit_id"], site_id,
+                                       row["client_mac"], row["started_at"],
+                                       row["evaluation_end"]))
+                parameters.append(gap_threshold_seconds)
+                rows = self._all(connection, f"""
+                  WITH windows(visit_id,site_id,client_mac,start_at,end_at) AS (
+                    VALUES {values}
+                  ), accepted AS (
+                    SELECT w.visit_id, w.start_at, w.end_at,
+                           o.observed_at, o.row_id
+                    FROM windows w
+                    LEFT JOIN client_observations o
+                      ON o.site_id=w.site_id AND o.client_mac=w.client_mac
+                     AND o.observed_at>=w.start_at AND o.observed_at<w.end_at
+                    LEFT JOIN observation_cycles c ON c.cycle_id=o.cycle_id
+                    WHERE o.row_id IS NULL OR (
+                      c.state='completed' AND c.complete=1
+                      AND c.result='success'
+                      AND o.source_inventory_complete=1)
+                  ), ordered AS (
+                    SELECT *, LAG(observed_at) OVER (
+                      PARTITION BY visit_id ORDER BY observed_at,row_id
+                    ) previous_at FROM accepted
+                  ), gaps AS (
+                    SELECT *, CASE WHEN previous_at IS NULL THEN NULL ELSE
+                      (julianday(observed_at)-julianday(previous_at))*86400.0
+                    END gap_seconds FROM ordered
+                  )
+                  SELECT visit_id, MIN(start_at) start_at, MIN(end_at) end_at,
+                         COUNT(observed_at) sample_count,
+                         MIN(observed_at) first_observed_at,
+                         MAX(observed_at) last_observed_at,
+                         MAX(gap_seconds) max_gap_seconds,
+                         COALESCE(SUM(gap_seconds>?),0)
+                           gap_count_over_threshold
+                  FROM gaps GROUP BY visit_id ORDER BY visit_id
+                """, (*parameters,), deadline)
+                for row in rows:
+                    item = dict(row)
+                    results.append(item)
+                    examined += int(item["sample_count"])
+                    accepted += int(item["sample_count"])
+                    observed = item["last_observed_at"]
+                    if observed is not None:
+                        watermark = max(watermark or str(observed), str(observed))
+        return {"rows": tuple(results), "rows_examined": examined,
+                "rows_accepted": accepted, "watermark": watermark}
+
+    def visit_observed_traffic_batch(
+        self, *, site_id: str, windows: Sequence[Mapping[str, Any]],
+        max_gap_seconds: float, deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        if not windows:
+            return {"rows": (), "rows_examined": 0, "rows_accepted": 0,
+                    "watermark": None}
+        output: list[Mapping[str, Any]] = []
+        examined = accepted = 0
+        watermark: str | None = None
+        with self._connection("observations", deadline) as connection:
+            for offset in range(0, len(windows), _VISIT_WINDOW_BATCH_SIZE):
+                batch = windows[offset:offset + _VISIT_WINDOW_BATCH_SIZE]
+                values = ",".join("(?,?,?,?,?)" for _ in batch)
+                parameters: list[Any] = []
+                for row in batch:
+                    parameters.extend((row["visit_id"], site_id,
+                                       row["client_mac"], row["started_at"],
+                                       row["evaluation_end"]))
+                rows = self._all(connection, f"""
+                  WITH windows(visit_id,site_id,client_mac,start_at,end_at) AS (
+                    VALUES {values}
+                  ), samples AS (
+                    SELECT w.visit_id,o.observed_at,o.row_id,
+                           o.traffic_down,o.traffic_up
+                    FROM windows w JOIN client_observations o
+                      ON o.site_id=w.site_id AND o.client_mac=w.client_mac
+                     AND o.observed_at>=w.start_at AND o.observed_at<w.end_at
+                    JOIN observation_cycles c ON c.cycle_id=o.cycle_id
+                    WHERE c.state='completed' AND c.complete=1
+                      AND c.result='success' AND o.source_inventory_complete=1
+                  ), pairs AS (
+                    SELECT *, LAG(observed_at) OVER (
+                      PARTITION BY visit_id ORDER BY observed_at,row_id) prev_at,
+                      LAG(traffic_down) OVER (
+                      PARTITION BY visit_id ORDER BY observed_at,row_id) prev_down,
+                      LAG(traffic_up) OVER (
+                      PARTITION BY visit_id ORDER BY observed_at,row_id) prev_up
+                    FROM samples
+                  ), deltas AS (
+                    SELECT *,
+                      (julianday(observed_at)-julianday(prev_at))*86400.0 elapsed,
+                      CASE WHEN prev_down IS NOT NULL AND traffic_down>=prev_down
+                             AND ROUND((julianday(observed_at)-julianday(prev_at))*86400.0,3)>0
+                             AND ROUND((julianday(observed_at)-julianday(prev_at))*86400.0,3)<=?
+                           THEN traffic_down-prev_down END down_delta,
+                      CASE WHEN prev_up IS NOT NULL AND traffic_up>=prev_up
+                             AND ROUND((julianday(observed_at)-julianday(prev_at))*86400.0,3)>0
+                             AND ROUND((julianday(observed_at)-julianday(prev_at))*86400.0,3)<=?
+                           THEN traffic_up-prev_up END up_delta
+                    FROM pairs
+                  )
+                  SELECT visit_id, COUNT(*) sample_count,
+                         COALESCE(SUM(down_delta IS NOT NULL OR up_delta IS NOT NULL),0)
+                           valid_interval_count,
+                         SUM(down_delta) down_delta,
+                         SUM(up_delta) up_delta,
+                         MAX(observed_at) watermark
+                  FROM deltas GROUP BY visit_id
+                """, (*parameters, max_gap_seconds, max_gap_seconds), deadline)
+                for row in rows:
+                    item = dict(row); output.append(item)
+                    examined += max(int(item["sample_count"]) - 1, 0)
+                    accepted += int(item["valid_interval_count"])
+                    observed = item["watermark"]
+                    if observed is not None:
+                        watermark = max(watermark or str(observed), str(observed))
+        return {"rows": tuple(output), "rows_examined": examined,
+                "rows_accepted": accepted,
+                "rows_rejected": max(examined-accepted, 0),
+                "watermark": watermark}
+
+    def visit_return_intervals(
+        self, *, site_id: str, from_utc: str, to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        base = """
+          SELECT row_id, NULL cycle_id, NULL ap_mac,
+                 started_at observed_at, interval_seconds value,
+                 CASE WHEN interval_seconds>=0 THEN 1 ELSE 0 END accepted,
+                 NULL reason
+          FROM (
+            SELECT rowid row_id, started_at,
+              (julianday(started_at)-julianday(LAG(started_at) OVER (
+                PARTITION BY device_id ORDER BY started_at,visit_id)))*86400.0
+                interval_seconds
+            FROM visits
+            WHERE site_id=? AND device_id IS NOT NULL AND started_at<?
+          ) WHERE started_at>=? AND started_at<? AND interval_seconds IS NOT NULL
+        """
+        with self._connection("visits", deadline) as connection:
+            return self._distribution_from_base(
+                connection, base_sql=base,
+                parameters=(site_id, to_utc, from_utc, to_utc),
+                threshold=None, deadline=deadline)
 
     def wireless_scalar_distribution(
         self,
@@ -1304,6 +1738,7 @@ class AnalyticsSourceGateway:
         quality_mode: str,
         max_lag_seconds: float,
         deadline: QueryDeadline,
+        client_mac: str | None = None,
     ) -> Mapping[str, Any]:
         if signal_metric not in {"rssi", "snr"}:
             raise ValueError("unsupported signal correlation metric")
@@ -1314,6 +1749,10 @@ class AnalyticsSourceGateway:
         client_accepted = (
             client_spec["strict"] if quality_mode == "strict_complete"
             else client_spec["diagnostic"]
+        )
+        client_filter = "" if client_mac is None else "AND o.client_mac=?"
+        client_parameters: tuple[Any, ...] = (
+            () if client_mac is None else (client_mac,)
         )
         if target_source == "radio":
             lookup_identity = (
@@ -1372,6 +1811,7 @@ class AnalyticsSourceGateway:
                   FROM {client_spec['from']}
                   WHERE o.site_id=? AND o.observed_at>=? AND o.observed_at<?
                     AND ({client_accepted}) AND o.ap_mac IS NOT NULL
+                    {client_filter}
                 ), client_groups AS MATERIALIZED (
                   SELECT {key_columns}, signal_value, COUNT(*) weight
                   FROM clients GROUP BY {key_columns}, signal_value
@@ -1460,7 +1900,8 @@ class AnalyticsSourceGateway:
                     THEN lag_seconds END) FROM lag_ranked) lag_p95_upper,
                   (SELECT MAX(observed_at) FROM client_groups) watermark
                 """,
-                (site_id, from_utc, to_utc, site_id, max_lag_seconds),
+                (site_id, from_utc, to_utc, *client_parameters,
+                 site_id, max_lag_seconds),
                 deadline,
             )
         return dict(row)

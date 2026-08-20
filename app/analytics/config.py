@@ -26,6 +26,9 @@ class AnalyticsConfig:
     ap_join_max_lag_seconds: float = 120.0
     rssi_threshold_dbm: float | None = None
     snr_threshold_db: float | None = None
+    visit_enabled: bool = True
+    visit_min_cohort_size: int = 20
+    visit_max_window_days: int = 90
 
 
 def analytics_config_from_settings(
@@ -76,6 +79,22 @@ def analytics_config_from_settings(
         raise AnalyticsConfigError(
             "ANALYTICS_WIRELESS_MIN_SAMPLES must be at least 2"
         )
+    visit_min_cohort_size = _positive_int(
+        settings.get("analytics_visit_min_cohort_size", 20),
+        "ANALYTICS_VISIT_MIN_COHORT_SIZE",
+    )
+    if visit_min_cohort_size < 2:
+        raise AnalyticsConfigError(
+            "ANALYTICS_VISIT_MIN_COHORT_SIZE must be at least 2"
+        )
+    visit_max_window_days = _positive_int(
+        settings.get("analytics_visit_max_window_days", 90),
+        "ANALYTICS_VISIT_MAX_WINDOW_DAYS",
+    )
+    if visit_max_window_days > 90:
+        raise AnalyticsConfigError(
+            "ANALYTICS_VISIT_MAX_WINDOW_DAYS must not exceed 90"
+        )
     return AnalyticsConfig(
         enabled=enabled,
         default_limit=default_limit,
@@ -111,6 +130,12 @@ def analytics_config_from_settings(
             settings.get("analytics_snr_threshold_db"),
             "ANALYTICS_SNR_THRESHOLD_DB",
         ),
+        visit_enabled=_exact_bool(
+            settings.get("analytics_visit_enabled", "true"),
+            "ANALYTICS_VISIT_ENABLED",
+        ),
+        visit_min_cohort_size=visit_min_cohort_size,
+        visit_max_window_days=visit_max_window_days,
     )
 
 
