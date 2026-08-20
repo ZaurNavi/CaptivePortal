@@ -248,3 +248,158 @@ class SourceQualitySummary:
         object.__setattr__(
             self, "unavailable_sources", tuple(self.unavailable_sources)
         )
+
+
+@dataclass(frozen=True, slots=True)
+class NumericDistribution:
+    sample_count: int
+    missing_count: int
+    minimum: float | None
+    maximum: float | None
+    mean: float | None
+    p10: float | None
+    p50: float | None
+    p90: float | None
+    p95: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConfiguredThresholdRatio:
+    threshold: float | None
+    below_threshold_count: int | None
+    below_configured_threshold_ratio: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class SignalDistribution:
+    metric: str
+    distribution: NumericDistribution
+    threshold: ConfiguredThresholdRatio
+
+
+@dataclass(frozen=True, slots=True)
+class ClientContextDistributionItem:
+    context: str | int | None
+    observation_count: int
+    distinct_client_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ClientContextDistribution:
+    dimension: str
+    items: tuple[ClientContextDistributionItem, ...]
+    missing_context_count: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
+class ConcurrentClientDistribution:
+    group_dimension: str | None
+    context: str | None
+    cycle_sample_count: int
+    minimum: float | None
+    mean: float | None
+    p50: float | None
+    p95: float | None
+    maximum: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceDistribution:
+    metric: str
+    distribution: NumericDistribution
+    distinct_ap_count: int | None = None
+    band: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RadioUtilizationItem:
+    ap_mac: str
+    band: str
+    distribution: NumericDistribution
+
+
+@dataclass(frozen=True, slots=True)
+class RadioUtilizationSummary:
+    metric: str
+    items: tuple[RadioUtilizationItem, ...]
+    distinct_ap_count: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
+class ThroughputDistribution:
+    metric: str
+    valid_rate_sample_count: int
+    excluded_rate_sample_count: int
+    reason_counts: Mapping[str, int]
+    distribution: NumericDistribution
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reason_counts", freeze(self.reason_counts))
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerCounterMetric:
+    metric: str
+    valid_interval_count: int
+    reset_interval_count: int
+    gap_interval_count: int
+    missing_interval_count: int
+    total_delta: int
+    ratio_event_delta: int
+    packet_delta: int
+    controller_events_per_1000_packets: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class CounterQualitySummary:
+    ap_mac: str | None
+    band: str | None
+    metrics: Mapping[str, ControllerCounterMetric]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metrics", freeze(self.metrics))
+
+
+@dataclass(frozen=True, slots=True)
+class JoinCoverage:
+    client_sample_count: int
+    matched_count: int
+    unmatched_count: int
+    match_ratio: float | None
+    lag_p50: float | None
+    lag_p95: float | None
+    lag_max: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class SignalApCorrelation:
+    signal_metric: str
+    ap_metric: str
+    sample_count: int
+    coefficient: float | None
+    coverage: JoinCoverage
+
+
+@dataclass(frozen=True, slots=True)
+class WirelessEvidenceBundle:
+    signal: Mapping[str, AnalyticsResult[Any]]
+    client_context: Mapping[str, AnalyticsResult[Any]]
+    concurrent_clients: AnalyticsResult[Any]
+    ap_resources: Mapping[str, AnalyticsResult[Any]]
+    radio_utilization: Mapping[str, AnalyticsResult[Any]]
+    throughput: Mapping[str, AnalyticsResult[Any]]
+    counter_quality: AnalyticsResult[Any]
+    correlations: Mapping[str, AnalyticsResult[Any]]
+
+    def __post_init__(self) -> None:
+        for field in (
+            "signal", "client_context", "ap_resources",
+            "radio_utilization", "throughput", "correlations",
+        ):
+            object.__setattr__(self, field, freeze(getattr(self, field)))
