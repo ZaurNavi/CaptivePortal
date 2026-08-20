@@ -76,6 +76,10 @@ from app.config import (
     OBSERVATION_AP_CYCLE_MAX_DURATION_SECONDS,
     OBSERVATION_AP_CONFIG_CYCLE_MAX_DURATION_SECONDS,
     OBSERVATION_RATE_MAX_GAP_SECONDS,
+    ANALYTICS_FOUNDATION_ENABLED, ANALYTICS_DEFAULT_LIMIT,
+    ANALYTICS_MAX_LIMIT, ANALYTICS_MAX_QUERY_WINDOW_DAYS,
+    ANALYTICS_MAX_QUERY_DURATION_SECONDS,
+    ANALYTICS_QUALITY_GAP_THRESHOLD_SECONDS,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -321,6 +325,18 @@ def get_settings() -> dict:
             OBSERVATION_AP_CONFIG_CYCLE_MAX_DURATION_SECONDS
         ),
         "observation_rate_max_gap_seconds": OBSERVATION_RATE_MAX_GAP_SECONDS,
+        "analytics_foundation_enabled": ANALYTICS_FOUNDATION_ENABLED,
+        "analytics_default_limit": ANALYTICS_DEFAULT_LIMIT,
+        "analytics_max_limit": ANALYTICS_MAX_LIMIT,
+        "analytics_max_query_window_days": (
+            ANALYTICS_MAX_QUERY_WINDOW_DAYS
+        ),
+        "analytics_max_query_duration_seconds": (
+            ANALYTICS_MAX_QUERY_DURATION_SECONDS
+        ),
+        "analytics_quality_gap_threshold_seconds": (
+            ANALYTICS_QUALITY_GAP_THRESHOLD_SECONDS
+        ),
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,
         "capport_public_base_url": CAPPORT_PUBLIC_BASE_URL,

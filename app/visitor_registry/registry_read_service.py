@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import date, datetime
 from typing import Any
 
@@ -28,6 +28,12 @@ class VisitorRegistryReadService:
         self.repository = repository
         self.service = service
         self.configured_enabled = configured_enabled
+
+    @contextmanager
+    def analytics_read_connection(self):
+        """Yield the registry repository's read-only connection."""
+        with self.repository.read_connection() as connection:
+            yield connection
 
     def get_status(self) -> dict[str, Any]:
         status = self.repository.get_status(self.configured_enabled)

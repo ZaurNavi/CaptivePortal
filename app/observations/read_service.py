@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+from contextlib import contextmanager
 from typing import Any, Callable, Iterable, Mapping, Sequence, TypeVar
 
 from .models import (
@@ -53,6 +54,12 @@ class ObservationReadService:
 
     def __init__(self, repository: ObservationRepository):
         self._repository = repository
+
+    @contextmanager
+    def analytics_read_connection(self):
+        """Yield the existing repository's URI-mode read-only connection."""
+        with self._repository.read_connection() as connection:
+            yield connection
 
     def get_client_observations(
         self,
