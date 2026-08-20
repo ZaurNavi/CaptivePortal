@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -1672,6 +1672,15 @@ class VisitorRegistryRepository:
                 (device_id, limit, offset),
             ).fetchall()
         return [_snapshot_row(row) for row in rows]
+
+    @contextmanager
+    def read_connection(self):
+        """Yield a URI-mode read-only connection for bounded read services."""
+        connection = self._connect(readonly=True)
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         validate_registry_database_target(self.db_path)

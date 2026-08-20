@@ -1,0 +1,250 @@
+"""Immutable public contracts for Analytics Read and Data Quality v1."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any, Generic, Mapping, TypeVar
+
+
+ANALYTICS_STATUSES = frozenset({
+    "ok", "partial", "insufficient_data", "unavailable",
+})
+QUALITY_MODES = frozenset({
+    "strict_complete", "diagnostic_including_partial",
+})
+
+
+def freeze(value: Any) -> Any:
+    """Recursively detach and freeze values exposed by Analytics."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({
+            str(key): freeze(item) for key, item in value.items()
+        })
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(freeze(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsQuality:
+    quality_mode: str
+    reason: str | None = None
+    accepted_rows: int = 0
+    rejected_rows: int = 0
+    missing_count: int = 0
+    partial_cycle_count: int = 0
+    failed_cycle_count: int = 0
+    abandoned_cycle_count: int = 0
+    warnings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.quality_mode not in QUALITY_MODES:
+            raise ValueError("unsupported Analytics quality mode")
+        object.__setattr__(self, "warnings", tuple(self.warnings))
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsProvenance:
+    site_id: str
+    from_utc: str
+    to_utc: str
+    evaluation_at_utc: str
+    computed_at_utc: str
+    quality_mode: str
+    source_names: tuple[str, ...]
+    source_schema_versions: Mapping[str, int]
+    source_watermarks: Mapping[str, str | None]
+    source_rows_examined: int
+    source_rows_accepted: int
+    source_rows_rejected: int
+    sample_size: int
+    missing_count: int
+    partial_cycle_count: int
+    failed_cycle_count: int
+    abandoned_cycle_count: int
+    filters: Mapping[str, Any]
+    metric_version: str
+    query_duration_ms: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_names", tuple(self.source_names))
+        object.__setattr__(
+            self, "source_schema_versions",
+            freeze(self.source_schema_versions),
+        )
+        object.__setattr__(
+            self, "source_watermarks", freeze(self.source_watermarks)
+        )
+        object.__setattr__(self, "filters", freeze(self.filters))
+
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsResult(Generic[T]):
+    status: str
+    value: T | None
+    quality: AnalyticsQuality
+    provenance: AnalyticsProvenance
+
+    def __post_init__(self) -> None:
+        if self.status not in ANALYTICS_STATUSES:
+            raise ValueError("unsupported Analytics status")
+        object.__setattr__(self, "value", freeze(self.value))
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageMetric:
+    numerator: int
+    denominator: int
+    ratio: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class CycleQualitySummary:
+    kind: str
+    running: int
+    completed: int
+    abandoned: int
+    completed_complete: int
+    completed_incomplete: int
+    success: int
+    partial: int
+    failed: int
+    shutdown: int
+    complete_ratio: float | None
+    latest_accepted_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFreshness:
+    source_name: str
+    status: str
+    latest_timestamp: str | None
+    freshness_seconds: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class FieldCompleteness:
+    source: str
+    field: str
+    row_count: int
+    non_null_count: int
+    missing_count: int
+    coverage_ratio: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class VisitObservationCoverage:
+    sample_count: int
+    interval_count: int
+    first_observed_at: str | None
+    last_observed_at: str | None
+    edge_gap_start_seconds: float | None
+    edge_gap_end_seconds: float | None
+    max_inter_sample_gap_seconds: float | None
+    gap_count_over_threshold: int
+    gap_threshold_seconds: float
+    observed_span_seconds: float | None
+    observed_span_ratio: float | None
+    provisional: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SafeSnapshotSummary:
+    snapshot_id: str
+    device_id: str
+    auth_session_id: str
+    site_id: str
+    requested_mac: str
+    authorized_at: str
+    captured_at: str
+    device_type: str | None
+    ssid: str | None
+    ap_mac: str | None
+    radio_id: int | None
+    channel: int | None
+    rssi: int | None
+    snr: int | None
+    traffic_down: int | None
+    traffic_up: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryDeviceSummary:
+    device_id: str
+    mac: str
+    first_seen_at: str
+    last_seen_at: str
+    last_site_id: str
+    last_ip: str | None
+    last_ssid: str | None
+    last_ap_name: str | None
+    last_ap_mac: str | None
+    last_rssi: int | None
+    last_snr: int | None
+    snapshot_count: int
+    site_context_available: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VisitQualityItem:
+    visit_id: str
+    site_id: str
+    client_mac: str
+    device_id: str | None
+    initial_snapshot_id: str | None
+    started_at: str
+    closed_at: str | None
+    status: str
+    authorization_count: int | None
+    snapshot_resolved: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsPage(Generic[T]):
+    items: tuple[T, ...]
+    next_cursor: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsVisitContext:
+    visit: VisitQualityItem
+    device: RegistryDeviceSummary | None
+    snapshot: SafeSnapshotSummary | None
+    observation_coverage: VisitObservationCoverage | None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceQualitySummary:
+    cycle_quality: Mapping[str, CycleQualitySummary]
+    freshness: Mapping[str, SourceFreshness]
+    field_completeness: Mapping[str, tuple[FieldCompleteness, ...]]
+    device_link_coverage: CoverageMetric | None
+    initial_snapshot_link_coverage: CoverageMetric | None
+    resolved_snapshot_coverage: CoverageMetric | None
+    authorization_attachment_coverage: CoverageMetric | None
+    closed_visit_coverage: CoverageMetric | None
+    open_visit_count: int | None
+    source_event_quality: Mapping[str, Mapping[str, int]]
+    unavailable_sources: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "cycle_quality", freeze(self.cycle_quality))
+        object.__setattr__(self, "freshness", freeze(self.freshness))
+        object.__setattr__(
+            self, "field_completeness", freeze(self.field_completeness)
+        )
+        object.__setattr__(
+            self, "source_event_quality", freeze(self.source_event_quality)
+        )
+        object.__setattr__(
+            self, "unavailable_sources", tuple(self.unavailable_sources)
+        )

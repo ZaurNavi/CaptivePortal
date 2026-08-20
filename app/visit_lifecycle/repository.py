@@ -741,6 +741,15 @@ class VisitRepository:
             ).fetchone()
         return _visit_row(row) if row is not None else None
 
+    @contextmanager
+    def read_connection(self):
+        """Yield a URI-mode read-only connection for bounded read services."""
+        connection = self._connect(readonly=True)
+        try:
+            yield connection
+        finally:
+            connection.close()
+
     def get_open_visit(
         self,
         site_id: str,

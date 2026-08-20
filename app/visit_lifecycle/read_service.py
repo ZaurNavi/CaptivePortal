@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 from .models import (
@@ -27,6 +28,12 @@ MAX_LIMIT = 2_000
 class VisitLifecycleReadService:
     def __init__(self, repository: VisitRepository):
         self.repository = repository
+
+    @contextmanager
+    def analytics_read_connection(self):
+        """Yield the lifecycle repository's read-only connection."""
+        with self.repository.read_connection() as connection:
+            yield connection
 
     def get_visit(self, site_id: str, visit_id: str):
         return self.repository.get_visit(
