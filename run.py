@@ -12,6 +12,9 @@ import signal
 import sys
 import threading
 
+from werkzeug.serving import WSGIRequestHandler
+from flask import Flask
+
 from app import create_controller, logger, get_settings
 from app.visitor_registry import (
     UnavailableVisitorRegistry,
@@ -24,6 +27,8 @@ from app.visitor_registry.registry_read_service import (
 from app.visit_lifecycle import create_visit_lifecycle
 from app.pending_sessions import create_pending_session_cleaner
 from app.observations import create_observation_foundation
+from app.analytics import create_analytics_runtime
+from app.analytics.api import API_PREFIX
 from app.web.web import create_app, auth_executor, auth_manager
 
 
@@ -35,6 +40,32 @@ _visitor_registry = None
 _pending_session_cleaner = None
 _observation_foundation = None
 _visit_lifecycle = None
+_analytics_runtime = None
+
+
+def _safe_access_requestline(requestline: str) -> str:
+    """Strip Analytics query strings before Werkzeug writes access logs."""
+    parts = requestline.split(" ", 2)
+    if len(parts) != 3:
+        return "<malformed request>"
+    method, target, protocol = parts
+    path = target.split("?", 1)[0]
+    if path == API_PREFIX or path.startswith(API_PREFIX + "/"):
+        return f"{method} {path} {protocol}"
+    return requestline
+
+
+class SecretSafeRequestHandler(WSGIRequestHandler):
+    """Production request handler that never logs Analytics query values."""
+
+    def log_request(self, code="-", size="-") -> None:
+        self.log(
+            "info",
+            '"%s" %s %s',
+            _safe_access_requestline(self.requestline),
+            code,
+            size,
+        )
 
 
 def shutdown_handler() -> None:
@@ -182,11 +213,32 @@ def _start_public_traffic_worker(app) -> None:
         _public_traffic_worker = None
 
 
+def _configure_analytics(app, settings, registry_read_service) -> None:
+    """Attach the demand-only Analytics runtime after source composition."""
+    global _analytics_runtime
+
+    try:
+        _analytics_runtime = create_analytics_runtime(
+            settings,
+            _observation_foundation,
+            _visit_lifecycle,
+            registry_read_service,
+            logger,
+        )
+        app.extensions["analytics_runtime"] = _analytics_runtime
+        if _analytics_runtime.blueprint is not None:
+            app.register_blueprint(_analytics_runtime.blueprint)
+    except Exception:
+        _analytics_runtime = None
+        app.extensions["analytics_runtime"] = None
+        logger.exception("analytics_api_runtime_configuration_failed")
+
+
 def main() -> None:
     """Main application entry point."""
     global _visitor_snapshot_collector, _visitor_registry
     global _pending_session_cleaner, _observation_foundation
-    global _visit_lifecycle
+    global _visit_lifecycle, _analytics_runtime
 
     logger.info("Starting Captive Portal")
 
@@ -269,6 +321,7 @@ def main() -> None:
         )
     except Exception:
         logger.exception("visit_lifecycle_reconciliation_start_failed")
+    _configure_analytics(app, settings, registry_read_service)
     _start_public_traffic_worker(app)
 
     host = settings["host"]
@@ -280,11 +333,17 @@ def main() -> None:
     )
 
     try:
+        production_options = (
+            {"request_handler": SecretSafeRequestHandler}
+            if isinstance(app, Flask)
+            else {}
+        )
         app.run(
             host=host,
             port=port,
             debug=debug,
-            use_reloader=False
+            use_reloader=False,
+            **production_options,
         )
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt caught in main loop.")

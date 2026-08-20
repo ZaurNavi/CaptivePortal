@@ -5,6 +5,11 @@ from .config import (
     AnalyticsConfigError,
     analytics_config_from_settings,
 )
+from .api_config import (
+    AnalyticsApiConfig,
+    AnalyticsApiConfigError,
+    analytics_api_config_from_settings,
+)
 from .models import (
     AnalyticsPage,
     AnalyticsProvenance,
@@ -28,19 +33,24 @@ from .models import (
     VisitQualityItem,
 )
 from .read_service import AnalyticsReadService
+from .runtime import AnalyticsRuntime, create_analytics_runtime
 from .source_gateway import AnalyticsSourceGateway
 from .validation import AnalyticsQueryValidationError
+from .visits import VisitAnalyticsService
 from .wireless import WirelessAnalyticsService
 
 __all__ = [
     "AnalyticsConfig",
     "AnalyticsConfigError",
+    "AnalyticsApiConfig",
+    "AnalyticsApiConfigError",
     "AnalyticsPage",
     "AnalyticsProvenance",
     "AnalyticsQuality",
     "AnalyticsQueryValidationError",
     "AnalyticsResult",
     "AnalyticsReadService",
+    "AnalyticsRuntime",
     "AnalyticsSourceGateway",
     "AnalyticsVisitContext",
     "CoverageMetric",
@@ -58,6 +68,9 @@ __all__ = [
     "ThroughputDistribution",
     "VisitObservationCoverage",
     "VisitQualityItem",
+    "VisitAnalyticsService",
     "WirelessAnalyticsService",
+    "analytics_api_config_from_settings",
     "analytics_config_from_settings",
+    "create_analytics_runtime",
 ]
