@@ -575,14 +575,39 @@ class ObservationRepository:
             abandoned_cycles=max(0, int(updated)),
         )
 
-    def validate_runtime_health(self) -> None:
+    def validate_runtime_health(
+        self,
+        *,
+        should_interrupt: Callable[[], bool] | None = None,
+    ) -> bool:
+        interrupted = False
+
+        def progress_handler() -> int:
+            nonlocal interrupted
+            interrupted = bool(
+                should_interrupt is not None and should_interrupt()
+            )
+            return int(interrupted)
+
         try:
             with closing(self._connect(readonly=True)) as connection:
                 self._startup_check(connection)
+                if should_interrupt is not None:
+                    connection.set_progress_handler(progress_handler, 10_000)
+                try:
+                    self._integrity_check(connection)
+                finally:
+                    if should_interrupt is not None:
+                        connection.set_progress_handler(None, 0)
         except ObservationSchemaError:
             raise
+        except sqlite3.OperationalError as exc:
+            if interrupted and "interrupted" in str(exc).lower():
+                return False
+            raise _storage_error(exc) from exc
         except sqlite3.Error as exc:
             raise _storage_error(exc) from exc
+        return True
 
     def create_cycle(
         self,
@@ -995,12 +1020,21 @@ class ObservationRepository:
             )
         if version != SCHEMA_VERSION:
             raise ObservationSchemaError("Observation schema version mismatch")
+        self._validate_schema(connection)
+
+    def _integrity_check(self, connection: sqlite3.Connection) -> None:
         quick = connection.execute("PRAGMA quick_check").fetchone()
         if not quick or str(quick[0]) != "ok":
             raise ObservationSchemaError(
-                "Observation startup health check failed"
+                "Observation storage integrity check failed"
             )
-        self._validate_schema(connection)
+        violations = connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchone()
+        if violations is not None:
+            raise ObservationSchemaError(
+                "Observation foreign key validation failed"
+            )
 
     def _validate_schema(self, connection: sqlite3.Connection) -> None:
         tables = self._table_names(connection)
@@ -1084,11 +1118,6 @@ class ObservationRepository:
                 raise ObservationSchemaError(
                     f"Observation foreign key is invalid: {table}"
                 )
-        violations = connection.execute("PRAGMA foreign_key_check").fetchone()
-        if violations is not None:
-            raise ObservationSchemaError(
-                "Observation foreign key validation failed"
-            )
 
     @staticmethod
     def _table_names(connection: sqlite3.Connection) -> set[str]:

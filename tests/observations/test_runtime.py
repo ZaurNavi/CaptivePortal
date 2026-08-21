@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -89,6 +91,85 @@ def test_runtime_preserves_provider_identity_recovers_starts_and_stops(tmp_path)
     assert "observation.runtime_stopped" in names
 
 
+def test_runtime_start_does_not_wait_for_full_integrity_scan(
+    tmp_path,
+    monkeypatch,
+):
+    data = tmp_path / "data"
+    data.mkdir(mode=0o750)
+    runtime = create_observation_foundation(
+        enabled(tmp_path),
+        object(),
+        Telemetry(),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def delayed_health_check(*, should_interrupt):
+        entered.set()
+        while not release.wait(0.01):
+            if should_interrupt():
+                return False
+        return True
+
+    monkeypatch.setattr(
+        runtime.repository,
+        "validate_runtime_health",
+        delayed_health_check,
+    )
+
+    started_at = time.monotonic()
+    assert runtime.start() is True
+    elapsed = time.monotonic() - started_at
+    try:
+        assert elapsed < 0.5
+        assert entered.wait(1)
+        assert runtime.state == "active"
+        assert runtime.integrity_worker.running is True
+    finally:
+        release.set()
+        runtime.stop(2)
+
+
+def test_background_integrity_failure_degrades_without_stopping_runtime(
+    tmp_path,
+    monkeypatch,
+):
+    data = tmp_path / "data"
+    data.mkdir(mode=0o750)
+    telemetry = Telemetry()
+    runtime = create_observation_foundation(
+        enabled(tmp_path),
+        object(),
+        telemetry,
+    )
+
+    def failed_health_check(*, should_interrupt):
+        raise RuntimeError("integrity failure")
+
+    monkeypatch.setattr(
+        runtime.repository,
+        "validate_runtime_health",
+        failed_health_check,
+    )
+
+    assert runtime.start() is True
+    try:
+        deadline = time.monotonic() + 1
+        while (
+            runtime.integrity_worker.last_error is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert runtime.state == "degraded"
+        assert runtime.client_worker.running is True
+        assert runtime.ap_worker.running is True
+        names = [event[0] for event in telemetry.events]
+        assert "observation.integrity_check_failed" in names
+    finally:
+        runtime.stop(2)
+
+
 def test_stop_timeout_leaves_runtime_stopping(tmp_path, monkeypatch):
     data = tmp_path / "data"
     data.mkdir(mode=0o750)
@@ -139,6 +220,20 @@ def test_cleanup_success_clears_runtime_degraded_state(tmp_path, monkeypatch):
     runtime.cleanup_worker.run_once()
     assert runtime.cleanup_worker.last_error is None
     assert runtime.state == "active"
+
+
+def test_integrity_timeout_marks_runtime_degraded(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(mode=0o750)
+    runtime = create_observation_foundation(
+        enabled(tmp_path),
+        object(),
+        Telemetry(),
+    )
+    runtime._state = "active"
+    runtime.integrity_worker.timed_out = True
+
+    assert runtime.state == "degraded"
 
 
 def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
