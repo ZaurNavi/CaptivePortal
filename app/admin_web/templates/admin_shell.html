@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CaptivPortal Admin</title>
+</head>
+<body>
+  <header>
+    <strong>CaptivPortal</strong>
+    <span>Site {{ site_id }}</span>
+    <span>{{ username }}</span>
+    <form method="post" action="/admin/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Logout</button>
+    </form>
+  </header>
+  <nav aria-label="Admin navigation">
+    <a href="/admin/sites/{{ site_id }}/">Home</a>
+  </nav>
+  <main>
+    <h1>Admin Web Foundation</h1>
+    <p>Site context is active.</p>
+    <p>Runtime: {{ runtime_state }}</p>
+  </main>
+</body>
+</html>
