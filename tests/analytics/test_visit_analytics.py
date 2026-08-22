@@ -10,7 +10,10 @@ from app.analytics.config import AnalyticsConfig
 from app.analytics.config import (
     AnalyticsConfigError, analytics_config_from_settings,
 )
-from app.analytics.source_gateway import AnalyticsSourceUnavailable
+from app.analytics.source_gateway import (
+    AnalyticsSourceUnavailable,
+    QueryDeadline,
+)
 from app.analytics.validation import AnalyticsQueryValidationError
 from app.analytics.visits import VisitAnalyticsService
 
@@ -22,7 +25,7 @@ FROM = "2026-01-01T09:59:00.000Z"
 TO = "2026-01-01T11:00:00.000Z"
 
 
-def _service(stack, *, minimum=1, clock=None):
+def _service(stack, *, minimum=1, clock=None, monotonic=None):
     return VisitAnalyticsService(
         AnalyticsConfig(
             enabled=True, visit_enabled=True,
@@ -32,7 +35,67 @@ def _service(stack, *, minimum=1, clock=None):
         ),
         stack.gateway,
         clock=clock or (lambda: datetime(2026, 1, 1, 11, tzinfo=UTC)),
+        **({} if monotonic is None else {"monotonic": monotonic}),
     )
+
+
+def test_optional_admin_deadline_can_only_shorten_visit_counts(
+    analytics_stack, monkeypatch,
+):
+    now = lambda: 100.0
+    captured = []
+    original = analytics_stack.gateway.visit_cohort_summary
+
+    def visit_cohort_summary(**kwargs):
+        captured.append(kwargs["deadline"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        analytics_stack.gateway, "visit_cohort_summary", visit_cohort_summary
+    )
+    service = _service(analytics_stack, monotonic=now)
+    service.get_visit_counts(SITE_A, FROM, TO)
+    assert captured[-1].expires_at == 110.0
+    service.get_visit_counts(
+        SITE_A, FROM, TO, deadline=QueryDeadline(102.0, now)
+    )
+    assert captured[-1].expires_at == 102.0
+    service.get_visit_counts(
+        SITE_A, FROM, TO, deadline=QueryDeadline(200.0, now)
+    )
+    assert captured[-1].expires_at == 110.0
+
+
+def test_expired_external_deadline_uses_existing_unavailable_semantics(
+    analytics_stack,
+):
+    now = lambda: 100.0
+    result = _service(analytics_stack, monotonic=now).get_visit_counts(
+        SITE_A, FROM, TO, deadline=QueryDeadline(99.0, now)
+    )
+    assert result.status == "unavailable"
+    assert result.quality.reason == "query_deadline"
+
+
+def test_device_counts_forwards_effective_external_deadline(
+    analytics_stack, monkeypatch,
+):
+    now = lambda: 100.0
+    captured = []
+    original = analytics_stack.gateway.visit_device_summary
+
+    def visit_device_summary(**kwargs):
+        captured.append(kwargs["deadline"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        analytics_stack.gateway, "visit_device_summary", visit_device_summary
+    )
+    result = _service(analytics_stack, monotonic=now).get_device_counts(
+        SITE_A, FROM, TO, deadline=QueryDeadline(101.0, now)
+    )
+    assert result.status == "ok"
+    assert captured[0].expires_at == 101.0
 
 
 def _insert_open(stack, *, site=SITE_A, device=DEVICE_A,

@@ -21,6 +21,7 @@ class AdminWebRuntime:
     rate_limiter: AdminLoginRateLimiter | None = None
     access_policy: AdminAccessPolicy | None = None
     site_resolver: AdminSiteContextResolver | None = None
+    query_service: Any | None = None
     blueprint: Any | None = None
 
     def clear(self) -> None:
@@ -64,20 +65,27 @@ def create_admin_web_runtime(
         lock_seconds=config.login_lock_seconds,
         max_trackers=config.max_login_trackers,
     )
+    source_ready = all(
+        source is not None
+        for source in (
+            registry_read_service,
+            visit_read_service,
+            observation_read_service,
+        )
+    )
+    query_service = None
+    if getattr(analytics_runtime, "state", None) == "active" and source_ready:
+        query_service = _query_service(
+            config,
+            analytics_runtime,
+            registry_read_service,
+            visit_read_service,
+            observation_read_service,
+        )
     runtime = AdminWebRuntime(
         state=(
             "active"
-            if (
-                getattr(analytics_runtime, "state", None) == "active"
-                and all(
-                    source is not None
-                    for source in (
-                        registry_read_service,
-                        visit_read_service,
-                        observation_read_service,
-                    )
-                )
-            )
+            if query_service is not None
             else "unavailable"
         ),
         config=config,
@@ -89,8 +97,44 @@ def create_admin_web_runtime(
             config.allowed_site_ids,
             config.default_site_id,
         ),
+        query_service=query_service,
     )
     from .routes import create_admin_web_blueprint
 
     runtime.blueprint = create_admin_web_blueprint(runtime, logger=logger)
     return runtime
+
+
+def _query_service(
+    config: AdminWebConfig,
+    analytics_runtime: Any,
+    registry_read_service: Any,
+    visit_read_service: Any,
+    observation_read_service: Any,
+):
+    """Build 01B only when concrete read boundaries expose local paths."""
+    try:
+        registry_repository = registry_read_service.repository
+        visit_repository = visit_read_service.repository
+        observation_repository = observation_read_service._repository  # noqa: SLF001
+        analytics_service = analytics_runtime.visit_service
+        from .device_gateway import AdminDeviceReadGateway
+        from .query_service import AdminQueryService
+        from .read_gateway import AdminSqlReadGateway
+
+        policy = AdminAccessPolicy(config.allowed_site_ids)
+        return AdminQueryService(
+            config=config,
+            policy=policy,
+            device_gateway=AdminDeviceReadGateway(
+                registry_repository.config.db_path,
+                visit_repository.db_path,
+            ),
+            read_gateway=AdminSqlReadGateway(
+                visit_repository.db_path,
+                observation_repository.db_path,
+            ),
+            visit_analytics_service=analytics_service,
+        )
+    except (AttributeError, TypeError):
+        return None

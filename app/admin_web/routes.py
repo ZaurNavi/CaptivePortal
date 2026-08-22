@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import json
 import logging
 import time
 import uuid
@@ -27,6 +28,15 @@ from .config import USERNAME_PATTERN
 from .models import AdminPrincipal
 from .policy import AdminAccessDenied, AdminSiteContextError
 from .tokens import is_canonical_token, token_matches
+from .query_service import (
+    AdminQueryBusy,
+    AdminQueryDeadline,
+    AdminQueryError,
+    AdminQueryForbidden,
+    AdminQueryNotFound,
+    AdminQueryUnavailable,
+    AdminQueryValidationError,
+)
 
 
 ADMIN_PREFIX = "/admin"
@@ -310,6 +320,163 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         code = 200 if runtime.state == "active" else 503
         return _success(None, {"status": runtime.state}, status_code=code)
 
+    @blueprint.get("/admin/api/v1/sites/<site_id>/summary/visits")
+    @authenticated
+    def api_visit_summary(site_id: str) -> Response:
+        if set(request.args) != {"from_utc", "to_utc"}:
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.visit_summary(
+                g.admin_principal,
+                selected,
+                request.args["from_utc"],
+                request.args["to_utc"],
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/summary/devices")
+    @authenticated
+    def api_device_summary(site_id: str) -> Response:
+        if set(request.args) != {"from_utc", "to_utc"}:
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.device_summary(
+                g.admin_principal,
+                selected,
+                request.args["from_utc"],
+                request.args["to_utc"],
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/devices")
+    @authenticated
+    def api_devices(site_id: str) -> Response:
+        if set(request.args) - {"limit", "cursor"}:
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.list_devices(
+                g.admin_principal,
+                selected,
+                limit=request.args.get("limit"),
+                cursor=request.args.get("cursor"),
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/devices/<device_id>")
+    @authenticated
+    def api_device(site_id: str, device_id: str) -> Response:
+        if request.args:
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.device_detail(
+                g.admin_principal, selected, device_id
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/visits")
+    @authenticated
+    def api_visits(site_id: str) -> Response:
+        allowed = {
+            "from_utc", "to_utc", "status", "client_mac", "device_id",
+            "ssid", "ap_mac", "limit", "cursor",
+        }
+        if set(request.args) - allowed:
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.list_visits(
+                g.admin_principal,
+                selected,
+                **{key: request.args.get(key) for key in allowed},
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/visits/<visit_id>")
+    @authenticated
+    def api_visit(site_id: str, visit_id: str) -> Response:
+        if request.args:
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.visit_detail(
+                g.admin_principal, selected, visit_id
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/observations/clients")
+    @authenticated
+    def api_client_observations(site_id: str) -> Response:
+        required = {"client_mac", "from_utc", "to_utc"}
+        allowed = required | {"limit", "cursor"}
+        if set(request.args) - allowed or not required.issubset(request.args):
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.client_observations(
+                g.admin_principal,
+                selected,
+                **{key: request.args.get(key) for key in allowed},
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/observations/aps")
+    @authenticated
+    def api_ap_observations(site_id: str) -> Response:
+        required = {"ap_mac", "from_utc", "to_utc"}
+        allowed = required | {"limit", "cursor"}
+        if set(request.args) - allowed or not required.issubset(request.args):
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.ap_observations(
+                g.admin_principal,
+                selected,
+                **{key: request.args.get(key) for key in allowed},
+            ),
+        )
+
+    def _site_query(site_id: str, operation: Callable[..., Any]) -> Response:
+        try:
+            selected = resolver.resolve(site_id)
+        except AdminSiteContextError:
+            return _error("invalid_request", 400)
+        except AdminAccessDenied:
+            return _error("site_forbidden", 403)
+        service = runtime.query_service
+        if service is None:
+            return _error("source_unavailable", 503)
+        try:
+            response = operation(service, selected)
+        except AdminQueryValidationError:
+            return _error("invalid_request", 400)
+        except AdminQueryForbidden:
+            return _error("site_forbidden", 403)
+        except AdminQueryNotFound:
+            return _error("not_found", 404)
+        except AdminQueryBusy:
+            result = make_response(_error("concurrency_limit", 429))
+            result.headers["Retry-After"] = "1"
+            return result
+        except AdminQueryDeadline:
+            return _error("query_deadline", 503)
+        except AdminQueryUnavailable:
+            return _error("source_unavailable", 503)
+        except AdminQueryError:
+            return _error("internal_error", 500)
+        except Exception:
+            logger.exception("admin.query_failed")
+            return _error("internal_error", 500)
+        return _success(
+            selected,
+            response.result,
+            page=response.page,
+            enforce_size=True,
+        )
+
     def _delete_preauth(response: Response) -> Response:
         response.delete_cookie(PREAUTH_COOKIE, path="/admin/login")
         return response
@@ -325,16 +492,36 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             401,
         )
 
-    def _success(site_id: str | None, result: dict[str, Any], *, status_code: int = 200) -> Response:
-        return jsonify(
-            {
-                "api_version": API_VERSION,
-                "request_id": g.admin_request_id,
-                "site_id": site_id,
-                "result": result,
-                "page": None,
-            }
-        ), status_code
+    def _success(
+        site_id: str | None,
+        result: Any,
+        *,
+        status_code: int = 200,
+        page: dict[str, Any] | None = None,
+        enforce_size: bool = False,
+    ) -> Response:
+        payload = {
+            "api_version": API_VERSION,
+            "request_id": g.admin_request_id,
+            "site_id": site_id,
+            "result": result,
+            "page": page,
+        }
+        try:
+            body = json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            return _error("internal_error", 500)
+        if enforce_size and len(body) > config.max_response_bytes:
+            return _error("response_too_large", 503)
+        response = make_response(body, status_code)
+        response.mimetype = "application/json"
+        return response
 
     return blueprint
 
