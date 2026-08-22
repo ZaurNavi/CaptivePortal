@@ -46,6 +46,46 @@ def test_valid_security_with_missing_sources_keeps_safe_shell_available():
     assert runtime.blueprint is not None
 
 
+def test_concrete_read_boundaries_compose_admin_query_service(tmp_path):
+    registry = SimpleNamespace(
+        repository=SimpleNamespace(
+            config=SimpleNamespace(db_path=str(tmp_path / "registry.sqlite3"))
+        )
+    )
+    visits = SimpleNamespace(
+        repository=SimpleNamespace(db_path=tmp_path / "visits.sqlite3")
+    )
+    observations = SimpleNamespace(
+        _repository=SimpleNamespace(db_path=tmp_path / "observations.sqlite3")
+    )
+    analytics = SimpleNamespace(state="active", visit_service=object())
+    runtime = create_admin_web_runtime(
+        enabled_settings(),
+        analytics,
+        registry,
+        visits,
+        observations,
+        logging.getLogger("admin-query-composition"),
+    )
+    assert runtime.state == "active"
+    assert runtime.query_service is not None
+
+
+def test_incomplete_read_boundary_keeps_admin_runtime_unavailable():
+    analytics = SimpleNamespace(state="active", visit_service=object())
+    runtime = create_admin_web_runtime(
+        enabled_settings(),
+        analytics,
+        SimpleNamespace(repository=object()),
+        SimpleNamespace(repository=object()),
+        SimpleNamespace(_repository=object()),
+        logging.getLogger("admin-query-incomplete"),
+    )
+    assert runtime.state == "unavailable"
+    assert runtime.query_service is None
+    assert runtime.blueprint is not None
+
+
 def test_process_runtime_composes_admin_after_sources(monkeypatch):
     selected = SimpleNamespace(blueprint=object())
     seen = {}

@@ -59,7 +59,10 @@ class VisitAnalyticsService:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._monotonic = monotonic
 
-    def get_visit_counts(self, site_id: str, from_utc: str, to_utc: str):
+    def get_visit_counts(
+        self, site_id: str, from_utc: str, to_utc: str, *,
+        deadline: QueryDeadline | None = None,
+    ):
         site, start, end, _, _ = self._query(site_id, from_utc, to_utc)
         return self._execute(
             site, start, end, "visit.counts.v1", ("visits",),
@@ -75,6 +78,7 @@ class VisitAnalyticsService:
                 self._meta(raw, sample=int(raw["total_visit_count"])),
             ),
             {"population_semantics": _START_COHORT},
+            external_deadline=deadline,
         )
 
     def get_visit_time_series(
@@ -105,14 +109,19 @@ class VisitAnalyticsService:
              "display_timezone": display_timezone},
         )
 
-    def get_device_counts(self, site_id: str, from_utc: str, to_utc: str):
-        return self._device_result(site_id, from_utc, to_utc, "counts")
+    def get_device_counts(
+        self, site_id: str, from_utc: str, to_utc: str, *,
+        deadline: QueryDeadline | None = None,
+    ):
+        return self._device_result(
+            site_id, from_utc, to_utc, "counts", deadline=deadline)
 
     def get_repeat_devices(self, site_id: str, from_utc: str, to_utc: str):
         return self._device_result(site_id, from_utc, to_utc, "repeat")
 
     def _device_result(
-        self, site_id: str, from_utc: str, to_utc: str, mode: str,
+        self, site_id: str, from_utc: str, to_utc: str, mode: str, *,
+        deadline: QueryDeadline | None = None,
     ):
         site, start, end, _, _ = self._query(site_id, from_utc, to_utc)
         metric = "visit.devices.v1" if mode == "counts" else "visit.repeat.v1"
@@ -140,7 +149,8 @@ class VisitAnalyticsService:
             site, start, end, metric, ("visits",),
             lambda deadline, _evaluation: self.gateway.visit_device_summary(
                 site_id=site, from_utc=start, to_utc=end, deadline=deadline),
-            build, {"population_semantics": _START_COHORT})
+            build, {"population_semantics": _START_COHORT},
+            external_deadline=deadline)
 
     def get_new_to_site_devices(
         self, site_id: str, from_utc: str, to_utc: str,
@@ -626,12 +636,15 @@ class VisitAnalyticsService:
         builder: Callable[[Mapping[str, Any]], tuple[Any, str, str | None,
                                                       Mapping[str, Any]]],
         filters: Mapping[str, Any],
+        *,
+        external_deadline: QueryDeadline | None = None,
     ):
         started = self._monotonic()
         evaluation = self._now()
         try:
             self._require_enabled()
-            raw = loader(self._deadline(), evaluation)
+            raw = loader(
+                self._effective_deadline(external_deadline), evaluation)
             value, status, reason, meta = builder(raw)
         except (AnalyticsSourceUnavailable, AnalyticsQueryDeadlineExceeded,
                 AnalyticsPerformanceBudgetExceeded) as exc:
@@ -716,6 +729,15 @@ class VisitAnalyticsService:
         return QueryDeadline.after(
             self.config.max_query_duration_seconds,
             monotonic=self._monotonic)
+
+    def _effective_deadline(
+        self,
+        external: QueryDeadline | None,
+    ) -> QueryDeadline:
+        service = self._deadline()
+        if external is None or service.expires_at <= external.expires_at:
+            return service
+        return external
 
     def _now(self) -> str:
         value = self._clock()

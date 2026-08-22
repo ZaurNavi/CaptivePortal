@@ -34,13 +34,23 @@ def enabled_settings(**overrides):
 
 
 @pytest.fixture
-def admin_app():
+def admin_app(tmp_path):
     runtime = create_admin_web_runtime(
         enabled_settings(),
-        SimpleNamespace(state="active"),
-        object(),
-        object(),
-        object(),
+        SimpleNamespace(state="active", visit_service=object()),
+        SimpleNamespace(
+            repository=SimpleNamespace(
+                config=SimpleNamespace(db_path=tmp_path / "registry.sqlite3")
+            )
+        ),
+        SimpleNamespace(
+            repository=SimpleNamespace(db_path=tmp_path / "visits.sqlite3")
+        ),
+        SimpleNamespace(
+            _repository=SimpleNamespace(
+                db_path=tmp_path / "observations.sqlite3"
+            )
+        ),
         __import__("logging").getLogger("admin-web-test"),
     )
     app = Flask(__name__)
