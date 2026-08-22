@@ -222,6 +222,74 @@ def test_exact_site_membership_union_counts_and_latest_context(tmp_path):
     assert page.items[1].last_site_ip is None
 
 
+def test_exact_mac_filter_preserves_site_membership_and_deduplication(tmp_path):
+    paths = _databases(tmp_path)
+    registry, visits = paths
+    _snapshot(
+        registry,
+        device_id="snapshot-only",
+        mac="00:00:00:00:00:11",
+        captured_at="2026-01-01T01:00:00.000Z",
+    )
+    _visit(
+        visits,
+        device_id="visit-only",
+        mac="00:00:00:00:00:12",
+        started_at="2026-01-01T02:00:00.000Z",
+    )
+    _snapshot(
+        registry,
+        device_id="both",
+        mac="00:00:00:00:00:13",
+        captured_at="2026-01-01T03:00:00.000Z",
+    )
+    _visit(
+        visits,
+        device_id="both",
+        mac="00:00:00:00:00:13",
+        started_at="2026-01-01T04:00:00.000Z",
+    )
+    _snapshot(
+        registry,
+        device_id="other-site",
+        mac="00:00:00:00:00:14",
+        captured_at="2026-01-01T05:00:00.000Z",
+        site_id=OTHER_SITE,
+    )
+    _snapshot(
+        registry,
+        device_id="other-mac",
+        mac="00:00:00:00:00:15",
+        captured_at="2026-01-01T06:00:00.000Z",
+    )
+
+    gateway = _gateway(paths)
+    snapshot_only = gateway.list_devices(
+        site_id=SITE, canonical_mac="00:00:00:00:00:11",
+        limit=10, deadline=_deadline(),
+    )
+    visit_only = gateway.list_devices(
+        site_id=SITE, canonical_mac="00:00:00:00:00:12",
+        limit=10, deadline=_deadline(),
+    )
+    both_page = gateway.list_devices(
+        site_id=SITE, canonical_mac="00:00:00:00:00:13",
+        limit=10, deadline=_deadline(),
+    )
+    other_site = gateway.list_devices(
+        site_id=SITE, canonical_mac="00:00:00:00:00:14",
+        limit=10, deadline=_deadline(),
+    )
+
+    assert [item.device_id for item in snapshot_only.items] == ["snapshot-only"]
+    assert [item.device_id for item in visit_only.items] == ["visit-only"]
+    assert [item.device_id for item in both_page.items] == ["both"]
+    assert other_site.items == ()
+    both = both_page.items[0]
+    assert both.site_snapshot_count == 1
+    assert both.site_visit_count == 1
+
+
 def test_descending_keyset_is_stable_across_sources(tmp_path):
     paths = _databases(tmp_path)
     registry, visits = paths
@@ -427,7 +495,10 @@ def test_device_page_executes_one_cross_database_data_statement(
 
     monkeypatch.setattr("app.admin_web.device_gateway.sqlite3.connect", connect)
     _gateway(paths).list_devices(
-        site_id=SITE, limit=100, deadline=_deadline()
+        site_id=SITE,
+        canonical_mac="00:00:00:00:00:01",
+        limit=100,
+        deadline=_deadline(),
     )
     assert len(statements) == 1
     assert progress_calls[-1] == (None, 0)

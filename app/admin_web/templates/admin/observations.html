@@ -1,0 +1,21 @@
+{% extends "admin/base.html" %}
+{% block subtitle %}<p>Bounded client or AP history from normalized observations.</p>{% endblock %}
+{% block controls %}
+<form id="observation-form" class="filter-panel" novalidate>
+  <fieldset>
+    <legend>Observation type</legend>
+    <label><input type="radio" name="kind" value="clients" checked> Client</label>
+    <label><input type="radio" name="kind" value="aps"> Access point</label>
+  </fieldset>
+  <label for="observation-mac">Exact MAC address
+    <input id="observation-mac" name="mac" inputmode="text" autocomplete="off" placeholder="AA:BB:CC:DD:EE:FF" maxlength="17" required>
+  </label>
+  <label for="observation-from">From
+    <input id="observation-from" name="from" type="datetime-local" required>
+  </label>
+  <label for="observation-to">To
+    <input id="observation-to" name="to" type="datetime-local" required>
+  </label>
+  <button class="button" type="submit">Load observations</button>
+</form>
+{% endblock %}

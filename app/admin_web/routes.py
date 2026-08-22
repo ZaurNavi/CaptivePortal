@@ -26,6 +26,15 @@ from werkzeug.security import check_password_hash
 
 from .config import USERNAME_PATTERN
 from .models import AdminPrincipal
+from .pages import (
+    DEVICE,
+    DEVICES,
+    HOME,
+    OBSERVATIONS,
+    VISITS,
+    canonical_device_id,
+    render_admin_page,
+)
 from .policy import AdminAccessDenied, AdminSiteContextError
 from .tokens import is_canonical_token, token_matches
 from .query_service import (
@@ -59,6 +68,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         "admin_web_v1",
         __name__,
         template_folder="templates",
+        static_folder="static",
+        static_url_path="/admin/static",
     )
 
     @blueprint.before_app_request
@@ -266,6 +277,32 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     @blueprint.get("/admin/sites/<site_id>/")
     @authenticated
     def site_home(site_id: str) -> Response:
+        return _site_page(site_id, HOME)
+
+    @blueprint.get("/admin/sites/<site_id>/devices")
+    @authenticated
+    def site_devices(site_id: str) -> Response:
+        return _site_page(site_id, DEVICES)
+
+    @blueprint.get("/admin/sites/<site_id>/devices/<device_id>")
+    @authenticated
+    def site_device(site_id: str, device_id: str) -> Response:
+        selected_device = canonical_device_id(device_id)
+        if selected_device is None:
+            return _error("invalid_request", 400)
+        return _site_page(site_id, DEVICE, device_id=selected_device)
+
+    @blueprint.get("/admin/sites/<site_id>/visits")
+    @authenticated
+    def site_visits(site_id: str) -> Response:
+        return _site_page(site_id, VISITS)
+
+    @blueprint.get("/admin/sites/<site_id>/observations")
+    @authenticated
+    def site_observations(site_id: str) -> Response:
+        return _site_page(site_id, OBSERVATIONS)
+
+    def _site_page(site_id: str, page, *, device_id: str | None = None) -> Response:
         try:
             selected = resolver.resolve(site_id)
         except AdminSiteContextError:
@@ -274,14 +311,13 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return _error("site_forbidden", 403)
         if not policy.authorize(g.admin_principal, "admin.read.context", selected):
             return _error("site_forbidden", 403)
-        return make_response(
-            render_template(
-                "admin_shell.html",
-                site_id=selected,
-                username=g.admin_principal.username,
-                csrf_token=g.admin_session.csrf_token,
-                runtime_state=runtime.state,
-            )
+        return render_admin_page(
+            page,
+            site_id=selected,
+            username=g.admin_principal.username,
+            csrf_token=g.admin_session.csrf_token,
+            runtime_state=runtime.state,
+            device_id=device_id,
         )
 
     @blueprint.get("/admin/api/v1/session")
@@ -353,7 +389,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     @blueprint.get("/admin/api/v1/sites/<site_id>/devices")
     @authenticated
     def api_devices(site_id: str) -> Response:
-        if set(request.args) - {"limit", "cursor"}:
+        if set(request.args) - {"limit", "cursor", "mac"}:
             return _error("invalid_request", 400)
         return _site_query(
             site_id,
@@ -362,6 +398,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 selected,
                 limit=request.args.get("limit"),
                 cursor=request.args.get("cursor"),
+                mac=request.args.get("mac"),
             ),
         )
 
