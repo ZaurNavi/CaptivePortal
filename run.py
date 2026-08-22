@@ -29,6 +29,7 @@ from app.pending_sessions import create_pending_session_cleaner
 from app.observations import create_observation_foundation
 from app.analytics import create_analytics_runtime
 from app.analytics.api import API_PREFIX
+from app.admin_web import create_admin_web_runtime
 from app.web.web import create_app, auth_executor, auth_manager
 
 
@@ -41,22 +42,28 @@ _pending_session_cleaner = None
 _observation_foundation = None
 _visit_lifecycle = None
 _analytics_runtime = None
+_admin_web_runtime = None
 
 
 def _safe_access_requestline(requestline: str) -> str:
-    """Strip Analytics query strings before Werkzeug writes access logs."""
+    """Strip sensitive namespace query strings from production access logs."""
     parts = requestline.split(" ", 2)
     if len(parts) != 3:
         return "<malformed request>"
     method, target, protocol = parts
     path = target.split("?", 1)[0]
-    if path == API_PREFIX or path.startswith(API_PREFIX + "/"):
+    if (
+        path == API_PREFIX
+        or path.startswith(API_PREFIX + "/")
+        or path == "/admin"
+        or path.startswith("/admin/")
+    ):
         return f"{method} {path} {protocol}"
     return requestline
 
 
 class SecretSafeRequestHandler(WSGIRequestHandler):
-    """Production request handler that never logs Analytics query values."""
+    """Production handler that strips sensitive namespace query values."""
 
     def log_request(self, code="-", size="-") -> None:
         self.log(
@@ -84,6 +91,12 @@ def shutdown_handler() -> None:
         _shutdown_completed = True
 
     logger.info("Shutting down authentication worker executor...")
+
+    if _admin_web_runtime is not None:
+        try:
+            _admin_web_runtime.clear()
+        except Exception:
+            logger.exception("admin_runtime_clear_failed")
 
     if _pending_session_cleaner is not None:
         try:
@@ -234,11 +247,34 @@ def _configure_analytics(app, settings, registry_read_service) -> None:
         logger.exception("analytics_api_runtime_configuration_failed")
 
 
+def _configure_admin_web(app, settings, registry_read_service) -> None:
+    """Attach Admin Web after all existing read boundaries are composed."""
+    global _admin_web_runtime
+
+    try:
+        source_services = getattr(_analytics_runtime, "_source_services", {})
+        _admin_web_runtime = create_admin_web_runtime(
+            settings,
+            _analytics_runtime,
+            registry_read_service,
+            source_services.get("visits"),
+            source_services.get("observations"),
+            logger,
+        )
+        app.extensions["admin_web_runtime"] = _admin_web_runtime
+        if _admin_web_runtime.blueprint is not None:
+            app.register_blueprint(_admin_web_runtime.blueprint)
+    except Exception:
+        _admin_web_runtime = None
+        app.extensions["admin_web_runtime"] = None
+        logger.exception("admin_runtime_configuration_failed")
+
+
 def main() -> None:
     """Main application entry point."""
     global _visitor_snapshot_collector, _visitor_registry
     global _pending_session_cleaner, _observation_foundation
-    global _visit_lifecycle, _analytics_runtime
+    global _visit_lifecycle, _analytics_runtime, _admin_web_runtime
 
     logger.info("Starting Captive Portal")
 
@@ -322,6 +358,7 @@ def main() -> None:
     except Exception:
         logger.exception("visit_lifecycle_reconciliation_start_failed")
     _configure_analytics(app, settings, registry_read_service)
+    _configure_admin_web(app, settings, registry_read_service)
     _start_public_traffic_worker(app)
 
     host = settings["host"]

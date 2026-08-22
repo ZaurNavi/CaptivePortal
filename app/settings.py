@@ -92,6 +92,23 @@ from app.config import (
     ANALYTICS_API_ALLOWED_NETWORKS, ANALYTICS_API_ALLOWED_SITE_IDS,
     ANALYTICS_API_MAX_CONCURRENT_REQUESTS,
     ANALYTICS_API_MAX_RESPONSE_BYTES,
+    WEB_ADMIN_ENABLED, WEB_ADMIN_USERNAME, WEB_ADMIN_PASSWORD_HASH,
+    WEB_ADMIN_ALLOWED_NETWORKS, WEB_ADMIN_ALLOWED_SITE_IDS,
+    WEB_ADMIN_DEFAULT_SITE_ID, WEB_ADMIN_REQUIRE_HTTPS,
+    WEB_ADMIN_SESSION_IDLE_SECONDS,
+    WEB_ADMIN_SESSION_ABSOLUTE_SECONDS,
+    WEB_ADMIN_LOGIN_WINDOW_SECONDS, WEB_ADMIN_LOGIN_MAX_FAILURES,
+    WEB_ADMIN_LOGIN_LOCK_SECONDS, WEB_ADMIN_PREAUTH_CSRF_TTL_SECONDS,
+    WEB_ADMIN_MAX_PREAUTH_STATES, WEB_ADMIN_MAX_SESSIONS,
+    WEB_ADMIN_MAX_LOGIN_TRACKERS, WEB_ADMIN_MAX_POST_BYTES,
+    WEB_ADMIN_MAX_QUERY_STRING_BYTES, WEB_ADMIN_MAX_USERNAME_CHARS,
+    WEB_ADMIN_MAX_PASSWORD_CHARS, WEB_ADMIN_MAX_CSRF_CHARS,
+    WEB_ADMIN_MAX_NEXT_CHARS, WEB_ADMIN_MAX_CURSOR_CHARS,
+    WEB_ADMIN_MAX_FILTER_CHARS, WEB_ADMIN_MAX_CONCURRENT_QUERIES,
+    WEB_ADMIN_MAX_QUERY_DURATION_SECONDS, WEB_ADMIN_MAX_RESPONSE_BYTES,
+    WEB_ADMIN_DEVICE_PAGE_SIZE, WEB_ADMIN_VISIT_PAGE_SIZE,
+    WEB_ADMIN_OBSERVATION_PAGE_SIZE,
+    WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -384,6 +401,51 @@ def get_settings() -> dict:
         ),
         "analytics_api_max_response_bytes": (
             ANALYTICS_API_MAX_RESPONSE_BYTES
+        ),
+        "web_admin_enabled": WEB_ADMIN_ENABLED,
+        "web_admin_username": WEB_ADMIN_USERNAME,
+        "web_admin_password_hash": WEB_ADMIN_PASSWORD_HASH,
+        "web_admin_allowed_networks": WEB_ADMIN_ALLOWED_NETWORKS,
+        "web_admin_allowed_site_ids": WEB_ADMIN_ALLOWED_SITE_IDS,
+        "web_admin_default_site_id": WEB_ADMIN_DEFAULT_SITE_ID,
+        "web_admin_require_https": WEB_ADMIN_REQUIRE_HTTPS,
+        "web_admin_session_idle_seconds": WEB_ADMIN_SESSION_IDLE_SECONDS,
+        "web_admin_session_absolute_seconds": (
+            WEB_ADMIN_SESSION_ABSOLUTE_SECONDS
+        ),
+        "web_admin_login_window_seconds": WEB_ADMIN_LOGIN_WINDOW_SECONDS,
+        "web_admin_login_max_failures": WEB_ADMIN_LOGIN_MAX_FAILURES,
+        "web_admin_login_lock_seconds": WEB_ADMIN_LOGIN_LOCK_SECONDS,
+        "web_admin_preauth_csrf_ttl_seconds": (
+            WEB_ADMIN_PREAUTH_CSRF_TTL_SECONDS
+        ),
+        "web_admin_max_preauth_states": WEB_ADMIN_MAX_PREAUTH_STATES,
+        "web_admin_max_sessions": WEB_ADMIN_MAX_SESSIONS,
+        "web_admin_max_login_trackers": WEB_ADMIN_MAX_LOGIN_TRACKERS,
+        "web_admin_max_post_bytes": WEB_ADMIN_MAX_POST_BYTES,
+        "web_admin_max_query_string_bytes": (
+            WEB_ADMIN_MAX_QUERY_STRING_BYTES
+        ),
+        "web_admin_max_username_chars": WEB_ADMIN_MAX_USERNAME_CHARS,
+        "web_admin_max_password_chars": WEB_ADMIN_MAX_PASSWORD_CHARS,
+        "web_admin_max_csrf_chars": WEB_ADMIN_MAX_CSRF_CHARS,
+        "web_admin_max_next_chars": WEB_ADMIN_MAX_NEXT_CHARS,
+        "web_admin_max_cursor_chars": WEB_ADMIN_MAX_CURSOR_CHARS,
+        "web_admin_max_filter_chars": WEB_ADMIN_MAX_FILTER_CHARS,
+        "web_admin_max_concurrent_queries": (
+            WEB_ADMIN_MAX_CONCURRENT_QUERIES
+        ),
+        "web_admin_max_query_duration_seconds": (
+            WEB_ADMIN_MAX_QUERY_DURATION_SECONDS
+        ),
+        "web_admin_max_response_bytes": WEB_ADMIN_MAX_RESPONSE_BYTES,
+        "web_admin_device_page_size": WEB_ADMIN_DEVICE_PAGE_SIZE,
+        "web_admin_visit_page_size": WEB_ADMIN_VISIT_PAGE_SIZE,
+        "web_admin_observation_page_size": (
+            WEB_ADMIN_OBSERVATION_PAGE_SIZE
+        ),
+        "web_admin_observation_max_window_hours": (
+            WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS
         ),
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,
