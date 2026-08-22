@@ -173,6 +173,34 @@ def test_device_list_dto_does_not_expose_detail_snapshot():
     assert isinstance(devices.calls[0]["deadline"], QueryDeadline)
 
 
+def test_device_mac_filter_is_canonical_and_bound_to_cursor():
+    service, devices, _reads, _analytics = _service()
+    devices.list_devices = lambda **kwargs: (
+        devices.calls.append(kwargs)
+        or AdminDevicePage((_device(),), True)
+    )
+    first = service.list_devices(
+        AdminPrincipal("x"), SITE_ID, mac="02-00-00-00-00-01"
+    )
+    assert devices.calls[0]["canonical_mac"] == "02:00:00:00:00:01"
+    cursor = first.page["next_cursor"]
+    with pytest.raises(AdminQueryValidationError):
+        service.list_devices(
+            AdminPrincipal("x"),
+            SITE_ID,
+            mac="02:00:00:00:00:02",
+            cursor=cursor,
+        )
+    assert len(devices.calls) == 1
+
+
+def test_invalid_device_mac_stops_before_source_query():
+    service, devices, _reads, _analytics = _service()
+    with pytest.raises(AdminQueryValidationError):
+        service.list_devices(AdminPrincipal("x"), SITE_ID, mac="not-a-mac")
+    assert devices.calls == []
+
+
 def test_device_detail_propagates_one_deadline_to_all_sources():
     service, devices, reads, _analytics = _service()
     response = service.device_detail(AdminPrincipal("x"), SITE_ID, DEVICE_ID)

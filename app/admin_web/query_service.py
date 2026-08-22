@@ -103,15 +103,19 @@ class AdminQueryService:
             )
         )
 
-    def list_devices(self, principal, site_id, *, limit=None, cursor=None):
+    def list_devices(
+        self, principal, site_id, *, limit=None, cursor=None, mac=None,
+    ):
         self._authorize(principal, "admin.read.devices", site_id)
         selected_limit = self._limit(limit, self._config.device_page_size)
+        selected_mac = self._optional_mac(mac)
+        filters = {} if selected_mac is None else {"mac": selected_mac}
         try:
             decoded = decode_cursor(
                 cursor,
                 kind="devices",
                 site_id=site_id,
-                filters={},
+                filters=filters,
                 identity_kind="uuid",
                 maximum_length=self._config.max_cursor_chars,
             )
@@ -123,6 +127,7 @@ class AdminQueryService:
                 site_id=site_id,
                 limit=selected_limit,
                 cursor=decoded,  # type: ignore[arg-type]
+                canonical_mac=selected_mac,
                 deadline=deadline,
             )
             items = [self._device_list_dto(item) for item in page.items]
@@ -134,7 +139,7 @@ class AdminQueryService:
                     site_id=site_id,
                     timestamp=last.site_last_seen_at,
                     identity=last.device_id,
-                    filters={},
+                    filters=filters,
                 )
             return AdminQueryResponse(
                 result={"items": items},

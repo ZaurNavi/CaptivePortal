@@ -1,0 +1,21 @@
+{% extends "admin/base.html" %}
+{% block subtitle %}<p>Newest Site visits first. All controls are read-only.</p>{% endblock %}
+{% block controls %}
+<form id="visit-filter-form" class="filter-panel visit-filter-panel" novalidate>
+  <label>From
+    <input name="from" type="datetime-local">
+  </label>
+  <label>To
+    <input name="to" type="datetime-local">
+  </label>
+  <label>Status
+    <select name="status">
+      <option value="all">All</option>
+      <option value="open">Open</option>
+      <option value="closed">Closed</option>
+    </select>
+  </label>
+  <button class="button" type="submit">Apply filters</button>
+  <button id="clear-visit-filters" class="button button-quiet" type="button">Clear</button>
+</form>
+{% endblock %}

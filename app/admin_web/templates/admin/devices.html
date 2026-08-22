@@ -1,0 +1,10 @@
+{% extends "admin/base.html" %}
+{% block subtitle %}<p>Site membership from authorized snapshots and visits.</p>{% endblock %}
+{% block controls %}
+<form id="device-search-form" class="filter-bar" novalidate>
+  <label for="device-mac">Exact MAC address</label>
+  <input id="device-mac" name="mac" inputmode="text" autocomplete="off" placeholder="AA:BB:CC:DD:EE:FF" maxlength="17">
+  <button class="button button-secondary" type="submit">Search</button>
+  <button id="clear-device-search" class="button button-quiet" type="button">Clear</button>
+</form>
+{% endblock %}

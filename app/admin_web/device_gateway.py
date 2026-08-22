@@ -224,6 +224,7 @@ page AS (
     SELECT *
     FROM devices
     WHERE (:device_id IS NULL OR device_id = :device_id)
+      AND (:canonical_mac IS NULL OR canonical_mac = :canonical_mac)
       AND (
         :cursor_at IS NULL
         OR site_last_seen_at < :cursor_at
@@ -281,6 +282,7 @@ class AdminDeviceReadGateway:
         limit: int,
         deadline: QueryDeadline,
         cursor: tuple[str, str] | None = None,
+        canonical_mac: str | None = None,
     ) -> AdminDevicePage:
         return self._query(
             site_id=site_id,
@@ -288,6 +290,7 @@ class AdminDeviceReadGateway:
             deadline=deadline,
             cursor=cursor,
             device_id=None,
+            canonical_mac=canonical_mac,
         )
 
     def get_device(
@@ -303,6 +306,7 @@ class AdminDeviceReadGateway:
             deadline=deadline,
             cursor=None,
             device_id=device_id,
+            canonical_mac=None,
         )
         return page.items[0] if page.items else None
 
@@ -314,6 +318,7 @@ class AdminDeviceReadGateway:
         deadline: QueryDeadline,
         cursor: tuple[str, str] | None,
         device_id: str | None,
+        canonical_mac: str | None,
     ) -> AdminDevicePage:
         if not isinstance(site_id, str) or not site_id:
             raise ValueError("site_id must be a non-empty string")
@@ -323,6 +328,11 @@ class AdminDeviceReadGateway:
             not isinstance(device_id, str) or not device_id
         ):
             raise ValueError("device_id must be a non-empty string")
+        if canonical_mac is not None and (
+            not isinstance(canonical_mac, str)
+            or _MAC_PATTERN.fullmatch(canonical_mac) is None
+        ):
+            raise ValueError("canonical_mac must be canonical")
         cursor_at, cursor_device_id = cursor or (None, None)
         connection = self._open(deadline)
         try:
@@ -333,6 +343,7 @@ class AdminDeviceReadGateway:
                     "cursor_at": cursor_at,
                     "cursor_device_id": cursor_device_id,
                     "device_id": device_id,
+                    "canonical_mac": canonical_mac,
                     "row_limit": limit + 1,
                 },
             ).fetchall()
@@ -366,6 +377,7 @@ class AdminDeviceReadGateway:
                     "cursor_at": None,
                     "cursor_device_id": None,
                     "device_id": None,
+                    "canonical_mac": None,
                     "row_limit": 101,
                 },
             ).fetchall()

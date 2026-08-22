@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page.title }} · CaptivPortal</title>
+  <link rel="stylesheet" href="{{ url_for('admin_web_v1.static', filename='admin.css') }}">
+  <script defer src="{{ url_for('admin_web_v1.static', filename='admin.js') }}"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="/admin/sites/{{ site_id }}/" aria-label="CaptivPortal admin home">
+      <span class="brand-mark" aria-hidden="true">CP</span>
+      <span>CaptivPortal</span>
+    </a>
+    <div class="topbar-context">
+      <span class="eyebrow">Current Site</span>
+      <strong class="mono">{{ site_id }}</strong>
+    </div>
+    <div class="topbar-account">
+      <span>{{ username }}</span>
+      <form method="post" action="/admin/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="button button-quiet" type="submit">Logout</button>
+      </form>
+    </div>
+  </header>
+  <div class="app-frame">
+    <nav class="sidebar" aria-label="Admin navigation">
+      <a class="nav-link{% if page.key == 'home' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/">Home</a>
+      <a class="nav-link{% if page.key in ('devices', 'device') %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/devices">Devices</a>
+      <a class="nav-link{% if page.key == 'visits' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/visits">Visits</a>
+      <a class="nav-link{% if page.key == 'observations' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/observations">Observations</a>
+    </nav>
+    <main id="main-content" class="content">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">Read-only operations</p>
+          <h1>{{ page.title }}</h1>
+          {% block subtitle %}{% endblock %}
+        </div>
+        <button id="refresh-button" class="button" type="button">Refresh</button>
+      </div>
+      <section
+        id="admin-page"
+        data-page="{{ page.key }}"
+        data-site-id="{{ site_id }}"
+        data-api-base="/admin/api/v1/sites/{{ site_id }}"
+        {% if device_id %}data-device-id="{{ device_id }}"{% endif %}
+        data-runtime-state="{{ runtime_state }}"
+      >
+        {% block controls %}{% endblock %}
+        <div id="page-state" class="state-panel" role="status" aria-live="polite">
+          <span class="state-dot" aria-hidden="true"></span>
+          <div>
+            <strong id="state-title">Loading</strong>
+            <p id="state-message">Requesting current Site data…</p>
+          </div>
+        </div>
+        <div id="page-content" class="content-grid" aria-live="polite"></div>
+        <div id="pagination" class="pagination" hidden>
+          <button id="load-more-button" class="button button-secondary" type="button">Load more</button>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

@@ -99,7 +99,7 @@ def test_invalid_and_forbidden_site_stop_before_query_service(api_client):
 
 @pytest.mark.parametrize(
     "suffix",
-    ["?unknown=x", "?limit=1&limit=2"],
+    ["?unknown=x", "?limit=1&limit=2", "?mac=x&mac=y"],
 )
 def test_unknown_or_duplicate_scalar_input_is_rejected(api_client, suffix):
     client, service = api_client
@@ -109,6 +109,17 @@ def test_unknown_or_duplicate_scalar_input_is_rejected(api_client, suffix):
     )
     assert response.status_code == 400
     assert service.calls == []
+
+
+def test_device_mac_filter_is_forwarded_once(api_client):
+    client, service = api_client
+    response = client.get(
+        f"/admin/api/v1/sites/{SITE_ID}/devices?mac=02-00-00-00-00-01",
+        base_url="https://localhost",
+    )
+    assert response.status_code == 200
+    assert service.calls[-1][0] == "list_devices"
+    assert service.calls[-1][2]["mac"] == "02-00-00-00-00-01"
 
 
 @pytest.mark.parametrize(
