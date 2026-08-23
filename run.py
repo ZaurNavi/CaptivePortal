@@ -27,6 +27,7 @@ from app.visitor_registry.registry_read_service import (
 from app.visit_lifecycle import create_visit_lifecycle
 from app.pending_sessions import create_pending_session_cleaner
 from app.observations import create_observation_foundation
+from app.current_state import create_current_state_runtime
 from app.analytics import create_analytics_runtime
 from app.analytics.api import API_PREFIX
 from app.admin_web import create_admin_web_runtime
@@ -40,6 +41,7 @@ _visitor_snapshot_collector = None
 _visitor_registry = None
 _pending_session_cleaner = None
 _observation_foundation = None
+_current_state_runtime = None
 _visit_lifecycle = None
 _analytics_runtime = None
 _admin_web_runtime = None
@@ -119,6 +121,12 @@ def shutdown_handler() -> None:
             _observation_foundation.stop()
         except Exception:
             logger.exception("observation_foundation_stop_failed")
+
+    if _current_state_runtime is not None:
+        try:
+            _current_state_runtime.stop()
+        except Exception:
+            logger.exception("current_state_runtime_stop_failed")
 
     if _public_traffic_worker is not None:
         try:
@@ -270,10 +278,29 @@ def _configure_admin_web(app, settings, registry_read_service) -> None:
         logger.exception("admin_runtime_configuration_failed")
 
 
+def _configure_current_state(app, settings, controller) -> None:
+    """Compose Current State with the already-created shared provider."""
+    global _current_state_runtime
+
+    try:
+        _current_state_runtime = create_current_state_runtime(
+            settings=settings,
+            provider=controller,
+            telemetry=app.extensions.get("auth_telemetry"),
+            logger=logger,
+        )
+        app.extensions["current_state_runtime"] = _current_state_runtime
+    except Exception:
+        _current_state_runtime = None
+        app.extensions["current_state_runtime"] = None
+        logger.exception("current_state_runtime_configuration_failed")
+
+
 def main() -> None:
     """Main application entry point."""
     global _visitor_snapshot_collector, _visitor_registry
     global _pending_session_cleaner, _observation_foundation
+    global _current_state_runtime
     global _visit_lifecycle, _analytics_runtime, _admin_web_runtime
 
     logger.info("Starting Captive Portal")
@@ -313,6 +340,7 @@ def main() -> None:
         telemetry=app.extensions.get("auth_telemetry"),
         logger=logger,
     )
+    _configure_current_state(app, settings, controller)
     _pending_session_cleaner = create_pending_session_cleaner(
         settings=settings,
         provider=controller,
@@ -327,6 +355,11 @@ def main() -> None:
         _observation_foundation.start()
     except Exception:
         logger.exception("observation_foundation_start_failed")
+    if _current_state_runtime is not None:
+        try:
+            _current_state_runtime.start()
+        except Exception:
+            logger.exception("current_state_runtime_start_failed")
     try:
         _visitor_snapshot_collector.start()
     except Exception:
