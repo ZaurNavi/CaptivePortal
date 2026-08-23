@@ -235,6 +235,7 @@ class CurrentHistoryQuality:
     last_snapshot_at: str | None
     max_gap_seconds: float | None
     scope_changed: bool
+    retention_pressure: bool
     coverage_status: str
 
 

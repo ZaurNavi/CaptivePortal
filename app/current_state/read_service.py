@@ -21,12 +21,14 @@ from .models import (
     CurrentHistoryQuality,
     CurrentSnapshotMeta,
     CurrentStateValidationError,
+    SCOPE_HASH_PATTERN,
     format_utc,
     parse_utc,
     require_cycle_id,
     require_site_id,
     utc_now,
 )
+from .normalizer import canonical_scope
 from .repository import AUTH_CLASSIFICATIONS, CurrentStateRepository
 
 
@@ -45,9 +47,12 @@ class CurrentStateReadService:
     def get_current_client_summary(self, site_id: str, *, evaluated_at_utc: datetime | str | None = None) -> CurrentClientSummary:
         site = require_site_id(site_id)
         evaluated = _evaluated(evaluated_at_utc)
+        current_scope_hash = self._current_client_scope_hash(site)
         with self.repository.read_connection() as connection:
             connection.execute("BEGIN")
-            attempt, complete, partial = _cycle_selection(connection, site, "client")
+            attempt, complete, partial = _cycle_selection(
+                connection, site, "client", source_scope_hash=current_scope_hash,
+            )
             meta = self._meta(site, "client", evaluated, attempt, complete, partial)
             if complete is None or meta.freshness_status == "unavailable":
                 return CurrentClientSummary(meta, None, None, None, None, None, None, None, ())
@@ -107,18 +112,23 @@ class CurrentStateReadService:
         if sort not in _SORTS:
             raise CurrentStateValidationError("sort is not allowed")
         decoded = _decode_cursor(cursor, "clients") if cursor is not None else None
+        current_scope_hash = self._current_client_scope_hash(site)
         if decoded is not None:
             _cursor_context(decoded, site, sort, filters)
+            if decoded["scope"] != current_scope_hash:
+                raise CurrentStateValidationError("cursor source scope is no longer current")
             if cycle_id is not None and cycle_id != decoded["cycle"]:
                 raise CurrentStateValidationError("cursor cycle changed")
             cycle_id = decoded["cycle"]
         evaluated = _evaluated(evaluated_at_utc)
         with self.repository.read_connection() as connection:
             connection.execute("BEGIN")
-            attempt, latest_complete, partial = _cycle_selection(connection, site, "client")
+            attempt, latest_complete, partial = _cycle_selection(
+                connection, site, "client", source_scope_hash=current_scope_hash,
+            )
             selected = latest_complete if cycle_id is None else connection.execute(
-                "SELECT * FROM current_state_cycles WHERE cycle_id=? AND site_id=? AND kind='client' AND result='success' AND complete=1",
-                (require_cycle_id(cycle_id), site),
+                "SELECT * FROM current_state_cycles WHERE cycle_id=? AND site_id=? AND kind='client' AND result='success' AND complete=1 AND source_scope_hash=?",
+                (require_cycle_id(cycle_id), site, current_scope_hash),
             ).fetchone()
             meta = self._meta(site, "client", evaluated, attempt, selected, partial)
             if selected is None or meta.freshness_status == "unavailable":
@@ -228,9 +238,10 @@ class CurrentStateReadService:
         end = parse_utc(to_utc, "to_utc")
         if start > end or (end - start).total_seconds() > 168 * 3600:
             raise CurrentStateValidationError("history window is invalid")
-        if not isinstance(source_scope_hash, str) or len(source_scope_hash) != 64:
+        if not isinstance(source_scope_hash, str) or SCOPE_HASH_PATTERN.fullmatch(source_scope_hash) is None:
             raise CurrentStateValidationError("source_scope_hash is invalid")
         with self.repository.read_connection() as connection:
+            connection.execute("BEGIN")
             row = connection.execute(
                 """
                 WITH selected AS (
@@ -253,6 +264,9 @@ class CurrentStateReadService:
                 """,
                 (site, from_utc, to_utc, source_scope_hash, source_scope_hash, source_scope_hash, source_scope_hash, source_scope_hash),
             ).fetchone()
+            client_row_count = int(connection.execute(
+                "SELECT COUNT(*) FROM current_client_state",
+            ).fetchone()[0])
         complete = int(row["complete_count"] or 0)
         scope_changed = bool(row["scope_changed"] or 0)
         coverage = "insufficient_data" if complete == 0 else "incompatible_scope" if scope_changed else "partial" if row["first_at"] > from_utc or row["last_at"] < to_utc else "complete"
@@ -260,8 +274,12 @@ class CurrentStateReadService:
             site, from_utc, to_utc, 1, source_scope_hash, complete,
             int(row["partial_count"] or 0), int(row["failed_count"] or 0),
             row["first_at"], row["last_at"], float(row["max_gap"]) if row["max_gap"] is not None else None,
-            scope_changed, coverage,
+            scope_changed, client_row_count > self.config.history_max_client_rows, coverage,
         )
+
+    def _current_client_scope_hash(self, site: str) -> str:
+        _scope_json, scope_hash = canonical_scope("client", site, self.config.client_ssids)
+        return scope_hash
 
     def _meta(self, site: str, kind: str, evaluated: str, attempt: sqlite3.Row | None, complete: sqlite3.Row | None, partial: sqlite3.Row | None) -> CurrentSnapshotMeta:
         if complete is None:
@@ -274,7 +292,10 @@ class CurrentStateReadService:
         observed = str(complete["capture_started_at"])
         try:
             observed_dt = parse_utc(observed, "observed_at")
+            finished_dt = parse_utc(str(complete["capture_finished_at"]), "capture_finished_at")
             evaluated_dt = parse_utc(evaluated, "evaluated_at")
+            if finished_dt < observed_dt:
+                raise CurrentStateValidationError("capture interval is invalid")
             age = (evaluated_dt - observed_dt).total_seconds()
         except CurrentStateValidationError:
             return _meta_from_row(site, kind, evaluated, complete, attempt, partial, None, "unavailable", "invalid_timestamp")
@@ -305,18 +326,26 @@ _SORTS: dict[str, dict[str, str]] = {
 }
 
 
-def _cycle_selection(connection: sqlite3.Connection, site: str, kind: str) -> tuple[sqlite3.Row | None, sqlite3.Row | None, sqlite3.Row | None]:
+def _cycle_selection(
+    connection: sqlite3.Connection,
+    site: str,
+    kind: str,
+    *,
+    source_scope_hash: str | None = None,
+) -> tuple[sqlite3.Row | None, sqlite3.Row | None, sqlite3.Row | None]:
     attempt = connection.execute(
         "SELECT * FROM current_state_cycles WHERE site_id=? AND kind=? ORDER BY capture_started_at DESC, cycle_id DESC LIMIT 1",
         (site, kind),
     ).fetchone()
+    scope_clause = "" if source_scope_hash is None else " AND source_scope_hash=?"
+    scope_params: tuple[str, ...] = () if source_scope_hash is None else (source_scope_hash,)
     complete = connection.execute(
-        "SELECT * FROM current_state_cycles WHERE site_id=? AND kind=? AND result='success' AND complete=1 ORDER BY capture_started_at DESC, cycle_id DESC LIMIT 1",
-        (site, kind),
+        f"SELECT * FROM current_state_cycles WHERE site_id=? AND kind=? AND result='success' AND complete=1{scope_clause} ORDER BY capture_started_at DESC, cycle_id DESC LIMIT 1",
+        (site, kind, *scope_params),
     ).fetchone()
     partial = connection.execute(
-        "SELECT * FROM current_state_cycles WHERE site_id=? AND kind=? AND result='partial' AND complete=0 AND items_stored>0 ORDER BY capture_started_at DESC, cycle_id DESC LIMIT 1",
-        (site, kind),
+        f"SELECT * FROM current_state_cycles WHERE site_id=? AND kind=? AND result='partial' AND complete=0 AND items_stored>0{scope_clause} ORDER BY capture_started_at DESC, cycle_id DESC LIMIT 1",
+        (site, kind, *scope_params),
     ).fetchone()
     return attempt, complete, partial
 

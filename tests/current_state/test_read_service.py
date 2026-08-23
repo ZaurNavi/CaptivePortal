@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.current_state.cleanup import CurrentStateCleanup
 from app.current_state.models import CurrentStateValidationError
 from app.current_state.normalizer import canonical_scope
 from app.current_state.read_service import CurrentStateReadService
@@ -28,14 +29,16 @@ def service(config):
     return CurrentStateReadService(repository)
 
 
-def publish_clients(service, cycle_id="client", started=NOW, result="success", rows=None, site=SITE):
+def publish_clients(service, cycle_id="client", started=NOW, result="success", rows=None, site=SITE, scope_ssids=("Zefer_Parki",)):
     rows = rows if rows is not None else [
-        client_row(cycle_id=cycle_id, site_id=site, observed_at=started, mac="AA:BB:CC:DD:EE:01", auth_status_code=2, auth_classification="authorized", ap_mac="11:22:33:44:55:66", controller_traffic_total=100, controller_uptime=20),
-        client_row(cycle_id=cycle_id, site_id=site, observed_at=started, mac="AA:BB:CC:DD:EE:02", auth_status_code=1, auth_classification="pending", ap_mac=None, controller_traffic_total=None, controller_uptime=None),
-        client_row(cycle_id=cycle_id, site_id=site, observed_at=started, mac="AA:BB:CC:DD:EE:03", auth_status_code=0, auth_classification="other", ap_mac="11:22:33:44:55:66", controller_traffic_total=50, controller_uptime=10),
-        client_row(cycle_id=cycle_id, site_id=site, observed_at=started, mac="AA:BB:CC:DD:EE:04", auth_classification="unknown", ap_mac="22:33:44:55:66:77", controller_traffic_total=0, controller_uptime=0),
+        client_row(cycle_id=cycle_id, site_id=site, observed_at=started, ssid=scope_ssids[0], mac="AA:BB:CC:DD:EE:01", auth_status_code=2, auth_classification="authorized", ap_mac="11:22:33:44:55:66", controller_traffic_total=100, controller_uptime=20),
+        client_row(cycle_id=cycle_id, site_id=site, observed_at=started, ssid=scope_ssids[0], mac="AA:BB:CC:DD:EE:02", auth_status_code=1, auth_classification="pending", ap_mac=None, controller_traffic_total=None, controller_uptime=None),
+        client_row(cycle_id=cycle_id, site_id=site, observed_at=started, ssid=scope_ssids[0], mac="AA:BB:CC:DD:EE:03", auth_status_code=0, auth_classification="other", ap_mac="11:22:33:44:55:66", controller_traffic_total=50, controller_uptime=10),
+        client_row(cycle_id=cycle_id, site_id=site, observed_at=started, ssid=scope_ssids[0], mac="AA:BB:CC:DD:EE:04", auth_classification="unknown", ap_mac="22:33:44:55:66:77", controller_traffic_total=0, controller_uptime=0),
     ]
     parent = cycle(kind="client", cycle_id=cycle_id, site_id=site, started=started, result=result, items_stored=len(rows), items_seen=len(rows))
+    scope_json, scope_hash = canonical_scope("client", site, scope_ssids)
+    parent = replace(parent, source_scope_json=scope_json, source_scope_hash=scope_hash)
     service.repository.publish_cycle(parent, client_rows=rows)
     return parent
 
@@ -68,6 +71,71 @@ def test_failed_latest_attempt_does_not_erase_complete(service):
     summary = service.get_current_client_summary(SITE, evaluated_at_utc=EVALUATED)
     assert summary.snapshot.cycle_id == "complete"
     assert summary.snapshot.latest_attempt_result == "failed"
+
+
+def test_old_scope_complete_plus_current_scope_partial_is_unavailable(service):
+    publish_clients(
+        service,
+        cycle_id="old-complete",
+        started="2026-08-23T09:59:30.000Z",
+        scope_ssids=("OldSSID",),
+    )
+    publish_clients(
+        service,
+        cycle_id="current-partial",
+        started=NOW,
+        result="partial",
+        rows=[client_row(cycle_id="current-partial")],
+    )
+
+    summary = service.get_current_client_summary(SITE, evaluated_at_utc=EVALUATED)
+
+    assert summary.snapshot.cycle_id is None
+    assert summary.snapshot.freshness_status == "unavailable"
+    assert summary.snapshot.latest_partial_cycle_id == "current-partial"
+    assert summary.online_count is None
+
+
+def test_old_scope_complete_plus_current_scope_failed_is_unavailable(service):
+    publish_clients(
+        service,
+        cycle_id="old-complete",
+        started="2026-08-23T09:59:30.000Z",
+        scope_ssids=("OldSSID",),
+    )
+    publish_clients(service, cycle_id="current-failed", started=NOW, result="failed", rows=[])
+
+    summary = service.get_current_client_summary(SITE, evaluated_at_utc=EVALUATED)
+
+    assert summary.snapshot.cycle_id is None
+    assert summary.snapshot.latest_attempt_result == "failed"
+    assert summary.online_count is None
+
+
+def test_current_scope_complete_wins_over_old_scope_complete(service):
+    publish_clients(service, cycle_id="old-complete", started=NOW, scope_ssids=("OldSSID",))
+    publish_clients(service, cycle_id="current-complete", started="2026-08-23T09:59:30.000Z")
+
+    summary = service.get_current_client_summary(SITE, evaluated_at_utc=EVALUATED)
+
+    assert summary.snapshot.cycle_id == "current-complete"
+    assert summary.online_count == 4
+
+
+def test_old_scope_explicit_cycle_and_cursor_are_not_current(service):
+    publish_clients(service, cycle_id="old-complete", started=NOW, scope_ssids=("OldSSID",))
+    old_repository = CurrentStateRepository(replace(service.config, client_ssids=("OldSSID",)))
+    old_service = CurrentStateReadService(old_repository)
+    old_page = old_service.list_current_clients(SITE, limit=1, evaluated_at_utc=EVALUATED)
+    assert old_page.next_cursor is not None
+
+    explicit = service.list_current_clients(
+        SITE, cycle_id="old-complete", evaluated_at_utc=EVALUATED,
+    )
+    assert explicit.snapshot.freshness_status == "unavailable"
+    assert explicit.items == ()
+    with pytest.raises(CurrentStateValidationError, match="no longer current"):
+        service.list_current_clients(SITE, cursor=old_page.next_cursor, evaluated_at_utc=EVALUATED)
 
 
 def test_old_complete_plus_fresh_partial_is_unavailable(service):
@@ -121,6 +189,24 @@ def test_invalid_persisted_timestamp_is_unavailable(service):
     connection.commit()
     connection.close()
     summary = service.get_current_client_summary(SITE, evaluated_at_utc=EVALUATED)
+    assert summary.snapshot.freshness_reason == "invalid_timestamp"
+    assert summary.snapshot.age_seconds is None
+
+
+@pytest.mark.parametrize("capture_finished_at", ["invalid", "2026-08-23T09:59:59.999Z"])
+def test_invalid_or_reversed_capture_finish_is_unavailable(service, capture_finished_at):
+    publish_clients(service)
+    connection = sqlite3.connect(service.repository.config.db_path)
+    connection.execute(
+        "UPDATE current_state_cycles SET capture_finished_at=?",
+        (capture_finished_at,),
+    )
+    connection.commit()
+    connection.close()
+
+    summary = service.get_current_client_summary(SITE, evaluated_at_utc=EVALUATED)
+
+    assert summary.snapshot.freshness_status == "unavailable"
     assert summary.snapshot.freshness_reason == "invalid_timestamp"
     assert summary.snapshot.age_seconds is None
 
@@ -216,4 +302,41 @@ def test_history_quality_never_merges_scope_hashes(service):
     )
     assert quality.complete_cycle_count == 2
     assert quality.scope_changed is True
+    assert quality.retention_pressure is False
     assert quality.coverage_status == "incompatible_scope"
+
+
+def test_history_quality_reports_retention_pressure_over_cap_with_protected_cycle(service):
+    current = publish_clients(service)
+    pressure_config = replace(
+        service.config,
+        history_max_client_rows=1,
+    )
+    pressure_repository = CurrentStateRepository(pressure_config)
+    cleanup_result = CurrentStateCleanup(pressure_repository, pressure_config).run_once(
+        now_utc="2026-08-23T10:00:30.000Z",
+    )
+    assert cleanup_result.retention_pressure is True
+    assert pressure_repository.get_cycle(current.cycle_id) is not None
+    pressure_service = CurrentStateReadService(pressure_repository)
+
+    quality = pressure_service.get_client_history_quality(
+        SITE,
+        "2026-08-23T09:00:00.000Z",
+        "2026-08-23T10:00:00.000Z",
+        source_scope_hash=current.source_scope_hash,
+    )
+
+    assert quality.complete_cycle_count == 1
+    assert quality.retention_pressure is True
+
+
+@pytest.mark.parametrize("source_scope_hash", ["A" * 64, "g" * 64, "a" * 63, "a" * 65])
+def test_history_quality_rejects_noncanonical_scope_hash(service, source_scope_hash):
+    with pytest.raises(CurrentStateValidationError, match="source_scope_hash is invalid"):
+        service.get_client_history_quality(
+            SITE,
+            "2026-08-23T09:00:00.000Z",
+            "2026-08-23T10:00:00.000Z",
+            source_scope_hash=source_scope_hash,
+        )
