@@ -76,6 +76,30 @@ from app.config import (
     OBSERVATION_AP_CYCLE_MAX_DURATION_SECONDS,
     OBSERVATION_AP_CONFIG_CYCLE_MAX_DURATION_SECONDS,
     OBSERVATION_RATE_MAX_GAP_SECONDS,
+    CURRENT_STATE_ENABLED, CURRENT_STATE_DB_PATH,
+    CURRENT_STATE_SITE_IDS, CURRENT_STATE_CLIENT_SSIDS_JSON,
+    CURRENT_STATE_CLIENT_INITIAL_DELAY_SECONDS,
+    CURRENT_STATE_CLIENT_INTERVAL_SECONDS,
+    CURRENT_STATE_AP_INITIAL_DELAY_SECONDS,
+    CURRENT_STATE_AP_INTERVAL_SECONDS,
+    CURRENT_STATE_REQUEST_TIMEOUT_SECONDS,
+    CURRENT_STATE_CLIENT_PAGE_SIZE, CURRENT_STATE_CLIENT_MAX_PAGES,
+    CURRENT_STATE_CLIENT_MAX_ROWS,
+    CURRENT_STATE_AP_PAGE_SIZE, CURRENT_STATE_AP_MAX_PAGES,
+    CURRENT_STATE_AP_MAX_ROWS,
+    CURRENT_STATE_CLIENT_FRESH_MAX_AGE_SECONDS,
+    CURRENT_STATE_CLIENT_STALE_MAX_AGE_SECONDS,
+    CURRENT_STATE_AP_FRESH_MAX_AGE_SECONDS,
+    CURRENT_STATE_AP_STALE_MAX_AGE_SECONDS,
+    CURRENT_STATE_HISTORY_RETENTION_HOURS,
+    CURRENT_STATE_HISTORY_MAX_CLIENT_ROWS,
+    CURRENT_STATE_CLEANUP_INITIAL_DELAY_SECONDS,
+    CURRENT_STATE_CLEANUP_INTERVAL_SECONDS,
+    CURRENT_STATE_CLEANUP_MAX_CYCLES_PER_RUN,
+    CURRENT_STATE_CLEANUP_MAX_ROWS_PER_TRANSACTION,
+    CURRENT_STATE_CLEANUP_MAX_DURATION_SECONDS,
+    CURRENT_STATE_SQLITE_BUSY_TIMEOUT_MS,
+    CURRENT_STATE_SHUTDOWN_TIMEOUT_SECONDS,
     ANALYTICS_FOUNDATION_ENABLED, ANALYTICS_WIRELESS_ENABLED,
     ANALYTICS_VISIT_ENABLED, ANALYTICS_DEFAULT_LIMIT,
     ANALYTICS_MAX_LIMIT, ANALYTICS_MAX_QUERY_WINDOW_DAYS,
@@ -354,6 +378,68 @@ def get_settings() -> dict:
             OBSERVATION_AP_CONFIG_CYCLE_MAX_DURATION_SECONDS
         ),
         "observation_rate_max_gap_seconds": OBSERVATION_RATE_MAX_GAP_SECONDS,
+        "current_state_enabled": CURRENT_STATE_ENABLED,
+        "current_state_db_path": CURRENT_STATE_DB_PATH,
+        "current_state_site_ids": CURRENT_STATE_SITE_IDS,
+        "current_state_client_ssids_json": CURRENT_STATE_CLIENT_SSIDS_JSON,
+        "current_state_client_initial_delay_seconds": (
+            CURRENT_STATE_CLIENT_INITIAL_DELAY_SECONDS
+        ),
+        "current_state_client_interval_seconds": (
+            CURRENT_STATE_CLIENT_INTERVAL_SECONDS
+        ),
+        "current_state_ap_initial_delay_seconds": (
+            CURRENT_STATE_AP_INITIAL_DELAY_SECONDS
+        ),
+        "current_state_ap_interval_seconds": CURRENT_STATE_AP_INTERVAL_SECONDS,
+        "current_state_request_timeout_seconds": (
+            CURRENT_STATE_REQUEST_TIMEOUT_SECONDS
+        ),
+        "current_state_client_page_size": CURRENT_STATE_CLIENT_PAGE_SIZE,
+        "current_state_client_max_pages": CURRENT_STATE_CLIENT_MAX_PAGES,
+        "current_state_client_max_rows": CURRENT_STATE_CLIENT_MAX_ROWS,
+        "current_state_ap_page_size": CURRENT_STATE_AP_PAGE_SIZE,
+        "current_state_ap_max_pages": CURRENT_STATE_AP_MAX_PAGES,
+        "current_state_ap_max_rows": CURRENT_STATE_AP_MAX_ROWS,
+        "current_state_client_fresh_max_age_seconds": (
+            CURRENT_STATE_CLIENT_FRESH_MAX_AGE_SECONDS
+        ),
+        "current_state_client_stale_max_age_seconds": (
+            CURRENT_STATE_CLIENT_STALE_MAX_AGE_SECONDS
+        ),
+        "current_state_ap_fresh_max_age_seconds": (
+            CURRENT_STATE_AP_FRESH_MAX_AGE_SECONDS
+        ),
+        "current_state_ap_stale_max_age_seconds": (
+            CURRENT_STATE_AP_STALE_MAX_AGE_SECONDS
+        ),
+        "current_state_history_retention_hours": (
+            CURRENT_STATE_HISTORY_RETENTION_HOURS
+        ),
+        "current_state_history_max_client_rows": (
+            CURRENT_STATE_HISTORY_MAX_CLIENT_ROWS
+        ),
+        "current_state_cleanup_initial_delay_seconds": (
+            CURRENT_STATE_CLEANUP_INITIAL_DELAY_SECONDS
+        ),
+        "current_state_cleanup_interval_seconds": (
+            CURRENT_STATE_CLEANUP_INTERVAL_SECONDS
+        ),
+        "current_state_cleanup_max_cycles_per_run": (
+            CURRENT_STATE_CLEANUP_MAX_CYCLES_PER_RUN
+        ),
+        "current_state_cleanup_max_rows_per_transaction": (
+            CURRENT_STATE_CLEANUP_MAX_ROWS_PER_TRANSACTION
+        ),
+        "current_state_cleanup_max_duration_seconds": (
+            CURRENT_STATE_CLEANUP_MAX_DURATION_SECONDS
+        ),
+        "current_state_sqlite_busy_timeout_ms": (
+            CURRENT_STATE_SQLITE_BUSY_TIMEOUT_MS
+        ),
+        "current_state_shutdown_timeout_seconds": (
+            CURRENT_STATE_SHUTDOWN_TIMEOUT_SECONDS
+        ),
         "analytics_foundation_enabled": ANALYTICS_FOUNDATION_ENABLED,
         "analytics_wireless_enabled": ANALYTICS_WIRELESS_ENABLED,
         "analytics_visit_enabled": ANALYTICS_VISIT_ENABLED,
