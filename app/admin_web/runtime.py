@@ -140,6 +140,9 @@ def _query_service(
             ),
             visit_analytics_service=analytics_service,
             current_state_read_service=current_state_read_service,
+            current_traffic_read_service=getattr(
+                analytics_runtime, "current_traffic_service", None
+            ),
         )
     except (AttributeError, TypeError):
         return None

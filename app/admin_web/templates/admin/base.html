@@ -54,6 +54,10 @@
         data-home-live-refresh-seconds="{{ home_live_refresh_seconds }}"
         data-home-live-request-timeout-seconds="{{ home_live_request_timeout_seconds }}"
         data-current-state-page-size="{{ current_state_page_size }}"
+        data-home-traffic-enabled="{{ 'true' if home_traffic_enabled else 'false' }}"
+        data-home-traffic-refresh-seconds="{{ home_traffic_refresh_seconds }}"
+        data-home-traffic-request-timeout-seconds="{{ home_traffic_request_timeout_seconds }}"
+        data-home-traffic-page-size="{{ home_traffic_page_size }}"
         {% endif %}
       >
         {% block page_body %}

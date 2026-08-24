@@ -36,6 +36,10 @@ def render_admin_page(
     home_live_refresh_seconds: int = 60,
     home_live_request_timeout_seconds: int = 20,
     current_state_page_size: int = 100,
+    home_traffic_enabled: bool = False,
+    home_traffic_refresh_seconds: int = 60,
+    home_traffic_request_timeout_seconds: int = 20,
+    home_traffic_page_size: int = 100,
 ) -> Response:
     """Render only canonical server context; business data is API-loaded."""
     return make_response(
@@ -51,6 +55,10 @@ def render_admin_page(
             home_live_refresh_seconds=home_live_refresh_seconds,
             home_live_request_timeout_seconds=home_live_request_timeout_seconds,
             current_state_page_size=current_state_page_size,
+            home_traffic_enabled=home_traffic_enabled,
+            home_traffic_refresh_seconds=home_traffic_refresh_seconds,
+            home_traffic_request_timeout_seconds=home_traffic_request_timeout_seconds,
+            home_traffic_page_size=home_traffic_page_size,
         )
     )
 
