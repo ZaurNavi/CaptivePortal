@@ -188,6 +188,49 @@ def traffic_summary(*, mode="complete", snapshot=None):
     )
 
 
+def invalid_population_summary(case):
+    mode = "complete" if case == "nonempty_empty_reason" else "empty"
+    value = traffic_summary(mode=mode)
+    if case == "empty_lan":
+        return replace(
+            value,
+            snapshot=replace(value.snapshot, selected_source="lan"),
+            source_selection=replace(value.source_selection, selected_source="lan"),
+        )
+    if case == "empty_wrong_reason":
+        return replace(
+            value,
+            snapshot=replace(value.snapshot, selection_reason="primary_full_coverage"),
+            source_selection=replace(
+                value.source_selection,
+                selection_reason="primary_full_coverage",
+            ),
+        )
+    if case == "nonempty_empty_reason":
+        return replace(
+            value,
+            snapshot=replace(value.snapshot, selection_reason="empty_population"),
+            source_selection=replace(
+                value.source_selection,
+                selection_reason="empty_population",
+            ),
+        )
+    if case == "empty_nonzero_count":
+        return replace(
+            value,
+            coverage=replace(
+                value.coverage,
+                total_ap_count=1,
+                missing_rate_ap_count=1,
+            ),
+        )
+    if case == "empty_null_traffic":
+        return replace(value, traffic=CurrentTrafficTotals(None, 0.0, None))
+    if case == "empty_nonzero_traffic":
+        return replace(value, traffic=CurrentTrafficTotals(1.0, 0.0, 1.0))
+    raise AssertionError(f"unknown test case: {case}")
+
+
 def traffic_page(*, source="wired", cursor=None):
     snapshot = traffic_snapshot(
         selected_source=source,
@@ -326,6 +369,22 @@ def test_summary_serializer_explicit_contract(mode):
     if mode == "none":
         assert result["snapshot"]["selected_source"] is None
         assert result["coverage"]["coverage_status"] == "none"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "empty_lan",
+        "empty_wrong_reason",
+        "nonempty_empty_reason",
+        "empty_nonzero_count",
+        "empty_null_traffic",
+        "empty_nonzero_traffic",
+    ],
+)
+def test_summary_serializer_rejects_invalid_empty_population_combinations(case):
+    with pytest.raises(CurrentTrafficSerializationError):
+        serialize_current_traffic_summary(invalid_population_summary(case), SITE_ID)
 
 
 def test_serializers_reject_site_source_and_arithmetic_mismatch():

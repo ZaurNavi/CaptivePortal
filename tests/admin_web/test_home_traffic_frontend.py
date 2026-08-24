@@ -32,6 +32,7 @@ def test_home_traffic_node_state_machine_and_validation(tmp_path):
 const api = window.CaptivPortalHomeTrafficTest;
 const live = window.CaptivPortalHomeLiveTest;
 function assert(value, message) { if (!value) throw new Error(message); }
+function copy(value) { return JSON.parse(JSON.stringify(value)); }
 const site = "0123456789abcdef01234567";
 const cycle = "10000000-0000-4000-8000-000000000001";
 function snapshot() {
@@ -98,6 +99,31 @@ empty.result.source_selection.wired_pair_valid_ap_count = 0; empty.result.source
 empty.result.traffic = {download_mbps: 0, upload_mbps: 0, total_mbps: 0, unit: "Mbps"};
 assert(api.validateTrafficSummary(empty, site) !== null, "empty-cycle exact zero accepted");
 
+const invalidEmptyLan = copy(empty);
+invalidEmptyLan.result.snapshot.selected_source = "lan";
+invalidEmptyLan.result.source_selection.selected_source = "lan";
+assert(api.validateTrafficSummary(invalidEmptyLan, site) === null, "empty cycle rejects LAN selection");
+const invalidEmptyReason = copy(empty);
+invalidEmptyReason.result.snapshot.selection_reason = "primary_full_coverage";
+invalidEmptyReason.result.source_selection.selection_reason = "primary_full_coverage";
+assert(api.validateTrafficSummary(invalidEmptyReason, site) === null, "empty cycle rejects non-empty selection reason");
+const invalidNonemptyReason = summary();
+invalidNonemptyReason.result.snapshot.selection_reason = "empty_population";
+invalidNonemptyReason.result.source_selection.selection_reason = "empty_population";
+assert(api.validateTrafficSummary(invalidNonemptyReason, site) === null, "non-empty cycle rejects empty selection reason");
+const invalidEmptyCount = copy(empty);
+invalidEmptyCount.result.coverage.total_ap_count = 1;
+invalidEmptyCount.result.coverage.missing_rate_ap_count = 1;
+assert(api.validateTrafficSummary(invalidEmptyCount, site) === null, "empty cycle rejects nonzero counts");
+const invalidEmptyNull = copy(empty);
+invalidEmptyNull.result.traffic.download_mbps = null;
+invalidEmptyNull.result.traffic.total_mbps = null;
+assert(api.validateTrafficSummary(invalidEmptyNull, site) === null, "empty cycle rejects null traffic");
+const invalidEmptyValue = copy(empty);
+invalidEmptyValue.result.traffic.download_mbps = 1;
+invalidEmptyValue.result.traffic.total_mbps = 1;
+assert(api.validateTrafficSummary(invalidEmptyValue, site) === null, "empty cycle rejects nonzero traffic");
+
 const missing = summary();
 Object.assign(missing.result.snapshot, {cycle_id: null, complete: false, observed_at: null,
   newest_observed_at: null, age_seconds: null, source_skew_seconds: null,
@@ -151,8 +177,10 @@ assert(!api.ownsGeneration(generationOwner, 2, true), "stopped lifecycle ignores
 
 const trafficState = {summary: {old: true}, acceptedAt: 0, rows: [{old: true}], cursor: "old", pageForbidden: true};
 api.acceptTrafficSummary(trafficState, valid.result, 123);
-assert(trafficState.summary === valid.result && trafficState.rows.length === 0 && trafficState.cursor === null && !trafficState.pageForbidden, "new summary clears old AP rows before page result");
-assert(api.trafficPageEligible(valid.result, "fresh") && !api.trafficPageEligible(missing.result, "unavailable"), "unavailable/no-cycle summary skips AP request");
+assert(trafficState.summary === valid.result && trafficState.rows.length === 0 && trafficState.cursor === null && trafficState.pageForbidden, "new summary preserves lifetime AP denial while clearing rows");
+assert(api.trafficPageEligible(valid.result, "fresh", false)
+  && !api.trafficPageEligible(valid.result, "fresh", true)
+  && !api.trafficPageEligible(missing.result, "unavailable", false), "unavailable/no-cycle/forbidden summary skips AP request");
 trafficState.rows = [{old: true}]; trafficState.cursor = "next"; api.clearTrafficPageState(trafficState);
 assert(trafficState.rows.length === 0 && trafficState.cursor === null && trafficState.summary === valid.result, "local unavailable clears only Traffic page state");
 
@@ -167,6 +195,40 @@ assert(currentFailures.failureCount === 0 && busy.failureCount === 1, "Traffic f
 assert(live.neutralAbort("hidden", false) && live.neutralAbort("pagehide", false), "hidden/pagehide abort is neutral");
 
 (async () => {
+  const refreshSources = {
+    client: {nextEligibleAt: 10000, failureCount: 0, disabled: false},
+    ap: {nextEligibleAt: 10000, failureCount: 0, disabled: false},
+    traffic: {nextEligibleAt: 10000, failureCount: 0, disabled: false},
+  };
+  const refreshCalls = {client: 0, ap: 0, traffic: 0};
+  const refreshOperations = {
+    client: async () => { refreshCalls.client += 1; return {cleanRefresh: false}; },
+    ap: async () => { refreshCalls.ap += 1; return {cleanRefresh: false}; },
+    traffic: async () => { refreshCalls.traffic += 1; return {cleanRefresh: false}; },
+  };
+  await api.runEligiblePhasedCycle(refreshSources, false, 1000, refreshOperations);
+  assert(JSON.stringify(refreshCalls) === '{"client":0,"ap":0,"traffic":0}', "automatic refresh respects success interval");
+  await api.runEligiblePhasedCycle(refreshSources, true, 1000, refreshOperations);
+  assert(JSON.stringify(refreshCalls) === '{"client":1,"ap":1,"traffic":1}', "manual refresh immediately performs one new phased cycle");
+  refreshSources.client.failureCount = 1;
+  await api.runEligiblePhasedCycle(refreshSources, true, 1000, refreshOperations);
+  assert(refreshCalls.client === 1 && refreshCalls.ap === 2 && refreshCalls.traffic === 2, "manual refresh does not bypass active source backoff");
+
+  const forbiddenPageState = {summary: null, acceptedAt: 0, rows: [], cursor: null, pageForbidden: false};
+  let summaryRequests = 0; let pageRequests = 0;
+  async function trafficCycle() {
+    summaryRequests += 1;
+    api.acceptTrafficSummary(forbiddenPageState, valid.result, summaryRequests);
+    if (api.trafficPageEligible(valid.result, "fresh", forbiddenPageState.pageForbidden)) {
+      pageRequests += 1;
+      forbiddenPageState.pageForbidden = true;
+      api.clearTrafficPageState(forbiddenPageState);
+    }
+  }
+  await trafficCycle(); await trafficCycle(); await trafficCycle();
+  assert(summaryRequests === 3 && pageRequests === 1, "AP 403 blocks later AP pages while summaries continue");
+  assert(forbiddenPageState.summary === valid.result && forbiddenPageState.pageForbidden, "summary data survives persistent AP detail denial");
+
   let active = 0; let maximum = 0; const events = [];
   function operation(name, delay) { return () => new Promise((resolve) => {
     active += 1; maximum = Math.max(maximum, active); events.push(`${name}:start`);

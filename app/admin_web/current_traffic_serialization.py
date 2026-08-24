@@ -178,6 +178,11 @@ def _snapshot(value: Any, site_id: str) -> dict[str, Any]:
             raise CurrentTrafficSerializationError("no-snapshot state is invalid")
     elif value.complete is not True or selected not in _SOURCES:
         raise CurrentTrafficSerializationError("complete snapshot state is invalid")
+    elif value.empty_population:
+        if selected != "wired" or value.selection_reason != "empty_population":
+            raise CurrentTrafficSerializationError("empty snapshot source selection is invalid")
+    elif value.selection_reason == "empty_population":
+        raise CurrentTrafficSerializationError("non-empty snapshot selection reason is invalid")
     return {
         "source_kind": value.source_kind,
         "cycle_id": cycle_id,

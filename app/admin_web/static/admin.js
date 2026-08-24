@@ -1082,7 +1082,12 @@
         && snapshot.freshness_status === "unavailable" && snapshot.freshness_reason === "no_complete_snapshot"
         && snapshot.observed_at === null && snapshot.age_seconds === null && snapshot.source_skew_seconds === null;
     }
-    return snapshot.complete === true && SOURCES.has(snapshot.selected_source);
+    if (snapshot.complete !== true || !SOURCES.has(snapshot.selected_source)) return false;
+    if (snapshot.empty_population) {
+      return snapshot.selected_source === "wired"
+        && snapshot.selection_reason === "empty_population";
+    }
+    return snapshot.selection_reason !== "empty_population";
   }
   function validPolicy(policy, includeSkew) {
     return object(policy) && numberOrNull(policy.fresh_max_age_seconds) && policy.fresh_max_age_seconds !== null
@@ -1224,6 +1229,21 @@
     const traffic = await trafficOperation();
     return {phaseA, traffic};
   }
+  function sourceEligible(source, manual, now) {
+    if (now >= source.nextEligibleAt) return true;
+    return Boolean(manual && source.failureCount === 0
+      && source.nextEligibleAt !== Infinity && !source.disabled);
+  }
+  function runEligiblePhasedCycle(sourceStates, manual, now, operations) {
+    const clock = typeof now === "function" ? now : () => now;
+    const invoke = (name) => sourceEligible(sourceStates[name], manual, clock())
+      ? operations[name]() : Promise.resolve({cleanRefresh: false, skipped: true});
+    return runPhasedCycle(
+      () => invoke("client"),
+      () => invoke("ap"),
+      () => invoke("traffic"),
+    );
+  }
   function beginCoordinator(state, view) {
     if (state.active) return null;
     state.active = true;
@@ -1245,11 +1265,10 @@
     source.acceptedAt = acceptedAt;
     source.rows = [];
     source.cursor = null;
-    source.pageForbidden = false;
   }
-  function trafficPageEligible(summary, effectiveFreshness) {
+  function trafficPageEligible(summary, effectiveFreshness, pageForbidden) {
     return Boolean(summary && summary.snapshot.cycle_id !== null
-      && effectiveFreshness !== "unavailable");
+      && effectiveFreshness !== "unavailable" && !pageForbidden);
   }
   function clearTrafficPageState(source) {
     source.rows = [];
@@ -1264,6 +1283,7 @@
       acceptTrafficSummary, beginCoordinator, canonicalUtc, classify,
       clearTrafficPageState, endCoordinator, formatMbps, ownsGeneration,
       pageFailureEffect, retryDelay, retryJitter, runPhasedCycle,
+      runEligiblePhasedCycle, sourceEligible,
       trafficFailureTransition,
       trafficAge, trafficDisplay, trafficFreshness, trafficPageEligible,
       validateTrafficPage, validateTrafficSummary,
@@ -1357,7 +1377,6 @@
       live.releaseController(source, controller);
     }
   }
-  function eligible(source) { return performance.now() >= source.nextEligibleAt; }
   function markSuccess(source, interval) {
     source.failureCount = 0;
     source.cleanRetry = false;
@@ -1547,7 +1566,7 @@
   }
   async function refreshCurrent(kind, generation) {
     const source = sources[kind]; source.generation = generation;
-    if (stopped || document.hidden || coordinator.pending || !eligible(source)) return {cleanRefresh: false};
+    if (stopped || document.hidden || coordinator.pending) return {cleanRefresh: false};
     try {
       const stem = kind === "client" ? "clients" : "aps";
       const summaryPayload = await requestJson(`${currentBase}/${stem}/summary`, source, generation, liveTimeout);
@@ -1585,7 +1604,7 @@
   }
   async function refreshTraffic(generation) {
     const source = sources.traffic; source.generation = generation;
-    if (stopped || document.hidden || coordinator.pending || source.disabled || !eligible(source)) return {cleanRefresh: false};
+    if (stopped || document.hidden || coordinator.pending || source.disabled) return {cleanRefresh: false};
     try {
       const payload = await requestJson(`${trafficBase}/summary`, source, generation, trafficTimeout);
       const summary = validateTrafficSummary(payload, siteId);
@@ -1593,7 +1612,7 @@
       if (source.generation !== generation) return {cleanRefresh: false};
       acceptTrafficSummary(source, summary, performance.now());
       renderTrafficSummary(); renderTrafficRows();
-      if (trafficPageEligible(summary, summary.snapshot.freshness_status)) {
+      if (trafficPageEligible(summary, summary.snapshot.freshness_status, source.pageForbidden)) {
         try {
           const params = trafficParams(summary, null);
           const pagePayload = await requestJson(`${trafficBase}/aps?${params.toString()}`, source, generation, trafficTimeout);
@@ -1626,19 +1645,24 @@
     if (stopped || document.hidden) return;
     coordinator.timer = window.setTimeout(() => { coordinator.timer = null; requestRefresh(false); }, delayMs);
   }
-  async function performRefresh() {
+  async function performRefresh(manual) {
     const busyView = {setBusy: (value) => { refreshButton.disabled = value; }};
     const generation = beginCoordinator(coordinator, busyView);
     if (generation === null) return;
     abortAll("superseded");
     let cleanRefresh = false;
     try {
-      const outcome = await runPhasedCycle(
-        () => refreshCurrent("client", generation),
-        () => refreshCurrent("ap", generation),
-        () => coordinator.pending || stopped || document.hidden
-          ? Promise.resolve({cleanRefresh: false})
-          : refreshTraffic(generation),
+      const outcome = await runEligiblePhasedCycle(
+        sources,
+        manual,
+        () => performance.now(),
+        {
+          client: () => refreshCurrent("client", generation),
+          ap: () => refreshCurrent("ap", generation),
+          traffic: () => coordinator.pending || stopped || document.hidden
+            ? Promise.resolve({cleanRefresh: false})
+            : refreshTraffic(generation),
+        },
       );
       cleanRefresh = outcome.phaseA.some((item) => item.status === "fulfilled" && item.value.cleanRefresh)
         || (outcome.traffic && outcome.traffic.cleanRefresh);
@@ -1662,7 +1686,7 @@
       }
       return;
     }
-    coordinator.activePromise = performRefresh();
+    coordinator.activePromise = performRefresh(manual);
   }
   async function loadMore(kind) {
     const source = sources[kind];
