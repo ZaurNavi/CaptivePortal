@@ -588,3 +588,132 @@ class VisitAnalyticsBundle:
     observation_coverage: AnalyticsResult[Any]
     traffic: AnalyticsResult[Any]
     return_intervals: AnalyticsResult[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentTrafficFreshnessPolicy:
+    fresh_max_age_seconds: float
+    stale_max_age_seconds: float
+    max_ap_skew_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentTrafficSnapshot:
+    source_kind: str
+    site_id: str
+    cycle_id: str | None
+    started_at: str | None
+    finished_at: str | None
+    complete: bool
+    evaluated_at: str
+    observed_at: str | None
+    newest_observed_at: str | None
+    age_seconds: float | None
+    source_skew_seconds: float | None
+    freshness_status: str
+    freshness_reason: str
+    primary_source: str
+    selected_source: str | None
+    selection_reason: str
+    empty_population: bool
+    latest_attempt_state: str
+    latest_attempt_result: str | None
+    latest_attempt_at: str | None
+    using_previous_complete_snapshot: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentTrafficSourceSelection:
+    primary_source: str
+    selected_source: str | None
+    selection_reason: str
+    wired_pair_valid_ap_count: int
+    lan_pair_valid_ap_count: int
+    source_mixing_allowed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentTrafficCoverage:
+    status: str
+    reasons: tuple[str, ...]
+    empty_population: bool
+    total_ap_count: int
+    valid_rate_ap_count: int
+    valid_download_ap_count: int
+    valid_upload_ap_count: int
+    missing_rate_ap_count: int
+    stale_ap_count: int
+    unavailable_ap_count: int
+    reset_ap_count: int
+    gap_rejected_ap_count: int
+    no_baseline_ap_count: int
+    source_unavailable_ap_count: int
+    invalid_elapsed_ap_count: int
+    observed_at: str | None
+    newest_observed_at: str | None
+    source_skew_seconds: float | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reasons", tuple(self.reasons))
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentTrafficFreshness:
+    status: str
+    reason: str
+    evaluated_at_utc: str
+    observed_at: str | None
+    newest_observed_at: str | None
+    age_seconds: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentTrafficTotals:
+    download_mbps: float | None
+    upload_mbps: float | None
+    total_mbps: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentSiteTraffic:
+    snapshot: CurrentTrafficSnapshot
+    freshness_policy: CurrentTrafficFreshnessPolicy
+    source_selection: CurrentTrafficSourceSelection
+    coverage: CurrentTrafficCoverage
+    freshness: CurrentTrafficFreshness
+    traffic: CurrentTrafficTotals
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentApTrafficItem:
+    ap_mac: str
+    name: str | None
+    download_mbps: float | None
+    upload_mbps: float | None
+    total_mbps: float | None
+    download_reason: str
+    upload_reason: str
+    rate_status: str
+    observed_at: str | None
+    age_seconds: float | None
+    selected_source: str
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentTrafficPageMetadata:
+    limit: int
+    next_cursor: str | None
+    cycle_id: str
+    selected_source: str
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentApTrafficPage:
+    snapshot: CurrentTrafficSnapshot
+    freshness_policy: CurrentTrafficFreshnessPolicy
+    source_selection: CurrentTrafficSourceSelection
+    items: tuple[CurrentApTrafficItem, ...]
+    page: CurrentTrafficPageMetadata
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))

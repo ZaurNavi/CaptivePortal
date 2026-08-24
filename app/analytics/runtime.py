@@ -14,6 +14,7 @@ from .api_config import (
     analytics_api_config_from_settings,
 )
 from .config import AnalyticsConfig, AnalyticsConfigError, analytics_config_from_settings
+from .current_traffic import CurrentTrafficReadService
 from .read_service import AnalyticsReadService
 from .source_gateway import AnalyticsSourceGateway, SOURCE_SCHEMA_VERSIONS
 from .telemetry import AnalyticsTelemetry
@@ -52,6 +53,7 @@ class AnalyticsRuntime:
         wireless_service: WirelessAnalyticsService | None = None,
         visit_service: VisitAnalyticsService | None = None,
         logger: logging.Logger,
+        current_traffic_service: CurrentTrafficReadService | None = None,
         register_routes: bool = False,
     ):
         self.state = state
@@ -62,6 +64,7 @@ class AnalyticsRuntime:
         self.quality_service = quality_service
         self.wireless_service = wireless_service
         self.visit_service = visit_service
+        self.current_traffic_service = current_traffic_service
         self.blueprint = None
         if register_routes and api_config is not None:
             from .api import create_analytics_blueprint
@@ -181,6 +184,11 @@ def create_analytics_runtime(
         registry_read_service,
     )
     telemetry = AnalyticsTelemetry(logger)
+    try:
+        current_traffic_service = CurrentTrafficReadService(gateway)
+    except Exception:
+        current_traffic_service = None
+        _event(logger, "analytics.current_traffic_unavailable", "construction_error")
     runtime = AnalyticsRuntime(
         state="active",
         config=analytics_config,
@@ -196,6 +204,7 @@ def create_analytics_runtime(
         visit_service=VisitAnalyticsService(
             analytics_config, gateway, telemetry=telemetry
         ),
+        current_traffic_service=current_traffic_service,
         logger=logger,
         register_routes=True,
     )
