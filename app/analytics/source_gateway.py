@@ -73,6 +73,71 @@ FIELD_ALLOWLIST = {
     "radio": RADIO_FIELDS,
 }
 
+_NON_OK_RATE_REASONS_SQL = (
+    "'no_baseline','counter_reset','gap_too_large','invalid_elapsed',"
+    "'source_unavailable'"
+)
+_CANONICAL_MAC_SQL = (
+    "ap_mac GLOB "
+    "'[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:"
+    "[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]'"
+)
+
+
+def _rate_ok_sql(value: str, reason: str, timestamp: str) -> str:
+    return (
+        f"({reason}='ok' AND {timestamp} IS NOT NULL "
+        f"AND typeof({value}) IN ('integer','real') AND {value}>=0 "
+        f"AND abs({value})<=1.7976931348623157e308)"
+    )
+
+
+def _rate_valid_sql(value: str, reason: str, timestamp: str) -> str:
+    return (
+        f"COALESCE(({_rate_ok_sql(value, reason, timestamp)} OR "
+        f"({reason} IN ({_NON_OK_RATE_REASONS_SQL}) AND {value} IS NULL)),0)"
+    )
+
+
+_WIRED_DOWN_OK = _rate_ok_sql(
+    "wired_download_mbps", "wired_download_rate_reason", "wired_observed_at"
+)
+_WIRED_UP_OK = _rate_ok_sql(
+    "wired_upload_mbps", "wired_upload_rate_reason", "wired_observed_at"
+)
+_LAN_DOWN_OK = _rate_ok_sql(
+    "lan_rx_mbps", "lan_rx_rate_reason", "lan_observed_at"
+)
+_LAN_UP_OK = _rate_ok_sql(
+    "lan_tx_mbps", "lan_tx_rate_reason", "lan_observed_at"
+)
+_CURRENT_TRAFFIC_STATS_SQL = f"""
+    SELECT
+      COUNT(*) AS stored_row_count,
+      COALESCE(SUM(site_id!=?),0) AS bad_site_count,
+      COALESCE(SUM(NOT ({_CANONICAL_MAC_SQL})),0) AS bad_mac_count,
+      COUNT(*)-COUNT(DISTINCT ap_mac) AS duplicate_mac_count,
+      COALESCE(SUM(partial!=0 OR overview_ok!=1 OR wired_uplink_ok!=1
+                   OR lan_traffic_ok!=1 OR radios_ok!=1),0) AS bad_flag_count,
+      COALESCE(SUM(NOT ({_rate_valid_sql('wired_download_mbps', 'wired_download_rate_reason', 'wired_observed_at')})),0)
+        + COALESCE(SUM(NOT ({_rate_valid_sql('wired_upload_mbps', 'wired_upload_rate_reason', 'wired_observed_at')})),0)
+        + COALESCE(SUM(NOT ({_rate_valid_sql('lan_rx_mbps', 'lan_rx_rate_reason', 'lan_observed_at')})),0)
+        + COALESCE(SUM(NOT ({_rate_valid_sql('lan_tx_mbps', 'lan_tx_rate_reason', 'lan_observed_at')})),0)
+        AS bad_rate_count,
+      COALESCE(SUM(wired_observed_at IS NULL),0) AS missing_wired_time_count,
+      COALESCE(SUM(lan_observed_at IS NULL),0) AS missing_lan_time_count,
+      MIN(wired_observed_at) AS wired_oldest,
+      MAX(wired_observed_at) AS wired_newest,
+      MIN(lan_observed_at) AS lan_oldest,
+      MAX(lan_observed_at) AS lan_newest,
+      COALESCE(SUM(({_WIRED_DOWN_OK}) AND ({_WIRED_UP_OK})),0)
+        AS wired_pair_valid_count,
+      COALESCE(SUM(({_LAN_DOWN_OK}) AND ({_LAN_UP_OK})),0)
+        AS lan_pair_valid_count
+    FROM ap_observations
+    WHERE cycle_id=?
+"""
+
 
 class AnalyticsSourceError(RuntimeError):
     """A source cannot satisfy the read-only Analytics contract."""
@@ -133,6 +198,107 @@ class AnalyticsSourceGateway:
         self._observations = observation_read_service
         self._visits = visit_read_service
         self._registry = registry_read_service
+
+    def current_traffic_data(
+        self,
+        *,
+        site_id: str,
+        cycle_id: str | None,
+        after_ap_mac: str | None,
+        page_limit: int | None,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        """Read one AP traffic snapshot in a single SQLite transaction."""
+        with self._connection("observations", deadline) as connection:
+            connection.execute("BEGIN")
+            try:
+                if cycle_id is None:
+                    cycle = self._one(
+                        connection,
+                        """
+                        SELECT * FROM observation_cycles
+                        WHERE site_id=? AND kind='ap_dynamic'
+                          AND state='completed' AND complete=1
+                          AND result='success'
+                        ORDER BY started_at DESC, cycle_id DESC
+                        LIMIT 1
+                        """,
+                        (site_id,),
+                        deadline,
+                    )
+                else:
+                    cycle = self._one(
+                        connection,
+                        """
+                        SELECT * FROM observation_cycles
+                        WHERE site_id=? AND cycle_id=? AND kind='ap_dynamic'
+                          AND state='completed' AND complete=1
+                          AND result='success'
+                        LIMIT 1
+                        """,
+                        (site_id, cycle_id),
+                        deadline,
+                    )
+                latest = self._one(
+                    connection,
+                    """
+                    SELECT cycle_id, state, result, started_at, finished_at
+                    FROM observation_cycles
+                    WHERE site_id=? AND kind='ap_dynamic'
+                    ORDER BY started_at DESC, cycle_id DESC
+                    LIMIT 1
+                    """,
+                    (site_id,),
+                    deadline,
+                )
+                if cycle is None:
+                    return {"cycle": None, "latest": latest, "stats": None,
+                            "rows": ()}
+
+                selected_cycle_id = str(cycle["cycle_id"])
+                stats = self._one(
+                    connection,
+                    _CURRENT_TRAFFIC_STATS_SQL,
+                    (site_id, selected_cycle_id),
+                    deadline,
+                )
+                parameters: list[Any] = [selected_cycle_id]
+                where = "cycle_id=?"
+                if after_ap_mac is not None:
+                    where += " AND ap_mac>?"
+                    parameters.append(after_ap_mac)
+                suffix = ""
+                if page_limit is not None:
+                    suffix = " LIMIT ?"
+                    parameters.append(page_limit + 1)
+                rows = self._all(
+                    connection,
+                    f"""
+                    SELECT cycle_id, site_id, ap_mac, name,
+                           partial, overview_ok, wired_uplink_ok,
+                           lan_traffic_ok, radios_ok,
+                           wired_observed_at, wired_download_mbps,
+                           wired_upload_mbps,
+                           wired_download_rate_reason,
+                           wired_upload_rate_reason,
+                           lan_observed_at, lan_rx_mbps, lan_tx_mbps,
+                           lan_rx_rate_reason, lan_tx_rate_reason
+                    FROM ap_observations
+                    WHERE {where}
+                    ORDER BY ap_mac ASC{suffix}
+                    """,
+                    parameters,
+                    deadline,
+                )
+                deadline.require_remaining()
+                return {
+                    "cycle": cycle,
+                    "latest": latest,
+                    "stats": stats,
+                    "rows": tuple(rows),
+                }
+            finally:
+                connection.rollback()
 
     def cycle_quality(
         self,
