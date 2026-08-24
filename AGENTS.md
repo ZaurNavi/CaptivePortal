@@ -1,7 +1,7 @@
 # CaptivPortal: правила для coding agents
 
 Status: current
-Updated: 2026-08-04
+Updated: 2026-08-24
 
 ## Project
 
@@ -75,7 +75,7 @@ TASK задаёт scope и намерение изменения, но не ст
 - Не использовать Flask current_app из фонового thread.
 - Worker создаётся в composition root, не при import.
 - Не менять Alloy, Loki, Grafana, production systemd или reverse proxy без отдельного TASK.
-- Сначала targeted tests, затем full gate.
+- Исполнитель запускает только targeted tests модулей и компонентов, которые он изменял, добавлял или переписывал. Полный repository suite выполняет Reviewer / Tech Lead / owner непосредственно перед production deployment или feature activation.
 - Не исправлять несвязанные падения full suite.
 - Не утверждать, что test, commit, push, PR или deploy выполнен, если это не так.
 - Merge, force push и production deploy — owner-only без прямого разрешения.
@@ -91,13 +91,45 @@ TASK задаёт scope и намерение изменения, но не ст
 
 ## Проверки
 
-Targeted command определяет TASK. Полный gate:
+Targeted commands для исполнителя определяет TASK. Они должны проверять только изменённые модули, их непосредственные контракты и добавленные regression-сценарии.
+
+Статические проверки, такие как `compileall`, проверка синтаксиса изменённого frontend-кода и `git diff --check`, не считаются полным test suite и могут оставаться в TASK исполнителя.
+
+Полный repository gate не является обязанностью исполнителя и не должен включаться в его TASK без отдельной прямой команды владельца. Его выполняет Reviewer / Tech Lead / owner на exact artifact непосредственно перед production deployment или feature activation:
 
     python -m pytest -q -rs
     PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
     git diff --check
 
-Если environment запрещает проверку, укажи команду, причину и owner action.
+Если environment запрещает назначенную стороне проверку, укажи команду, причину и owner action.
+
+## Повторное использование результатов тестирования
+
+Reviewer / Tech Lead не должен повторно запускать идентичные targeted tests только для формального подтверждения результата исполнителя.
+
+Результаты исполнителя принимаются как targeted test evidence, если handoff содержит:
+
+- exact baseline;
+- exact patch SHA256 или commit SHA;
+- точную команду;
+- Python/Node и операционную среду;
+- passed/skipped/failed;
+- классификацию известных падений;
+- подтверждение применимости exact patch.
+
+Перед повторным targeted-прогоном reviewer обязан определить, какую новую информацию даст этот запуск.
+
+Повторный targeted-прогон разрешён только когда он:
+
+1. проверяет новый риск или сценарий, не проверенный исполнителем;
+2. запускает пропущенные platform-specific тесты в другой среде;
+3. подтверждает exact-artifact integration или обязательный independent gate;
+4. расследует неполный, противоречивый или сомнительный результат;
+5. прямо требуется утверждённым TASK, deploy/production gate или отдельной owner-командой.
+
+Full repository suite выполняется нашей стороной один раз в составе pre-production gate. Он не перекладывается на исполнителя и не повторяется без новой причины после успешного gate на неизменённом exact artifact.
+
+Reviewer не должен утверждать, что лично выполнил targeted tests, если он использует результаты исполнителя.
 
 ## Stop conditions
 

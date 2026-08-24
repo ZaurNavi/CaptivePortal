@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from werkzeug.security import generate_password_hash
 
 from app.admin_web.config import AdminWebConfigError, admin_web_config_from_settings
 
 from .conftest import SITE_ID, enabled_settings
+
+
+def test_env_example_allows_owner_vpn_network():
+    example = (Path(__file__).parents[2] / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "WEB_ADMIN_ALLOWED_NETWORKS="
+        "127.0.0.1/32,::1/128,10.8.0.0/24\n"
+    ) in example
 
 
 def test_disabled_config_accepts_empty_credentials_and_sites():
