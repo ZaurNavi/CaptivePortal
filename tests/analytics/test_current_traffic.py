@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import copy
 import inspect
 import sqlite3
 
@@ -15,6 +16,7 @@ from app.analytics.current_traffic import (
 from app.analytics.source_gateway import (
     AnalyticsQueryDeadlineExceeded,
     QueryDeadline,
+    _CURRENT_TRAFFIC_STATS_SQL,
 )
 
 
@@ -99,6 +101,46 @@ def _summary(stack, **overrides):
     )
 
 
+class _PayloadGateway:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def current_traffic_data(self, **kwargs):
+        return copy.deepcopy(self.payload)
+
+
+def _latest_only_result(latest):
+    service = CurrentTrafficReadService(_PayloadGateway({
+        "cycle": None, "latest": latest, "stats": None, "rows": (),
+    }))
+    return service.get_current_site_traffic(
+        SITE, evaluated_at_utc=EVALUATED, **POLICY
+    )
+
+
+def _valid_payload(stack):
+    _cycle(stack, "corruptible", [
+        _row("corruptible", "02:AA:BB:CC:DD:47")
+    ])
+    data = stack.gateway.current_traffic_data(
+        site_id=SITE, cycle_id=None, evaluated_at_utc=EVALUATED,
+        after_ap_mac=None, page_limit=None,
+        deadline=QueryDeadline.after(2),
+    )
+    return {
+        "cycle": dict(data["cycle"]),
+        "latest": dict(data["latest"]),
+        "stats": dict(data["stats"]),
+        "rows": tuple(dict(row) for row in data["rows"]),
+    }
+
+
+def _summary_from_payload(payload):
+    return CurrentTrafficReadService(_PayloadGateway(payload)).get_current_site_traffic(
+        SITE, evaluated_at_utc=EVALUATED, **POLICY
+    )
+
+
 def test_no_cycle_and_empty_cycle_have_distinct_exact_semantics(analytics_stack):
     missing = _service(analytics_stack).get_current_site_traffic(
         "site-without-ap", evaluated_at_utc=EVALUATED, **POLICY
@@ -108,6 +150,9 @@ def test_no_cycle_and_empty_cycle_have_distinct_exact_semantics(analytics_stack)
     assert missing.snapshot.selected_source is None
     assert missing.snapshot.selection_reason == "no_complete_snapshot"
     assert missing.snapshot.empty_population is False
+    assert missing.snapshot.latest_attempt_state == "none"
+    assert missing.snapshot.latest_attempt_result is None
+    assert missing.snapshot.latest_attempt_at is None
     assert missing.coverage.status == "none"
     assert missing.traffic.total_mbps is None
 
@@ -140,6 +185,9 @@ def test_source_selection_and_direction_aggregation(analytics_stack):
     assert result.traffic.upload_mbps == 11.0
     assert result.traffic.total_mbps == 20.0
     assert result.coverage.valid_rate_ap_count == 2
+    assert result.snapshot.latest_attempt_state == "completed"
+    assert result.snapshot.latest_attempt_result == "success"
+    assert result.snapshot.latest_attempt_at == "2026-01-01T12:00:40.000Z"
 
 
 @pytest.mark.parametrize(
@@ -205,6 +253,19 @@ def test_lan_higher_partial_coverage_wins_without_blending(analytics_stack):
     assert result.traffic.total_mbps == 10.0
 
 
+def test_wired_full_coverage_beats_partial_lan(analytics_stack):
+    _cycle(analytics_stack, "wired-full", [
+        _row(
+            "wired-full", "02:AA:BB:CC:DD:49",
+            lan=(3.0, None, "ok", "no_baseline"),
+        )
+    ])
+    result = _summary(analytics_stack)
+    assert result.snapshot.selected_source == "wired"
+    assert result.snapshot.selection_reason == "primary_full_coverage"
+    assert result.traffic.total_mbps == 3.0
+
+
 def test_reason_counters_are_nonexclusive_per_ap(analytics_stack):
     _cycle(analytics_stack, "reasons", [
         _row(
@@ -262,6 +323,30 @@ def test_cycle_tie_breaks_by_cycle_id_descending(analytics_stack):
     assert result.traffic.total_mbps == 18.0
 
 
+def test_newer_cross_site_success_is_excluded_from_canonical_selection(
+    analytics_stack,
+):
+    _cycle(analytics_stack, "site-a-good", [
+        _row("site-a-good", "02:AA:BB:CC:DD:50")
+    ], started="2026-01-01T11:59:00.000Z",
+       finished="2026-01-01T11:59:40.000Z")
+    repository = analytics_stack.observations
+    repository.create_cycle(
+        kind="ap_dynamic", site_id="site-b",
+        started_at="2026-01-01T12:00:50.000Z", cycle_id="site-b-newer",
+    )
+    other = _row("site-b-newer", "02:AA:BB:CC:DD:51")
+    other["site_id"] = "site-b"
+    repository.insert_ap_batch([(other, ())])
+    repository.finalize_cycle(
+        "site-b-newer", finished_at="2026-01-01T12:00:55.000Z",
+        complete=True, result="success", source_rows_reported=1,
+        items_seen=1, items_stored=1,
+    )
+    result = _summary(analytics_stack)
+    assert result.snapshot.cycle_id == "site-a-good"
+
+
 def test_newer_non_success_attempt_does_not_replace_canonical(analytics_stack):
     _cycle(analytics_stack, "good", [
         _row("good", "02:AA:BB:CC:DD:14")
@@ -316,6 +401,71 @@ def test_newer_running_attempt_is_latest_only(analytics_stack):
     assert result.snapshot.latest_attempt_at == "2026-01-01T12:00:50.000Z"
 
 
+def test_newer_abandoned_attempt_uses_started_at(analytics_stack):
+    _cycle(analytics_stack, "stable-abandoned", [
+        _row("stable-abandoned", "02:AA:BB:CC:DD:46")
+    ], started="2026-01-01T11:59:00.000Z",
+       finished="2026-01-01T11:59:40.000Z")
+    analytics_stack.observations.create_cycle(
+        kind="ap_dynamic", site_id=SITE,
+        started_at="2026-01-01T12:00:50.000Z", cycle_id="abandoned",
+    )
+    with sqlite3.connect(analytics_stack.observations.db_path) as connection:
+        connection.execute(
+            "UPDATE observation_cycles SET state='abandoned', "
+            "abandoned_at='2026-01-01T12:00:55.000Z', complete=0, "
+            "updated_at='2026-01-01T12:00:55.000Z' "
+            "WHERE cycle_id='abandoned'"
+        )
+    result = _summary(analytics_stack)
+    assert result.snapshot.latest_attempt_state == "abandoned"
+    assert result.snapshot.latest_attempt_result is None
+    assert result.snapshot.latest_attempt_at == "2026-01-01T12:00:50.000Z"
+    assert result.snapshot.using_previous_complete_snapshot is True
+
+
+@pytest.mark.parametrize(
+    "latest",
+    [
+        {
+            "cycle_id": "bad", "state": "unknown", "result": None,
+            "started_at": "2026-01-01T12:00:00.000Z", "finished_at": None,
+        },
+        {
+            "cycle_id": "bad", "state": "completed", "result": "unknown",
+            "started_at": "2026-01-01T12:00:00.000Z",
+            "finished_at": "2026-01-01T12:00:01.000Z",
+        },
+        {
+            "cycle_id": "bad", "state": "running", "result": "failed",
+            "started_at": "2026-01-01T12:00:00.000Z", "finished_at": None,
+        },
+        {
+            "cycle_id": "bad", "state": "completed", "result": None,
+            "started_at": "2026-01-01T12:00:00.000Z",
+            "finished_at": "2026-01-01T12:00:01.000Z",
+        },
+        {
+            "cycle_id": "bad", "state": "abandoned", "result": None,
+            "started_at": "2026-01-01T12:00:00.000Z",
+            "finished_at": "2026-01-01T12:00:01.000Z",
+        },
+        {
+            "cycle_id": "bad", "state": "running", "result": None,
+            "started_at": "invalid", "finished_at": None,
+        },
+        {
+            "cycle_id": "bad", "state": "completed", "result": "success",
+            "started_at": "2026-01-01T12:00:02.000Z",
+            "finished_at": "2026-01-01T12:00:01.000Z",
+        },
+    ],
+)
+def test_invalid_latest_attempt_metadata_is_source_unavailable(latest):
+    with pytest.raises(CurrentTrafficSourceUnavailable):
+        _latest_only_result(latest)
+
+
 def test_integrity_counter_contradiction_is_source_unavailable(analytics_stack):
     _cycle(analytics_stack, "bad-count", [
         _row("bad-count", "02:AA:BB:CC:DD:15")
@@ -326,6 +476,109 @@ def test_integrity_counter_contradiction_is_source_unavailable(analytics_stack):
         )
     with pytest.raises(CurrentTrafficSourceUnavailable):
         _summary(analytics_stack)
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        ("cycle", "finished_at", None),
+        ("cycle", "finished_at", "2026-01-01T11:59:59.000Z"),
+        ("cycle", "items_seen", 2),
+        ("cycle", "items_skipped", 1),
+        ("cycle", "error_count", 1),
+        ("cycle", "data_quality_warning_count", 1),
+        ("cycle", "source_rows_reported", 2),
+        ("stats", "stored_row_count", 2),
+        ("stats", "duplicate_mac_count", 1),
+        ("stats", "bad_mac_count", 1),
+        ("row", "site_id", "other-site"),
+        ("row", "cycle_id", "other-cycle"),
+        ("row", "ap_mac", "02:aa:bb:cc:dd:47"),
+        ("row", "partial", 1),
+        ("row", "partial", None),
+        ("row", "overview_ok", 0),
+        ("row", "overview_ok", None),
+        ("row", "wired_uplink_ok", 0),
+        ("row", "wired_uplink_ok", None),
+        ("row", "lan_traffic_ok", 0),
+        ("row", "lan_traffic_ok", None),
+        ("row", "radios_ok", 0),
+        ("row", "radios_ok", None),
+        ("stats", "bad_flag_count", None),
+        ("stats", "bad_rate_count", None),
+    ],
+)
+def test_controlled_corrupted_source_matrix_is_unavailable(
+    analytics_stack, target, field, value
+):
+    payload = _valid_payload(analytics_stack)
+    if target == "row":
+        payload["rows"][0][field] = value
+    else:
+        payload[target][field] = value
+    with pytest.raises(CurrentTrafficSourceUnavailable):
+        _summary_from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "counter"),
+    [
+        ("site_id", None, "bad_site_count"),
+        ("ap_mac", None, "bad_mac_count"),
+        ("partial", None, "bad_flag_count"),
+        ("overview_ok", None, "bad_flag_count"),
+        ("wired_uplink_ok", None, "bad_flag_count"),
+        ("lan_traffic_ok", None, "bad_flag_count"),
+        ("radios_ok", None, "bad_flag_count"),
+        ("wired_download_rate_reason", None, "bad_rate_count"),
+        ("wired_download_rate_reason", "unknown", "bad_rate_count"),
+        ("wired_download_rate_reason", "no_baseline", "bad_rate_count"),
+        ("wired_download_mbps", None, "bad_rate_count"),
+        ("wired_download_mbps", float("nan"), "bad_rate_count"),
+        ("wired_download_mbps", float("inf"), "bad_rate_count"),
+        ("wired_observed_at", None, "bad_rate_count"),
+    ],
+)
+def test_sql_integrity_aggregates_reject_corrupt_rate_and_null_values(
+    column, value, counter
+):
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.executescript(
+        """
+        CREATE TABLE observation_cycles (
+          cycle_id TEXT, site_id TEXT, started_at TEXT, finished_at TEXT
+        );
+        CREATE TABLE ap_observations (
+          cycle_id TEXT, site_id TEXT, ap_mac TEXT, partial INTEGER,
+          overview_ok INTEGER, wired_uplink_ok INTEGER,
+          lan_traffic_ok INTEGER, radios_ok INTEGER,
+          wired_observed_at TEXT, wired_download_mbps REAL,
+          wired_upload_mbps REAL, wired_download_rate_reason TEXT,
+          wired_upload_rate_reason TEXT, lan_observed_at TEXT,
+          lan_rx_mbps REAL, lan_tx_mbps REAL,
+          lan_rx_rate_reason TEXT, lan_tx_rate_reason TEXT
+        );
+        INSERT INTO observation_cycles VALUES (
+          'cycle', 'site-a', '2026-01-01T12:00:00.000Z',
+          '2026-01-01T12:00:40.000Z'
+        );
+        INSERT INTO ap_observations VALUES (
+          'cycle', 'site-a', '02:AA:BB:CC:DD:48', 0, 1, 1, 1, 1,
+          '2026-01-01T12:00:30.000Z', 1.0, 2.0, 'ok', 'ok',
+          '2026-01-01T12:00:30.000Z', 3.0, 4.0, 'ok', 'ok'
+        );
+        """
+    )
+    connection.execute(
+        f"UPDATE ap_observations SET {column}=?", (value,)
+    )
+    stats = connection.execute(
+        _CURRENT_TRAFFIC_STATS_SQL,
+        (EVALUATED, "cycle", SITE, "cycle"),
+    ).fetchone()
+    connection.close()
+    assert int(stats[counter]) > 0
 
 
 def test_temporal_clock_anomaly_hides_aggregate_traffic(analytics_stack):
@@ -345,11 +598,67 @@ def test_temporal_clock_anomaly_hides_aggregate_traffic(analytics_stack):
 def test_section_outside_capture_interval_is_clock_anomaly(analytics_stack):
     row = _row("bad-time", "02:AA:BB:CC:DD:33")
     row["wired_observed_at"] = "2026-01-01T11:59:59.000Z"
+    row["lan_observed_at"] = "2026-01-01T11:59:59.000Z"
     _cycle(analytics_stack, "bad-time", [row])
     result = _summary(analytics_stack)
     assert result.freshness.status == "unavailable"
     assert result.freshness.reason == "clock_anomaly"
     assert result.coverage.unavailable_ap_count == 1
+
+
+def test_temporally_invalid_wired_falls_back_to_valid_lan(analytics_stack):
+    row = _row("temporal-fallback", "02:AA:BB:CC:DD:37")
+    row["wired_observed_at"] = "2026-01-01T11:59:59.000Z"
+    _cycle(analytics_stack, "temporal-fallback", [row])
+    result = _summary(analytics_stack)
+    assert result.snapshot.selected_source == "lan"
+    assert result.snapshot.selection_reason == "fallback_full_coverage"
+    assert result.source_selection.wired_pair_valid_ap_count == 0
+    assert result.source_selection.lan_pair_valid_ap_count == 1
+    assert result.freshness.status == "fresh"
+    assert result.traffic.download_mbps == 3.0
+    assert result.traffic.upload_mbps == 4.0
+    assert result.traffic.total_mbps == 7.0
+    page = _service(analytics_stack).list_current_ap_traffic(
+        SITE, cycle_id="temporal-fallback", evaluated_at_utc=EVALUATED,
+        **POLICY,
+    )
+    assert page.page.selected_source == "lan"
+    assert page.items[0].selected_source == "lan"
+    assert page.items[0].total_mbps == 7.0
+
+
+def test_temporally_invalid_lan_preserves_valid_wired(analytics_stack):
+    row = _row("temporal-primary", "02:AA:BB:CC:DD:38")
+    row["lan_observed_at"] = "2026-01-01T12:00:41.000Z"
+    _cycle(analytics_stack, "temporal-primary", [row])
+    result = _summary(analytics_stack)
+    assert result.snapshot.selected_source == "wired"
+    assert result.snapshot.selection_reason == "primary_full_coverage"
+    assert result.freshness.status == "fresh"
+    assert result.traffic.total_mbps == 3.0
+
+
+@pytest.mark.parametrize(
+    ("observed", "finished", "evaluated"),
+    [
+        ("2026-01-01T12:00:00.000Z", "2026-01-01T12:00:40.000Z", EVALUATED),
+        ("2026-01-01T12:00:40.000Z", "2026-01-01T12:00:40.000Z", EVALUATED),
+        ("2026-01-01T12:01:00.000Z", EVALUATED, EVALUATED),
+    ],
+)
+def test_temporal_equality_boundaries_are_valid(
+    analytics_stack, observed, finished, evaluated
+):
+    _cycle(analytics_stack, "time-boundary", [
+        _row("time-boundary", "02:AA:BB:CC:DD:39", observed=observed)
+    ], finished=finished)
+    result = _service(analytics_stack).get_current_site_traffic(
+        SITE, evaluated_at_utc=evaluated, **POLICY
+    )
+    assert result.snapshot.selected_source == "wired"
+    assert result.source_selection.wired_pair_valid_ap_count == 1
+    assert result.freshness.status == "fresh"
 
 
 def test_skew_boundary_is_inclusive(analytics_stack):
@@ -416,6 +725,11 @@ def test_cursor_and_explicit_cycle_validation(analytics_stack):
     service = _service(analytics_stack)
     with pytest.raises(CurrentTrafficValidationError):
         service.list_current_ap_traffic(
+            SITE, cycle_id=None, evaluated_at_utc=EVALUATED,
+            cursor="present", **POLICY,
+        )
+    with pytest.raises(CurrentTrafficValidationError):
+        service.list_current_ap_traffic(
             SITE, cycle_id="missing", evaluated_at_utc=EVALUATED, **POLICY
         )
     with pytest.raises(CurrentTrafficValidationError):
@@ -463,6 +777,24 @@ def test_noncanonical_and_overlong_cursors_are_rejected(analytics_stack):
             )
 
 
+def test_cursor_replay_against_another_cycle_is_rejected(analytics_stack):
+    for cycle_id, suffix in (("cursor-a", "52"), ("cursor-b", "53")):
+        _cycle(analytics_stack, cycle_id, [
+            _row(cycle_id, f"02:AA:BB:CC:DD:{suffix}"),
+            _row(cycle_id, f"02:AA:BB:CC:DE:{suffix}"),
+        ])
+    service = _service(analytics_stack)
+    first = service.list_current_ap_traffic(
+        SITE, cycle_id="cursor-a", evaluated_at_utc=EVALUATED,
+        limit=1, **POLICY,
+    )
+    with pytest.raises(CurrentTrafficValidationError):
+        service.list_current_ap_traffic(
+            SITE, cycle_id="cursor-b", evaluated_at_utc=EVALUATED,
+            limit=1, cursor=first.page.next_cursor, **POLICY,
+        )
+
+
 def test_retained_older_complete_cycle_remains_pageable(analytics_stack):
     _cycle(analytics_stack, "old", [
         _row("old", "02:AA:BB:CC:DD:20")
@@ -484,6 +816,17 @@ def test_expired_deadline_is_propagated(analytics_stack):
         _service(analytics_stack).get_current_site_traffic(
             SITE, evaluated_at_utc=EVALUATED,
             deadline=QueryDeadline.after(0), **POLICY,
+        )
+
+
+@pytest.mark.parametrize("limit", [0, 251, True, "100"])
+def test_page_limit_is_strictly_bounded_before_source_read(
+    analytics_stack, limit
+):
+    with pytest.raises(CurrentTrafficValidationError):
+        _service(analytics_stack).list_current_ap_traffic(
+            SITE, cycle_id="anything", evaluated_at_utc=EVALUATED,
+            limit=limit, **POLICY,
         )
 
 

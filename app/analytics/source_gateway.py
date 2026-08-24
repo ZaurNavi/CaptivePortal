@@ -84,7 +84,7 @@ _CANONICAL_MAC_SQL = (
 )
 
 
-def _rate_ok_sql(value: str, reason: str, timestamp: str) -> str:
+def _rate_shape_ok_sql(value: str, reason: str, timestamp: str) -> str:
     return (
         f"({reason}='ok' AND {timestamp} IS NOT NULL "
         f"AND typeof({value}) IN ('integer','real') AND {value}>=0 "
@@ -92,9 +92,18 @@ def _rate_ok_sql(value: str, reason: str, timestamp: str) -> str:
     )
 
 
+def _rate_ok_sql(value: str, reason: str, timestamp: str) -> str:
+    return (
+        f"({_rate_shape_ok_sql(value, reason, timestamp)} "
+        f"AND {timestamp}>=target.started_at "
+        f"AND {timestamp}<=target.finished_at "
+        "AND target.finished_at<=target.evaluated_at)"
+    )
+
+
 def _rate_valid_sql(value: str, reason: str, timestamp: str) -> str:
     return (
-        f"COALESCE(({_rate_ok_sql(value, reason, timestamp)} OR "
+        f"COALESCE(({_rate_shape_ok_sql(value, reason, timestamp)} OR "
         f"({reason} IN ({_NON_OK_RATE_REASONS_SQL}) AND {value} IS NULL)),0)"
     )
 
@@ -112,13 +121,22 @@ _LAN_UP_OK = _rate_ok_sql(
     "lan_tx_mbps", "lan_tx_rate_reason", "lan_observed_at"
 )
 _CURRENT_TRAFFIC_STATS_SQL = f"""
+    WITH target AS (
+      SELECT started_at, finished_at, ? AS evaluated_at
+      FROM observation_cycles
+      WHERE cycle_id=?
+    )
     SELECT
       COUNT(*) AS stored_row_count,
-      COALESCE(SUM(site_id!=?),0) AS bad_site_count,
-      COALESCE(SUM(NOT ({_CANONICAL_MAC_SQL})),0) AS bad_mac_count,
+      COALESCE(SUM(COALESCE(site_id!=?,1)),0) AS bad_site_count,
+      COALESCE(SUM(COALESCE(NOT ({_CANONICAL_MAC_SQL}),1)),0)
+        AS bad_mac_count,
       COUNT(*)-COUNT(DISTINCT ap_mac) AS duplicate_mac_count,
-      COALESCE(SUM(partial!=0 OR overview_ok!=1 OR wired_uplink_ok!=1
-                   OR lan_traffic_ok!=1 OR radios_ok!=1),0) AS bad_flag_count,
+      COALESCE(SUM(COALESCE(partial!=0,1)
+                   OR COALESCE(overview_ok!=1,1)
+                   OR COALESCE(wired_uplink_ok!=1,1)
+                   OR COALESCE(lan_traffic_ok!=1,1)
+                   OR COALESCE(radios_ok!=1,1)),0) AS bad_flag_count,
       COALESCE(SUM(NOT ({_rate_valid_sql('wired_download_mbps', 'wired_download_rate_reason', 'wired_observed_at')})),0)
         + COALESCE(SUM(NOT ({_rate_valid_sql('wired_upload_mbps', 'wired_upload_rate_reason', 'wired_observed_at')})),0)
         + COALESCE(SUM(NOT ({_rate_valid_sql('lan_rx_mbps', 'lan_rx_rate_reason', 'lan_observed_at')})),0)
@@ -134,7 +152,7 @@ _CURRENT_TRAFFIC_STATS_SQL = f"""
         AS wired_pair_valid_count,
       COALESCE(SUM(({_LAN_DOWN_OK}) AND ({_LAN_UP_OK})),0)
         AS lan_pair_valid_count
-    FROM ap_observations
+    FROM ap_observations CROSS JOIN target
     WHERE cycle_id=?
 """
 
@@ -204,6 +222,7 @@ class AnalyticsSourceGateway:
         *,
         site_id: str,
         cycle_id: str | None,
+        evaluated_at_utc: str,
         after_ap_mac: str | None,
         page_limit: int | None,
         deadline: QueryDeadline,
@@ -259,7 +278,10 @@ class AnalyticsSourceGateway:
                 stats = self._one(
                     connection,
                     _CURRENT_TRAFFIC_STATS_SQL,
-                    (site_id, selected_cycle_id),
+                    (
+                        evaluated_at_utc, selected_cycle_id,
+                        site_id, selected_cycle_id,
+                    ),
                     deadline,
                 )
                 parameters: list[Any] = [selected_cycle_id]

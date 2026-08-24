@@ -38,6 +38,8 @@ RATE_REASONS = frozenset({
     "ok", "no_baseline", "counter_reset", "gap_too_large",
     "invalid_elapsed", "source_unavailable",
 })
+_LATEST_STATES = frozenset({"running", "completed", "abandoned"})
+_LATEST_RESULTS = frozenset({"success", "partial", "failed", "shutdown"})
 _CURSOR_VERSION = 1
 _CURSOR_KIND = "current_traffic_aps"
 _MAX_CURSOR_LENGTH = 1024
@@ -80,6 +82,7 @@ class CurrentTrafficReadService:
         data = self._read(
             site_id=site,
             cycle_id=None,
+            evaluated_at_utc=evaluated_text,
             after_ap_mac=None,
             page_limit=None,
             deadline=query_deadline,
@@ -128,6 +131,7 @@ class CurrentTrafficReadService:
         data = self._read(
             site_id=site,
             cycle_id=cycle,
+            evaluated_at_utc=evaluated_text,
             after_ap_mac=after_ap_mac,
             page_limit=page_limit,
             deadline=deadline or QueryDeadline.after(10.0),
@@ -254,20 +258,12 @@ def _validated_context(
         try:
             oldest = parse_utc(oldest_text, "traffic observed_at")
             newest = parse_utc(newest_text, "traffic newest_observed_at")
-            wired_oldest = parse_utc(stats["wired_oldest"], "wired observed_at")
-            wired_newest = parse_utc(stats["wired_newest"], "wired observed_at")
-            lan_oldest = parse_utc(stats["lan_oldest"], "lan observed_at")
-            lan_newest = parse_utc(stats["lan_newest"], "lan observed_at")
         except AnalyticsQueryValidationError as exc:
             raise CurrentTrafficSourceUnavailable(
                 "Current traffic timestamp is invalid"
             ) from exc
-        temporal_anomaly = temporal_anomaly or any(
-            not (started <= first <= last <= finished)
-            for first, last in (
-                (oldest, newest), (wired_oldest, wired_newest),
-                (lan_oldest, lan_newest),
-            )
+        temporal_anomaly = temporal_anomaly or not (
+            started <= oldest <= newest <= finished
         )
     context = {
         "site": site,
@@ -344,6 +340,12 @@ def _site_result(
     reset = gap = baseline = source_unavailable = invalid_elapsed = 0
     for row in rows:
         down, up, down_reason, up_reason, observed_text = _source_values(row, source)
+        observed = _source_datetime(observed_text)
+        if not (
+            context["started"] <= observed <= context["finished"]
+            <= context["evaluated"]
+        ):
+            down = up = None
         if down is not None:
             down_values.append(down)
         if up is not None:
@@ -356,7 +358,6 @@ def _site_result(
         baseline += int("no_baseline" in reasons)
         source_unavailable += int("source_unavailable" in reasons)
         invalid_elapsed += int("invalid_elapsed" in reasons)
-        observed = _source_datetime(observed_text)
         age = (context["evaluated"] - observed).total_seconds()
         if (
             observed < context["started"] or observed > context["finished"]
@@ -365,6 +366,14 @@ def _site_result(
             unavailable += 1
         elif age > policy.fresh_max_age_seconds:
             stale += 1
+    expected_pairs = (
+        int(context["wired_pairs"])
+        if source == "wired" else int(context["lan_pairs"])
+    )
+    if pair_count != expected_pairs:
+        raise CurrentTrafficSourceUnavailable(
+            "Current traffic source integrity is unavailable"
+        )
     download = sum(down_values) if down_values else None
     upload = sum(up_values) if up_values else None
     total_value = download + upload if download is not None and upload is not None else None
@@ -513,13 +522,9 @@ def _snapshot(
     empty: bool,
     evaluated_text: str,
 ) -> CurrentTrafficSnapshot:
-    latest_state = str(latest["state"]) if latest else "none"
-    latest_at = None
-    latest_result = None
+    latest_state, latest_result, latest_at = _latest_attempt(latest)
     using_previous = False
     if latest:
-        latest_result = latest["result"]
-        latest_at = latest["finished_at"] or latest["started_at"]
         cycle_key = (str(cycle["started_at"]), str(cycle["cycle_id"]))
         latest_key = (str(latest["started_at"]), str(latest["cycle_id"]))
         using_previous = latest_key > cycle_key and latest["cycle_id"] != cycle["cycle_id"]
@@ -545,9 +550,7 @@ def _no_snapshot(
     evaluated_text: str,
 ) -> CurrentSiteTraffic:
     latest = dict(latest_row) if latest_row is not None else None
-    latest_state = str(latest["state"]) if latest else "none"
-    latest_result = latest["result"] if latest else None
-    latest_at = (latest["finished_at"] or latest["started_at"]) if latest else None
+    latest_state, latest_result, latest_at = _latest_attempt(latest)
     snapshot = CurrentTrafficSnapshot(
         source_kind="observation_ap_dynamic",
         site_id=site, cycle_id=None, started_at=None, finished_at=None,
@@ -575,6 +578,56 @@ def _no_snapshot(
         ),
         traffic=CurrentTrafficTotals(None, None, None),
     )
+
+
+def _latest_attempt(
+    latest: Mapping[str, Any] | None,
+) -> tuple[str, str | None, str | None]:
+    if latest is None:
+        return "none", None, None
+    try:
+        state = latest["state"]
+        result = latest["result"]
+        started_text = latest["started_at"]
+        finished_text = latest["finished_at"]
+    except KeyError as exc:
+        raise CurrentTrafficSourceUnavailable(
+            "Current traffic latest attempt is unavailable"
+        ) from exc
+    if not isinstance(state, str) or state not in _LATEST_STATES:
+        raise CurrentTrafficSourceUnavailable(
+            "Current traffic latest attempt is unavailable"
+        )
+    if result is not None and (
+        not isinstance(result, str) or result not in _LATEST_RESULTS
+    ):
+        raise CurrentTrafficSourceUnavailable(
+            "Current traffic latest attempt is unavailable"
+        )
+    try:
+        started = parse_utc(started_text, "latest attempt started_at")
+        finished = (
+            parse_utc(finished_text, "latest attempt finished_at")
+            if finished_text is not None else None
+        )
+    except AnalyticsQueryValidationError as exc:
+        raise CurrentTrafficSourceUnavailable(
+            "Current traffic latest attempt is unavailable"
+        ) from exc
+    valid_combination = (
+        (state == "running" and result is None and finished is None)
+        or (
+            state == "completed" and result in _LATEST_RESULTS
+            and finished is not None and finished >= started
+        )
+        or (state == "abandoned" and result is None and finished is None)
+    )
+    if not valid_combination:
+        raise CurrentTrafficSourceUnavailable(
+            "Current traffic latest attempt is unavailable"
+        )
+    attempt_at = finished_text if finished_text is not None else started_text
+    return state, result, str(attempt_at)
 
 
 def _site(value: Any) -> str:
