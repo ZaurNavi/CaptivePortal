@@ -86,7 +86,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         g.admin_source_ip = source_ip
         if len(request.query_string) > config.max_query_string_bytes:
             return _error("invalid_request", 400)
-        if any(len(request.args.getlist(key)) != 1 for key in request.args):
+        if (
+            not _is_current_state_path(request.path)
+            and any(len(request.args.getlist(key)) != 1 for key in request.args)
+        ):
             return _error("invalid_request", 400)
         if request.method == "POST":
             if request.content_length is None:
@@ -318,6 +321,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             csrf_token=g.admin_session.csrf_token,
             runtime_state=runtime.state,
             device_id=device_id,
+            home_live_enabled=config.home_live_enabled,
+            home_live_refresh_seconds=config.home_live_refresh_seconds,
+            home_live_request_timeout_seconds=config.home_live_request_timeout_seconds,
+            current_state_page_size=config.current_state_page_size,
         )
 
     @blueprint.get("/admin/api/v1/session")
@@ -476,6 +483,206 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             ),
         )
 
+    @blueprint.get("/admin/api/v1/sites/<site_id>/current-state/clients/summary")
+    @authenticated
+    def api_current_client_summary(site_id: str) -> Response:
+        return _current_state_query(
+            site_id,
+            route_name="current_client_summary",
+            source_kind="client",
+            capability="admin.read.overview",
+            allowed_parameters=frozenset(),
+            operation=lambda service, selected: service.current_client_summary(
+                g.admin_principal, selected
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/current-state/clients")
+    @authenticated
+    def api_current_clients(site_id: str) -> Response:
+        allowed = frozenset({
+            "cycle_id", "limit", "cursor", "sort", "auth_classification",
+            "ap_mac", "ssid",
+        })
+        return _current_state_query(
+            site_id,
+            route_name="current_client_page",
+            source_kind="client",
+            capability="admin.read.devices",
+            allowed_parameters=allowed,
+            operation=lambda service, selected: service.list_current_clients(
+                g.admin_principal,
+                selected,
+                **{key: request.args.get(key) for key in allowed},
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/current-state/aps/summary")
+    @authenticated
+    def api_current_ap_summary(site_id: str) -> Response:
+        return _current_state_query(
+            site_id,
+            route_name="current_ap_summary",
+            source_kind="ap",
+            capability="admin.read.overview",
+            allowed_parameters=frozenset(),
+            operation=lambda service, selected: service.current_ap_summary(
+                g.admin_principal, selected
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/current-state/aps")
+    @authenticated
+    def api_current_aps(site_id: str) -> Response:
+        allowed = frozenset({"cycle_id", "limit", "cursor"})
+        return _current_state_query(
+            site_id,
+            route_name="current_ap_page",
+            source_kind="ap",
+            capability="admin.read.overview",
+            allowed_parameters=allowed,
+            operation=lambda service, selected: service.list_current_aps(
+                g.admin_principal,
+                selected,
+                **{key: request.args.get(key) for key in allowed},
+            ),
+        )
+
+    def _current_state_query(
+        site_id: str,
+        *,
+        route_name: str,
+        source_kind: str,
+        capability: str,
+        allowed_parameters: frozenset[str],
+        operation: Callable[..., Any],
+    ) -> Response:
+        started = time.monotonic()
+        selected = None
+        authorized_site = None
+        item_count = 0
+        response: Response
+        reason = "internal_error"
+        try:
+            try:
+                selected = resolver.resolve(site_id)
+            except AdminSiteContextError:
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            except AdminAccessDenied:
+                response = make_response(_error("site_forbidden", 403))
+                reason = "forbidden"
+                return response
+            except Exception:
+                response = make_response(_error("internal_error", 500))
+                reason = "internal_error"
+                return response
+            try:
+                authorized = policy.authorize(
+                    g.admin_principal, capability, selected
+                )
+            except Exception:
+                response = make_response(_error("internal_error", 500))
+                reason = "internal_error"
+                return response
+            if not authorized:
+                response = make_response(_error("site_forbidden", 403))
+                reason = "forbidden"
+                return response
+            authorized_site = selected
+            if not config.home_live_enabled:
+                response = make_response(_error("not_found", 404))
+                reason = "feature_disabled"
+                return response
+            if set(request.args) - allowed_parameters or (
+                not allowed_parameters and request.args
+            ) or any(len(request.args.getlist(key)) != 1 for key in request.args):
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            service = runtime.query_service
+            if service is None:
+                response = make_response(_error("source_unavailable", 503))
+                reason = "source_unavailable"
+                return response
+            try:
+                result = operation(service, selected)
+                if isinstance(result.result, dict) and isinstance(result.result.get("items"), list):
+                    item_count = len(result.result["items"])
+                response = make_response(_success(
+                    selected, result.result, page=result.page, enforce_size=True
+                ))
+                if response.status_code == 503:
+                    reason = "response_too_large"
+                elif response.status_code == 200:
+                    snapshot = result.result.get("snapshot") if isinstance(result.result, dict) else None
+                    freshness = snapshot.get("freshness_status") if isinstance(snapshot, dict) else None
+                    reason = freshness if freshness in {"fresh", "stale"} else "ok"
+                else:
+                    reason = "internal_error"
+                return response
+            except AdminQueryValidationError:
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            except AdminQueryForbidden:
+                response = make_response(_error("site_forbidden", 403))
+                reason = "forbidden"
+                return response
+            except AdminQueryBusy:
+                response = make_response(_error("concurrency_limit", 429))
+                response.headers["Retry-After"] = "1"
+                reason = "busy"
+                return response
+            except AdminQueryDeadline:
+                response = make_response(_error("query_deadline", 503))
+                reason = "query_deadline"
+                return response
+            except AdminQueryUnavailable:
+                response = make_response(_error("source_unavailable", 503))
+                reason = "source_unavailable"
+                return response
+            except AdminQueryError:
+                response = make_response(_error("internal_error", 500))
+                reason = "internal_error"
+                return response
+            except Exception:
+                try:
+                    logger.error(
+                        "admin.current_state_query_failed",
+                        extra={
+                            "event": "admin.current_state_query_failed",
+                            "request_id": getattr(g, "admin_request_id", None),
+                            "route_name": route_name,
+                            "source_kind": source_kind,
+                        },
+                    )
+                except Exception:
+                    pass
+                response = make_response(_error("internal_error", 500))
+                reason = "internal_error"
+                return response
+        finally:
+            status_code = response.status_code if "response" in locals() else 500
+            outcome = "success" if status_code == 200 else "error"
+            try:
+                _event(
+                    logger,
+                    "admin.current_state_query_completed",
+                    request_id=getattr(g, "admin_request_id", None),
+                    route_name=route_name,
+                    source_kind=source_kind,
+                    site_id=authorized_site,
+                    status_code=status_code,
+                    outcome=outcome,
+                    reason=reason,
+                    duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                    item_count=item_count,
+                )
+            except Exception:
+                pass
+
     def _site_query(site_id: str, operation: Callable[..., Any]) -> Response:
         try:
             selected = resolver.resolve(site_id)
@@ -584,6 +791,13 @@ def _is_admin_path(path: str) -> bool:
 
 def _is_api_path(path: str) -> bool:
     return path == ADMIN_API_PREFIX or path.startswith(ADMIN_API_PREFIX + "/")
+
+
+def _is_current_state_path(path: str) -> bool:
+    return (
+        path.startswith(ADMIN_API_PREFIX + "/sites/")
+        and "/current-state/" in path
+    )
 
 
 def _canonical_source_ip(value: object) -> str | None:

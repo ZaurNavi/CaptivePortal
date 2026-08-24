@@ -89,11 +89,14 @@ def test_static_assets_are_local_csp_compatible_and_secret_free(admin_app):
     forbidden = (
         "innerHTML", "localStorage", "sessionStorage", "Bearer",
         "/api/internal/analytics/v1", "grafana", "loki", "omada",
-        "setInterval", "setTimeout", "http://", "https://",
+        "setInterval", "http://", "https://",
     )
     assert all(value not in source for value in forbidden)
     assert "textContent" in source
     assert "replaceChildren" in source
+    assert "window.setTimeout" in source
+    assert "window.clearTimeout" in source
+    assert "AbortController" in source
     assert "credentials: \"same-origin\"" in source
     assert "captivportal_admin_session" not in source
     assert "csrf_token" not in source

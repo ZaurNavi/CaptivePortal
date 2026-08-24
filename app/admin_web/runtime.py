@@ -40,6 +40,8 @@ def create_admin_web_runtime(
     visit_read_service: Any,
     observation_read_service: Any,
     logger: logging.Logger,
+    *,
+    current_state_read_service: Any | None = None,
 ) -> AdminWebRuntime:
     """Create Admin security state without mutating or querying data sources."""
     try:
@@ -81,6 +83,7 @@ def create_admin_web_runtime(
             registry_read_service,
             visit_read_service,
             observation_read_service,
+            current_state_read_service,
         )
     runtime = AdminWebRuntime(
         state=(
@@ -111,6 +114,7 @@ def _query_service(
     registry_read_service: Any,
     visit_read_service: Any,
     observation_read_service: Any,
+    current_state_read_service: Any | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
     try:
@@ -135,6 +139,7 @@ def _query_service(
                 observation_repository.db_path,
             ),
             visit_analytics_service=analytics_service,
+            current_state_read_service=current_state_read_service,
         )
     except (AttributeError, TypeError):
         return None

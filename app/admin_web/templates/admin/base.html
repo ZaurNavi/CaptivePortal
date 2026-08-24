@@ -49,7 +49,14 @@
         data-api-base="/admin/api/v1/sites/{{ site_id }}"
         {% if device_id %}data-device-id="{{ device_id }}"{% endif %}
         data-runtime-state="{{ runtime_state }}"
+        {% if page.key == 'home' %}
+        data-home-live-enabled="{{ 'true' if home_live_enabled else 'false' }}"
+        data-home-live-refresh-seconds="{{ home_live_refresh_seconds }}"
+        data-home-live-request-timeout-seconds="{{ home_live_request_timeout_seconds }}"
+        data-current-state-page-size="{{ current_state_page_size }}"
+        {% endif %}
       >
+        {% block page_body %}
         {% block controls %}{% endblock %}
         <div id="page-state" class="state-panel" role="status" aria-live="polite">
           <span class="state-dot" aria-hidden="true"></span>
@@ -62,6 +69,7 @@
         <div id="pagination" class="pagination" hidden>
           <button id="load-more-button" class="button button-secondary" type="button">Load more</button>
         </div>
+        {% endblock %}
       </section>
     </main>
   </div>

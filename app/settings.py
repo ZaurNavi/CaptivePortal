@@ -133,6 +133,9 @@ from app.config import (
     WEB_ADMIN_DEVICE_PAGE_SIZE, WEB_ADMIN_VISIT_PAGE_SIZE,
     WEB_ADMIN_OBSERVATION_PAGE_SIZE,
     WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS,
+    WEB_ADMIN_HOME_LIVE_ENABLED, WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS,
+    WEB_ADMIN_HOME_LIVE_REQUEST_TIMEOUT_SECONDS,
+    WEB_ADMIN_CURRENT_STATE_PAGE_SIZE,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
     CAPPORT_API_PATH, CAPPORT_LOGIN_PATH,
     CAPPORT_ALLOWED_CLIENT_NETWORKS,
@@ -533,6 +536,10 @@ def get_settings() -> dict:
         "web_admin_observation_max_window_hours": (
             WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS
         ),
+        "web_admin_home_live_enabled": WEB_ADMIN_HOME_LIVE_ENABLED,
+        "web_admin_home_live_refresh_seconds": WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS,
+        "web_admin_home_live_request_timeout_seconds": WEB_ADMIN_HOME_LIVE_REQUEST_TIMEOUT_SECONDS,
+        "web_admin_current_state_page_size": WEB_ADMIN_CURRENT_STATE_PAGE_SIZE,
         "capport_enabled": CAPPORT_ENABLED,
         "capport_site_id": CAPPORT_SITE_ID,
         "capport_public_base_url": CAPPORT_PUBLIC_BASE_URL,

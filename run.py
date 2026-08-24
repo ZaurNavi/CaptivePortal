@@ -268,6 +268,11 @@ def _configure_admin_web(app, settings, registry_read_service) -> None:
             source_services.get("visits"),
             source_services.get("observations"),
             logger,
+            current_state_read_service=(
+                _current_state_runtime.read_service
+                if _current_state_runtime is not None
+                else None
+            ),
         )
         app.extensions["admin_web_runtime"] = _admin_web_runtime
         if _admin_web_runtime.blueprint is not None:
