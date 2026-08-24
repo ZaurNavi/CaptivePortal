@@ -20,6 +20,36 @@
 </section>
 <div id="live-client-warning" class="state-panel" data-state="warning" hidden><span class="state-dot" aria-hidden="true"></span><p>Latest collection attempt did not complete successfully; showing the latest complete snapshot.</p></div>
 <div id="live-ap-warning" class="state-panel" data-state="warning" hidden><span class="state-dot" aria-hidden="true"></span><p>Latest collection attempt did not complete successfully; showing the latest complete snapshot.</p></div>
+{% if home_traffic_enabled %}
+<section id="home-traffic" aria-labelledby="traffic-now-title">
+  <div class="section-heading">
+    <div><h2 id="traffic-now-title">Traffic Now</h2><p class="live-detail">Derived from persisted AP traffic counters. May include local/service traffic and is not an Internet-only measurement.</p></div>
+  </div>
+  <div id="traffic-state" class="state-panel" data-state="warning" role="status" aria-live="polite">
+    <span class="state-dot" aria-hidden="true"></span>
+    <div><strong id="traffic-state-title">Loading traffic</strong><p id="traffic-state-message">Waiting for Current State before reading persisted AP traffic.</p></div>
+  </div>
+  <section class="traffic-metrics" aria-label="Current AP traffic totals">
+    <article class="card live-metric"><h3>Download Now</h3><p id="traffic-download" class="metric">—</p><p id="traffic-download-label" class="live-detail"></p></article>
+    <article class="card live-metric"><h3>Upload Now</h3><p id="traffic-upload" class="metric">—</p><p id="traffic-upload-label" class="live-detail"></p></article>
+    <article class="card live-metric"><h3>Total Traffic Now</h3><p id="traffic-total" class="metric">—</p><p id="traffic-total-label" class="live-detail"></p></article>
+    <article class="card traffic-quality">
+      <h3>Traffic evidence</h3>
+      <p id="traffic-freshness" class="live-detail">Loading…</p>
+      <p id="traffic-coverage" class="live-detail">Coverage unavailable</p>
+      <p id="traffic-download-coverage" class="live-detail">Download —/— APs</p>
+      <p id="traffic-upload-coverage" class="live-detail">Upload —/— APs</p>
+      <p id="traffic-both-coverage" class="live-detail">Both —/— APs</p>
+    </article>
+  </section>
+  <section class="card card-wide live-section" aria-labelledby="traffic-ap-title">
+    <h3 id="traffic-ap-title">Traffic by AP</h3>
+    <p id="traffic-ap-state" class="live-inline-state">Waiting for an available Traffic snapshot…</p>
+    <div id="traffic-ap-rows" class="row-list"></div>
+    <div class="pagination"><button id="traffic-ap-more" class="button button-secondary" type="button" hidden>Load more traffic rows</button></div>
+  </section>
+</section>
+{% endif %}
 <section class="card card-wide live-section" aria-labelledby="by-ap-title">
   <h2 id="by-ap-title">Devices by AP — Now</h2>
   <div id="live-devices-by-ap" class="live-bars"></div>

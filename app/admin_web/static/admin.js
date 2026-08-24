@@ -643,7 +643,8 @@
   }
   if (typeof document === "undefined") return;
   const root = document.getElementById("admin-page");
-  if (!root || root.dataset.page !== "home" || root.dataset.homeLiveEnabled !== "true") return;
+  if (!root || root.dataset.page !== "home" || root.dataset.homeLiveEnabled !== "true"
+    || root.dataset.homeTrafficEnabled === "true") return;
 
   const siteId = root.dataset.siteId;
   const apiBase = root.dataset.apiBase + "/current-state";
@@ -1018,4 +1019,698 @@
   }
   scheduleAgeTick();
   refreshAll();
+}());
+
+(function () {
+  "use strict";
+
+  const API_VERSION = "admin.read.v1";
+  const SOURCES = new Set(["wired", "lan"]);
+  const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
+  const FRESHNESS_REASONS = new Set(["within_freshness_window", "within_stale_window", "age_exceeded", "clock_anomaly", "no_complete_snapshot", "source_unavailable"]);
+  const COVERAGE = new Set(["complete", "partial", "none"]);
+  const COVERAGE_REASONS = new Set(["missing_direction", "missing_pair", "temporal_skew", "no_valid_rate", "empty_population"]);
+  const SELECTION_REASONS = new Set(["no_complete_snapshot", "empty_population", "primary_full_coverage", "fallback_full_coverage", "fallback_higher_coverage", "primary_preferred_tie_or_higher"]);
+  const RATE_REASONS = new Set(["ok", "no_baseline", "counter_reset", "gap_too_large", "invalid_elapsed", "source_unavailable"]);
+  const RATE_STATUS = new Set(["valid", "partial", "unavailable"]);
+  const LATEST_STATES = new Set(["none", "running", "completed", "abandoned"]);
+  const LATEST_RESULTS = new Set(["success", "partial", "failed", "shutdown"]);
+  const UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const BACKOFF = [60, 120, 300];
+
+  function object(value) { return value && typeof value === "object" && !Array.isArray(value); }
+  function integer(value) { return typeof value === "number" && Number.isInteger(value) && value >= 0; }
+  function numberOrNull(value) { return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0); }
+  function stringOrNull(value) { return value === null || typeof value === "string"; }
+  function canonicalUtc(value) {
+    if (typeof value !== "string" || !UTC_PATTERN.test(value)) return false;
+    const parsed = new Date(value);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+  }
+  function optionalUtc(value) { return value === null || canonicalUtc(value); }
+  function envelope(payload, siteId) {
+    return object(payload) && payload.api_version === API_VERSION && payload.site_id === siteId && object(payload.result);
+  }
+  function latestAttempt(snapshot) {
+    if (!LATEST_STATES.has(snapshot.latest_attempt_state)
+      || !(snapshot.latest_attempt_result === null || LATEST_RESULTS.has(snapshot.latest_attempt_result))
+      || !optionalUtc(snapshot.latest_attempt_at)) return false;
+    if (snapshot.latest_attempt_state === "none") return snapshot.latest_attempt_result === null && snapshot.latest_attempt_at === null;
+    if (snapshot.latest_attempt_state === "running" || snapshot.latest_attempt_state === "abandoned") return snapshot.latest_attempt_result === null && snapshot.latest_attempt_at !== null;
+    return LATEST_RESULTS.has(snapshot.latest_attempt_result) && snapshot.latest_attempt_at !== null;
+  }
+  function validTrafficSnapshot(snapshot) {
+    if (!object(snapshot) || snapshot.source_kind !== "observation_ap_dynamic"
+      || typeof snapshot.complete !== "boolean" || !stringOrNull(snapshot.cycle_id)
+      || (snapshot.cycle_id !== null && snapshot.cycle_id.length === 0)
+      || !canonicalUtc(snapshot.evaluated_at) || !optionalUtc(snapshot.observed_at)
+      || !optionalUtc(snapshot.newest_observed_at) || !numberOrNull(snapshot.age_seconds)
+      || !numberOrNull(snapshot.source_skew_seconds) || !FRESHNESS.has(snapshot.freshness_status)
+      || !FRESHNESS_REASONS.has(snapshot.freshness_reason)
+      || !SELECTION_REASONS.has(snapshot.selection_reason)
+      || !(snapshot.selected_source === null || SOURCES.has(snapshot.selected_source))
+      || typeof snapshot.using_previous_complete_snapshot !== "boolean"
+      || typeof snapshot.empty_population !== "boolean" || !latestAttempt(snapshot)) return false;
+    if ((snapshot.observed_at === null) !== (snapshot.newest_observed_at === null)) return false;
+    if (snapshot.observed_at !== null) {
+      if (new Date(snapshot.observed_at) > new Date(snapshot.newest_observed_at)
+        || new Date(snapshot.newest_observed_at) > new Date(snapshot.evaluated_at)) return false;
+    }
+    if (snapshot.cycle_id === null) {
+      return snapshot.complete === false && snapshot.selected_source === null
+        && snapshot.selection_reason === "no_complete_snapshot" && snapshot.empty_population === false
+        && snapshot.freshness_status === "unavailable" && snapshot.freshness_reason === "no_complete_snapshot"
+        && snapshot.observed_at === null && snapshot.age_seconds === null && snapshot.source_skew_seconds === null;
+    }
+    return snapshot.complete === true && SOURCES.has(snapshot.selected_source);
+  }
+  function validPolicy(policy, includeSkew) {
+    return object(policy) && numberOrNull(policy.fresh_max_age_seconds) && policy.fresh_max_age_seconds !== null
+      && numberOrNull(policy.unavailable_after_seconds) && policy.unavailable_after_seconds !== null
+      && policy.unavailable_after_seconds >= policy.fresh_max_age_seconds
+      && (!includeSkew || (numberOrNull(policy.max_ap_skew_seconds) && policy.max_ap_skew_seconds !== null));
+  }
+  function validSourceSelection(value, snapshot, full) {
+    if (!object(value) || value.selected_source !== snapshot.selected_source
+      || value.selection_reason !== snapshot.selection_reason || value.source_mixing_allowed !== false) return false;
+    if (!full) return true;
+    return value.primary_source === "wired" && integer(value.wired_pair_valid_ap_count) && integer(value.lan_pair_valid_ap_count);
+  }
+  function validCoverage(value, snapshot) {
+    if (!object(value) || !COVERAGE.has(value.coverage_status)
+      || value.empty_population !== snapshot.empty_population || !Array.isArray(value.coverage_reasons)
+      || new Set(value.coverage_reasons).size !== value.coverage_reasons.length
+      || value.coverage_reasons.some((reason) => !COVERAGE_REASONS.has(reason))) return false;
+    const names = ["total_ap_count", "valid_rate_ap_count", "valid_download_ap_count", "valid_upload_ap_count", "missing_rate_ap_count", "stale_ap_count", "unavailable_ap_count", "reset_ap_count", "gap_rejected_ap_count", "no_baseline_ap_count", "source_unavailable_ap_count", "invalid_elapsed_ap_count"];
+    if (!names.every((name) => integer(value[name]))) return false;
+    const total = value.total_ap_count;
+    if (names.slice(1).some((name) => value[name] > total)
+      || value.missing_rate_ap_count !== total - value.valid_rate_ap_count) return false;
+    if (snapshot.cycle_id === null) return value.coverage_status === "none" && total === 0;
+    if (snapshot.empty_population) return value.coverage_status === "complete" && total === 0;
+    return true;
+  }
+  function validTraffic(value, snapshot, coverage) {
+    if (!object(value) || value.unit !== "Mbps" || !numberOrNull(value.download_mbps)
+      || !numberOrNull(value.upload_mbps) || !numberOrNull(value.total_mbps)) return false;
+    if (value.download_mbps !== null && value.upload_mbps !== null) {
+      if (value.total_mbps === null || Math.abs(value.total_mbps - value.download_mbps - value.upload_mbps) > 1e-6) return false;
+    } else if (value.total_mbps !== null) return false;
+    if (coverage.coverage_status === "none" || snapshot.freshness_status === "unavailable") {
+      if (value.download_mbps !== null || value.upload_mbps !== null || value.total_mbps !== null) return false;
+    }
+    if (snapshot.empty_population) return value.download_mbps === 0 && value.upload_mbps === 0 && value.total_mbps === 0;
+    return true;
+  }
+  function validateTrafficSummary(payload, siteId) {
+    if (!envelope(payload, siteId)) return null;
+    const result = payload.result;
+    if (!validTrafficSnapshot(result.snapshot) || !validPolicy(result.freshness_policy, true)
+      || !validSourceSelection(result.source_selection, result.snapshot, true)
+      || !validCoverage(result.coverage, result.snapshot)
+      || !validTraffic(result.traffic, result.snapshot, result.coverage)) return null;
+    return result;
+  }
+  function validateTrafficPage(payload, siteId, summary) {
+    if (!envelope(payload, siteId) || !object(payload.page) || !Array.isArray(payload.result.items)) return null;
+    const result = payload.result;
+    const snapshot = result.snapshot;
+    if (!object(snapshot) || snapshot.source_kind !== "observation_ap_dynamic"
+      || snapshot.cycle_id !== summary.snapshot.cycle_id || snapshot.freshness_status === "unavailable"
+      || !canonicalUtc(snapshot.evaluated_at) || !optionalUtc(snapshot.observed_at)
+      || !optionalUtc(snapshot.newest_observed_at) || !numberOrNull(snapshot.age_seconds)
+      || !FRESHNESS.has(snapshot.freshness_status) || !FRESHNESS_REASONS.has(snapshot.freshness_reason)
+      || !validPolicy(result.freshness_policy, false)
+      || !validSourceSelection(result.source_selection, summary.snapshot, false)
+      || !integer(payload.page.limit) || payload.page.limit < 1 || payload.page.limit > 250
+      || payload.page.cycle_id !== summary.snapshot.cycle_id
+      || payload.page.selected_source !== summary.snapshot.selected_source
+      || !(payload.page.next_cursor === null || (typeof payload.page.next_cursor === "string" && payload.page.next_cursor.length > 0 && payload.page.next_cursor.length <= 4096))) return null;
+    if ((snapshot.observed_at === null) !== (snapshot.newest_observed_at === null)) return null;
+    if (snapshot.observed_at !== null && (
+      new Date(snapshot.observed_at) > new Date(snapshot.newest_observed_at)
+      || new Date(snapshot.newest_observed_at) > new Date(snapshot.evaluated_at)
+    )) return null;
+    for (const item of result.items) {
+      if (!object(item) || typeof item.ap_mac !== "string" || !stringOrNull(item.name)
+        || !numberOrNull(item.download_mbps) || !numberOrNull(item.upload_mbps) || !numberOrNull(item.total_mbps)
+        || !RATE_REASONS.has(item.download_reason) || !RATE_REASONS.has(item.upload_reason)
+        || !RATE_STATUS.has(item.rate_status) || !optionalUtc(item.observed_at)
+        || !numberOrNull(item.age_seconds) || item.selected_source !== summary.snapshot.selected_source) return null;
+      if (item.observed_at !== null && new Date(item.observed_at) > new Date(snapshot.evaluated_at)) return null;
+      if (item.download_mbps !== null && item.upload_mbps !== null) {
+        if (item.total_mbps === null || Math.abs(item.total_mbps - item.download_mbps - item.upload_mbps) > 1e-6) return null;
+      } else if (item.total_mbps !== null) return null;
+    }
+    return payload;
+  }
+  function trafficAge(snapshot, acceptedAt, now) {
+    if (!snapshot || snapshot.age_seconds === null) return null;
+    return snapshot.age_seconds + Math.max(0, now - acceptedAt) / 1000;
+  }
+  function trafficFreshness(snapshot, policy, acceptedAt, now) {
+    const age = trafficAge(snapshot, acceptedAt, now);
+    if (!snapshot || snapshot.freshness_status === "unavailable" || age === null || age > policy.unavailable_after_seconds) return "unavailable";
+    return age <= policy.fresh_max_age_seconds ? "fresh" : "stale";
+  }
+  function formatMbps(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
+  function trafficDisplay(result, effectiveFreshness) {
+    if (!result || effectiveFreshness === "unavailable") return {download: "—", upload: "—", total: "—", label: "", downloadLabel: "", uploadLabel: "", totalLabel: "", state: "Unavailable"};
+    const partial = result.coverage.coverage_status === "partial";
+    return {
+      download: formatMbps(result.traffic.download_mbps),
+      upload: formatMbps(result.traffic.upload_mbps),
+      total: formatMbps(result.traffic.total_mbps),
+      label: partial ? "Observed subtotal" : "",
+      downloadLabel: partial && result.traffic.download_mbps !== null ? "Observed subtotal" : "",
+      uploadLabel: partial && result.traffic.upload_mbps !== null ? "Observed subtotal" : "",
+      totalLabel: partial && result.traffic.total_mbps !== null ? "Observed subtotal" : "",
+      state: effectiveFreshness === "stale" ? "Stale" : "Current",
+    };
+  }
+  function retryDelay(failureCount, refreshSeconds, retryAfter, jitter) {
+    return Math.max(refreshSeconds, BACKOFF[Math.min(Math.max(failureCount - 1, 0), 2)], retryAfter || 0) + (jitter || 0);
+  }
+  function retryJitter(status, randomValue) {
+    return status === 429 ? Math.max(0, Math.min(1, randomValue)) * 10 : 0;
+  }
+  function trafficFailureTransition(state, failure, refreshSeconds, now, randomValue) {
+    if (failure.kind === "invalid" && !state.cleanRetry) {
+      state.cleanRetry = true;
+      state.nextEligibleAt = now;
+      return {cleanRefresh: true, delaySeconds: 0};
+    }
+    state.failureCount += 1;
+    const terminal = failure.kind === "invalid" || failure.kind === "disabled";
+    const delay = terminal ? Infinity : retryDelay(
+      state.failureCount,
+      refreshSeconds,
+      failure.retryAfter,
+      retryJitter(failure.status, randomValue),
+    );
+    state.nextEligibleAt = terminal ? Infinity : now + delay * 1000;
+    return {cleanRefresh: false, delaySeconds: delay};
+  }
+  function classify(status, code) {
+    if (status === 401) return {global: true, retryable: false, kind: "session", status};
+    if (status === 403) return {global: true, retryable: false, kind: "forbidden", status};
+    if (status === 404) return {global: false, retryable: false, kind: "disabled", status};
+    if (status === 400) return {global: false, retryable: false, kind: "invalid", status};
+    if (status === 429 || status === 503 || status === 500) return {global: false, retryable: true, kind: code === "query_deadline" ? "timeout" : "unavailable", status};
+    return {global: false, retryable: true, kind: "unexpected", status};
+  }
+  async function runPhasedCycle(clientOperation, apOperation, trafficOperation) {
+    const phaseA = await Promise.allSettled([clientOperation(), apOperation()]);
+    const traffic = await trafficOperation();
+    return {phaseA, traffic};
+  }
+  function beginCoordinator(state, view) {
+    if (state.active) return null;
+    state.active = true;
+    state.generation += 1;
+    if (view) view.setBusy(true);
+    return state.generation;
+  }
+  function endCoordinator(state, generation, view) {
+    if (state.generation !== generation) return false;
+    state.active = false;
+    if (view) view.setBusy(false);
+    return true;
+  }
+  function ownsGeneration(source, generation, stopped) {
+    return !stopped && source.generation === generation;
+  }
+  function acceptTrafficSummary(source, summary, acceptedAt) {
+    source.summary = summary;
+    source.acceptedAt = acceptedAt;
+    source.rows = [];
+    source.cursor = null;
+    source.pageForbidden = false;
+  }
+  function trafficPageEligible(summary, effectiveFreshness) {
+    return Boolean(summary && summary.snapshot.cycle_id !== null
+      && effectiveFreshness !== "unavailable");
+  }
+  function clearTrafficPageState(source) {
+    source.rows = [];
+    source.cursor = null;
+  }
+  function pageFailureEffect(failure) {
+    return failure && failure.status === 403 ? "preserve_summary_forbidden" : "retry_group";
+  }
+
+  if (typeof window !== "undefined") {
+    window.CaptivPortalHomeTrafficTest = Object.freeze({
+      acceptTrafficSummary, beginCoordinator, canonicalUtc, classify,
+      clearTrafficPageState, endCoordinator, formatMbps, ownsGeneration,
+      pageFailureEffect, retryDelay, retryJitter, runPhasedCycle,
+      trafficFailureTransition,
+      trafficAge, trafficDisplay, trafficFreshness, trafficPageEligible,
+      validateTrafficPage, validateTrafficSummary,
+    });
+  }
+  if (typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  if (!root || root.dataset.page !== "home" || root.dataset.homeLiveEnabled !== "true"
+    || root.dataset.homeTrafficEnabled !== "true") return;
+
+  const live = window.CaptivPortalHomeLiveTest;
+  const siteId = root.dataset.siteId;
+  const currentBase = root.dataset.apiBase + "/current-state";
+  const trafficBase = root.dataset.apiBase + "/current-traffic";
+  const liveRefresh = Number(root.dataset.homeLiveRefreshSeconds);
+  const trafficRefresh = Number(root.dataset.homeTrafficRefreshSeconds);
+  const liveTimeout = Number(root.dataset.homeLiveRequestTimeoutSeconds) * 1000;
+  const trafficTimeout = Number(root.dataset.homeTrafficRequestTimeoutSeconds) * 1000;
+  const currentPageSize = Number(root.dataset.currentStatePageSize);
+  const trafficPageSize = Number(root.dataset.homeTrafficPageSize);
+  const refreshButton = document.getElementById("refresh-button");
+  const clientRows = document.getElementById("live-client-rows");
+  const apRows = document.getElementById("live-ap-rows");
+  const trafficRows = document.getElementById("traffic-ap-rows");
+  const clientMore = document.getElementById("live-client-more");
+  const apMore = document.getElementById("live-ap-more");
+  const trafficMore = document.getElementById("traffic-ap-more");
+  const filters = document.getElementById("live-client-filters");
+  const globalPanel = document.getElementById("home-live-global");
+  const sources = {
+    client: {generation: 0, controller: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, rows: [], cursor: null, nextEligibleAt: 0},
+    ap: {generation: 0, controller: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, rows: [], cursor: null, nextEligibleAt: 0},
+    traffic: {generation: 0, controller: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, rows: [], cursor: null, nextEligibleAt: 0, pageForbidden: false, disabled: false},
+  };
+  const coordinator = {generation: 0, active: false, pending: false, timer: null, activePromise: null};
+  let stopped = false;
+  let ageTimer = null;
+
+  function node(tag, className, text) {
+    const value = document.createElement(tag);
+    if (className) value.className = className;
+    if (text !== undefined) value.textContent = text === null || text === undefined ? "—" : String(text);
+    return value;
+  }
+  function setGlobal(title, message, state) {
+    document.getElementById("home-live-global-title").textContent = title;
+    document.getElementById("home-live-global-message").textContent = message;
+    globalPanel.dataset.state = state || "warning";
+    globalPanel.hidden = false;
+  }
+  function clearGlobal() { globalPanel.hidden = true; }
+  function abortAll(reason) { Object.values(sources).forEach((source) => live.abortOwnedController(source, reason)); }
+  function stopAll(kind) {
+    stopped = true;
+    abortAll(kind);
+    if (coordinator.timer !== null) window.clearTimeout(coordinator.timer);
+    if (ageTimer !== null) window.clearTimeout(ageTimer);
+    if (kind === "session") {
+      setGlobal("Session expired", "Sign in again to continue.", "error");
+      const link = node("a", "button", "Sign in");
+      link.href = `/admin/login?next=${encodeURIComponent(window.location.pathname)}`;
+      globalPanel.append(link);
+    } else setGlobal("Access denied", "This Site is not available to your account.", "error");
+  }
+  async function requestJson(url, source, generation, timeoutMs) {
+    const controller = new AbortController();
+    if (!live.claimController(source, controller, generation)) throw {neutral: true};
+    const timeout = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+    try {
+      const response = await fetch(url, {method: "GET", credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}, signal: controller.signal});
+      let payload = null;
+      try { payload = await response.json(); } catch (_error) { payload = null; }
+      if (!response.ok) {
+        const code = payload && payload.error && typeof payload.error.code === "string" ? payload.error.code : null;
+        const failure = classify(response.status, code);
+        const header = Number(response.headers.get("Retry-After"));
+        failure.retryAfter = Number.isFinite(header) && header > 0 ? header : 0;
+        throw {liveFailure: failure};
+      }
+      if (!ownsGeneration(source, generation, stopped)) throw {neutral: true};
+      return payload;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (live.neutralAbort(controller.signal.reason, document.hidden)) throw {neutral: true};
+        throw {liveFailure: {global: false, retryable: true, kind: "timeout", retryAfter: 0, status: 0}};
+      }
+      if (error && (error.liveFailure || error.neutral)) throw error;
+      throw {liveFailure: {global: false, retryable: true, kind: "unavailable", retryAfter: 0, status: 0}};
+    } finally {
+      window.clearTimeout(timeout);
+      live.releaseController(source, controller);
+    }
+  }
+  function eligible(source) { return performance.now() >= source.nextEligibleAt; }
+  function markSuccess(source, interval) {
+    source.failureCount = 0;
+    source.cleanRetry = false;
+    source.nextEligibleAt = performance.now() + interval * 1000;
+  }
+  function markFailure(source, failure, interval) {
+    return trafficFailureTransition(
+      source, failure, interval, performance.now(), Math.random()
+    ).cleanRefresh;
+  }
+  function currentParams(kind, summary, cursor) {
+    if (kind === "client") return live.clientParameters(summary.snapshot.cycle_id, currentPageSize, cursor, {
+      sort: filters.elements.sort.value, auth: filters.elements.auth.value,
+      ap: filters.elements.ap.value, ssid: filters.elements.ssid.value,
+    });
+    const value = new URLSearchParams({cycle_id: summary.snapshot.cycle_id, limit: String(currentPageSize)});
+    if (cursor) value.set("cursor", cursor);
+    return value;
+  }
+  function trafficParams(summary, cursor) {
+    const value = new URLSearchParams({cycle_id: summary.snapshot.cycle_id, limit: String(trafficPageSize)});
+    if (cursor) value.set("cursor", cursor);
+    return value;
+  }
+  function renderCurrentFreshness(kind) {
+    const source = sources[kind];
+    if (!source.summary) return;
+    const status = live.localFreshness(source.summary.snapshot, source.summary.freshness_policy, source.acceptedAt, performance.now());
+    const age = live.currentAge(source.summary.snapshot, source.acceptedAt, performance.now());
+    document.getElementById(kind === "client" ? "live-client-freshness" : "live-ap-freshness").textContent = status === "unavailable" ? "Unavailable" : `${status === "stale" ? "STALE" : "Fresh"} · age ${Math.floor(age)}s · observed ${source.summary.snapshot.observed_at || "—"}`;
+    if (status !== "unavailable") return;
+    const values = live.unavailableValues(kind);
+    if (kind === "client") {
+      ["live-online", "live-authorized", "live-pending", "live-other-unknown"].forEach((id) => { document.getElementById(id).textContent = values.primary; });
+      document.getElementById("live-other-detail").textContent = values.detail;
+      document.getElementById("live-client-state").textContent = values.state;
+      clientRows.replaceChildren(); clientMore.hidden = true;
+      document.getElementById("live-devices-by-ap").replaceChildren(node("p", "live-detail", "Unavailable"));
+    } else {
+      document.getElementById("live-ap-total").textContent = values.primary;
+      document.getElementById("live-ap-detail").textContent = values.detail;
+      document.getElementById("live-ap-count").textContent = values.count;
+      document.getElementById("live-ap-state").textContent = values.state;
+      apRows.replaceChildren(); apMore.hidden = true;
+      renderByAp();
+    }
+  }
+  function renderClientSummary() {
+    const result = sources.client.summary;
+    const counts = result.counts;
+    document.getElementById("live-online").textContent = counts.online === null ? "—" : String(counts.online);
+    document.getElementById("live-authorized").textContent = counts.authorized === null ? "—" : String(counts.authorized);
+    document.getElementById("live-pending").textContent = counts.pending === null ? "—" : String(counts.pending);
+    document.getElementById("live-other-unknown").textContent = counts.other_unknown === null ? "—" : String(counts.other_unknown);
+    document.getElementById("live-other-detail").textContent = `Other ${counts.other === null ? "—" : counts.other} · Unknown ${counts.unknown === null ? "—" : counts.unknown}`;
+    document.getElementById("live-client-warning").hidden = !result.snapshot.latest_attempt_result || result.snapshot.latest_attempt_result === "success";
+    const ssids = result.snapshot.source_scope && result.snapshot.source_scope.ssids;
+    const select = filters.elements.ssid;
+    const selected = select.value;
+    select.replaceChildren(node("option", null, "All")); select.firstChild.value = "";
+    if (Array.isArray(ssids)) ssids.forEach((ssid) => { const option = node("option", null, ssid); option.value = ssid; select.append(option); });
+    select.value = live.retainedSelection(ssids, selected);
+    document.getElementById("live-ssid-label").hidden = !Array.isArray(ssids) || ssids.length <= 1;
+    renderCurrentFreshness("client");
+  }
+  function renderApSummary() {
+    const result = sources.ap.summary; const counts = result.counts;
+    document.getElementById("live-ap-total").textContent = `${counts.online === null ? "—" : counts.online} / ${counts.total === null ? "—" : counts.total}`;
+    document.getElementById("live-ap-detail").textContent = `Other ${counts.other === null ? "—" : counts.other} · Unknown ${counts.unknown === null ? "—" : counts.unknown}`;
+    document.getElementById("live-ap-warning").hidden = !result.snapshot.latest_attempt_result || result.snapshot.latest_attempt_result === "success";
+    renderCurrentFreshness("ap");
+  }
+  function apLabel(mac) {
+    const item = sources.ap.rows.find((value) => value.ap_mac === mac);
+    return item && item.name ? `${item.name} · ${mac}` : mac;
+  }
+  function renderByAp() {
+    const target = document.getElementById("live-devices-by-ap"); target.replaceChildren();
+    const result = sources.client.summary;
+    const freshness = result ? live.localFreshness(result.snapshot, result.freshness_policy, sources.client.acceptedAt, performance.now()) : "unavailable";
+    if (!result || freshness === "unavailable") { target.append(node("p", "live-detail", "Unavailable")); return; }
+    const apFreshness = sources.ap.summary ? live.localFreshness(sources.ap.summary.snapshot, sources.ap.summary.freshness_policy, sources.ap.acceptedAt, performance.now()) : "unavailable";
+    const max = Math.max(1, ...result.devices_by_ap.map((item) => item.client_count));
+    result.devices_by_ap.forEach((item) => {
+      const row = node("div", "live-bar"); const track = node("span", "live-bar-track"); const fill = node("span", "live-bar-fill");
+      fill.style.width = `${Math.min(100, item.client_count / max * 100)}%`; track.append(fill);
+      const label = node("span"); label.append(node("strong", null, apLabel(item.ap_mac)), node("br"), node("small", "live-detail", live.enrichmentState(sources.ap.rows, sources.ap.cursor, sources.ap.summary, item.ap_mac, apFreshness)));
+      row.append(label, track, node("strong", null, item.client_count)); target.append(row);
+    });
+    if (result.counts.ap_unknown > 0) target.append(node("p", "live-detail", `AP Unknown · ${result.counts.ap_unknown}`));
+    rebuildApFilter();
+  }
+  function rebuildApFilter() {
+    const select = filters.elements.ap; const selected = select.value; const macs = new Set();
+    if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => macs.add(item.ap_mac));
+    sources.ap.rows.forEach((item) => macs.add(item.ap_mac));
+    select.replaceChildren(node("option", null, "All")); select.firstChild.value = "";
+    Array.from(macs).sort().forEach((mac) => { const option = node("option", null, apLabel(mac)); option.value = mac; select.append(option); });
+    select.value = macs.has(selected) ? selected : "";
+  }
+  function renderClients() {
+    clientRows.replaceChildren();
+    sources.client.rows.forEach((item) => {
+      const row = node("tr"); const identity = node("td");
+      identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
+      const facts = node("details", "controller-facts"); facts.append(node("summary", null, "Controller facts"));
+      const list = node("dl", "detail-list");
+      [["Controller uptime", item.controller_uptime], ["Controller trafficDown", item.controller_traffic_down], ["Controller trafficUp", item.controller_traffic_up], ["Controller trafficTotal", item.controller_traffic_total]].forEach(([label, value]) => list.append(node("dt", null, label), node("dd", null, value)));
+      facts.append(list);
+      [identity, node("td", null, {authorized: "Authorized", pending: "Waiting", other: "Other", unknown: "Unknown"}[item.auth_classification]), node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), node("td", null, item.band), node("td", null, item.rssi), node("td", null, item.snr)].forEach((cell) => row.append(cell));
+      const factCell = node("td"); factCell.append(facts); row.append(factCell); clientRows.append(row);
+    });
+    clientMore.hidden = !sources.client.cursor;
+    document.getElementById("live-client-state").textContent = sources.client.rows.length ? `Showing ${sources.client.rows.length} current device(s).` : "No devices in this current snapshot.";
+  }
+  function renderAps() {
+    apRows.replaceChildren(); const buckets = new Map();
+    if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => buckets.set(item.ap_mac, item.client_count));
+    sources.ap.rows.forEach((item) => {
+      const row = node("article", "data-row"); const header = node("div", "data-row-header");
+      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.product_status_classification));
+      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Current scoped clients: ${buckets.get(item.ap_mac) || 0}`)); apRows.append(row);
+    });
+    const total = sources.ap.summary && sources.ap.summary.counts.total;
+    document.getElementById("live-ap-count").textContent = total === null || total === undefined ? "" : (sources.ap.cursor ? `Showing ${sources.ap.rows.length} of ${total}` : `${sources.ap.rows.length} access point(s) loaded`);
+    document.getElementById("live-ap-state").textContent = sources.ap.rows.length ? "Current access points loaded." : "No access points in this current snapshot.";
+    apMore.hidden = !sources.ap.cursor; rebuildApFilter(); renderByAp();
+  }
+  function setTrafficState(title, message, state) {
+    document.getElementById("traffic-state-title").textContent = title;
+    document.getElementById("traffic-state-message").textContent = message;
+    document.getElementById("traffic-state").dataset.state = state || "warning";
+  }
+  function clearTrafficCurrent(message) {
+    ["traffic-download", "traffic-upload", "traffic-total"].forEach((id) => { document.getElementById(id).textContent = "—"; });
+    ["traffic-download-label", "traffic-upload-label", "traffic-total-label"].forEach((id) => { document.getElementById(id).textContent = ""; });
+    document.getElementById("traffic-freshness").textContent = "Unavailable";
+    document.getElementById("traffic-coverage").textContent = "Coverage unavailable";
+    document.getElementById("traffic-download-coverage").textContent = "Download —/— APs";
+    document.getElementById("traffic-upload-coverage").textContent = "Upload —/— APs";
+    document.getElementById("traffic-both-coverage").textContent = "Both —/— APs";
+    trafficRows.replaceChildren(); trafficMore.hidden = true;
+    document.getElementById("traffic-ap-state").textContent = message || "Traffic AP details unavailable.";
+  }
+  function renderTrafficSummary() {
+    const result = sources.traffic.summary;
+    const effective = result ? trafficFreshness(result.snapshot, result.freshness_policy, sources.traffic.acceptedAt, performance.now()) : "unavailable";
+    const shown = trafficDisplay(result, effective);
+    document.getElementById("traffic-download").textContent = shown.download;
+    document.getElementById("traffic-upload").textContent = shown.upload;
+    document.getElementById("traffic-total").textContent = shown.total;
+    document.getElementById("traffic-download-label").textContent = shown.downloadLabel;
+    document.getElementById("traffic-upload-label").textContent = shown.uploadLabel;
+    document.getElementById("traffic-total-label").textContent = shown.totalLabel;
+    if (!result || effective === "unavailable") { clearTrafficCurrent("Traffic snapshot is unavailable."); setTrafficState("Traffic unavailable", "Persisted AP traffic cannot currently describe the Site.", "warning"); return; }
+    const age = trafficAge(result.snapshot, sources.traffic.acceptedAt, performance.now());
+    document.getElementById("traffic-freshness").textContent = `${effective === "stale" ? "STALE" : "Fresh"} · age ${Math.floor(age)}s · observed ${result.snapshot.observed_at || "—"}`;
+    const c = result.coverage;
+    document.getElementById("traffic-coverage").textContent = `${c.coverage_status === "partial" ? "Partial" : "Complete"} coverage · source ${result.source_selection.selected_source === "lan" ? "LAN" : "Wired"}`;
+    document.getElementById("traffic-download-coverage").textContent = `Download ${c.valid_download_ap_count}/${c.total_ap_count} APs`;
+    document.getElementById("traffic-upload-coverage").textContent = `Upload ${c.valid_upload_ap_count}/${c.total_ap_count} APs`;
+    document.getElementById("traffic-both-coverage").textContent = `Both ${c.valid_rate_ap_count}/${c.total_ap_count} APs`;
+    setTrafficState(effective === "stale" ? "Traffic is stale" : "Traffic updated", c.coverage_status === "partial" ? "Showing persisted observed subtotals for available AP evidence." : "Persisted AP traffic evidence is available.", effective === "stale" || c.coverage_status === "partial" ? "warning" : "ready");
+  }
+  function renderTrafficRows() {
+    trafficRows.replaceChildren();
+    sources.traffic.rows.forEach((item) => {
+      const row = node("article", "data-row"); const header = node("div", "data-row-header");
+      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.rate_status));
+      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Download ${formatMbps(item.download_mbps)} · Upload ${formatMbps(item.upload_mbps)} · Total ${formatMbps(item.total_mbps)}`), node("p", "live-detail", `Source ${item.selected_source === "lan" ? "LAN" : "Wired"} · observed ${item.observed_at || "—"}`));
+      trafficRows.append(row);
+    });
+    trafficMore.hidden = !sources.traffic.cursor || sources.traffic.pageForbidden;
+    document.getElementById("traffic-ap-state").textContent = sources.traffic.pageForbidden ? "AP traffic detail access denied." : (sources.traffic.rows.length ? `Showing ${sources.traffic.rows.length} AP traffic row(s).` : "No AP traffic rows in this snapshot.");
+  }
+  function renderTrafficFreshness() {
+    if (!sources.traffic.summary) return;
+    const effective = trafficFreshness(sources.traffic.summary.snapshot, sources.traffic.summary.freshness_policy, sources.traffic.acceptedAt, performance.now());
+    renderTrafficSummary();
+    if (effective === "unavailable") { clearTrafficPageState(sources.traffic); renderTrafficRows(); }
+  }
+  function currentFailure(kind, failure) {
+    if (failure.global) { stopAll(failure.kind); return false; }
+    const source = sources[kind]; const clean = markFailure(source, failure, liveRefresh);
+    document.getElementById(kind === "client" ? "live-client-state" : "live-ap-state").textContent = failure.kind === "invalid" ? "Unexpected current-state response; bounded clean refresh applied." : "Live source unavailable; retry remains bounded.";
+    return clean;
+  }
+  async function refreshCurrent(kind, generation) {
+    const source = sources[kind]; source.generation = generation;
+    if (stopped || document.hidden || coordinator.pending || !eligible(source)) return {cleanRefresh: false};
+    try {
+      const stem = kind === "client" ? "clients" : "aps";
+      const summaryPayload = await requestJson(`${currentBase}/${stem}/summary`, source, generation, liveTimeout);
+      const summary = kind === "client" ? live.validateClientSummary(summaryPayload, siteId) : live.validateApSummary(summaryPayload, siteId);
+      if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+      if (source.generation !== generation) return {cleanRefresh: false};
+      source.summary = summary; source.acceptedAt = performance.now(); source.rows = []; source.cursor = null;
+      if (kind === "client") { renderClientSummary(); renderClients(); } else { renderApSummary(); renderAps(); }
+      if (summary.snapshot.cycle_id !== null && summary.snapshot.freshness_status !== "unavailable") {
+        const params = currentParams(kind, summary, null);
+        const pagePayload = await requestJson(`${currentBase}/${stem}?${params.toString()}`, source, generation, liveTimeout);
+        const valid = live.validatePage(pagePayload, siteId, kind, summary.snapshot);
+        if (!valid) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+        source.rows = valid.result.items.slice(); source.cursor = valid.page.next_cursor;
+        if (kind === "client") renderClients(); else renderAps();
+      }
+      markSuccess(source, liveRefresh); clearGlobal();
+      return {cleanRefresh: false};
+    } catch (error) {
+      if (error && error.neutral) return {cleanRefresh: false};
+      return {cleanRefresh: currentFailure(kind, error && error.liveFailure ? error.liveFailure : {global: false, kind: "unexpected", retryAfter: 0, status: 0})};
+    }
+  }
+  function trafficFailure(failure) {
+    if (failure.kind === "session" || (failure.kind === "forbidden" && failure.status === 403)) { stopAll(failure.kind); return false; }
+    if (failure.kind === "disabled") {
+      sources.traffic.disabled = true; sources.traffic.nextEligibleAt = Infinity;
+      clearTrafficCurrent("Traffic is disabled; Home Live remains available.");
+      setTrafficState("Traffic disabled", "Reload after the feature is enabled.", "warning");
+      return false;
+    }
+    const clean = markFailure(sources.traffic, failure, trafficRefresh);
+    setTrafficState("Traffic unavailable", failure.kind === "invalid" ? "Unexpected Traffic response; bounded clean refresh applied." : "Traffic retry remains bounded; Current State is unchanged.", "warning");
+    return clean;
+  }
+  async function refreshTraffic(generation) {
+    const source = sources.traffic; source.generation = generation;
+    if (stopped || document.hidden || coordinator.pending || source.disabled || !eligible(source)) return {cleanRefresh: false};
+    try {
+      const payload = await requestJson(`${trafficBase}/summary`, source, generation, trafficTimeout);
+      const summary = validateTrafficSummary(payload, siteId);
+      if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+      if (source.generation !== generation) return {cleanRefresh: false};
+      acceptTrafficSummary(source, summary, performance.now());
+      renderTrafficSummary(); renderTrafficRows();
+      if (trafficPageEligible(summary, summary.snapshot.freshness_status)) {
+        try {
+          const params = trafficParams(summary, null);
+          const pagePayload = await requestJson(`${trafficBase}/aps?${params.toString()}`, source, generation, trafficTimeout);
+          const valid = validateTrafficPage(pagePayload, siteId, summary);
+          if (!valid) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+          source.rows = valid.result.items.slice(); source.cursor = valid.page.next_cursor; renderTrafficRows();
+        } catch (error) {
+          const failure = error && error.liveFailure;
+          if (failure && pageFailureEffect(failure) === "preserve_summary_forbidden") {
+            source.pageForbidden = true; clearTrafficPageState(source); renderTrafficRows();
+            markSuccess(source, trafficRefresh); return {cleanRefresh: false};
+          }
+          throw error;
+        }
+      }
+      markSuccess(source, trafficRefresh);
+      return {cleanRefresh: false};
+    } catch (error) {
+      if (error && error.neutral) return {cleanRefresh: false};
+      return {cleanRefresh: trafficFailure(error && error.liveFailure ? error.liveFailure : {global: false, kind: "unexpected", retryAfter: 0, status: 0})};
+    }
+  }
+  function nextDelay() {
+    const finite = Object.values(sources).map((source) => source.nextEligibleAt).filter(Number.isFinite);
+    if (!finite.length) return Math.min(liveRefresh, trafficRefresh) * 1000;
+    return Math.max(1000, Math.min(...finite) - performance.now());
+  }
+  function scheduleCoordinator(delayMs) {
+    if (coordinator.timer !== null) window.clearTimeout(coordinator.timer);
+    if (stopped || document.hidden) return;
+    coordinator.timer = window.setTimeout(() => { coordinator.timer = null; requestRefresh(false); }, delayMs);
+  }
+  async function performRefresh() {
+    const busyView = {setBusy: (value) => { refreshButton.disabled = value; }};
+    const generation = beginCoordinator(coordinator, busyView);
+    if (generation === null) return;
+    abortAll("superseded");
+    let cleanRefresh = false;
+    try {
+      const outcome = await runPhasedCycle(
+        () => refreshCurrent("client", generation),
+        () => refreshCurrent("ap", generation),
+        () => coordinator.pending || stopped || document.hidden
+          ? Promise.resolve({cleanRefresh: false})
+          : refreshTraffic(generation),
+      );
+      cleanRefresh = outcome.phaseA.some((item) => item.status === "fulfilled" && item.value.cleanRefresh)
+        || (outcome.traffic && outcome.traffic.cleanRefresh);
+      document.getElementById("home-live-announcement").textContent = "Home current sources updated.";
+    } finally {
+      endCoordinator(coordinator, generation, busyView);
+    }
+    if (cleanRefresh || coordinator.pending) {
+      coordinator.pending = false;
+      await Promise.resolve();
+      if (!stopped && !document.hidden) requestRefresh(true);
+    } else scheduleCoordinator(nextDelay());
+  }
+  function requestRefresh(manual) {
+    if (stopped || document.hidden) return;
+    if (coordinator.active) {
+      if (manual) {
+        coordinator.pending = true;
+        Object.values(sources).forEach((source) => { source.generation += 1; });
+        abortAll("superseded");
+      }
+      return;
+    }
+    coordinator.activePromise = performRefresh();
+  }
+  async function loadMore(kind) {
+    const source = sources[kind];
+    if (stopped || coordinator.active || !source.summary || !source.cursor || source.pageForbidden) return;
+    const busyView = {setBusy: (value) => { refreshButton.disabled = value; }};
+    const generation = beginCoordinator(coordinator, busyView);
+    if (generation === null) return;
+    source.generation = generation;
+    try {
+      const params = kind === "traffic" ? trafficParams(source.summary, source.cursor) : currentParams(kind, source.summary, source.cursor);
+      const stem = kind === "traffic" ? `${trafficBase}/aps` : `${currentBase}/${kind === "client" ? "clients" : "aps"}`;
+      const payload = await requestJson(`${stem}?${params.toString()}`, source, generation, kind === "traffic" ? trafficTimeout : liveTimeout);
+      const valid = kind === "traffic" ? validateTrafficPage(payload, siteId, source.summary) : live.validatePage(payload, siteId, kind, source.summary.snapshot);
+      if (!valid || source.generation !== generation) throw {liveFailure: {global: false, kind: "unexpected", retryAfter: 0, status: 200}};
+      source.rows.push(...valid.result.items); source.cursor = valid.page.next_cursor;
+      if (kind === "client") renderClients(); else if (kind === "ap") renderAps(); else renderTrafficRows();
+    } catch (error) {
+      if (!(error && error.neutral)) {
+        const failure = error && error.liveFailure ? error.liveFailure : {global: false, kind: "unexpected", retryAfter: 0, status: 0};
+        if (kind === "traffic" && pageFailureEffect(failure) === "preserve_summary_forbidden") { source.pageForbidden = true; clearTrafficPageState(source); renderTrafficRows(); }
+        else if (kind === "traffic") trafficFailure(failure); else currentFailure(kind, failure);
+      }
+    } finally {
+      endCoordinator(coordinator, generation, busyView);
+      if (coordinator.pending) { coordinator.pending = false; requestRefresh(true); }
+      else scheduleCoordinator(nextDelay());
+    }
+  }
+  refreshButton.addEventListener("click", () => requestRefresh(true));
+  clientMore.addEventListener("click", () => loadMore("client"));
+  apMore.addEventListener("click", () => loadMore("ap"));
+  trafficMore.addEventListener("click", () => loadMore("traffic"));
+  filters.addEventListener("change", () => {
+    live.resetClientState(sources.client, {clearRows: () => clientRows.replaceChildren(), hideMore: () => { clientMore.hidden = true; }, loading: () => { document.getElementById("live-client-state").textContent = "Loading filtered current clients…"; }});
+    requestRefresh(true);
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { coordinator.pending = false; abortAll("hidden"); if (coordinator.timer !== null) window.clearTimeout(coordinator.timer); coordinator.timer = null; }
+    else if (!stopped) requestRefresh(false);
+  });
+  window.addEventListener("pagehide", () => { stopped = true; coordinator.pending = false; abortAll("pagehide"); if (coordinator.timer !== null) window.clearTimeout(coordinator.timer); });
+  function ageTick() {
+    if (stopped) return;
+    ageTimer = window.setTimeout(() => {
+      ageTimer = null;
+      if (!document.hidden) { renderCurrentFreshness("client"); renderCurrentFreshness("ap"); renderTrafficFreshness(); }
+      ageTick();
+    }, 1000);
+  }
+  ageTick(); requestRefresh(true);
 }());

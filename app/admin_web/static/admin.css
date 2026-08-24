@@ -99,6 +99,10 @@ input[type="radio"] { width: auto; min-height: 0; }
 .pagination { padding: 1.25rem 0; text-align: center; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .live-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.traffic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.traffic-quality { grid-column: auto; }
+.section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin: 1.25rem 0 .75rem; }
+.section-heading h2 { margin: 0; }
 .live-metric { grid-column: auto; }
 .live-detail { margin: .35rem 0 0; color: var(--muted); font-size: .85rem; }
 .live-section { margin-bottom: 1rem; }
@@ -131,7 +135,7 @@ input[type="radio"] { width: auto; min-height: 0; }
   .card { grid-column: span 6; }
   .filter-panel { grid-template-columns: 1fr 1fr; }
   .visit-filter-panel { grid-template-columns: 1fr 1fr; }
-  .live-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-metrics, .traffic-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {
@@ -145,7 +149,7 @@ input[type="radio"] { width: auto; min-height: 0; }
   .filter-panel fieldset { grid-column: auto; }
   .detail-list { grid-template-columns: 1fr; }
   .detail-list dd { margin-bottom: .35rem; }
-  .live-metrics { grid-template-columns: 1fr; }
+  .live-metrics, .traffic-metrics { grid-template-columns: 1fr; }
   .live-bar { grid-template-columns: 1fr auto; }
   .live-bar-track { grid-column: 1 / -1; }
 }

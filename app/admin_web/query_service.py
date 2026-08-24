@@ -15,6 +15,10 @@ from app.analytics.source_gateway import (
     QueryDeadline,
 )
 from app.analytics.validation import AnalyticsQueryValidationError, parse_utc
+from app.analytics import (
+    CurrentTrafficSourceUnavailable,
+    CurrentTrafficValidationError,
+)
 from app.common.mac import format_mac_colon
 from app.current_state import (
     CurrentStateSchemaError,
@@ -37,6 +41,11 @@ from .current_state_serialization import (
     serialize_ap_summary,
     serialize_client_page,
     serialize_client_summary,
+)
+from .current_traffic_serialization import (
+    CurrentTrafficSerializationError,
+    serialize_current_ap_traffic_page,
+    serialize_current_traffic_summary,
 )
 
 
@@ -101,6 +110,7 @@ class AdminQueryService:
         read_gateway: AdminSqlReadGateway,
         visit_analytics_service: Any,
         current_state_read_service: Any | None = None,
+        current_traffic_read_service: Any | None = None,
     ):
         self._config = config
         self._policy = policy
@@ -108,6 +118,7 @@ class AdminQueryService:
         self._reads = read_gateway
         self._analytics = visit_analytics_service
         self._current_state = current_state_read_service
+        self._current_traffic = current_traffic_read_service
         self._slots = threading.BoundedSemaphore(config.max_concurrent_queries)
 
     def current_client_summary(self, principal, site_id):
@@ -212,6 +223,63 @@ class AdminQueryService:
                 raise AdminQueryUnavailable() from exc
             except ValueError as exc:
                 raise AdminQueryValidationError() from exc
+            return AdminQueryResponse(result, page)
+
+        return self._run(query)
+
+    def current_traffic_summary(self, principal, site_id):
+        self._authorize(principal, "admin.read.overview", site_id)
+
+        def query(deadline):
+            value = self._traffic_call(
+                deadline,
+                "summary",
+                "get_current_site_traffic",
+                site_id,
+                fresh_max_age_seconds=self._config.home_traffic_fresh_max_age_seconds,
+                stale_max_age_seconds=self._config.home_traffic_stale_max_age_seconds,
+                max_ap_skew_seconds=self._config.home_traffic_max_ap_skew_seconds,
+            )
+            try:
+                result = serialize_current_traffic_summary(value, site_id)
+            except CurrentTrafficSerializationError as exc:
+                raise AdminQueryUnavailable() from exc
+            return AdminQueryResponse(result)
+
+        return self._run(query)
+
+    def list_current_ap_traffic(
+        self, principal, site_id, *, cycle_id, limit=None, cursor=None,
+    ):
+        self._authorize(principal, "admin.read.observations", site_id)
+        selected_cycle = self._current_cycle(cycle_id)
+        if selected_cycle is None:
+            raise AdminQueryValidationError()
+        selected_limit = self._traffic_limit(limit)
+        selected_cursor = self._current_cursor(cursor)
+
+        def query(deadline):
+            value = self._traffic_call(
+                deadline,
+                "page",
+                "list_current_ap_traffic",
+                site_id,
+                cycle_id=selected_cycle,
+                fresh_max_age_seconds=self._config.home_traffic_fresh_max_age_seconds,
+                stale_max_age_seconds=self._config.home_traffic_stale_max_age_seconds,
+                max_ap_skew_seconds=self._config.home_traffic_max_ap_skew_seconds,
+                limit=selected_limit,
+                cursor=selected_cursor,
+            )
+            try:
+                result, page = serialize_current_ap_traffic_page(
+                    value,
+                    site_id,
+                    cycle_id=selected_cycle,
+                    limit=selected_limit,
+                )
+            except CurrentTrafficSerializationError as exc:
+                raise AdminQueryUnavailable() from exc
             return AdminQueryResponse(result, page)
 
         return self._run(query)
@@ -538,9 +606,37 @@ class AdminQueryService:
         except (CurrentStateSchemaError, CurrentStateStorageError, sqlite3.Error, OSError) as exc:
             raise AdminQueryUnavailable() from exc
 
+    def _traffic_call(self, deadline, operation_kind, method_name, site_id, **kwargs):
+        source = self._current_traffic
+        if source is None:
+            raise AdminQueryUnavailable()
+        method = getattr(source, method_name, None)
+        if not callable(method):
+            raise AdminQueryUnavailable()
+        try:
+            return method(site_id, deadline=deadline, **kwargs)
+        except AnalyticsQueryDeadlineExceeded as exc:
+            raise AdminQueryDeadline() from exc
+        except CurrentTrafficValidationError as exc:
+            if operation_kind == "page":
+                raise AdminQueryValidationError() from exc
+            raise AdminQueryUnavailable() from exc
+        except (CurrentTrafficSourceUnavailable, sqlite3.Error, OSError) as exc:
+            raise AdminQueryUnavailable() from exc
+
     def _current_limit(self, value) -> int:
         if value is None:
             return self._config.current_state_page_size
+        if not isinstance(value, str) or not value or not value.isascii() or not value.isdigit() or value.startswith("0"):
+            raise AdminQueryValidationError()
+        parsed = int(value)
+        if not 1 <= parsed <= 250:
+            raise AdminQueryValidationError()
+        return parsed
+
+    def _traffic_limit(self, value) -> int:
+        if value is None:
+            return self._config.home_traffic_page_size
         if not isinstance(value, str) or not value or not value.isascii() or not value.isdigit() or value.startswith("0"):
             raise AdminQueryValidationError()
         parsed = int(value)
