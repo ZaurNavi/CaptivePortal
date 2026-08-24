@@ -372,6 +372,7 @@
   }
 
   function configure() {
+    if (context.page === "home" && root.dataset.homeLiveEnabled === "true") return;
     if (context.page === "home") context.operation = () => loadHome();
     if (context.page === "devices") {
       context.operation = () => loadDevices(false);
@@ -439,4 +440,582 @@
   }
 
   configure();
+}());
+
+(function () {
+  "use strict";
+
+  const API_VERSION = "admin.read.v1";
+  const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
+  const AUTH = new Set(["authorized", "pending", "other", "unknown"]);
+  const AP_PRODUCT = new Set(["Online", "Other", "Unknown"]);
+  const BACKOFF_SECONDS = [60, 120, 300];
+
+  function integer(value) { return Number.isInteger(value) && value >= 0 && typeof value !== "boolean"; }
+  function signedIntegerOrNull(value) { return value === null || Number.isInteger(value); }
+  function nonnegativeIntegerOrNull(value) { return value === null || integer(value); }
+  function optionalString(value) { return value === null || typeof value === "string"; }
+  function display(value) { return value === null || value === undefined ? "—" : String(value); }
+  function currentAge(snapshot, acceptedAt, now) {
+    if (!snapshot || snapshot.age_seconds === null) return null;
+    return snapshot.age_seconds + Math.max(0, now - acceptedAt) / 1000;
+  }
+  function localFreshness(snapshot, policy, acceptedAt, now) {
+    const age = currentAge(snapshot, acceptedAt, now);
+    if (!snapshot || snapshot.freshness_status === "unavailable" || age === null || age > policy.unavailable_after_seconds) return "unavailable";
+    return age <= policy.fresh_max_age_seconds ? "fresh" : "stale";
+  }
+  function retryDelay(failureCount, refreshSeconds, retryAfter) {
+    const backoff = BACKOFF_SECONDS[Math.min(Math.max(failureCount - 1, 0), 2)];
+    return Math.max(refreshSeconds, backoff, retryAfter || 0);
+  }
+  function enrichmentState(rows, cursor, summary, mac, effectiveFreshness) {
+    if (!summary || effectiveFreshness === "unavailable") return "AP source unavailable";
+    const item = rows.find((value) => value.ap_mac === mac);
+    if (item) return `Matched · ${item.product_status_classification}`;
+    return cursor ? "Not yet loaded" : "Absent after inventory load";
+  }
+  function sourceScopeValid(scope, kind, siteId) {
+    if (!scope || typeof scope !== "object" || Array.isArray(scope) || scope.site_id !== siteId) return false;
+    if (kind === "ap") return scope.scope_type === "site_ap_inventory";
+    return scope.scope_type === "client_ssid_allowlist" && Array.isArray(scope.ssids)
+      && scope.ssids.length > 0 && scope.ssids.every((item) => typeof item === "string" && item.length > 0);
+  }
+  function classify(status, code) {
+    if (status === 401) return {global: true, retryable: false, kind: "session"};
+    if (status === 403) return {global: true, retryable: false, kind: "forbidden"};
+    if (status === 404) return {global: true, retryable: false, kind: "disabled"};
+    if (status === 400) return {global: false, retryable: false, kind: "invalid"};
+    if (status === 429 || status === 503 || status === 500) return {global: false, retryable: true, kind: code === "query_deadline" ? "timeout" : "unavailable"};
+    return {global: false, retryable: true, kind: "unexpected"};
+  }
+  function validSnapshot(value, kind, siteId) {
+    const basic = value && typeof value === "object" && !Array.isArray(value)
+      && value.kind === kind && value.site_id === undefined
+      && FRESHNESS.has(value.freshness_status)
+      && (value.age_seconds === null || (typeof value.age_seconds === "number" && Number.isFinite(value.age_seconds) && value.age_seconds >= 0))
+      && optionalString(value.cycle_id) && (value.cycle_id === null || value.cycle_id.length > 0)
+      && optionalString(value.source_scope_hash) && (value.source_scope_hash === null || /^[0-9a-f]{64}$/.test(value.source_scope_hash))
+      && typeof siteId === "string";
+    if (!basic) return false;
+    if (value.freshness_status === "fresh" || value.freshness_status === "stale") {
+      return value.complete === true && value.cycle_id !== null
+        && value.source_scope_hash !== null && sourceScopeValid(value.source_scope, kind, siteId);
+    }
+    if (typeof value.complete !== "boolean") return false;
+    if (value.cycle_id === null) return value.source_scope_hash === null && value.source_scope === null;
+    return value.source_scope_hash !== null && sourceScopeValid(value.source_scope, kind, siteId);
+  }
+  function validEnvelope(payload, siteId) {
+    return payload && typeof payload === "object" && !Array.isArray(payload)
+      && payload.api_version === API_VERSION && payload.site_id === siteId
+      && payload.result && typeof payload.result === "object" && !Array.isArray(payload.result);
+  }
+  function validateClientSummary(payload, siteId) {
+    if (!validEnvelope(payload, siteId)) return null;
+    const result = payload.result;
+    const scope = result.snapshot && result.snapshot.source_scope;
+    if (!validSnapshot(result.snapshot, "client", siteId) || !result.freshness_policy
+      || !integer(result.freshness_policy.fresh_max_age_seconds)
+      || !integer(result.freshness_policy.unavailable_after_seconds)
+      || !Array.isArray(result.devices_by_ap)
+      || (scope !== null && !sourceScopeValid(scope, "client", siteId))) return null;
+    const counts = result.counts;
+    if (!counts || typeof counts !== "object") return null;
+    if (result.snapshot.freshness_status === "unavailable") {
+      if (Object.values(counts).some((value) => value !== null) || result.devices_by_ap.length) return null;
+    } else {
+      if (!Object.values(counts).every(integer)) return null;
+      if (counts.online !== counts.authorized + counts.pending + counts.other + counts.unknown) return null;
+      if (counts.other_unknown !== counts.other + counts.unknown) return null;
+      let bucketTotal = 0;
+      for (const bucket of result.devices_by_ap) {
+        if (!bucket || typeof bucket.ap_mac !== "string" || !integer(bucket.client_count)) return null;
+        bucketTotal += bucket.client_count;
+      }
+      if (counts.online !== bucketTotal + counts.ap_unknown) return null;
+    }
+    return result;
+  }
+  function validateApSummary(payload, siteId) {
+    if (!validEnvelope(payload, siteId)) return null;
+    const result = payload.result;
+    const scope = result.snapshot && result.snapshot.source_scope;
+    if (!validSnapshot(result.snapshot, "ap", siteId) || !result.freshness_policy
+      || !integer(result.freshness_policy.fresh_max_age_seconds)
+      || !integer(result.freshness_policy.unavailable_after_seconds)
+      || (scope !== null && !sourceScopeValid(scope, "ap", siteId))
+      || !result.counts) return null;
+    const values = Object.values(result.counts);
+    if (result.snapshot.freshness_status === "unavailable") {
+      if (values.some((value) => value !== null)) return null;
+    } else if (!values.every(integer) || result.counts.total !== result.counts.online + result.counts.other + result.counts.unknown) return null;
+    return result;
+  }
+  function validatePage(payload, siteId, kind, pinned) {
+    if (!validEnvelope(payload, siteId) || !payload.page || !Array.isArray(payload.result.items)) return null;
+    const result = payload.result;
+    if (!validSnapshot(result.snapshot, kind, siteId)
+      || result.snapshot.freshness_status === "unavailable" || result.snapshot.complete !== true
+      || !Number.isInteger(payload.page.limit) || payload.page.limit < 1 || payload.page.limit > 250) return null;
+    if (payload.page.cycle_id !== pinned.cycle_id || payload.page.source_scope_hash !== pinned.source_scope_hash) return null;
+    if (result.snapshot.cycle_id !== pinned.cycle_id || result.snapshot.source_scope_hash !== pinned.source_scope_hash) return null;
+    if (JSON.stringify(result.snapshot.source_scope) !== JSON.stringify(pinned.source_scope)) return null;
+    if (!(payload.page.next_cursor === null || (typeof payload.page.next_cursor === "string" && payload.page.next_cursor.length > 0 && payload.page.next_cursor.length <= 4096))) return null;
+    for (const item of result.items) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+      if (kind === "client") {
+        if (typeof item.client_mac !== "string" || typeof item.ssid !== "string" || !AUTH.has(item.auth_classification)
+          || !optionalString(item.name) || !optionalString(item.hostname) || !optionalString(item.ip)
+          || !optionalString(item.ap_name) || !optionalString(item.ap_mac) || !optionalString(item.band)
+          || !signedIntegerOrNull(item.rssi) || !signedIntegerOrNull(item.snr)
+          || !nonnegativeIntegerOrNull(item.controller_uptime)
+          || !nonnegativeIntegerOrNull(item.controller_traffic_down)
+          || !nonnegativeIntegerOrNull(item.controller_traffic_up)
+          || !nonnegativeIntegerOrNull(item.controller_traffic_total)) return null;
+        const ssids = pinned.source_scope && pinned.source_scope.ssids;
+        if (!Array.isArray(ssids) || !ssids.includes(item.ssid)) return null;
+      } else if (typeof item.ap_mac !== "string" || !optionalString(item.name) || !AP_PRODUCT.has(item.product_status_classification)) return null;
+    }
+    return payload;
+  }
+  function claimController(source, controller, generation) {
+    if (source.generation !== generation || source.controller !== null) return false;
+    source.controller = controller;
+    return true;
+  }
+  function releaseController(source, controller) {
+    if (source.controller === controller) source.controller = null;
+  }
+  function abortOwnedController(source, reason) {
+    const controller = source.controller;
+    if (!controller) return false;
+    controller.abort(reason);
+    releaseController(source, controller);
+    return true;
+  }
+  function retainedSelection(options, selected) {
+    return Array.isArray(options) && options.includes(selected) ? selected : "";
+  }
+  function clientParameters(cycleId, limit, cursor, values) {
+    const result = new URLSearchParams({cycle_id: cycleId, limit: String(limit), sort: values.sort});
+    if (values.auth) result.set("auth_classification", values.auth);
+    if (values.ap) result.set("ap_mac", values.ap);
+    if (values.ssid) result.set("ssid", values.ssid);
+    if (cursor) result.set("cursor", cursor);
+    return result;
+  }
+  function resetClientState(source, view) {
+    source.cursor = null;
+    source.rows = [];
+    view.clearRows();
+    view.hideMore();
+    view.loading();
+  }
+  function failureTransition(source, failure) {
+    if (failure.kind === "invalid" && !source.cleanRetry) {
+      source.cleanRetry = true;
+      return {cleanRefresh: true, failureCount: source.failureCount};
+    }
+    source.failureCount += 1;
+    return {cleanRefresh: false, failureCount: source.failureCount};
+  }
+  function neutralAbort(reason, hidden) {
+    return hidden || reason === "hidden" || reason === "superseded" || reason === "pagehide";
+  }
+  function canStartCleanRefresh(source, generation, isStopped, hidden) {
+    return source.generation === generation && source.controller === null && !isStopped && !hidden;
+  }
+  function unavailableValues(kind) {
+    return kind === "client"
+      ? {primary: "—", detail: "Other — · Unknown —", state: "Unavailable"}
+      : {primary: "— / —", detail: "Other — · Unknown —", count: "Unavailable", state: "Unavailable"};
+  }
+
+  if (typeof window !== "undefined") {
+    window.CaptivPortalHomeLiveTest = Object.freeze({
+      classify, currentAge, localFreshness, retryDelay,
+      abortOwnedController, canStartCleanRefresh, claimController, clientParameters, enrichmentState,
+      failureTransition, neutralAbort, releaseController, resetClientState,
+      retainedSelection, unavailableValues,
+      validateApSummary, validateClientSummary, validatePage,
+    });
+  }
+  if (typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  if (!root || root.dataset.page !== "home" || root.dataset.homeLiveEnabled !== "true") return;
+
+  const siteId = root.dataset.siteId;
+  const apiBase = root.dataset.apiBase + "/current-state";
+  const refreshSeconds = Number(root.dataset.homeLiveRefreshSeconds);
+  const timeoutMs = Number(root.dataset.homeLiveRequestTimeoutSeconds) * 1000;
+  const pageSize = Number(root.dataset.currentStatePageSize);
+  const refreshButton = document.getElementById("refresh-button");
+  const clientRows = document.getElementById("live-client-rows");
+  const apRows = document.getElementById("live-ap-rows");
+  const clientMore = document.getElementById("live-client-more");
+  const apMore = document.getElementById("live-ap-more");
+  const filters = document.getElementById("live-client-filters");
+  const globalPanel = document.getElementById("home-live-global");
+  const globalTitle = document.getElementById("home-live-global-title");
+  const globalMessage = document.getElementById("home-live-global-message");
+  const sources = {
+    client: {generation: 0, controller: null, timer: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, lastCompletedAt: 0, rows: [], cursor: null, loadingMore: false},
+    ap: {generation: 0, controller: null, timer: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, lastCompletedAt: 0, rows: [], cursor: null, loadingMore: false},
+  };
+  let stopped = false;
+  let ageTimer = null;
+
+  function node(tag, className, text) {
+    const value = document.createElement(tag);
+    if (className) value.className = className;
+    if (text !== undefined) value.textContent = display(text);
+    return value;
+  }
+  function setGlobal(title, message, state) {
+    globalTitle.textContent = title;
+    globalMessage.textContent = message;
+    globalPanel.dataset.state = state || "warning";
+    globalPanel.hidden = false;
+  }
+  function clearGlobal() { globalPanel.hidden = true; }
+  function abortSource(source) {
+    abortOwnedController(source, "superseded");
+    if (source.timer !== null) window.clearTimeout(source.timer);
+    source.timer = null;
+  }
+  function abortAll(reason) {
+    Object.values(sources).forEach((source) => {
+      abortOwnedController(source, reason);
+      if (source.timer !== null) window.clearTimeout(source.timer);
+      source.timer = null;
+    });
+    if (reason === "pagehide" && ageTimer !== null) window.clearTimeout(ageTimer);
+  }
+  function stop(kind) {
+    stopped = true;
+    abortAll(kind);
+    if (kind === "session") {
+      setGlobal("Session expired", "Sign in again to continue.", "error");
+      const link = node("a", "button", "Sign in");
+      link.href = `/admin/login?next=${encodeURIComponent(window.location.pathname)}`;
+      globalPanel.append(link);
+    } else if (kind === "forbidden") setGlobal("Access denied", "This Site is not available to your account.", "error");
+    else setGlobal("Live Home is disabled", "Reload the page to continue.", "warning");
+  }
+  async function requestJson(url, source, generation) {
+    const controller = new AbortController();
+    if (!claimController(source, controller, generation)) throw {neutral: true};
+    const timeout = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+    try {
+      const response = await fetch(url, {method: "GET", credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}, signal: controller.signal});
+      let payload = null;
+      try { payload = await response.json(); } catch (_error) { payload = null; }
+      if (!response.ok) {
+        const code = payload && payload.error && typeof payload.error.code === "string" ? payload.error.code : null;
+        const failure = classify(response.status, code);
+        const retry = Number(response.headers.get("Retry-After"));
+        failure.retryAfter = Number.isFinite(retry) && retry > 0 ? retry : 0;
+        throw {liveFailure: failure};
+      }
+      if (source.generation !== generation || stopped) throw {neutral: true};
+      return payload;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (neutralAbort(controller.signal.reason, document.hidden)) throw {neutral: true};
+        throw {liveFailure: {global: false, retryable: true, kind: "timeout", retryAfter: 0}};
+      }
+      if (error && (error.liveFailure || error.neutral)) throw error;
+      throw {liveFailure: {global: false, retryable: true, kind: "unavailable", retryAfter: 0}};
+    } finally {
+      window.clearTimeout(timeout);
+      releaseController(source, controller);
+    }
+  }
+  function paramsForClients(summary, cursor) {
+    return clientParameters(summary.snapshot.cycle_id, pageSize, cursor, {
+      sort: filters.elements.sort.value,
+      auth: filters.elements.auth.value,
+      ap: filters.elements.ap.value,
+      ssid: filters.elements.ssid.value,
+    });
+  }
+  function paramsForAps(summary, cursor) {
+    const value = new URLSearchParams({cycle_id: summary.snapshot.cycle_id, limit: String(pageSize)});
+    if (cursor) value.set("cursor", cursor);
+    return value;
+  }
+  function renderFreshness(kind) {
+    const source = sources[kind];
+    if (!source.summary) return;
+    const snapshot = source.summary.snapshot;
+    const status = localFreshness(snapshot, source.summary.freshness_policy, source.acceptedAt, performance.now());
+    const age = currentAge(snapshot, source.acceptedAt, performance.now());
+    const label = status === "unavailable" ? "Unavailable" : `${status === "stale" ? "STALE" : "Fresh"} · age ${Math.floor(age)}s · observed ${display(snapshot.observed_at)}`;
+    document.getElementById(kind === "client" ? "live-client-freshness" : "live-ap-freshness").textContent = label;
+    if (kind === "client") {
+      clientRows.closest(".table-scroll").hidden = status === "unavailable";
+      document.getElementById("live-devices-by-ap").hidden = status === "unavailable";
+      if (status === "unavailable") clientMore.hidden = true;
+    } else {
+      apRows.hidden = status === "unavailable";
+      if (status === "unavailable") apMore.hidden = true;
+    }
+    if (status === "unavailable") {
+      const values = unavailableValues(kind);
+      if (kind === "client") {
+        ["live-online", "live-authorized", "live-pending", "live-other-unknown"].forEach((id) => { document.getElementById(id).textContent = values.primary; });
+        document.getElementById("live-other-detail").textContent = values.detail;
+        document.getElementById("live-client-state").textContent = values.state;
+        clientRows.replaceChildren();
+        const byAp = document.getElementById("live-devices-by-ap");
+        byAp.replaceChildren();
+      } else {
+        document.getElementById("live-ap-total").textContent = values.primary;
+        document.getElementById("live-ap-detail").textContent = values.detail;
+        document.getElementById("live-ap-count").textContent = values.count;
+        document.getElementById("live-ap-state").textContent = values.state;
+        apRows.replaceChildren();
+        if (sources.client.summary) renderByAp();
+      }
+    }
+  }
+  function renderClientSummary() {
+    const result = sources.client.summary;
+    const counts = result.counts;
+    document.getElementById("live-online").textContent = display(counts.online);
+    document.getElementById("live-authorized").textContent = display(counts.authorized);
+    document.getElementById("live-pending").textContent = display(counts.pending);
+    document.getElementById("live-other-unknown").textContent = display(counts.other_unknown);
+    document.getElementById("live-other-detail").textContent = `Other ${display(counts.other)} · Unknown ${display(counts.unknown)}`;
+    document.getElementById("live-client-warning").hidden = !result.snapshot.latest_attempt_result || result.snapshot.latest_attempt_result === "success";
+    const ssids = result.snapshot.source_scope && result.snapshot.source_scope.ssids;
+    const ssidSelect = filters.elements.ssid;
+    const selectedSsid = ssidSelect.value;
+    ssidSelect.replaceChildren(node("option", null, "All"));
+    ssidSelect.firstChild.value = "";
+    if (Array.isArray(ssids)) ssids.forEach((ssid) => { const option = node("option", null, ssid); option.value = ssid; ssidSelect.append(option); });
+    ssidSelect.value = retainedSelection(ssids, selectedSsid);
+    document.getElementById("live-ssid-label").hidden = !Array.isArray(ssids) || ssids.length <= 1;
+    if (sources.ap.rows.length) renderAps(); else renderByAp();
+    renderFreshness("client");
+  }
+  function renderApSummary() {
+    const result = sources.ap.summary;
+    const counts = result.counts;
+    document.getElementById("live-ap-total").textContent = `${display(counts.online)} / ${display(counts.total)}`;
+    document.getElementById("live-ap-detail").textContent = `Other ${display(counts.other)} · Unknown ${display(counts.unknown)}`;
+    document.getElementById("live-ap-warning").hidden = !result.snapshot.latest_attempt_result || result.snapshot.latest_attempt_result === "success";
+    renderFreshness("ap");
+  }
+  function apLabel(mac) {
+    const item = sources.ap.rows.find((value) => value.ap_mac === mac);
+    return item && item.name ? `${item.name} · ${mac}` : mac;
+  }
+  function apEnrichment(mac) {
+    const summary = sources.ap.summary;
+    const effectiveFreshness = summary
+      ? localFreshness(summary.snapshot, summary.freshness_policy, sources.ap.acceptedAt, performance.now())
+      : "unavailable";
+    return enrichmentState(sources.ap.rows, sources.ap.cursor, summary, mac, effectiveFreshness);
+  }
+  function renderByAp() {
+    const target = document.getElementById("live-devices-by-ap");
+    target.replaceChildren();
+    const result = sources.client.summary;
+    const effectiveFreshness = result
+      ? localFreshness(result.snapshot, result.freshness_policy, sources.client.acceptedAt, performance.now())
+      : "unavailable";
+    if (!result || effectiveFreshness === "unavailable") { target.append(node("p", "live-detail", "Unavailable")); return; }
+    const max = Math.max(1, ...result.devices_by_ap.map((item) => item.client_count));
+    result.devices_by_ap.forEach((item) => {
+      const row = node("div", "live-bar");
+      const track = node("span", "live-bar-track");
+      const fill = node("span", "live-bar-fill");
+      fill.style.width = `${Math.min(100, item.client_count / max * 100)}%`;
+      track.append(fill);
+      const label = node("span");
+      label.append(node("strong", null, apLabel(item.ap_mac)), node("br"), node("small", "live-detail", apEnrichment(item.ap_mac)));
+      row.append(label, track, node("strong", null, item.client_count));
+      target.append(row);
+    });
+    if (result.counts.ap_unknown > 0) target.append(node("p", "live-detail", `AP Unknown · ${result.counts.ap_unknown}`));
+    rebuildApFilter();
+  }
+  function rebuildApFilter() {
+    const selected = filters.elements.ap.value;
+    const macs = new Set();
+    if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => macs.add(item.ap_mac));
+    sources.ap.rows.forEach((item) => macs.add(item.ap_mac));
+    filters.elements.ap.replaceChildren(node("option", null, "All"));
+    filters.elements.ap.firstChild.value = "";
+    Array.from(macs).sort().forEach((mac) => { const option = node("option", null, apLabel(mac)); option.value = mac; filters.elements.ap.append(option); });
+    filters.elements.ap.value = macs.has(selected) ? selected : "";
+  }
+  function clientRow(item) {
+    const row = node("tr");
+    const identity = node("td");
+    identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
+    const facts = node("details", "controller-facts");
+    facts.append(node("summary", null, "Controller facts"));
+    const list = node("dl", "detail-list");
+    [["Controller uptime", item.controller_uptime], ["Controller trafficDown", item.controller_traffic_down], ["Controller trafficUp", item.controller_traffic_up], ["Controller trafficTotal", item.controller_traffic_total]].forEach(([label, value]) => { list.append(node("dt", null, label), node("dd", null, value)); });
+    facts.append(list);
+    [identity, node("td", null, {authorized: "Authorized", pending: "Waiting", other: "Other", unknown: "Unknown"}[item.auth_classification]), node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), node("td", null, item.band), node("td", null, item.rssi), node("td", null, item.snr)].forEach((cell) => row.append(cell));
+    const factCell = node("td"); factCell.append(facts); row.append(factCell);
+    return row;
+  }
+  function renderClients(append) {
+    if (!append) clientRows.replaceChildren();
+    sources.client.rows.forEach((item, index) => { if (!append || index >= clientRows.children.length) clientRows.append(clientRow(item)); });
+    clientMore.hidden = !sources.client.cursor;
+    document.getElementById("live-client-state").textContent = sources.client.rows.length ? `Showing ${sources.client.rows.length} current device(s).` : "No devices in this current snapshot.";
+  }
+  function renderAps() {
+    apRows.replaceChildren();
+    const buckets = new Map();
+    if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => buckets.set(item.ap_mac, item.client_count));
+    sources.ap.rows.forEach((item) => {
+      const row = node("article", "data-row");
+      const header = node("div", "data-row-header");
+      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.product_status_classification));
+      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Current scoped clients: ${buckets.get(item.ap_mac) || 0}`));
+      apRows.append(row);
+    });
+    const total = sources.ap.summary && sources.ap.summary.counts.total;
+    document.getElementById("live-ap-count").textContent = total === null || total === undefined
+      ? ""
+      : (sources.ap.cursor ? `Showing ${sources.ap.rows.length} of ${total}` : `${sources.ap.rows.length} access point(s) loaded`);
+    document.getElementById("live-ap-state").textContent = sources.ap.rows.length ? "Current access points loaded." : "No access points in this current snapshot.";
+    apMore.hidden = !sources.ap.cursor;
+    rebuildApFilter(); renderByAp();
+  }
+  function schedule(kind, delaySeconds) {
+    const source = sources[kind];
+    if (source.timer !== null) window.clearTimeout(source.timer);
+    if (stopped || document.hidden) return;
+    source.timer = window.setTimeout(() => { source.timer = null; refreshGroup(kind, false); }, delaySeconds * 1000);
+  }
+  function handleFailure(kind, failure) {
+    if (failure.global) { stop(failure.kind); return false; }
+    const source = sources[kind];
+    const transition = failureTransition(source, failure);
+    if (transition.cleanRefresh) {
+      source.cursor = null; source.rows = [];
+      if (kind === "client") renderClients(false); else renderAps();
+      return true;
+    }
+    const state = document.getElementById(kind === "client" ? "live-client-state" : "live-ap-state");
+    state.textContent = failure.kind === "invalid" ? "Unexpected current-state request response. Automatic retry stopped." : "Live source unavailable; retry remains bounded.";
+    if (failure.kind !== "invalid") schedule(kind, retryDelay(source.failureCount, refreshSeconds, failure.retryAfter));
+    return false;
+  }
+  async function refreshGroup(kind, manual) {
+    if (stopped || document.hidden) return;
+    if (sources[kind].controller) {
+      if (!manual) schedule(kind, refreshSeconds);
+      return;
+    }
+    const source = sources[kind];
+    source.generation += 1;
+    const generation = source.generation;
+    abortSource(source);
+    let cleanRefresh = false;
+    try {
+      const summaryPayload = await requestJson(`${apiBase}/${kind === "client" ? "clients" : "aps"}/summary`, source, generation);
+      const summary = kind === "client" ? validateClientSummary(summaryPayload, siteId) : validateApSummary(summaryPayload, siteId);
+      if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0}};
+      if (source.generation !== generation) return;
+      source.summary = summary; source.acceptedAt = performance.now(); source.rows = []; source.cursor = null;
+      if (kind === "client") { renderClientSummary(); renderClients(false); } else { renderApSummary(); renderAps(); }
+      if (summary.snapshot.cycle_id !== null && summary.snapshot.freshness_status !== "unavailable") {
+        const parameters = kind === "client" ? paramsForClients(summary, null) : paramsForAps(summary, null);
+        const pagePayload = await requestJson(`${apiBase}/${kind === "client" ? "clients" : "aps"}?${parameters.toString()}`, source, generation);
+        const valid = validatePage(pagePayload, siteId, kind, summary.snapshot);
+        if (!valid) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0}};
+        source.rows = valid.result.items.slice(); source.cursor = valid.page.next_cursor;
+        if (kind === "client") renderClients(false); else renderAps();
+      }
+      source.failureCount = 0; source.cleanRetry = false; clearGlobal();
+      source.lastCompletedAt = performance.now();
+      document.getElementById("home-live-announcement").textContent = `Home updated. ${sources.client.summary && sources.client.summary.counts.online !== null ? sources.client.summary.counts.online : "unknown"} devices online.`;
+      schedule(kind, refreshSeconds);
+    } catch (error) {
+      if (!(error && error.neutral)) cleanRefresh = handleFailure(kind, error && error.liveFailure ? error.liveFailure : {global: false, retryable: true, kind: "unexpected", retryAfter: 0});
+    } finally {
+      refreshButton.disabled = false;
+    }
+    if (cleanRefresh && canStartCleanRefresh(source, generation, stopped, document.hidden)) {
+      await Promise.resolve();
+      if (canStartCleanRefresh(source, generation, stopped, document.hidden)) await refreshGroup(kind, true);
+    }
+  }
+  async function loadMore(kind) {
+    const source = sources[kind];
+    if (source.loadingMore || !source.cursor || !source.summary || stopped) return;
+    source.loadingMore = true;
+    const generation = source.generation;
+    const cursor = source.cursor;
+    const identity = `${siteId}|${source.summary.snapshot.cycle_id}|${source.summary.snapshot.source_scope_hash}|${cursor}`;
+    let cleanRefresh = false;
+    try {
+      const parameters = kind === "client" ? paramsForClients(source.summary, cursor) : paramsForAps(source.summary, cursor);
+      const payload = await requestJson(`${apiBase}/${kind === "client" ? "clients" : "aps"}?${parameters.toString()}`, source, generation);
+      const valid = validatePage(payload, siteId, kind, source.summary.snapshot);
+      const currentIdentity = `${siteId}|${source.summary.snapshot.cycle_id}|${source.summary.snapshot.source_scope_hash}|${cursor}`;
+      if (!valid || identity !== currentIdentity || source.generation !== generation) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0}};
+      source.rows.push(...valid.result.items); source.cursor = valid.page.next_cursor;
+      if (kind === "client") renderClients(true); else renderAps();
+    } catch (error) {
+      if (!(error && error.neutral)) cleanRefresh = handleFailure(kind, error && error.liveFailure ? error.liveFailure : {global: false, retryable: true, kind: "unexpected", retryAfter: 0});
+    } finally { source.loadingMore = false; }
+    if (cleanRefresh && canStartCleanRefresh(source, generation, stopped, document.hidden)) {
+      await Promise.resolve();
+      if (canStartCleanRefresh(source, generation, stopped, document.hidden)) await refreshGroup(kind, true);
+    }
+  }
+  function refreshAll() {
+    if (stopped || document.hidden) return;
+    refreshButton.disabled = true;
+    abortAll("superseded");
+    Promise.allSettled([refreshGroup("client", true), refreshGroup("ap", true)]).finally(() => { refreshButton.disabled = false; });
+  }
+  refreshButton.addEventListener("click", refreshAll);
+  clientMore.addEventListener("click", () => loadMore("client"));
+  apMore.addEventListener("click", () => loadMore("ap"));
+  filters.addEventListener("change", () => {
+    const source = sources.client;
+    abortSource(source);
+    source.generation += 1;
+    resetClientState(source, {
+      clearRows: () => clientRows.replaceChildren(),
+      hideMore: () => { clientMore.hidden = true; },
+      loading: () => {
+        clientRows.closest(".table-scroll").hidden = false;
+        document.getElementById("live-client-state").textContent = "Loading filtered current clients…";
+      },
+    });
+    refreshGroup("client", true);
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) abortAll("hidden");
+    else if (!stopped) {
+      Object.entries(sources).forEach(([kind, source]) => {
+        const elapsed = source.lastCompletedAt ? (performance.now() - source.lastCompletedAt) / 1000 : refreshSeconds;
+        if (!source.summary || elapsed >= refreshSeconds) refreshGroup(kind, false);
+        else schedule(kind, refreshSeconds - elapsed);
+      });
+    }
+  });
+  window.addEventListener("pagehide", () => { stopped = true; abortAll("pagehide"); });
+  function scheduleAgeTick() {
+    if (stopped) return;
+    ageTimer = window.setTimeout(() => {
+      ageTimer = null;
+      if (!document.hidden) { renderFreshness("client"); renderFreshness("ap"); }
+      scheduleAgeTick();
+    }, 1000);
+  }
+  scheduleAgeTick();
+  refreshAll();
 }());

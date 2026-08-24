@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from typing import Any, Callable, Mapping
@@ -15,6 +16,11 @@ from app.analytics.source_gateway import (
 )
 from app.analytics.validation import AnalyticsQueryValidationError, parse_utc
 from app.common.mac import format_mac_colon
+from app.current_state import (
+    CurrentStateSchemaError,
+    CurrentStateStorageError,
+    CurrentStateValidationError,
+)
 
 from .config import AdminWebConfig
 from .cursors import AdminCursorError, decode_cursor, encode_cursor
@@ -26,6 +32,12 @@ from .device_gateway import (
 from .models import AdminPrincipal
 from .policy import AdminAccessPolicy
 from .read_gateway import AdminReadSourceError, AdminSqlReadGateway
+from .current_state_serialization import (
+    serialize_ap_page,
+    serialize_ap_summary,
+    serialize_client_page,
+    serialize_client_summary,
+)
 
 
 class AdminQueryError(RuntimeError):
@@ -56,6 +68,21 @@ class AdminQueryDeadline(AdminQueryError):
     code = "query_deadline"
 
 
+_CURRENT_CLIENT_SORTS = frozenset({
+    "client_mac", "controller_uptime", "controller_traffic_total_desc",
+    "controller_traffic_down", "controller_traffic_up", "auth_status",
+    "ap", "rssi", "snr",
+})
+_CURRENT_AUTH = frozenset({"authorized", "pending", "other", "unknown"})
+_CURRENT_PAGE_CALLER_REASONS = frozenset({
+    "cursor is malformed", "cursor Site changed", "cursor cycle changed",
+    "cursor source scope changed", "cursor source scope is no longer current",
+    "cursor context changed", "sort is not allowed", "limit is outside bounds",
+    "auth_classification is invalid", "ap_mac is invalid", "ssid is invalid",
+    "cycle_id is invalid",
+})
+
+
 @dataclass(frozen=True, slots=True)
 class AdminQueryResponse:
     result: Any
@@ -73,13 +100,121 @@ class AdminQueryService:
         device_gateway: AdminDeviceReadGateway,
         read_gateway: AdminSqlReadGateway,
         visit_analytics_service: Any,
+        current_state_read_service: Any | None = None,
     ):
         self._config = config
         self._policy = policy
         self._devices = device_gateway
         self._reads = read_gateway
         self._analytics = visit_analytics_service
+        self._current_state = current_state_read_service
         self._slots = threading.BoundedSemaphore(config.max_concurrent_queries)
+
+    def current_client_summary(self, principal, site_id):
+        self._authorize(principal, "admin.read.overview", site_id)
+
+        def query(deadline):
+            value = self._current_call(
+                deadline, "summary", "get_current_client_summary", site_id
+            )
+            try:
+                result = serialize_client_summary(value, site_id)
+            except CurrentStateValidationError as exc:
+                raise AdminQueryUnavailable() from exc
+            return AdminQueryResponse(result)
+
+        return self._run(query)
+
+    def list_current_clients(
+        self, principal, site_id, *, cycle_id=None, limit=None, cursor=None,
+        sort=None, auth_classification=None, ap_mac=None, ssid=None,
+    ):
+        self._authorize(principal, "admin.read.devices", site_id)
+        selected_limit = self._current_limit(limit)
+        selected_cycle = self._current_cycle(cycle_id)
+        selected_cursor = self._current_cursor(cursor)
+        selected_sort = "controller_traffic_total_desc" if sort is None else sort
+        if selected_sort not in _CURRENT_CLIENT_SORTS:
+            raise AdminQueryValidationError()
+        if auth_classification is not None and auth_classification not in _CURRENT_AUTH:
+            raise AdminQueryValidationError()
+        selected_ap = self._optional_mac(ap_mac)
+        selected_ssid = self._exact_ssid(ssid)
+
+        def query(deadline):
+            value = self._current_call(
+                deadline,
+                "page",
+                "list_current_clients",
+                site_id,
+                cycle_id=selected_cycle,
+                limit=selected_limit,
+                cursor=selected_cursor,
+                sort=selected_sort,
+                auth_classification=auth_classification,
+                ap_mac=selected_ap,
+                ssid=selected_ssid,
+            )
+            try:
+                result, page = serialize_client_page(
+                    value, site_id, limit=selected_limit,
+                    explicit_cycle_id=selected_cycle,
+                    explicit_cursor=selected_cursor,
+                )
+            except CurrentStateValidationError as exc:
+                raise AdminQueryUnavailable() from exc
+            except ValueError as exc:
+                raise AdminQueryValidationError() from exc
+            return AdminQueryResponse(result, page)
+
+        return self._run(query)
+
+    def current_ap_summary(self, principal, site_id):
+        self._authorize(principal, "admin.read.overview", site_id)
+
+        def query(deadline):
+            value = self._current_call(
+                deadline, "summary", "get_current_ap_summary", site_id
+            )
+            try:
+                result = serialize_ap_summary(value, site_id)
+            except CurrentStateValidationError as exc:
+                raise AdminQueryUnavailable() from exc
+            return AdminQueryResponse(result)
+
+        return self._run(query)
+
+    def list_current_aps(
+        self, principal, site_id, *, cycle_id=None, limit=None, cursor=None,
+    ):
+        self._authorize(principal, "admin.read.overview", site_id)
+        selected_limit = self._current_limit(limit)
+        selected_cycle = self._current_cycle(cycle_id)
+        selected_cursor = self._current_cursor(cursor)
+
+        def query(deadline):
+            value = self._current_call(
+                deadline,
+                "page",
+                "list_current_aps",
+                site_id,
+                cycle_id=selected_cycle,
+                limit=selected_limit,
+                cursor=selected_cursor,
+            )
+            try:
+                result, page = serialize_ap_page(
+                    value, site_id, limit=selected_limit,
+                    explicit_cycle_id=selected_cycle,
+                    explicit_cursor=selected_cursor,
+                )
+            except CurrentStateValidationError as exc:
+                raise AdminQueryUnavailable() from exc
+            except ValueError as exc:
+                raise AdminQueryValidationError() from exc
+            return AdminQueryResponse(result, page)
+
+        return self._run(query)
 
     def visit_summary(self, principal, site_id, from_utc, to_utc):
         self._authorize(principal, "admin.read.overview", site_id)
@@ -381,6 +516,65 @@ class AdminQueryService:
     def _authorize(self, principal, capability: str, site_id: str) -> None:
         if not self._policy.authorize(principal, capability, site_id):
             raise AdminQueryForbidden()
+
+    def _current_call(self, deadline, operation_kind, method_name, site_id, **kwargs):
+        source = self._current_state
+        if source is None:
+            raise AdminQueryUnavailable()
+        method = getattr(source, method_name, None)
+        if not callable(method):
+            raise AdminQueryUnavailable()
+        try:
+            deadline.require_remaining()
+            value = method(site_id, **kwargs)
+            deadline.require_remaining()
+            return value
+        except AnalyticsQueryDeadlineExceeded as exc:
+            raise AdminQueryDeadline() from exc
+        except CurrentStateValidationError as exc:
+            if operation_kind == "page" and str(exc) in _CURRENT_PAGE_CALLER_REASONS:
+                raise AdminQueryValidationError() from exc
+            raise AdminQueryUnavailable() from exc
+        except (CurrentStateSchemaError, CurrentStateStorageError, sqlite3.Error, OSError) as exc:
+            raise AdminQueryUnavailable() from exc
+
+    def _current_limit(self, value) -> int:
+        if value is None:
+            return self._config.current_state_page_size
+        if not isinstance(value, str) or not value or not value.isascii() or not value.isdigit() or value.startswith("0"):
+            raise AdminQueryValidationError()
+        parsed = int(value)
+        if not 1 <= parsed <= 250:
+            raise AdminQueryValidationError()
+        return parsed
+
+    def _current_cursor(self, value):
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value or len(value) > self._config.max_cursor_chars:
+            raise AdminQueryValidationError()
+        return value
+
+    @staticmethod
+    def _current_cycle(value):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise AdminQueryValidationError()
+        try:
+            canonical = str(uuid.UUID(value))
+        except (ValueError, AttributeError) as exc:
+            raise AdminQueryValidationError() from exc
+        if canonical != value:
+            raise AdminQueryValidationError()
+        return value
+
+    def _exact_ssid(self, value):
+        if value is None:
+            return None
+        if not isinstance(value, str) or value == "" or len(value) > self._config.max_filter_chars:
+            raise AdminQueryValidationError()
+        return value
 
     @staticmethod
     def _analytics_response(result: Any) -> AdminQueryResponse:

@@ -65,6 +65,10 @@ class AdminWebConfig:
     visit_page_size: int
     observation_page_size: int
     observation_max_window_hours: int
+    home_live_enabled: bool
+    home_live_refresh_seconds: int
+    home_live_request_timeout_seconds: int
+    current_state_page_size: int
 
     def __repr__(self) -> str:
         return (
@@ -89,6 +93,10 @@ def admin_web_config_from_settings(
     require_https = _exact_bool(
         settings.get("web_admin_require_https", "true"),
         "WEB_ADMIN_REQUIRE_HTTPS",
+    )
+    home_live_enabled = _exact_bool(
+        settings.get("web_admin_home_live_enabled", "false"),
+        "WEB_ADMIN_HOME_LIVE_ENABLED",
     )
     username = _string(settings.get("web_admin_username", ""), "WEB_ADMIN_USERNAME")
     password_hash = _string(
@@ -132,10 +140,21 @@ def admin_web_config_from_settings(
         "visit_page_size": _bounded_int(settings, "visit_page_size", 100, 1, 500),
         "observation_page_size": _bounded_int(settings, "observation_page_size", 100, 1, 500),
         "observation_max_window_hours": _bounded_int(settings, "observation_max_window_hours", 24, 1, 168),
+        "home_live_refresh_seconds": _bounded_int(settings, "home_live_refresh_seconds", 60, 60, 300),
+        "home_live_request_timeout_seconds": _bounded_int(settings, "home_live_request_timeout_seconds", 20, 5, 60),
+        "current_state_page_size": _bounded_int(settings, "current_state_page_size", 100, 1, 250),
     }
     if values["session_absolute_seconds"] < values["session_idle_seconds"]:
         raise AdminWebConfigError(
             "WEB_ADMIN_SESSION_ABSOLUTE_SECONDS must not be shorter than idle"
+        )
+    if values["home_live_request_timeout_seconds"] <= values["max_query_duration_seconds"]:
+        raise AdminWebConfigError(
+            "WEB_ADMIN_HOME_LIVE_REQUEST_TIMEOUT_SECONDS must exceed WEB_ADMIN_MAX_QUERY_DURATION_SECONDS"
+        )
+    if home_live_enabled and not enabled:
+        raise AdminWebConfigError(
+            "WEB_ADMIN_HOME_LIVE_ENABLED requires WEB_ADMIN_ENABLED=true"
         )
 
     if enabled:
@@ -163,6 +182,7 @@ def admin_web_config_from_settings(
         allowed_site_ids=sites,
         default_site_id=default_site,
         require_https=require_https,
+        home_live_enabled=home_live_enabled,
         **values,
     )
 

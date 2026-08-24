@@ -1,2 +1,49 @@
 {% extends "admin/base.html" %}
-{% block subtitle %}<p>Health and a compact 24-hour Site summary.</p>{% endblock %}
+{% block subtitle %}
+<p>{% if home_live_enabled %}Current network state for the selected Site.{% else %}Health and a compact 24-hour Site summary.{% endif %}</p>
+{% endblock %}
+{% block page_body %}
+{% if not home_live_enabled %}
+{{ super() }}
+{% else %}
+<div id="home-live-global" class="state-panel" role="status" aria-live="polite" hidden>
+  <span class="state-dot" aria-hidden="true"></span>
+  <div><strong id="home-live-global-title"></strong><p id="home-live-global-message"></p></div>
+</div>
+<div id="home-live-announcement" class="visually-hidden" role="status" aria-live="polite"></div>
+<section class="live-metrics" aria-label="Current network totals">
+  <article class="card live-metric"><h2>Online Now</h2><p id="live-online" class="metric">—</p><p id="live-client-freshness" class="live-detail">Loading…</p></article>
+  <article class="card live-metric"><h2>Authorized</h2><p id="live-authorized" class="metric">—</p></article>
+  <article class="card live-metric"><h2>Waiting Authorization</h2><p id="live-pending" class="metric">—</p></article>
+  <article class="card live-metric"><h2>Other / Unknown</h2><p id="live-other-unknown" class="metric">—</p><p id="live-other-detail" class="live-detail">Other — · Unknown —</p></article>
+  <article class="card live-metric"><h2>AP Online / Total</h2><p id="live-ap-total" class="metric">— / —</p><p id="live-ap-detail" class="live-detail">Other — · Unknown —</p><p id="live-ap-freshness" class="live-detail">Loading…</p></article>
+</section>
+<div id="live-client-warning" class="state-panel" data-state="warning" hidden><span class="state-dot" aria-hidden="true"></span><p>Latest collection attempt did not complete successfully; showing the latest complete snapshot.</p></div>
+<div id="live-ap-warning" class="state-panel" data-state="warning" hidden><span class="state-dot" aria-hidden="true"></span><p>Latest collection attempt did not complete successfully; showing the latest complete snapshot.</p></div>
+<section class="card card-wide live-section" aria-labelledby="by-ap-title">
+  <h2 id="by-ap-title">Devices by AP — Now</h2>
+  <div id="live-devices-by-ap" class="live-bars"></div>
+</section>
+<section class="card card-wide live-section" aria-labelledby="devices-now-title">
+  <h2 id="devices-now-title">Online Devices</h2>
+  <form id="live-client-filters" class="filter-panel" novalidate>
+    <label>Auth<select name="auth"><option value="">All</option><option value="authorized">Authorized</option><option value="pending">Waiting</option><option value="other">Other</option><option value="unknown">Unknown</option></select></label>
+    <label>AP<select name="ap"><option value="">All</option></select></label>
+    <label id="live-ssid-label" hidden>SSID<select name="ssid"><option value="">All</option></select></label>
+    <label>Sort<select name="sort"><option value="controller_traffic_total_desc">Controller trafficTotal — highest first</option><option value="controller_uptime">Controller uptime — highest first</option><option value="client_mac">MAC — ascending</option><option value="auth_status">Auth status — ascending</option><option value="ap">AP — ascending</option><option value="rssi">RSSI — highest first</option><option value="snr">SNR — highest first</option><option value="controller_traffic_down">Controller trafficDown — highest first</option><option value="controller_traffic_up">Controller trafficUp — highest first</option></select></label>
+  </form>
+  <div id="live-client-state" class="live-inline-state">Loading current clients…</div>
+  <div class="table-scroll" role="region" aria-label="Online devices table" tabindex="0">
+    <table class="live-table"><caption>Current scoped online devices</caption><thead><tr><th scope="col">Device / MAC</th><th scope="col">Auth</th><th scope="col">IP</th><th scope="col">AP</th><th scope="col">Band</th><th scope="col">RSSI</th><th scope="col">SNR</th><th scope="col">Controller facts</th></tr></thead><tbody id="live-client-rows"></tbody></table>
+  </div>
+  <div class="pagination"><button id="live-client-more" class="button button-secondary" type="button" hidden>Load more devices</button></div>
+</section>
+<section class="card card-wide live-section" aria-labelledby="aps-now-title">
+  <h2 id="aps-now-title">Access Points Now</h2>
+  <p id="live-ap-count" class="live-detail"></p>
+  <div id="live-ap-state" class="live-inline-state">Loading access points…</div>
+  <div id="live-ap-rows" class="row-list"></div>
+  <div class="pagination"><button id="live-ap-more" class="button button-secondary" type="button" hidden>Load more access points</button></div>
+</section>
+{% endif %}
+{% endblock %}

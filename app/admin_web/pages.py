@@ -32,6 +32,10 @@ def render_admin_page(
     csrf_token: str,
     runtime_state: str,
     device_id: str | None = None,
+    home_live_enabled: bool = False,
+    home_live_refresh_seconds: int = 60,
+    home_live_request_timeout_seconds: int = 20,
+    current_state_page_size: int = 100,
 ) -> Response:
     """Render only canonical server context; business data is API-loaded."""
     return make_response(
@@ -43,6 +47,10 @@ def render_admin_page(
             csrf_token=csrf_token,
             runtime_state=runtime_state,
             device_id=device_id,
+            home_live_enabled=home_live_enabled,
+            home_live_refresh_seconds=home_live_refresh_seconds,
+            home_live_request_timeout_seconds=home_live_request_timeout_seconds,
+            current_state_page_size=current_state_page_size,
         )
     )
 

@@ -96,26 +96,34 @@ def test_process_runtime_composes_admin_after_sources(monkeypatch):
         def register_blueprint(self, blueprint):
             seen["blueprint"] = blueprint
 
-    def create(settings, analytics, registry, visits, observations, logger):
+    def create(settings, analytics, registry, visits, observations, logger, **kwargs):
         seen.update(
             settings=settings,
             analytics=analytics,
             registry=registry,
             visits=visits,
             observations=observations,
+            current_state=kwargs.get("current_state_read_service"),
         )
         return selected
 
     analytics = SimpleNamespace(
         _source_services={"visits": "visit-read", "observations": "obs-read"}
     )
+    current_read = object()
     monkeypatch.setattr(process_runtime, "_analytics_runtime", analytics)
+    monkeypatch.setattr(
+        process_runtime,
+        "_current_state_runtime",
+        SimpleNamespace(read_service=current_read),
+    )
     monkeypatch.setattr(process_runtime, "create_admin_web_runtime", create)
     process_runtime._configure_admin_web(App(), {"web_admin_enabled": "false"}, "registry")
     assert seen["analytics"] is analytics
     assert seen["registry"] == "registry"
     assert seen["visits"] == "visit-read"
     assert seen["observations"] == "obs-read"
+    assert seen["current_state"] is current_read
     assert seen["blueprint"] is selected.blueprint
 
 
