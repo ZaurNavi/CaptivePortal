@@ -182,7 +182,7 @@ flowchart TB
 
     subgraph ProductPlane["Product / operator plane"]
         AdminQuery[AdminQueryService]
-        AdminAPI[/admin/api/v1]
+        AdminAPI["/admin/api/v1"]
         AdminPages[Admin Web]
         Browser[Operator browser]
     end
@@ -553,7 +553,7 @@ The browser is deliberately isolated from backend sources.
 
 ```mermaid
 flowchart LR
-    Browser[Operator browser] --> Admin[/admin + /admin/api/v1]
+    Browser[Operator browser] --> Admin["/admin + /admin/api/v1"]
     Admin --> Policy[Admin auth / Site policy / query bounds]
     Policy --> Query[AdminQueryService]
     Query --> Registry[Registry read service]
@@ -564,7 +564,7 @@ flowchart LR
 
     Browser -. forbidden .-> SQLite[(SQLite)]
     Browser -. forbidden .-> Omada[(Omada)]
-    Browser -. forbidden .-> Internal[/api/internal/analytics/v1]
+    Browser -. forbidden .-> Internal["/api/internal/analytics/v1"]
     Browser -. forbidden .-> Grafana[Grafana / Loki]
 ```
 
