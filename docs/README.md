@@ -1,51 +1,72 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-08-04
+Updated: 2026-08-25
+Current-state baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
 
-Это навигация, а не ещё одно описание архитектуры.
-
-## Для новой задачи
-
-1. Создайте TASK по docs/tasks/TASK-template.md.
-2. Передайте агенту TASK, execution mode и 1–3 связанных документа.
-3. Агент читает AGENTS.md, затем текущий TASK и только указанные документы.
-4. Агент сверяет код, тесты и актуальную документацию до планирования изменения.
-5. Результат возвращается по docs/agents/handoff.md.
+Эта страница — навигация. Она не дублирует архитектуру.
 
 ## Модели истины
 
-Current-state truth: код → тесты → актуальная документация.
+**Current-state truth:** current code → current tests → current docs.
 
-Change-intent truth: утверждённый TASK → PLAN → ADR.
+**Change-intent truth:** approved FINAL TASK → PLAN → ADR.
 
-TASK является scope contract изменения, но не подменяет фактическое состояние. При конфликте затронутая часть останавливается, источники фиксируются и передаются Architect/Tech Lead.
+Historical reports, production acceptance и research сохраняют доказательную ценность, но не заменяют current code при описании того, как система работает сейчас.
+
+## Рекомендуемый порядок чтения
+
+1. `../AGENTS.md`
+2. `project-inventory.md`
+3. `architecture.md`
+4. `module-index.md`
+5. `configuration.md`
+6. соответствующий `modules/*.md`
+7. `testing.md`, `security.md`, `deployment.md` по задаче
 
 ## Карта знаний
 
-| Нужно понять | Документ |
+| Нужно понять | Источник |
 |---|---|
-| Фактический снимок main | project-inventory.md |
-| Архитектура и границы | architecture.md |
-| Статусы и маршрутизация по модулям | module-index.md |
-| Omada Open API | api/omada-open-api.md |
-| Тесты | testing.md |
-| Журналы и telemetry | logging.md |
-| Deployment и rollback | deployment.md |
-| Security | security.md |
-| Процесс coding agent | agents/workflow.md |
-| Контракт задачи | agents/task-contract.md |
-| Repository permissions | agents/repository-actions.md |
-| Формат результата | agents/handoff.md |
-| Выбор класса модели | agents/model-selection.md |
-| Предварительные материалы pilots | agents/pilot-results.md |
-| Устойчивые решения | decisions/ |
-| История | archive/ |
+| Exact current snapshot | `project-inventory.md` |
+| Dependency/lifecycle architecture | `architecture.md` |
+| Module status and routing | `module-index.md` |
+| Configuration groups/defaults | `configuration.md` |
+| Omada OpenAPI evidence | `api/omada-open-api.md` |
+| Testing responsibility/gates | `testing.md` |
+| Logging/journals | `logging.md` |
+| Security boundaries | `security.md` |
+| Deployment/activation | `deployment.md` |
+| Agent workflow | `agents/workflow.md` |
+| TASK contract | `agents/task-contract.md` |
+| Handoff format | `agents/handoff.md` |
+| Historical/superseded material | `archive/` |
 
-## Модульные документы
+## Current module contracts
 
-Текущий список и status находятся только в module-index.md. Открывайте документ модуля, если TASK затрагивает его код, контракт, persistence, events или lifecycle.
+- `modules/authorization.md`
+- `modules/portal-entry.md`
+- `modules/capport.md`
+- `modules/auth-telemetry.md`
+- `modules/public-authorization-counter.md`
+- `modules/public-traffic-counter.md`
+- `modules/authorized-client-snapshot.md`
+- `modules/visitor-registry.md`
+- `modules/omada-webhook-receiver.md`
+- `modules/omada-webhook-normalizer.md`
+- `modules/pending-session-cleaner.md`
+- `modules/visit-lifecycle.md`
+- `modules/observations.md`
+- `modules/current-state.md`
+- `modules/analytics.md`
+- `modules/admin-web.md`
 
-## Принцип экономии контекста
+## Current vs planned
 
-AGENTS.md содержит только стабильные инварианты. TASK выбирает минимальный набор документов. Подробности хранятся один раз и связываются ссылками. Полные журналы, исходники, история чатов и несвязанные модули в prompt не передаются.
+Home Live and Home Traffic находятся в current `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`.
+
+Home Activity не находится в коде этого baseline и не должен описываться как current implementation. Если approved TASK для него передан вне repository, он остаётся change-intent до merge соответствующего runtime change.
+
+## Контекстная экономия
+
+Подробный факт хранится в одном нормативном документе и связывается ссылкой. Не копируйте целые TASK/research reports в current architecture. Не передавайте агенту весь repository KB, если TASK требует 1–3 связанных contracts.

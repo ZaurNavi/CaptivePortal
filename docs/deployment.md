@@ -1,111 +1,75 @@
 # Deployment
 
-Status: current contract; exact production unit remains host-verified
-Updated: 2026-08-10
+Status: current contract; production details remain host-verified
+Updated: 2026-08-25
+Repository baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
 
-## Подтверждённая основа
+## Repository vs production
 
-- Repository docs используют /opt/CaptivePortal.
-- Repository docs называют service captive-portal.service.
-- Сам unit file отсутствует в repository, поэтому точный ExecStart и user/group требуют проверки на target host.
-- Код не загружает `.env` автоматически. Environment должен передаваться process manager, например systemd EnvironmentFile или approved drop-in.
+Repository establishes code/default contracts. It does not prove:
+- feature flags currently enabled in systemd;
+- current DB health/size;
+- process environment values;
+- reverse-proxy/systemd unit details.
 
-## Обязательная конфигурация Omada OpenAPI
+Never print production secret values in deployment evidence.
 
-До deployment и restart процесса необходимо подготовить четыре обязательные
-переменные environment: `OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID` и
-`OMADA_CLIENT_SECRET`. `OMADA_URL` содержит только базовый HTTP(S)-адрес
-контроллера. Без полного и корректного набора приложение завершит создание
-`OmadaProvider` с `ConfigurationError` до сетевого запроса.
+## Core precondition
 
-Код с этим контрактом запрещено перезапускать на production до проверки, что
-все четыре имени уже передаются процессу. Значения и их фрагменты в вывод
-проверки, deploy-отчёт и журналы не включаются.
+Required Omada environment:
+`OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID`, `OMADA_CLIENT_SECRET`.
 
-Configuration pipeline: process environment → `app/config.py` →
-`app/settings.py` → `get_settings()`. Current Git tree не содержит production
-Omada literals.
+Provider construction is fail-closed when core configuration is missing/invalid.
 
-## Repository defaults и production state
+## Deploy model
 
-- `.env.example` документирует имена и безопасные defaults, но приложение его
-  автоматически не читает.
-- Repository defaults для Cleaner, Snapshot Collector и Visitor Registry —
-  `false`.
-- Production systemd EnvironmentFile/drop-ins принадлежат target host и могут
-  включать эти features независимо от repository defaults.
-- Проверка production configuration подтверждает только наличие нужных имён и
-  enabled/disabled state без вывода значений, полного environment dump или
-  secret fragments.
+Implementation and production activation are separate actions.
 
-## Обязательный deploy TASK
+A deploy TASK must specify:
+target, approved commit, backup, exact config change, test gate, health checks, rollback and owner authorization.
 
-Deploy требует target environment, owner, backup, feature flag, разрешённых команд, health checks и rollback. Coding TASK без deploy mode production не меняет.
+Repository feature defaults being `false` intentionally support code deployment before separate activation.
 
-## Стадия 1: deployment с feature disabled
+## Current runtime startup health
 
-1. Зафиксировать approved commit и clean working tree.
-2. Создать backup изменяемых config/data согласно модулю.
-3. Доставить код, сохранив новый feature disabled.
-4. Сравнить requirements с развёрнутой версией. Устанавливать dependencies в существующий venv только если requirements изменились.
-5. Выполнить Linux gate и module-specific checks.
-6. Проверить EnvironmentFile без вывода secrets и убедиться, что feature flag выключен.
-7. Restart captive-portal.service.
-8. Проверить service status, portal/auth endpoint health, startup logs, process topology и отсутствие запуска disabled feature.
+Use current `run.py` ordering documented in `project-inventory.md`.
 
-Стадия 1 завершается отдельным health-check verdict. Она не означает разрешение activation.
+Health review should distinguish:
+- core portal/auth availability;
+- independent runtime state: disabled / active / degraded / unavailable;
+- no duplicate OmadaProvider;
+- expected single application process;
+- expected storage/journal permissions.
 
-## Стадия 2: отдельная activation
+## Current shutdown
 
-1. Получить разрешение на activation после успешной стадии 1.
-2. Изменить feature flag в environment, не выводя secrets.
-3. Обязательно restart captive-portal.service: изменение environment не применяется к уже запущенному process.
-4. Повторно проверить service status, portal/auth endpoint health, startup logs и process topology.
-5. Проверить module start/events, storage permissions, bounded operational logs и fail-open основного портала.
-6. Зафиксировать activation verdict и готовность rollback.
+Expected order:
+Admin state clear → Cleaner → Observation → Current State → Public Traffic → stop Visit scheduling → drain Auth executor → stop Visit accepting/close → drain Snapshot → Registry final scan.
 
-## Health checks
+Do not activate/deploy changes that break bounded shutdown.
 
-- service active, один application process;
-- portal route и auth session endpoints отвечают;
-- нет startup exception;
-- shared provider не дублирован;
-- background component start/stop events корректны;
-- storage/journal writable с ожидаемыми permissions.
+## Testing responsibility
 
-## Pending Session Cleaner activation
+Executor targeted evidence is reused.
 
-Repository default — `PENDING_SESSION_CLEANER_ENABLED=false`. Disabled deployment обязан подтвердить отсутствие worker, Omada polling и Cleaner journal creation.
+Before production deployment/activation, Reviewer / Tech Lead / owner runs the full exact-artifact gate required by `AGENTS.md`.
 
-После отдельного разрешения activation:
+## Feature activation
 
-1. установить `PENDING_SESSION_CLEANER_ENABLED=true` в process environment;
-2. сохранить `PENDING_SESSION_CLEANER_MAX_ACTIONS_PER_SCAN=1` для v1;
-3. выполнить обязательный restart;
-4. проверить startup/state telemetry и появление `pending_session.scan.completed`;
-5. на одном живом кандидате проверить две local-protection проверки, fresh preflight, `action.planned` до POST, bounded verification и `action.completed`;
-6. убедиться, что основной portal остаётся доступен при Cleaner error.
+Activation of Snapshot, Registry, Visit, Observation, Current State, Analytics/API, Admin Web/Home sections or Cleaner is owner-controlled and requires production configuration verification plus component-specific health evidence.
 
-Owner сообщил об успешной production activation 2026-08-04. Это эксплуатационное подтверждение не заменяет повторяемый Linux regression gate и не раскрывает EnvironmentFile.
-
-## Последнее подтверждённое развёртывание
-
-`main@ab776af` доставлен на `/opt/CaptivePortal` 2026-08-10 через fast-forward
-и restart `captive-portal.service`; общий systemd health подтверждён как PASS.
-Это historical deployment evidence, а не разрешение на новый deploy.
-
-В представленном evidence не было отдельной post-restart проверки фактических
-lifecycle events Cleaner, Snapshot Collector и Visitor Registry. Она остаётся
-owner/tech-lead action и не восстанавливается из repository defaults.
+A repository `*_ENABLED=false` does not imply production disabled.
 
 ## Rollback
 
-Сначала выключить feature в environment, обязательно restart service и повторить health checks. Для Cleaner journal сохраняется; удалять audit при rollback нельзя. Если недостаточно — вернуть approved code version и совместимый config/data backup. Migration rollback определяется отдельным PLAN.
+Prefer:
+1. disable affected feature in production environment;
+2. restart service where environment change requires it;
+3. verify core portal and component state;
+4. if necessary restore approved code/config/data backup.
 
-## Shutdown
+Never delete audit/history merely to make rollback look clean.
 
-Соблюдать порядок run.py и bounded timeout. SIGTERM не должен запускать новые mutation.
+## Infrastructure boundary
 
-## Запрет
-
-Ручное production-изменение, которое не переносится в Git и документацию, запрещено. Alloy, Loki, Grafana, reverse proxy и systemd меняются отдельными tasks.
+systemd, reverse proxy, Alloy, Loki and Grafana are outside normal application implementation scope and require their own deploy/infrastructure authorization.

@@ -1,49 +1,73 @@
 # Security
 
 Status: current
-Updated: 2026-08-10
+Updated: 2026-08-25
+Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
 
 ## Secrets
 
-- Secrets поступают только через production environment или утверждённый secret mechanism.
-- Secrets запрещены в Git, fixtures, TASK, PLAN, ADR, PR, chat handoff и examples.
-- Access Token, Client Secret, cookie, Authorization header и SSID password не логируются.
-- Agent не запрашивает production secret без прямой необходимости.
-- Exception и raw response очищаются до journal/telemetry.
-- Omada Client Secret передаётся только через process environment или другой
-  утверждённый secret mechanism; fallback-значение в repository запрещено.
-- Если Omada Client Secret когда-либо попал в Git history, его необходимо
-  заменить и отозвать в рамках owner-controlled rotation независимо от решения
-  о переписывании history.
+- Production secrets come only from process environment/approved secret handling.
+- No secrets in Git, fixtures, TASK, PLAN, ADR, PR, examples or handoff.
+- Never log Access Token, Client Secret, Authorization header, Admin password/hash, session token/cookie, CSRF token or Wi-Fi password.
+- A leaked historical secret must be rotated/revoked even if Git history is not rewritten.
 
-## Current findings на `main@ab776af`
+## Current repository findings
 
-- Production Omada credentials отсутствуют в current Git tree. `OMADA_URL`,
-  `OMADA_ID`, `OMADA_CLIENT_ID` и `OMADA_CLIENT_SECRET` читаются из process
-  environment и не имеют repository fallback values.
-- Tracked Python cache и backup-файлы удалены; `.gitignore` блокирует их
-  повторное добавление.
-- Старый Omada Client Secret остаётся в Git history. Owner-controlled rotation
-  и отзыв старого значения остаются OPEN независимо от решения о переписывании
-  history.
-- `VERIFY_SSL=false` остаётся current repository contract и открытым
-  security/operations debt. Включение TLS verification требует отдельного TASK,
-  выбранной доверенной certificate model и focused deployment/tests.
+- Required Omada credentials have no production literal fallback.
+- `VERIFY_SSL=false` remains repository default and an open security/operations debt.
+- `.github/workflows` is absent; release CI is manual.
+- `.env.example` allows the owner-approved VPN client network `10.8.0.0/24` for Admin Web repository defaults.
 
-Secret values, fingerprints, длина и фрагменты в findings не фиксируются.
+Repository facts do not prove current production secret/flag values.
 
-## Identifiers и network boundary
+## Reverse proxy and request-line privacy
 
-- MAC не считается secret и не маскируется в технических журналах.
-- CAPPORT проверяет guest source IP по allowlist.
-- Trust к reverse proxy ограничен известной topology; forwarded headers не принимаются безусловно.
-- Webhook source/auth policy проверяется до persistence.
+Current Flask app uses `ProxyFix` for exactly one trusted local reverse-proxy hop.
 
-## Files и persistence
+`SecretSafeRequestHandler` strips the entire query string from access-log request lines for Admin and internal Analytics namespaces.
 
-- Repository, logs и data имеют минимальные POSIX permissions.
-- SQLite backup создаётся до migration.
-- Raw Omada override response не сохраняется: он может содержать пароль SSID.
-- Data journal выполняет redaction известных sensitive keys.
+Do not broaden proxy trust without a deployment/security TASK.
 
-Этот документ содержит только постоянную policy. Findings конкретного снимка фиксируются в ограниченном review report и отдельном security TASK без раскрытия значений.
+## Admin Web security boundary
+
+Guest Portal authentication is unrelated to Admin authentication.
+
+When Admin Web is enabled:
+- HTTPS is required by policy;
+- source network must be allowlisted;
+- Site is allowlisted/defaulted separately;
+- password is verified against external stored hash;
+- login uses pre-auth CSRF;
+- login attempts are rate limited;
+- sessions are bounded and process-local;
+- idle and absolute expiration apply;
+- cookies are Secure + HttpOnly + SameSite=Strict;
+- logout requires CSRF;
+- responses apply no-store, nosniff, no-referrer, frame deny and CSP.
+
+Admin business/data API remains read-only.
+
+## Analytics internal API
+
+Separate protected service boundary:
+- Bearer token;
+- source-network allowlist;
+- Site allowlist;
+- bounded concurrency;
+- response-size cap;
+- no query-string credentials.
+
+Admin browser must not consume this bearer API directly.
+
+## Persistence
+
+- writer owns schema/migration;
+- read-only Analytics connections require `PRAGMA query_only`;
+- backups are required before schema migration in deployment tasks;
+- raw sensitive Omada responses are not persisted.
+
+## Omada mutations
+
+Research proving a mutation works does not authorize product exposure.
+
+New write/control behavior requires explicit policy/audit/change-intent. Private Omada UI `/api/v2` behavior is research evidence, not an approved integration contract.

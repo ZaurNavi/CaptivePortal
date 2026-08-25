@@ -1,119 +1,95 @@
-# Omada Open API: уровни подтверждения
+# Omada Open API: evidence levels and current application usage
 
-Status: current
-Updated: 2026-08-10
-Sources: runtime baseline `ab776af…`, local Swagger research и переданные live-test reports для Omada Controller 5.14.31
+Status: current curated contract
+Updated: 2026-08-25
+Repository baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Live research target: Omada Software Controller 5.14.31
 
-Этот документ разделяет доказательства, а не объединяет их словом «confirmed». Один endpoint может одновременно находиться в разделе live-tested, быть описан Swagger и использоваться текущим кодом. Наличие endpoint в Swagger без live-выполнения не подтверждает его runtime behavior и не разрешает новую mutation.
+This document separates:
+1. schema presence;
+2. live controller behavior;
+3. physical/effect verification;
+4. current application usage.
 
-## OAuth и общая проверка ответа
+A verified capability is not automatically an approved product action.
 
-    POST /openapi/authorize/token?grant_type=client_credentials
+## Response rule
 
-Body содержит `omadacId`, `client_id` и `client_secret`. Последующие запросы используют:
+For Omada OpenAPI:
+`HTTP 200 != success`.
 
-    Authorization: AccessToken=<token>
+Check:
+network/timeout → HTTP status → JSON shape → `errorCode`/message → endpoint-specific result → post-action verification where required.
 
-Значение header и credentials не логируются.
+## Live-verified read foundations
 
-Ответ проверяется по отдельным уровням:
+Verified on Controller 5.14.31 include OAuth `client_credentials`, Site/client inventory/detail, AP read endpoints used by research, Rate Limit Profile reads and Hotspot authentication records.
 
-1. network/timeout;
-2. HTTP status;
-3. наличие JSON object;
-4. Omada `errorCode`;
-5. endpoint-specific result shape.
+Important runtime fact:
+Client List is not the universe of all historical known clients; direct Client Detail can return an offline known client even when it is absent from active list search.
 
-HTTP 200 не означает успех при `errorCode != 0`.
+## Controlled live mutation findings
 
-## 1. Live-tested endpoints
+Research on the owner's designated test phone established:
 
-Live-tested означает, что запрос был выполнен против реального проверенного контроллера и результат зафиксирован в research report. Ошибка 404 тоже является live-tested результатом, но не доказательством поддержки операции.
-
-### Общие и клиентские операции
-
-| Endpoint | Наблюдавшийся результат |
+| Capability | Evidence |
 |---|---|
-| `POST /openapi/authorize/token?grant_type=client_credentials` | token получен и использован в последующих live-запросах |
-| `GET /openapi/v1/{omadacId}/sites` | успешный ответ |
-| `GET /openapi/v1/{omadacId}/sites/{siteId}/devices` | успешный ответ |
-| `GET /openapi/v1/{omadacId}/sites/{siteId}/clients` | успешный paginated client inventory |
-| `GET /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}` | карточка клиента получена до и после операции |
-| `POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/reconnect` | успешное завершение pending session; после операции `active=false`, клиент исчез из active list |
-| `POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/disconnect` | live-tested как HTTP 404 на Omada 5.14.31; операция не поддержана |
-| `GET /openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}` | live-tested как HTTP 404; для общей карточки используется `/devices` с выбором по MAC |
+| Rename client | live verified |
+| Custom per-client Rate Limit apply | live + physical shaping verified |
+| Rate Limit Profile CRUD/application | live + physical shaping verified |
+| Lock-to-AP configuration/rollback | live config verified; roaming-prevention physical effect still unverified |
+| Reconnect | live disruptive disconnect verified; OS auto-reconnect not guaranteed |
+| Block / Unblock | live connectivity effect verified |
+| Hotspot Unauth | live authorization revocation verified |
+| Hotspot Auth | live transition of captured pending client to authorized verified; isolated portal-bypass test not obtained |
+| Authentication Period | live verified as expiration extension delta in milliseconds |
+| Batch | schema surface exists; destructive product use not approved |
 
-### AP read-only operations
+## Critical semantics
 
-Следующие endpoints выполнены live на реальном EAP613/Omada 5.14.31:
+- Reconnect ≠ guaranteed automatic reconnect.
+- Unblock ≠ reconnect.
+- Block ≠ Hotspot Unauth.
+- Authentication Period: `new_end = old_end + period_ms`.
+- Lock-to-AP has Block interaction constraints.
+- A valid authentication record does not prove every future join will skip captive flow.
+- Profile-mode client detail may not expand effective profile rates; the profile object is authoritative for configured profile values.
 
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/available-channel
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/general-config
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ip-setting
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/lan-traffic-info
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ofdma
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/override
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/power-saving
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radios
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result
-    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/wired-uplink
-    GET /openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/override
-    GET /openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result
+## Known limitation: Custom Rate Limit clear
 
-`power-saving` был обработан endpoint router, но для проверенной модели/конфигурации не вернул объект настроек. Override response может содержать пароль SSID и не должен сохраняться целиком.
+Public `/ratelimit` successfully applies custom limits, but research did not establish a supported public call that reliably restores `rateLimit.enable=false`.
 
-## 2. Schema-confirmed endpoints
+The Omada UI can clear it through a private `/api/v2/.../clients/{MAC}` path.
 
-Присутствие следующих endpoints подтверждено локальным Swagger. Для `reconnect` дополнительно существует live-tested доказательство. Для остальных перечисленных mutations рассмотренные отчёты не содержат отдельного подтверждения успешного live-выполнения:
+Private UI API is **not** an approved stable CaptivPortal integration contract without separate architecture/risk approval.
 
-    POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/block
-    POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/reconnect
-    POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/unblock
-    POST /openapi/v1/{omadacId}/sites/{siteId}/hotspot/clients/{clientMac}/auth
-    POST /openapi/v1/{omadacId}/sites/{siteId}/hotspot/clients/{clientMac}/unauth
-    POST /openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}/forget
+## Current application provider usage
 
-Для `unauth`, `block` и `unblock` schema presence не следует называть live confirmation без отдельного отчёта выполнения.
+Current application code uses the shared provider for the Portal/Auth/CAPPORT/operational contracts, including client reads, Hotspot auth/unauth and guarded reconnect where implemented.
 
-## 3. Endpoints used by current code
+Observation and Current State reuse the same provider for read collection.
 
-Runtime baseline `ab776af…` использует `app/controllers/omada.py` и pending-session adapter `app/controllers/omada_pending_sessions.py`. Один `OmadaProvider` вызывает:
+Admin Web and Analytics do not call Omada.
 
-    POST /openapi/authorize/token?grant_type=client_credentials
-    GET  /openapi/v1/{omadacId}/sites
-    GET  /openapi/v1/{omadacId}/sites/{siteId}/clients
-    GET  /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}
-    POST /openapi/v1/{omadacId}/sites/{siteId}/hotspot/clients/{clientMac}/auth
-    POST /openapi/v1/{omadacId}/sites/{siteId}/hotspot/clients/{clientMac}/unauth
-    POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/reconnect
+Client-control research capabilities such as rename, block/unblock, rate-limit and lock-to-AP are **not** automatically exposed by Admin Web. The current Admin product boundary remains read-only.
 
-Использование endpoint кодом не доказывает live success само по себе. В частности, рассмотренные research reports подтверждают `unauth` по Swagger, но не содержат отдельного live execution proof.
+## Unsupported / not approved
 
-`list_active_clients()` использует query `page`/`pageSize`; `get_pending_client_state()` и `reconnect_client()` форматируют MAC через общую utility и возвращают defensive/safe contracts без token, Authorization header или raw response. Pending-session methods подключаются к существующему provider class, а не создают отдельный client.
+- direct `/clients/{mac}/disconnect` was live-tested as unsupported/404 on 5.14.31;
+- Delete Client/historical card deletion not established as supported public client-control contract;
+- ordinary endpoint reboot not established;
+- destructive batch operations not approved;
+- private/internal UI API not approved;
+- Fixed IP/DHCP semantics must not be assumed in the current Cisco-authoritative guest DHCP topology.
 
-Current code не вызывает `block`, `unblock`, `forget` или AP read-only endpoints из application provider. `disconnect` и client `DELETE` отсутствуют в action path. Текущий shared token-cache lifecycle фиксируется в `docs/project-inventory.md` и module contract Cleaner.
+## Safety for future mutations
 
-## 4. Unsupported or rejected operations
-
-| Операция | Статус | Причина |
-|---|---|---|
-| `POST /clients/{clientMac}/disconnect` | unsupported on tested controller | live HTTP 404; отсутствует в локальном Swagger |
-| `DELETE /clients/{clientMac}` | unsupported/unverified | отсутствует в локальном Swagger; не использовать |
-| `GET /devices/{deviceMac}` | unsupported on tested controller | live HTTP 404; использовать list `/devices` и exact MAC match |
-| `POST /hotspot/clients/{clientMac}/unauth` | rejected for Cleaner v1 | schema-confirmed и используется другим current-code contract, но не подтверждён как безопасная замена reconnect для pending session |
-| `POST /clients/{clientMac}/block` и `/unblock` | rejected for Cleaner v1 | schema-confirmed, но block запрещает повторное подключение и не соответствует action policy Cleaner |
-| `POST /devices/{deviceMac}/forget` | rejected for Cleaner v1 | относится к device removal, а не к guarded завершению pending session |
-
-Rejected for Cleaner не означает глобально unsupported: это ограничение конкретного change intent.
-
-## Pagination, identity и MAC
-
-Client list пагинируется. Неполный inventory запрещает batch mutation. Fresh exact client card обязателен перед `reconnect`.
-
-MAC normalization находится в `app/common/mac.py`. Формат URL выбирается по endpoint contract; client snapshot использует hyphen format. Не реализовывать ad-hoc `replace` в новом модуле.
-
-## Mutation safety
-
-Любой новый mutation endpoint требует отдельного TASK, audit-before-action, bounded retry, protection against stale identity/session и verification. Успешный POST без последующей проверки не объявляется подтверждённым результатом.
+Any new product mutation requires:
+- explicit TASK/policy;
+- correct permission scope;
+- Site/client identity validation;
+- audit-before-action when appropriate;
+- bounded retry;
+- post-action read-back/effect verification;
+- safe rollback semantics;
+- no action on unrelated visitors during testing.
