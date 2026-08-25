@@ -1,97 +1,256 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-08-10
-Runtime baseline: main commit `ab776af3fc58dc090e17ecd20534abddc1f33ad3`
+Updated: 2026-08-25
+Runtime baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
 
-## Назначение
+## 1. Mental model
 
-CaptivPortal обеспечивает внешний Captive Portal и связанные operational-функции для Omada Controller.
+CaptivPortal — один Python process, в котором guest authorization остаётся критическим ядром, а operational/data/product слои подключаются вокруг него с ограниченной связанностью.
 
-## Основной поток авторизации
+```text
+Authorization / Identity
+        ↓
+Snapshots / Webhook evidence
+        ↓
+Registry + Visit Lifecycle
+        ↓
+Observation + Current State
+        ↓
+Analytics
+        ↓
+Admin Web
+```
 
-~~~mermaid
-flowchart TD
-    A["Omada External Portal или CAPPORT login"] --> B["PortalClientContext"]
-    B --> C["AuthSessionManager"]
-    C --> D["AuthWorker"]
-    D --> E["Shared OmadaProvider"]
-    E --> F["AUTHORIZED / FAILED / RESET"]
-~~~
+## 2. Composition boundaries
 
-CAPPORT разрешает client identity через bounded same-page discovery requests и направляет найденного client в PortalEntryHandler. Независимый CAPPORT authorization worker или второй provider запрещены. Frontend сохраняет монотонный progress между discovery/auth phases и после `AUTHORIZED` использует guarded one-time same-page revalidation без reload-loop.
+`run.py`:
+- process lifecycle;
+- shared provider;
+- storage/worker composition outside Flask;
+- startup/shutdown order.
 
-## Composition root
-
-run.py управляет process lifecycle:
-
-- загружает settings;
-- создаёт общий OmadaProvider;
-- создаёт snapshot collector;
-- вызывает create_app();
-- создаёт Pending Session Cleaner с общим provider и AuthSessionManager;
-- запускает и останавливает background components;
-- запускает Flask development server в текущей реализации.
-
-app/web/web.py:create_app() собирает Flask application: AuthSessionManager, auth executor, AuthWorker, PortalEntryHandler, routes, counters, telemetry и webhook components. Это Flask composition factory, но не отдельный process entrypoint.
-
-## Dependency direction
-
-~~~mermaid
-flowchart TD
-    A["Web routes"] --> B["Application services"]
-    B --> C["Provider / repository interfaces"]
-    C --> D["Omada API / JSONL / SQLite"]
-~~~
-
-Запрещено:
-
-- repository → Flask route;
-- Visitor Registry → Omada API;
-- Pending Session Cleaner → Visitor Registry database;
-- CAPPORT → отдельный authorization mechanism;
-- worker thread → Flask current_app.
-
-## Подсистемы
-
-- Configuration: app/config.py и app/settings.py.
-- Omada: ControllerInterface, factory и OmadaProvider.
-- Portal/Auth: PortalClientContext, AuthSessionManager, AuthWorker.
-- CAPPORT: RFC 8908/8910 API, client lookup и общий login flow.
-- Counters: portal open counter и completed-session public traffic.
-- Authorized Snapshot: асинхронная фиксация карточки после AUTHORIZED.
-- Visitor Registry: последовательное чтение snapshot journal в SQLite.
-- Pending Cleaner: `app/pending_sessions/`, implemented-disabled по repository default; guarded reconnect operational module.
-- Webhook: raw receiver, normalization и journals.
-- Observability: operational telemetry отдельно от data journals.
-
-## Shared OmadaProvider
-
-Один экземпляр на process создаётся в `run.py` и передаётся зависимым компонентам. Provider содержит единый thread-safe token cache на `Condition(RLock)` с одним concurrent refresh и guarded invalidation. Pending-session API methods устанавливаются на тот же класс через `app/controllers/omada_pending_sessions.py`; второй provider или token manager отсутствует.
-
-Фактический lifecycle фиксируется в `docs/project-inventory.md`. Новое изменение cache/provider contract требует явного TASK, regression/concurrency tests и ADR при устойчивом архитектурном решении.
-
-## State и single-process
-
-Auth sessions, retry guards, executor и worker locks находятся в памяти. Несколько WSGI processes создали бы независимые session maps и workers. До отдельного ADR production topology — один application process.
-
-## Fail-open
-
-Независимый модуль при ошибке становится unavailable/disabled, пишет telemetry и не блокирует portal:
-
-- telemetry и counters;
+`app/web/web.py:create_app()`:
+- Flask app;
+- process-local Auth manager/executor;
+- Portal/CAPPORT;
 - webhook receiver/normalizer;
-- snapshot collector;
-- visitor registry;
-- public traffic worker;
-- pending session cleaner.
+- portal/public traffic services and routes.
 
-Auth failure самого клиента остаётся fail-closed для выдачи доступа, но не валит process.
+`run.py` remains the only direct executable entrypoint.
 
-## Lifecycle
+## 3. Authorization architecture
 
-Worker создаётся в composition root, не при import. Cleaner использует fixed-delay и non-blocking scan lock; incomplete inventory, local protection, failed preflight/audit, exhausted budget или shutdown запрещают reconnect. `stop()` идемпотентен, HTTP/retries/verification/shutdown ограничены. Cleaner останавливается первым и после `stopping` не начинает новый POST.
+```mermaid
+flowchart LR
+    A[Omada External Portal] --> C[PortalClientContext]
+    B[CAPPORT resolve_for_login] --> C
+    C --> D[PortalEntryHandler]
+    D --> E[AuthSessionManager]
+    E --> F[AuthWorker]
+    F --> G[Shared OmadaProvider]
+    G --> H[(Omada)]
+```
 
-## Infrastructure boundary
+CAPPORT is discovery/identity resolution, not a second auth engine.
 
-Application repository отвечает за код, tests, structured events и документацию контрактов. Alloy, Loki, Grafana, systemd, reverse proxy, OS permissions и production deployment меняются только отдельными infrastructure/deploy TASK.
+Auth success is verified state, not successful POST:
+`authorize → read-back verification → authStatus==2`.
+
+The Auth layer tracks run number/token, stale-run ownership, retry, expiration and monotonic progress in process memory.
+
+## 4. Data architecture
+
+```mermaid
+flowchart TD
+    AUTH[Confirmed AUTHORIZED] --> SNAP[Snapshot Collector]
+    SNAP --> SJ[visitor_snapshots.log]
+    SJ --> REG[Visitor Registry]
+    REG --> RDB[(visitor_registry.sqlite3)]
+
+    AUTH --> VS[Visit Start]
+    VS --> VISIT[Visit Lifecycle]
+    WH[normalized webhook journal] --> VISIT
+    VISIT --> VDB[(visits.sqlite3)]
+
+    OPROV[Shared OmadaProvider] --> OBS[Observation]
+    OBS --> ODB[(observations.sqlite3)]
+
+    OPROV --> CUR[Current State]
+    CUR --> CDB[(current_state.sqlite3)]
+
+    RDB --> ANA[Analytics]
+    VDB --> ANA
+    ODB --> ANA
+    CDB --> ADMIN[Admin Web]
+    ANA --> ADMIN
+```
+
+### Observation vs Current State
+
+Observation answers: **what happened historically to the authorized measured population?**
+
+Current State answers: **what active wireless clients/APs are present now in configured scope?**
+
+Do not merge their semantics or populations.
+
+## 5. Visit Lifecycle
+
+`AuthSession` is not a physical Visit.
+
+Start:
+`confirmed AuthRun → VisitStartRequest → LocalVisitStartSubmitter → VisitLifecycleService → visits.sqlite3`
+
+Close:
+`normalized Omada offline journal → webhook reader → OfflineEvidence → service → match/close`.
+
+Current schema: v2.
+
+Write concurrency is explicit: `PriorityWriteCoordinator` serializes writers, gives Visit Start foreground priority, and queues background reader/reconciliation writers FIFO.
+
+Reader/reconciliation health influences runtime `active/degraded`.
+
+## 6. Analytics
+
+Analytics reads persisted source facts only.
+
+```text
+ObservationReadService
+VisitLifecycleReadService
+VisitorRegistryReadService
+        ↓
+AnalyticsSourceGateway
+        ↓
+Quality / Wireless / Visit / CurrentTraffic services
+```
+
+Source boundaries validate SQLite schema version and require `PRAGMA query_only`.
+
+Prohibited:
+- Analytics → Omada;
+- Analytics → source INSERT/UPDATE/DELETE;
+- Analytics-owned source migrations/tables.
+
+The protected internal Analytics API is an operator/service boundary, not browser authentication.
+
+## 7. Current Traffic
+
+`CurrentTrafficReadService` reads persisted AP Observation cycles.
+
+Integrity rules include:
+- current complete-success cycle;
+- expected item counts;
+- no cycle quality errors;
+- consistent timestamps/source;
+- one selected traffic source family for whole Site snapshot;
+- `wired` primary, `lan` fallback;
+- freshness and AP skew.
+
+Do not label this metric as Internet, WAN, guest, or SSID traffic unless a later source contract actually proves that scope.
+
+## 8. Admin Web
+
+Guest auth and Admin auth are separate boundaries.
+
+```text
+browser
+  ↓ same-origin
+/admin + /admin/api/v1
+  ↓
+Admin auth/network/Site policy
+  ↓
+AdminQueryService
+  ↓ bounded query slot/deadline
+read gateways/services
+```
+
+Forbidden browser paths:
+- direct SQLite;
+- Omada;
+- Loki/Grafana;
+- internal Analytics bearer API.
+
+Current pages:
+Home, Devices, Device Detail, Visits, Observations.
+
+Home Live reads Current State. Home Traffic reads Current Traffic. Both are optional and fail independently.
+
+## 9. Shared OmadaProvider invariant
+
+Exactly one provider per process.
+
+The provider owns the shared OAuth token cache. `Condition(RLock)` prevents concurrent refresh storms; compare-and-invalidate prevents stale failures from deleting a newer token.
+
+New independent provider/token manager/cache requires explicit change intent.
+
+## 10. Dependency invariants
+
+| From | Forbidden direct dependency |
+|---|---|
+| Visitor Registry | Omada API |
+| Analytics | Omada API / source writes |
+| Admin browser | SQLite / Omada / Loki / Grafana / internal Analytics bearer API |
+| CAPPORT | separate AuthWorker/provider |
+| Pending Cleaner | Registry DB |
+| background worker | Flask `current_app` |
+| new subsystem | independent OmadaProvider without approval |
+
+Additional rules:
+- worker creation happens in composition, not import side effects;
+- writer owns its persistence schema;
+- normalized webhook is canonical interpretation boundary for Visit Lifecycle.
+
+## 11. Fail-open matrix
+
+Core fail-closed:
+- required Omada configuration/provider construction;
+- final client authorization result;
+- Admin authentication/network/Site policy.
+
+Independent fail-open relative to guest auth:
+- telemetry/counters;
+- Snapshot/Registry;
+- webhook processing;
+- Visit;
+- Observation;
+- Current State;
+- Analytics;
+- Admin Web;
+- Cleaner.
+
+Fail-open means explicit `disabled`, `unavailable` or `degraded`, never invented values.
+
+## 12. Process/thread model
+
+Supported: one application process.
+
+Process-local:
+- AuthSessionManager;
+- Auth locks/run ownership;
+- auth executor;
+- CAPPORT caches;
+- Cleaner guard counters/cooldowns;
+- Admin sessions, pre-auth CSRF and rate limiter.
+
+Background categories:
+Snapshot executor, Registry, Visit reader/reconciler, Observation client/AP/cleanup/integrity, Current State client/AP/cleanup, Cleaner, Public Traffic.
+
+Horizontal HA/multi-process requires shared state plus leader election/inter-process coordination and therefore a separate ADR.
+
+## 13. Startup/shutdown
+
+Startup and shutdown order is normative in `docs/project-inventory.md` and must match current `run.py`.
+
+A key shutdown rule is to stop Visit scheduling before draining Auth, then stop Visit accepting only after Auth executor has drained, so no accepted Auth job can enqueue a Visit start after Visit closes.
+
+## 14. Security boundary
+
+Current Flask proxy trust: exactly one trusted local reverse-proxy hop.
+
+`SecretSafeRequestHandler` strips query strings from access log lines for `/admin...` and `/api/internal/analytics/v1...`.
+
+Admin Web applies HTTPS/source allowlist/session/CSRF/rate-limit/security-header policy separately from guest authorization.
+
+## 15. Infrastructure boundary
+
+Repository code/docs do not own production systemd, reverse proxy, Alloy, Loki or Grafana configuration unless a separate infrastructure/deploy TASK explicitly changes them.
