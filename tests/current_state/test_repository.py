@@ -60,16 +60,25 @@ def test_existing_database_transient_contention_is_retryable(
         repository.initialize()
 
 
-@pytest.mark.parametrize("primary_code", (5, 6))
+@pytest.mark.parametrize(
+    ("sqlite_errorcode", "expected"),
+    (
+        (5, True),
+        (6, True),
+        (261, True),
+        (262, True),
+        (1, False),
+    ),
+)
 def test_transient_contention_uses_stable_primary_codes_without_optional_constants(
-    monkeypatch, primary_code
+    monkeypatch, sqlite_errorcode, expected
 ):
     monkeypatch.delattr(repository_module.sqlite3, "SQLITE_BUSY", raising=False)
     monkeypatch.delattr(repository_module.sqlite3, "SQLITE_LOCKED", raising=False)
     error = sqlite3.OperationalError("contention without a stable message")
-    error.sqlite_errorcode = primary_code
+    error.sqlite_errorcode = sqlite_errorcode
 
-    assert repository_module._transient_sqlite_contention(error) is True
+    assert repository_module._transient_sqlite_contention(error) is expected
 
 
 class _FetchOne:
