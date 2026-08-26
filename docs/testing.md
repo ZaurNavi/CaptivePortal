@@ -2,8 +2,8 @@
 
 Status: current
 Updated: 2026-08-26
-Documentation/workflow baseline: `main@8e36132398398b13d7503f624ef19c26d0057566`
-Runtime code checkpoint described by the current KB: `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Documentation/current-state baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Production deployed HEAD: `53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 ## Responsibility model
 
@@ -82,13 +82,16 @@ Owner-provided confirmed baseline date:
 2026-08-26
 ```
 
-Strict-suite result:
+Strict-suite result for exact artifact `53f617b3ac0155d0d647e58e98309927f9a4d318`:
 
 ```text
-1985 passed
+2100 passed
 30 skipped
-0 strict regressions
+5 deselected
+STRICT_REGRESSIONS=0
 ```
+
+Production Python used by the deployed runtime: `3.10.12`. Compatibility evidence must cover the production Python version/family rather than assuming newer `sqlite3` module attributes are universal.
 
 Five compatibility cases are tracked separately and narrowly:
 
@@ -123,7 +126,9 @@ Forbidden:
 
 Any new failure outside the explicitly recorded compatibility cases is a **strict regression** until investigated and reclassified through an explicit reviewed decision.
 
-The numeric baseline above is evidence from the confirmed 2026-08-26 run. After runtime/test changes, a new official exact-artifact baseline must be generated before the old numbers are presented as current.
+The numeric baseline above is evidence from the confirmed 2026-08-26 run on exact local HEAD. Before accepting any Central Lab result, verify that the tested repository SHA equals the artifact being promoted. A stale PASS from an earlier HEAD is historical evidence only.
+
+Production startup changes additionally require a first-restart acceptance gate. A second restart must not be used to hide a first-start defect; if a second restart occurs, preserve the first-restart evidence separately.
 
 ## Linux / production-compatible gate
 

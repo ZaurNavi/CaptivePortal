@@ -1,8 +1,8 @@
 # Logging, telemetry and data journals
 
 Status: current
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 ## Separation
 
@@ -35,6 +35,10 @@ Current operational events also exist for:
 - Public Traffic.
 
 Their telemetry does not replace their persisted source data.
+
+### Current State startup telemetry gap
+
+On the accepted 2026-08-26 first restart, persisted Current State cycles proved successful runtime operation, but the expected `current_state.runtime_started` event was not found in the inspected journal. This is an **observability/telemetry gap**, not an active Current State runtime defect. Track any telemetry correction separately from the closed startup defect.
 
 ## Safety
 

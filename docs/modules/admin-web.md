@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 ## Boundary
 
@@ -13,9 +13,10 @@ Home, Devices, Device Detail, Visits, Observations.
 
 Current optional Home increments:
 - Home Live — Current State;
-- Home Traffic — Current Traffic.
+- Home Traffic — Current Traffic;
+- Home Activity — Authorized Visits + completed-session Traffic.
 
-Home Activity is not current code at this baseline.
+Home Activity is current code. Repository default remains disabled; production activation is a separate fact.
 
 ## Browser data path
 
@@ -66,6 +67,15 @@ Shows authorized/pending/other/unknown and AP/current device summaries with expl
 Reads `CurrentTrafficReadService` through Admin query boundary.
 
 Traffic source freshness/unavailable/partial states must be preserved; missing data is not rendered as zero.
+
+## Home Activity
+
+Reads `HomeActivityReadService` through the Admin query boundary. The UI must preserve independent Visits/Traffic status and coverage. `Unknown/unproven guest scope != 0`. Today/selected ranges are Site-timezone aware; no artificial 31/90-day Activity limit exists.
+
+Confirmed production Site context on 2026-08-26:
+- Site `6a64f17630da7c70d232187a`, timezone `Asia/Baku`;
+- Visits coverage from `2026-08-26T17:46:55.982Z`;
+- Traffic coverage start remains `null`.
 
 ## Lifecycle
 

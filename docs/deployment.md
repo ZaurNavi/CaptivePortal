@@ -2,8 +2,8 @@
 
 Status: current contract; production details remain host-verified
 Updated: 2026-08-26
-Runtime repository baseline documented by KB: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
-Test-workflow update baseline: `main@8e36132398398b13d7503f624ef19c26d0057566`
+Current repository baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Confirmed production deployed HEAD: `53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 ## Repository vs production
 
@@ -48,6 +48,12 @@ Expected order:
 Admin state clear → Cleaner → Observation → Current State → Public Traffic → stop Visit scheduling → drain Auth executor → stop Visit accepting/close → drain Snapshot → Registry final scan.
 
 Do not activate/deploy changes that break bounded shutdown.
+
+## First-restart acceptance
+
+A production startup/retry change is not accepted merely because a later restart succeeds. Capture the **first restart** after deployment: service state plus component-specific persisted/telemetry evidence. Do not use a second restart to mask a startup defect.
+
+For the 2026-08-26 rollout at `main@53f617b3`, only one restart was performed (`22:55:39 +04`). Service, CAPPORT, webhook and Observation were active; Current State persisted 4/4 successful client cycles and 4/4 successful AP cycles with no non-success result. First-restart startup acceptance: **PASS**.
 
 ## Testing responsibility
 

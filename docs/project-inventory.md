@@ -3,10 +3,10 @@
 Status: current runtime snapshot
 Updated: 2026-08-26
 Branch: `main`
-Runtime commit: `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
-Commit source: merge PR #62, 2026-08-24
+Runtime commit: `53f617b3ac0155d0d647e58e98309927f9a4d318`
+Commit source: merge PR #72, 2026-08-26
 
-Этот документ описывает repository implementation указанного commit. Production state не выводится из Git. Historical acceptance не является live health.
+Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
 ## 1. Composition roots
 
@@ -78,6 +78,7 @@ Analytics has no worker/write lifecycle to stop.
 | Home Live | Admin Web | `CurrentStateReadService` | none | no |
 | Current Traffic | `app/analytics/current_traffic.py` | persisted AP Observation facts | none | no |
 | Home Traffic | Admin Web | `CurrentTrafficReadService` | none | no |
+| Home Activity | `app/analytics/home_activity.py`, Admin Web | Visit Lifecycle persisted facts + Current State guest scope | none | no |
 
 ## 5. Observation vs Current State
 
@@ -153,6 +154,8 @@ Schema version: **1**.
 - client scope has a canonical source-scope hash; cursors are bound to Site/cycle/scope and reject stale scope.
 - short client history default retention: 48 hours.
 - no Admin request polls Omada through this service.
+- startup `PRAGMA quick_check` self-timeout is retryable storage contention only when the repository itself interrupted that quick_check; unrelated `interrupted`, schema mismatch and `quick_check != ok` remain schema/integrity failures.
+- SQLite contention detection is Python-3.10 compatible: primary BUSY/LOCKED codes are `5`/`6`; integer `sqlite_errorcode` is normalized with `code & 0xFF`, with message fallback for `database is locked` / `database is busy`.
 
 ## 10. Analytics current contract
 
@@ -168,7 +171,8 @@ Services:
 - data quality (`AnalyticsReadService`);
 - wireless analytics;
 - visit analytics;
-- optional `CurrentTrafficReadService`.
+- optional `CurrentTrafficReadService`;
+- `HomeActivityReadService`.
 
 Protected internal API prefix:
 `/api/internal/analytics/v1`
@@ -202,7 +206,8 @@ Current pages:
 
 Home has optional current sections:
 - Home Live via `CurrentStateReadService`;
-- Home Traffic via `CurrentTrafficReadService`.
+- Home Traffic via `CurrentTrafficReadService`;
+- Home Activity via `HomeActivityReadService` with independent Visits/Traffic coverage.
 
 Browser flow:
 `browser → /admin + /admin/api/v1 → AdminQueryService/read gateways → read services`.
@@ -257,7 +262,7 @@ No second provider/token manager/OAuth cache without approved change intent.
 Exact variables/defaults are in `configuration.md`, `app/config.py`, `app/settings.py`, and `.env.example`.
 
 Groups:
-Core/Omada, Portal/CAPPORT, telemetry, counters, Snapshot, Registry, Webhook, Cleaner, Visit, Observation, Current State, Analytics/API, Admin Web/Home Live/Home Traffic.
+Core/Omada, Portal/CAPPORT, telemetry, counters, Snapshot, Registry, Webhook, Cleaner, Visit, Observation, Current State, Analytics/API, Admin Web/Home Live/Home Traffic/Home Activity.
 
 Repository feature defaults are not production proof.
 
@@ -322,13 +327,13 @@ Owner-provided current Windows Local Gate tool:
 C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
 ```
 
-Confirmed 2026-08-26 Windows evidence:
+Confirmed 2026-08-26 Windows evidence for exact artifact `53f617b3ac0155d0d647e58e98309927f9a4d318` on the production-compatible Python family:
 
 ```text
-strict suite: 1985 passed / 30 skipped / 0 strict regressions
+production Python: 3.10.12
+strict suite: 2100 passed / 30 skipped / 5 deselected
+STRICT_REGRESSIONS: 0
 compatibility: 2 WARN + 3 PASS (five exact tracked cases)
-compileall: PASS
-git diff --check: PASS
 overall Windows Local Gate: PASS
 ```
 
@@ -350,11 +355,17 @@ Current:
 - Current State
 - Home Live
 - Current Traffic/Home Traffic
+- Home Activity
 
-Not current at this baseline:
-- Home Activity implementation.
+Production evidence at `main@53f617b3`:
+- production HEAD equals repository main and working tree is clean;
+- Home Activity is deployed;
+- Visits coverage starts at `2026-08-26T17:46:55.982Z`;
+- 14/14 post-boundary Visits were verified guest, with 0 integrity anomalies and 0 unproven scope;
+- `traffic_coverage_from_utc=null`;
+- first-restart Current State acceptance PASS: 4/4 client cycles and 4/4 AP cycles success, no non-success cycle.
 
-Historical production numbers (device counts, test snapshots, individual acceptance counters) must remain labelled historical and must not be presented as current counters.
+Historical production numbers outside an explicitly dated evidence block remain historical and must not be presented as current counters.
 
 ## 20. Repository-only unknowns
 

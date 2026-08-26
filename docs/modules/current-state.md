@@ -1,8 +1,8 @@
 # Current Network State
 
 Status: current module contract
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 Schema: v1
 
 ## Purpose
@@ -54,3 +54,20 @@ Collector uses the shared `OmadaProvider`.
 Admin/Home uses `CurrentStateReadService` over persisted storage; Admin HTTP requests do not poll Omada.
 
 Failure is fail-open relative to guest authorization.
+
+## Startup integrity and SQLite compatibility
+
+Final current behavior:
+- a self-imposed `PRAGMA quick_check` progress-handler timeout is classified as retryable `CurrentStateStorageError`;
+- unrelated SQLite `interrupted`, schema mismatch and `quick_check != ok` remain schema/integrity errors;
+- runtime retry policy was not redesigned;
+- Python 3.10 does not require `sqlite3.SQLITE_BUSY` / `sqlite3.SQLITE_LOCKED` module constants;
+- stable primary result codes are BUSY=`5`, LOCKED=`6`;
+- integer `sqlite_errorcode` is normalized with `code & 0xFF`, so extended codes such as 261/262 map to BUSY/LOCKED;
+- message fallback `database is locked` / `database is busy` remains.
+
+## Production first-restart evidence — 2026-08-26
+
+One restart at `22:55:39 +04`; no second restart. Client cycles: 4 success / 0 errors. AP cycles: 4 success / 0 errors. All inspected cycles were `complete=1`, `result=success`, `failure_category=None`.
+
+Verdict: **Current State first-restart startup acceptance PASS**.

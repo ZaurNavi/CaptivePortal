@@ -1,8 +1,8 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-08-25
-Runtime baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Runtime baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -28,10 +28,11 @@ Runtime baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
 | Home Live | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
 | Current Traffic | current when Analytics sources healthy | `app/analytics/current_traffic.py` | `modules/analytics.md` | none | no |
 | Home Traffic | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
+| Home Activity | current; default disabled | `app/analytics/home_activity.py`, `app/admin_web/` | `modules/home-activity.md` | reads Visit Lifecycle | no |
 
-## Not current implementation
+## Current production evidence
 
-**Home Activity** is not present in `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`. It may be an approved external change-intent, but must not be described as merged/current until the implementation is present in `main`.
+Home Activity is merged/deployed. Visits coverage is production-proven from `2026-08-26T17:46:55.982Z`; Traffic coverage start remains unproven (`null`).
 
 ## Production evidence rule
 
