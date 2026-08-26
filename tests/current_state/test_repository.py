@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from app.current_state.models import CurrentStateConfigError, CurrentStateSchemaError, CurrentStateValidationError
+from app.current_state.models import (
+    CurrentStateConfigError,
+    CurrentStateSchemaError,
+    CurrentStateStorageError,
+    CurrentStateValidationError,
+)
 from app.current_state.repository import CurrentStateRepository
 
 from .conftest import OTHER_SITE, SITE, ap_row, client_row, cycle
@@ -37,6 +42,18 @@ def test_schema_v1_and_required_indexes(repository):
 
 def test_existing_exact_database_reopens(repository):
     assert repository.initialize() is False
+
+
+@pytest.mark.parametrize("message", ("database is locked", "database is busy"))
+def test_existing_database_transient_contention_is_retryable(
+    repository, monkeypatch, message
+):
+    def busy(*_args, **_kwargs):
+        raise sqlite3.OperationalError(message)
+
+    monkeypatch.setattr(sqlite3, "connect", busy)
+    with pytest.raises(CurrentStateStorageError):
+        repository.initialize()
 
 
 def test_wrong_user_version_rejected_without_recreation(config):

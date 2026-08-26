@@ -94,6 +94,16 @@ unavailableVisits.result.authorized_visits.coverage.covered_through_utc = null;
 unavailableVisits.result.authorized_visits.coverage.quality_reasons = ["source_unavailable"];
 assert(api.validateActivity(unavailableVisits, site, "today") !== null,
   "Visits unavailable with complete Traffic is accepted");
+const unprovenVisits = copy(unavailableVisits);
+unprovenVisits.result.authorized_visits.coverage.quality_reasons = ["guest_scope_unproven"];
+unprovenVisits.result.authorized_visits.coverage.coverage_through_utc =
+  "2026-08-25T08:00:00.000Z";
+unprovenVisits.result.authorized_visits.coverage.covered_from_utc =
+  "2026-08-24T20:00:00.000Z";
+unprovenVisits.result.authorized_visits.coverage.covered_through_utc =
+  "2026-08-25T08:00:00.000Z";
+assert(api.validateActivity(unprovenVisits, site, "today") !== null,
+  "unproven guest scope is rendered unavailable without rejecting Traffic");
 const selected = payload("preset");
 assert(api.validateActivity(selected, site, "preset") !== null, "valid selected accepted");
 assert(api.selectionDynamic("last_24h") && api.selectionDynamic("current_month"), "rolling selections refresh");
@@ -339,6 +349,19 @@ const activity = window.CaptivPortalHomeActivityCoordinator;
   assert(elements["activity-today-visits"].textContent === "— · Unavailable"
     && elements["activity-today-traffic"].textContent.startsWith("4.8 GB"),
     "Visits unavailable preserves complete Traffic in the DOM");
+  const unproven = payload("today", 0, false, true);
+  unproven.result.authorized_visits.coverage.quality_reasons = ["guest_scope_unproven"];
+  unproven.result.authorized_visits.coverage.coverage_through_utc =
+    "2026-08-25T08:00:00.000Z";
+  unproven.result.authorized_visits.coverage.covered_from_utc =
+    "2026-08-24T20:00:00.000Z";
+  unproven.result.authorized_visits.coverage.covered_through_utc =
+    "2026-08-25T08:00:00.000Z";
+  fetchQueue.push(Promise.resolve(response(200, unproven)));
+  await activity.runToday(true);
+  assert(elements["activity-today-visits"].textContent === "— · Unavailable"
+    && elements["activity-today-traffic"].textContent.startsWith("4.8 GB"),
+    "unproven guest scope renders unavailable while Traffic remains current");
 
   const todayBefore = elements["activity-today-visits"].textContent;
   clock += 400000; fetchQueue.push(Promise.resolve(response(503, {error: {code: "query_deadline"}})));

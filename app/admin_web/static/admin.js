@@ -455,6 +455,7 @@
     "coverage_start_unknown", "requested_before_coverage_start",
     "requested_after_coverage_through", "source_unavailable", "query_deadline",
     "opening_authorization_evidence_missing", "authorization_chronology_anomaly",
+    "guest_scope_unproven",
     "pending_offline_events", "invalid_offline_events", "missing_reported_traffic",
     "missing_controller_time", "semantic_replay_suppressed",
     "unsupported_processing_result", "reader_stale", "reader_unavailable",

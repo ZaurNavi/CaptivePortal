@@ -176,9 +176,16 @@ class CurrentStateRepository:
                 raise
         else:
             self._validate_existing(path)
-        with self._connect(write=True) as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=NORMAL")
+        try:
+            with self._connect(write=True) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError as exc:
+            if _transient_sqlite_contention(exc):
+                raise CurrentStateStorageError(
+                    "Current State database is temporarily busy"
+                ) from exc
+            raise
         self._enforce_modes()
         return created
 
@@ -240,6 +247,14 @@ class CurrentStateRepository:
                 connection.close()
         except CurrentStateSchemaError:
             raise
+        except sqlite3.OperationalError as exc:
+            if _transient_sqlite_contention(exc):
+                raise CurrentStateStorageError(
+                    "Current State database is temporarily busy"
+                ) from exc
+            raise CurrentStateSchemaError(
+                "Current State database is unavailable"
+            ) from exc
         except sqlite3.Error as exc:
             raise CurrentStateSchemaError("Current State database is unavailable") from exc
 
@@ -441,6 +456,13 @@ def _insert_rows(connection: sqlite3.Connection, table: str, columns: Sequence[s
     connection.executemany(
         f"INSERT INTO {table} ({names}) VALUES ({placeholders})",
         [tuple(row.get(column) for column in columns) for row in rows],
+    )
+
+
+def _transient_sqlite_contention(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or any(
+        marker in str(exc).lower() for marker in ("database is locked", "database is busy")
     )
 
 

@@ -339,6 +339,7 @@ def test_unknown_processing_result_only_makes_traffic_unavailable():
                 "visits": {
                     "verified_visit_count": 0,
                     "integrity_anomaly_count": 0,
+                    "unproven_scope_count": 0,
                     "earliest_persisted_evidence_at": None,
                     "latest_persisted_evidence_at": None,
                 },
@@ -472,6 +473,7 @@ def test_reader_freshness_is_independent_from_historical_range_completeness(
             empty = {
                 "verified_visit_count": 0,
                 "integrity_anomaly_count": 0,
+                "unproven_scope_count": 0,
                 "earliest_persisted_evidence_at": None,
                 "latest_persisted_evidence_at": None,
             }
@@ -595,6 +597,134 @@ def test_missing_opening_authorization_is_integrity_anomaly(analytics_stack):
     assert raw["integrity_anomaly_count"] == 1
 
 
+def test_unproven_guest_scope_is_unavailable_without_hiding_traffic(
+    analytics_stack,
+):
+    with closing(analytics_stack.visits._connect()) as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE visits SET start_ssid=NULL WHERE site_id=?",
+            (SITE_A,),
+        )
+        connection.execute(
+            """
+            UPDATE visit_authorizations SET portal_ssid=NULL
+            WHERE visit_id IN (SELECT visit_id FROM visits WHERE site_id=?)
+            """,
+            (SITE_A,),
+        )
+        connection.commit()
+    _insert_source_event(
+        analytics_stack.visits,
+        event_id="traffic-remains-provable",
+        processing_result="closed",
+        controller_event_at="2026-01-01T10:15:00.000Z",
+        received_at="2026-01-01T10:15:01.000Z",
+        traffic=321,
+        connected=60,
+    )
+    result = HomeActivityReadService(analytics_stack.gateway).get_activity(
+        site_id=SITE_A, guest_ssids=("ssid-a",),
+        range_payload=resolve_selected(
+            context(), {"period": "last_24h"}, EVALUATED
+        ).public_range(),
+        from_utc="2026-01-01T09:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        evaluated_at_utc="2026-01-01T11:00:00.000Z",
+        timezone_name="UTC",
+        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_fresh_max_age_seconds=90,
+        traffic_stale_max_age_seconds=180,
+        deadline=QueryDeadline.after(5),
+    )
+    assert result.authorized_visits.value is None
+    assert result.authorized_visits.status == "unavailable"
+    assert "guest_scope_unproven" in (
+        result.authorized_visits.coverage.quality_reasons
+    )
+    assert (
+        result.authorized_visits.coverage.coverage_through_utc
+        == "2026-01-01T11:00:00.000Z"
+    )
+    assert result.authorized_visits.integrity_anomaly_count == 0
+    assert result.traffic.bytes == 321
+    assert result.traffic.status == "complete"
+    public = serialize_home_activity(result)
+    assert public["authorized_visits"]["value"] is None
+    assert public["authorized_visits"]["coverage"]["quality_reasons"] == [
+        "guest_scope_unproven"
+    ]
+
+
+def test_opening_authorization_ssid_proves_scope_when_visit_copy_is_null(
+    analytics_stack,
+):
+    with closing(analytics_stack.visits._connect()) as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE visits SET start_ssid=NULL WHERE visit_id=?",
+            (analytics_stack.visit_id,),
+        )
+        connection.commit()
+    raw = analytics_stack.gateway.home_activity_data(
+        site_id=SITE_A, guest_ssids=("ssid-a",),
+        from_utc="2026-01-01T09:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        deadline=QueryDeadline.after(5),
+    )["visits"]
+    assert raw["verified_visit_count"] == 2
+    assert raw["unproven_scope_count"] == 0
+
+
+def test_known_non_guest_ssid_does_not_poison_guest_result(analytics_stack):
+    with closing(analytics_stack.visits._connect()) as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE visits SET start_ssid='staff' WHERE visit_id=?",
+            (analytics_stack.visit_id,),
+        )
+        connection.execute(
+            "UPDATE visit_authorizations SET portal_ssid='staff' "
+            "WHERE visit_id=?",
+            (analytics_stack.visit_id,),
+        )
+        connection.commit()
+    raw = analytics_stack.gateway.home_activity_data(
+        site_id=SITE_A, guest_ssids=("ssid-a",),
+        from_utc="2026-01-01T09:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        deadline=QueryDeadline.after(5),
+    )["visits"]
+    assert raw["verified_visit_count"] == 1
+    assert raw["unproven_scope_count"] == 0
+
+
+def test_conflicting_opening_ssid_is_safely_unavailable(analytics_stack):
+    with closing(analytics_stack.visits._connect()) as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE visit_authorizations SET portal_ssid='staff' "
+            "WHERE visit_id=?",
+            (analytics_stack.visit_id,),
+        )
+        connection.commit()
+    result = HomeActivityReadService(analytics_stack.gateway).get_activity(
+        site_id=SITE_A, guest_ssids=("ssid-a",), range_payload={},
+        from_utc="2026-01-01T09:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        evaluated_at_utc="2026-01-01T11:00:00.000Z",
+        timezone_name="UTC",
+        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_fresh_max_age_seconds=90,
+        traffic_stale_max_age_seconds=180,
+        deadline=QueryDeadline.after(5),
+    )
+    assert result.authorized_visits.value is None
+    assert result.authorized_visits.status == "unavailable"
+    assert result.authorized_visits.integrity_anomaly_count == 0
+    assert "guest_scope_unproven" in (
+        result.authorized_visits.coverage.quality_reasons
+    )
+
+
 def test_traffic_zero_received_only_and_distinct_fingerprints(analytics_stack):
     _insert_source_event(
         analytics_stack.visits, event_id="zero", processing_result="closed",
@@ -650,7 +780,7 @@ def test_activity_explain_uses_site_time_indexes(analytics_stack):
         deadline=QueryDeadline.after(5),
     )
     joined = " ".join(plans["authorized_visits"] + plans["traffic"])
-    assert "idx_visits_site_start_ssid" in joined
+    assert "idx_visits_site_started" in joined
     assert "idx_visit_auth_visit_time" in joined
     assert "idx_visit_events_site_controller" in joined
 

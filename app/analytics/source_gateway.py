@@ -168,29 +168,57 @@ def _home_activity_visit_sql(ssid_placeholders: str) -> str:
     return f"""
         WITH cohort AS (
           SELECT v.visit_id, v.started_at, v.start_auth_session_id,
-                 v.start_auth_run_number
-          FROM visits AS v INDEXED BY idx_visits_site_start_ssid
-          WHERE v.site_id=? AND v.start_ssid IN ({ssid_placeholders})
-            AND v.started_at>=? AND v.started_at<?
+                 v.start_auth_run_number, v.start_ssid
+          FROM visits AS v INDEXED BY idx_visits_site_started
+          WHERE v.site_id=? AND v.started_at>=? AND v.started_at<?
         ), evidence AS (
-          SELECT c.visit_id, c.started_at,
+          SELECT c.visit_id, c.started_at, c.start_ssid,
                  COALESCE(SUM(
                    a.auth_session_id=c.start_auth_session_id
                    AND a.auth_run_number=c.start_auth_run_number
                    AND a.authorized_at=c.started_at
-                 ),0) AS opening_match_count
+                 ),0) AS opening_match_count,
+                 MAX(CASE WHEN
+                   a.auth_session_id=c.start_auth_session_id
+                   AND a.auth_run_number=c.start_auth_run_number
+                   AND a.authorized_at=c.started_at
+                 THEN a.portal_ssid END) AS opening_portal_ssid,
+                 COUNT(DISTINCT CASE WHEN
+                   a.auth_session_id=c.start_auth_session_id
+                   AND a.auth_run_number=c.start_auth_run_number
+                   AND a.authorized_at=c.started_at
+                   AND a.portal_ssid IS NOT NULL
+                 THEN a.portal_ssid END) AS opening_ssid_count
           FROM cohort AS c
           LEFT JOIN visit_authorizations AS a
             INDEXED BY idx_visit_auth_visit_time
             ON a.visit_id=c.visit_id
-          GROUP BY c.visit_id, c.started_at
+          GROUP BY c.visit_id, c.started_at, c.start_ssid
+        ), resolved AS (
+          SELECT *, COALESCE(start_ssid, opening_portal_ssid) AS scoped_ssid,
+                 CASE
+                   WHEN opening_ssid_count>1 THEN 1
+                   WHEN start_ssid IS NOT NULL
+                    AND opening_portal_ssid IS NOT NULL
+                    AND start_ssid<>opening_portal_ssid THEN 1
+                   ELSE 0
+                 END AS scope_conflict
+          FROM evidence
         )
         SELECT
-          COALESCE(SUM(opening_match_count=1),0) AS verified_visit_count,
-          COALESCE(SUM(opening_match_count!=1),0) AS integrity_anomaly_count,
-          MIN(started_at) AS earliest_persisted_evidence_at,
-          MAX(started_at) AS latest_persisted_evidence_at
-        FROM evidence
+          COALESCE(SUM(scoped_ssid IN ({ssid_placeholders})
+                       AND opening_match_count=1 AND scope_conflict=0),0)
+            AS verified_visit_count,
+          COALESCE(SUM(scoped_ssid IN ({ssid_placeholders})
+                       AND opening_match_count!=1 AND scope_conflict=0),0)
+            AS integrity_anomaly_count,
+          COALESCE(SUM(scoped_ssid IS NULL OR scope_conflict!=0),0)
+            AS unproven_scope_count,
+          MIN(CASE WHEN scoped_ssid IN ({ssid_placeholders})
+                   THEN started_at END) AS earliest_persisted_evidence_at,
+          MAX(CASE WHEN scoped_ssid IN ({ssid_placeholders})
+                   THEN started_at END) AS latest_persisted_evidence_at
+        FROM resolved
     """
 
 
@@ -465,7 +493,9 @@ class AnalyticsSourceGateway:
         visit_sql = _home_activity_visit_sql(placeholders)
         traffic_sql = _home_activity_traffic_sql(placeholders)
         visit_parameters = (
-            site_id, *tuple(guest_ssids), from_utc, to_utc
+            site_id, from_utc, to_utc,
+            *tuple(guest_ssids), *tuple(guest_ssids),
+            *tuple(guest_ssids), *tuple(guest_ssids),
         )
         traffic_parameters = (
             site_id, from_utc, to_utc, *tuple(guest_ssids),
@@ -514,7 +544,9 @@ class AnalyticsSourceGateway:
             raise AnalyticsSourceUnavailable("Activity guest scope is empty")
         placeholders = ",".join("?" for _ in guest_ssids)
         visit_parameters = (
-            site_id, *tuple(guest_ssids), from_utc, to_utc
+            site_id, from_utc, to_utc,
+            *tuple(guest_ssids), *tuple(guest_ssids),
+            *tuple(guest_ssids), *tuple(guest_ssids),
         )
         traffic_parameters = (
             site_id, from_utc, to_utc, *tuple(guest_ssids),

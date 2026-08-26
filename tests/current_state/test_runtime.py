@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+import time
+
+import pytest
 
 import run as process_runtime
 
@@ -10,6 +14,10 @@ from app.current_state.runtime import (
     UnavailableCurrentStateRuntime,
     create_current_state_runtime,
 )
+from app.current_state.models import CurrentStateSchemaError
+from app.current_state import repository as repository_module
+from app.current_state.repository import CurrentStateRepository
+from app.models import Result
 
 
 class Telemetry:
@@ -80,6 +88,84 @@ def test_client_and_ap_degradation_are_independent(enabled_settings):
     assert runtime.client_state == "degraded"
     assert runtime.ap_state == "active"
     assert runtime.stop(2.0)
+
+
+@pytest.mark.parametrize("message", ("database is locked", "database is busy"))
+def test_existing_database_restart_retries_transient_storage_and_polls(
+    enabled_settings, monkeypatch, message,
+):
+    enabled_settings["current_state_client_initial_delay_seconds"] = "0"
+    enabled_settings["current_state_ap_initial_delay_seconds"] = "0"
+    config_runtime = create_current_state_runtime(
+        enabled_settings, Provider(), Telemetry()
+    )
+    assert isinstance(config_runtime, CurrentStateRuntime)
+    CurrentStateRepository(config_runtime.config).initialize()
+
+    class PollingProvider:
+        def list_observation_clients(self, _site, page, page_size, _timeout):
+            return Result.ok(data={
+                "clients": [], "total_rows": 0, "page": page,
+                "page_size": page_size, "http_status": 200, "error_code": 0,
+            })
+
+        def list_observation_access_points(
+            self, _site, page, page_size, _timeout
+        ):
+            return Result.ok(data={
+                "access_points": [], "total_rows": 0, "page": page,
+                "page_size": page_size, "http_status": 200, "error_code": 0,
+            })
+
+    runtime = create_current_state_runtime(
+        enabled_settings, PollingProvider(), Telemetry()
+    )
+    real_connect = repository_module.sqlite3.connect
+    connect_attempts = 0
+
+    def transient_then_connect(*args, **kwargs):
+        nonlocal connect_attempts
+        connect_attempts += 1
+        if connect_attempts == 1:
+            raise sqlite3.OperationalError(message)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module.sqlite3, "connect", transient_then_connect)
+    assert runtime.start() is True
+    deadline = time.monotonic() + 2
+    cycle_kinds = set()
+    while time.monotonic() < deadline:
+        with runtime.repository.read_connection() as connection:
+            cycle_kinds = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT DISTINCT kind FROM current_state_cycles"
+                )
+            }
+        if cycle_kinds == {"client", "ap"}:
+            break
+        time.sleep(0.01)
+    assert connect_attempts >= 2
+    assert cycle_kinds == {"client", "ap"}
+    assert runtime.client_worker.running
+    assert runtime.ap_worker.running
+    assert runtime.stop(2.0)
+
+
+def test_nontransient_schema_error_is_not_retried(enabled_settings):
+    runtime = create_current_state_runtime(
+        enabled_settings, Provider(), Telemetry()
+    )
+    attempts = 0
+
+    def invalid_schema():
+        nonlocal attempts
+        attempts += 1
+        raise CurrentStateSchemaError("incompatible schema")
+
+    runtime.repository.initialize = invalid_schema
+    assert runtime.start() is False
+    assert runtime.state == "unavailable"
+    assert attempts == 1
 
 
 def test_process_composition_reuses_controller_and_telemetry(monkeypatch):
