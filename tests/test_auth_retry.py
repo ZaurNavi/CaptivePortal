@@ -42,6 +42,14 @@ class CapturingExecutor:
         return object()
 
 
+class CapturingVisitStartSubmitter:
+    def __init__(self):
+        self.requests = []
+
+    def submit_authorized(self, request):
+        self.requests.append(request)
+
+
 class AuthorizedProvider:
     def get_client(self, **_kwargs):
         return Result.ok(data={
@@ -242,7 +250,11 @@ def settings(temp_dir):
     }
 
 
-def create_client(executor=None, controller=None):
+def create_client(
+    executor=None,
+    controller=None,
+    visit_start_submitter=None,
+):
     import app.web.web as web_module
 
     temp_dir = tempfile.TemporaryDirectory()
@@ -266,7 +278,8 @@ def create_client(executor=None, controller=None):
         ),
     ):
         app = web_module.create_app(
-            portal_counter_service=None
+            portal_counter_service=None,
+            visit_start_submitter=visit_start_submitter,
         )
     app.config["TESTING"] = True
     return (
@@ -289,6 +302,107 @@ def open_session(client, manager):
     session = manager.get_by_client(SITE_ID, CLIENT_MAC)
     assert session is not None
     return session
+
+
+def test_external_portal_ssid_name_reaches_session_and_visit_opening():
+    visits = CapturingVisitStartSubmitter()
+    client, manager, executor, temp_dir = create_client(
+        controller=AuthorizedProvider(),
+        visit_start_submitter=visits,
+    )
+    try:
+        response = client.get(
+            (
+                f"/?site={SITE_ID}&clientMac={CLIENT_MAC}"
+                f"&clientIp={CLIENT_IP}&ssidName=Zefer_Parki"
+            ),
+            environ_base={"REMOTE_ADDR": CLIENT_IP},
+        )
+        session = manager.get_by_client(SITE_ID, CLIENT_MAC)
+
+        assert response.status_code == 200
+        assert session is not None
+        assert session.ssid == "Zefer_Parki"
+        assert len(executor.submissions) == 1
+        with fast_worker():
+            function, session_id = executor.submissions[0]
+            function(session_id)
+        assert len(visits.requests) == 1
+        assert visits.requests[0].portal_ssid == "Zefer_Parki"
+    finally:
+        temp_dir.cleanup()
+
+
+def test_external_portal_legacy_ssid_remains_supported():
+    client, manager, _executor, temp_dir = create_client()
+    try:
+        response = client.get(
+            (
+                f"/?site={SITE_ID}&clientMac={CLIENT_MAC}"
+                f"&clientIp={CLIENT_IP}&ssid=Zefer_Parki"
+            ),
+            environ_base={"REMOTE_ADDR": CLIENT_IP},
+        )
+        session = manager.get_by_client(SITE_ID, CLIENT_MAC)
+
+        assert response.status_code == 200
+        assert session is not None
+        assert session.ssid == "Zefer_Parki"
+    finally:
+        temp_dir.cleanup()
+
+
+def test_external_portal_conflicting_ssid_parameters_are_unproven():
+    client, manager, _executor, temp_dir = create_client()
+    try:
+        response = client.get(
+            (
+                f"/?site={SITE_ID}&clientMac={CLIENT_MAC}"
+                f"&clientIp={CLIENT_IP}&ssidName=Zefer_Parki&ssid=Other"
+            ),
+            environ_base={"REMOTE_ADDR": CLIENT_IP},
+        )
+        session = manager.get_by_client(SITE_ID, CLIENT_MAC)
+
+        assert response.status_code == 200
+        assert session is not None
+        assert session.ssid is None
+    finally:
+        temp_dir.cleanup()
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "",
+        "&ssidName=",
+        "&ssidName=+++",
+        "&ssidName=bad%00ssid",
+    ),
+)
+def test_external_portal_missing_or_malformed_ssid_is_unproven(query):
+    client, manager, _executor, temp_dir = create_client()
+    try:
+        response = client.get(
+            (
+                f"/?site={SITE_ID}&clientMac={CLIENT_MAC}"
+                f"&clientIp={CLIENT_IP}{query}"
+            ),
+            environ_base={"REMOTE_ADDR": CLIENT_IP},
+        )
+        session = manager.get_by_client(SITE_ID, CLIENT_MAC)
+
+        assert response.status_code == 200
+        assert session is not None
+        assert session.ssid is None
+    finally:
+        temp_dir.cleanup()
+
+
+def test_external_portal_invalid_unicode_ssid_is_unproven():
+    import app.web.web as web_module
+
+    assert web_module._external_portal_ssid({"ssidName": "\ud800"}) is None
 
 
 def finish_retryable(manager, session, reason="CLIENT_NOT_FOUND"):
