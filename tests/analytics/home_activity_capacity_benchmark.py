@@ -56,6 +56,7 @@ def main() -> int:
             to_utc=_stamp(EVALUATED), deadline=QueryDeadline.after(10),
         )
         windows = (
+            ("today", EVALUATED.replace(hour=0, minute=0, second=0, microsecond=0)),
             ("24h", EVALUATED - timedelta(days=1)),
             ("7d", EVALUATED - timedelta(days=7)),
             ("30d", EVALUATED - timedelta(days=30)),

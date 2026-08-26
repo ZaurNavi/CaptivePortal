@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .models import (
     HomeActivityCoverage,
@@ -31,8 +31,14 @@ class HomeActivitySourceUnavailable(RuntimeError):
 class HomeActivityReadService:
     """Aggregate persisted Visit v2 facts without any provider path."""
 
-    def __init__(self, gateway: AnalyticsSourceGateway):
+    def __init__(
+        self,
+        gateway: AnalyticsSourceGateway,
+        *,
+        visit_source_available: Callable[[], bool] | None = None,
+    ):
         self._gateway = gateway
+        self._visit_source_available = visit_source_available or (lambda: True)
 
     def get_activity(
         self,
@@ -87,8 +93,12 @@ class HomeActivityReadService:
 
         visits_raw = _mapping(raw.get("visits"))
         traffic_raw = _mapping(raw.get("traffic"))
+        try:
+            visits_available = bool(self._visit_source_available())
+        except Exception:
+            visits_available = False
         visits = _visits(
-            visits_raw, start, end, visits_from, evaluated
+            visits_raw, start, end, visits_from, evaluated, visits_available
         )
         traffic = _traffic(
             traffic_raw,
@@ -128,9 +138,27 @@ class HomeActivityReadService:
         )
 
 
-def _visits(raw, start, end, coverage_from, evaluated):
+def _visits(raw, start, end, coverage_from, evaluated, source_available):
     verified = _count(raw, "verified_visit_count")
     anomalies = _count(raw, "integrity_anomaly_count")
+    if not source_available:
+        coverage = _unavailable_coverage(
+            _coverage(
+                start, end, coverage_from, None, ("source_unavailable",)
+            ),
+            "source_unavailable",
+        )
+        return HomeActivityVisits(
+            value=None,
+            status="unavailable",
+            cohort="visit_opening_authorization",
+            source_kind="visit_lifecycle",
+            verified_visit_count=None,
+            integrity_anomaly_count=0,
+            coverage=coverage,
+            earliest_persisted_evidence_at=None,
+            latest_persisted_evidence_at=None,
+        )
     reasons = []
     if anomalies:
         reasons.append("opening_authorization_evidence_missing")

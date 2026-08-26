@@ -493,8 +493,11 @@
       && new Date(resolved.to_utc) <= new Date(evaluatedAt);
   }
   function visits(value) {
-    return object(value) && integer(value.value) && STATUSES.has(value.status)
-      && value.value === value.verified_visit_count && integer(value.verified_visit_count)
+    return object(value) && STATUSES.has(value.status)
+      && ((value.status === "unavailable" && value.value === null
+        && value.verified_visit_count === null)
+        || (value.status !== "unavailable" && integer(value.value)
+          && value.value === value.verified_visit_count && integer(value.verified_visit_count)))
       && integer(value.integrity_anomaly_count) && value.cohort === "visit_opening_authorization"
       && value.source_kind === "visit_lifecycle" && coverage(value.coverage)
       && value.status === value.coverage.status
@@ -685,6 +688,10 @@
   }
   function rangeText(value) {
     const resolved = value.range.resolved;
+    const requested = value.range.requested;
+    if (requested.kind === "custom" && requested.to_date_inclusive === true) {
+      return `${resolved.from_local} → Through ${requested.to_date} inclusive · technical end ${resolved.to_local_exclusive} · ${resolved.timezone}`;
+    }
     return `${resolved.from_local} → ${resolved.to_local_exclusive} · ${resolved.timezone}`;
   }
   function coverageText(label, value) {
@@ -709,7 +716,8 @@
   }
   function render(kind, value) {
     document.getElementById(`activity-${kind}-range`).textContent = rangeText(value);
-    document.getElementById(`activity-${kind}-visits`).textContent = String(value.authorized_visits.value);
+    document.getElementById(`activity-${kind}-visits`).textContent = value.authorized_visits.status === "unavailable"
+      ? "— · Unavailable" : String(value.authorized_visits.value);
     const suffix = value.traffic.status === "partial" ? " · Partial · Estimated"
       : value.traffic.status === "unavailable" ? " · Unavailable · Estimated" : " · Estimated";
     document.getElementById(`activity-${kind}-traffic`).textContent = bytes(value.traffic.bytes) + suffix;
@@ -1065,6 +1073,9 @@
       ? {primary: "—", detail: "Other — · Unknown —", state: "Unavailable"}
       : {primary: "— / —", detail: "Other — · Unknown —", count: "Unavailable", state: "Unavailable"};
   }
+  function standaloneCoordinatorEnabled(homeLive, homeTraffic, homeActivity) {
+    return homeLive === "true" && homeTraffic !== "true" && homeActivity !== "true";
+  }
 
   if (typeof window !== "undefined") {
     window.CaptivPortalHomeLiveTest = Object.freeze({
@@ -1072,14 +1083,17 @@
       abortOwnedController, canStartCleanRefresh, claimController, clientParameters, enrichmentState,
       failureTransition, neutralAbort, releaseController, resetClientState,
       retainedSelection, unavailableValues,
+      standaloneCoordinatorEnabled,
       validateApSummary, validateClientSummary, validatePage,
     });
   }
   if (typeof document === "undefined") return;
   const root = document.getElementById("admin-page");
-  if (!root || root.dataset.page !== "home" || root.dataset.homeLiveEnabled !== "true"
-    || root.dataset.homeTrafficEnabled === "true"
-    || root.dataset.homeActivityEnabled === "true") return;
+  if (!root || root.dataset.page !== "home" || !standaloneCoordinatorEnabled(
+    root.dataset.homeLiveEnabled,
+    root.dataset.homeTrafficEnabled,
+    root.dataset.homeActivityEnabled,
+  )) return;
 
   const siteId = root.dataset.siteId;
   const apiBase = root.dataset.apiBase + "/current-state";
@@ -1718,6 +1732,9 @@
   function pageFailureEffect(failure) {
     return failure && failure.status === 403 ? "preserve_summary_forbidden" : "retry_group";
   }
+  function combinedCoordinatorEnabled(homeLive, homeTraffic, homeActivity) {
+    return homeLive === "true" && (homeTraffic === "true" || homeActivity === "true");
+  }
 
   if (typeof window !== "undefined") {
     window.CaptivPortalHomeTrafficTest = Object.freeze({
@@ -1728,13 +1745,16 @@
       trafficFailureTransition,
       trafficAge, trafficDisplay, trafficFreshness, trafficPageEligible,
       validateTrafficPage, validateTrafficSummary,
+      combinedCoordinatorEnabled,
     });
   }
   if (typeof document === "undefined") return;
   const root = document.getElementById("admin-page");
-  if (!root || root.dataset.page !== "home" || root.dataset.homeLiveEnabled !== "true"
-    || (root.dataset.homeTrafficEnabled !== "true"
-      && root.dataset.homeActivityEnabled !== "true")) return;
+  if (!root || root.dataset.page !== "home" || !combinedCoordinatorEnabled(
+    root.dataset.homeLiveEnabled,
+    root.dataset.homeTrafficEnabled,
+    root.dataset.homeActivityEnabled,
+  )) return;
 
   const live = window.CaptivPortalHomeLiveTest;
   const siteId = root.dataset.siteId;

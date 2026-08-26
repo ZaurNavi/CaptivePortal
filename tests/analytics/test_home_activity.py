@@ -20,6 +20,7 @@ from app.analytics.source_gateway import (
     AnalyticsQueryDeadlineExceeded,
     QueryDeadline,
 )
+from app.analytics.runtime import _visit_opening_available
 
 from .conftest import SITE_A
 
@@ -384,6 +385,66 @@ def test_unknown_processing_result_only_makes_traffic_unavailable():
     assert serialized["authorized_visits"]["value"] == 0
     assert serialized["traffic"]["bytes"] is None
     assert serialized["traffic"]["status"] == "unavailable"
+
+
+def test_visit_opening_source_unavailable_preserves_complete_traffic(
+    analytics_stack,
+):
+    timestamp = "2026-01-01T10:15:00.000Z"
+    _insert_source_event(
+        analytics_stack.visits,
+        event_id="traffic-survives-visit-unavailable",
+        processing_result="closed",
+        controller_event_at=timestamp,
+        received_at=timestamp,
+        traffic=480,
+        connected=60,
+    )
+    service = HomeActivityReadService(
+        analytics_stack.gateway,
+        visit_source_available=lambda: False,
+    )
+    result = service.get_activity(
+        site_id=SITE_A, guest_ssids=("ssid-a",),
+        range_payload=resolve_selected(
+            context(), {"period": "last_24h"}, EVALUATED
+        ).public_range(),
+        from_utc="2026-01-01T10:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        evaluated_at_utc="2026-01-01T11:00:00.000Z", timezone_name="UTC",
+        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_fresh_max_age_seconds=90,
+        traffic_stale_max_age_seconds=180,
+        deadline=QueryDeadline.after(5),
+    )
+    assert result.authorized_visits.status == "unavailable"
+    assert result.authorized_visits.value is None
+    assert result.authorized_visits.verified_visit_count is None
+    assert result.authorized_visits.coverage.coverage_through_utc is None
+    assert result.traffic.status == "complete"
+    assert result.traffic.bytes == 480
+    serialized = serialize_home_activity(result)
+    assert serialized["authorized_visits"]["value"] is None
+    assert serialized["traffic"]["bytes"] == 480
+
+
+@pytest.mark.parametrize(
+    ("state", "available", "expected"),
+    (
+        ("active", True, True),
+        ("degraded", True, True),
+        ("starting", True, False),
+        ("stopping", True, False),
+        ("unavailable", False, False),
+        ("disabled", False, False),
+    ),
+)
+def test_visit_opening_availability_uses_runtime_fact(
+    state, available, expected
+):
+    runtime = type("Runtime", (), {"state": state, "available": available})()
+    assert _visit_opening_available(runtime) is expected
 
 
 @pytest.mark.parametrize(

@@ -82,11 +82,21 @@ def _visits(value: HomeActivityVisits) -> dict[str, Any]:
     if (
         value.status not in _STATUSES
         or value.status != value.coverage.status
-        or type(value.verified_visit_count) is not int
-        or value.verified_visit_count < 0
+        or not (
+            (
+                value.status == "unavailable"
+                and value.value is None
+                and value.verified_visit_count is None
+            )
+            or (
+                value.status != "unavailable"
+                and type(value.verified_visit_count) is int
+                and value.verified_visit_count >= 0
+                and value.value == value.verified_visit_count
+            )
+        )
         or type(value.integrity_anomaly_count) is not int
         or value.integrity_anomaly_count < 0
-        or value.value != value.verified_visit_count
     ):
         raise HomeActivitySerializationError("Activity Visit metric is invalid")
     return {

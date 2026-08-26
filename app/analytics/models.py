@@ -739,7 +739,7 @@ class HomeActivityVisits:
     status: str
     cohort: str
     source_kind: str
-    verified_visit_count: int
+    verified_visit_count: int | None
     integrity_anomaly_count: int
     coverage: HomeActivityCoverage
     earliest_persisted_evidence_at: str | None

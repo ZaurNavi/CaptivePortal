@@ -82,6 +82,18 @@ unavailableTraffic.coverage.fully_covered = false;
 unavailableTraffic.coverage.quality_reasons = ["unsupported_processing_result"];
 assert(api.traffic(unavailableTraffic), "per-metric unavailable Traffic is accepted");
 assert(api.coverageText("Traffic", unavailableTraffic) === "Traffic unavailable", "unavailable provenance is explicit");
+const unavailableVisits = payload();
+unavailableVisits.result.authorized_visits.value = null;
+unavailableVisits.result.authorized_visits.verified_visit_count = null;
+unavailableVisits.result.authorized_visits.status = "unavailable";
+unavailableVisits.result.authorized_visits.coverage.status = "unavailable";
+unavailableVisits.result.authorized_visits.coverage.fully_covered = false;
+unavailableVisits.result.authorized_visits.coverage.coverage_through_utc = null;
+unavailableVisits.result.authorized_visits.coverage.covered_from_utc = null;
+unavailableVisits.result.authorized_visits.coverage.covered_through_utc = null;
+unavailableVisits.result.authorized_visits.coverage.quality_reasons = ["source_unavailable"];
+assert(api.validateActivity(unavailableVisits, site, "today") !== null,
+  "Visits unavailable with complete Traffic is accepted");
 const selected = payload("preset");
 assert(api.validateActivity(selected, site, "preset") !== null, "valid selected accepted");
 assert(api.selectionDynamic("last_24h") && api.selectionDynamic("current_month"), "rolling selections refresh");
@@ -136,6 +148,16 @@ assert(api.abort(owner, "hidden") && first.signal.aborted && owner.controller ==
 
 (async () => {
   const coordinator = window.CaptivPortalHomeTrafficTest;
+  const live = window.CaptivPortalHomeLiveTest;
+  const featureModes = [
+    ["true", "false", "false"], ["true", "true", "false"],
+    ["true", "false", "true"], ["true", "true", "true"],
+  ];
+  featureModes.forEach(([home, traffic, activity]) => {
+    const owners = Number(live.standaloneCoordinatorEnabled(home, traffic, activity))
+      + Number(coordinator.combinedCoordinatorEnabled(home, traffic, activity));
+    assert(owners === 1, `exactly one coordinator owns startup for ${traffic}/${activity}`);
+  });
   const calls = [];
   const activity = {
     run: async () => calls.push("today+selected"),
@@ -235,15 +257,23 @@ function coverage(status = "complete", reasons = []) { return {
   covered_from_utc: "2026-08-24T20:00:00.000Z",
   covered_through_utc: "2026-08-25T08:00:00.000Z",
   fully_covered: status === "complete", status, quality_reasons: reasons}; }
-function payload(kind = "today", visits = 4, trafficUnavailable = false) { const trafficStatus = trafficUnavailable ? "unavailable" : "complete";
+function payload(kind = "today", visits = 4, trafficUnavailable = false, visitsUnavailable = false) { const trafficStatus = trafficUnavailable ? "unavailable" : "complete";
   return {api_version: "admin.read.v1", site_id: elements["admin-page"].dataset.siteId, result: {
     evaluated_at_utc: "2026-08-25T08:00:00.000Z", timezone: "Asia/Baku", guest_ssids: ["Zefer_Parki"],
-    range: {requested: {kind}, resolved: {from_utc: "2026-08-24T20:00:00.000Z",
-      to_utc: "2026-08-25T08:00:00.000Z", from_local: "2026-08-25T00:00:00+04:00",
-      to_local_exclusive: "2026-08-26T00:00:00+04:00", timezone: "Asia/Baku"}},
-    authorized_visits: {value: visits, status: "complete", cohort: "visit_opening_authorization",
-      source_kind: "visit_lifecycle", verified_visit_count: visits, integrity_anomaly_count: 0,
-      coverage: coverage(), earliest_persisted_evidence_at: null, latest_persisted_evidence_at: null},
+    range: {requested: kind === "custom" ? {kind, from_date: "2026-08-01", from_time: null,
+      to_date: "2026-08-05", to_time: null, to_date_inclusive: true} : {kind}, resolved: {
+      from_utc: kind === "custom" ? "2026-07-31T20:00:00.000Z" : "2026-08-24T20:00:00.000Z",
+      to_utc: kind === "custom" ? "2026-08-05T20:00:00.000Z" : "2026-08-25T08:00:00.000Z",
+      from_local: kind === "custom" ? "2026-08-01T00:00:00+04:00" : "2026-08-25T00:00:00+04:00",
+      to_local_exclusive: kind === "custom" ? "2026-08-06T00:00:00+04:00" : "2026-08-26T00:00:00+04:00",
+      timezone: "Asia/Baku"}},
+    authorized_visits: {value: visitsUnavailable ? null : visits,
+      status: visitsUnavailable ? "unavailable" : "complete", cohort: "visit_opening_authorization",
+      source_kind: "visit_lifecycle", verified_visit_count: visitsUnavailable ? null : visits,
+      integrity_anomaly_count: 0, coverage: visitsUnavailable
+        ? {...coverage("unavailable", ["source_unavailable"]), coverage_through_utc: null,
+          covered_from_utc: null, covered_through_utc: null} : coverage(),
+      earliest_persisted_evidence_at: null, latest_persisted_evidence_at: null},
     traffic: {bytes: trafficUnavailable ? null : 5153960755, status: trafficStatus, estimated: true,
       attribution: "completed_session_end", source_kind: "omada_offline_reported_traffic",
       eligible_terminal_event_count: 1, included_fingerprint_count: 1,
@@ -280,6 +310,9 @@ const activity = window.CaptivPortalHomeActivityCoordinator;
   await picker.dispatch("submit"); await selectedPromise;
   assert(fetchCalls.at(-1).includes("period=custom") && elements["activity-selected-visits"].textContent === "4",
     "Apply loads the selected custom range");
+  assert(elements["activity-selected-range"].textContent.includes("Through 2026-08-05 inclusive")
+    && elements["activity-selected-range"].textContent.includes("technical end"),
+    "date-only To exposes inclusive and technical exclusive semantics");
   await opener.dispatch("click"); picker.elements.period.value = "last_7d";
   await elements["activity-cancel"].dispatch("click");
   assert(picker.hidden && picker.elements.period.value === "custom" && global.focused === "activity-picker-open",
@@ -301,6 +334,11 @@ const activity = window.CaptivPortalHomeActivityCoordinator;
   assert(elements["activity-today-visits"].textContent === "7"
     && elements["activity-today-traffic"].textContent.startsWith("— · Unavailable · Estimated"),
     "Traffic unavailable preserves independent Visits");
+  fetchQueue.push(Promise.resolve(response(200, payload("today", 0, false, true))));
+  await activity.runToday(true);
+  assert(elements["activity-today-visits"].textContent === "— · Unavailable"
+    && elements["activity-today-traffic"].textContent.startsWith("4.8 GB"),
+    "Visits unavailable preserves complete Traffic in the DOM");
 
   const todayBefore = elements["activity-today-visits"].textContent;
   clock += 400000; fetchQueue.push(Promise.resolve(response(503, {error: {code: "query_deadline"}})));

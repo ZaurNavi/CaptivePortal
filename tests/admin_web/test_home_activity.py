@@ -349,6 +349,24 @@ def test_selected_telemetry_has_safe_duration_and_coverage_categories(
     assert "2025-01-01" not in rendered and "2026-01-01" not in rendered
 
 
+def test_invalid_selected_period_is_not_logged_raw(activity_app, caplog):
+    client = activity_app.test_client()
+    login(client)
+    caplog.set_level(logging.INFO, logger="activity-test")
+    response = client.get(
+        f"/admin/api/v1/sites/{SITE_ID}/home-activity/selected"
+        "?period=owner-secret-period",
+        base_url="https://localhost",
+    )
+    assert response.status_code == 400
+    record = next(
+        item for item in caplog.records
+        if item.getMessage() == "admin.home_activity_selected_query_completed"
+    )
+    assert not hasattr(record, "period")
+    assert "owner-secret-period" not in repr(record.__dict__)
+
+
 def test_activity_response_size_cap_is_enforced(activity_app):
     client = activity_app.test_client()
     login(client)

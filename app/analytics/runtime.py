@@ -193,7 +193,12 @@ def create_analytics_runtime(
         current_traffic_service = None
         _event(logger, "analytics.current_traffic_unavailable", "construction_error")
     try:
-        home_activity_service = HomeActivityReadService(gateway)
+        home_activity_service = HomeActivityReadService(
+            gateway,
+            visit_source_available=lambda: _visit_opening_available(
+                visit_runtime
+            ),
+        )
     except Exception:
         home_activity_service = None
         _event(logger, "analytics.home_activity_unavailable", "construction_error")
@@ -232,6 +237,13 @@ def _visit_read_service(runtime: Any) -> Any | None:
     if getattr(runtime, "state", None) not in {"active", "degraded"}:
         return None
     return getattr(runtime, "read_service", None)
+
+
+def _visit_opening_available(runtime: Any) -> bool:
+    return (
+        getattr(runtime, "state", None) in {"active", "degraded"}
+        and bool(getattr(runtime, "available", True))
+    )
 
 
 def _check_source(name: str, service: Any | None) -> SourceBoundaryHealth:

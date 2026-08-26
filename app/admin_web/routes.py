@@ -704,7 +704,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         started = time.monotonic()
         authorized_site = None
         reason = "internal_error"
-        period = request.args.get("period") if route_name == "selected" else "today"
+        period = None
         range_duration_category = None
         visits_coverage_status = None
         traffic_coverage_status = None
@@ -722,6 +722,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             evaluated = datetime.now(timezone.utc)
             try:
                 resolved = resolver_operation(context, evaluated)
+                period = resolved.kind
                 range_duration_category = _activity_duration_category(resolved)
             except HomeActivityRangeError:
                 response = make_response(_error("invalid_request", 400))
