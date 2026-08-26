@@ -156,6 +156,133 @@ _CURRENT_TRAFFIC_STATS_SQL = f"""
     WHERE cycle_id=?
 """
 
+_CLIENT_MAC_SQL = (
+    "client_mac GLOB "
+    "'[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:"
+    "[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]'"
+)
+_OFFLINE_EVENT_TYPE = "om" + "ada.client_offline"
+
+
+def _home_activity_visit_sql(ssid_placeholders: str) -> str:
+    return f"""
+        WITH cohort AS (
+          SELECT v.visit_id, v.started_at, v.start_auth_session_id,
+                 v.start_auth_run_number
+          FROM visits AS v INDEXED BY idx_visits_site_start_ssid
+          WHERE v.site_id=? AND v.start_ssid IN ({ssid_placeholders})
+            AND v.started_at>=? AND v.started_at<?
+        ), evidence AS (
+          SELECT c.visit_id, c.started_at,
+                 COALESCE(SUM(
+                   a.auth_session_id=c.start_auth_session_id
+                   AND a.auth_run_number=c.start_auth_run_number
+                   AND a.authorized_at=c.started_at
+                 ),0) AS opening_match_count
+          FROM cohort AS c
+          LEFT JOIN visit_authorizations AS a
+            INDEXED BY idx_visit_auth_visit_time
+            ON a.visit_id=c.visit_id
+          GROUP BY c.visit_id, c.started_at
+        )
+        SELECT
+          COALESCE(SUM(opening_match_count=1),0) AS verified_visit_count,
+          COALESCE(SUM(opening_match_count!=1),0) AS integrity_anomaly_count,
+          MIN(started_at) AS earliest_persisted_evidence_at,
+          MAX(started_at) AS latest_persisted_evidence_at
+        FROM evidence
+    """
+
+
+def _home_activity_traffic_sql(ssid_placeholders: str) -> str:
+    return f"""
+        WITH scoped AS (
+          SELECT event_id, processing_result, client_mac,
+                 controller_event_at, received_at, ssid,
+                 reported_connected_seconds, reported_traffic_total_bytes,
+                 1 AS controller_in_range
+          FROM visit_source_events INDEXED BY idx_visit_events_site_controller
+          WHERE site_id=? AND controller_event_at>=? AND controller_event_at<?
+            AND ssid IN ({ssid_placeholders})
+            AND event_type=?
+          UNION ALL
+          SELECT event_id, processing_result, client_mac,
+                 controller_event_at, received_at, ssid,
+                 reported_connected_seconds, reported_traffic_total_bytes,
+                 0 AS controller_in_range
+          FROM visit_source_events INDEXED BY idx_visit_events_site_controller
+          WHERE site_id=? AND controller_event_at IS NULL
+            AND received_at>=? AND received_at<?
+            AND ssid IN ({ssid_placeholders})
+            AND event_type=?
+        ), attributable AS (
+          SELECT * FROM scoped
+        ), eligible AS (
+          SELECT * FROM attributable
+          WHERE controller_in_range=1
+            AND processing_result IN ('closed','unmatched')
+            AND {_CLIENT_MAC_SQL}
+            AND typeof(reported_connected_seconds)='integer'
+            AND reported_connected_seconds>=0
+            AND typeof(reported_traffic_total_bytes)='integer'
+            AND reported_traffic_total_bytes>=0
+        ), fingerprints AS (
+          SELECT client_mac, ssid, controller_event_at,
+                 reported_connected_seconds, reported_traffic_total_bytes,
+                 COUNT(*) AS event_count,
+                 MAX(processing_result='unmatched') AS contains_unmatched
+          FROM eligible
+          GROUP BY client_mac, ssid, controller_event_at,
+                   reported_connected_seconds, reported_traffic_total_bytes
+        )
+        SELECT
+          COALESCE((SELECT SUM(reported_traffic_total_bytes)
+                    FROM fingerprints),0) AS traffic_bytes,
+          (SELECT COUNT(*) FROM eligible) AS eligible_terminal_event_count,
+          (SELECT COUNT(*) FROM fingerprints) AS included_fingerprint_count,
+          COALESCE((SELECT SUM(processing_result='unmatched')
+                    FROM eligible),0) AS unmatched_included_event_count,
+          COALESCE((SELECT SUM(processing_result='pending_match')
+                    FROM attributable),0) AS pending_event_count,
+          COALESCE((SELECT SUM(processing_result='invalid')
+                    FROM attributable),0) AS invalid_event_count,
+          COALESCE((SELECT SUM(
+                    processing_result IN ('closed','unmatched')
+                    AND controller_in_range=1
+                    AND (reported_traffic_total_bytes IS NULL
+                         OR typeof(reported_traffic_total_bytes)!='integer'
+                         OR reported_traffic_total_bytes<0))
+                    FROM attributable),0) AS missing_traffic_count,
+          COALESCE((SELECT SUM(controller_event_at IS NULL)
+                    FROM attributable),0) AS missing_controller_time_count,
+          COALESCE((SELECT SUM(event_count-1) FROM fingerprints),0)
+                    AS semantic_duplicate_count,
+          COALESCE((SELECT SUM(
+                    processing_result IN ('closed','unmatched')
+                    AND controller_in_range=1
+                    AND NOT (
+                      {_CLIENT_MAC_SQL}
+                      AND typeof(reported_connected_seconds)='integer'
+                      AND reported_connected_seconds>=0
+                      AND typeof(reported_traffic_total_bytes)='integer'
+                      AND reported_traffic_total_bytes>=0
+                    )) FROM attributable),0)
+          - COALESCE((SELECT SUM(
+                    processing_result IN ('closed','unmatched')
+                    AND controller_in_range=1
+                    AND (reported_traffic_total_bytes IS NULL
+                         OR typeof(reported_traffic_total_bytes)!='integer'
+                         OR reported_traffic_total_bytes<0))
+                    FROM attributable),0) AS other_excluded_event_count,
+          COALESCE((SELECT SUM(processing_result NOT IN
+                    ('pending_match','closed','unmatched','invalid'))
+                    FROM attributable),0) AS unsupported_result_count,
+          (SELECT MIN(COALESCE(controller_event_at,received_at))
+             FROM attributable) AS earliest_persisted_evidence_at,
+          (SELECT MAX(COALESCE(controller_event_at,received_at))
+             FROM attributable) AS latest_persisted_evidence_at
+    """
+
 
 class AnalyticsSourceError(RuntimeError):
     """A source cannot satisfy the read-only Analytics contract."""
@@ -321,6 +448,97 @@ class AnalyticsSourceGateway:
                 }
             finally:
                 connection.rollback()
+
+    def home_activity_data(
+        self,
+        *,
+        site_id: str,
+        guest_ssids: Sequence[str],
+        from_utc: str,
+        to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        """Return bounded Activity aggregates in one read-only snapshot."""
+        if not guest_ssids:
+            raise AnalyticsSourceUnavailable("Activity guest scope is empty")
+        placeholders = ",".join("?" for _ in guest_ssids)
+        visit_sql = _home_activity_visit_sql(placeholders)
+        traffic_sql = _home_activity_traffic_sql(placeholders)
+        visit_parameters = (
+            site_id, *tuple(guest_ssids), from_utc, to_utc
+        )
+        traffic_parameters = (
+            site_id, from_utc, to_utc, *tuple(guest_ssids),
+            _OFFLINE_EVENT_TYPE,
+            site_id, from_utc, to_utc, *tuple(guest_ssids),
+            _OFFLINE_EVENT_TYPE,
+        )
+        with self._connection("visits", deadline) as connection:
+            connection.execute("BEGIN")
+            try:
+                visits = self._one(
+                    connection, visit_sql, visit_parameters, deadline
+                )
+                traffic = self._one(
+                    connection, traffic_sql, traffic_parameters, deadline
+                )
+                reader = self._one(
+                    connection,
+                    "SELECT MAX(updated_at) AS watermark "
+                    "FROM visit_reader_state",
+                    (),
+                    deadline,
+                )
+                deadline.require_remaining()
+            finally:
+                connection.rollback()
+        return {
+            "visits": dict(visits) if visits is not None else {},
+            "traffic": dict(traffic) if traffic is not None else {},
+            "reader_watermark_at": (
+                None if reader is None else reader["watermark"]
+            ),
+        }
+
+    def explain_home_activity(
+        self,
+        *,
+        site_id: str,
+        guest_ssids: Sequence[str],
+        from_utc: str,
+        to_utc: str,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, tuple[str, ...]]:
+        """Return plans used by the deterministic Activity capacity gate."""
+        if not guest_ssids:
+            raise AnalyticsSourceUnavailable("Activity guest scope is empty")
+        placeholders = ",".join("?" for _ in guest_ssids)
+        visit_parameters = (
+            site_id, *tuple(guest_ssids), from_utc, to_utc
+        )
+        traffic_parameters = (
+            site_id, from_utc, to_utc, *tuple(guest_ssids),
+            _OFFLINE_EVENT_TYPE,
+            site_id, from_utc, to_utc, *tuple(guest_ssids),
+            _OFFLINE_EVENT_TYPE,
+        )
+        with self._connection("visits", deadline) as connection:
+            visits = self._all(
+                connection,
+                "EXPLAIN QUERY PLAN " + _home_activity_visit_sql(placeholders),
+                visit_parameters,
+                deadline,
+            )
+            traffic = self._all(
+                connection,
+                "EXPLAIN QUERY PLAN " + _home_activity_traffic_sql(placeholders),
+                traffic_parameters,
+                deadline,
+            )
+        return {
+            "authorized_visits": tuple(str(row[3]) for row in visits),
+            "traffic": tuple(str(row[3]) for row in traffic),
+        }
 
     def cycle_quality(
         self,

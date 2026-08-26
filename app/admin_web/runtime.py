@@ -10,6 +10,11 @@ from .config import AdminWebConfig, AdminWebConfigError, admin_web_config_from_s
 from .policy import AdminAccessPolicy, AdminSiteContextResolver
 from .rate_limit import AdminLoginRateLimiter
 from .stores import AdminPreAuthCsrfStore, AdminSessionStore
+from .home_activity_config import (
+    HomeActivityConfig,
+    HomeActivityConfigError,
+    home_activity_config_from_settings,
+)
 
 
 @dataclass(slots=True)
@@ -22,6 +27,8 @@ class AdminWebRuntime:
     access_policy: AdminAccessPolicy | None = None
     site_resolver: AdminSiteContextResolver | None = None
     query_service: Any | None = None
+    home_activity_config: HomeActivityConfig | None = None
+    home_activity_state: str = "disabled"
     blueprint: Any | None = None
 
     def clear(self) -> None:
@@ -75,6 +82,32 @@ def create_admin_web_runtime(
             observation_read_service,
         )
     )
+    activity_requested = settings.get(
+        "web_admin_home_activity_enabled", "false"
+    ) in (True, "true")
+    current_state_config = (
+        getattr(current_state_read_service, "config", None)
+        if activity_requested
+        else None
+    )
+    try:
+        activity_config = home_activity_config_from_settings(
+            settings,
+            admin_config=config,
+            current_state_config=current_state_config,
+        )
+        activity_state = "active" if activity_config.enabled else "disabled"
+    except HomeActivityConfigError as exc:
+        activity_config = None
+        activity_state = "unavailable"
+        logger.error(
+            "admin.home_activity_configuration_failed",
+            extra={
+                "event": "admin.home_activity_configuration_failed",
+                "reason": exc.reason,
+            },
+            exc_info=True,
+        )
     query_service = None
     if getattr(analytics_runtime, "state", None) == "active" and source_ready:
         query_service = _query_service(
@@ -84,6 +117,7 @@ def create_admin_web_runtime(
             visit_read_service,
             observation_read_service,
             current_state_read_service,
+            activity_config,
         )
     runtime = AdminWebRuntime(
         state=(
@@ -101,6 +135,8 @@ def create_admin_web_runtime(
             config.default_site_id,
         ),
         query_service=query_service,
+        home_activity_config=activity_config,
+        home_activity_state=activity_state,
     )
     from .routes import create_admin_web_blueprint
 
@@ -115,6 +151,7 @@ def _query_service(
     visit_read_service: Any,
     observation_read_service: Any,
     current_state_read_service: Any | None = None,
+    home_activity_config: HomeActivityConfig | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
     try:
@@ -143,6 +180,10 @@ def _query_service(
             current_traffic_read_service=getattr(
                 analytics_runtime, "current_traffic_service", None
             ),
+            home_activity_read_service=getattr(
+                analytics_runtime, "home_activity_service", None
+            ),
+            home_activity_config=home_activity_config,
         )
     except (AttributeError, TypeError):
         return None

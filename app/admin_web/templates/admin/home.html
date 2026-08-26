@@ -50,6 +50,66 @@
   </section>
 </section>
 {% endif %}
+{% if home_activity_enabled %}
+<section id="home-activity" aria-labelledby="home-activity-title">
+  <div class="section-heading">
+    <div>
+      <h2 id="home-activity-title">Visits and Traffic</h2>
+      <p class="live-detail">Authorized Visit openings and estimated completed guest-session traffic.</p>
+    </div>
+  </div>
+  <div class="activity-grid">
+    <article class="card activity-period" aria-labelledby="activity-today-title">
+      <h3 id="activity-today-title">Today</h3>
+      <p id="activity-today-range" class="live-detail">Loading resolved Site-local period…</p>
+      <p id="activity-today-visits" class="metric">—</p>
+      <p class="live-detail">Authorized visits</p>
+      <p id="activity-today-traffic" class="metric">—</p>
+      <p class="live-detail">Traffic · Estimated</p>
+      <p id="activity-today-quality" class="activity-quality">Loading…</p>
+    </article>
+    <article class="card activity-period" aria-labelledby="activity-selected-title">
+      <h3 id="activity-selected-title">Selected period</h3>
+      <button id="activity-picker-open" class="button button-secondary" type="button" aria-controls="activity-picker" aria-expanded="false">Change range</button>
+      <form id="activity-picker" class="activity-picker" novalidate hidden>
+        <label>Range<select name="period">
+          <option value="last_24h">Last 24 hours</option>
+          <option value="yesterday">Yesterday</option>
+          <option value="last_48h">Last 48 hours</option>
+          <option value="last_7d">Last 7 days</option>
+          <option value="current_month">Current month</option>
+          <option value="last_30d">Last 30 days</option>
+          <option value="custom">Custom</option>
+        </select></label>
+        <div id="activity-custom-fields" class="activity-custom" hidden>
+          <label>From date<input name="from_date" type="date"></label>
+          <label>From time<input name="from_time" type="time" step="1"></label>
+          <label>To date<input name="to_date" type="date"></label>
+          <label>To time<input name="to_time" type="time" step="1"></label>
+        </div>
+        <div class="form-actions">
+          <button id="activity-preview" class="button button-secondary" type="button" hidden>Preview</button>
+          <button id="activity-apply" class="button" type="submit">Apply</button>
+          <button id="activity-cancel" class="button button-secondary" type="button">Cancel</button>
+        </div>
+      </form>
+      <div id="activity-preview-state" class="live-detail" role="status" aria-live="polite"></div>
+      <p id="activity-selected-range" class="live-detail">Loading selected period…</p>
+      <p id="activity-selected-visits" class="metric">—</p>
+      <p class="live-detail">Authorized visits</p>
+      <p id="activity-selected-traffic" class="metric">—</p>
+      <p class="live-detail">Traffic · Estimated</p>
+      <p id="activity-selected-quality" class="activity-quality">Loading…</p>
+    </article>
+  </div>
+  <p class="activity-explanation">Estimated from completed guest sessions. Active sessions appear after offline reporting. Volume is attributed to session end. Not WAN/Internet or billing traffic.</p>
+</section>
+{% elif home_activity_unavailable %}
+<section class="state-panel" data-state="warning" aria-label="Visits and Traffic unavailable">
+  <span class="state-dot" aria-hidden="true"></span>
+  <div><strong>Visits and Traffic unavailable</strong><p>Activity configuration or its persisted read source is unavailable. Current panels remain independent.</p></div>
+</section>
+{% endif %}
 <section class="card card-wide live-section" aria-labelledby="by-ap-title">
   <h2 id="by-ap-title">Devices by AP — Now</h2>
   <div id="live-devices-by-ap" class="live-bars"></div>
