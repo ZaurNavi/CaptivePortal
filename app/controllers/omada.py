@@ -605,6 +605,7 @@ class OmadaProvider(ControllerInterface):
         return {
             "client_ip": client_ip,
             "client_mac": client_mac,
+            "ssid": cls._optional_ssid(item.get("ssid")),
             "authStatus": cls._optional_int(
                 item.get("authStatus")
             ),
@@ -625,6 +626,18 @@ class OmadaProvider(ControllerInterface):
     @staticmethod
     def _normalize_mac(value: Any) -> str:
         return format_mac_colon(value)
+
+    @staticmethod
+    def _optional_ssid(value: Any) -> Optional[str]:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
+        if "\x00" in value:
+            return None
+        return value
 
     @staticmethod
     def _optional_int(value: Any) -> Optional[int]:

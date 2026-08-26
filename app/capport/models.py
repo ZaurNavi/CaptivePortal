@@ -13,6 +13,7 @@ class CapportClient:
     client_mac: str
     auth_status: int | None
     active: bool | None
+    ssid: str | None = None
 
 
 @dataclass(frozen=True)
