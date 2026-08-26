@@ -41,11 +41,20 @@ from .models import (
     CurrentTrafficSnapshot,
     CurrentTrafficSourceSelection,
     CurrentTrafficTotals,
+    HomeActivityCoverage,
+    HomeActivityResult,
+    HomeActivityTraffic,
+    HomeActivityVisits,
 )
 from .current_traffic import (
     CurrentTrafficReadService,
     CurrentTrafficSourceUnavailable,
     CurrentTrafficValidationError,
+)
+from .home_activity import (
+    HomeActivityReadService,
+    HomeActivitySourceUnavailable,
+    HomeActivityValidationError,
 )
 from .read_service import AnalyticsReadService
 from .runtime import AnalyticsRuntime, create_analytics_runtime
@@ -96,6 +105,13 @@ __all__ = [
     "CurrentTrafficSourceUnavailable",
     "CurrentTrafficTotals",
     "CurrentTrafficValidationError",
+    "HomeActivityCoverage",
+    "HomeActivityReadService",
+    "HomeActivityResult",
+    "HomeActivitySourceUnavailable",
+    "HomeActivityTraffic",
+    "HomeActivityValidationError",
+    "HomeActivityVisits",
     "VisitAnalyticsService",
     "WirelessAnalyticsService",
     "analytics_api_config_from_settings",

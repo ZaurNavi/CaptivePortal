@@ -40,6 +40,8 @@ def render_admin_page(
     home_traffic_refresh_seconds: int = 60,
     home_traffic_request_timeout_seconds: int = 20,
     home_traffic_page_size: int = 100,
+    home_activity_state: str = "disabled",
+    home_activity_config: object | None = None,
 ) -> Response:
     """Render only canonical server context; business data is API-loaded."""
     return make_response(
@@ -59,6 +61,17 @@ def render_admin_page(
             home_traffic_refresh_seconds=home_traffic_refresh_seconds,
             home_traffic_request_timeout_seconds=home_traffic_request_timeout_seconds,
             home_traffic_page_size=home_traffic_page_size,
+            home_activity_enabled=(
+                home_activity_state == "active"
+                and bool(getattr(home_activity_config, "enabled", False))
+            ),
+            home_activity_unavailable=home_activity_state == "unavailable",
+            home_activity_refresh_seconds=getattr(
+                home_activity_config, "refresh_seconds", 60
+            ),
+            home_activity_request_timeout_seconds=getattr(
+                home_activity_config, "request_timeout_seconds", 20
+            ),
         )
     )
 

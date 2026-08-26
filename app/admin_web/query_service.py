@@ -18,7 +18,10 @@ from app.analytics.validation import AnalyticsQueryValidationError, parse_utc
 from app.analytics import (
     CurrentTrafficSourceUnavailable,
     CurrentTrafficValidationError,
+    HomeActivitySourceUnavailable,
+    HomeActivityValidationError,
 )
+from app.analytics.validation import format_utc
 from app.common.mac import format_mac_colon
 from app.current_state import (
     CurrentStateSchemaError,
@@ -46,6 +49,10 @@ from .current_traffic_serialization import (
     CurrentTrafficSerializationError,
     serialize_current_ap_traffic_page,
     serialize_current_traffic_summary,
+)
+from .home_activity_serialization import (
+    HomeActivitySerializationError,
+    serialize_home_activity,
 )
 
 
@@ -111,6 +118,8 @@ class AdminQueryService:
         visit_analytics_service: Any,
         current_state_read_service: Any | None = None,
         current_traffic_read_service: Any | None = None,
+        home_activity_read_service: Any | None = None,
+        home_activity_config: Any | None = None,
     ):
         self._config = config
         self._policy = policy
@@ -119,7 +128,59 @@ class AdminQueryService:
         self._analytics = visit_analytics_service
         self._current_state = current_state_read_service
         self._current_traffic = current_traffic_read_service
+        self._home_activity = home_activity_read_service
+        self._home_activity_config = home_activity_config
         self._slots = threading.BoundedSemaphore(config.max_concurrent_queries)
+
+    def home_activity(
+        self,
+        principal,
+        site_id,
+        *,
+        resolved_range,
+        evaluated_at,
+        next_site_midnight_utc=None,
+    ):
+        self._authorize(principal, "admin.read.overview", site_id)
+        activity = self._home_activity_config
+        source = self._home_activity
+        context = None if activity is None else activity.site(site_id)
+        if source is None or context is None or not activity.enabled:
+            raise AdminQueryUnavailable()
+
+        def query(deadline):
+            try:
+                value = source.get_activity(
+                    site_id=site_id,
+                    guest_ssids=activity.guest_ssids,
+                    range_payload=resolved_range.public_range(),
+                    from_utc=format_utc(resolved_range.from_utc),
+                    to_utc=format_utc(resolved_range.to_utc),
+                    evaluated_at_utc=format_utc(evaluated_at),
+                    timezone_name=context.timezone,
+                    visits_coverage_from_utc=context.visits_coverage_from_utc,
+                    traffic_coverage_from_utc=context.traffic_coverage_from_utc,
+                    traffic_fresh_max_age_seconds=(
+                        activity.traffic_fresh_max_age_seconds
+                    ),
+                    traffic_stale_max_age_seconds=(
+                        activity.traffic_stale_max_age_seconds
+                    ),
+                    deadline=deadline,
+                    next_site_midnight_utc=next_site_midnight_utc,
+                )
+                return AdminQueryResponse(serialize_home_activity(value))
+            except HomeActivityValidationError as exc:
+                raise AdminQueryValidationError() from exc
+            except (
+                HomeActivitySourceUnavailable,
+                HomeActivitySerializationError,
+                sqlite3.Error,
+                OSError,
+            ) as exc:
+                raise AdminQueryUnavailable() from exc
+
+        return self._run(query)
 
     def current_client_summary(self, principal, site_id):
         self._authorize(principal, "admin.read.overview", site_id)

@@ -8,6 +8,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -45,6 +46,13 @@ from .query_service import (
     AdminQueryNotFound,
     AdminQueryUnavailable,
     AdminQueryValidationError,
+)
+from .home_activity_ranges import (
+    HomeActivityRangeError,
+    next_site_midnight_utc,
+    resolve_custom,
+    resolve_selected,
+    resolve_today,
 )
 
 
@@ -90,6 +98,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             not (
                 _is_current_state_path(request.path)
                 or _is_current_traffic_path(request.path)
+                or _is_home_activity_path(request.path)
             )
             and any(len(request.args.getlist(key)) != 1 for key in request.args)
         ):
@@ -332,6 +341,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             home_traffic_refresh_seconds=config.home_traffic_refresh_seconds,
             home_traffic_request_timeout_seconds=config.home_traffic_request_timeout_seconds,
             home_traffic_page_size=config.home_traffic_page_size,
+            home_activity_state=runtime.home_activity_state,
+            home_activity_config=runtime.home_activity_config,
         )
 
     @blueprint.get("/admin/api/v1/session")
@@ -585,6 +596,238 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 **{key: request.args.get(key) for key in allowed},
             ),
         )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/home-activity/today")
+    @authenticated
+    def api_home_activity_today(site_id: str) -> Response:
+        return _home_activity_query(
+            site_id,
+            route_name="today",
+            allowed_parameters=frozenset(),
+            required_parameters=frozenset(),
+            resolver_operation=lambda context, evaluated: resolve_today(
+                context, evaluated
+            ),
+            include_midnight=True,
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/home-activity/selected")
+    @authenticated
+    def api_home_activity_selected(site_id: str) -> Response:
+        allowed = frozenset({
+            "period", "from_date", "from_time", "to_date", "to_time"
+        })
+        return _home_activity_query(
+            site_id,
+            route_name="selected",
+            allowed_parameters=allowed,
+            required_parameters=frozenset({"period"}),
+            resolver_operation=lambda context, evaluated: resolve_selected(
+                context,
+                {key: request.args.get(key) for key in request.args},
+                evaluated,
+            ),
+            include_midnight=False,
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/home-activity/range-preview")
+    @authenticated
+    def api_home_activity_range_preview(site_id: str) -> Response:
+        started = time.monotonic()
+        authorized_site = None
+        reason = "internal_error"
+        response: Response
+        try:
+            selected, context, failure = _home_activity_gate(
+                site_id,
+                allowed_parameters=frozenset({
+                    "from_date", "from_time", "to_date", "to_time"
+                }),
+                required_parameters=frozenset({"from_date", "to_date"}),
+            )
+            if failure is not None:
+                response, reason = failure
+                return response
+            authorized_site = selected
+            evaluated = datetime.now(timezone.utc)
+            try:
+                resolved = resolve_custom(
+                    context,
+                    {key: request.args.get(key) for key in request.args},
+                    evaluated,
+                    reject_future=False,
+                )
+            except HomeActivityRangeError:
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            payload = resolved.public_range()
+            response = make_response(_success(
+                selected,
+                {
+                    "timezone": context.timezone,
+                    "requested": payload["requested"],
+                    "resolved": payload["resolved"],
+                    "can_apply": resolved.to_utc <= evaluated,
+                    "validation_reason": (
+                        None if resolved.to_utc <= evaluated else "end_in_future"
+                    ),
+                },
+                enforce_size=True,
+            ))
+            reason = "ok" if response.status_code == 200 else "response_too_large"
+            return response
+        finally:
+            try:
+                _event(
+                    logger,
+                    "admin.home_activity_range_preview_completed",
+                    request_id=getattr(g, "admin_request_id", None),
+                    site_id=authorized_site,
+                    status_code=(response.status_code if "response" in locals() else 500),
+                    outcome=("success" if "response" in locals() and response.status_code == 200 else "error"),
+                    reason=reason,
+                    duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                )
+            except Exception:
+                pass
+
+    def _home_activity_query(
+        site_id: str,
+        *,
+        route_name: str,
+        allowed_parameters: frozenset[str],
+        required_parameters: frozenset[str],
+        resolver_operation: Callable[..., Any],
+        include_midnight: bool,
+    ) -> Response:
+        started = time.monotonic()
+        authorized_site = None
+        reason = "internal_error"
+        period = request.args.get("period") if route_name == "selected" else "today"
+        response: Response
+        try:
+            selected, context, failure = _home_activity_gate(
+                site_id,
+                allowed_parameters=allowed_parameters,
+                required_parameters=required_parameters,
+            )
+            if failure is not None:
+                response, reason = failure
+                return response
+            authorized_site = selected
+            evaluated = datetime.now(timezone.utc)
+            try:
+                resolved = resolver_operation(context, evaluated)
+            except HomeActivityRangeError:
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            service = runtime.query_service
+            if service is None:
+                response = make_response(_error("source_unavailable", 503))
+                reason = "source_unavailable"
+                return response
+            try:
+                result = service.home_activity(
+                    g.admin_principal,
+                    selected,
+                    resolved_range=resolved,
+                    evaluated_at=evaluated,
+                    next_site_midnight_utc=(
+                        next_site_midnight_utc(context, evaluated)
+                        if include_midnight else None
+                    ),
+                )
+                response = make_response(_success(
+                    selected, result.result, enforce_size=True
+                ))
+                reason = "ok" if response.status_code == 200 else "response_too_large"
+                return response
+            except AdminQueryValidationError:
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            except AdminQueryForbidden:
+                response = make_response(_error("site_forbidden", 403))
+                reason = "forbidden"
+                return response
+            except AdminQueryBusy:
+                response = make_response(_error("concurrency_limit", 429))
+                response.headers["Retry-After"] = "1"
+                reason = "busy"
+                return response
+            except AdminQueryDeadline:
+                response = make_response(_error("query_deadline", 503))
+                reason = "query_deadline"
+                return response
+            except AdminQueryUnavailable:
+                response = make_response(_error("source_unavailable", 503))
+                reason = "source_unavailable"
+                return response
+            except AdminQueryError:
+                response = make_response(_error("internal_error", 500))
+                return response
+            except Exception:
+                logger.exception("admin.home_activity_query_failed")
+                response = make_response(_error("internal_error", 500))
+                return response
+        finally:
+            status_code = response.status_code if "response" in locals() else 500
+            result_value = None
+            if "result" in locals() and isinstance(result.result, dict):
+                result_value = result.result
+            try:
+                _event(
+                    logger,
+                    f"admin.home_activity_{route_name}_query_completed",
+                    request_id=getattr(g, "admin_request_id", None),
+                    site_id=authorized_site,
+                    status_code=status_code,
+                    outcome="success" if status_code == 200 else "error",
+                    reason=reason,
+                    period=period,
+                    visit_status=(result_value or {}).get("authorized_visits", {}).get("status") if isinstance((result_value or {}).get("authorized_visits"), dict) else None,
+                    traffic_status=(result_value or {}).get("traffic", {}).get("status") if isinstance((result_value or {}).get("traffic"), dict) else None,
+                    duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                )
+            except Exception:
+                pass
+
+    def _home_activity_gate(
+        site_id: str,
+        *,
+        allowed_parameters: frozenset[str],
+        required_parameters: frozenset[str],
+    ):
+        try:
+            selected = resolver.resolve(site_id)
+        except AdminSiteContextError:
+            return None, None, (make_response(_error("invalid_request", 400)), "invalid_request")
+        except AdminAccessDenied:
+            return None, None, (make_response(_error("site_forbidden", 403)), "forbidden")
+        try:
+            authorized = policy.authorize(
+                g.admin_principal, "admin.read.overview", selected
+            )
+        except Exception:
+            return None, None, (make_response(_error("internal_error", 500)), "internal_error")
+        if not authorized:
+            return None, None, (make_response(_error("site_forbidden", 403)), "forbidden")
+        if runtime.home_activity_state == "disabled":
+            return selected, None, (make_response(_error("not_found", 404)), "feature_disabled")
+        activity = runtime.home_activity_config
+        context = None if activity is None else activity.site(selected)
+        if runtime.home_activity_state != "active" or context is None:
+            return selected, None, (make_response(_error("source_unavailable", 503)), "source_unavailable")
+        keys = set(request.args)
+        if (
+            keys - allowed_parameters
+            or not required_parameters.issubset(keys)
+            or any(len(request.args.getlist(key)) != 1 for key in request.args)
+        ):
+            return selected, context, (make_response(_error("invalid_request", 400)), "invalid_request")
+        return selected, context, None
 
     def _current_traffic_query(
         site_id: str,
@@ -987,6 +1230,13 @@ def _is_current_traffic_path(path: str) -> bool:
     return (
         path.startswith(ADMIN_API_PREFIX + "/sites/")
         and "/current-traffic/" in path
+    )
+
+
+def _is_home_activity_path(path: str) -> bool:
+    return (
+        path.startswith(ADMIN_API_PREFIX + "/sites/")
+        and "/home-activity/" in path
     )
 
 

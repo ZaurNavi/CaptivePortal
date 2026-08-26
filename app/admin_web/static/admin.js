@@ -446,6 +446,413 @@
   "use strict";
 
   const API_VERSION = "admin.read.v1";
+  const UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const STATUSES = new Set(["complete", "partial"]);
+  const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
+  const PERIODS = new Set(["last_24h", "yesterday", "last_48h", "last_7d", "current_month", "last_30d", "custom"]);
+  const ROLLING = new Set(["last_24h", "last_48h", "last_7d", "current_month", "last_30d"]);
+  const QUALITY = new Set([
+    "coverage_start_unknown", "requested_before_coverage_start",
+    "requested_after_coverage_through", "source_unavailable", "query_deadline",
+    "opening_authorization_evidence_missing", "authorization_chronology_anomaly",
+    "pending_offline_events", "invalid_offline_events", "missing_reported_traffic",
+    "missing_controller_time", "semantic_replay_suppressed",
+    "unsupported_processing_result", "reader_stale", "reader_unavailable",
+  ]);
+  const BACKOFF = [60, 120, 300];
+
+  function object(value) { return value && typeof value === "object" && !Array.isArray(value); }
+  function integer(value) { return typeof value === "number" && Number.isInteger(value) && value >= 0; }
+  function utc(value) {
+    if (typeof value !== "string" || !UTC.test(value)) return false;
+    const parsed = new Date(value);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+  }
+  function optionalUtc(value) { return value === null || utc(value); }
+  function coverage(value) {
+    if (!object(value) || !STATUSES.has(value.status)
+      || value.fully_covered !== (value.status === "complete")
+      || !optionalUtc(value.coverage_from_utc) || !optionalUtc(value.coverage_through_utc)
+      || !optionalUtc(value.covered_from_utc) || !optionalUtc(value.covered_through_utc)
+      || !Array.isArray(value.quality_reasons)
+      || new Set(value.quality_reasons).size !== value.quality_reasons.length
+      || value.quality_reasons.some((reason) => !QUALITY.has(reason))) return false;
+    if (value.status === "complete" && value.quality_reasons.length) return false;
+    if ((value.covered_from_utc === null) !== (value.covered_through_utc === null)) return false;
+    if (value.covered_from_utc !== null
+      && new Date(value.covered_from_utc) >= new Date(value.covered_through_utc)) return false;
+    return true;
+  }
+  function range(value, evaluatedAt) {
+    if (!object(value) || !object(value.requested) || !object(value.resolved)) return false;
+    const resolved = value.resolved;
+    return utc(resolved.from_utc) && utc(resolved.to_utc)
+      && typeof resolved.from_local === "string" && typeof resolved.to_local_exclusive === "string"
+      && typeof resolved.timezone === "string" && resolved.timezone.length > 0
+      && new Date(resolved.from_utc) < new Date(resolved.to_utc)
+      && new Date(resolved.to_utc) <= new Date(evaluatedAt);
+  }
+  function visits(value) {
+    return object(value) && integer(value.value) && STATUSES.has(value.status)
+      && value.value === value.verified_visit_count && integer(value.verified_visit_count)
+      && integer(value.integrity_anomaly_count) && value.cohort === "visit_opening_authorization"
+      && value.source_kind === "visit_lifecycle" && coverage(value.coverage)
+      && value.status === value.coverage.status
+      && optionalUtc(value.earliest_persisted_evidence_at)
+      && optionalUtc(value.latest_persisted_evidence_at);
+  }
+  function traffic(value) {
+    const names = ["eligible_terminal_event_count", "included_fingerprint_count",
+      "unmatched_included_event_count", "pending_event_count", "invalid_event_count",
+      "missing_traffic_count", "missing_controller_time_count", "semantic_duplicate_count",
+      "other_excluded_event_count"];
+    return object(value) && integer(value.bytes) && STATUSES.has(value.status)
+      && value.estimated === true && value.attribution === "completed_session_end"
+      && value.source_kind === ["om", "ada_offline_reported_traffic"].join("")
+      && names.every((name) => integer(value[name]))
+      && value.included_fingerprint_count <= value.eligible_terminal_event_count
+      && value.semantic_duplicate_count === value.eligible_terminal_event_count - value.included_fingerprint_count
+      && FRESHNESS.has(value.ingestion_freshness) && optionalUtc(value.reader_watermark_at)
+      && coverage(value.coverage) && value.status === value.coverage.status
+      && optionalUtc(value.earliest_persisted_evidence_at)
+      && optionalUtc(value.latest_persisted_evidence_at);
+  }
+  function validateActivity(payload, siteId, expectedKind) {
+    if (!object(payload) || payload.api_version !== API_VERSION || payload.site_id !== siteId
+      || !object(payload.result)) return null;
+    const result = payload.result;
+    if (!utc(result.evaluated_at_utc) || typeof result.timezone !== "string"
+      || !Array.isArray(result.guest_ssids) || !result.guest_ssids.length
+      || result.guest_ssids.some((ssid) => typeof ssid !== "string" || !ssid)
+      || !range(result.range, result.evaluated_at_utc)
+      || result.range.requested.kind !== expectedKind
+      || !visits(result.authorized_visits) || !traffic(result.traffic)
+      || !(result.next_site_midnight_utc === null || utc(result.next_site_midnight_utc))) return null;
+    if (expectedKind === "today" && result.next_site_midnight_utc === null) return null;
+    return result;
+  }
+  function validatePreview(payload, siteId) {
+    if (!object(payload) || payload.api_version !== API_VERSION || payload.site_id !== siteId
+      || !object(payload.result) || typeof payload.result.timezone !== "string"
+      || !object(payload.result.requested) || !object(payload.result.resolved)
+      || !utc(payload.result.resolved.from_utc) || !utc(payload.result.resolved.to_utc)
+      || typeof payload.result.resolved.from_local !== "string"
+      || typeof payload.result.resolved.to_local_exclusive !== "string"
+      || typeof payload.result.can_apply !== "boolean"
+      || !(payload.result.validation_reason === null || payload.result.validation_reason === "end_in_future")) return null;
+    return payload.result;
+  }
+  function bytes(value) {
+    if (!integer(value)) return "—";
+    if (value === 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let amount = value; let index = 0;
+    while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1; }
+    return `${index === 0 ? amount : amount.toFixed(amount >= 10 ? 1 : 2)} ${units[index]}`;
+  }
+  function selectionDynamic(period) { return ROLLING.has(period); }
+  function eligible(source, manual, now) {
+    if (source.disabled) return false;
+    if (!manual && !source.autoRefresh) return false;
+    if (source.failureCount > 0) {
+      const threshold = manual && Number.isFinite(source.manualEligibleAt)
+        ? source.manualEligibleAt
+        : source.nextEligibleAt;
+      return now >= threshold;
+    }
+    return manual || now >= source.nextEligibleAt;
+  }
+  function nextEligible(today, selected) {
+    const values = [today.nextEligibleAt];
+    if (selected.autoRefresh) values.push(selected.nextEligibleAt);
+    return Math.min(...values.filter(Number.isFinite));
+  }
+  function claim(source, controller, generation) {
+    if (source.generation !== generation || source.controller !== null) return false;
+    source.controller = controller; return true;
+  }
+  function release(source, controller) { if (source.controller === controller) source.controller = null; }
+  function abort(source, reason) {
+    const controller = source.controller; if (!controller) return false;
+    controller.abort(reason); release(source, controller); return true;
+  }
+  function failureTransition(source, item, interval, now, randomValue) {
+    if (item.kind === "disabled" || item.kind === "invalid") {
+      if (item.kind === "disabled") source.disabled = true;
+      source.autoRefresh = false; source.nextEligibleAt = Infinity;
+      return Infinity;
+    }
+    source.failureCount += 1;
+    const jitter = item.status === 429
+      ? Math.max(0, Math.min(1, randomValue || 0)) * 10
+      : 0;
+    const delay = Math.max(
+      interval,
+      BACKOFF[Math.min(source.failureCount - 1, 2)],
+      item.retryAfter || 0,
+    ) + jitter;
+    source.nextEligibleAt = now + delay * 1000;
+    source.manualEligibleAt = source.nextEligibleAt;
+    return delay;
+  }
+
+  if (typeof window !== "undefined") {
+    window.CaptivPortalHomeActivityTest = Object.freeze({
+      bytes, coverage, coverageText, eligible, nextEligible, range,
+      selectionDynamic, failureTransition,
+      validateActivity, validatePreview, visits, traffic, claim, release, abort,
+    });
+  }
+  if (typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  if (!root || root.dataset.page !== "home" || root.dataset.homeActivityEnabled !== "true") return;
+
+  const siteId = root.dataset.siteId;
+  const base = root.dataset.apiBase + "/home-activity";
+  const interval = Number(root.dataset.homeActivityRefreshSeconds);
+  const timeoutMs = Number(root.dataset.homeActivityRequestTimeoutSeconds) * 1000;
+  const picker = document.getElementById("activity-picker");
+  const pickerOpener = document.getElementById("activity-picker-open");
+  const fields = document.getElementById("activity-custom-fields");
+  const previewButton = document.getElementById("activity-preview");
+  const applyButton = document.getElementById("activity-apply");
+  const cancelButton = document.getElementById("activity-cancel");
+  const previewState = document.getElementById("activity-preview-state");
+  const today = {generation: 0, controller: null, failureCount: 0, nextEligibleAt: 0, manualEligibleAt: 0, autoRefresh: true, disabled: false, accepted: null};
+  const selected = {generation: 0, controller: null, failureCount: 0, nextEligibleAt: 0, manualEligibleAt: 0, autoRefresh: true, disabled: false, accepted: null, revision: 0};
+  const preview = {generation: 0, controller: null};
+  let applied = {period: "last_24h"};
+  let previewSignature = null;
+  let stopped = false;
+
+  function currentSignature() {
+    return JSON.stringify({
+      from_date: picker.elements.from_date.value,
+      from_time: picker.elements.from_time.value,
+      to_date: picker.elements.to_date.value,
+      to_time: picker.elements.to_time.value,
+    });
+  }
+  function selectedParameters() {
+    const values = {period: picker.elements.period.value};
+    if (values.period === "custom") {
+      ["from_date", "from_time", "to_date", "to_time"].forEach((name) => {
+        if (picker.elements[name].value) values[name] = picker.elements[name].value;
+      });
+    }
+    return values;
+  }
+  function query(values) {
+    const result = new URLSearchParams();
+    Object.entries(values).forEach(([key, value]) => result.set(key, value));
+    return result.toString();
+  }
+  function classify(status, code) {
+    if (status === 401) return {global: true, kind: "session", retryAfter: 0, status};
+    if (status === 403) return {global: true, kind: "forbidden", retryAfter: 0, status};
+    if (status === 404) return {global: false, kind: "disabled", retryAfter: 0, status};
+    if (status === 400) return {global: false, kind: "invalid", retryAfter: 0, status};
+    return {global: false, kind: code === "query_deadline" ? "timeout" : "unavailable", retryAfter: 0, status};
+  }
+  async function requestJson(url, source, generation) {
+    const controller = new AbortController();
+    if (!claim(source, controller, generation)) throw {neutral: true};
+    const timer = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+    try {
+      const response = await fetch(url, {method: "GET", credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}, signal: controller.signal});
+      let payload = null; try { payload = await response.json(); } catch (_error) { payload = null; }
+      if (!response.ok) {
+        const failure = classify(response.status, payload && payload.error && payload.error.code);
+        const retryAfter = Number(response.headers.get("Retry-After"));
+        failure.retryAfter = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0;
+        throw {failure};
+      }
+      if (source.generation !== generation || stopped) throw {neutral: true};
+      return payload;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (["hidden", "pagehide", "superseded"].includes(controller.signal.reason)) throw {neutral: true};
+        throw {failure: {global: false, kind: "timeout", retryAfter: 0}};
+      }
+      if (error && (error.failure || error.neutral)) throw error;
+      throw {failure: {global: false, kind: "unavailable", retryAfter: 0}};
+    } finally {
+      window.clearTimeout(timer); release(source, controller);
+    }
+  }
+  function rangeText(value) {
+    const resolved = value.range.resolved;
+    return `${resolved.from_local} → ${resolved.to_local_exclusive} · ${resolved.timezone}`;
+  }
+  function coverageText(label, value) {
+    if (value.status === "complete") return `${label} complete`;
+    const coverageValue = value.coverage;
+    if (coverageValue.covered_from_utc && coverageValue.covered_through_utc) {
+      return `${label} partial · proven ${coverageValue.covered_from_utc} → ${coverageValue.covered_through_utc}`;
+    }
+    return `${label} partial · proven coverage unavailable`;
+  }
+  function qualityText(value) {
+    const visit = value.authorized_visits; const trafficValue = value.traffic;
+    const labels = [coverageText("Visits", visit), coverageText("Traffic", trafficValue), `Reader ${trafficValue.ingestion_freshness}`];
+    return labels.join(" · ");
+  }
+  function render(kind, value) {
+    document.getElementById(`activity-${kind}-range`).textContent = rangeText(value);
+    document.getElementById(`activity-${kind}-visits`).textContent = String(value.authorized_visits.value);
+    const suffix = value.traffic.status === "partial" ? " · Partial · Estimated" : " · Estimated";
+    document.getElementById(`activity-${kind}-traffic`).textContent = bytes(value.traffic.bytes) + suffix;
+    document.getElementById(`activity-${kind}-quality`).textContent = qualityText(value);
+  }
+  function loading(kind) {
+    document.getElementById(`activity-${kind}-quality`).textContent = "Loading…";
+  }
+  function failed(kind, message) {
+    document.getElementById(`activity-${kind}-quality`).textContent = message;
+  }
+  function success(source, dynamic, value) {
+    source.accepted = value; source.failureCount = 0; source.manualEligibleAt = 0; source.autoRefresh = dynamic;
+    if (source === selected && applied.period === "yesterday"
+      && today.accepted && today.accepted.next_site_midnight_utc) {
+      source.autoRefresh = true;
+      source.nextEligibleAt = new Date(today.accepted.next_site_midnight_utc).getTime() - Date.now() + performance.now();
+    } else if (dynamic) source.nextEligibleAt = performance.now() + interval * 1000;
+    else if (value.next_site_midnight_utc) source.nextEligibleAt = new Date(value.next_site_midnight_utc).getTime() - Date.now() + performance.now();
+    else source.nextEligibleAt = Infinity;
+  }
+  function failure(source, kind, item) {
+    if (item.global) {
+      const coordinator = window.CaptivPortalHomeCoordinator;
+      if (coordinator) coordinator.stop(item.kind);
+      return;
+    }
+    if (item.kind === "disabled") {
+      failureTransition(source, item, interval, performance.now(), Math.random());
+      failed(kind, "Activity is disabled; current panels remain available.");
+      return;
+    }
+    failureTransition(source, item, interval, performance.now(), Math.random());
+    if (source === selected && !selectionDynamic(applied.period)) {
+      if (applied.period === "yesterday"
+        && today.accepted && today.accepted.next_site_midnight_utc) {
+        source.autoRefresh = true;
+        source.nextEligibleAt = new Date(today.accepted.next_site_midnight_utc).getTime() - Date.now() + performance.now();
+      } else {
+        source.autoRefresh = false;
+        source.nextEligibleAt = Infinity;
+      }
+    }
+    failed(kind, item.kind === "invalid" ? "Invalid Activity request or response." : "Activity source unavailable; retry remains bounded.");
+  }
+  async function refreshToday(manual) {
+    if (!eligible(today, manual, performance.now())) return;
+    today.generation += 1; const generation = today.generation; loading("today");
+    try {
+      const payload = await requestJson(`${base}/today`, today, generation);
+      const value = validateActivity(payload, siteId, "today");
+      if (!value) throw {failure: {global: false, kind: "invalid", retryAfter: 0}};
+      render("today", value); success(today, true, value);
+    } catch (error) { if (!(error && error.neutral)) failure(today, "today", error.failure || {global: false, kind: "unavailable", retryAfter: 0}); }
+  }
+  async function refreshSelected(manual) {
+    if (!eligible(selected, manual, performance.now())) return;
+    selected.generation += 1; const generation = selected.generation; const revision = selected.revision; loading("selected");
+    try {
+      const payload = await requestJson(`${base}/selected?${query(applied)}`, selected, generation);
+      const expected = applied.period === "custom" ? "custom" : "preset";
+      const value = validateActivity(payload, siteId, expected);
+      if (!value || selected.revision !== revision) throw {failure: {global: false, kind: "invalid", retryAfter: 0}};
+      render("selected", value); success(selected, selectionDynamic(applied.period), value);
+    } catch (error) { if (!(error && error.neutral)) failure(selected, "selected", error.failure || {global: false, kind: "unavailable", retryAfter: 0}); }
+  }
+  async function run(manual) { await refreshToday(manual); await refreshSelected(manual); }
+  async function runToday(manual) { await refreshToday(manual); }
+  async function runSelected(manual) { await refreshSelected(manual); }
+  function abortAll(reason) { abort(today, reason); abort(selected, reason); abort(preview, reason); }
+  function abortSelected(reason) { selected.generation += 1; abort(selected, reason); }
+  function due() { return nextEligible(today, selected); }
+
+  window.CaptivPortalHomeActivityCoordinator = Object.freeze({
+    abort: abortAll, abortSelected, nextEligibleAt: due,
+    run, runToday, runSelected,
+  });
+
+  async function doPreview() {
+    preview.generation += 1; const generation = preview.generation; abort(preview, "superseded");
+    previewState.textContent = "Resolving range in the Site timezone…";
+    const values = selectedParameters(); delete values.period;
+    try {
+      const payload = await requestJson(`${base}/range-preview?${query(values)}`, preview, generation);
+      const value = validatePreview(payload, siteId);
+      if (!value) throw {failure: {global: false, kind: "invalid", retryAfter: 0}};
+      previewSignature = value.can_apply ? currentSignature() : null;
+      applyButton.disabled = !value.can_apply;
+      previewState.textContent = value.can_apply
+        ? `${value.resolved.from_local} → ${value.resolved.to_local_exclusive} · ${value.timezone} · UTC ${value.resolved.from_utc} → ${value.resolved.to_utc}`
+        : "End is in the future.";
+    } catch (error) {
+      if (!(error && error.neutral)) {
+        previewSignature = null; applyButton.disabled = true;
+        previewState.textContent = "This local range is invalid, nonexistent, or ambiguous in the Site timezone.";
+      }
+    }
+  }
+  function showCustom() {
+    const custom = picker.elements.period.value === "custom";
+    fields.hidden = !custom; previewButton.hidden = !custom;
+    previewSignature = null; applyButton.disabled = custom;
+    previewState.textContent = "";
+  }
+  function openPicker() {
+    picker.hidden = false;
+    pickerOpener.setAttribute("aria-expanded", "true");
+    picker.elements.period.focus();
+  }
+  function closePicker() {
+    picker.hidden = true;
+    pickerOpener.setAttribute("aria-expanded", "false");
+    pickerOpener.focus();
+  }
+  function restoreAppliedDraft() {
+    picker.elements.period.value = applied.period;
+    ["from_date", "from_time", "to_date", "to_time"].forEach((name) => {
+      picker.elements[name].value = applied[name] || "";
+    });
+    showCustom();
+  }
+  pickerOpener.addEventListener("click", openPicker);
+  picker.elements.period.addEventListener("change", showCustom);
+  ["from_date", "from_time", "to_date", "to_time"].forEach((name) => picker.elements[name].addEventListener("input", () => {
+    previewSignature = null; if (picker.elements.period.value === "custom") applyButton.disabled = true;
+  }));
+  previewButton.addEventListener("click", doPreview);
+  picker.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const values = selectedParameters();
+    if (values.period === "custom" && previewSignature !== currentSignature()) return;
+    applied = values; selected.revision += 1; abortSelected("superseded");
+    selected.failureCount = 0; selected.nextEligibleAt = 0; selected.manualEligibleAt = 0; selected.autoRefresh = selectionDynamic(values.period);
+    closePicker();
+    const coordinator = window.CaptivPortalHomeCoordinator;
+    if (coordinator) coordinator.requestActivitySelected();
+  });
+  cancelButton.addEventListener("click", () => {
+    restoreAppliedDraft(); closePicker();
+  });
+  picker.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault(); restoreAppliedDraft(); closePicker();
+    }
+  });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) abortAll("hidden"); });
+  window.addEventListener("pagehide", () => { stopped = true; abortAll("pagehide"); });
+  showCustom();
+}());
+
+(function () {
+  "use strict";
+
+  const API_VERSION = "admin.read.v1";
   const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
   const AUTH = new Set(["authorized", "pending", "other", "unknown"]);
   const AP_PRODUCT = new Set(["Online", "Other", "Unknown"]);
@@ -644,7 +1051,8 @@
   if (typeof document === "undefined") return;
   const root = document.getElementById("admin-page");
   if (!root || root.dataset.page !== "home" || root.dataset.homeLiveEnabled !== "true"
-    || root.dataset.homeTrafficEnabled === "true") return;
+    || root.dataset.homeTrafficEnabled === "true"
+    || root.dataset.homeActivityEnabled === "true") return;
 
   const siteId = root.dataset.siteId;
   const apiBase = root.dataset.apiBase + "/current-state";
@@ -1244,6 +1652,12 @@
       () => invoke("traffic"),
     );
   }
+  function runActivityPhase(activity, pendingSelected, manual) {
+    if (!activity) return Promise.resolve();
+    return pendingSelected
+      ? activity.runToday(manual)
+      : activity.run(manual);
+  }
   function beginCoordinator(state, view) {
     if (state.active) return null;
     state.active = true;
@@ -1283,7 +1697,7 @@
       acceptTrafficSummary, beginCoordinator, canonicalUtc, classify,
       clearTrafficPageState, endCoordinator, formatMbps, ownsGeneration,
       pageFailureEffect, retryDelay, retryJitter, runPhasedCycle,
-      runEligiblePhasedCycle, sourceEligible,
+      runActivityPhase, runEligiblePhasedCycle, sourceEligible,
       trafficFailureTransition,
       trafficAge, trafficDisplay, trafficFreshness, trafficPageEligible,
       validateTrafficPage, validateTrafficSummary,
@@ -1292,12 +1706,14 @@
   if (typeof document === "undefined") return;
   const root = document.getElementById("admin-page");
   if (!root || root.dataset.page !== "home" || root.dataset.homeLiveEnabled !== "true"
-    || root.dataset.homeTrafficEnabled !== "true") return;
+    || (root.dataset.homeTrafficEnabled !== "true"
+      && root.dataset.homeActivityEnabled !== "true")) return;
 
   const live = window.CaptivPortalHomeLiveTest;
   const siteId = root.dataset.siteId;
   const currentBase = root.dataset.apiBase + "/current-state";
   const trafficBase = root.dataset.apiBase + "/current-traffic";
+  const trafficEnabled = root.dataset.homeTrafficEnabled === "true";
   const liveRefresh = Number(root.dataset.homeLiveRefreshSeconds);
   const trafficRefresh = Number(root.dataset.homeTrafficRefreshSeconds);
   const liveTimeout = Number(root.dataset.homeLiveRequestTimeoutSeconds) * 1000;
@@ -1316,9 +1732,9 @@
   const sources = {
     client: {generation: 0, controller: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, rows: [], cursor: null, nextEligibleAt: 0},
     ap: {generation: 0, controller: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, rows: [], cursor: null, nextEligibleAt: 0},
-    traffic: {generation: 0, controller: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, rows: [], cursor: null, nextEligibleAt: 0, pageForbidden: false, disabled: false},
+    traffic: {generation: 0, controller: null, failureCount: 0, cleanRetry: false, summary: null, acceptedAt: 0, rows: [], cursor: null, nextEligibleAt: trafficEnabled ? 0 : Infinity, pageForbidden: false, disabled: !trafficEnabled},
   };
-  const coordinator = {generation: 0, active: false, pending: false, timer: null, activePromise: null};
+  const coordinator = {generation: 0, active: false, pending: false, pendingActivity: false, timer: null, activePromise: null};
   let stopped = false;
   let ageTimer = null;
 
@@ -1335,7 +1751,12 @@
     globalPanel.hidden = false;
   }
   function clearGlobal() { globalPanel.hidden = true; }
-  function abortAll(reason) { Object.values(sources).forEach((source) => live.abortOwnedController(source, reason)); }
+  function activityController() { return window.CaptivPortalHomeActivityCoordinator || null; }
+  function abortAll(reason) {
+    Object.values(sources).forEach((source) => live.abortOwnedController(source, reason));
+    const activity = activityController();
+    if (activity) activity.abort(reason);
+  }
   function stopAll(kind) {
     stopped = true;
     abortAll(kind);
@@ -1553,6 +1974,7 @@
     document.getElementById("traffic-ap-state").textContent = sources.traffic.pageForbidden ? "AP traffic detail access denied." : (sources.traffic.rows.length ? `Showing ${sources.traffic.rows.length} AP traffic row(s).` : "No AP traffic rows in this snapshot.");
   }
   function renderTrafficFreshness() {
+    if (!trafficEnabled) return;
     if (!sources.traffic.summary) return;
     const effective = trafficFreshness(sources.traffic.summary.snapshot, sources.traffic.summary.freshness_policy, sources.traffic.acceptedAt, performance.now());
     renderTrafficSummary();
@@ -1604,7 +2026,7 @@
   }
   async function refreshTraffic(generation) {
     const source = sources.traffic; source.generation = generation;
-    if (stopped || document.hidden || coordinator.pending || source.disabled) return {cleanRefresh: false};
+    if (!trafficEnabled || stopped || document.hidden || coordinator.pending || source.disabled) return {cleanRefresh: false};
     try {
       const payload = await requestJson(`${trafficBase}/summary`, source, generation, trafficTimeout);
       const summary = validateTrafficSummary(payload, siteId);
@@ -1637,6 +2059,11 @@
   }
   function nextDelay() {
     const finite = Object.values(sources).map((source) => source.nextEligibleAt).filter(Number.isFinite);
+    const activity = activityController();
+    if (activity) {
+      const due = activity.nextEligibleAt();
+      if (Number.isFinite(due)) finite.push(due);
+    }
     if (!finite.length) return Math.min(liveRefresh, trafficRefresh) * 1000;
     return Math.max(1000, Math.min(...finite) - performance.now());
   }
@@ -1666,6 +2093,11 @@
       );
       cleanRefresh = outcome.phaseA.some((item) => item.status === "fulfilled" && item.value.cleanRefresh)
         || (outcome.traffic && outcome.traffic.cleanRefresh);
+      await Promise.resolve();
+      const activity = activityController();
+      if (activity && !coordinator.pending && !stopped && !document.hidden) {
+        await runActivityPhase(activity, coordinator.pendingActivity, manual);
+      }
       document.getElementById("home-live-announcement").textContent = "Home current sources updated.";
     } finally {
       endCoordinator(coordinator, generation, busyView);
@@ -1674,6 +2106,9 @@
       coordinator.pending = false;
       await Promise.resolve();
       if (!stopped && !document.hidden) requestRefresh(true);
+    } else if (coordinator.pendingActivity) {
+      coordinator.pendingActivity = false;
+      requestActivitySelected();
     } else scheduleCoordinator(nextDelay());
   }
   function requestRefresh(manual) {
@@ -1688,6 +2123,36 @@
     }
     coordinator.activePromise = performRefresh(manual);
   }
+  async function performActivitySelected() {
+    const busyView = {setBusy: (value) => { refreshButton.disabled = value; }};
+    const generation = beginCoordinator(coordinator, busyView);
+    if (generation === null) return;
+    try {
+      const activity = activityController();
+      if (activity && !stopped && !document.hidden) await activity.runSelected(true);
+    } finally {
+      endCoordinator(coordinator, generation, busyView);
+    }
+    if (coordinator.pendingActivity) {
+      coordinator.pendingActivity = false;
+      requestActivitySelected();
+    } else scheduleCoordinator(nextDelay());
+  }
+  function requestActivitySelected() {
+    if (stopped || document.hidden) return;
+    const activity = activityController();
+    if (!activity) return;
+    if (coordinator.active) {
+      coordinator.pendingActivity = true;
+      activity.abortSelected("superseded");
+      return;
+    }
+    coordinator.activePromise = performActivitySelected();
+  }
+  window.CaptivPortalHomeCoordinator = Object.freeze({
+    requestActivitySelected,
+    stop: stopAll,
+  });
   async function loadMore(kind) {
     const source = sources[kind];
     if (stopped || coordinator.active || !source.summary || !source.cursor || source.pageForbidden) return;
@@ -1718,7 +2183,7 @@
   refreshButton.addEventListener("click", () => requestRefresh(true));
   clientMore.addEventListener("click", () => loadMore("client"));
   apMore.addEventListener("click", () => loadMore("ap"));
-  trafficMore.addEventListener("click", () => loadMore("traffic"));
+  if (trafficMore) trafficMore.addEventListener("click", () => loadMore("traffic"));
   filters.addEventListener("change", () => {
     live.resetClientState(sources.client, {clearRows: () => clientRows.replaceChildren(), hideMore: () => { clientMore.hidden = true; }, loading: () => { document.getElementById("live-client-state").textContent = "Loading filtered current clients…"; }});
     requestRefresh(true);

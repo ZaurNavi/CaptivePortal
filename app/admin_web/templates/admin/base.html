@@ -58,6 +58,10 @@
         data-home-traffic-refresh-seconds="{{ home_traffic_refresh_seconds }}"
         data-home-traffic-request-timeout-seconds="{{ home_traffic_request_timeout_seconds }}"
         data-home-traffic-page-size="{{ home_traffic_page_size }}"
+        data-home-activity-enabled="{{ 'true' if home_activity_enabled else 'false' }}"
+        data-home-activity-unavailable="{{ 'true' if home_activity_unavailable else 'false' }}"
+        data-home-activity-refresh-seconds="{{ home_activity_refresh_seconds }}"
+        data-home-activity-request-timeout-seconds="{{ home_activity_request_timeout_seconds }}"
         {% endif %}
       >
         {% block page_body %}

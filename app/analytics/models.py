@@ -717,3 +717,68 @@ class CurrentApTrafficPage:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
+class HomeActivityCoverage:
+    coverage_from_utc: str | None
+    coverage_through_utc: str | None
+    covered_from_utc: str | None
+    covered_through_utc: str | None
+    fully_covered: bool
+    status: str
+    quality_reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "quality_reasons", tuple(self.quality_reasons))
+
+
+@dataclass(frozen=True, slots=True)
+class HomeActivityVisits:
+    value: int | None
+    status: str
+    cohort: str
+    source_kind: str
+    verified_visit_count: int
+    integrity_anomaly_count: int
+    coverage: HomeActivityCoverage
+    earliest_persisted_evidence_at: str | None
+    latest_persisted_evidence_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HomeActivityTraffic:
+    bytes: int | None
+    status: str
+    estimated: bool
+    attribution: str
+    source_kind: str
+    eligible_terminal_event_count: int
+    included_fingerprint_count: int
+    unmatched_included_event_count: int
+    pending_event_count: int
+    invalid_event_count: int
+    missing_traffic_count: int
+    missing_controller_time_count: int
+    semantic_duplicate_count: int
+    other_excluded_event_count: int
+    reader_watermark_at: str | None
+    ingestion_freshness: str
+    coverage: HomeActivityCoverage
+    earliest_persisted_evidence_at: str | None
+    latest_persisted_evidence_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HomeActivityResult:
+    evaluated_at_utc: str
+    timezone: str
+    guest_ssids: tuple[str, ...]
+    range: Mapping[str, Any]
+    authorized_visits: HomeActivityVisits
+    traffic: HomeActivityTraffic
+    next_site_midnight_utc: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "guest_ssids", tuple(self.guest_ssids))
+        object.__setattr__(self, "range", freeze(self.range))
