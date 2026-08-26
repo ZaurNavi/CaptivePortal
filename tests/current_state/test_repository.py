@@ -15,6 +15,7 @@ from app.current_state.models import (
     CurrentStateStorageError,
     CurrentStateValidationError,
 )
+from app.current_state import repository as repository_module
 from app.current_state.repository import CurrentStateRepository
 
 from .conftest import OTHER_SITE, SITE, ap_row, client_row, cycle
@@ -53,6 +54,101 @@ def test_existing_database_transient_contention_is_retryable(
 
     monkeypatch.setattr(sqlite3, "connect", busy)
     with pytest.raises(CurrentStateStorageError):
+        repository.initialize()
+
+
+class _FetchOne:
+    def __init__(self, value):
+        self._value = value
+
+    def fetchone(self):
+        return (self._value,)
+
+
+class _QuickCheckConnection:
+    def __init__(
+        self,
+        *,
+        quick_check_result="ok",
+        quick_check_error=None,
+        invoke_progress=False,
+    ):
+        self.quick_check_result = quick_check_result
+        self.quick_check_error = quick_check_error
+        self.invoke_progress = invoke_progress
+        self.progress_handler = None
+        self.row_factory = None
+        self.closed = False
+
+    def execute(self, statement):
+        if statement == "PRAGMA query_only=ON":
+            return _FetchOne(None)
+        if statement == "PRAGMA user_version":
+            return _FetchOne(repository_module.SCHEMA_VERSION)
+        if statement == "PRAGMA quick_check":
+            if self.invoke_progress:
+                assert self.progress_handler is not None
+                assert self.progress_handler() == 1
+            if self.quick_check_error is not None:
+                raise self.quick_check_error
+            return _FetchOne(self.quick_check_result)
+        raise AssertionError(f"Unexpected SQL: {statement}")
+
+    def set_progress_handler(self, callback, _steps):
+        self.progress_handler = callback
+
+    def close(self):
+        self.closed = True
+
+
+def _install_quick_check_connection(monkeypatch, connection):
+    signature = (("table", "current_state_cycles", "current_state_cycles", "sql"),)
+    monkeypatch.setattr(repository_module, "_schema_signature", lambda _connection: signature)
+    monkeypatch.setattr(repository_module, "_expected_schema_signature", lambda: signature)
+    monkeypatch.setattr(repository_module.sqlite3, "connect", lambda *_args, **_kwargs: connection)
+
+
+def test_self_interrupted_quick_check_is_retryable_storage_error(
+    repository, monkeypatch
+):
+    connection = _QuickCheckConnection(
+        quick_check_error=sqlite3.OperationalError("interrupted"),
+        invoke_progress=True,
+    )
+    _install_quick_check_connection(monkeypatch, connection)
+    clock = iter((100.0, 110.001))
+    monkeypatch.setattr(repository_module.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(CurrentStateStorageError) as failure:
+        repository.initialize()
+
+    assert not isinstance(failure.value, CurrentStateSchemaError)
+    assert connection.progress_handler is None
+    assert connection.closed is True
+
+
+def test_unrelated_interrupted_operational_error_remains_schema_error(
+    repository, monkeypatch
+):
+    connection = _QuickCheckConnection(
+        quick_check_error=sqlite3.OperationalError("interrupted"),
+        invoke_progress=False,
+    )
+    _install_quick_check_connection(monkeypatch, connection)
+    monkeypatch.setattr(repository_module.time, "monotonic", lambda: 100.0)
+
+    with pytest.raises(CurrentStateSchemaError):
+        repository.initialize()
+
+
+def test_failed_quick_check_result_remains_schema_error(repository, monkeypatch):
+    connection = _QuickCheckConnection(
+        quick_check_result="database disk image is malformed"
+    )
+    _install_quick_check_connection(monkeypatch, connection)
+    monkeypatch.setattr(repository_module.time, "monotonic", lambda: 100.0)
+
+    with pytest.raises(CurrentStateSchemaError, match="integrity check failed"):
         repository.initialize()
 
 
