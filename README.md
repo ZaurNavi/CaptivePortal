@@ -987,29 +987,54 @@ Current Registry device identity is not automatically a per-Site truth. Site-sco
 
 # Testing and release discipline
 
-The current repository policy separates executor responsibility from the final repository gate.
+The current model separates day-to-day implementation testing from the official full regression function.
 
-### Executor
+```text
+Coder
+→ targeted / module / TASK-scoped tests
 
-Runs:
+Tech Lead
+→ architecture / TASK / DIFF / targeted-evidence review
 
-- targeted tests for changed modules/components;
-- relevant static/frontend checks;
-- exact risk-specific checks required by the TASK.
-
-### Reviewer / Tech Lead / owner pre-production gate
-
-```bash
-python -m pytest -q -rs
-PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
-git diff --check
+Central Lab
+→ Full Regression Gate
+→ official current baseline
+→ final Test Evidence
 ```
 
-Do not claim a full green gate unless it was actually executed on the exact artifact.
+The Coder can and should rerun tests for the implemented functionality as often as development and fixes require. The Coder does not need to execute the whole CaptivPortal regression suite after every implementation.
+
+The Tech Lead does not need to duplicate the heavy full suite for ordinary review. When an official exact-artifact baseline is required, the team consumes Central Lab evidence.
+
+### Official Windows Local Gate
+
+Current approved tool:
+
+```text
+C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
+```
+
+Confirmed baseline from **26 August 2026**:
+
+```text
+Strict suite: 1985 passed / 30 skipped / 0 strict regressions
+Compatibility: 5 exact cases → 2 WARN / 3 PASS
+compileall: PASS
+git diff --check: PASS
+RESULT: PASS
+```
+
+The two compatibility WARNs are the SQLite infinity edge case and Node async harness timing. The three Visitor Registry Windows thread-timing cases passed in the control run.
+
+The compatibility allowlist stays narrow. Any new failure outside the explicitly recorded cases is a strict regression until a separate reviewed decision reclassifies it.
+
+The Windows Local Gate does not replace Linux/production-compatible pre-production acceptance. If a release/deploy contract requires a Linux full gate, it is executed separately on the exact artifact.
+
+Do not present an old run as the current full green baseline after runtime/test changes.
 
 Tests must not depend on real production Omada credentials or a live production controller.
 
-The repository currently has no `.github/workflows` release CI at the documented runtime checkpoint, so release CI remains an explicit process debt.
+At the documented runtime checkpoint `.github/workflows` is absent, so GitHub release CI remains separate process debt.
 
 ---
 

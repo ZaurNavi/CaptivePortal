@@ -18,9 +18,15 @@ Status: draft
 
 ## Риски
 
-## Targeted tests
+## Targeted/module tests исполнителя
 
-## Full gate
+## Central Lab full regression
+
+required / not-required; exact artifact/evidence reference when available
+
+## Linux / production-compatible gate
+
+required / not-required / separate release step
 
 ## Repository actions
 

@@ -1,7 +1,7 @@
 # CaptivPortal: правила для coding agents
 
 Status: current
-Updated: 2026-08-24
+Updated: 2026-08-26
 
 ## Project
 
@@ -75,7 +75,10 @@ TASK задаёт scope и намерение изменения, но не ст
 - Не использовать Flask current_app из фонового thread.
 - Worker создаётся в composition root, не при import.
 - Не менять Alloy, Loki, Grafana, production systemd или reverse proxy без отдельного TASK.
-- Исполнитель запускает только targeted tests модулей и компонентов, которые он изменял, добавлял или переписывал. Полный repository suite выполняет Reviewer / Tech Lead / owner непосредственно перед production deployment или feature activation.
+- Coder/исполнитель запускает TASK/module-scoped targeted tests, новые regression cases и релевантные static/syntax checks; он может повторять эти targeted-прогоны в процессе разработки.
+- Официальный full repository regression / current baseline / final Test Evidence является централизованной функцией Central Lab и не дублируется Coder или Tech Lead без отдельной причины.
+- Tech Lead проверяет архитектуру, TASK/ADR, DIFF и targeted evidence; полный suite не является его обычной ручной обязанностью.
+- Windows Local Gate не заменяет отдельный Linux/production-compatible gate, когда такой gate требуется release/deploy contract.
 - Не исправлять несвязанные падения full suite.
 - Не утверждать, что test, commit, push, PR или deploy выполнен, если это не так.
 - Merge, force push и production deploy — owner-only без прямого разрешения.
@@ -91,18 +94,17 @@ TASK задаёт scope и намерение изменения, но не ст
 
 ## Проверки
 
-Targeted commands для исполнителя определяет TASK. Они должны проверять только изменённые модули, их непосредственные контракты и добавленные regression-сценарии.
+Targeted commands для Coder/исполнителя определяет TASK. Они проверяют изменённые модули, непосредственные контракты, новые regression-сценарии и необходимые static/syntax checks.
 
-Статические проверки, такие как `compileall`, проверка синтаксиса изменённого frontend-кода и `git diff --check`, не считаются полным test suite и могут оставаться в TASK исполнителя.
+Статические проверки, такие как `compileall`, проверка синтаксиса изменённого frontend-кода и `git diff --check`, не превращают targeted workflow Coder в официальный full regression.
 
-Полный repository gate не является обязанностью исполнителя и не должен включаться в его TASK без отдельной прямой команды владельца. Его выполняет Reviewer / Tech Lead / owner на exact artifact непосредственно перед production deployment или feature activation:
+Полный repository suite не является обязанностью Coder и не является обычной ручной обязанностью Tech Lead. Официальный full-regression baseline и final Test Evidence предоставляет Central Lab для exact artifact, когда он требуется для продвижения изменения.
 
-    python -m pytest -q -rs
-    PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
-    git diff --check
+Current approved Windows Local Gate и его compatibility baseline описаны в `docs/testing.md`.
 
-Если environment запрещает назначенную стороне проверку, укажи команду, причину и owner action.
+Если перед production требуется Linux/full production-compatible gate, он выполняется отдельно по deploy/release contract. Windows gate его не заменяет.
 
+Если environment запрещает назначенную стороне проверку, укажи команду/требуемый gate, причину и owner action.
 ## Повторное использование результатов тестирования
 
 Reviewer / Tech Lead не должен повторно запускать идентичные targeted tests только для формального подтверждения результата исполнителя.
@@ -127,7 +129,7 @@ Reviewer / Tech Lead не должен повторно запускать ид�
 4. расследует неполный, противоречивый или сомнительный результат;
 5. прямо требуется утверждённым TASK, deploy/production gate или отдельной owner-командой.
 
-Full repository suite выполняется нашей стороной один раз в составе pre-production gate. Он не перекладывается на исполнителя и не повторяется без новой причины после успешного gate на неизменённом exact artifact.
+Full repository suite выполняется централизованно Central Lab и не повторяется другими ролями без новой причины после успешного gate на неизменённом exact artifact. Отдельный Linux production-compatible gate не считается дублированием, когда он требуется как platform-specific release acceptance.
 
 Reviewer не должен утверждать, что лично выполнил targeted tests, если он использует результаты исполнителя.
 
@@ -148,4 +150,4 @@ Reviewer не должен утверждать, что лично выполн�
 
 ## Handoff
 
-Верни: цель и результат; изменённые файлы; targeted/full checks с числами passed, skipped и failed; не выполненные проверки; риски; repository actions, выполненные фактически; owner actions; Agent execution summary.
+Верни: цель и результат; изменённые файлы; TASK-scoped targeted checks с числами passed, skipped и failed; Central Lab/full evidence reference или pending/not-required; отдельный Linux gate evidence если применимо; не выполненные проверки; риски; repository actions, выполненные фактически; owner actions; Agent execution summary.

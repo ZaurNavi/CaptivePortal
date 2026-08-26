@@ -1,7 +1,7 @@
 # Контракт TASK
 
 Status: current
-Updated: 2026-08-04
+Updated: 2026-08-26
 
 TASK — высший источник change intent конкретной задачи и её scope contract. Он не является источником фактов о текущей реализации и не может молча отменить security или необратимые owner-only ограничения.
 
@@ -27,7 +27,9 @@ TASK определяет требуемое изменение относите
 - execution mode;
 - исполнитель/platform;
 - capability assumptions;
-- test responsibility: agent, owner, shared или not-applicable;
+- TASK-scoped test responsibility: agent, owner, shared или not-applicable;
+- требуется ли свежий официальный Central Lab full-regression baseline для продвижения exact artifact;
+- требуется ли отдельный Linux/production-compatible gate;
 - текущее фактическое состояние;
 - out of scope;
 - 1–3 связанных документа;
@@ -36,7 +38,7 @@ TASK определяет требуемое изменение относите
 - входные и выходные contracts;
 - fail-open/fail-closed;
 - logging, persistence, lifecycle и security;
-- targeted tests и full gate;
+- targeted tests;
 - acceptance и stop conditions;
 - handoff и PR requirements.
 
@@ -53,12 +55,33 @@ TASK определяет требуемое изменение относите
 3. продолжает независимые безопасные части;
 4. передаёт конфликт Architect/Tech Lead.
 
-## Test responsibility
+## TASK-scoped test responsibility
 
-- agent: агент создаёт/обновляет и запускает назначенные tests.
-- owner: агент не добавляет tests, но описывает необходимые cases.
-- shared: TASK делит конкретные cases/actions.
-- not-applicable: TASK объясняет почему.
+Значения относятся к тестированию конкретного TASK/изменяемого модуля, а не к официальному full regression всего CaptivPortal:
+
+- `agent`: агент создаёт/обновляет и запускает назначенные targeted/module tests;
+- `owner`: агент не добавляет назначенные tests, но описывает необходимые cases/actions;
+- `shared`: TASK делит конкретные targeted cases/actions;
+- `not-applicable`: TASK объясняет, почему TASK-scoped tests не требуются.
+
+По умолчанию full repository regression не назначается Coder/agent и не должен автоматически копироваться из исторических TASK.
+
+## Official full regression
+
+Официальный full regression / current baseline / final Test Evidence является функцией Central Lab согласно `docs/testing.md`.
+
+TASK должен указать только:
+
+```text
+fresh Central Lab baseline required: yes/no
+exact artifact to validate: <SHA/patch identity when known>
+```
+
+Если для конкретной задачи действительно нужен exceptional full run в другой роли, это должно быть отдельным прямым owner requirement с причиной.
+
+## Linux / production-compatible gate
+
+Linux gate — отдельная release/deploy acceptance boundary. TASK указывает необходимость и среду; он не назначается автоматически Coder или Tech Lead.
 
 ## Repository permissions
 
