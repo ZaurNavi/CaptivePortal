@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
+
+import pytest
 
 import run as process_runtime
 
@@ -11,7 +14,8 @@ from app.current_state.runtime import (
     UnavailableCurrentStateRuntime,
     create_current_state_runtime,
 )
-from app.current_state.models import CurrentStateStorageError
+from app.current_state.models import CurrentStateSchemaError
+from app.current_state import repository as repository_module
 from app.current_state.repository import CurrentStateRepository
 from app.models import Result
 
@@ -86,8 +90,9 @@ def test_client_and_ap_degradation_are_independent(enabled_settings):
     assert runtime.stop(2.0)
 
 
+@pytest.mark.parametrize("message", ("database is locked", "database is busy"))
 def test_existing_database_restart_retries_transient_storage_and_polls(
-    enabled_settings,
+    enabled_settings, monkeypatch, message,
 ):
     enabled_settings["current_state_client_initial_delay_seconds"] = "0"
     enabled_settings["current_state_ap_initial_delay_seconds"] = "0"
@@ -115,17 +120,17 @@ def test_existing_database_restart_retries_transient_storage_and_polls(
     runtime = create_current_state_runtime(
         enabled_settings, PollingProvider(), Telemetry()
     )
-    real_initialize = runtime.repository.initialize
-    attempts = 0
+    real_connect = repository_module.sqlite3.connect
+    connect_attempts = 0
 
-    def transient_then_initialize():
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise CurrentStateStorageError("transient startup contention")
-        return real_initialize()
+    def transient_then_connect(*args, **kwargs):
+        nonlocal connect_attempts
+        connect_attempts += 1
+        if connect_attempts == 1:
+            raise sqlite3.OperationalError(message)
+        return real_connect(*args, **kwargs)
 
-    runtime.repository.initialize = transient_then_initialize
+    monkeypatch.setattr(repository_module.sqlite3, "connect", transient_then_connect)
     assert runtime.start() is True
     deadline = time.monotonic() + 2
     cycle_kinds = set()
@@ -139,11 +144,28 @@ def test_existing_database_restart_retries_transient_storage_and_polls(
         if cycle_kinds == {"client", "ap"}:
             break
         time.sleep(0.01)
-    assert attempts == 2
+    assert connect_attempts >= 2
     assert cycle_kinds == {"client", "ap"}
     assert runtime.client_worker.running
     assert runtime.ap_worker.running
     assert runtime.stop(2.0)
+
+
+def test_nontransient_schema_error_is_not_retried(enabled_settings):
+    runtime = create_current_state_runtime(
+        enabled_settings, Provider(), Telemetry()
+    )
+    attempts = 0
+
+    def invalid_schema():
+        nonlocal attempts
+        attempts += 1
+        raise CurrentStateSchemaError("incompatible schema")
+
+    runtime.repository.initialize = invalid_schema
+    assert runtime.start() is False
+    assert runtime.state == "unavailable"
+    assert attempts == 1
 
 
 def test_process_composition_reuses_controller_and_telemetry(monkeypatch):

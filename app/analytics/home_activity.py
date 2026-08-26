@@ -142,14 +142,15 @@ def _visits(raw, start, end, coverage_from, evaluated, source_available):
     verified = _count(raw, "verified_visit_count")
     anomalies = _count(raw, "integrity_anomaly_count")
     unproven_scope = _count(raw, "unproven_scope_count")
-    unavailable_reason = (
-        "source_unavailable" if not source_available
-        else "guest_scope_unproven" if unproven_scope else None
+    unavailable_reason = "source_unavailable" if not source_available else (
+        "guest_scope_unproven" if unproven_scope else None
     )
     if unavailable_reason is not None:
+        coverage_through = None if not source_available else evaluated
         coverage = _unavailable_coverage(
             _coverage(
-                start, end, coverage_from, None, (unavailable_reason,)
+                start, end, coverage_from, coverage_through,
+                (unavailable_reason,)
             ),
             unavailable_reason,
         )
@@ -159,7 +160,7 @@ def _visits(raw, start, end, coverage_from, evaluated, source_available):
             cohort="visit_opening_authorization",
             source_kind="visit_lifecycle",
             verified_visit_count=None,
-            integrity_anomaly_count=anomalies + unproven_scope,
+            integrity_anomaly_count=anomalies,
             coverage=coverage,
             earliest_persisted_evidence_at=None,
             latest_persisted_evidence_at=None,

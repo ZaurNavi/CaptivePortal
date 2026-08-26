@@ -210,7 +210,7 @@ def _home_activity_visit_sql(ssid_placeholders: str) -> str:
                        AND opening_match_count=1 AND scope_conflict=0),0)
             AS verified_visit_count,
           COALESCE(SUM(scoped_ssid IN ({ssid_placeholders})
-                       AND (opening_match_count!=1 OR scope_conflict!=0)),0)
+                       AND opening_match_count!=1 AND scope_conflict=0),0)
             AS integrity_anomaly_count,
           COALESCE(SUM(scoped_ssid IS NULL OR scope_conflict!=0),0)
             AS unproven_scope_count,
