@@ -11,7 +11,11 @@ from .ap_worker import CurrentApWorker
 from .cleanup import CurrentStateCleanup, CurrentStateCleanupWorker
 from .client_worker import CurrentClientWorker
 from .config import current_state_config_from_settings
-from .models import CurrentStateConfig, CurrentStateConfigError
+from .models import (
+    CurrentStateConfig,
+    CurrentStateConfigError,
+    CurrentStateStorageError,
+)
 from .read_service import CurrentStateReadService
 from .repository import CurrentStateRepository
 from .telemetry import CurrentStateTelemetry
@@ -87,7 +91,7 @@ class CurrentStateRuntime:
                 return False
             self._state = "starting"
         try:
-            created = self.repository.initialize()
+            created = self._initialize_repository()
             if not self.client_worker.start() or not self.ap_worker.start() or not self.cleanup_worker.start():
                 raise RuntimeError("Current State worker did not start")
         except Exception:
@@ -106,6 +110,17 @@ class CurrentStateRuntime:
             ap_interval_seconds=self.config.ap_interval_seconds,
         )
         return True
+
+    def _initialize_repository(self) -> bool:
+        delays = (0.1, 0.25)
+        for attempt in range(len(delays) + 1):
+            try:
+                return self.repository.initialize()
+            except CurrentStateStorageError:
+                if attempt == len(delays):
+                    raise
+                time.sleep(delays[attempt])
+        raise AssertionError("unreachable")
 
     def stop(self, timeout_seconds: float | None = None) -> bool:
         with self._lock:

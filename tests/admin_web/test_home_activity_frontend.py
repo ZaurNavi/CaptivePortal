@@ -94,6 +94,10 @@ unavailableVisits.result.authorized_visits.coverage.covered_through_utc = null;
 unavailableVisits.result.authorized_visits.coverage.quality_reasons = ["source_unavailable"];
 assert(api.validateActivity(unavailableVisits, site, "today") !== null,
   "Visits unavailable with complete Traffic is accepted");
+const unprovenVisits = copy(unavailableVisits);
+unprovenVisits.result.authorized_visits.coverage.quality_reasons = ["guest_scope_unproven"];
+assert(api.validateActivity(unprovenVisits, site, "today") !== null,
+  "unproven guest scope is rendered unavailable without rejecting Traffic");
 const selected = payload("preset");
 assert(api.validateActivity(selected, site, "preset") !== null, "valid selected accepted");
 assert(api.selectionDynamic("last_24h") && api.selectionDynamic("current_month"), "rolling selections refresh");

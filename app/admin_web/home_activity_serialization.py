@@ -23,6 +23,7 @@ _QUALITY_REASONS = frozenset({
     "requested_before_coverage_start",
     "requested_after_coverage_through",
     "source_unavailable",
+    "guest_scope_unproven",
     "query_deadline",
     "opening_authorization_evidence_missing",
     "authorization_chronology_anomaly",
