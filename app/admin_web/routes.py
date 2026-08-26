@@ -705,6 +705,9 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         authorized_site = None
         reason = "internal_error"
         period = request.args.get("period") if route_name == "selected" else "today"
+        range_duration_category = None
+        visits_coverage_status = None
+        traffic_coverage_status = None
         response: Response
         try:
             selected, context, failure = _home_activity_gate(
@@ -719,6 +722,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             evaluated = datetime.now(timezone.utc)
             try:
                 resolved = resolver_operation(context, evaluated)
+                range_duration_category = _activity_duration_category(resolved)
             except HomeActivityRangeError:
                 response = make_response(_error("invalid_request", 400))
                 reason = "invalid_request"
@@ -777,6 +781,16 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             result_value = None
             if "result" in locals() and isinstance(result.result, dict):
                 result_value = result.result
+                visits_value = result_value.get("authorized_visits")
+                traffic_value = result_value.get("traffic")
+                if isinstance(visits_value, dict):
+                    coverage_value = visits_value.get("coverage")
+                    if isinstance(coverage_value, dict):
+                        visits_coverage_status = coverage_value.get("status")
+                if isinstance(traffic_value, dict):
+                    coverage_value = traffic_value.get("coverage")
+                    if isinstance(coverage_value, dict):
+                        traffic_coverage_status = coverage_value.get("status")
             try:
                 _event(
                     logger,
@@ -787,6 +801,9 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     outcome="success" if status_code == 200 else "error",
                     reason=reason,
                     period=period,
+                    range_duration_category=range_duration_category,
+                    visits_coverage_status=visits_coverage_status,
+                    traffic_coverage_status=traffic_coverage_status,
                     visit_status=(result_value or {}).get("authorized_visits", {}).get("status") if isinstance((result_value or {}).get("authorized_visits"), dict) else None,
                     traffic_status=(result_value or {}).get("traffic", {}).get("status") if isinstance((result_value or {}).get("traffic"), dict) else None,
                     duration_ms=max(0, int((time.monotonic() - started) * 1000)),
@@ -1238,6 +1255,21 @@ def _is_home_activity_path(path: str) -> bool:
         path.startswith(ADMIN_API_PREFIX + "/sites/")
         and "/home-activity/" in path
     )
+
+
+def _activity_duration_category(value: Any) -> str:
+    seconds = (value.to_utc - value.from_utc).total_seconds()
+    if seconds <= 24 * 3600:
+        return "up_to_24h"
+    if seconds <= 7 * 86400:
+        return "over_24h_to_7d"
+    if seconds <= 31 * 86400:
+        return "over_7d_to_31d"
+    if seconds <= 90 * 86400:
+        return "over_31d_to_90d"
+    if seconds <= 365 * 86400:
+        return "over_90d_to_365d"
+    return "over_365d"
 
 
 def _canonical_source_ip(value: object) -> str | None:

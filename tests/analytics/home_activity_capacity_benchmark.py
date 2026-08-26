@@ -56,11 +56,17 @@ def main() -> int:
             to_utc=_stamp(EVALUATED), deadline=QueryDeadline.after(10),
         )
         windows = (
-            ("today", 1), ("32d", 32), ("90d", 90),
-            ("365d", 365), ("retained", args.days),
+            ("24h", EVALUATED - timedelta(days=1)),
+            ("7d", EVALUATED - timedelta(days=7)),
+            ("30d", EVALUATED - timedelta(days=30)),
+            ("current_month", EVALUATED.replace(day=1, hour=0)),
+            ("32d", EVALUATED - timedelta(days=32)),
+            ("90d", EVALUATED - timedelta(days=90)),
+            ("365d", EVALUATED - timedelta(days=365)),
+            ("retained", EVALUATED - timedelta(days=args.days)),
         )
         results = []
-        for label, days in windows:
+        for label, range_start in windows:
             durations = []
             failures = 0
             raw = None
@@ -69,7 +75,7 @@ def main() -> int:
                 try:
                     raw = gateway.home_activity_data(
                         site_id=SITE, guest_ssids=(SSID,),
-                        from_utc=_stamp(EVALUATED - timedelta(days=days)),
+                        from_utc=_stamp(range_start),
                         to_utc=_stamp(EVALUATED),
                         deadline=QueryDeadline.after(args.deadline),
                     )
@@ -79,7 +85,9 @@ def main() -> int:
             ordered = sorted(durations[1:])
             results.append({
                 "range": label,
-                "days": days,
+                "days": round(
+                    (EVALUATED - range_start).total_seconds() / 86400, 3
+                ),
                 "cold_seconds": round(durations[0], 6),
                 "warm_p50_seconds": round(statistics.median(ordered), 6),
                 "warm_p95_seconds": round(
@@ -101,6 +109,7 @@ def main() -> int:
             "runs_per_range": args.runs,
             "deadline_seconds": args.deadline,
             "plans": plans,
+            "received_at_fallback_rows": _fallback_rows(repository),
             "results": results,
             "read_only_fingerprints_unchanged": (
                 fingerprints_before == _fingerprints(repository)
@@ -166,7 +175,8 @@ def _seed(repository: VisitRepository, row_count: int, days: int) -> float:
             timestamp,
         ))
         events.append((
-            f"event-{index}", SITE, mac, timestamp, timestamp,
+            f"event-{index}", SITE, mac,
+            None if index % 13 == 0 else timestamp, timestamp,
             index, index + 1, "unmatched" if index % 11 == 0 else "closed",
             timestamp, timestamp, SSID, index % 3600, index % 5_000_000,
         ))
@@ -225,6 +235,14 @@ def _fingerprints(repository: VisitRepository) -> tuple[int, ...]:
             int(connection.execute("SELECT COUNT(*) FROM visit_source_events").fetchone()[0]),
             int(connection.execute("SELECT COUNT(*) FROM visit_reader_state").fetchone()[0]),
         )
+
+
+def _fallback_rows(repository: VisitRepository) -> int:
+    with closing(repository._connect(readonly=True)) as connection:  # noqa: SLF001
+        return int(connection.execute(
+            "SELECT COUNT(*) FROM visit_source_events "
+            "WHERE controller_event_at IS NULL AND received_at IS NOT NULL"
+        ).fetchone()[0])
 
 
 def _stamp(value: datetime) -> str:

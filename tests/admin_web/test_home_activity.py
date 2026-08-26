@@ -65,6 +65,25 @@ def test_activity_config_uses_only_current_state_ssid_scope():
     assert not hasattr(config.site(SITE_ID), "guest_ssids")
 
 
+def test_disabled_activity_ignores_broken_activity_only_configuration():
+    values = activity_settings(
+        web_admin_home_activity_enabled="false",
+        web_admin_home_activity_site_context_json="not-json",
+        web_admin_home_activity_refresh_seconds="broken",
+        web_admin_home_activity_request_timeout_seconds="broken",
+        web_admin_home_activity_traffic_fresh_max_age_seconds="broken",
+        web_admin_home_activity_traffic_stale_max_age_seconds="broken",
+    )
+    config = home_activity_config_from_settings(
+        values,
+        admin_config=admin_web_config_from_settings(values),
+        current_state_config=None,
+    )
+    assert config.enabled is False
+    assert config.sites == {} and config.guest_ssids == ()
+    assert (config.refresh_seconds, config.request_timeout_seconds) == (60, 20)
+
+
 @pytest.mark.parametrize(
     "current",
     (
@@ -301,6 +320,35 @@ def test_selected_failure_does_not_change_independent_today_result(activity_app)
     assert calls == ["today", "last_30d"]
 
 
+def test_selected_telemetry_has_safe_duration_and_coverage_categories(
+    activity_app, caplog
+):
+    client = activity_app.test_client()
+    login(client)
+    service = activity_app.extensions["admin_web_runtime"].query_service
+    service.home_activity = lambda *_args, **_kwargs: AdminQueryResponse({
+        "authorized_visits": {"status": "complete", "coverage": {"status": "complete"}},
+        "traffic": {"status": "partial", "coverage": {"status": "partial"}},
+    })
+    caplog.set_level(logging.INFO, logger="activity-test")
+    response = client.get(
+        f"/admin/api/v1/sites/{SITE_ID}/home-activity/selected"
+        "?period=custom&from_date=2025-01-01&to_date=2026-01-01",
+        base_url="https://localhost",
+    )
+    assert response.status_code == 200
+    record = next(
+        item for item in caplog.records
+        if item.getMessage() == "admin.home_activity_selected_query_completed"
+    )
+    assert record.range_duration_category == "over_365d"
+    assert record.visits_coverage_status == "complete"
+    assert record.traffic_coverage_status == "partial"
+    assert record.period == "custom"
+    rendered = repr(record.__dict__)
+    assert "2025-01-01" not in rendered and "2026-01-01" not in rendered
+
+
 def test_activity_response_size_cap_is_enforced(activity_app):
     client = activity_app.test_client()
     login(client)
@@ -330,8 +378,21 @@ def test_activity_page_contains_no_secret_or_browser_storage_contract(activity_a
     assert "sessionStorage" not in text
 
 
-def test_live_traffic_and_activity_feature_combination_renders(tmp_path):
-    values = activity_settings(web_admin_home_traffic_enabled="true")
+@pytest.mark.parametrize(
+    ("traffic_enabled", "activity_enabled"),
+    ((False, False), (True, False), (False, True), (True, True)),
+)
+def test_all_home_traffic_and_activity_feature_combinations_render(
+    tmp_path, traffic_enabled, activity_enabled
+):
+    values = activity_settings(
+        web_admin_home_traffic_enabled=str(traffic_enabled).lower(),
+        web_admin_home_activity_enabled=str(activity_enabled).lower(),
+        web_admin_home_activity_site_context_json=(
+            activity_settings()["web_admin_home_activity_site_context_json"]
+            if activity_enabled else "broken-but-disabled"
+        ),
+    )
     current = SimpleNamespace(config=current_config())
     analytics = SimpleNamespace(
         state="active", visit_service=object(), current_traffic_service=None,
@@ -354,6 +415,7 @@ def test_live_traffic_and_activity_feature_combination_renders(tmp_path):
     text = client.get(
         f"/admin/sites/{SITE_ID}/", base_url="https://localhost"
     ).get_data(as_text=True)
-    assert 'data-home-traffic-enabled="true"' in text
-    assert 'data-home-activity-enabled="true"' in text
-    assert "Traffic Now" in text and "Visits and Traffic" in text
+    assert f'data-home-traffic-enabled="{str(traffic_enabled).lower()}"' in text
+    assert f'data-home-activity-enabled="{str(activity_enabled).lower()}"' in text
+    assert ("Traffic Now" in text) is traffic_enabled
+    assert ("Visits and Traffic" in text) is activity_enabled

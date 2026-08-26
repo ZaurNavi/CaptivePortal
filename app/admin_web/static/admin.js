@@ -447,7 +447,7 @@
 
   const API_VERSION = "admin.read.v1";
   const UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-  const STATUSES = new Set(["complete", "partial"]);
+  const STATUSES = new Set(["complete", "partial", "unavailable"]);
   const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
   const PERIODS = new Set(["last_24h", "yesterday", "last_48h", "last_7d", "current_month", "last_30d", "custom"]);
   const ROLLING = new Set(["last_24h", "last_48h", "last_7d", "current_month", "last_30d"]);
@@ -506,7 +506,9 @@
       "unmatched_included_event_count", "pending_event_count", "invalid_event_count",
       "missing_traffic_count", "missing_controller_time_count", "semantic_duplicate_count",
       "other_excluded_event_count"];
-    return object(value) && integer(value.bytes) && STATUSES.has(value.status)
+    return object(value) && STATUSES.has(value.status)
+      && ((value.status === "unavailable" && value.bytes === null)
+        || (value.status !== "unavailable" && integer(value.bytes)))
       && value.estimated === true && value.attribution === "completed_session_end"
       && value.source_kind === ["om", "ada_offline_reported_traffic"].join("")
       && names.every((name) => integer(value[name]))
@@ -548,7 +550,8 @@
     const units = ["B", "KB", "MB", "GB", "TB"];
     let amount = value; let index = 0;
     while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1; }
-    return `${index === 0 ? amount : amount.toFixed(amount >= 10 ? 1 : 2)} ${units[index]}`;
+    const rendered = index === 0 ? String(amount) : amount.toFixed(1).replace(/\.0$/, "");
+    return `${rendered} ${units[index]}`;
   }
   function selectionDynamic(period) { return ROLLING.has(period); }
   function eligible(source, manual, now) {
@@ -671,7 +674,7 @@
       return payload;
     } catch (error) {
       if (controller.signal.aborted) {
-        if (["hidden", "pagehide", "superseded"].includes(controller.signal.reason)) throw {neutral: true};
+        if (["hidden", "pagehide", "superseded", "disabled"].includes(controller.signal.reason)) throw {neutral: true};
         throw {failure: {global: false, kind: "timeout", retryAfter: 0}};
       }
       if (error && (error.failure || error.neutral)) throw error;
@@ -687,6 +690,7 @@
   function coverageText(label, value) {
     if (value.status === "complete") return `${label} complete`;
     const coverageValue = value.coverage;
+    if (value.status === "unavailable") return `${label} unavailable`;
     if (coverageValue.covered_from_utc && coverageValue.covered_through_utc) {
       return `${label} partial · proven ${coverageValue.covered_from_utc} → ${coverageValue.covered_through_utc}`;
     }
@@ -694,13 +698,20 @@
   }
   function qualityText(value) {
     const visit = value.authorized_visits; const trafficValue = value.traffic;
-    const labels = [coverageText("Visits", visit), coverageText("Traffic", trafficValue), `Reader ${trafficValue.ingestion_freshness}`];
+    const visitStart = visit.coverage.coverage_from_utc || "unknown";
+    const visitThrough = visit.coverage.coverage_through_utc || "unknown";
+    const trafficStart = trafficValue.coverage.coverage_from_utc || "unknown";
+    const trafficThrough = trafficValue.coverage.coverage_through_utc || "unknown";
+    const labels = [coverageText("Visits", visit), `Visits data ${visitStart} → ${visitThrough}`,
+      coverageText("Traffic", trafficValue), `Traffic data ${trafficStart} → ${trafficThrough}`,
+      `Reader ${trafficValue.ingestion_freshness}`, `Last updated ${value.evaluated_at_utc}`];
     return labels.join(" · ");
   }
   function render(kind, value) {
     document.getElementById(`activity-${kind}-range`).textContent = rangeText(value);
     document.getElementById(`activity-${kind}-visits`).textContent = String(value.authorized_visits.value);
-    const suffix = value.traffic.status === "partial" ? " · Partial · Estimated" : " · Estimated";
+    const suffix = value.traffic.status === "partial" ? " · Partial · Estimated"
+      : value.traffic.status === "unavailable" ? " · Unavailable · Estimated" : " · Estimated";
     document.getElementById(`activity-${kind}-traffic`).textContent = bytes(value.traffic.bytes) + suffix;
     document.getElementById(`activity-${kind}-quality`).textContent = qualityText(value);
   }
@@ -709,6 +720,23 @@
   }
   function failed(kind, message) {
     document.getElementById(`activity-${kind}-quality`).textContent = message;
+  }
+  function disableActivity() {
+    stopped = true;
+    [today, selected].forEach((source) => {
+      source.disabled = true; source.autoRefresh = false;
+      source.nextEligibleAt = Infinity; source.manualEligibleAt = Infinity;
+      source.generation += 1; abort(source, "disabled");
+    });
+    abort(preview, "disabled");
+    ["today", "selected"].forEach((kind) => {
+      document.getElementById(`activity-${kind}-range`).textContent = "Activity unavailable";
+      document.getElementById(`activity-${kind}-visits`).textContent = "—";
+      document.getElementById(`activity-${kind}-traffic`).textContent = "— · Estimated";
+      failed(kind, "Activity is disabled; current panels remain available.");
+    });
+    picker.hidden = true; pickerOpener.disabled = true;
+    previewButton.disabled = true; applyButton.disabled = true;
   }
   function success(source, dynamic, value) {
     source.accepted = value; source.failureCount = 0; source.manualEligibleAt = 0; source.autoRefresh = dynamic;
@@ -727,8 +755,7 @@
       return;
     }
     if (item.kind === "disabled") {
-      failureTransition(source, item, interval, performance.now(), Math.random());
-      failed(kind, "Activity is disabled; current panels remain available.");
+      disableActivity();
       return;
     }
     failureTransition(source, item, interval, performance.now(), Math.random());

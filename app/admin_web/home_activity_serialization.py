@@ -118,8 +118,14 @@ def _traffic(value: HomeActivityTraffic) -> dict[str, Any]:
         value.status not in _STATUSES
         or value.status != value.coverage.status
         or value.estimated is not True
-        or type(value.bytes) is not int
-        or value.bytes < 0
+        or not (
+            (value.status == "unavailable" and value.bytes is None)
+            or (
+                value.status != "unavailable"
+                and type(value.bytes) is int
+                and value.bytes >= 0
+            )
+        )
         or value.ingestion_freshness not in _FRESHNESS
         or any(type(item) is not int or item < 0 for item in counts.values())
         or value.included_fingerprint_count > value.eligible_terminal_event_count

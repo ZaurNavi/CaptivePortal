@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.admin_web.home_activity_config import HomeActivitySiteContext
+from app.admin_web.home_activity_serialization import serialize_home_activity
 from app.admin_web.home_activity_ranges import (
     HomeActivityRangeError,
     resolve_custom,
@@ -14,7 +15,6 @@ from app.admin_web.home_activity_ranges import (
 )
 from app.analytics.home_activity import (
     HomeActivityReadService,
-    HomeActivitySourceUnavailable,
 )
 from app.analytics.source_gateway import (
     AnalyticsQueryDeadlineExceeded,
@@ -205,7 +205,38 @@ def test_authorized_visits_traffic_replay_and_quality(analytics_stack):
     assert result.traffic.other_excluded_event_count == 1
     assert result.traffic.status == "partial"
     assert "pending_offline_events" in result.traffic.coverage.quality_reasons
-    assert "semantic_replay_suppressed" in result.traffic.coverage.quality_reasons
+    assert "semantic_replay_suppressed" not in result.traffic.coverage.quality_reasons
+
+
+def test_confident_semantic_replay_suppression_does_not_degrade_quality(
+    analytics_stack,
+):
+    timestamp = "2026-01-01T10:15:00.000Z"
+    for event_id in ("replay-a", "replay-b"):
+        _insert_source_event(
+            analytics_stack.visits,
+            event_id=event_id,
+            processing_result="closed",
+            controller_event_at=timestamp,
+            received_at=timestamp,
+            traffic=111,
+            connected=60,
+        )
+    result = HomeActivityReadService(analytics_stack.gateway).get_activity(
+        site_id=SITE_A, guest_ssids=("ssid-a",), range_payload={},
+        from_utc="2026-01-01T10:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        evaluated_at_utc="2026-01-01T11:00:00.000Z", timezone_name="UTC",
+        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_fresh_max_age_seconds=90,
+        traffic_stale_max_age_seconds=180,
+        deadline=QueryDeadline.after(5),
+    )
+    assert result.traffic.bytes == 111
+    assert result.traffic.semantic_duplicate_count == 1
+    assert result.traffic.status == "complete"
+    assert result.traffic.coverage.quality_reasons == ()
 
 
 def test_activity_read_is_site_and_ssid_scoped_and_read_only(analytics_stack):
@@ -300,7 +331,7 @@ def test_every_supported_traffic_processing_result_branch(
     assert (result.traffic.status == "partial") is partial
 
 
-def test_unknown_processing_result_fails_closed_without_exposing_value():
+def test_unknown_processing_result_only_makes_traffic_unavailable():
     class Gateway:
         def home_activity_data(self, **_kwargs):
             return {
@@ -328,18 +359,93 @@ def test_unknown_processing_result_fails_closed_without_exposing_value():
                 "reader_watermark_at": "2026-01-01T11:00:00.000Z",
             }
 
-    with pytest.raises(HomeActivitySourceUnavailable):
-        HomeActivityReadService(Gateway()).get_activity(
-            site_id=SITE_A, guest_ssids=("ssid-a",), range_payload={},
-            from_utc="2026-01-01T10:00:00.000Z",
-            to_utc="2026-01-01T11:00:00.000Z",
-            evaluated_at_utc="2026-01-01T11:00:00.000Z",
-            timezone_name="UTC", visits_coverage_from_utc=None,
-            traffic_coverage_from_utc=None,
-            traffic_fresh_max_age_seconds=90,
-            traffic_stale_max_age_seconds=180,
-            deadline=QueryDeadline.after(5),
-        )
+    result = HomeActivityReadService(Gateway()).get_activity(
+        site_id=SITE_A, guest_ssids=("ssid-a",),
+        range_payload=resolve_selected(
+            context(), {"period": "last_24h"}, EVALUATED
+        ).public_range(),
+        from_utc="2026-01-01T10:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        evaluated_at_utc="2026-01-01T11:00:00.000Z",
+        timezone_name="UTC",
+        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_fresh_max_age_seconds=90,
+        traffic_stale_max_age_seconds=180,
+        deadline=QueryDeadline.after(5),
+    )
+    assert result.authorized_visits.status == "complete"
+    assert result.authorized_visits.value == 0
+    assert result.traffic.status == "unavailable"
+    assert result.traffic.bytes is None
+    assert result.traffic.estimated is True
+    assert "unsupported_processing_result" in result.traffic.coverage.quality_reasons
+    serialized = serialize_home_activity(result)
+    assert serialized["authorized_visits"]["value"] == 0
+    assert serialized["traffic"]["bytes"] is None
+    assert serialized["traffic"]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    ("watermark", "start", "end", "expected_status", "freshness"),
+    (
+        (
+            "2026-01-01T10:00:00.000Z", "2026-01-01T08:00:00.000Z",
+            "2026-01-01T09:00:00.000Z", "complete", "unavailable",
+        ),
+        (
+            "2026-01-01T10:00:00.000Z", "2026-01-01T09:30:00.000Z",
+            "2026-01-01T11:00:00.000Z", "partial", "unavailable",
+        ),
+        (
+            "2026-01-01T10:59:00.000Z", "2026-01-01T09:30:00.000Z",
+            "2026-01-01T10:30:00.000Z", "complete", "fresh",
+        ),
+    ),
+)
+def test_reader_freshness_is_independent_from_historical_range_completeness(
+    watermark, start, end, expected_status, freshness
+):
+    class Gateway:
+        def home_activity_data(self, **_kwargs):
+            empty = {
+                "verified_visit_count": 0,
+                "integrity_anomaly_count": 0,
+                "earliest_persisted_evidence_at": None,
+                "latest_persisted_evidence_at": None,
+            }
+            traffic = {
+                "traffic_bytes": 0, "eligible_terminal_event_count": 0,
+                "included_fingerprint_count": 0,
+                "unmatched_included_event_count": 0,
+                "pending_event_count": 0, "invalid_event_count": 0,
+                "missing_traffic_count": 0,
+                "missing_controller_time_count": 0,
+                "semantic_duplicate_count": 0,
+                "other_excluded_event_count": 0,
+                "unsupported_result_count": 0,
+                "earliest_persisted_evidence_at": None,
+                "latest_persisted_evidence_at": None,
+            }
+            return {"visits": empty, "traffic": traffic,
+                    "reader_watermark_at": watermark}
+
+    result = HomeActivityReadService(Gateway()).get_activity(
+        site_id=SITE_A, guest_ssids=("ssid-a",), range_payload={},
+        from_utc=start, to_utc=end,
+        evaluated_at_utc="2026-01-01T11:00:00.000Z", timezone_name="UTC",
+        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_fresh_max_age_seconds=90,
+        traffic_stale_max_age_seconds=180,
+        deadline=QueryDeadline.after(5),
+    )
+    assert result.traffic.status == expected_status
+    assert result.traffic.ingestion_freshness == freshness
+    if expected_status == "complete":
+        assert result.traffic.coverage.quality_reasons == ()
+    else:
+        assert "requested_after_coverage_through" in result.traffic.coverage.quality_reasons
 
 
 def test_activity_deadline_is_checked_before_sql(analytics_stack):

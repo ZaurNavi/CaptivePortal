@@ -153,29 +153,27 @@ def _visits(raw, start, end, coverage_from, evaluated):
 
 
 def _traffic(raw, watermark_value, start, end, coverage_from, evaluated, fresh, stale):
-    if _count(raw, "unsupported_result_count"):
-        raise HomeActivitySourceUnavailable(
-            "Activity processing-result contract is unsupported"
-        )
+    unsupported = _count(raw, "unsupported_result_count")
     watermark = _evidence(watermark_value)
     freshness = "unavailable"
-    reader_reasons = []
+    reader_reason = "reader_unavailable"
     coverage_through = None
-    if watermark is None:
-        reader_reasons.append("reader_unavailable")
-    else:
+    if watermark is not None:
         watermark_time = parse_utc(watermark, "reader watermark")
-        coverage_through = watermark_time
         age = (evaluated - watermark_time).total_seconds()
         if age < 0:
-            reader_reasons.append("reader_unavailable")
+            reader_reason = "reader_unavailable"
         elif age <= fresh:
+            coverage_through = watermark_time
             freshness = "fresh"
+            reader_reason = ""
         elif age <= stale:
+            coverage_through = watermark_time
             freshness = "stale"
-            reader_reasons.append("reader_stale")
+            reader_reason = "reader_stale"
         else:
-            reader_reasons.append("reader_unavailable")
+            coverage_through = watermark_time
+            reader_reason = "reader_unavailable"
 
     pending = _count(raw, "pending_event_count")
     invalid = _count(raw, "invalid_event_count")
@@ -183,7 +181,12 @@ def _traffic(raw, watermark_value, start, end, coverage_from, evaluated, fresh, 
     missing_time = _count(raw, "missing_controller_time_count")
     duplicates = _count(raw, "semantic_duplicate_count")
     other = _count(raw, "other_excluded_event_count")
-    reasons = list(reader_reasons)
+    reasons = []
+    # Reader freshness describes the current ingestion process.  A historical
+    # range already ending at/before the durable watermark remains complete.
+    if coverage_through is None or end > coverage_through:
+        if reader_reason:
+            reasons.append(reader_reason)
     if pending:
         reasons.append("pending_offline_events")
     if invalid:
@@ -192,13 +195,15 @@ def _traffic(raw, watermark_value, start, end, coverage_from, evaluated, fresh, 
         reasons.append("missing_reported_traffic")
     if missing_time:
         reasons.append("missing_controller_time")
-    if duplicates:
-        reasons.append("semantic_replay_suppressed")
     if other:
         reasons.append("missing_reported_traffic")
     coverage = _coverage(start, end, coverage_from, coverage_through, reasons)
+    if unsupported:
+        coverage = _unavailable_coverage(
+            coverage, "unsupported_processing_result"
+        )
     return HomeActivityTraffic(
-        bytes=_count(raw, "traffic_bytes"),
+        bytes=None if unsupported else _count(raw, "traffic_bytes"),
         status=coverage.status,
         estimated=True,
         attribution="completed_session_end",
@@ -268,6 +273,21 @@ def _coverage(start, end, coverage_from, coverage_through, extra_reasons):
         fully_covered=complete,
         status="complete" if complete else "partial",
         quality_reasons=tuple(reasons),
+    )
+
+
+def _unavailable_coverage(
+    value: HomeActivityCoverage, reason: str
+) -> HomeActivityCoverage:
+    reasons = tuple(dict.fromkeys((*value.quality_reasons, reason)))
+    return HomeActivityCoverage(
+        coverage_from_utc=value.coverage_from_utc,
+        coverage_through_utc=value.coverage_through_utc,
+        covered_from_utc=value.covered_from_utc,
+        covered_through_utc=value.covered_through_utc,
+        fully_covered=False,
+        status="unavailable",
+        quality_reasons=reasons,
     )
 
 

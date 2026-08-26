@@ -55,6 +55,11 @@ def home_activity_config_from_settings(
         settings.get("web_admin_home_activity_enabled", "false"),
         "WEB_ADMIN_HOME_ACTIVITY_ENABLED",
     )
+    # The feature flag is the rollback boundary.  Activity-only values are
+    # deliberately not parsed while disabled, so stale/broken optional
+    # configuration cannot degrade the rest of Admin Web.
+    if not enabled:
+        return HomeActivityConfig(False, 60, 20, 90, 180, {}, ())
     refresh = _integer(
         settings.get("web_admin_home_activity_refresh_seconds", "60"),
         "WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS",
@@ -92,10 +97,6 @@ def home_activity_config_from_settings(
             "Activity request timeout must exceed the Admin query deadline"
         )
 
-    if not enabled:
-        return HomeActivityConfig(
-            False, refresh, request_timeout, fresh, stale, {}, ()
-        )
     if not admin_config.enabled or not admin_config.home_live_enabled:
         raise HomeActivityConfigError(
             "Home Activity requires Admin Web and Home Live"
