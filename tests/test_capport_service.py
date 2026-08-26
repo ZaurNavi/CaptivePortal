@@ -70,6 +70,7 @@ def controller_with(
     found=True,
     auth_status=0,
     active=True,
+    ssid=None,
 ):
     controller = Mock()
     controller.get_clients.return_value = Result.ok(
@@ -79,6 +80,7 @@ def controller_with(
                     {
                         "client_ip": "192.168.1.10",
                         "client_mac": "AA:BB:CC:DD:EE:FF",
+                        "ssid": ssid,
                         # Deliberately not authoritative.
                         "authStatus": None,
                         "active": None,
@@ -160,6 +162,28 @@ def test_authorized_client_is_not_captive():
     assert state.client_found
     assert state.captive is False
     assert state.client.auth_status == 2
+
+
+def test_list_ssid_survives_resolution_without_extra_controller_call():
+    controller = controller_with(ssid="Zefer_Parki")
+
+    state = service_for(controller).resolve("192.168.1.10")
+
+    assert state.client.ssid == "Zefer_Parki"
+    controller.get_clients.assert_called_once_with("site-1")
+    controller.get_client.assert_called_once_with(
+        "site-1",
+        "AA:BB:CC:DD:EE:FF",
+    )
+
+
+@pytest.mark.parametrize("ssid", (None, "", "   ", 123, "bad\x00ssid", "\ud800"))
+def test_missing_or_malformed_list_ssid_remains_none(ssid):
+    state = service_for(controller_with(ssid=ssid)).resolve(
+        "192.168.1.10"
+    )
+
+    assert state.client.ssid is None
 
 
 def test_list_with_only_ip_mac_uses_authoritative_get_client_state():

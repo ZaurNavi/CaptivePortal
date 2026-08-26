@@ -133,6 +133,7 @@ def create_capport_blueprint(
             site_id=state.client.site_id,
             client_mac=state.client.client_mac,
             client_ip=state.client.client_ip,
+            ssid=state.client.ssid,
         )
         if wants_json:
             result = portal_entry_handler.prepare_portal(context)

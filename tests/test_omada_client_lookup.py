@@ -40,10 +40,11 @@ def page(data, **result_fields):
     )
 
 
-def client(ip, mac, auth_status=0, active=True):
+def client(ip, mac, auth_status=0, active=True, ssid=None):
     return {
         "ip": ip,
         "mac": mac,
+        "ssid": ssid,
         "authStatus": auth_status,
         "active": active,
     }
@@ -52,7 +53,11 @@ def client(ip, mac, auth_status=0, active=True):
 def test_get_clients_one_page_normalizes_fields_and_uses_params():
     omada = provider()
     response = page(
-        [client("192.168.1.10", "aa-bb-cc-dd-ee-ff")]
+        [client(
+            "192.168.1.10",
+            "aa-bb-cc-dd-ee-ff",
+            ssid="Zefer_Parki",
+        )]
     )
 
     with patch(
@@ -66,6 +71,7 @@ def test_get_clients_one_page_normalizes_fields_and_uses_params():
         {
             "client_ip": "192.168.1.10",
             "client_mac": "AA:BB:CC:DD:EE:FF",
+            "ssid": "Zefer_Parki",
             "authStatus": 0,
             "active": True,
         }
@@ -75,6 +81,16 @@ def test_get_clients_one_page_normalizes_fields_and_uses_params():
         "pageSize": 100,
     }
     omada._get_token.assert_called_once()
+
+
+@pytest.mark.parametrize("ssid", (None, "", "   ", 123, "bad\x00ssid", "\ud800"))
+def test_get_clients_normalizes_missing_or_malformed_ssid_to_none(ssid):
+    normalized = OmadaProvider._normalize_client(
+        client("192.168.1.10", "aa-bb-cc-dd-ee-ff", ssid=ssid)
+    )
+
+    assert normalized is not None
+    assert normalized["ssid"] is None
 
 
 def test_get_clients_reads_multiple_pages_with_one_token():

@@ -147,6 +147,30 @@ def test_repeated_prepare_reuses_session_and_starts_one_worker():
     ]
 
 
+def test_portal_context_ssid_is_preserved_in_new_auth_session():
+    manager = AuthSessionManager()
+    handler = PortalEntryHandler(
+        session_manager=manager,
+        auth_worker=Mock(),
+        executor=CapturingExecutor(),
+        auth_telemetry=Mock(),
+    )
+
+    result = handler.prepare_portal(PortalClientContext(
+        site_id="site-1",
+        client_mac="AA:BB:CC:DD:EE:FF",
+        client_ip="192.168.1.10",
+        ssid="Zefer_Parki",
+    ))
+
+    session = manager.get_by_client(
+        "site-1",
+        "AA:BB:CC:DD:EE:FF",
+    )
+    assert session is not None
+    assert session.ssid == "Zefer_Parki"
+
+
 def test_expired_portal_entry_starts_new_session_without_expired_page():
     manager = AuthSessionManager()
     executor = CapturingExecutor()

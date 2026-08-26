@@ -21,6 +21,7 @@ from app.analytics.source_gateway import (
     QueryDeadline,
 )
 from app.analytics.runtime import _visit_opening_available
+from app.visit_lifecycle.models import NormalizedVisitStart
 
 from .conftest import SITE_A
 
@@ -673,6 +674,41 @@ def test_opening_authorization_ssid_proves_scope_when_visit_copy_is_null(
     )["visits"]
     assert raw["verified_visit_count"] == 2
     assert raw["unproven_scope_count"] == 0
+
+
+def test_persisted_guest_scoped_visit_opening_is_counted(analytics_stack):
+    outcome = analytics_stack.visits.create_or_reuse_start(
+        NormalizedVisitStart(
+            auth_session_id="55555555-5555-4555-8555-555555555555",
+            site_id=SITE_A,
+            client_mac="02:11:22:33:44:77",
+            authorized_at="2026-01-01T10:45:00.000Z",
+            auth_run_number=1,
+            authorization_attempt=1,
+            final_reason="AUTHORIZED",
+            client_ip="192.0.2.77",
+            portal_ssid="ssid-a",
+            portal_ap_mac=None,
+            portal_radio_id=None,
+        ),
+        now_utc="2026-01-01T10:45:00.000Z",
+    )
+    assert outcome.status == "opened"
+
+    result = HomeActivityReadService(analytics_stack.gateway).get_activity(
+        site_id=SITE_A, guest_ssids=("ssid-a",), range_payload={},
+        from_utc="2026-01-01T09:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        evaluated_at_utc="2026-01-01T11:00:00.000Z",
+        timezone_name="UTC",
+        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_fresh_max_age_seconds=90,
+        traffic_stale_max_age_seconds=180,
+        deadline=QueryDeadline.after(5),
+    )
+    assert result.authorized_visits.status == "complete"
+    assert result.authorized_visits.value == 3
 
 
 def test_known_non_guest_ssid_does_not_poison_guest_result(analytics_stack):

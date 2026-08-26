@@ -26,6 +26,7 @@ class _ListedClient:
     client_mac: str
     auth_status: int | None
     active: bool | None
+    ssid: str | None
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class _IdentitySnapshot:
     expires_at: float
     generation: int
     mac_by_ip: dict[str, str]
+    ssid_by_ip: dict[str, str | None]
     fallback_by_ip: dict[str, _ListedClient]
     ambiguous_ips: frozenset[str]
 
@@ -294,6 +296,7 @@ class CapportService:
                     client_ip=client_ip,
                     client_mac=client_mac,
                     identity_generation=identity.generation,
+                    listed_ssid=identity.ssid_by_ip.get(client_ip),
                     fallback_client=identity.fallback_by_ip.get(
                         client_ip
                     ),
@@ -408,10 +411,12 @@ class CapportService:
                         raw.get("authStatus")
                     ),
                     active=self._optional_bool(raw.get("active")),
+                    ssid=self._optional_ssid(raw.get("ssid")),
                 )
             )
 
         mac_by_ip: dict[str, str] = {}
+        ssid_by_ip: dict[str, str | None] = {}
         fallback_by_ip: dict[str, _ListedClient] = {}
         ambiguous: set[str] = set()
         for client_ip, listed_clients in grouped.items():
@@ -430,6 +435,17 @@ class CapportService:
                 )
             else:
                 mac_by_ip[client_ip] = selected
+                selected_rows = [
+                    client
+                    for client in listed_clients
+                    if client.client_mac == selected
+                ]
+                selected_ssids = {client.ssid for client in selected_rows}
+                ssid_by_ip[client_ip] = (
+                    next(iter(selected_ssids))
+                    if len(selected_ssids) == 1
+                    else None
+                )
                 if len(listed_clients) == 1:
                     fallback_by_ip[client_ip] = listed_clients[0]
 
@@ -440,6 +456,7 @@ class CapportService:
             ),
             generation=generation,
             mac_by_ip=mac_by_ip,
+            ssid_by_ip=ssid_by_ip,
             fallback_by_ip=fallback_by_ip,
             ambiguous_ips=frozenset(ambiguous),
         )
@@ -450,6 +467,7 @@ class CapportService:
         client_ip: str,
         client_mac: str,
         identity_generation: int,
+        listed_ssid: str | None,
         fallback_client: _ListedClient | None,
     ) -> _ResolvedClient:
         site_id = self.config.site_id
@@ -610,6 +628,7 @@ class CapportService:
                 client_mac=client_mac,
                 auth_status=auth_status,
                 active=active,
+                ssid=listed_ssid,
             )
             cached = _CachedClientState(
                 expires_at=(
@@ -929,3 +948,15 @@ class CapportService:
             if normalized in {"false", "0", "no"}:
                 return False
         return None
+
+    @staticmethod
+    def _optional_ssid(value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
+        if "\x00" in value:
+            return None
+        return value

@@ -65,6 +65,7 @@ def test_authorized_submits_independent_snapshot_and_visit_evidence():
     assert request.auth_run_number == 1
     assert request.authorization_attempt == 2
     assert request.final_reason == "AUTHORIZED_AFTER_ATTEMPT"
+    assert request.portal_ssid == "Zefer_Parki"
     assert request.portal_radio_id == "0"
     assert manager.snapshot(session)["status"] == AuthStatus.AUTHORIZED.value
 

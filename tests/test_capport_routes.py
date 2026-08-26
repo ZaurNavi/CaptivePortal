@@ -63,6 +63,7 @@ def state(
     allowed=True,
     lookup_failed=False,
     auth_status=0,
+    ssid=None,
 ):
     client = None
     if found:
@@ -72,6 +73,7 @@ def state(
             client_mac="AA:BB:CC:DD:EE:FF",
             auth_status=auth_status,
             active=True,
+            ssid=ssid,
         )
     return CapportState(
         allowed=allowed,
@@ -323,7 +325,7 @@ def test_api_is_read_only_and_never_enters_authorization_flow():
 
 def test_login_found_client_calls_shared_entry_handler():
     service = Mock()
-    service.resolve_for_login.return_value = state()
+    service.resolve_for_login.return_value = state(ssid="Zefer_Parki")
     handler = Mock()
     handler.open_portal.return_value = ("opened", 200)
     app, _ = app_for(service, handler)
@@ -339,6 +341,7 @@ def test_login_found_client_calls_shared_entry_handler():
             site_id="site-1",
             client_mac="AA:BB:CC:DD:EE:FF",
             client_ip="192.168.1.10",
+            ssid="Zefer_Parki",
         )
     )
 
