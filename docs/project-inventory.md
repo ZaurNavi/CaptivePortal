@@ -1,7 +1,7 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-08-25
+Updated: 2026-08-26
 Branch: `main`
 Runtime commit: `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
 Commit source: merge PR #62, 2026-08-24
@@ -308,9 +308,37 @@ Fail-open means disabled/unavailable/degraded and safe omission — never fabric
 
 `tests/` is the repository test root. Current groups cover Auth, CAPPORT, Omada/webhook, Visitor Registry, Pending Cleaner, Visit Lifecycle, Observation, Current State, Analytics and Admin Web.
 
-Do not carry old numeric test counts as permanent current facts without recounting.
+Current workflow separates test responsibilities:
 
-`.github/workflows` is absent at this baseline. GitHub release CI is therefore an open process debt; current release gate is manual.
+```text
+Coder → TASK/module-scoped targeted testing
+Central Lab → full regression / official baseline / final Test Evidence
+Tech Lead → architecture/DIFF/targeted-evidence review
+```
+
+Owner-provided current Windows Local Gate tool:
+
+```text
+C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
+```
+
+Confirmed 2026-08-26 Windows evidence:
+
+```text
+strict suite: 1985 passed / 30 skipped / 0 strict regressions
+compatibility: 2 WARN + 3 PASS (five exact tracked cases)
+compileall: PASS
+git diff --check: PASS
+overall Windows Local Gate: PASS
+```
+
+The compatibility baseline is narrow; a new failure outside the recorded cases is a strict regression until reviewed.
+
+These numbers are operational test evidence, not a repository-derived evergreen count. After runtime/test changes a new exact-artifact Central Lab baseline is required before presenting them as current.
+
+`.github/workflows` is absent at the documented runtime baseline. GitHub release CI remains open process debt; the official full-regression source is currently the manual Central Lab.
+
+Windows Local Gate does not replace a separately required Linux/production-compatible pre-production gate.
 
 ## 19. Current vs historical vs change-intent
 

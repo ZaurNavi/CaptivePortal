@@ -1,7 +1,7 @@
 # Handoff contract
 
 Status: current
-Updated: 2026-08-04
+Updated: 2026-08-26
 
 ## Обязательный итог
 
@@ -17,9 +17,27 @@ Updated: 2026-08-04
 
 Изменились ли public API, config, events, persistence, lifecycle, security или architecture.
 
-### Проверки
+### TASK-scoped проверки исполнителя
 
-Точная команда и результат: passed, skipped, failed. Не выполненные проверки с причиной.
+Точные targeted/module/static команды и результат: passed, skipped, failed. Не выполненные проверки — с причиной.
+
+Не писать, что Coder выполнил full regression, если он только передаёт Central Lab evidence.
+
+### Central Lab / official Test Evidence
+
+Указать одно из:
+
+```text
+not required for this handoff
+pending Central Lab gate
+Central Lab evidence: <artifact/date/result/reference>
+```
+
+Если официальный baseline существует, указать exact artifact и результат, но не приписывать выполнение Coder/Tech Lead.
+
+### Linux / production-compatible evidence
+
+Если применимо: environment, exact artifact, command/gate and result. Иначе явно `not applicable / separate release step`.
 
 ### Риски и ограничения
 
@@ -41,8 +59,9 @@ Updated: 2026-08-04
     Execution mode:
     Files inspected:
     Files changed:
-    Targeted tests:
-    Full tests:
+    Targeted/module tests:
+    Central Lab full regression: not-run-by-agent / evidence reference / not-required
+    Linux pre-production gate: separate / evidence reference / not-required
     Unexpected rework:
     Reason for additional context:
     Repository actions:

@@ -1,13 +1,13 @@
 # Workflow coding agent
 
 Status: current
-Updated: 2026-08-25
+Updated: 2026-08-26
 
 ## 1. Intake
 
 1. Read `AGENTS.md`.
 2. Read the current TASK as scope/change-intent.
-3. Determine execution mode, test responsibility and repository actions.
+3. Determine execution mode, TASK-scoped test responsibility and repository actions.
 4. Read only linked knowledge contracts.
 5. Verify affected current code/tests before planning.
 
@@ -32,27 +32,69 @@ Change-intent truth: FINAL TASK → PLAN → ADR.
 
 ## 4. Verification responsibility
 
-Executor:
-- targeted tests for changed modules;
+### Coder / executor
+
+Runs task-scoped verification:
+
+- targeted tests for changed modules/components;
 - new regression tests assigned by TASK;
-- relevant static/syntax checks;
+- repeated targeted tests needed during implementation/fixes;
+- relevant static/syntax/frontend checks;
 - `git diff --check`.
 
-Reviewer / Tech Lead / owner:
-- full repository suite on exact artifact before production deployment/activation.
+The Coder does not run the whole CaptivPortal regression suite by default.
 
-Do **not** repeat identical executor targeted tests unless the rerun supplies new evidence:
-new risk, different platform, exact-artifact integration, investigation, or explicit TASK/deploy requirement.
+### Tech Lead / Reviewer
 
-## 5. Repository actions
+Reviews architecture, TASK/ADR conformance, DIFF, contracts, risk and the Coder's targeted-test evidence.
+
+The Tech Lead does not personally rerun the full suite for ordinary review unless a separate concrete reason requires it.
+
+### Central Lab
+
+Owns the controlled full-regression function:
+
+```text
+official full baseline
+Full Regression Gate
+final Test Evidence
+strict-regression confirmation
+```
+
+Use the Central Lab evidence for the exact artifact rather than duplicating the same full run in multiple roles.
+
+### Linux pre-production
+
+When production acceptance requires Linux/production-compatible execution, that is a separate exact-artifact gate defined by the deploy/release contract. Windows Local Gate does not replace it.
+
+Detailed policy and current Windows V4 baseline: `../testing.md`.
+
+## 5. Promotion flow
+
+Normal flow:
+
+```text
+Coder implementation
+→ targeted/module test evidence
+→ Tech Lead review
+→ Central Lab full gate when required
+→ owner/release decision
+→ separate Linux production-compatible gate when required
+→ deploy/activation
+```
+
+Do not repeat an identical test run unless the rerun supplies new evidence: changed artifact, new risk, different platform, investigation or explicit release requirement.
+
+## 6. Repository actions
 
 Implementation permission does not imply publish/merge permission.
 
 Branch/commit/push/PR/merge are separate repository actions. Merge, force push and production deploy remain owner-only without direct authorization.
 
-## 6. Conflicts
+## 7. Conflicts
 
 If TASK, code, tests and current docs disagree:
+
 - identify exact sources;
 - stop only affected part;
 - continue independent safe work;
@@ -60,8 +102,8 @@ If TASK, code, tests and current docs disagree:
 
 Never silently choose the convenient source.
 
-## 7. Handoff
+## 8. Handoff
 
 Use `agents/handoff.md`.
 
-State exact artifact, files changed, targeted/full checks, actual repository actions, open risks and owner actions. Never claim an operation that was not executed.
+State exact artifact, files changed, Coder targeted checks, any Central Lab evidence reference, any separate Linux pre-production evidence, actual repository actions, open risks and owner actions. Never claim an operation that was not executed.

@@ -12,9 +12,11 @@ planning-only / implementation / review / publish / deploy
 
 ## 4. Agent capability assumptions
 
-## 5. Test responsibility
+## 5. TASK-scoped test responsibility
 
 agent / owner / shared / not-applicable
+
+> Это поле относится к targeted/module tests текущего TASK. Официальный full regression по умолчанию принадлежит Central Lab.
 
 ## 6. Текущее состояние
 
@@ -52,14 +54,27 @@ agent / owner / shared / not-applicable
 
 ## 22. Security
 
-## 23. Targeted tests
+## 23. Targeted/module tests
 
-## 24. Full gate
+## 24. Official full regression / Central Lab
 
-## 25. Acceptance criteria
+Указать:
 
-## 26. Stop conditions
+```text
+fresh Central Lab baseline required: yes/no
+exact artifact: <SHA/patch identity when known>
+```
 
-## 27. Handoff format
+Не назначать full repository suite Coder/Tech Lead автоматически.
 
-## 28. PR requirements
+## 25. Linux / production-compatible gate
+
+required / not-required / separate deploy-release task
+
+## 26. Acceptance criteria
+
+## 27. Stop conditions
+
+## 28. Handoff format
+
+## 29. PR requirements

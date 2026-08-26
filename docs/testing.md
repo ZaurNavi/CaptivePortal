@@ -1,26 +1,137 @@
 # Testing
 
 Status: current
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Documentation/workflow baseline: `main@8e36132398398b13d7503f624ef19c26d0057566`
+Runtime code checkpoint described by the current KB: `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
 
-## Responsibility
+## Responsibility model
 
-`AGENTS.md` is authoritative.
+`AGENTS.md` is the universal entry contract. This document is the detailed testing authority.
 
-### Executor / coding agent
+The current project model is:
 
-Runs:
-- targeted tests for modules/components changed by the task;
-- regression cases added for the changed contract;
-- relevant static/syntax checks;
+```text
+Coder / executor
+→ TASK/module-scoped testing
+
+Central Lab
+→ full regression
+→ official baseline
+→ final Test Evidence
+```
+
+The purpose is to avoid repeating the same heavy regression suite in Coder, Tech Lead and owner workflows while preserving strong local verification of each implementation.
+
+### Coder / executor
+
+The Coder keeps both the right and the responsibility to test the work being implemented.
+
+Expected Coder verification includes:
+
+- targeted tests for modules/components changed by the TASK;
+- tests for specific files/classes/scenarios affected by the change;
+- regression cases added with the implementation;
+- repeated local runs of those targeted tests during development/fixes;
+- relevant static/syntax/frontend checks;
 - `git diff --check`.
 
-The executor does **not** run the full repository suite merely for formality unless the owner/TASK explicitly assigns it.
+The Coder does **not** run the full CaptivPortal repository regression suite by default after every implementation.
 
-### Reviewer / Tech Lead / owner
+A TASK may explicitly require an exceptional broader run when there is a concrete reason, but that exception must be stated; it is not inherited from old TASK wording.
 
-Runs the full exact-artifact pre-production gate before deployment/feature activation:
+### Tech Lead / Reviewer
+
+The Tech Lead normally verifies:
+
+- architecture and TASK/ADR conformance;
+- implementation boundaries and DIFF;
+- contracts, risk and regression surface;
+- Coder targeted-test evidence;
+- whether new/changed tests cover the intended behavior.
+
+The Tech Lead is **not** required to personally execute the full repository suite for ordinary implementation review.
+
+When official full-baseline evidence is required, the Tech Lead requests/consumes the Central Lab result for the exact artifact.
+
+The Tech Lead may still run a targeted or broader test when it answers a specific unresolved question, platform delta or investigation need.
+
+### Central Lab
+
+The Central Lab is the controlled source for:
+
+- official current full-regression baseline;
+- Full Regression Gate;
+- final Test Evidence before further promotion when required;
+- confirmation that no strict regression appeared;
+- reproducible evidence that can be consumed by Tech Lead, Coder and other roles.
+
+A successful full gate on an unchanged exact artifact must not be duplicated by another role merely for formality.
+
+## Official Windows Local Gate
+
+Current approved tool:
+
+```text
+C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
+```
+
+Owner-provided confirmed baseline date:
+
+```text
+2026-08-26
+```
+
+Strict-suite result:
+
+```text
+1985 passed
+30 skipped
+0 strict regressions
+```
+
+Five compatibility cases are tracked separately and narrowly:
+
+```text
+WARN — SQLite infinity edge case
+WARN — Node async harness timing
+PASS — Visitor Registry Windows thread-timing case 1
+PASS — Visitor Registry Windows thread-timing case 2
+PASS — Visitor Registry Windows thread-timing case 3
+```
+
+Additional gate checks:
+
+```text
+compileall          PASS
+git diff --check    PASS
+Windows Local Gate  PASS
+```
+
+`lab-test-v4-fixed.cmd` is the current official Windows Local Test Gate. It must not be loosened merely to make a new failure green.
+
+### Compatibility-baseline rule
+
+Compatibility handling is exact and case-specific.
+
+Forbidden:
+
+- excluding a whole module/file because one known case is environment-sensitive;
+- converting a new failure into WARN without reviewed evidence;
+- broadening the compatibility allowlist merely to preserve a green result;
+- weakening assertions or deleting tests to satisfy the gate.
+
+Any new failure outside the explicitly recorded compatibility cases is a **strict regression** until investigated and reclassified through an explicit reviewed decision.
+
+The numeric baseline above is evidence from the confirmed 2026-08-26 run. After runtime/test changes, a new official exact-artifact baseline must be generated before the old numbers are presented as current.
+
+## Linux / production-compatible gate
+
+The Windows Local Gate does **not** replace, weaken or waive Linux pre-production acceptance.
+
+When a deploy/release contract requires a Linux or other production-compatible full gate, it is executed separately on the exact artifact in the required environment.
+
+Canonical Linux gate remains:
 
 ```bash
 python -m pytest -q -rs
@@ -28,13 +139,42 @@ PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
 git diff --check
 ```
 
-Reuse valid executor targeted-test evidence. Do not repeat an identical targeted run unless it answers a new risk/question.
+The deploy/release TASK identifies who executes that environment-specific acceptance. It is not automatically assigned to the Coder or Tech Lead merely because they implemented/reviewed the change.
+
+Windows compatibility WARNs do not automatically transfer to Linux; platform-specific results are classified in their own evidence.
+
+## Evidence contract
+
+Every claimed targeted or full test result must identify, as applicable:
+
+- exact artifact/baseline;
+- exact command or approved lab gate version;
+- environment;
+- passed/skipped/failed or strict-regression result;
+- compatibility classification;
+- `compileall` / `git diff --check` status where included;
+- whether the result is Coder targeted evidence, Central Lab official evidence, or Linux pre-production evidence.
+
+Historical green results remain historical. Never present a prior count as a current exact-artifact result after runtime/test changes.
+
+## Reuse and non-duplication
+
+Do not repeat an identical targeted or full run only to duplicate another role's evidence.
+
+A rerun is justified when it provides new information, for example:
+
+- a new patch/commit changed the tested artifact;
+- a new risk or previously uncovered scenario must be checked;
+- a different platform/environment is required;
+- previous evidence is incomplete, contradictory or suspect;
+- a deploy/production contract explicitly requires the independent environment gate.
 
 ## Current test map
 
 Repository test root: `tests/`.
 
 Coverage groups include:
+
 - Portal/Auth/retry/session ownership;
 - CAPPORT/discovery/frontend;
 - telemetry/counters;
@@ -47,29 +187,18 @@ Coverage groups include:
 - Analytics/API/Current Traffic;
 - Admin Web/Home Live/Home Traffic.
 
-Do not preserve an old numeric test-file/test-case count as a current fact without recounting on the target commit.
-
-## Evidence
-
-Every claimed test result must include:
-- exact baseline/artifact;
-- exact command;
-- environment;
-- passed/skipped/failed;
-- relevant failure classification.
-
-Historical green results remain historical.
-
 ## CI
 
-`.github/workflows` is absent at this baseline. Automated GitHub release gating is not implemented; this is process debt, not a runtime defect.
+`.github/workflows` is absent at the documented runtime baseline. Automated GitHub release gating is not implemented; this remains process debt, not a runtime defect.
+
+The Central Lab is the official manual full-regression source until a separately approved CI/release-gate architecture changes that responsibility.
 
 ## Documentation-only tasks
 
-For a pure docs change:
-- no runtime test changes;
-- no runtime pytest claim is required from executor;
-- validate paths/links/claims against code;
-- run Markdown/link tooling only if already available;
+For a pure documentation change:
+
+- no runtime pytest claim is required from the documentation executor;
+- validate paths/links/claims against current sources;
+- run Markdown/link tooling only if already available/relevant;
 - run `git diff --check`;
-- Reviewer may run the normal full gate before production integration if policy requires exact-artifact validation.
+- request a fresh Central Lab or Linux gate only when an owner/release contract requires exact-artifact runtime evidence.

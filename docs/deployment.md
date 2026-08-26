@@ -1,8 +1,9 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-08-25
-Repository baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Runtime repository baseline documented by KB: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Test-workflow update baseline: `main@8e36132398398b13d7503f624ef19c26d0057566`
 
 ## Repository vs production
 
@@ -26,7 +27,7 @@ Provider construction is fail-closed when core configuration is missing/invalid.
 Implementation and production activation are separate actions.
 
 A deploy TASK must specify:
-target, approved commit, backup, exact config change, test gate, health checks, rollback and owner authorization.
+target, approved commit, backup, exact config change, required test evidence, health checks, rollback and owner authorization.
 
 Repository feature defaults being `false` intentionally support code deployment before separate activation.
 
@@ -50,9 +51,13 @@ Do not activate/deploy changes that break bounded shutdown.
 
 ## Testing responsibility
 
-Executor targeted evidence is reused.
+Coder targeted/module evidence is reused by Tech Lead and the release process.
 
-Before production deployment/activation, Reviewer / Tech Lead / owner runs the full exact-artifact gate required by `AGENTS.md`.
+The official full-regression baseline / Full Regression Gate / final Test Evidence is supplied by Central Lab according to `docs/testing.md`. Tech Lead does not need to duplicate the same full suite for ordinary review.
+
+Before a production deployment/activation, the release owner decides whether the exact artifact requires a fresh Central Lab gate and whether a separate Linux/production-compatible gate is mandatory.
+
+The Windows Local Gate does **not** replace Linux acceptance when the deploy contract requires Linux. The Linux gate is executed separately by the executor named by the deploy/release TASK; it is not automatically Coder or Tech Lead responsibility.
 
 ## Feature activation
 

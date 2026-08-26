@@ -985,25 +985,50 @@ Registry device identity сегодня не является автоматич
 
 # Testing и release discipline
 
-Current policy разделяет executor responsibility и final repository gate.
+Текущая модель разделяет повседневное тестирование реализации и официальный full regression.
 
-### Executor
+```text
+Coder
+→ targeted / module / TASK-scoped tests
 
-Запускает:
+Tech Lead
+→ architecture / TASK / DIFF / targeted-evidence review
 
-- targeted tests изменённых modules/components;
-- relevant static/frontend checks;
-- exact risk-specific checks, требуемые TASK.
-
-### Reviewer / Tech Lead / owner перед production
-
-```bash
-python -m pytest -q -rs
-PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
-git diff --check
+Central Lab
+→ Full Regression Gate
+→ official current baseline
+→ final Test Evidence
 ```
 
-Нельзя заявлять full green gate, если он не был реально выполнен на exact artifact.
+Кодер может и должен тестировать свою функциональность столько раз, сколько требуется для разработки и исправлений. Но ему не нужно после каждой реализации запускать весь CaptivPortal regression suite.
+
+Tech Lead не обязан дублировать тяжёлый full suite для обычного review. Когда нужен официальный baseline exact artifact, используется evidence Central Lab.
+
+### Official Windows Local Gate
+
+Текущий утверждённый инструмент:
+
+```text
+C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
+```
+
+Подтверждённый baseline от **26 августа 2026 года**:
+
+```text
+Strict suite: 1985 passed / 30 skipped / 0 strict regressions
+Compatibility: 5 точечных cases → 2 WARN / 3 PASS
+compileall: PASS
+git diff --check: PASS
+RESULT: PASS
+```
+
+Два compatibility WARN относятся к SQLite infinity edge case и Node async harness timing. Три Visitor Registry Windows thread-timing cases в контрольном прогоне — PASS.
+
+Compatibility allowlist остаётся точечным. Новое падение вне этих явно зафиксированных cases считается strict regression до отдельного reviewed решения.
+
+Windows Local Gate не заменяет Linux/production-compatible pre-production acceptance. Если release/deploy contract требует Linux full gate, он выполняется отдельно на exact artifact.
+
+Нельзя заявлять current full green baseline после runtime/test changes, опираясь только на старый прогон.
 
 Тесты не должны зависеть от реальных production Omada credentials или live production controller.
 
