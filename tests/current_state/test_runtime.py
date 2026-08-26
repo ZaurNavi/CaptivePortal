@@ -14,7 +14,7 @@ from app.current_state.runtime import (
     UnavailableCurrentStateRuntime,
     create_current_state_runtime,
 )
-from app.current_state.models import CurrentStateSchemaError
+from app.current_state.models import CurrentStateSchemaError, CurrentStateStorageError
 from app.current_state import repository as repository_module
 from app.current_state.repository import CurrentStateRepository
 from app.models import Result
@@ -166,6 +166,34 @@ def test_nontransient_schema_error_is_not_retried(enabled_settings):
     assert runtime.start() is False
     assert runtime.state == "unavailable"
     assert attempts == 1
+
+
+def test_runtime_retries_self_interrupted_quick_check_then_starts(
+    enabled_settings, monkeypatch
+):
+    enabled_settings["current_state_client_initial_delay_seconds"] = "3600"
+    enabled_settings["current_state_ap_initial_delay_seconds"] = "3600"
+    runtime = create_current_state_runtime(
+        enabled_settings, Provider(), Telemetry()
+    )
+    attempts = 0
+
+    def interrupted_then_success():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise CurrentStateStorageError(
+                "Current State integrity check temporarily timed out"
+            )
+        return False
+
+    runtime.repository.initialize = interrupted_then_success
+    monkeypatch.setattr(time, "sleep", lambda _delay: None)
+
+    assert runtime.start() is True
+    assert runtime.state == "active"
+    assert attempts == 2
+    assert runtime.stop(2.0) is True
 
 
 def test_process_composition_reuses_controller_and_telemetry(monkeypatch):

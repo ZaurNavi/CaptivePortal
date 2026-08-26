@@ -6,6 +6,7 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 import hashlib
 import json
 from contextlib import contextmanager
@@ -221,6 +222,16 @@ class CurrentStateRepository:
 
     def _validate_existing(self, path: Path) -> None:
         uri = f"{path.resolve().as_uri()}?mode=ro"
+        quick_check_interrupted = False
+        quick_check_started = 0.0
+
+        def quick_check_progress() -> int:
+            nonlocal quick_check_interrupted
+            quick_check_interrupted = (
+                time.monotonic() - quick_check_started > 10.0
+            )
+            return int(quick_check_interrupted)
+
         try:
             connection = sqlite3.connect(uri, uri=True, timeout=0.5)
             try:
@@ -232,11 +243,8 @@ class CurrentStateRepository:
                 actual = _schema_signature(connection)
                 if actual != _expected_schema_signature():
                     raise CurrentStateSchemaError("Current State schema signature is incompatible")
-                started = __import__("time").monotonic()
-                connection.set_progress_handler(
-                    lambda: 1 if __import__("time").monotonic() - started > 10.0 else 0,
-                    10_000,
-                )
+                quick_check_started = time.monotonic()
+                connection.set_progress_handler(quick_check_progress, 10_000)
                 try:
                     result = connection.execute("PRAGMA quick_check").fetchone()[0]
                 finally:
@@ -248,6 +256,10 @@ class CurrentStateRepository:
         except CurrentStateSchemaError:
             raise
         except sqlite3.OperationalError as exc:
+            if quick_check_interrupted and "interrupted" in str(exc).lower():
+                raise CurrentStateStorageError(
+                    "Current State integrity check temporarily timed out"
+                ) from exc
             if _transient_sqlite_contention(exc):
                 raise CurrentStateStorageError(
                     "Current State database is temporarily busy"
