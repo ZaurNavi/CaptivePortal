@@ -1,8 +1,8 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-08-25
-Current-state baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Current-state baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -40,6 +40,7 @@ Historical reports, production acceptance и research сохраняют док�
 | Agent workflow | `agents/workflow.md` |
 | TASK contract | `agents/task-contract.md` |
 | Handoff format | `agents/handoff.md` |
+| Home Activity postmortem | `postmortems/TASK-HOME-ACTIVITY-01-2026-08-26.md` |
 | Historical/superseded material | `archive/` |
 
 ## Current module contracts
@@ -60,12 +61,15 @@ Historical reports, production acceptance и research сохраняют док�
 - `modules/current-state.md`
 - `modules/analytics.md`
 - `modules/admin-web.md`
+- `modules/home-activity.md`
 
 ## Current vs planned
 
-Home Live and Home Traffic находятся в current `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`.
+Home Live, Home Traffic и Home Activity находятся в current `main@53f617b3ac0155d0d647e58e98309927f9a4d318`.
 
-Home Activity не находится в коде этого baseline и не должен описываться как current implementation. Если approved TASK для него передан вне repository, он остаётся change-intent до merge соответствующего runtime change.
+`TASK-HOME-ACTIVITY-01` имеет состояние: Implemented → Merged → Central Lab PASS → Production deployed → Core production acceptance PASS.
+
+Текущий incident/postmortem: `postmortems/TASK-HOME-ACTIVITY-01-2026-08-26.md`.
 
 ## Контекстная экономия
 

@@ -1,8 +1,8 @@
 # Visit Lifecycle
 
 Status: current module contract
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 Schema: v2
 
 ## Purpose
@@ -14,6 +14,8 @@ Model physical visits independently from process-local AuthSession state.
 ## Start path
 
 `confirmed AUTHORIZED AuthRun → VisitStartRequest → LocalVisitStartSubmitter → VisitLifecycleService → visits.sqlite3`
+
+Opening evidence includes the ingress `portal_ssid` when proven. CAPPORT and External Portal must preserve their actual ingress SSID context; Visit Lifecycle does not reconstruct missing SSID from Site/configuration.
 
 Auth success is fail-open with respect to Visit persistence: failure to persist Visit history must not revoke otherwise verified guest authorization.
 

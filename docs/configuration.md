@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -161,6 +161,24 @@ Prefix: `WEB_ADMIN_HOME_TRAFFIC_*`
 Repository default: disabled.
 
 Controls refresh/request timeout/page size plus fresh/stale age and maximum AP skew.
+
+### Home Activity
+
+Prefix: `WEB_ADMIN_HOME_ACTIVITY_*`.
+
+Repository default: `WEB_ADMIN_HOME_ACTIVITY_ENABLED=false`.
+
+Current contract:
+- requires Admin Web + Home Live + enabled Current State scope when activated;
+- guest SSIDs come from canonical `CURRENT_STATE_CLIENT_SSIDS_JSON`; no second Activity SSID list exists;
+- `WEB_ADMIN_HOME_ACTIVITY_SITE_CONTEXT_JSON` supplies per-Site `timezone`, `visits_coverage_from_utc`, `traffic_coverage_from_utc`;
+- Activity-only invalid configuration fails open relative to the rest of Admin/guest authorization.
+
+Confirmed production Site context on 2026-08-26:
+- Site `6a64f17630da7c70d232187a`;
+- timezone `Asia/Baku`;
+- Visits coverage `2026-08-26T17:46:55.982Z`;
+- Traffic coverage `null`.
 
 ### Pending Session Cleaner
 

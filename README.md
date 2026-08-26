@@ -25,9 +25,9 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository / documentation checkpoint | `main@b55dcabeea22cbb802b044c263a0887123771c7d` |
-| Runtime code checkpoint described by the current KB | `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7` |
-| Why two SHAs? | PR #63 was documentation-only; it changed no runtime code |
+| Repository / current-state checkpoint | `main@53f617b3ac0155d0d647e58e98309927f9a4d318` |
+| Production deployed HEAD | `53f617b3ac0155d0d647e58e98309927f9a4d318` |
+| Home Activity production state | Implemented, merged, deployed; core production acceptance PASS |
 | Omada Controller family used by the project | Omada Software Controller 5.14.31 |
 | Core guest authorization | Implemented |
 | RFC 8908 CAPPORT | Implemented |
@@ -40,7 +40,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Native Admin Web | Implemented |
 | Home Live | Implemented |
 | Home Traffic / Current Traffic | Implemented |
-| Next approved change-intent | **Home Activity — Visits and Traffic** |
+| Home Activity — Visits and Traffic | **Implemented / deployed** |
 | Multi-Site / Tenant / RBAC | Future evolution, intentionally not prematurely implemented |
 | Current topology | Single application process; HA/multi-process requires a separate ADR |
 
@@ -81,8 +81,8 @@ flowchart LR
     G --> H[Web Foundation / Admin Web]
     H --> I[Home Live]
     I --> J[Home Traffic]
-    J --> K{{NEXT: Home Activity}}
-    K --> L[Deeper product views]
+    J --> K[Home Activity]
+    K --> L{{NEXT: Deeper product views}}
     L --> M[Real Multi-Site trigger]
     M --> N[Tenant / RBAC / Entitlements]
     N --> O[Managed Captive Portal Service]
@@ -100,7 +100,7 @@ The project is therefore no longer “just a login page.” The current platform
 - internal engineering observability;
 - product-facing Admin Web.
 
-The next increment is not another collector. It is a **human-facing use of already persisted facts**: Home Activity.
+Home Activity is now a **current deployed product view over persisted facts**. It was finalized through PR #67–#72 without introducing a new collector.
 
 ---
 
@@ -125,6 +125,7 @@ At the current runtime checkpoint, the repository contains these major capabilit
 - native Admin Web security/session boundary;
 - Home Live current client/AP summary;
 - Home Traffic based on persisted AP Observation facts;
+- Home Activity with independent Authorized Visits and completed-session Traffic coverage;
 - internal Grafana/Loki observability kept separate from the product UI.
 
 A permanent Omada rule applies across the project:
@@ -633,9 +634,9 @@ Human meaning:
 
 ---
 
-## NEXT — Home Activity: Visits and Traffic
+## Home Activity: Visits and Traffic
 
-The approved next change-intent is a Home panel comparing:
+Home Activity is implemented, merged and deployed. The Home panel compares:
 
 ```text
 Today
@@ -650,9 +651,16 @@ Authorized visits
 Traffic
 ```
 
-At the current documented runtime checkpoint this feature is **not yet current code**. Its FINAL specification is approved and has no unresolved Owner product decision, but it must not be listed as implemented until its implementation is merged into `main`.
+Current implementation checkpoint: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`.
 
-Conceptual architecture:
+Production evidence on 2026-08-26 proves the Visit source chain after
+`2026-08-26T17:46:55.982Z` (`21:46:55.982 +04`, Asia/Baku). In the validated
+range 14 of 14 Visits were guest-scope verified with zero opening-evidence
+integrity anomalies and zero unproven-scope rows. `traffic_coverage_from_utc`
+remains `null`; Traffic coverage must not be claimed complete merely because
+time passes.
+
+Current architecture:
 
 ```mermaid
 flowchart TB
@@ -783,7 +791,7 @@ The table below is deliberately about **repository implementation**, not a claim
 | Home Live | ✅ Current, default disabled | Current client/AP summary |
 | Current Traffic | ✅ Current when sources healthy | AP traffic interpretation |
 | Home Traffic | ✅ Current, default disabled | Home presentation of Current Traffic |
-| Home Activity | ⏭️ Approved change-intent | Next human-facing Home increment |
+| Home Activity | ✅ Current, default disabled | Visits and completed-session Traffic with independent coverage |
 | GitHub Actions release CI | ⚠️ Not present | Release gate remains process debt |
 
 ---
@@ -836,8 +844,8 @@ flowchart LR
     A --> W[Web Foundation]:::done
     W --> L[Home Live]:::done
     L --> T[Home Traffic]:::done
-    T --> HA[Home Activity]:::next
-    HA --> D[Deeper product views]:::future
+    T --> HA[Home Activity]:::done
+    HA --> D[Deeper product views]:::next
     D --> MS[Multi-Site]:::future
     MS --> TN[Tenant/RBAC]:::future
     TN --> E[Entitlements]:::future
@@ -1014,13 +1022,14 @@ Current approved tool:
 C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
 ```
 
-Confirmed baseline from **26 August 2026**:
+Confirmed exact-artifact baseline from **26 August 2026**:
 
 ```text
-Strict suite: 1985 passed / 30 skipped / 0 strict regressions
+Artifact: 53f617b3ac0155d0d647e58e98309927f9a4d318
+Production Python: 3.10.12
+Strict suite: 2100 passed / 30 skipped / 5 deselected
+STRICT_REGRESSIONS: 0
 Compatibility: 5 exact cases → 2 WARN / 3 PASS
-compileall: PASS
-git diff --check: PASS
 RESULT: PASS
 ```
 

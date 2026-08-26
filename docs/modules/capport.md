@@ -1,8 +1,8 @@
 # CAPPORT
 
 Status: current
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 ## Purpose
 
@@ -15,6 +15,12 @@ CAPPORT is **not** a second authorization system.
 `source IP → allowed-network validation → Site-bound client discovery → PortalClientContext → PortalEntryHandler → AuthSessionManager → AuthWorker`.
 
 When the client is not yet discoverable, CAPPORT returns a bounded discovery mode and the existing page performs sequential same-page polling. No AuthSession/AuthWorker is created until client identity is resolved.
+
+SSID evidence is preserved from the existing Omada client lookup:
+
+`Omada /clients ssid → CapportClient.ssid → PortalClientContext.ssid → AuthSession.ssid → VisitStartRequest.portal_ssid → Visit Lifecycle`.
+
+Missing/malformed SSID remains unproven; CAPPORT does not infer it from Site or configuration and does not add an extra Omada request.
 
 ## Identity/discovery safeguards
 

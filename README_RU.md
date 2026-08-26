@@ -25,9 +25,9 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository / documentation checkpoint | `main@b55dcabeea22cbb802b044c263a0887123771c7d` |
-| Runtime code checkpoint, описываемый текущей KB | `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7` |
-| Почему два SHA? | PR #63 был documentation-only и не менял runtime code |
+| Repository / current-state checkpoint | `main@53f617b3ac0155d0d647e58e98309927f9a4d318` |
+| Production deployed HEAD | `53f617b3ac0155d0d647e58e98309927f9a4d318` |
+| Home Activity production state | Реализован, merged, deployed; core production acceptance PASS |
 | Семейство Omada Controller в проекте | Omada Software Controller 5.14.31 |
 | Основная гостевая авторизация | Реализована |
 | RFC 8908 CAPPORT | Реализован |
@@ -40,7 +40,7 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | Native Admin Web | Реализован |
 | Home Live | Реализован |
 | Home Traffic / Current Traffic | Реализован |
-| Ближайший approved change-intent | **Home Activity — Visits and Traffic** |
+| Home Activity — Visits and Traffic | **Реализован / deployed** |
 | Multi-Site / Tenant / RBAC | Будущая эволюция; намеренно не реализуется преждевременно |
 | Текущая topology | Один application process; HA/multi-process требует отдельного ADR |
 
@@ -81,8 +81,8 @@ flowchart LR
     G --> H[Web Foundation / Admin Web]
     H --> I[Home Live]
     I --> J[Home Traffic]
-    J --> K{{СЛЕДУЮЩИЙ: Home Activity}}
-    K --> L[Более глубокие product views]
+    J --> K[Home Activity]
+    K --> L{{СЛЕДУЮЩИЙ: Deeper product views}}
     L --> M[Реальный Multi-Site trigger]
     M --> N[Tenant / RBAC / Entitlements]
     N --> O[Managed Captive Portal Service]
@@ -100,7 +100,7 @@ CaptivPortal уже нельзя описывать как «страницу л
 - инженерная observability;
 - product-facing Admin Web.
 
-Следующий increment — **не новый collector**, а человеческое отображение уже накопленных фактов: Home Activity.
+Home Activity теперь является **current deployed product view поверх persisted facts**. Финализация прошла через PR #67–#72 без добавления нового collector.
 
 ---
 
@@ -125,6 +125,7 @@ CaptivPortal уже нельзя описывать как «страницу л
 - собственную Admin Web security/session boundary;
 - Home Live с текущими clients/AP;
 - Home Traffic на persisted AP Observation facts;
+- Home Activity с независимыми Authorized Visits и completed-session Traffic coverage;
 - Grafana/Loki для engineering observability, отдельно от product UI.
 
 Для Omada API действует постоянное правило:
@@ -633,9 +634,9 @@ Home request не делает direct Omada polling.
 
 ---
 
-## СЛЕДУЮЩИЙ — Home Activity: Visits and Traffic
+## Home Activity: Visits and Traffic
 
-Approved next change-intent — Home panel:
+Home Activity реализован, merged и deployed. Home panel:
 
 ```text
 Today
@@ -650,9 +651,15 @@ Authorized visits
 Traffic
 ```
 
-На текущем documented runtime checkpoint эта feature **ещё не является current code**. FINAL specification утверждена и не содержит unresolved Owner product decisions, но feature нельзя переносить в Current Features до merge implementation в `main`.
+Current implementation checkpoint: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`.
 
-Conceptual architecture:
+Production evidence 26.08.2026 подтверждает Visit source chain после
+`2026-08-26T17:46:55.982Z` (`21:46:55.982 +04`, Asia/Baku). В проверенном
+диапазоне 14 из 14 Visits были guest-scope verified, без opening-evidence
+integrity anomalies и без unproven-scope rows. `traffic_coverage_from_utc`
+остаётся `null`; Traffic нельзя объявлять Complete только из-за течения времени.
+
+Current architecture:
 
 ```mermaid
 flowchart TB
@@ -783,7 +790,7 @@ Writer владеет schema/migrations. Read consumers не изменяют so
 | Home Live | ✅ Current, default disabled | Current client/AP summary |
 | Current Traffic | ✅ Current при healthy sources | AP traffic interpretation |
 | Home Traffic | ✅ Current, default disabled | Home presentation Current Traffic |
-| Home Activity | ⏭️ Approved change-intent | Следующий human-facing Home increment |
+| Home Activity | ✅ Current, default disabled | Visits и completed-session Traffic с independent coverage |
 | GitHub Actions release CI | ⚠️ Отсутствует | Process debt |
 
 ---
@@ -836,8 +843,8 @@ flowchart LR
     A --> W[Web Foundation]:::done
     W --> L[Home Live]:::done
     L --> T[Home Traffic]:::done
-    T --> HA[Home Activity]:::next
-    HA --> D[Deeper product views]:::future
+    T --> HA[Home Activity]:::done
+    HA --> D[Deeper product views]:::next
     D --> MS[Multi-Site]:::future
     MS --> TN[Tenant/RBAC]:::future
     TN --> E[Entitlements]:::future
@@ -1012,13 +1019,14 @@ Tech Lead не обязан дублировать тяжёлый full suite д�
 C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
 ```
 
-Подтверждённый baseline от **26 августа 2026 года**:
+Подтверждённый exact-artifact baseline от **26 августа 2026 года**:
 
 ```text
-Strict suite: 1985 passed / 30 skipped / 0 strict regressions
+Artifact: 53f617b3ac0155d0d647e58e98309927f9a4d318
+Production Python: 3.10.12
+Strict suite: 2100 passed / 30 skipped / 5 deselected
+STRICT_REGRESSIONS: 0
 Compatibility: 5 точечных cases → 2 WARN / 3 PASS
-compileall: PASS
-git diff --check: PASS
 RESULT: PASS
 ```
 

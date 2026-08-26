@@ -1,8 +1,8 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-08-25
-Runtime baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-08-26
+Runtime baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 
 ## 1. Mental model
 
@@ -53,6 +53,11 @@ flowchart LR
 ```
 
 CAPPORT is discovery/identity resolution, not a second auth engine.
+
+Ingress SSID evidence has one no-guess contract:
+- CAPPORT preserves Omada `/clients` `ssid` through `CapportClient.ssid → PortalClientContext.ssid → AuthSession.ssid → VisitStartRequest.portal_ssid`;
+- External Portal uses canonical `ssidName`, with legacy `ssid` fallback;
+- conflicting non-empty `ssidName` and `ssid` produce unproven SSID rather than a silent choice.
 
 Auth success is verified state, not successful POST:
 `authorize → read-back verification → authStatus==2`.
@@ -121,7 +126,7 @@ VisitorRegistryReadService
         ↓
 AnalyticsSourceGateway
         ↓
-Quality / Wireless / Visit / CurrentTraffic services
+Quality / Wireless / Visit / CurrentTraffic / HomeActivity services
 ```
 
 Source boundaries validate SQLite schema version and require `PRAGMA query_only`.
@@ -173,7 +178,7 @@ Forbidden browser paths:
 Current pages:
 Home, Devices, Device Detail, Visits, Observations.
 
-Home Live reads Current State. Home Traffic reads Current Traffic. Both are optional and fail independently.
+Home Live reads Current State. Home Traffic reads Current Traffic. Home Activity reads persisted Visit Lifecycle facts and reuses the canonical Current State guest SSID scope. All are optional/fail-open relative to guest authorization; Home Activity Visits and Traffic expose independent status/coverage.
 
 ## 9. Shared OmadaProvider invariant
 

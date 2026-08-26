@@ -1,7 +1,7 @@
 # Portal entry
 
 Status: active
-Updated: 2026-08-10
+Updated: 2026-08-26
 
 ## 1. Назначение
 
@@ -17,7 +17,13 @@ HTTP parsing/rendering и передача в PortalEntryHandler; authorization 
 
 ## 4. Входные данные
 
-site, clientMac или clientIp, apMac, ssid, redirectUrl, radioId.
+External Portal: `site`, `clientMac` или `clientIp`, `apMac`, canonical `ssidName`, legacy fallback `ssid`, `redirectUrl`, `radioId`.
+
+SSID contract:
+- valid `ssidName` wins when legacy `ssid` is absent;
+- legacy `ssid` remains fallback;
+- if both non-empty values exist and conflict, SSID is left unproven (`None`) rather than guessed;
+- the resulting SSID is propagated through PortalClientContext/AuthSession into Visit opening evidence.
 
 ## 5. Выходные данные
 
