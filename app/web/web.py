@@ -66,6 +66,30 @@ _AUTO_COUNTER = object()
 _AUTO_TRAFFIC = object()
 
 
+def _normalize_external_portal_ssid(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if "\x00" in value:
+        return None
+    return value
+
+
+def _external_portal_ssid(args):
+    canonical = _normalize_external_portal_ssid(args.get("ssidName"))
+    legacy = _normalize_external_portal_ssid(args.get("ssid"))
+    if (
+        canonical is not None
+        and legacy is not None
+        and canonical != legacy
+    ):
+        return None
+    return canonical if canonical is not None else legacy
+
+
 # One manager and one bounded executor per application process.
 # Auth sessions and locks are in memory, so the WSGI process count must
 # remain exactly one. The executor threads below are supported.
@@ -315,7 +339,7 @@ def create_app(
         site_id = request.args.get("site")
         client_ip = request.args.get("clientIp") or request.remote_addr
         ap_mac = request.args.get("apMac")
-        ssid = request.args.get("ssid")
+        ssid = _external_portal_ssid(request.args)
         redirect_url = request.args.get("redirectUrl")
         radio_id = request.args.get("radioId")
 
