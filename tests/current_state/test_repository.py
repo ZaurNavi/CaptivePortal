@@ -49,12 +49,36 @@ def test_existing_exact_database_reopens(repository):
 def test_existing_database_transient_contention_is_retryable(
     repository, monkeypatch, message
 ):
+    monkeypatch.delattr(repository_module.sqlite3, "SQLITE_BUSY", raising=False)
+    monkeypatch.delattr(repository_module.sqlite3, "SQLITE_LOCKED", raising=False)
+
     def busy(*_args, **_kwargs):
         raise sqlite3.OperationalError(message)
 
     monkeypatch.setattr(sqlite3, "connect", busy)
     with pytest.raises(CurrentStateStorageError):
         repository.initialize()
+
+
+@pytest.mark.parametrize(
+    ("sqlite_errorcode", "expected"),
+    (
+        (5, True),
+        (6, True),
+        (261, True),
+        (262, True),
+        (1, False),
+    ),
+)
+def test_transient_contention_uses_stable_primary_codes_without_optional_constants(
+    monkeypatch, sqlite_errorcode, expected
+):
+    monkeypatch.delattr(repository_module.sqlite3, "SQLITE_BUSY", raising=False)
+    monkeypatch.delattr(repository_module.sqlite3, "SQLITE_LOCKED", raising=False)
+    error = sqlite3.OperationalError("contention without a stable message")
+    error.sqlite_errorcode = sqlite_errorcode
+
+    assert repository_module._transient_sqlite_contention(error) is expected
 
 
 class _FetchOne:

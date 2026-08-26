@@ -35,6 +35,8 @@ CYCLE_KINDS = frozenset({"client", "ap"})
 CYCLE_RESULTS = frozenset({"success", "partial", "failed", "shutdown"})
 AUTH_CLASSIFICATIONS = frozenset({"authorized", "pending", "other", "unknown"})
 AP_STATUS_CLASSIFICATIONS = frozenset({"online", "offline", "other", "unknown"})
+_SQLITE_BUSY_PRIMARY_CODE = 5
+_SQLITE_LOCKED_PRIMARY_CODE = 6
 
 _CLIENT_COLUMNS = (
     "cycle_id", "cycle_kind", "site_id", "observed_at", "client_mac",
@@ -473,7 +475,11 @@ def _insert_rows(connection: sqlite3.Connection, table: str, columns: Sequence[s
 
 def _transient_sqlite_contention(exc: sqlite3.OperationalError) -> bool:
     code = getattr(exc, "sqlite_errorcode", None)
-    return code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or any(
+    primary_code = (code & 0xFF) if isinstance(code, int) else None
+    return primary_code in {
+        _SQLITE_BUSY_PRIMARY_CODE,
+        _SQLITE_LOCKED_PRIMARY_CODE,
+    } or any(
         marker in str(exc).lower() for marker in ("database is locked", "database is busy")
     )
 
