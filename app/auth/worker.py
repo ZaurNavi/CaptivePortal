@@ -1453,6 +1453,8 @@ class AuthWorker:
             "AUTH_PROVIDER_EXCEPTION",
             "WORKER_EXCEPTION",
             "AUTH_TOKEN_ERROR",
+            "INVALID_CREDENTIALS",
+            "OMADA_HTTP_401",
             "OMADA_HTTP_403",
             "CONFIGURATION_ERROR",
             "RESET_REQUEST_FAILED",

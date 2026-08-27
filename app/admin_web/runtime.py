@@ -149,8 +149,6 @@ def create_admin_web_runtime(
                 auth_evidence_max_age_seconds=(
                     health_config.auth_evidence_max_age_seconds
                 ),
-                max_concurrent_queries=config.max_concurrent_queries,
-                max_query_duration_seconds=config.max_query_duration_seconds,
                 home_traffic_enabled=config.home_traffic_enabled,
                 home_activity_enabled=activity_requested,
                 logger=logger,
@@ -174,6 +172,7 @@ def create_admin_web_runtime(
             observation_read_service,
             current_state_read_service,
             activity_config,
+            health_service,
         )
     runtime = AdminWebRuntime(
         state=(
@@ -211,6 +210,7 @@ def _query_service(
     observation_read_service: Any,
     current_state_read_service: Any | None = None,
     home_activity_config: HomeActivityConfig | None = None,
+    home_health_read_service: HomeHealthReadService | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
     try:
@@ -243,6 +243,7 @@ def _query_service(
                 analytics_runtime, "home_activity_service", None
             ),
             home_activity_config=home_activity_config,
+            home_health_read_service=home_health_read_service,
         )
     except (AttributeError, TypeError):
         return None

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
-import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from app.analytics.source_gateway import (
+    AnalyticsQueryDeadlineExceeded,
+    QueryDeadline,
+)
 from app.auth.health import (
     OUTCOME_BLOCKING_FAILURE,
     OUTCOME_RETRYABLE_FAILURE,
@@ -61,14 +63,6 @@ class HomeHealthError(RuntimeError):
     pass
 
 
-class HomeHealthBusy(HomeHealthError):
-    pass
-
-
-class HomeHealthDeadline(HomeHealthError):
-    pass
-
-
 class HomeHealthValidationError(HomeHealthError):
     pass
 
@@ -110,12 +104,10 @@ class HomeHealthReadService:
         visit_runtime: Any,
         analytics_runtime: Any,
         auth_evidence_max_age_seconds: int,
-        max_concurrent_queries: int,
-        max_query_duration_seconds: int,
         home_traffic_enabled: bool,
         home_activity_enabled: bool,
         logger: logging.Logger | None = None,
-        monotonic: Callable[[], float] = time.monotonic,
+        now_factory: Callable[[], datetime] | None = None,
     ):
         self._sites = allowed_site_ids
         self._auth_tracker = auth_tracker
@@ -124,70 +116,64 @@ class HomeHealthReadService:
         self._visits = visit_runtime
         self._analytics = analytics_runtime
         self._auth_max_age = auth_evidence_max_age_seconds
-        self._max_duration = max_query_duration_seconds
         self._traffic_expected = home_traffic_enabled
         self._activity_expected = home_activity_enabled
         self._logger = logger or logging.getLogger("admin.home_health")
-        self._slots = threading.BoundedSemaphore(max_concurrent_queries)
-        self._monotonic = monotonic
+        self._now_factory = now_factory or (lambda: datetime.now(timezone.utc))
 
     def evaluate(
-        self, site_id: str, *, evaluated_at: datetime | None = None
+        self,
+        site_id: str,
+        *,
+        deadline: QueryDeadline,
+        evaluated_at: datetime | None = None,
     ) -> HomeHealthResult:
         if site_id not in self._sites:
             raise HomeHealthValidationError("Site is not allowed")
-        if not self._slots.acquire(blocking=False):
-            raise HomeHealthBusy()
-        try:
-            now = _utc(evaluated_at or datetime.now(timezone.utc))
-            deadline = self._monotonic() + self._max_duration
-            evaluators = (
-                self._guest_access,
-                self._live_network_state,
-                self._network_history,
-                self._visit_tracking,
-                self._analytics_home_data,
-            )
-            components = []
-            for index, evaluator in enumerate(evaluators):
-                self._require_time(deadline)
-                try:
-                    value = evaluator(site_id, now)
-                except HomeHealthDeadline:
-                    raise
-                except Exception:
-                    identity = _COMPONENTS[index]
-                    self._logger.warning(
-                        "admin.home_health_component_read_failed",
-                        extra={
-                            "event": "admin.home_health_component_read_failed",
-                            "component_id": identity[0],
-                            "failure_category": "source_read_error",
-                        },
-                    )
-                    value = _component(
-                        identity, site_id, "unknown", "health_read_failed"
-                    )
-                components.append(value)
-                self._require_time(deadline)
-            result = tuple(components)
-            status = _aggregate(result)
-            return HomeHealthResult(
-                1,
-                site_id,
-                now,
-                status,
-                _AGGREGATE_MESSAGES[status],
-                result,
-            )
-        finally:
-            self._slots.release()
+        now = _utc(evaluated_at or self._now_factory())
+        evaluators = (
+            self._guest_access,
+            self._live_network_state,
+            self._network_history,
+            self._visit_tracking,
+            self._analytics_home_data,
+        )
+        components = []
+        for index, evaluator in enumerate(evaluators):
+            deadline.require_remaining()
+            try:
+                value = evaluator(site_id, now, deadline)
+            except AnalyticsQueryDeadlineExceeded:
+                raise
+            except Exception:
+                identity = _COMPONENTS[index]
+                self._logger.warning(
+                    "admin.home_health_component_read_failed",
+                    extra={
+                        "event": "admin.home_health_component_read_failed",
+                        "component_id": identity[0],
+                        "failure_category": "source_read_error",
+                    },
+                )
+                value = _component(
+                    identity, site_id, "unknown", "health_read_failed"
+                )
+            components.append(value)
+            deadline.require_remaining()
+        result = tuple(components)
+        status = _aggregate(result)
+        return HomeHealthResult(
+            1,
+            site_id,
+            now,
+            status,
+            _AGGREGATE_MESSAGES[status],
+            result,
+        )
 
-    def _require_time(self, deadline: float) -> None:
-        if self._monotonic() >= deadline:
-            raise HomeHealthDeadline()
-
-    def _guest_access(self, site_id: str, now: datetime) -> HomeHealthComponent:
+    def _guest_access(
+        self, site_id: str, now: datetime, deadline: QueryDeadline
+    ) -> HomeHealthComponent:
         identity = _COMPONENTS[0]
         snapshot = self._auth_tracker.snapshot(site_id)
         if snapshot is None or snapshot.outcome is None:
@@ -230,7 +216,7 @@ class HomeHealthReadService:
         )
 
     def _live_network_state(
-        self, site_id: str, now: datetime
+        self, site_id: str, now: datetime, deadline: QueryDeadline
     ) -> HomeHealthComponent:
         identity = _COMPONENTS[1]
         runtime = self._current_state
@@ -244,8 +230,11 @@ class HomeHealthReadService:
         source = getattr(runtime, "read_service", None)
         if source is None:
             return _component(identity, site_id, "unavailable", "current_state_unavailable")
+        deadline.require_remaining()
         client = source.get_current_client_summary(site_id, evaluated_at_utc=now)
+        deadline.require_remaining()
         ap = source.get_current_ap_summary(site_id, evaluated_at_utc=now)
+        deadline.require_remaining()
         metas = (client.snapshot, ap.snapshot)
         evidence = _minimum_timestamp(tuple(meta.observed_at for meta in metas))
         success = _minimum_timestamp(tuple(meta.capture_finished_at for meta in metas))
@@ -272,7 +261,7 @@ class HomeHealthReadService:
         )
 
     def _network_history(
-        self, site_id: str, now: datetime
+        self, site_id: str, now: datetime, deadline: QueryDeadline
     ) -> HomeHealthComponent:
         identity = _COMPONENTS[2]
         runtime = self._observations
@@ -309,7 +298,9 @@ class HomeHealthReadService:
         for kind, worker, allowance in required:
             if not bool(getattr(worker, "running", False)):
                 return _component(identity, site_id, "unavailable", "observation_unavailable")
-            latest, success = repository.get_home_health_cycles(site_id, kind)
+            latest, success = repository.get_home_health_cycles(
+                site_id, kind, deadline=deadline
+            )
             if latest is not None and latest.finished_at is not None:
                 latest_times.append(latest.finished_at)
                 if latest.result != "success" or latest.complete is not True:
@@ -336,7 +327,9 @@ class HomeHealthReadService:
             evidence_at=evidence, last_success_at=last_success,
         )
 
-    def _visit_tracking(self, site_id: str, now: datetime) -> HomeHealthComponent:
+    def _visit_tracking(
+        self, site_id: str, now: datetime, deadline: QueryDeadline
+    ) -> HomeHealthComponent:
         identity = _COMPONENTS[3]
         runtime = self._visits
         state = getattr(runtime, "state", None)
@@ -352,7 +345,7 @@ class HomeHealthReadService:
         return _component(identity, site_id, "unknown", "initializing")
 
     def _analytics_home_data(
-        self, site_id: str, now: datetime
+        self, site_id: str, now: datetime, deadline: QueryDeadline
     ) -> HomeHealthComponent:
         identity = _COMPONENTS[4]
         runtime = self._analytics
@@ -363,7 +356,10 @@ class HomeHealthReadService:
             return _component(identity, site_id, "unavailable", "analytics_source_unavailable")
         if state not in {"active", "degraded"}:
             return _component(identity, site_id, "unknown", "initializing")
+        deadline.require_remaining()
         healthy, _ = runtime.live_health_payload()
+        evidence_at = _utc(self._now_factory())
+        deadline.require_remaining()
         if not healthy:
             status, reason = "unavailable", "analytics_source_unavailable"
         elif self._traffic_expected and getattr(runtime, "current_traffic_service", None) is None:
@@ -374,7 +370,9 @@ class HomeHealthReadService:
             status, reason = "degraded", "analytics_source_unavailable"
         else:
             status, reason = "operational", "analytics_operational"
-        return _component(identity, site_id, status, reason, evidence_at=now)
+        return _component(
+            identity, site_id, status, reason, evidence_at=evidence_at
+        )
 
 
 def _component(

@@ -46,7 +46,7 @@ function payload() {
     components: ids.map((id, index) => ({id, label: labels[index],
       status: states[index][0], reason_code: states[index][1], message: states[index][2],
       criticality: index === 0 ? "critical" : "feature",
-      scope: index < 3 ? {type: "site", site_id: site} : {type: "global", site_id: null},
+      scope: index < 3 ? {type: "site", site_id: site} : {type: "global"},
       evidence_at: index === 1 ? null : "2026-08-27T11:59:00.000Z",
       last_success_at: index === 2 ? null : "2026-08-27T11:58:00.000Z"}))}};
 }
@@ -174,7 +174,7 @@ function payload(status = "operational", suffix = "A") { return {api_version: "a
     message: index === 1 && status === "degraded"
       ? "Current network state is delayed; last complete data remains available."
       : operationalReasons[index][1], criticality: index === 0 ? "critical" : "feature",
-    scope: index < 3 ? {type: "site", site_id: site} : {type: "global", site_id: null},
+    scope: index < 3 ? {type: "site", site_id: site} : {type: "global"},
     evidence_at: "2026-08-27T11:59:00.000Z", last_success_at: null}))}}; }
 ''' + health_source + r'''
 const health = window.CaptivPortalHomeHealthCoordinator;

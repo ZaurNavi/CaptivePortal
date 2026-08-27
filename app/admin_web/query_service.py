@@ -54,6 +54,11 @@ from .home_activity_serialization import (
     HomeActivitySerializationError,
     serialize_home_activity,
 )
+from .home_health import HomeHealthValidationError
+from .home_health_serialization import (
+    HomeHealthSerializationError,
+    serialize_home_health,
+)
 
 
 class AdminQueryError(RuntimeError):
@@ -120,6 +125,7 @@ class AdminQueryService:
         current_traffic_read_service: Any | None = None,
         home_activity_read_service: Any | None = None,
         home_activity_config: Any | None = None,
+        home_health_read_service: Any | None = None,
     ):
         self._config = config
         self._policy = policy
@@ -130,7 +136,25 @@ class AdminQueryService:
         self._current_traffic = current_traffic_read_service
         self._home_activity = home_activity_read_service
         self._home_activity_config = home_activity_config
+        self._home_health = home_health_read_service
         self._slots = threading.BoundedSemaphore(config.max_concurrent_queries)
+
+    def home_health(self, principal, site_id):
+        self._authorize(principal, "admin.read.overview", site_id)
+        source = self._home_health
+        if source is None:
+            raise AdminQueryUnavailable()
+
+        def query(deadline):
+            try:
+                value = source.evaluate(site_id, deadline=deadline)
+                return AdminQueryResponse(serialize_home_health(value))
+            except HomeHealthValidationError as exc:
+                raise AdminQueryValidationError() from exc
+            except HomeHealthSerializationError as exc:
+                raise AdminQueryUnavailable() from exc
+
+        return self._run(query)
 
     def home_activity(
         self,

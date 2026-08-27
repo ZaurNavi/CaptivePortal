@@ -59,10 +59,11 @@ def serialize_home_health(value: HomeHealthResult) -> dict[str, Any]:
                 "reason_code": item.reason_code,
                 "message": item.message,
                 "criticality": item.criticality,
-                "scope": {
-                    "type": item.scope_type,
-                    "site_id": item.site_id,
-                },
+                "scope": (
+                    {"type": "site", "site_id": item.site_id}
+                    if item.scope_type == "site"
+                    else {"type": "global"}
+                ),
                 "evidence_at": _optional_timestamp(item.evidence_at),
                 "last_success_at": _optional_timestamp(item.last_success_at),
             }

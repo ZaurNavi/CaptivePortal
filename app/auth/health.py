@@ -63,23 +63,29 @@ class AuthorizationHealthTracker:
             current = self._records.get(site_id)
             if current is None:
                 return False
-            if current.observed_at is not None:
-                if timestamp < current.observed_at:
-                    return False
-                if (
-                    timestamp == current.observed_at
-                    and _PRECEDENCE[outcome]
-                    < _PRECEDENCE.get(current.outcome, -1)
-                ):
-                    return False
             last_success = current.last_success_at
             if outcome == OUTCOME_VERIFIED_SUCCESS and (
                 last_success is None or timestamp > last_success
             ):
                 last_success = timestamp
-            self._records[site_id] = AuthorizationHealthSnapshot(
-                site_id, outcome, timestamp, last_success
+            replace_latest = (
+                current.observed_at is None
+                or timestamp > current.observed_at
+                or (
+                    timestamp == current.observed_at
+                    and _PRECEDENCE[outcome]
+                    > _PRECEDENCE.get(current.outcome, -1)
+                )
             )
+            updated = AuthorizationHealthSnapshot(
+                site_id,
+                outcome if replace_latest else current.outcome,
+                timestamp if replace_latest else current.observed_at,
+                last_success,
+            )
+            if updated == current:
+                return False
+            self._records[site_id] = updated
             return True
 
     def snapshot(self, site_id: str) -> AuthorizationHealthSnapshot | None:

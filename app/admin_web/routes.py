@@ -54,12 +54,6 @@ from .home_activity_ranges import (
     resolve_selected,
     resolve_today,
 )
-from .home_health import (
-    HomeHealthBusy,
-    HomeHealthDeadline,
-    HomeHealthValidationError,
-)
-from .home_health_serialization import serialize_home_health
 
 
 ADMIN_PREFIX = "/admin"
@@ -406,20 +400,23 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return _error("site_forbidden", 403)
         if runtime.home_health_state == "disabled":
             return _error("not_found", 404)
-        service = runtime.home_health_service
+        service = runtime.query_service
         if runtime.home_health_state != "active" or service is None:
             return _error("source_unavailable", 503)
         try:
-            result = service.evaluate(selected)
-            payload = serialize_home_health(result)
-        except HomeHealthValidationError:
+            result = service.home_health(g.admin_principal, selected)
+        except AdminQueryValidationError:
             return _error("invalid_request", 400)
-        except HomeHealthBusy:
+        except AdminQueryForbidden:
+            return _error("site_forbidden", 403)
+        except AdminQueryBusy:
             response = make_response(_error("concurrency_limit", 429))
             response.headers["Retry-After"] = "1"
             return response
-        except HomeHealthDeadline:
+        except AdminQueryDeadline:
             return _error("query_deadline", 503)
+        except AdminQueryUnavailable:
+            return _error("source_unavailable", 503)
         except Exception:
             logger.error(
                 "admin.home_health_evaluation_failed",
@@ -429,7 +426,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 },
             )
             return _error("source_unavailable", 503)
-        return _success(selected, payload, enforce_size=True)
+        return _success(selected, result.result, enforce_size=True)
 
     @blueprint.get("/admin/api/v1/sites/<site_id>/summary/visits")
     @authenticated

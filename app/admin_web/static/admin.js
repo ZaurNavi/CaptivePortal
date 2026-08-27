@@ -575,8 +575,10 @@
         || item.message !== REASON_MESSAGES[item.reason_code]
         || item.criticality !== criticality
         || !object(item.scope) || item.scope.type !== scopeType
-        || (item.scope.type === "site" && item.scope.site_id !== siteId)
-        || (item.scope.type === "global" && item.scope.site_id !== null)
+        || (item.scope.type === "site" && (item.scope.site_id !== siteId
+          || Object.keys(item.scope).length !== 2))
+        || (item.scope.type === "global" && ("site_id" in item.scope
+          || Object.keys(item.scope).length !== 1))
         || !optionalUtc(item.evidence_at) || !optionalUtc(item.last_success_at)) return null;
     }
     if (result.status !== aggregateStatus(result.components)) return null;

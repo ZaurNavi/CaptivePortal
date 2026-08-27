@@ -13,11 +13,13 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app.admin_web import create_admin_web_runtime
 from app.admin_web.home_health import (
-    HomeHealthBusy,
-    HomeHealthDeadline,
     HomeHealthReadService,
     _aggregate,
     _component,
+)
+from app.analytics.source_gateway import (
+    AnalyticsQueryDeadlineExceeded,
+    QueryDeadline,
 )
 from app.admin_web.home_health_config import (
     HomeHealthConfigError,
@@ -28,6 +30,8 @@ from app.admin_web.home_health_serialization import (
     serialize_home_health,
 )
 from app.admin_web.config import admin_web_config_from_settings
+from app.admin_web.models import AdminPrincipal
+from app.admin_web.query_service import AdminQueryBusy
 from app.auth.health import (
     AuthorizationHealthTracker,
     OUTCOME_BLOCKING_FAILURE,
@@ -90,9 +94,13 @@ def _cycle(kind, finished, *, result="success", complete=True):
 class ObservationRepository:
     def __init__(self, values):
         self.values = values
+        self.deadlines = []
 
-    def get_home_health_cycles(self, site_id, kind):
+    def get_home_health_cycles(self, site_id, kind, *, deadline=None):
         assert site_id == SITE_ID
+        self.deadlines.append(deadline)
+        if deadline is not None:
+            deadline.require_remaining()
         return self.values[kind]
 
 
@@ -107,7 +115,7 @@ class Analytics:
 
 
 def service(*, tracker=None, current=None, observation=None, visit=None, analytics=None,
-            traffic=False, activity=False):
+            traffic=False, activity=False, now_factory=None):
     if tracker is None:
         tracker = AuthorizationHealthTracker((SITE_ID,))
         tracker.record(SITE_ID, OUTCOME_VERIFIED_SUCCESS, NOW - timedelta(seconds=10))
@@ -139,10 +147,17 @@ def service(*, tracker=None, current=None, observation=None, visit=None, analyti
         visit_runtime=visit or SimpleNamespace(state="active", available=True),
         analytics_runtime=analytics or Analytics(),
         auth_evidence_max_age_seconds=300,
-        max_concurrent_queries=2,
-        max_query_duration_seconds=10,
         home_traffic_enabled=traffic,
         home_activity_enabled=activity,
+        now_factory=now_factory,
+    )
+
+
+def evaluate(value, *, at=NOW, deadline=None):
+    return value.evaluate(
+        SITE_ID,
+        deadline=deadline or QueryDeadline.after(60),
+        evaluated_at=at,
     )
 
 
@@ -188,6 +203,7 @@ def test_tracker_is_bounded_immutable_thread_safe_and_deterministic():
         ))
     assert tracker.snapshot(SITE_ID).outcome == OUTCOME_BLOCKING_FAILURE
     assert tracker.record(SITE_ID, OUTCOME_VERIFIED_SUCCESS, older) is False
+    assert tracker.snapshot(SITE_ID).last_success_at == NOW
     assert tracker.record("ffffffffffffffffffffffff", OUTCOME_VERIFIED_SUCCESS, NOW) is False
     assert tracker.site_count == 1
     with pytest.raises(TypeError):
@@ -207,16 +223,16 @@ def test_tracker_is_bounded_immutable_thread_safe_and_deterministic():
 def test_guest_evidence_age_and_outcomes(outcome, age, expected, reason):
     tracker = AuthorizationHealthTracker((SITE_ID,))
     tracker.record(SITE_ID, outcome, NOW - timedelta(seconds=age))
-    item = service(tracker=tracker).evaluate(SITE_ID, evaluated_at=NOW).components[0]
+    item = evaluate(service(tracker=tracker)).components[0]
     assert (item.status, item.reason_code) == (expected, reason)
 
 
 def test_no_guest_evidence_and_future_evidence_are_unknown():
     empty = AuthorizationHealthTracker((SITE_ID,))
-    first = service(tracker=empty).evaluate(SITE_ID, evaluated_at=NOW).components[0]
+    first = evaluate(service(tracker=empty)).components[0]
     future = AuthorizationHealthTracker((SITE_ID,))
     future.record(SITE_ID, OUTCOME_VERIFIED_SUCCESS, NOW + timedelta(seconds=1))
-    second = service(tracker=future).evaluate(SITE_ID, evaluated_at=NOW).components[0]
+    second = evaluate(service(tracker=future)).components[0]
     assert first.reason_code == "no_authorization_evidence"
     assert second.reason_code == "invalid_authorization_evidence_time"
 
@@ -233,7 +249,7 @@ def test_no_guest_evidence_and_future_evidence_are_unknown():
 )
 def test_current_state_reuses_canonical_freshness(state, client, ap, latest, expected):
     current = SimpleNamespace(state=state, read_service=CurrentRead(client, ap, latest))
-    item = service(current=current).evaluate(SITE_ID, evaluated_at=NOW).components[1]
+    item = evaluate(service(current=current)).components[1]
     assert item.status == expected
     if state == "disabled":
         assert item.reason_code == "component_disabled"
@@ -254,32 +270,40 @@ def test_observation_stale_boundary_and_latest_partial():
         client_worker=SimpleNamespace(running=True),
         repository=ObservationRepository({"client": (client, client)}),
     )
-    at_boundary = service(observation=runtime).evaluate(
-        SITE_ID, evaluated_at=finished + timedelta(seconds=160)
+    at_boundary = evaluate(
+        service(observation=runtime),
+        at=finished + timedelta(seconds=160),
     ).components[2]
-    beyond = service(observation=runtime).evaluate(
-        SITE_ID, evaluated_at=finished + timedelta(seconds=160, microseconds=1)
+    beyond = evaluate(
+        service(observation=runtime),
+        at=finished + timedelta(seconds=160, microseconds=1),
     ).components[2]
     assert at_boundary.status == "operational"
     assert (beyond.status, beyond.reason_code) == ("degraded", "stale_evidence")
 
 
 def test_visit_and_analytics_are_independent_component_states():
-    value = service(
+    value = evaluate(service(
         visit=SimpleNamespace(state="degraded", available=True),
         analytics=SimpleNamespace(state="unavailable"),
-    ).evaluate(SITE_ID, evaluated_at=NOW)
+    ))
     assert value.components[3].status == "degraded"
     assert value.components[4].status == "unavailable"
     assert value.status == "degraded"
+
+
+def test_no_recent_visits_and_empty_successful_observation_are_healthy():
+    value = evaluate(service())
+    assert value.components[2].reason_code == "observation_operational"
+    assert value.components[3].reason_code == "visit_operational"
 
 
 def test_optional_home_services_are_expectation_gated():
     analytics = Analytics()
     analytics.current_traffic_service = None
     analytics.home_activity_service = None
-    not_expected = service(analytics=analytics).evaluate(SITE_ID, evaluated_at=NOW)
-    expected = service(analytics=analytics, traffic=True).evaluate(SITE_ID, evaluated_at=NOW)
+    not_expected = evaluate(service(analytics=analytics))
+    expected = evaluate(service(analytics=analytics, traffic=True))
     assert not_expected.components[4].status == "operational"
     assert expected.components[4].reason_code == "current_traffic_service_unavailable"
 
@@ -287,7 +311,7 @@ def test_optional_home_services_are_expectation_gated():
 def test_component_exception_is_isolated_and_order_serializes():
     current = SimpleNamespace(state="active", read_service=CurrentRead())
     current.read_service.get_current_client_summary = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("private-path"))
-    result = service(current=current).evaluate(SITE_ID, evaluated_at=NOW)
+    result = evaluate(service(current=current))
     payload = serialize_home_health(result)
     assert [item["id"] for item in payload["components"]] == [
         "guest_access", "live_network_state", "network_history",
@@ -295,6 +319,11 @@ def test_component_exception_is_isolated_and_order_serializes():
     ]
     assert payload["components"][1]["reason_code"] == "health_read_failed"
     assert "private-path" not in str(payload)
+    assert payload["components"][0]["scope"] == {
+        "type": "site", "site_id": SITE_ID,
+    }
+    assert payload["components"][3]["scope"] == {"type": "global"}
+    assert payload["components"][4]["scope"] == {"type": "global"}
 
     forged = replace(
         result,
@@ -307,33 +336,48 @@ def test_component_exception_is_isolated_and_order_serializes():
         serialize_home_health(forged)
 
 
-def test_health_query_slot_is_nonblocking_and_deadline_is_checked_between_sources():
-    entered = threading.Event()
-    release = threading.Event()
+def test_analytics_evidence_is_actual_boundary_evaluation_time():
+    boundary_time = NOW + timedelta(seconds=7)
+    result = evaluate(
+        service(now_factory=lambda: boundary_time),
+        at=NOW - timedelta(days=30),
+    )
+    analytics = result.components[4]
+    assert analytics.evidence_at == boundary_time
+    assert analytics.evidence_at != result.evaluated_at
+    assert analytics.last_success_at is None
+
+
+def test_health_has_no_private_query_slot_and_deadline_stops_remaining_sources():
     current = SimpleNamespace(state="active", read_service=CurrentRead())
-    original = current.read_service.get_current_client_summary
+    calls = []
+    current.read_service.get_current_client_summary = (
+        lambda *_args, **_kwargs: calls.append("client")
+    )
 
-    def blocked(*args, **kwargs):
-        entered.set()
-        assert release.wait(2)
-        return original(*args, **kwargs)
+    class Deadline:
+        def __init__(self):
+            self.calls = 0
 
-    current.read_service.get_current_client_summary = blocked
-    bounded = service(current=current)
-    bounded._slots = threading.BoundedSemaphore(1)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(bounded.evaluate, SITE_ID, evaluated_at=NOW)
-        assert entered.wait(1)
-        with pytest.raises(HomeHealthBusy):
-            bounded.evaluate(SITE_ID, evaluated_at=NOW)
-        release.set()
-        assert future.result().site_id == SITE_ID
+        def require_remaining(self):
+            self.calls += 1
+            if self.calls == 3:
+                raise AnalyticsQueryDeadlineExceeded("expired")
 
-    clock = iter((0.0, 0.0, 11.0))
-    expired = service()
-    expired._monotonic = lambda: next(clock)
-    with pytest.raises(HomeHealthDeadline):
-        expired.evaluate(SITE_ID, evaluated_at=NOW)
+    value = service(current=current)
+    assert not hasattr(value, "_slots")
+    deadline = Deadline()
+    with pytest.raises(AnalyticsQueryDeadlineExceeded):
+        evaluate(value, deadline=deadline)
+    assert deadline.calls == 3
+    assert calls == []
+
+
+def test_one_request_deadline_reaches_each_observation_read():
+    value = service()
+    deadline = QueryDeadline.after(60)
+    evaluate(value, deadline=deadline)
+    assert value._observations.repository.deadlines == [deadline, deadline]
 
 
 def test_health_config_isolated_and_strict():
@@ -400,29 +444,110 @@ def test_health_route_security_feature_gate_and_component_http_200(health_app):
     assert body["result"]["components"][1]["reason_code"] == "health_read_failed"
     assert "private" not in str(body)
 
+    legacy = client.get("/admin/api/v1/health", base_url="https://localhost")
+    assert legacy.status_code == 200
+    assert legacy.get_json()["result"] == {"status": "active"}
 
-@pytest.mark.parametrize(
-    ("error", "status", "code", "retry_after"),
-    [
-        (HomeHealthBusy(), 429, "concurrency_limit", "1"),
-        (HomeHealthDeadline(), 503, "query_deadline", None),
-    ],
-)
-def test_health_route_bounded_failure_mapping(
-    health_app, error, status, code, retry_after
-):
+
+def test_health_route_uses_shared_query_slot_and_deadline_mapping(health_app):
     runtime = health_app.extensions["admin_web_runtime"]
-    runtime.home_health_service = SimpleNamespace(
-        evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(error)
-    )
     client = health_app.test_client(); login(client)
-    response = client.get(
+    url = f"/admin/api/v1/sites/{SITE_ID}/home/health"
+    runtime.query_service._slots = threading.BoundedSemaphore(1)
+
+    assert runtime.query_service._slots.acquire(blocking=False)
+    busy = client.get(url, base_url="https://localhost")
+    runtime.query_service._slots.release()
+    assert busy.status_code == 429
+    assert busy.get_json()["error"]["code"] == "concurrency_limit"
+    assert busy.headers["Retry-After"] == "1"
+
+    original = runtime.query_service._home_health
+    runtime.query_service._home_health = SimpleNamespace(
+        evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AnalyticsQueryDeadlineExceeded("expired")
+        )
+    )
+    deadline = client.get(url, base_url="https://localhost")
+    assert deadline.status_code == 503
+    assert deadline.get_json()["error"]["code"] == "query_deadline"
+    assert runtime.query_service._slots.acquire(blocking=False)
+    runtime.query_service._slots.release()
+
+    runtime.query_service._home_health = SimpleNamespace(
+        evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("private path")
+        )
+    )
+    unavailable = client.get(
         f"/admin/api/v1/sites/{SITE_ID}/home/health",
         base_url="https://localhost",
     )
-    assert response.status_code == status
-    assert response.get_json()["error"]["code"] == code
-    assert response.headers.get("Retry-After") == retry_after
+    assert unavailable.status_code == 503
+    assert unavailable.get_json()["error"]["code"] == "source_unavailable"
+    assert runtime.query_service._slots.acquire(blocking=False)
+    runtime.query_service._slots.release()
+    runtime.query_service._home_health = original
+
+
+def test_health_occupies_shared_slot_and_passes_one_deadline(health_app):
+    runtime = health_app.extensions["admin_web_runtime"]
+    query_service = runtime.query_service
+    original = query_service._home_health
+    entered = threading.Event()
+    release = threading.Event()
+    captured = []
+
+    class BlockingHealth:
+        def evaluate(self, site_id, *, deadline):
+            captured.append(deadline)
+            entered.set()
+            assert release.wait(2)
+            return original.evaluate(site_id, deadline=deadline)
+
+    query_service._home_health = BlockingHealth()
+    query_service._slots = threading.BoundedSemaphore(1)
+    principal = AdminPrincipal("operator")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(query_service.home_health, principal, SITE_ID)
+        assert entered.wait(1)
+        with pytest.raises(AdminQueryBusy):
+            query_service.current_client_summary(principal, SITE_ID)
+        release.set()
+        assert future.result().result["health_version"] == 1
+    assert len(captured) == 1
+    assert isinstance(captured[0], QueryDeadline)
+    assert query_service._slots.acquire(blocking=False)
+    query_service._slots.release()
+    query_service._home_health = original
+
+
+def test_health_query_creates_exactly_one_shared_deadline(
+    health_app, monkeypatch
+):
+    query_service = health_app.extensions["admin_web_runtime"].query_service
+    original_source = query_service._home_health
+    original_after = QueryDeadline.after
+    created = []
+    received = []
+
+    def after(cls, seconds, **kwargs):
+        deadline = original_after(seconds, **kwargs)
+        created.append(deadline)
+        return deadline
+
+    class CapturingHealth:
+        def evaluate(self, site_id, *, deadline):
+            received.append(deadline)
+            return original_source.evaluate(site_id, deadline=deadline)
+
+    monkeypatch.setattr(QueryDeadline, "after", classmethod(after))
+    query_service._home_health = CapturingHealth()
+    result = query_service.home_health(AdminPrincipal("operator"), SITE_ID)
+    assert result.result["health_version"] == 1
+    assert len(created) == 1
+    assert received == created
+    query_service._home_health = original_source
 
 
 def test_health_disabled_is_404_without_evaluation(tmp_path):
