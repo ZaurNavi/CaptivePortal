@@ -399,13 +399,34 @@ def test_health_config_isolated_and_strict():
     assert disabled.enabled is False
 
 
-@pytest.fixture
-def health_app(tmp_path):
+def _health_app(
+    tmp_path,
+    *,
+    analytics=None,
+    registry_source=True,
+    setting_updates=None,
+):
     tracker = AuthorizationHealthTracker((SITE_ID,))
+    tracker.record(
+        SITE_ID,
+        OUTCOME_VERIFIED_SUCCESS,
+        datetime.now(UTC) - timedelta(seconds=10),
+    )
+    registry = (
+        SimpleNamespace(
+            repository=SimpleNamespace(
+                config=SimpleNamespace(
+                    db_path=tmp_path / "registry.sqlite3"
+                )
+            )
+        )
+        if registry_source
+        else None
+    )
     runtime = create_admin_web_runtime(
-        health_settings(),
-        Analytics(),
-        SimpleNamespace(repository=SimpleNamespace(config=SimpleNamespace(db_path=tmp_path / "registry.sqlite3"))),
+        health_settings(**(setting_updates or {})),
+        analytics or Analytics(),
+        registry,
         SimpleNamespace(repository=SimpleNamespace(db_path=tmp_path / "visits.sqlite3")),
         SimpleNamespace(_repository=SimpleNamespace(db_path=tmp_path / "observations.sqlite3")),
         logging.getLogger("home-health-test"),
@@ -420,6 +441,11 @@ def health_app(tmp_path):
     app.register_blueprint(runtime.blueprint)
     app.extensions["admin_web_runtime"] = runtime
     return app
+
+
+@pytest.fixture
+def health_app(tmp_path):
+    return _health_app(tmp_path)
 
 
 def test_health_route_security_feature_gate_and_component_http_200(health_app):
@@ -449,6 +475,105 @@ def test_health_route_security_feature_gate_and_component_http_200(health_app):
     assert legacy.get_json()["result"] == {"status": "active"}
 
 
+def test_unavailable_analytics_is_one_component_not_health_503(tmp_path):
+    app = _health_app(tmp_path, analytics=SimpleNamespace(state="unavailable"))
+    runtime = app.extensions["admin_web_runtime"]
+    assert runtime.state == "unavailable"
+    assert runtime.query_service is None
+    assert runtime.home_health_query_service is not None
+
+    client = app.test_client(); login(client)
+    response = client.get(
+        f"/admin/api/v1/sites/{SITE_ID}/home/health",
+        base_url="https://localhost",
+    )
+    assert response.status_code == 200
+    result = response.get_json()["result"]
+    assert [item["status"] for item in result["components"]] == [
+        "operational", "operational", "operational", "operational",
+        "unavailable",
+    ]
+    assert result["components"][4]["reason_code"] == (
+        "analytics_source_unavailable"
+    )
+    assert result["status"] == "degraded"
+
+    legacy = client.get("/admin/api/v1/health", base_url="https://localhost")
+    assert legacy.status_code == 503
+    assert legacy.get_json()["result"] == {"status": "unavailable"}
+
+
+def test_missing_normal_admin_source_does_not_block_home_health(tmp_path):
+    app = _health_app(tmp_path, registry_source=False)
+    runtime = app.extensions["admin_web_runtime"]
+    assert runtime.state == "unavailable"
+    assert runtime.query_service is None
+    assert runtime.home_health_query_service is not None
+
+    client = app.test_client(); login(client)
+    response = client.get(
+        f"/admin/api/v1/sites/{SITE_ID}/home/health",
+        base_url="https://localhost",
+    )
+    assert response.status_code == 200
+    assert len(response.get_json()["result"]["components"]) == 5
+
+
+def test_health_without_general_query_service_keeps_shared_gate_and_deadline(
+    tmp_path,
+):
+    app = _health_app(
+        tmp_path,
+        registry_source=False,
+        setting_updates={"web_admin_max_concurrent_queries": 1},
+    )
+    runtime = app.extensions["admin_web_runtime"]
+    client = app.test_client(); login(client)
+    url = f"/admin/api/v1/sites/{SITE_ID}/home/health"
+    controls = runtime.query_execution_controls
+    assert runtime.query_service is None
+    assert runtime.home_health_query_service._execution_controls is controls
+
+    assert controls._slots.acquire(blocking=False)
+    busy = client.get(url, base_url="https://localhost")
+    controls._slots.release()
+    assert busy.status_code == 429
+    assert busy.get_json()["error"]["code"] == "concurrency_limit"
+    assert busy.headers["Retry-After"] == "1"
+
+    received = []
+
+    def expired(_site_id, *, deadline):
+        received.append(deadline)
+        raise AnalyticsQueryDeadlineExceeded("expired")
+
+    original = runtime.home_health_query_service._home_health
+    runtime.home_health_query_service._home_health = SimpleNamespace(
+        evaluate=expired
+    )
+    deadline = client.get(url, base_url="https://localhost")
+    runtime.home_health_query_service._home_health = original
+    assert deadline.status_code == 503
+    assert deadline.get_json()["error"]["code"] == "query_deadline"
+    assert len(received) == 1 and isinstance(received[0], QueryDeadline)
+    assert controls._slots.acquire(blocking=False)
+    controls._slots.release()
+
+
+def test_missing_health_query_composition_remains_whole_feature_503(
+    health_app,
+):
+    runtime = health_app.extensions["admin_web_runtime"]
+    runtime.home_health_query_service = None
+    client = health_app.test_client(); login(client)
+    response = client.get(
+        f"/admin/api/v1/sites/{SITE_ID}/home/health",
+        base_url="https://localhost",
+    )
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "source_unavailable"
+
+
 def test_health_route_uses_shared_query_slot_and_deadline_mapping(health_app):
     runtime = health_app.extensions["admin_web_runtime"]
     client = health_app.test_client(); login(client)
@@ -462,8 +587,9 @@ def test_health_route_uses_shared_query_slot_and_deadline_mapping(health_app):
     assert busy.get_json()["error"]["code"] == "concurrency_limit"
     assert busy.headers["Retry-After"] == "1"
 
-    original = runtime.query_service._home_health
-    runtime.query_service._home_health = SimpleNamespace(
+    health_queries = runtime.home_health_query_service
+    original = health_queries._home_health
+    health_queries._home_health = SimpleNamespace(
         evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AnalyticsQueryDeadlineExceeded("expired")
         )
@@ -474,7 +600,7 @@ def test_health_route_uses_shared_query_slot_and_deadline_mapping(health_app):
     assert runtime.query_service._slots.acquire(blocking=False)
     runtime.query_service._slots.release()
 
-    runtime.query_service._home_health = SimpleNamespace(
+    health_queries._home_health = SimpleNamespace(
         evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             OSError("private path")
         )
@@ -487,13 +613,16 @@ def test_health_route_uses_shared_query_slot_and_deadline_mapping(health_app):
     assert unavailable.get_json()["error"]["code"] == "source_unavailable"
     assert runtime.query_service._slots.acquire(blocking=False)
     runtime.query_service._slots.release()
-    runtime.query_service._home_health = original
+    health_queries._home_health = original
 
 
 def test_health_occupies_shared_slot_and_passes_one_deadline(health_app):
     runtime = health_app.extensions["admin_web_runtime"]
     query_service = runtime.query_service
-    original = query_service._home_health
+    health_queries = runtime.home_health_query_service
+    assert query_service._execution_controls is runtime.query_execution_controls
+    assert health_queries._execution_controls is runtime.query_execution_controls
+    original = health_queries._home_health
     entered = threading.Event()
     release = threading.Event()
     captured = []
@@ -505,11 +634,11 @@ def test_health_occupies_shared_slot_and_passes_one_deadline(health_app):
             assert release.wait(2)
             return original.evaluate(site_id, deadline=deadline)
 
-    query_service._home_health = BlockingHealth()
+    health_queries._home_health = BlockingHealth()
     query_service._slots = threading.BoundedSemaphore(1)
     principal = AdminPrincipal("operator")
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(query_service.home_health, principal, SITE_ID)
+        future = pool.submit(health_queries.home_health, principal, SITE_ID)
         assert entered.wait(1)
         with pytest.raises(AdminQueryBusy):
             query_service.current_client_summary(principal, SITE_ID)
@@ -519,14 +648,15 @@ def test_health_occupies_shared_slot_and_passes_one_deadline(health_app):
     assert isinstance(captured[0], QueryDeadline)
     assert query_service._slots.acquire(blocking=False)
     query_service._slots.release()
-    query_service._home_health = original
+    health_queries._home_health = original
 
 
 def test_health_query_creates_exactly_one_shared_deadline(
     health_app, monkeypatch
 ):
-    query_service = health_app.extensions["admin_web_runtime"].query_service
-    original_source = query_service._home_health
+    runtime = health_app.extensions["admin_web_runtime"]
+    health_queries = runtime.home_health_query_service
+    original_source = health_queries._home_health
     original_after = QueryDeadline.after
     created = []
     received = []
@@ -542,12 +672,12 @@ def test_health_query_creates_exactly_one_shared_deadline(
             return original_source.evaluate(site_id, deadline=deadline)
 
     monkeypatch.setattr(QueryDeadline, "after", classmethod(after))
-    query_service._home_health = CapturingHealth()
-    result = query_service.home_health(AdminPrincipal("operator"), SITE_ID)
+    health_queries._home_health = CapturingHealth()
+    result = health_queries.home_health(AdminPrincipal("operator"), SITE_ID)
     assert result.result["health_version"] == 1
     assert len(created) == 1
     assert received == created
-    query_service._home_health = original_source
+    health_queries._home_health = original_source
 
 
 def test_health_disabled_is_404_without_evaluation(tmp_path):

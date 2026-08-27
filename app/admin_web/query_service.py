@@ -110,6 +110,59 @@ class AdminQueryResponse:
     page: dict[str, Any] | None = None
 
 
+class AdminQueryExecutionControls:
+    """One process-owned Admin concurrency budget and request deadline."""
+
+    def __init__(
+        self,
+        *,
+        max_concurrent_queries: int,
+        max_query_duration_seconds: int,
+    ):
+        self._slots = threading.BoundedSemaphore(max_concurrent_queries)
+        self._max_query_duration_seconds = max_query_duration_seconds
+
+    def run(self, operation: Callable[[QueryDeadline], Any]):
+        if not self._slots.acquire(blocking=False):
+            raise AdminQueryBusy()
+        try:
+            deadline = QueryDeadline.after(self._max_query_duration_seconds)
+            return operation(deadline)
+        except AnalyticsQueryDeadlineExceeded as exc:
+            raise AdminQueryDeadline() from exc
+        finally:
+            self._slots.release()
+
+
+class AdminHomeHealthQueryService:
+    """Authorize and serialize Health using the shared Admin query gate."""
+
+    def __init__(self, *, policy, read_service, execution_controls):
+        self._policy = policy
+        self._home_health = read_service
+        self._execution_controls = execution_controls
+
+    def home_health(self, principal, site_id):
+        if not self._policy.authorize(
+            principal, "admin.read.overview", site_id
+        ):
+            raise AdminQueryForbidden()
+        source = self._home_health
+        if source is None:
+            raise AdminQueryUnavailable()
+
+        def query(deadline):
+            try:
+                value = source.evaluate(site_id, deadline=deadline)
+                return AdminQueryResponse(serialize_home_health(value))
+            except HomeHealthValidationError as exc:
+                raise AdminQueryValidationError() from exc
+            except HomeHealthSerializationError as exc:
+                raise AdminQueryUnavailable() from exc
+
+        return self._execution_controls.run(query)
+
+
 class AdminQueryService:
     """Repeat policy checks and coordinate one deadline/slot per request."""
 
@@ -125,7 +178,7 @@ class AdminQueryService:
         current_traffic_read_service: Any | None = None,
         home_activity_read_service: Any | None = None,
         home_activity_config: Any | None = None,
-        home_health_read_service: Any | None = None,
+        execution_controls: AdminQueryExecutionControls | None = None,
     ):
         self._config = config
         self._policy = policy
@@ -136,25 +189,14 @@ class AdminQueryService:
         self._current_traffic = current_traffic_read_service
         self._home_activity = home_activity_read_service
         self._home_activity_config = home_activity_config
-        self._home_health = home_health_read_service
-        self._slots = threading.BoundedSemaphore(config.max_concurrent_queries)
-
-    def home_health(self, principal, site_id):
-        self._authorize(principal, "admin.read.overview", site_id)
-        source = self._home_health
-        if source is None:
-            raise AdminQueryUnavailable()
-
-        def query(deadline):
-            try:
-                value = source.evaluate(site_id, deadline=deadline)
-                return AdminQueryResponse(serialize_home_health(value))
-            except HomeHealthValidationError as exc:
-                raise AdminQueryValidationError() from exc
-            except HomeHealthSerializationError as exc:
-                raise AdminQueryUnavailable() from exc
-
-        return self._run(query)
+        self._execution_controls = execution_controls or (
+            AdminQueryExecutionControls(
+                max_concurrent_queries=config.max_concurrent_queries,
+                max_query_duration_seconds=(
+                    config.max_query_duration_seconds
+                ),
+            )
+        )
 
     def home_activity(
         self,
@@ -648,23 +690,23 @@ class AdminQueryService:
         return self._run(query)
 
     def _run(self, operation: Callable[[QueryDeadline], AdminQueryResponse]):
-        if not self._slots.acquire(blocking=False):
-            raise AdminQueryBusy()
         try:
-            deadline = QueryDeadline.after(
-                self._config.max_query_duration_seconds
-            )
-            return operation(deadline)
-        except AnalyticsQueryDeadlineExceeded as exc:
-            raise AdminQueryDeadline() from exc
+            return self._execution_controls.run(operation)
         except AnalyticsQueryValidationError as exc:
             raise AdminQueryValidationError() from exc
         except AdminDeviceIntegrityError as exc:
             raise AdminQueryUnavailable() from exc
         except (AdminDeviceSourceError, AdminReadSourceError) as exc:
             raise AdminQueryUnavailable() from exc
-        finally:
-            self._slots.release()
+
+    @property
+    def _slots(self):
+        """Compatibility access to the single shared execution gate."""
+        return self._execution_controls._slots
+
+    @_slots.setter
+    def _slots(self, value):
+        self._execution_controls._slots = value
 
     def _authorize(self, principal, capability: str, site_id: str) -> None:
         if not self._policy.authorize(principal, capability, site_id):

@@ -400,7 +400,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return _error("site_forbidden", 403)
         if runtime.home_health_state == "disabled":
             return _error("not_found", 404)
-        service = runtime.query_service
+        service = runtime.home_health_query_service
         if runtime.home_health_state != "active" or service is None:
             return _error("source_unavailable", 503)
         try:
