@@ -157,6 +157,13 @@ def test_busy_reconciliation_defers_and_recovers_next_cycle(visit_config):
     assert degraded[0][2]["operation"] == "reconciliation"
     assert degraded[0][2]["storage_category"] == "busy"
     assert degraded[0][2]["retry_exhausted"] is False
+    assert degraded[0][2]["contention_layer"] == "coordinator"
+    assert degraded[0][2]["holder_operation"] == "reader_line"
+    assert degraded[0][2]["holder_age_ms"] is not None
+    assert degraded[0][2]["foreground_queue_depth"] == 0
+    assert degraded[0][2]["background_queue_depth"] == 1
+    assert degraded[0][2]["waiter_operation"] == "reconciliation"
+    assert degraded[0][2]["waiter_wait_ms"] is not None
     release_holder.set()
     holder.join(1)
 

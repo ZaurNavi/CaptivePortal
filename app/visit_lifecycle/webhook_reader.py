@@ -27,6 +27,7 @@ from .models import (
     ReaderProgress,
     VisitLifecycleConfig,
     VisitReaderState,
+    VisitStorageCategory,
     VisitStorageError,
     VisitValidationError,
     normalize_utc,
@@ -94,6 +95,11 @@ class VisitLifecycleWebhookReader:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
+        self._deferral_started_at: float | None = None
+        self._deferral_count = 0
+        self._deferral_degraded = False
+        self._last_successful_scan_at: float | None = None
+        self._last_durable_progress_at: float | None = None
 
     @property
     def running(self) -> bool:
@@ -115,6 +121,8 @@ class VisitLifecycleWebhookReader:
 
     def stop(self, timeout_seconds: float) -> bool:
         self._stop_event.set()
+        self._reset_deferral_episode()
+        self.service.wake_write_waiters()
         thread = self._thread
         if thread is None:
             return True
@@ -146,8 +154,24 @@ class VisitLifecycleWebhookReader:
                 )
                 processed += line_count
                 complete = complete and source_complete
-            self._reconcile_missing(discovered)
-            self.service.retry_pending(now_utc=self._now())
+            self._reconcile_missing(discovered, budget)
+
+            def pending_progress(count: int) -> None:
+                if count > 0:
+                    self._last_durable_progress_at = self._monotonic()
+                    self._reset_deferral_episode()
+
+            self.service.retry_pending(
+                now_utc=self._now(),
+                deadline=budget.deadline,
+                cancel_event=self._stop_event,
+                on_committed_progress=pending_progress,
+            )
+            if (
+                self._stop_event.is_set()
+                or self._monotonic() >= budget.deadline
+            ):
+                complete = False
             self.telemetry.emit(
                 "visit.reader_scan_completed",
                 processed_line_count=processed,
@@ -156,8 +180,28 @@ class VisitLifecycleWebhookReader:
             )
             if self._health_callback is not None:
                 self._health_callback(True)
+            self._last_successful_scan_at = self._monotonic()
+            if processed:
+                self._last_durable_progress_at = self._last_successful_scan_at
+            self._reset_deferral_episode()
             return complete
         except Exception as exc:
+            if (
+                self._stop_event.is_set()
+                and isinstance(exc, VisitStorageError)
+                and exc.category is VisitStorageCategory.UNAVAILABLE
+            ):
+                self._reset_deferral_episode()
+                return False
+            if processed:
+                self._last_durable_progress_at = self._monotonic()
+                self._reset_deferral_episode()
+            if self._is_expected_foreground_deferral(exc):
+                return self._record_expected_deferral(
+                    exc,
+                    started=started,
+                    processed=processed,
+                )
             fields: dict[str, Any] = {
                 "error_type": type(exc).__name__,
                 "operation": "reader",
@@ -168,6 +212,7 @@ class VisitLifecycleWebhookReader:
             if isinstance(exc, VisitStorageError):
                 fields["storage_category"] = exc.category.value
                 fields["lock_wait_ms"] = exc.lock_wait_ms
+                fields.update(_contention_fields(exc))
             self.telemetry.emit(
                 "visit.reader_scan_failed",
                 "error",
@@ -256,6 +301,8 @@ class VisitLifecycleWebhookReader:
             self.repository.reset_reader_source(
                 _progress(source, 0, observed_size, checkpoint),
                 now_utc=self._now(),
+                deadline=budget.deadline,
+                cancel_event=self._stop_event,
             )
             self.telemetry.emit(
                 "visit.reader_source_restarted",
@@ -291,6 +338,8 @@ class VisitLifecycleWebhookReader:
                         checkpoint,
                     ),
                     now_utc=self._now(),
+                    deadline=budget.deadline,
+                    cancel_event=self._stop_event,
                 )
                 return processed, False
             checkpoint = _checkpoint(stream, line.offset_end)
@@ -329,6 +378,8 @@ class VisitLifecycleWebhookReader:
                 progress=progress,
                 evidence=evidence,
                 now_utc=self._now(),
+                deadline=budget.deadline,
+                cancel_event=self._stop_event,
             )
             processed += 1
             budget.lines -= 1
@@ -346,16 +397,26 @@ class VisitLifecycleWebhookReader:
                     retired_completed=not source.is_active,
                 ),
                 now_utc=self._now(),
+                deadline=budget.deadline,
+                cancel_event=self._stop_event,
             )
             return processed, True
         return processed, False
 
-    def _reconcile_missing(self, discovered: set[str]) -> None:
+    def _reconcile_missing(
+        self,
+        discovered: set[str],
+        budget: _Budget,
+    ) -> None:
         for identity, state in self.repository.get_reader_states().items():
             if identity in discovered:
                 continue
             if state.retired_completed:
-                self.repository.delete_reader_state(identity)
+                self.repository.delete_reader_state(
+                    identity,
+                    deadline=budget.deadline,
+                    cancel_event=self._stop_event,
+                )
             elif not state.missing_warning_emitted:
                 self.telemetry.emit(
                     "visit.reader_source_missing",
@@ -366,7 +427,84 @@ class VisitLifecycleWebhookReader:
                 self.repository.mark_reader_source_missing(
                     identity,
                     now_utc=self._now(),
+                    deadline=budget.deadline,
+                    cancel_event=self._stop_event,
                 )
+
+    def _is_expected_foreground_deferral(self, exc: Exception) -> bool:
+        if not isinstance(exc, VisitStorageError):
+            return False
+        if (
+            exc.category is not VisitStorageCategory.BUSY
+            or exc.contention_layer != "coordinator"
+            or exc.contention is None
+        ):
+            return False
+        holder = exc.contention.holder_operation
+        background_holders = {
+            "reader_line",
+            "reader_checkpoint",
+            "pending_retry",
+            "reconciliation",
+            "startup",
+        }
+        return holder == "start" or (
+            exc.contention.foreground_queue_depth > 0
+            and holder not in background_holders
+        )
+
+    def _record_expected_deferral(
+        self,
+        exc: VisitStorageError,
+        *,
+        started: float,
+        processed: int,
+    ) -> bool:
+        now = self._monotonic()
+        if self._deferral_started_at is None:
+            self._deferral_started_at = now
+        self._deferral_count += 1
+        episode_ms = _elapsed_ms(self._deferral_started_at, now)
+        fields = {
+            "operation": "reader",
+            "storage_category": exc.category.value,
+            "lock_wait_ms": exc.lock_wait_ms,
+            "wait_ms": exc.lock_wait_ms,
+            "scan_wait_ms": _elapsed_ms(started, now),
+            "processed_line_count": processed,
+            "continuous_deferral_ms": episode_ms,
+            "consecutive_deferral_count": self._deferral_count,
+            "last_successful_scan_at_monotonic": self._last_successful_scan_at,
+            "last_durable_progress_at_monotonic": (
+                self._last_durable_progress_at
+            ),
+            **_contention_fields(exc),
+        }
+        self.telemetry.emit("visit.reader_scan_deferred", "info", **fields)
+        threshold_seconds = max(
+            30.0,
+            6.0 * self.config.scan_interval_seconds,
+        )
+        if (
+            not self._deferral_degraded
+            and episode_ms >= int(threshold_seconds * 1000)
+        ):
+            self._deferral_degraded = True
+            self.telemetry.emit(
+                "visit.reader_scan_failed",
+                "error",
+                reason="writer_starvation",
+                retry_exhausted=False,
+                **fields,
+            )
+            if self._health_callback is not None:
+                self._health_callback(False)
+        return False
+
+    def _reset_deferral_episode(self) -> None:
+        self._deferral_started_at = None
+        self._deferral_count = 0
+        self._deferral_degraded = False
 
     def _bounded_stop(self, budget: _Budget) -> bool:
         return (
@@ -375,6 +513,27 @@ class VisitLifecycleWebhookReader:
             or budget.bytes <= 0
             or self._monotonic() >= budget.deadline
         )
+
+
+def _elapsed_ms(started: float, finished: float) -> int:
+    return max(0, int(round((finished - started) * 1000)))
+
+
+def _contention_fields(error: VisitStorageError) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "contention_layer": error.contention_layer,
+    }
+    snapshot = error.contention
+    if snapshot is not None:
+        fields.update({
+            "holder_operation": snapshot.holder_operation,
+            "holder_age_ms": snapshot.holder_age_ms,
+            "foreground_queue_depth": snapshot.foreground_queue_depth,
+            "background_queue_depth": snapshot.background_queue_depth,
+            "waiter_operation": snapshot.waiter_operation,
+            "waiter_wait_ms": snapshot.waiter_wait_ms,
+        })
+    return fields
 
 
 def _offline_evidence(record: dict[str, Any]) -> OfflineEvidence | None:

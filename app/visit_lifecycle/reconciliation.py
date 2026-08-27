@@ -71,6 +71,7 @@ class VisitLinkReconciler:
         with self._state_lock:
             thread = self._thread
             self._stop_event.set()
+        self.repository.wake_write_waiters()
         if thread is None:
             return True
         thread.join(max(0.0, float(timeout)))
@@ -144,6 +145,7 @@ class VisitLinkReconciler:
                 if isinstance(exc, VisitStorageError):
                     fields["storage_category"] = exc.category.value
                     fields["lock_wait_ms"] = exc.lock_wait_ms
+                    fields.update(_contention_fields(exc))
                 self.telemetry.emit(
                     "visit.reconciliation_degraded",
                     "warning",
@@ -164,6 +166,8 @@ class VisitLinkReconciler:
                         initial_snapshot_id=snapshot_id,
                         attempted_at=now,
                         retry_at=retry_at,
+                        deadline=deadline,
+                        cancel_event=self._stop_event,
                     )
                 )
             except VisitStorageError as exc:
@@ -177,6 +181,7 @@ class VisitLinkReconciler:
                     storage_category=exc.category.value,
                     lock_wait_ms=exc.lock_wait_ms,
                     wait_ms=exc.lock_wait_ms,
+                    **_contention_fields(exc),
                 )
                 break
             processed += 1
@@ -216,6 +221,31 @@ def _after_seconds(timestamp: str, seconds: float) -> str:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
+
+
+def _contention_fields(error: VisitStorageError) -> dict[str, Any]:
+    snapshot = error.contention
+    return {
+        "contention_layer": error.contention_layer,
+        "holder_operation": (
+            None if snapshot is None else snapshot.holder_operation
+        ),
+        "holder_age_ms": (
+            None if snapshot is None else snapshot.holder_age_ms
+        ),
+        "foreground_queue_depth": (
+            None if snapshot is None else snapshot.foreground_queue_depth
+        ),
+        "background_queue_depth": (
+            None if snapshot is None else snapshot.background_queue_depth
+        ),
+        "waiter_operation": (
+            None if snapshot is None else snapshot.waiter_operation
+        ),
+        "waiter_wait_ms": (
+            None if snapshot is None else snapshot.waiter_wait_ms
+        ),
+    }
 
 
 def _safe_device_id(value: Any) -> str | None:

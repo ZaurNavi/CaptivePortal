@@ -41,6 +41,18 @@ class VisitStorageCategory(Enum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True)
+class VisitWriterContention:
+    """Safe immutable snapshot of process-local writer contention."""
+
+    holder_operation: str | None = None
+    holder_age_ms: int | None = None
+    foreground_queue_depth: int = 0
+    background_queue_depth: int = 0
+    waiter_operation: str | None = None
+    waiter_wait_ms: int | None = None
+
+
 class VisitStorageError(RuntimeError):
     def __init__(
         self,
@@ -49,11 +61,15 @@ class VisitStorageError(RuntimeError):
         *,
         operation: str | None = None,
         lock_wait_ms: int | None = None,
+        contention_layer: str | None = None,
+        contention: VisitWriterContention | None = None,
     ):
         super().__init__(message)
         self.category = category
         self.operation = operation
         self.lock_wait_ms = lock_wait_ms
+        self.contention_layer = contention_layer
+        self.contention = contention
 
 
 @dataclass(frozen=True)

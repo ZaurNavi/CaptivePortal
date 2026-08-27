@@ -84,6 +84,7 @@ class LocalVisitStartSubmitter:
         started = self._monotonic()
         deadline = started + self._total_budget_ms / 1000
         attempt = 0
+        blockers = _new_blocker_totals()
         try:
             while attempt < self._max_attempts:
                 attempt += 1
@@ -93,6 +94,7 @@ class LocalVisitStartSubmitter:
                         attempt=attempt,
                         started=started,
                         retry_exhausted=False,
+                        blockers=blockers,
                     )
                 try:
                     outcome = self._service.submit_authorized(
@@ -107,7 +109,9 @@ class LocalVisitStartSubmitter:
                             attempt=attempt,
                             started=started,
                             retry_exhausted=False,
+                            blockers=blockers,
                         )
+                    _record_busy_attempt(blockers, exc)
                     remaining = deadline - self._monotonic()
                     exhausted = (
                         attempt >= self._max_attempts or remaining <= 0
@@ -118,6 +122,7 @@ class LocalVisitStartSubmitter:
                             attempt=attempt,
                             started=started,
                             retry_exhausted=True,
+                            blockers=blockers,
                         )
                     backoff = self._BACKOFF_SECONDS[
                         min(attempt - 1, len(self._BACKOFF_SECONDS) - 1)
@@ -128,6 +133,7 @@ class LocalVisitStartSubmitter:
                             attempt=attempt,
                             started=started,
                             retry_exhausted=True,
+                            blockers=blockers,
                         )
                     if self._stop_event.wait(backoff):
                         return self._storage_failure(
@@ -137,6 +143,7 @@ class LocalVisitStartSubmitter:
                             attempt=attempt,
                             started=started,
                             retry_exhausted=False,
+                            blockers=blockers,
                         )
                     continue
                 if attempt > 1 and outcome.status == "duplicate":
@@ -149,6 +156,7 @@ class LocalVisitStartSubmitter:
                         budget_ms=self._total_budget_ms,
                         wait_ms=self._elapsed_ms(started),
                         retry_exhausted=False,
+                        **blockers,
                     )
                 return outcome
             raise AssertionError("bounded Start retry loop did not return")
@@ -207,7 +215,9 @@ class LocalVisitStartSubmitter:
         attempt: int,
         started: float,
         retry_exhausted: bool,
+        blockers: dict[str, int | str | None],
     ) -> VisitStartOutcome:
+        snapshot = error.contention
         self._telemetry.emit(
             "visit.storage_error",
             "error",
@@ -220,6 +230,30 @@ class LocalVisitStartSubmitter:
             retry_exhausted=retry_exhausted,
             wait_ms=self._elapsed_ms(started),
             lock_wait_ms=error.lock_wait_ms,
+            contention_layer=error.contention_layer,
+            holder_operation=(
+                None if snapshot is None else snapshot.holder_operation
+            ),
+            holder_age_ms=(
+                None if snapshot is None else snapshot.holder_age_ms
+            ),
+            foreground_queue_depth=(
+                None
+                if snapshot is None
+                else snapshot.foreground_queue_depth
+            ),
+            background_queue_depth=(
+                None
+                if snapshot is None
+                else snapshot.background_queue_depth
+            ),
+            waiter_operation=(
+                None if snapshot is None else snapshot.waiter_operation
+            ),
+            waiter_wait_ms=(
+                None if snapshot is None else snapshot.waiter_wait_ms
+            ),
+            **blockers,
         )
         return VisitStartOutcome(
             status="unavailable",
@@ -228,3 +262,61 @@ class LocalVisitStartSubmitter:
 
     def _elapsed_ms(self, started: float) -> int:
         return max(0, int(round((self._monotonic() - started) * 1000)))
+
+
+def _new_blocker_totals() -> dict[str, int | str | None]:
+    return {
+        "coordinator_busy_attempt_count": 0,
+        "sqlite_busy_attempt_count": 0,
+        "background_blocked_attempt_count": 0,
+        "background_blocked_wait_ms": 0,
+        "foreground_blocked_attempt_count": 0,
+        "foreground_blocked_wait_ms": 0,
+        "max_background_holder_age_ms": 0,
+        "last_holder_operation": None,
+    }
+
+
+def _record_busy_attempt(
+    totals: dict[str, int | str | None],
+    error: VisitStorageError,
+) -> None:
+    if error.contention_layer == "coordinator":
+        totals["coordinator_busy_attempt_count"] = int(
+            totals["coordinator_busy_attempt_count"]
+        ) + 1
+    elif error.contention_layer == "sqlite":
+        totals["sqlite_busy_attempt_count"] = int(
+            totals["sqlite_busy_attempt_count"]
+        ) + 1
+    snapshot = error.contention
+    if snapshot is None:
+        return
+    holder = snapshot.holder_operation
+    wait_ms = max(0, int(error.lock_wait_ms or 0))
+    totals["last_holder_operation"] = holder
+    background_holders = {
+        "reader_line",
+        "reader_checkpoint",
+        "pending_retry",
+        "reconciliation",
+        "startup",
+    }
+    if holder in background_holders:
+        totals["background_blocked_attempt_count"] = int(
+            totals["background_blocked_attempt_count"]
+        ) + 1
+        totals["background_blocked_wait_ms"] = int(
+            totals["background_blocked_wait_ms"]
+        ) + wait_ms
+        totals["max_background_holder_age_ms"] = max(
+            int(totals["max_background_holder_age_ms"]),
+            int(snapshot.holder_age_ms or 0),
+        )
+    elif holder == "start" or snapshot.foreground_queue_depth > 0:
+        totals["foreground_blocked_attempt_count"] = int(
+            totals["foreground_blocked_attempt_count"]
+        ) + 1
+        totals["foreground_blocked_wait_ms"] = int(
+            totals["foreground_blocked_wait_ms"]
+        ) + wait_ms
