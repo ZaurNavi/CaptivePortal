@@ -368,6 +368,130 @@ def test_offline_duration_and_traffic_are_normalized():
     assert event["reported_traffic_bytes_estimate"] == 96_762_593
 
 
+def test_offline_production_bytes_alias_is_canonicalized_via_public_path():
+    text = OFFLINE.replace(
+        "31m connected, 92.28MB",
+        "2m connected, 887Bytes",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["event"] == "omada.client_offline"
+    assert event["schema_version"] == 1
+    assert event["parse_status"] == "parsed"
+    assert event["parse_reason"] is None
+    assert event["parse_warnings"] == []
+    assert event["level"] == "info"
+    assert event["reported_connected_raw"] == "2m"
+    assert event["reported_connected_seconds"] == 120
+    assert event["reported_traffic_raw"] == "887Bytes"
+    assert event["reported_traffic_value"] == 887
+    assert event["reported_traffic_unit"] == "B"
+    assert event["reported_traffic_bytes_estimate"] == 887
+    assert "TRAFFIC_INVALID" not in event["parse_warnings"]
+
+
+@pytest.mark.parametrize(
+    ("source", "value", "unit", "byte_estimate"),
+    [
+        ("887Bytes", 887, "B", 887),
+        ("887bytes", 887, "B", 887),
+        ("887BYTES", 887, "B", 887),
+        ("887ByTeS", 887, "B", 887),
+        ("887 Bytes", 887, "B", 887),
+        ("887B", 887, "B", 887),
+        ("1KB", 1, "KB", 1024),
+        ("1MB", 1, "MB", 1024**2),
+        ("1GB", 1, "GB", 1024**3),
+        ("1TB", 1, "TB", 1024**4),
+        ("1kb", 1, "KB", 1024),
+        ("1mb", 1, "MB", 1024**2),
+        ("1gb", 1, "GB", 1024**3),
+        ("1tb", 1, "TB", 1024**4),
+        ("15.43mb", 15.43, "MB", 16_179_528),
+        ("0.5Bytes", 0.5, "B", 1),
+    ],
+)
+def test_supported_traffic_spellings_keep_canonical_vocabulary(
+    source,
+    value,
+    unit,
+    byte_estimate,
+):
+    event = single(raw_record(OFFLINE.replace("92.28MB", source)))
+
+    assert event["reported_traffic_raw"] == source
+    assert event["reported_traffic_value"] == value
+    assert event["reported_traffic_unit"] == unit
+    assert event["reported_traffic_bytes_estimate"] == byte_estimate
+    assert "TRAFFIC_INVALID" not in event["parse_warnings"]
+    assert event["parse_status"] == "parsed"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "887Byte",
+        "887byte",
+        "887BYTE",
+        "1XB",
+        f"{'9' * 25}Bytes",
+    ],
+)
+def test_unsupported_or_overlong_traffic_remains_invalid(source):
+    event = single(raw_record(OFFLINE.replace("92.28MB", source)))
+
+    assert event["reported_traffic_raw"] == source
+    assert event["reported_traffic_value"] is None
+    assert event["reported_traffic_unit"] is None
+    assert event["reported_traffic_bytes_estimate"] is None
+    assert "TRAFFIC_INVALID" in event["parse_warnings"]
+    assert "DURATION_INVALID" not in event["parse_warnings"]
+    assert event["parse_status"] == "partial"
+
+
+def test_giant_bytes_alias_input_is_bounded_and_fail_open():
+    source = f"{'9' * 5000}Bytes"
+
+    event = single(raw_record(OFFLINE.replace("92.28MB", source)))
+
+    assert event["reported_traffic_raw"] == source
+    assert event["reported_traffic_value"] is None
+    assert event["reported_traffic_unit"] is None
+    assert event["reported_traffic_bytes_estimate"] is None
+    assert "TRAFFIC_INVALID" in event["parse_warnings"]
+    assert event["parse_status"] == "partial"
+
+
+def test_bytes_alias_preserves_independent_missing_ip_warning():
+    text = OFFLINE.replace("(IP: 192.168.1.92)\n", "").replace(
+        "92.28MB", "887Bytes"
+    )
+
+    event = single(raw_record(text))
+
+    assert event["reported_traffic_bytes_estimate"] == 887
+    assert event["reported_traffic_unit"] == "B"
+    assert event["parse_status"] == "partial"
+    assert "CLIENT_IP_MISSING" in event["parse_warnings"]
+    assert "TRAFFIC_INVALID" not in event["parse_warnings"]
+
+
+def test_bytes_alias_does_not_hide_independent_duration_warning():
+    text = OFFLINE.replace(
+        "31m connected, 92.28MB",
+        "1x connected, 887Bytes",
+    )
+
+    event = single(raw_record(text))
+
+    assert event["reported_connected_raw"] == "1x"
+    assert event["reported_connected_seconds"] is None
+    assert event["reported_traffic_bytes_estimate"] == 887
+    assert "DURATION_INVALID" in event["parse_warnings"]
+    assert "TRAFFIC_INVALID" not in event["parse_warnings"]
+
+
 @pytest.mark.parametrize(
     ("source", "seconds"),
     [
