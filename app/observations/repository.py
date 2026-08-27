@@ -721,6 +721,68 @@ class ObservationRepository:
             raise _storage_error(exc) from exc
         return None if row is None else _cycle_from_row(row)
 
+    def get_home_health_cycles(
+        self, site_id: str, kind: str, *, deadline: Any | None = None
+    ) -> tuple[ObservationCycle | None, ObservationCycle | None]:
+        """Return latest completed and latest successful-complete cycle."""
+        site = require_text(site_id, "site_id")
+        if kind not in CYCLE_KINDS:
+            raise ObservationValidationError("Unsupported observation cycle kind")
+        interrupted = False
+
+        def progress_handler() -> int:
+            nonlocal interrupted
+            interrupted = bool(deadline is not None and deadline.expired())
+            return int(interrupted)
+
+        try:
+            with self.read_connection() as connection:
+                if deadline is not None:
+                    deadline.require_remaining()
+                    connection.set_progress_handler(progress_handler, 10_000)
+                try:
+                    connection.execute("BEGIN")
+                    latest = connection.execute(
+                        """
+                        SELECT * FROM observation_cycles
+                        WHERE site_id=? AND kind=? AND state='completed'
+                        ORDER BY started_at DESC LIMIT 1
+                        """,
+                        (site, kind),
+                    ).fetchone()
+                    if deadline is not None:
+                        deadline.require_remaining()
+                    success = connection.execute(
+                        """
+                        SELECT * FROM observation_cycles
+                        WHERE site_id=? AND kind=? AND state='completed'
+                          AND result='success' AND complete=1
+                        ORDER BY started_at DESC LIMIT 1
+                        """,
+                        (site, kind),
+                    ).fetchone()
+                    if deadline is not None:
+                        deadline.require_remaining()
+                finally:
+                    if deadline is not None:
+                        connection.set_progress_handler(None, 0)
+        except sqlite3.OperationalError as exc:
+            if interrupted and "interrupted" in str(exc).lower():
+                from app.analytics.source_gateway import (
+                    AnalyticsQueryDeadlineExceeded,
+                )
+
+                raise AnalyticsQueryDeadlineExceeded(
+                    "Observation Health query exceeded its deadline"
+                ) from exc
+            raise _storage_error(exc) from exc
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+        return (
+            None if latest is None else _cycle_from_row(latest),
+            None if success is None else _cycle_from_row(success),
+        )
+
     def insert_client_batch(
         self,
         rows: Iterable[Mapping[str, Any]],

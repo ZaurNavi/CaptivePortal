@@ -4,11 +4,16 @@ import hashlib
 import os
 import sqlite3
 import stat
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
+from app.analytics.source_gateway import (
+    AnalyticsQueryDeadlineExceeded,
+    QueryDeadline,
+)
 from app.observations.models import (
     ObservationSchemaError,
     ObservationStorageError,
@@ -534,3 +539,135 @@ def test_classification_without_python311_error_code(message, expected):
     error = sqlite3.OperationalError(message)
     assert getattr(error, "sqlite_errorcode", None) is None
     assert classify_sqlite_error(error) == expected
+
+
+def test_home_health_cycles_are_bounded_and_use_site_kind_index(repository):
+    repository.create_cycle(
+        kind="client",
+        site_id="site-a",
+        started_at="2026-01-01T00:00:00.000Z",
+        cycle_id="health-success",
+    )
+    repository.finalize_cycle(
+        "health-success",
+        finished_at="2026-01-01T00:00:10.000Z",
+        complete=True,
+        result="success",
+        source_rows_reported=0,
+        items_seen=0,
+        items_stored=0,
+        items_skipped=0,
+        error_count=0,
+        data_quality_warning_count=0,
+    )
+    repository.create_cycle(
+        kind="client",
+        site_id="site-a",
+        started_at="2026-01-01T00:01:00.000Z",
+        cycle_id="health-partial",
+    )
+    repository.finalize_cycle(
+        "health-partial",
+        finished_at="2026-01-01T00:01:10.000Z",
+        complete=False,
+        result="partial",
+        source_rows_reported=1,
+        items_seen=1,
+        items_stored=0,
+        items_skipped=1,
+        error_count=1,
+        data_quality_warning_count=0,
+    )
+
+    latest, success = repository.get_home_health_cycles("site-a", "client")
+    assert latest is not None and latest.cycle_id == "health-partial"
+    assert success is not None and success.cycle_id == "health-success"
+
+    with repository.read_connection() as connection:
+        plans = []
+        for suffix in (
+            "state='completed'",
+            "state='completed' AND result='success' AND complete=1",
+        ):
+            plans.extend(
+                row[3]
+                for row in connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT * FROM observation_cycles "
+                    f"WHERE site_id=? AND kind=? AND {suffix} "
+                    "ORDER BY started_at DESC LIMIT 1",
+                    ("site-a", "client"),
+                )
+            )
+    assert plans and all("idx_cycles_site_kind_started" in plan for plan in plans)
+
+
+def test_home_health_cycles_use_and_clear_shared_query_deadline(
+    repository, monkeypatch
+):
+    original = repository.read_connection
+    progress_calls = []
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def set_progress_handler(self, callback, operations):
+            progress_calls.append((callback, operations))
+            return self.connection.set_progress_handler(callback, operations)
+
+        def execute(self, *args, **kwargs):
+            return self.connection.execute(*args, **kwargs)
+
+    @contextmanager
+    def tracked_connection():
+        with original() as connection:
+            yield ConnectionProxy(connection)
+
+    monkeypatch.setattr(repository, "read_connection", tracked_connection)
+    deadline = QueryDeadline.after(60)
+    repository.get_home_health_cycles(
+        "site-a", "client", deadline=deadline
+    )
+    assert callable(progress_calls[0][0])
+    assert progress_calls[0][1] == 10_000
+    assert progress_calls[-1] == (None, 0)
+
+
+def test_home_health_cycles_interrupt_sql_and_clear_progress_handler(
+    repository, monkeypatch
+):
+    progress_calls = []
+
+    class ExpiringDeadline:
+        def require_remaining(self):
+            return None
+
+        def expired(self):
+            return True
+
+    class InterruptingConnection:
+        callback = None
+
+        def set_progress_handler(self, callback, operations):
+            self.callback = callback
+            progress_calls.append((callback, operations))
+
+        def execute(self, sql, _params=()):
+            if sql == "BEGIN":
+                return self
+            assert self.callback is not None and self.callback() == 1
+            raise sqlite3.OperationalError("interrupted")
+
+    @contextmanager
+    def interrupted_connection():
+        yield InterruptingConnection()
+
+    monkeypatch.setattr(
+        repository, "read_connection", interrupted_connection
+    )
+    with pytest.raises(AnalyticsQueryDeadlineExceeded):
+        repository.get_home_health_cycles(
+            "site-a", "client", deadline=ExpiringDeadline()
+        )
+    assert callable(progress_calls[0][0])
+    assert progress_calls[-1] == (None, 0)

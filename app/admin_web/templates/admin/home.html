@@ -3,6 +3,23 @@
 <p>{% if home_live_enabled %}Current network state for the selected Site.{% else %}Health and a compact 24-hour Site summary.{% endif %}</p>
 {% endblock %}
 {% block page_body %}
+{% if home_health_enabled %}
+<section id="home-health" class="card card-wide health-section" aria-labelledby="home-health-title">
+  <div class="section-heading">
+    <div><h2 id="home-health-title">System Health</h2><p id="home-health-updated" class="live-detail">Waiting for current evidence…</p></div>
+  </div>
+  <div id="home-health-state" class="state-panel" data-state="unknown" role="status" aria-live="polite">
+    <span class="state-dot" aria-hidden="true"></span>
+    <div><strong id="home-health-status">Unknown</strong><p id="home-health-message">There is not enough current evidence to confirm system status.</p></div>
+  </div>
+  <div id="home-health-components" class="health-components" aria-live="polite"></div>
+</section>
+{% elif home_health_unavailable %}
+<section class="state-panel" data-state="warning" aria-label="System Health unavailable">
+  <span class="state-dot" aria-hidden="true"></span>
+  <div><strong>System Health unavailable</strong><p>Health configuration is unavailable. Other Home panels remain independent.</p></div>
+</section>
+{% endif %}
 {% if not home_live_enabled %}
 {{ super() }}
 {% else %}

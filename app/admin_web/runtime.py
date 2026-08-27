@@ -15,6 +15,12 @@ from .home_activity_config import (
     HomeActivityConfigError,
     home_activity_config_from_settings,
 )
+from .home_health import HomeHealthReadService
+from .home_health_config import (
+    HomeHealthConfig,
+    HomeHealthConfigError,
+    home_health_config_from_settings,
+)
 
 
 @dataclass(slots=True)
@@ -27,8 +33,13 @@ class AdminWebRuntime:
     access_policy: AdminAccessPolicy | None = None
     site_resolver: AdminSiteContextResolver | None = None
     query_service: Any | None = None
+    query_execution_controls: Any | None = None
     home_activity_config: HomeActivityConfig | None = None
     home_activity_state: str = "disabled"
+    home_health_config: HomeHealthConfig | None = None
+    home_health_state: str = "disabled"
+    home_health_service: HomeHealthReadService | None = None
+    home_health_query_service: Any | None = None
     blueprint: Any | None = None
 
     def clear(self) -> None:
@@ -49,6 +60,10 @@ def create_admin_web_runtime(
     logger: logging.Logger,
     *,
     current_state_read_service: Any | None = None,
+    authorization_health_tracker: Any | None = None,
+    current_state_runtime: Any | None = None,
+    observation_runtime: Any | None = None,
+    visit_runtime: Any | None = None,
 ) -> AdminWebRuntime:
     """Create Admin security state without mutating or querying data sources."""
     try:
@@ -108,6 +123,66 @@ def create_admin_web_runtime(
             },
             exc_info=True,
         )
+    try:
+        health_config = home_health_config_from_settings(
+            settings, admin_config=config
+        )
+        health_state = "active" if health_config.enabled else "disabled"
+    except HomeHealthConfigError:
+        health_config = None
+        health_state = "unavailable"
+        logger.error(
+            "admin.home_health_configuration_failed",
+            extra={
+                "event": "admin.home_health_configuration_failed",
+                "failure_category": "configuration_error",
+            },
+        )
+    health_service = None
+    if health_config is not None and health_config.enabled:
+        try:
+            health_service = HomeHealthReadService(
+                allowed_site_ids=config.allowed_site_ids,
+                auth_tracker=authorization_health_tracker,
+                current_state_runtime=current_state_runtime,
+                observation_runtime=observation_runtime,
+                visit_runtime=visit_runtime,
+                analytics_runtime=analytics_runtime,
+                auth_evidence_max_age_seconds=(
+                    health_config.auth_evidence_max_age_seconds
+                ),
+                home_traffic_enabled=config.home_traffic_enabled,
+                home_activity_enabled=activity_requested,
+                logger=logger,
+            )
+        except Exception:
+            health_state = "unavailable"
+            logger.error(
+                "admin.home_health_composition_failed",
+                extra={
+                    "event": "admin.home_health_composition_failed",
+                    "failure_category": "composition_error",
+                },
+            )
+    from .query_service import (
+        AdminHomeHealthQueryService,
+        AdminQueryExecutionControls,
+    )
+
+    policy = AdminAccessPolicy(config.allowed_site_ids)
+    execution_controls = AdminQueryExecutionControls(
+        max_concurrent_queries=config.max_concurrent_queries,
+        max_query_duration_seconds=config.max_query_duration_seconds,
+    )
+    health_query_service = (
+        AdminHomeHealthQueryService(
+            policy=policy,
+            read_service=health_service,
+            execution_controls=execution_controls,
+        )
+        if health_service is not None
+        else None
+    )
     query_service = None
     if getattr(analytics_runtime, "state", None) == "active" and source_ready:
         query_service = _query_service(
@@ -118,6 +193,7 @@ def create_admin_web_runtime(
             observation_read_service,
             current_state_read_service,
             activity_config,
+            execution_controls,
         )
     runtime = AdminWebRuntime(
         state=(
@@ -129,14 +205,19 @@ def create_admin_web_runtime(
         session_store=sessions,
         preauth_store=preauth,
         rate_limiter=limiter,
-        access_policy=AdminAccessPolicy(config.allowed_site_ids),
+        access_policy=policy,
         site_resolver=AdminSiteContextResolver(
             config.allowed_site_ids,
             config.default_site_id,
         ),
         query_service=query_service,
+        query_execution_controls=execution_controls,
         home_activity_config=activity_config,
         home_activity_state=activity_state,
+        home_health_config=health_config,
+        home_health_state=health_state,
+        home_health_service=health_service,
+        home_health_query_service=health_query_service,
     )
     from .routes import create_admin_web_blueprint
 
@@ -152,6 +233,7 @@ def _query_service(
     observation_read_service: Any,
     current_state_read_service: Any | None = None,
     home_activity_config: HomeActivityConfig | None = None,
+    execution_controls: Any | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
     try:
@@ -184,6 +266,7 @@ def _query_service(
                 analytics_runtime, "home_activity_service", None
             ),
             home_activity_config=home_activity_config,
+            execution_controls=execution_controls,
         )
     except (AttributeError, TypeError):
         return None
