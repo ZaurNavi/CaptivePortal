@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from typing import Callable
 
 from .models import (
     OfflineEvidence,
@@ -73,6 +74,8 @@ class VisitLifecycleService:
         progress: ReaderProgress,
         evidence: OfflineEvidence | None,
         now_utc: str,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> OfflineProcessingOutcome | None:
         outcome = self.repository.apply_journal_line(
             progress=progress,
@@ -85,11 +88,27 @@ class VisitLifecycleService:
             max_duration_drift_seconds=(
                 self.repository.config.max_reported_duration_drift_seconds
             ),
+            deadline=deadline,
+            cancel_event=cancel_event,
         )
         self._emit_offline_outcome(outcome)
         return outcome
 
-    def retry_pending(self, *, now_utc: str) -> int:
+    def retry_pending(
+        self,
+        *,
+        now_utc: str,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+        on_committed_progress: Callable[[int], None] | None = None,
+    ) -> int:
+        def committed(
+            outcomes: tuple[OfflineProcessingOutcome, ...],
+        ) -> None:
+            self._emit_committed_chunk(outcomes)
+            if on_committed_progress is not None:
+                on_committed_progress(len(outcomes))
+
         outcomes = self.repository.process_pending_events(
             now_utc=now_utc,
             limit=self.repository.config.pending_offline_batch_size,
@@ -99,10 +118,18 @@ class VisitLifecycleService:
             max_duration_drift_seconds=(
                 self.repository.config.max_reported_duration_drift_seconds
             ),
+            deadline=deadline,
+            cancel_event=cancel_event,
+            on_committed_chunk=committed,
         )
+        return len(outcomes)
+
+    def _emit_committed_chunk(
+        self,
+        outcomes: tuple[OfflineProcessingOutcome, ...],
+    ) -> None:
         for outcome in outcomes:
             self._emit_offline_outcome(outcome)
-        return len(outcomes)
 
     def _emit_offline_outcome(
         self,

@@ -8,6 +8,7 @@ from app.visit_lifecycle import (
     VisitStartOutcome,
     VisitStorageCategory,
     VisitStorageError,
+    VisitWriterContention,
     VisitTelemetry,
     VisitValidationError,
 )
@@ -147,6 +148,65 @@ def test_busy_exhaustion_is_bounded_and_emits_one_final_error():
     assert errors[0][2]["attempt"] == 3
     assert errors[0][2]["retry_exhausted"] is True
     assert errors[0][2]["budget_ms"] == 500
+
+
+def test_final_busy_telemetry_aggregates_every_retry_blocker():
+    background = VisitStorageError(
+        VisitStorageCategory.BUSY,
+        lock_wait_ms=11,
+        contention_layer="coordinator",
+        contention=VisitWriterContention(
+            holder_operation="pending_retry",
+            holder_age_ms=40,
+            foreground_queue_depth=0,
+            background_queue_depth=1,
+            waiter_operation="start",
+            waiter_wait_ms=11,
+        ),
+    )
+    foreground = VisitStorageError(
+        VisitStorageCategory.BUSY,
+        lock_wait_ms=17,
+        contention_layer="coordinator",
+        contention=VisitWriterContention(
+            holder_operation="start",
+            holder_age_ms=17,
+            foreground_queue_depth=1,
+            background_queue_depth=0,
+            waiter_operation="start",
+            waiter_wait_ms=17,
+        ),
+    )
+    sqlite_busy = VisitStorageError(
+        VisitStorageCategory.BUSY,
+        lock_wait_ms=23,
+        contention_layer="sqlite",
+    )
+    service = SequenceService([background, sqlite_busy, foreground])
+    telemetry = CapturingTelemetry()
+    sink = LocalVisitStartSubmitter(service, telemetry, total_budget_ms=500)
+
+    assert sink.submit_authorized(make_request()).status == "unavailable"
+    fields = [
+        event[2]
+        for event in telemetry.events
+        if event[0] == "visit.storage_error"
+    ][0]
+    assert fields["coordinator_busy_attempt_count"] == 2
+    assert fields["sqlite_busy_attempt_count"] == 1
+    assert fields["background_blocked_attempt_count"] == 1
+    assert fields["background_blocked_wait_ms"] == 11
+    assert fields["foreground_blocked_attempt_count"] == 1
+    assert fields["foreground_blocked_wait_ms"] == 17
+    assert fields["max_background_holder_age_ms"] == 40
+    assert fields["last_holder_operation"] == "start"
+    assert fields["contention_layer"] == "coordinator"
+    assert fields["holder_operation"] == "start"
+    assert fields["holder_age_ms"] == 17
+    assert fields["foreground_queue_depth"] == 1
+    assert fields["background_queue_depth"] == 0
+    assert fields["waiter_operation"] == "start"
+    assert fields["waiter_wait_ms"] == 17
 
 
 def test_permanent_storage_error_is_not_retried():

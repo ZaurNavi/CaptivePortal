@@ -13,7 +13,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .models import (
     OfflineEvidence,
@@ -28,6 +28,7 @@ from .models import (
     VisitStartOutcome,
     VisitStorageCategory,
     VisitStorageError,
+    VisitWriterContention,
     VisitReaderState,
     NormalizedVisitStart,
 )
@@ -46,9 +47,25 @@ _SQLITE_CONSTRAINT = 19
 _SQLITE_NOTADB = 26
 
 WRITE_OPERATION_START = "start"
-WRITE_OPERATION_READER = "reader"
+WRITE_OPERATION_READER_LINE = "reader_line"
+WRITE_OPERATION_READER_CHECKPOINT = "reader_checkpoint"
+WRITE_OPERATION_PENDING_RETRY = "pending_retry"
+# Compatibility alias for tests/integrations that intentionally acquire a
+# generic reader-line lease.
+WRITE_OPERATION_READER = WRITE_OPERATION_READER_LINE
 WRITE_OPERATION_RECONCILIATION = "reconciliation"
 WRITE_OPERATION_STARTUP = "startup"
+
+BACKGROUND_STARVATION_AGE_MS = 200
+BACKGROUND_CHUNK_MAX_ITEMS = 25
+BACKGROUND_CHUNK_TARGET_MAX_HOLD_MS = 50
+
+_BACKGROUND_CLASS_BY_OPERATION = {
+    WRITE_OPERATION_READER_LINE: "reader",
+    WRITE_OPERATION_READER_CHECKPOINT: "reader",
+    WRITE_OPERATION_PENDING_RETRY: "pending_retry",
+    WRITE_OPERATION_RECONCILIATION: "reconciliation",
+}
 
 REQUIRED_TABLES = frozenset({
     "visits",
@@ -103,9 +120,25 @@ REQUIRED_INDEXES: Mapping[str, tuple[str, ...]] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass
 class _WriteLease:
     lock_wait_ms: int
+    progress_made: bool = False
+    work_absent: bool = False
+
+    def mark_progress(self) -> None:
+        self.progress_made = True
+
+    def mark_no_work(self) -> None:
+        self.work_absent = True
+
+
+@dataclass(frozen=True)
+class _WriterWaiter:
+    token: object
+    operation: str
+    background_class: str | None
+    enqueued_at: float
 
 
 @dataclass(frozen=True)
@@ -119,14 +152,17 @@ class _OfflineMatch:
 
 
 class PriorityWriteCoordinator:
-    """Single foreground-priority, FIFO-background writer gate."""
+    """Single writer gate with foreground priority and bounded fairness."""
 
     def __init__(self, *, monotonic=time.monotonic):
         self._condition = threading.Condition()
         self._monotonic = monotonic
-        self._active = False
-        self._foreground: deque[object] = deque()
-        self._background: deque[object] = deque()
+        self._holder_operation: str | None = None
+        self._holder_acquired_at: float | None = None
+        self._foreground: deque[_WriterWaiter] = deque()
+        self._background: deque[_WriterWaiter] = deque()
+        self._starvation_since: dict[str, float] = {}
+        self._foreground_required_after_escape = False
 
     @contextmanager
     def acquire(
@@ -142,36 +178,97 @@ class PriorityWriteCoordinator:
         if deadline is not None:
             local_deadline = min(local_deadline, deadline)
         foreground = operation == WRITE_OPERATION_START
+        background_class = _BACKGROUND_CLASS_BY_OPERATION.get(operation)
         queue = self._foreground if foreground else self._background
-        waiter = object()
+        waiter = _WriterWaiter(
+            token=object(),
+            operation=operation,
+            background_class=background_class,
+            enqueued_at=started,
+        )
         acquired = False
+        lease: _WriteLease | None = None
         with self._condition:
             queue.append(waiter)
             try:
                 while True:
+                    now = self._monotonic()
+                    if not self._foreground:
+                        self._foreground_required_after_escape = False
                     if cancel_event is not None and cancel_event.is_set():
+                        if background_class is not None:
+                            self._starvation_since.pop(background_class, None)
                         raise VisitStorageError(
                             VisitStorageCategory.UNAVAILABLE,
                             "Visit write wait was cancelled",
                             operation=operation,
-                            lock_wait_ms=_elapsed_ms(started, self._monotonic()),
+                            lock_wait_ms=_elapsed_ms(started, now),
+                            contention_layer="coordinator",
+                            contention=self._snapshot_locked(
+                                waiter_operation=operation,
+                                waiter_started=started,
+                                now=now,
+                            ),
                         )
                     is_head = bool(queue) and queue[0] is waiter
-                    priority_allows = foreground or not self._foreground
-                    if not self._active and is_head and priority_allows:
+                    aged_escape = (
+                        not foreground
+                        and background_class is not None
+                        and is_head
+                        and self._background_is_aged_locked(
+                            background_class,
+                            now,
+                        )
+                        and not self._foreground_required_after_escape
+                    )
+                    priority_allows = (
+                        (
+                            foreground
+                            and (
+                                self._foreground_required_after_escape
+                                or not self._aged_background_head_locked(now)
+                            )
+                        )
+                        or not self._foreground
+                        or aged_escape
+                    )
+                    if (
+                        self._holder_operation is None
+                        and is_head
+                        and priority_allows
+                    ):
                         queue.popleft()
-                        self._active = True
+                        self._holder_operation = operation
+                        self._holder_acquired_at = now
+                        if foreground:
+                            self._foreground_required_after_escape = False
+                        elif aged_escape and self._foreground:
+                            self._foreground_required_after_escape = True
                         acquired = True
                         break
-                    remaining = local_deadline - self._monotonic()
+                    if (
+                        background_class is not None
+                        and self._foreground_blocks_locked(waiter)
+                    ):
+                        self._starvation_since.setdefault(
+                            background_class,
+                            now,
+                        )
+                    remaining = local_deadline - now
                     if remaining <= 0:
                         raise VisitStorageError(
                             VisitStorageCategory.BUSY,
                             "Visit write slot is busy",
                             operation=operation,
-                            lock_wait_ms=_elapsed_ms(started, self._monotonic()),
+                            lock_wait_ms=_elapsed_ms(started, now),
+                            contention_layer="coordinator",
+                            contention=self._snapshot_locked(
+                                waiter_operation=operation,
+                                waiter_started=started,
+                                now=now,
+                            ),
                         )
-                    self._condition.wait(remaining)
+                    self._condition.wait(min(remaining, 0.050))
             finally:
                 if not acquired:
                     try:
@@ -180,22 +277,108 @@ class PriorityWriteCoordinator:
                         pass
                     self._condition.notify_all()
         try:
-            yield _WriteLease(
+            lease = _WriteLease(
                 lock_wait_ms=_elapsed_ms(started, self._monotonic())
             )
+            yield lease
         finally:
             with self._condition:
-                self._active = False
+                if (
+                    lease is not None
+                    and background_class is not None
+                    and (lease.progress_made or lease.work_absent)
+                ):
+                    self._starvation_since.pop(background_class, None)
+                self._holder_operation = None
+                self._holder_acquired_at = None
                 self._condition.notify_all()
 
     def wake_all(self) -> None:
         with self._condition:
             self._condition.notify_all()
 
+    def clear_background_work(self, operation: str) -> None:
+        background_class = _BACKGROUND_CLASS_BY_OPERATION.get(operation)
+        if background_class is None:
+            return
+        with self._condition:
+            self._starvation_since.pop(background_class, None)
+            self._condition.notify_all()
+
+    def snapshot(
+        self,
+        *,
+        waiter_operation: str | None = None,
+        waiter_started: float | None = None,
+    ) -> VisitWriterContention:
+        with self._condition:
+            return self._snapshot_locked(
+                waiter_operation=waiter_operation,
+                waiter_started=waiter_started,
+                now=self._monotonic(),
+            )
+
     def _waiting_counts(self) -> tuple[int, int]:
         """Return foreground/background queue depths atomically."""
         with self._condition:
             return len(self._foreground), len(self._background)
+
+    def _background_is_aged_locked(
+        self,
+        background_class: str,
+        now: float,
+    ) -> bool:
+        since = self._starvation_since.get(background_class)
+        return (
+            since is not None
+            and (now - since) * 1000 >= BACKGROUND_STARVATION_AGE_MS
+        )
+
+    def _aged_background_head_locked(self, now: float) -> bool:
+        if not self._background:
+            return False
+        background_class = self._background[0].background_class
+        return (
+            background_class is not None
+            and self._background_is_aged_locked(background_class, now)
+        )
+
+    def _foreground_blocks_locked(self, waiter: _WriterWaiter) -> bool:
+        return (
+            bool(self._background)
+            and self._background[0] is waiter
+            and (
+                (
+                    self._holder_operation is None
+                    and bool(self._foreground)
+                )
+                or self._holder_operation == WRITE_OPERATION_START
+            )
+        )
+
+    def _snapshot_locked(
+        self,
+        *,
+        waiter_operation: str | None,
+        waiter_started: float | None,
+        now: float,
+    ) -> VisitWriterContention:
+        return VisitWriterContention(
+            holder_operation=self._holder_operation,
+            holder_age_ms=(
+                None
+                if self._holder_acquired_at is None
+                else _elapsed_ms(self._holder_acquired_at, now)
+            ),
+            foreground_queue_depth=len(self._foreground),
+            background_queue_depth=len(self._background),
+            waiter_operation=waiter_operation,
+            waiter_wait_ms=(
+                None
+                if waiter_started is None
+                else _elapsed_ms(waiter_started, now)
+            ),
+        )
 
 
 def _elapsed_ms(started: float, finished: float) -> int:
@@ -567,7 +750,7 @@ class VisitRepository:
         existed = self._database_exists()
         created = False
         try:
-            with self._bounded_write(WRITE_OPERATION_STARTUP), closing(
+            with self._bounded_write(WRITE_OPERATION_STARTUP) as lease, closing(
                 self._connect()
             ) as connection:
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])
@@ -589,6 +772,7 @@ class VisitRepository:
                 self._startup_check(connection)
                 if os.name == "posix":
                     os.chmod(self.db_path, 0o640)
+                lease.mark_progress()
         except VisitSchemaError:
             raise
         except sqlite3.Error as exc:
@@ -915,11 +1099,15 @@ class VisitRepository:
         initial_snapshot_id: str | None,
         attempted_at: str,
         retry_at: str,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[bool, bool]:
         try:
             with self._bounded_write(
-                WRITE_OPERATION_RECONCILIATION
-            ), closing(self._connect()) as connection:
+                WRITE_OPERATION_RECONCILIATION,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            ) as lease, closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 before = connection.execute(
                     """
@@ -930,6 +1118,7 @@ class VisitRepository:
                 ).fetchone()
                 if before is None:
                     connection.commit()
+                    lease.mark_no_work()
                     return False, True
                 new_device = before["device_id"] or device_id
                 new_snapshot = before["initial_snapshot_id"] or initial_snapshot_id
@@ -960,6 +1149,7 @@ class VisitRepository:
                     ),
                 )
                 connection.commit()
+                lease.mark_progress()
                 return changed, complete
         except sqlite3.Error as exc:
             raise _storage_error(
@@ -1007,37 +1197,56 @@ class VisitRepository:
         progress: ReaderProgress,
         *,
         now_utc: str,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         try:
             with self._bounded_write(
-                WRITE_OPERATION_READER
-            ), closing(self._connect()) as connection:
+                WRITE_OPERATION_READER_CHECKPOINT,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            ) as lease, closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 self._upsert_reader_progress(connection, progress, now_utc)
                 connection.commit()
+                lease.mark_progress()
         except sqlite3.Error as exc:
-            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
+            raise _storage_error(
+                exc,
+                operation=WRITE_OPERATION_READER_CHECKPOINT,
+            ) from exc
 
     def reset_reader_source(
         self,
         progress: ReaderProgress,
         *,
         now_utc: str,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
-        self.observe_reader_progress(progress, now_utc=now_utc)
+        self.observe_reader_progress(
+            progress,
+            now_utc=now_utc,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
 
     def mark_reader_source_missing(
         self,
         source_identity: str,
         *,
         now_utc: str,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         try:
             with self._bounded_write(
-                WRITE_OPERATION_READER
-            ), closing(self._connect()) as connection:
+                WRITE_OPERATION_READER_CHECKPOINT,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            ) as lease, closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
+                updated = connection.execute(
                     """
                     UPDATE visit_reader_state
                     SET missing_warning_emitted=1, updated_at=?
@@ -1046,22 +1255,44 @@ class VisitRepository:
                     (now_utc, source_identity),
                 )
                 connection.commit()
+                if updated.rowcount:
+                    lease.mark_progress()
+                else:
+                    lease.mark_no_work()
         except sqlite3.Error as exc:
-            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
+            raise _storage_error(
+                exc,
+                operation=WRITE_OPERATION_READER_CHECKPOINT,
+            ) from exc
 
-    def delete_reader_state(self, source_identity: str) -> None:
+    def delete_reader_state(
+        self,
+        source_identity: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         try:
             with self._bounded_write(
-                WRITE_OPERATION_READER
-            ), closing(self._connect()) as connection:
+                WRITE_OPERATION_READER_CHECKPOINT,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            ) as lease, closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
+                deleted = connection.execute(
                     "DELETE FROM visit_reader_state WHERE source_identity=?",
                     (source_identity,),
                 )
                 connection.commit()
+                if deleted.rowcount:
+                    lease.mark_progress()
+                else:
+                    lease.mark_no_work()
         except sqlite3.Error as exc:
-            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
+            raise _storage_error(
+                exc,
+                operation=WRITE_OPERATION_READER_CHECKPOINT,
+            ) from exc
 
     def apply_journal_line(
         self,
@@ -1072,11 +1303,15 @@ class VisitRepository:
         grace_seconds: float,
         max_clock_skew_seconds: float,
         max_duration_drift_seconds: float,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> OfflineProcessingOutcome | None:
         try:
             with self._bounded_write(
-                WRITE_OPERATION_READER
-            ), closing(self._connect()) as connection:
+                WRITE_OPERATION_READER_LINE,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            ) as lease, closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 outcome = self._apply_journal_line_transaction(
                     connection,
@@ -1089,9 +1324,13 @@ class VisitRepository:
                 )
                 self._upsert_reader_progress(connection, progress, now_utc)
                 connection.commit()
+                lease.mark_progress()
                 return outcome
         except sqlite3.Error as exc:
-            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
+            raise _storage_error(
+                exc,
+                operation=WRITE_OPERATION_READER_LINE,
+            ) from exc
 
     def process_pending_events(
         self,
@@ -1100,38 +1339,153 @@ class VisitRepository:
         limit: int,
         max_clock_skew_seconds: float,
         max_duration_drift_seconds: float,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+        on_committed_chunk: (
+            Callable[[tuple[OfflineProcessingOutcome, ...]], None] | None
+        ) = None,
     ) -> tuple[OfflineProcessingOutcome, ...]:
+        """Retry a bounded pass using short independently committed chunks."""
+        outcomes: list[OfflineProcessingOutcome] = []
+        examined = 0
+        cursor: tuple[str, str] | None = None
         try:
-            with self._bounded_write(
-                WRITE_OPERATION_READER
-            ), closing(self._connect()) as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                rows = connection.execute(
-                    """
-                    SELECT * FROM visit_source_events
-                    WHERE processing_result='pending_match'
-                    ORDER BY pending_until ASC, event_id ASC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
-                outcomes: list[OfflineProcessingOutcome] = []
-                for row in rows:
-                    outcomes.append(
-                        self._retry_pending_row(
-                            connection,
-                            row=row,
-                            now_utc=now_utc,
-                            max_clock_skew_seconds=max_clock_skew_seconds,
-                            max_duration_drift_seconds=(
-                                max_duration_drift_seconds
-                            ),
-                        )
+            while examined < limit:
+                if cancel_event is not None and cancel_event.is_set():
+                    self._write_coordinator.clear_background_work(
+                        WRITE_OPERATION_PENDING_RETRY
                     )
-                connection.commit()
-                return tuple(outcomes)
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                chunk_outcomes: list[OfflineProcessingOutcome] = []
+                chunk_examined = 0
+                chunk_cursor = cursor
+                no_work = False
+                chunk_limit = min(
+                    BACKGROUND_CHUNK_MAX_ITEMS,
+                    limit - examined,
+                )
+                with self._bounded_write(
+                    WRITE_OPERATION_PENDING_RETRY,
+                    deadline=deadline,
+                    cancel_event=cancel_event,
+                ) as lease:
+                    if cancel_event is not None and cancel_event.is_set():
+                        self._write_coordinator.clear_background_work(
+                            WRITE_OPERATION_PENDING_RETRY
+                        )
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        break
+                    chunk_started = time.monotonic()
+                    with closing(self._connect()) as connection:
+                        connection.execute("BEGIN IMMEDIATE")
+                        rows = self._pending_rows_after(
+                            connection,
+                            cursor=cursor,
+                            limit=chunk_limit,
+                        )
+                        if not rows:
+                            connection.commit()
+                            lease.mark_no_work()
+                            no_work = True
+                        else:
+                            for row in rows:
+                                if chunk_examined and (
+                                    (time.monotonic() - chunk_started) * 1000
+                                    >= BACKGROUND_CHUNK_TARGET_MAX_HOLD_MS
+                                ):
+                                    break
+                                if (
+                                    cancel_event is not None
+                                    and cancel_event.is_set()
+                                ) or (
+                                    deadline is not None
+                                    and time.monotonic() >= deadline
+                                ):
+                                    break
+                                pending_until = str(row["pending_until"])
+                                event_id = str(row["event_id"])
+                                chunk_cursor = (pending_until, event_id)
+                                chunk_examined += 1
+                                current = connection.execute(
+                                    """
+                                    SELECT * FROM visit_source_events
+                                    WHERE event_id=?
+                                      AND processing_result='pending_match'
+                                    """,
+                                    (event_id,),
+                                ).fetchone()
+                                if current is None:
+                                    continue
+                                chunk_outcomes.append(
+                                    self._retry_pending_row(
+                                        connection,
+                                        row=current,
+                                        now_utc=now_utc,
+                                        max_clock_skew_seconds=(
+                                            max_clock_skew_seconds
+                                        ),
+                                        max_duration_drift_seconds=(
+                                            max_duration_drift_seconds
+                                        ),
+                                    )
+                                )
+                            connection.commit()
+                            if chunk_examined:
+                                lease.mark_progress()
+                committed = tuple(chunk_outcomes)
+                outcomes.extend(committed)
+                if committed and on_committed_chunk is not None:
+                    on_committed_chunk(committed)
+                examined += chunk_examined
+                cursor = chunk_cursor
+                if no_work:
+                    break
+                if chunk_examined == 0:
+                    if cancel_event is not None and cancel_event.is_set():
+                        self._write_coordinator.clear_background_work(
+                            WRITE_OPERATION_PENDING_RETRY
+                        )
+                    break
+            return tuple(outcomes)
         except sqlite3.Error as exc:
-            raise _storage_error(exc, operation=WRITE_OPERATION_READER) from exc
+            raise _storage_error(
+                exc,
+                operation=WRITE_OPERATION_PENDING_RETRY,
+            ) from exc
+
+    @staticmethod
+    def _pending_rows_after(
+        connection: sqlite3.Connection,
+        *,
+        cursor: tuple[str, str] | None,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        if cursor is None:
+            return connection.execute(
+                """
+                SELECT * FROM visit_source_events
+                WHERE processing_result='pending_match'
+                ORDER BY pending_until ASC, event_id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return connection.execute(
+            """
+            SELECT * FROM visit_source_events
+            WHERE processing_result='pending_match'
+              AND (
+                    pending_until > ?
+                    OR (pending_until = ? AND event_id > ?)
+                  )
+            ORDER BY pending_until ASC, event_id ASC
+            LIMIT ?
+            """,
+            (cursor[0], cursor[0], cursor[1], limit),
+        ).fetchall()
 
     def _apply_journal_line_transaction(
         self,
@@ -1750,9 +2104,19 @@ class VisitRepository:
         deadline: float | None = None,
         cancel_event: threading.Event | None = None,
     ):
+        if operation == "reader":
+            operation = WRITE_OPERATION_READER_LINE
         timeout_ms = {
             WRITE_OPERATION_START: self.config.start_writer_slot_wait_ms,
-            WRITE_OPERATION_READER: self.config.reader_writer_slot_wait_ms,
+            WRITE_OPERATION_READER_LINE: (
+                self.config.reader_writer_slot_wait_ms
+            ),
+            WRITE_OPERATION_READER_CHECKPOINT: (
+                self.config.reader_writer_slot_wait_ms
+            ),
+            WRITE_OPERATION_PENDING_RETRY: (
+                self.config.reader_writer_slot_wait_ms
+            ),
             WRITE_OPERATION_RECONCILIATION: (
                 self.config.reconciliation_writer_slot_wait_ms
             ),
@@ -1951,4 +2315,5 @@ def _storage_error(
         classify_sqlite_error(exc),
         operation=operation,
         lock_wait_ms=lock_wait_ms,
+        contention_layer="sqlite",
     )

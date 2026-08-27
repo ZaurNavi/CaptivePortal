@@ -10,9 +10,15 @@ import pytest
 from app.visit_lifecycle import (
     VisitLifecycleService,
     VisitRepository,
+    VisitStorageCategory,
+    VisitStorageError,
+    VisitWriterContention,
     webhook_reader as reader_module,
 )
-from app.visit_lifecycle.repository import WRITE_OPERATION_READER
+from app.visit_lifecycle.repository import (
+    WRITE_OPERATION_READER,
+    WRITE_OPERATION_START,
+)
 from app.visit_lifecycle.webhook_reader import VisitLifecycleWebhookReader
 
 from .conftest import config_with
@@ -91,7 +97,11 @@ def test_missing_journal_is_safe_and_pending_recheck_still_runs(
     assert _reader(
         visit_config, visit_repository, visit_service
     ).scan_once() is True
-    assert calls == [{"now_utc": NOW}]
+    assert len(calls) == 1
+    assert calls[0]["now_utc"] == NOW
+    assert isinstance(calls[0]["deadline"], float)
+    assert isinstance(calls[0]["cancel_event"], threading.Event)
+    assert callable(calls[0]["on_committed_progress"])
 
 
 def test_busy_reader_preserves_checkpoint_and_recovers_next_scan(visit_config):
@@ -100,7 +110,15 @@ def test_busy_reader_preserves_checkpoint_and_recovers_next_scan(visit_config):
     repository.initialize()
     telemetry = CapturingTelemetry()
     service = VisitLifecycleService(repository, telemetry)
-    reader = _reader(config, repository, service, telemetry)
+    health = []
+    reader = VisitLifecycleWebhookReader(
+        config=config,
+        repository=repository,
+        service=service,
+        telemetry=telemetry,
+        now_factory=lambda: NOW,
+        health_callback=health.append,
+    )
     _append(config.webhook_source, _offline("event:busy-reader"))
     holder_ready = threading.Event()
     release_holder = threading.Event()
@@ -121,6 +139,7 @@ def test_busy_reader_preserves_checkpoint_and_recovers_next_scan(visit_config):
     assert failed[0][2]["operation"] == "reader"
     assert failed[0][2]["storage_category"] == "busy"
     assert failed[0][2]["retry_exhausted"] is False
+    assert health == [False]
     release_holder.set()
     holder.join(1)
 
@@ -129,6 +148,125 @@ def test_busy_reader_preserves_checkpoint_and_recovers_next_scan(visit_config):
     assert _state(repository).source_offset == os.path.getsize(
         config.webhook_source
     )
+    assert health == [False, True]
+
+
+def test_foreground_deferral_is_not_immediate_failure_or_health_degradation(
+    visit_config,
+):
+    config = config_with(visit_config, reader_writer_slot_wait_ms=25)
+    repository = VisitRepository(config)
+    repository.initialize()
+    telemetry = CapturingTelemetry()
+    service = VisitLifecycleService(repository, telemetry)
+    health = []
+    reader = VisitLifecycleWebhookReader(
+        config=config,
+        repository=repository,
+        service=service,
+        telemetry=telemetry,
+        now_factory=lambda: NOW,
+        health_callback=health.append,
+    )
+    _append(config.webhook_source, _offline("event:foreground-deferred"))
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_start():
+        with repository._bounded_write(WRITE_OPERATION_START):  # noqa: SLF001
+            holder_ready.set()
+            release_holder.wait(2)
+
+    holder = threading.Thread(target=hold_start)
+    holder.start()
+    assert holder_ready.wait(1)
+    assert reader.scan_once() is False
+    assert health == []
+    assert repository.get_reader_states() == {}
+    assert not [event for event in telemetry.events if event[0] == "visit.reader_scan_failed"]
+    deferred = [event for event in telemetry.events if event[0] == "visit.reader_scan_deferred"]
+    assert len(deferred) == 1
+    assert deferred[0][2]["contention_layer"] == "coordinator"
+    assert deferred[0][2]["holder_operation"] == "start"
+
+    release_holder.set()
+    holder.join(1)
+    assert reader.scan_once() is True
+    assert health == [True]
+    assert _event_count(repository) == 1
+
+
+def test_continuous_expected_deferral_degrades_once_and_success_recovers(
+    visit_config,
+    visit_repository,
+    visit_service,
+):
+    class Clock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = Clock()
+    telemetry = CapturingTelemetry()
+    health = []
+    reader = VisitLifecycleWebhookReader(
+        config=visit_config,
+        repository=visit_repository,
+        service=visit_service,
+        telemetry=telemetry,
+        now_factory=lambda: NOW,
+        monotonic=clock,
+        health_callback=health.append,
+    )
+    error = VisitStorageError(
+        VisitStorageCategory.BUSY,
+        operation="reader_line",
+        lock_wait_ms=250,
+        contention_layer="coordinator",
+        contention=VisitWriterContention(
+            holder_operation="start",
+            holder_age_ms=250,
+            foreground_queue_depth=1,
+            background_queue_depth=1,
+            waiter_operation="reader_line",
+            waiter_wait_ms=250,
+        ),
+    )
+    assert reader._record_expected_deferral(  # noqa: SLF001
+        error, started=0.0, processed=0
+    ) is False
+    clock.value = 30.001
+    reader._record_expected_deferral(error, started=30.0, processed=0)  # noqa: SLF001
+    clock.value = 35.0
+    reader._record_expected_deferral(error, started=35.0, processed=0)  # noqa: SLF001
+    failed = [event for event in telemetry.events if event[0] == "visit.reader_scan_failed"]
+    assert len(failed) == 1
+    assert failed[0][2]["reason"] == "writer_starvation"
+    assert health == [False]
+
+    assert reader.scan_once() is True
+    assert health == [False, True]
+    assert reader._deferral_started_at is None  # noqa: SLF001
+
+
+def test_quiet_journal_remains_healthy_without_checkpoint_movement(
+    visit_config,
+    visit_repository,
+    visit_service,
+):
+    health = []
+    reader = VisitLifecycleWebhookReader(
+        config=visit_config,
+        repository=visit_repository,
+        service=visit_service,
+        telemetry=CapturingTelemetry(),
+        now_factory=lambda: NOW,
+        health_callback=health.append,
+    )
+    assert reader.scan_once() is True
+    assert reader.scan_once() is True
+    assert health == [True, True]
 
 
 def test_malformed_unrelated_and_missing_event_id_advance_checkpoint_safely(

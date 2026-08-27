@@ -14,6 +14,7 @@ from .models import (
     VisitStartRequest,
     VisitStorageCategory,
     VisitStorageError,
+    VisitWriterContention,
     VisitValidationError,
 )
 from .read_service import VisitLifecycleReadService
@@ -53,6 +54,7 @@ __all__ = [
     "VisitStartSubmitter",
     "VisitStorageCategory",
     "VisitStorageError",
+    "VisitWriterContention",
     "VisitTelemetry",
     "VisitValidationError",
     "create_visit_lifecycle",
