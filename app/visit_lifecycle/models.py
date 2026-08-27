@@ -229,6 +229,10 @@ class OfflineProcessingOutcome:
     visit_id: str | None = None
     reason: str | None = None
     duplicate: bool = False
+    duration_drift_seconds: float | None = None
+    duration_drift_threshold_seconds: float | None = None
+    duration_drift_exceeded: bool = False
+    close_time_source: str | None = None
 
 
 @dataclass(frozen=True)

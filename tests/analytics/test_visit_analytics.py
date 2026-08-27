@@ -474,6 +474,26 @@ def test_closure_keeps_reported_and_lifecycle_duration_separate(
     assert result.value.duration_difference_seconds.p50 == 60
 
 
+def test_recovered_close_reason_remains_auditable_in_visit_analytics(
+    analytics_stack,
+):
+    with closing(analytics_stack.visits._connect()) as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE visits SET close_reason='omada_client_offline_recovered' "
+            "WHERE visit_id=?",
+            (analytics_stack.visit_id,),
+        )
+        connection.commit()
+
+    result = _service(analytics_stack).get_closure_distribution(
+        SITE_A, FROM, TO
+    )
+
+    assert result.value.close_reasons == {
+        "omada_client_offline_recovered": 1
+    }
+
+
 def test_coverage_summary_does_not_issue_per_visit_queries(
     analytics_stack, monkeypatch,
 ):

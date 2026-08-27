@@ -241,6 +241,51 @@ def test_confident_semantic_replay_suppression_does_not_degrade_quality(
     assert result.traffic.coverage.quality_reasons == ()
 
 
+def test_recovery_reclassification_does_not_double_count_traffic(
+    analytics_stack,
+):
+    timestamp = "2026-01-01T10:15:00.000Z"
+    _insert_source_event(
+        analytics_stack.visits,
+        event_id="recovered-event",
+        processing_result="unmatched",
+        controller_event_at=timestamp,
+        received_at=timestamp,
+        traffic=4800,
+        connected=60,
+    )
+    service = HomeActivityReadService(analytics_stack.gateway)
+    kwargs = dict(
+        site_id=SITE_A, guest_ssids=("ssid-a",), range_payload={},
+        from_utc="2026-01-01T10:00:00.000Z",
+        to_utc="2026-01-01T11:00:00.000Z",
+        evaluated_at_utc="2026-01-01T11:00:00.000Z", timezone_name="UTC",
+        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
+        traffic_fresh_max_age_seconds=90,
+        traffic_stale_max_age_seconds=180,
+    )
+    before = service.get_activity(
+        deadline=QueryDeadline.after(5), **kwargs
+    )
+    with closing(analytics_stack.visits._connect()) as connection:  # noqa: SLF001
+        connection.execute(
+            """
+            UPDATE visit_source_events
+            SET processing_result='closed', reason=NULL
+            WHERE event_id='recovered-event'
+            """
+        )
+        connection.commit()
+    after = service.get_activity(
+        deadline=QueryDeadline.after(5), **kwargs
+    )
+
+    assert before.traffic.bytes == after.traffic.bytes == 4800
+    assert before.traffic.included_fingerprint_count == 1
+    assert after.traffic.included_fingerprint_count == 1
+
+
 def test_activity_read_is_site_and_ssid_scoped_and_read_only(analytics_stack):
     _seed_activity_events(analytics_stack.visits)
     before = _fingerprint(analytics_stack.visits)

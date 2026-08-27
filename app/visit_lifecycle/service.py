@@ -118,7 +118,23 @@ class VisitLifecycleService:
         if outcome.duplicate:
             self.telemetry.emit("visit.offline_duplicate", **fields)
         elif outcome.processing_result == "closed":
-            self.telemetry.emit("visit.closed", **fields)
+            self.telemetry.emit(
+                "visit.closed",
+                close_time_source=outcome.close_time_source,
+                **fields,
+            )
+            if outcome.duration_drift_exceeded:
+                self.telemetry.emit(
+                    "visit.offline_duration_drift",
+                    "warning",
+                    duration_drift_seconds=outcome.duration_drift_seconds,
+                    duration_drift_threshold_seconds=(
+                        outcome.duration_drift_threshold_seconds
+                    ),
+                    duration_drift_exceeded=True,
+                    close_time_source=outcome.close_time_source,
+                    **fields,
+                )
         elif outcome.processing_result == "unmatched":
             self.telemetry.emit(
                 "visit.offline_unmatched",
