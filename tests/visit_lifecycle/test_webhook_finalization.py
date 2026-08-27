@@ -144,7 +144,6 @@ def test_same_mac_other_site_is_untouched_and_pending_is_site_scoped(
         ({"ssid": "Other_Network"}, "ssid_changed"),
         ({"controller_timestamp": "2026-08-13T09:50:00.000Z"},
          "stale_or_ambiguous"),
-        ({"reported_connected_seconds": 1800}, "stale_or_ambiguous"),
     ],
 )
 def test_safeguard_rejections_are_durable_unmatched(
@@ -252,7 +251,7 @@ def test_pending_recheck_uses_only_durable_context_after_journal_disappears(
     ("reported_seconds", "expected_result", "expected_reason"),
     [
         (300, "closed", None),
-        (1800, "unmatched", "stale_or_ambiguous"),
+        (1800, "closed", None),
     ],
 )
 def test_pending_restart_rechecks_durable_duration_and_can_close(
@@ -298,6 +297,179 @@ def test_pending_restart_rechecks_durable_duration_and_can_close(
     assert visit.status == ("closed" if expected_result == "closed" else "open")
     if expected_result == "closed":
         assert visit.reported_connected_seconds == reported_seconds
+
+
+@pytest.mark.parametrize("reported_seconds", [601, 627, 644, 670, 1800])
+def test_reported_duration_drift_is_diagnostic_and_never_blocks_close(
+    visit_config,
+    visit_repository,
+    reported_seconds,
+):
+    telemetry = CapturingTelemetry()
+    from app.visit_lifecycle.service import VisitLifecycleService
+
+    service = VisitLifecycleService(visit_repository, telemetry)
+    opened = service.submit_authorized(make_request())
+    _write(
+        visit_config.webhook_source,
+        _record(reported_connected_seconds=reported_seconds),
+    )
+    _reader(visit_config, visit_repository, service).scan_once()
+
+    visit = visit_repository.get_visit("site-a", opened.visit_id)
+    assert visit.status == "closed"
+    assert visit.reported_connected_seconds == reported_seconds
+    warnings = [
+        fields for event, level, fields in telemetry.events
+        if event == "visit.offline_duration_drift" and level == "warning"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["duration_drift_exceeded"] is True
+    assert warnings[0]["close_time_source"] == "controller"
+
+
+@pytest.mark.parametrize(
+    ("controller_timestamp", "authorization_count", "expected"),
+    [
+        ("2026-08-13T09:59:30.000Z", 1, "closed"),
+        ("2026-08-13T10:03:30.000Z", 2, "open"),
+        (None, 1, "closed"),
+        (None, 2, "open"),
+    ],
+)
+def test_received_fallback_is_ambiguity_aware_after_latest_authorization(
+    visit_config,
+    visit_repository,
+    visit_service,
+    controller_timestamp,
+    authorization_count,
+    expected,
+):
+    opened = visit_service.submit_authorized(make_request())
+    if authorization_count == 2:
+        visit_service.submit_authorized(make_request(
+            auth_session_id="22222222-2222-4222-8222-222222222222",
+            authorized_at=datetime(2026, 8, 13, 10, 4, tzinfo=timezone.utc),
+            auth_run_number=2,
+        ))
+    _write(
+        visit_config.webhook_source,
+        _record(
+            controller_timestamp=controller_timestamp,
+            received_at="2026-08-13T10:05:01.000Z",
+        ),
+    )
+    _reader(visit_config, visit_repository, visit_service).scan_once()
+
+    visit = visit_repository.get_visit("site-a", opened.visit_id)
+    assert visit.status == expected
+    if expected == "closed":
+        assert visit.close_time_source == "received_clock_fallback"
+    else:
+        assert _source(visit_repository, "webhook:0")["reason"] == (
+            "stale_or_ambiguous"
+        )
+
+
+def test_latest_authorization_is_the_temporal_match_floor(
+    visit_config,
+    visit_repository,
+    visit_service,
+):
+    opened = visit_service.submit_authorized(make_request())
+    visit_service.submit_authorized(make_request(
+        auth_session_id="22222222-2222-4222-8222-222222222222",
+        authorized_at=datetime(2026, 8, 13, 10, 4, tzinfo=timezone.utc),
+        auth_run_number=2,
+    ))
+    _write(
+        visit_config.webhook_source,
+        _record(
+            controller_timestamp="2026-08-13T10:03:59.000Z",
+            reported_connected_seconds=999999,
+        ),
+    )
+    _reader(visit_config, visit_repository, visit_service).scan_once()
+
+    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
+    assert _source(visit_repository, "webhook:0")["reason"] == (
+        "stale_or_ambiguous"
+    )
+
+
+def test_controller_at_latest_authorization_closes_reused_visit(
+    visit_config,
+    visit_repository,
+    visit_service,
+):
+    opened = visit_service.submit_authorized(make_request())
+    visit_service.submit_authorized(make_request(
+        auth_session_id="22222222-2222-4222-8222-222222222222",
+        authorized_at=datetime(2026, 8, 13, 10, 5, tzinfo=timezone.utc),
+        auth_run_number=2,
+    ))
+    _write(visit_config.webhook_source, _record())
+    _reader(visit_config, visit_repository, visit_service).scan_once()
+
+    visit = visit_repository.get_visit("site-a", opened.visit_id)
+    assert visit.status == "closed"
+    assert visit.closed_at == "2026-08-13T10:05:00.000Z"
+
+
+@pytest.mark.parametrize(
+    "controller_timestamp",
+    ["2026-08-13T10:05:00.000Z", None],
+)
+def test_zero_authorization_visit_fails_safe_without_received_fallback(
+    visit_config,
+    visit_repository,
+    controller_timestamp,
+):
+    from app.visit_lifecycle.service import VisitLifecycleService
+
+    telemetry = CapturingTelemetry()
+    service = VisitLifecycleService(visit_repository, telemetry)
+    opened = service.submit_authorized(make_request())
+    with visit_repository._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "DELETE FROM visit_authorizations WHERE visit_id=?",
+            (opened.visit_id,),
+        )
+        connection.commit()
+    _write(
+        visit_config.webhook_source,
+        _record(controller_timestamp=controller_timestamp),
+    )
+    _reader(visit_config, visit_repository, service).scan_once()
+
+    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
+    source = _source(visit_repository, "webhook:0")
+    assert source["processing_result"] == "unmatched"
+    assert source["reason"] == "authorization_evidence_missing"
+    unmatched = [
+        fields for event, level, fields in telemetry.events
+        if event == "visit.offline_unmatched" and level == "warning"
+    ]
+    assert len(unmatched) == 1
+    assert unmatched[0]["reason"] == "authorization_evidence_missing"
+
+
+def test_other_mac_offline_does_not_touch_open_visit(
+    visit_config,
+    visit_repository,
+    visit_service,
+):
+    opened = visit_service.submit_authorized(make_request())
+    _write(
+        visit_config.webhook_source,
+        _record(client_mac="02:11:22:33:44:99"),
+    )
+    _reader(visit_config, visit_repository, visit_service).scan_once()
+
+    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
+    assert _source(visit_repository, "webhook:0")["processing_result"] == (
+        "pending_match"
+    )
 
 
 def test_pending_deadline_is_absolute_and_never_reconstructs_visit(

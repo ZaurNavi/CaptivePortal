@@ -108,6 +108,16 @@ class _WriteLease:
     lock_wait_ms: int
 
 
+@dataclass(frozen=True)
+class _OfflineMatch:
+    closed_at: str | None
+    duration_seconds: int | None
+    close_time_source: str | None
+    reason: str | None
+    duration_drift_seconds: float | None = None
+    duration_drift_exceeded: bool = False
+
+
 class PriorityWriteCoordinator:
     """Single foreground-priority, FIFO-background writer gate."""
 
@@ -1271,8 +1281,8 @@ class VisitRepository:
             max_clock_skew_seconds=max_clock_skew_seconds,
             max_duration_drift_seconds=max_duration_drift_seconds,
         )
-        if match[0] is None:
-            reason = match[3]
+        if match.closed_at is None:
+            reason = match.reason
             if insert_event:
                 assert progress is not None
                 self._insert_source_event(
@@ -1301,7 +1311,9 @@ class VisitRepository:
                 reason=reason,
             )
 
-        closed_at, duration_seconds, close_time_source, _ = match
+        closed_at = match.closed_at
+        duration_seconds = match.duration_seconds
+        close_time_source = match.close_time_source
         visit_id = str(visit["visit_id"])
         if insert_event:
             assert progress is not None
@@ -1360,6 +1372,10 @@ class VisitRepository:
             processing_result="closed",
             event_id=evidence.event_id,
             visit_id=visit_id,
+            duration_drift_seconds=match.duration_drift_seconds,
+            duration_drift_threshold_seconds=max_duration_drift_seconds,
+            duration_drift_exceeded=match.duration_drift_exceeded,
+            close_time_source=close_time_source,
         )
 
     def _match_offline(
@@ -1370,46 +1386,69 @@ class VisitRepository:
         visit: sqlite3.Row,
         max_clock_skew_seconds: float,
         max_duration_drift_seconds: float,
-    ) -> tuple[str | None, int | None, str | None, str | None]:
+    ) -> _OfflineMatch:
         started = _parse_utc(str(visit["started_at"]))
         controller = _parse_optional_utc(evidence.controller_event_at)
         received = _parse_optional_utc(evidence.received_at)
+        authorization = connection.execute(
+            """
+            SELECT COUNT(*) AS authorization_count,
+                   MAX(authorized_at) AS latest_authorized_at
+            FROM visit_authorizations
+            WHERE visit_id=?
+            """,
+            (visit["visit_id"],),
+        ).fetchone()
+        authorization_count = int(authorization["authorization_count"])
+        latest_value = authorization["latest_authorized_at"]
+        if authorization_count < 1 or latest_value is None:
+            return _OfflineMatch(
+                None, None, None, "authorization_evidence_missing"
+            )
+        latest_authorized = _parse_utc(str(latest_value))
+        match_floor = max(started, latest_authorized)
         close_at: datetime | None = None
         source: str | None = None
-        if controller is not None and controller >= started:
+        if controller is not None and controller >= match_floor:
             close_at = controller
             source = "controller"
         elif controller is not None:
-            earliest = started - timedelta(
+            earliest = match_floor - timedelta(
                 seconds=max_clock_skew_seconds
             )
             if (
-                controller >= earliest
+                authorization_count == 1
+                and controller >= earliest
                 and received is not None
-                and received >= started
+                and received >= match_floor
             ):
                 close_at = received
                 source = "received_clock_fallback"
             else:
-                return None, None, None, "stale_or_ambiguous"
-        elif received is not None and received >= started:
+                return _OfflineMatch(
+                    None, None, None, "stale_or_ambiguous"
+                )
+        elif (
+            authorization_count == 1
+            and received is not None
+            and received >= match_floor
+        ):
             close_at = received
             source = "received_clock_fallback"
         else:
-            return None, None, None, "stale_or_ambiguous"
+            return _OfflineMatch(None, None, None, "stale_or_ambiguous")
 
+        drift_seconds: float | None = None
+        drift_exceeded = False
         if (
-            source == "controller"
-            and evidence.reported_connected_seconds is not None
+            evidence.reported_connected_seconds is not None
             and controller is not None
         ):
             reported_start = controller - timedelta(
                 seconds=evidence.reported_connected_seconds
             )
-            if abs((reported_start - started).total_seconds()) > (
-                max_duration_drift_seconds
-            ):
-                return None, None, None, "stale_or_ambiguous"
+            drift_seconds = abs((reported_start - started).total_seconds())
+            drift_exceeded = drift_seconds > max_duration_drift_seconds
 
         known_ssids = {
             str(row[0])
@@ -1428,9 +1467,16 @@ class VisitRepository:
             and known_ssids
             and evidence.ssid not in known_ssids
         ):
-            return None, None, None, "ssid_changed"
+            return _OfflineMatch(None, None, None, "ssid_changed")
         duration = int((close_at - started).total_seconds())
-        return _format_utc(close_at), duration, source, None
+        return _OfflineMatch(
+            _format_utc(close_at),
+            duration,
+            source,
+            None,
+            duration_drift_seconds=drift_seconds,
+            duration_drift_exceeded=drift_exceeded,
+        )
 
     @staticmethod
     def _open_visit_row(
