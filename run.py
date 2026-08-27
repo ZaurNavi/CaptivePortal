@@ -32,6 +32,7 @@ from app.analytics import create_analytics_runtime
 from app.analytics.api import API_PREFIX
 from app.admin_web import create_admin_web_runtime
 from app.web.web import create_app, auth_executor, auth_manager
+from app.auth.health import authorization_health_tracker_from_settings
 
 
 _shutdown_lock = threading.Lock()
@@ -273,6 +274,12 @@ def _configure_admin_web(app, settings, registry_read_service) -> None:
                 if _current_state_runtime is not None
                 else None
             ),
+            authorization_health_tracker=app.extensions.get(
+                "authorization_health_tracker"
+            ),
+            current_state_runtime=_current_state_runtime,
+            observation_runtime=_observation_foundation,
+            visit_runtime=_visit_lifecycle,
         )
         app.extensions["admin_web_runtime"] = _admin_web_runtime
         if _admin_web_runtime.blueprint is not None:
@@ -331,6 +338,12 @@ def main() -> None:
         "controller": controller,
         "visitor_snapshot_collector": _visitor_snapshot_collector,
     }
+    if "authorization_health_tracker" in inspect.signature(
+        create_app
+    ).parameters:
+        app_kwargs["authorization_health_tracker"] = (
+            authorization_health_tracker_from_settings(settings)
+        )
     if "visit_start_submitter" in inspect.signature(
         create_app
     ).parameters:

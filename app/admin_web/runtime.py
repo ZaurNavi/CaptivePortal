@@ -15,6 +15,12 @@ from .home_activity_config import (
     HomeActivityConfigError,
     home_activity_config_from_settings,
 )
+from .home_health import HomeHealthReadService
+from .home_health_config import (
+    HomeHealthConfig,
+    HomeHealthConfigError,
+    home_health_config_from_settings,
+)
 
 
 @dataclass(slots=True)
@@ -29,6 +35,9 @@ class AdminWebRuntime:
     query_service: Any | None = None
     home_activity_config: HomeActivityConfig | None = None
     home_activity_state: str = "disabled"
+    home_health_config: HomeHealthConfig | None = None
+    home_health_state: str = "disabled"
+    home_health_service: HomeHealthReadService | None = None
     blueprint: Any | None = None
 
     def clear(self) -> None:
@@ -49,6 +58,10 @@ def create_admin_web_runtime(
     logger: logging.Logger,
     *,
     current_state_read_service: Any | None = None,
+    authorization_health_tracker: Any | None = None,
+    current_state_runtime: Any | None = None,
+    observation_runtime: Any | None = None,
+    visit_runtime: Any | None = None,
 ) -> AdminWebRuntime:
     """Create Admin security state without mutating or querying data sources."""
     try:
@@ -108,6 +121,49 @@ def create_admin_web_runtime(
             },
             exc_info=True,
         )
+    try:
+        health_config = home_health_config_from_settings(
+            settings, admin_config=config
+        )
+        health_state = "active" if health_config.enabled else "disabled"
+    except HomeHealthConfigError:
+        health_config = None
+        health_state = "unavailable"
+        logger.error(
+            "admin.home_health_configuration_failed",
+            extra={
+                "event": "admin.home_health_configuration_failed",
+                "failure_category": "configuration_error",
+            },
+        )
+    health_service = None
+    if health_config is not None and health_config.enabled:
+        try:
+            health_service = HomeHealthReadService(
+                allowed_site_ids=config.allowed_site_ids,
+                auth_tracker=authorization_health_tracker,
+                current_state_runtime=current_state_runtime,
+                observation_runtime=observation_runtime,
+                visit_runtime=visit_runtime,
+                analytics_runtime=analytics_runtime,
+                auth_evidence_max_age_seconds=(
+                    health_config.auth_evidence_max_age_seconds
+                ),
+                max_concurrent_queries=config.max_concurrent_queries,
+                max_query_duration_seconds=config.max_query_duration_seconds,
+                home_traffic_enabled=config.home_traffic_enabled,
+                home_activity_enabled=activity_requested,
+                logger=logger,
+            )
+        except Exception:
+            health_state = "unavailable"
+            logger.error(
+                "admin.home_health_composition_failed",
+                extra={
+                    "event": "admin.home_health_composition_failed",
+                    "failure_category": "composition_error",
+                },
+            )
     query_service = None
     if getattr(analytics_runtime, "state", None) == "active" and source_ready:
         query_service = _query_service(
@@ -137,6 +193,9 @@ def create_admin_web_runtime(
         query_service=query_service,
         home_activity_config=activity_config,
         home_activity_state=activity_state,
+        home_health_config=health_config,
+        home_health_state=health_state,
+        home_health_service=health_service,
     )
     from .routes import create_admin_web_blueprint
 

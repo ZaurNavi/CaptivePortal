@@ -721,6 +721,40 @@ class ObservationRepository:
             raise _storage_error(exc) from exc
         return None if row is None else _cycle_from_row(row)
 
+    def get_home_health_cycles(
+        self, site_id: str, kind: str
+    ) -> tuple[ObservationCycle | None, ObservationCycle | None]:
+        """Return latest completed and latest successful-complete cycle."""
+        site = require_text(site_id, "site_id")
+        if kind not in CYCLE_KINDS:
+            raise ObservationValidationError("Unsupported observation cycle kind")
+        try:
+            with self.read_connection() as connection:
+                connection.execute("BEGIN")
+                latest = connection.execute(
+                    """
+                    SELECT * FROM observation_cycles
+                    WHERE site_id=? AND kind=? AND state='completed'
+                    ORDER BY started_at DESC LIMIT 1
+                    """,
+                    (site, kind),
+                ).fetchone()
+                success = connection.execute(
+                    """
+                    SELECT * FROM observation_cycles
+                    WHERE site_id=? AND kind=? AND state='completed'
+                      AND result='success' AND complete=1
+                    ORDER BY started_at DESC LIMIT 1
+                    """,
+                    (site, kind),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise _storage_error(exc) from exc
+        return (
+            None if latest is None else _cycle_from_row(latest),
+            None if success is None else _cycle_from_row(success),
+        )
+
     def insert_client_batch(
         self,
         rows: Iterable[Mapping[str, Any]],

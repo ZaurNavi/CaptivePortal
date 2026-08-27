@@ -123,6 +123,8 @@
     loading: false,
     operation: null,
     visitQuery: null,
+    homeTimer: null,
+    stopped: false,
   };
 
   function node(tag, className, text) {
@@ -236,6 +238,43 @@
     );
     const insufficient = !visitValue || !deviceValue;
     setState(insufficient ? "warning" : "ready", insufficient ? "Insufficient data" : "Up to date", insufficient ? "One or more summaries cannot produce a numeric value for this window." : "Showing the latest 24-hour Site summary.", true);
+  }
+
+  function legacyHealthCoordinatorEnabled() {
+    return context.page === "home" && root.dataset.homeLiveEnabled !== "true"
+      && root.dataset.homeHealthEnabled === "true";
+  }
+
+  function healthCoordinator() {
+    return window.CaptivPortalHomeHealthCoordinator || null;
+  }
+
+  async function loadLegacyHomeWithHealth(manual) {
+    await Promise.resolve();
+    const health = healthCoordinator();
+    const outcomes = await Promise.allSettled([
+      loadHome(),
+      health ? health.run(manual) : Promise.resolve(),
+    ]);
+    if (outcomes[0].status === "rejected") throw outcomes[0].reason;
+  }
+
+  function scheduleLegacyHome() {
+    if (!legacyHealthCoordinatorEnabled() || context.stopped || document.hidden) return;
+    if (context.homeTimer !== null) window.clearTimeout(context.homeTimer);
+    const health = healthCoordinator();
+    const due = health ? health.nextEligibleAt() : performance.now() + 60000;
+    if (!Number.isFinite(due)) return;
+    context.homeTimer = window.setTimeout(() => {
+      context.homeTimer = null;
+      run(() => loadLegacyHomeWithHealth(false)).finally(scheduleLegacyHome);
+    }, Math.max(1000, due - performance.now()));
+  }
+
+  function runLegacyHome(manual) {
+    if (context.homeTimer !== null) window.clearTimeout(context.homeTimer);
+    context.homeTimer = null;
+    return run(() => loadLegacyHomeWithHealth(manual)).finally(scheduleLegacyHome);
   }
 
   function deviceCard(item) {
@@ -373,7 +412,26 @@
 
   function configure() {
     if (context.page === "home" && root.dataset.homeLiveEnabled === "true") return;
-    if (context.page === "home") context.operation = () => loadHome();
+    if (context.page === "home") {
+      context.operation = () => loadHome();
+      if (legacyHealthCoordinatorEnabled()) {
+        document.addEventListener("visibilitychange", () => {
+          const health = healthCoordinator();
+          if (document.hidden) {
+            if (context.homeTimer !== null) window.clearTimeout(context.homeTimer);
+            context.homeTimer = null;
+            if (health) health.abort("hidden");
+          } else runLegacyHome(false);
+        });
+        window.addEventListener("pagehide", () => {
+          context.stopped = true;
+          if (context.homeTimer !== null) window.clearTimeout(context.homeTimer);
+          context.homeTimer = null;
+          const health = healthCoordinator();
+          if (health) health.abort("pagehide");
+        });
+      }
+    }
     if (context.page === "devices") {
       context.operation = () => loadDevices(false);
       const form = document.getElementById("device-search-form");
@@ -428,6 +486,10 @@
       form.addEventListener("submit", (event) => { event.preventDefault(); run(() => loadObservations(false)); });
     }
     refreshButton.addEventListener("click", () => {
+      if (legacyHealthCoordinatorEnabled()) {
+        runLegacyHome(true);
+        return;
+      }
       if (context.operation) run(context.operation);
       else if (context.page === "observations") run(() => loadObservations(false));
     });
@@ -436,10 +498,219 @@
       if (context.page === "visits") run(() => loadVisits(true));
       if (context.page === "observations") run(() => loadObservations(true));
     });
-    if (context.operation) run(context.operation);
+    if (legacyHealthCoordinatorEnabled()) runLegacyHome(false);
+    else if (context.operation) run(context.operation);
   }
 
   configure();
+}());
+
+(function () {
+  "use strict";
+
+  const API_VERSION = "admin.read.v1";
+  const IDS = ["guest_access", "live_network_state", "network_history", "visit_tracking", "analytics_home_data"];
+  const LABELS = ["Guest Access", "Live Network State", "Network History Collection", "Visit Tracking", "Analytics & Home Data"];
+  const STATUSES = new Set(["operational", "degraded", "unavailable", "unknown"]);
+  const AGGREGATE_MESSAGES = Object.freeze({
+    operational: "All CaptivPortal functions are operating normally.",
+    degraded: "Some CaptivPortal functions are degraded.",
+    unavailable: "Guest access is currently unavailable.",
+    unknown: "There is not enough current evidence to confirm system status.",
+  });
+  const REASON_MESSAGES = Object.freeze({
+    latest_authorization_verified: "Guest authorization is operating normally.",
+    no_authorization_evidence: "There is not enough current authorization evidence to confirm status.",
+    authorization_evidence_old: "Authorization evidence is too old to confirm current status.",
+    invalid_authorization_evidence_time: "Authorization evidence time cannot be trusted.",
+    authorization_transient_failure: "Guest authorization recently encountered a temporary system failure.",
+    authorization_unavailable: "Guest authorization is currently unavailable.",
+    current_state_operational: "Current client and access-point state is available.",
+    current_state_stale: "Current network state is delayed; last complete data remains available.",
+    current_state_unavailable: "Current network state is unavailable.",
+    latest_collection_incomplete: "The latest collection did not complete; last complete data remains available.",
+    observation_operational: "Network history collection is operating normally.",
+    stale_evidence: "Data collection is delayed; last known data remains available.",
+    observation_unavailable: "Network history collection is unavailable.",
+    initializing: "There is not enough current evidence to confirm status.",
+    visit_operational: "Visit tracking is operating normally.",
+    visit_runtime_degraded: "Visit tracking is operating with reduced availability.",
+    visit_runtime_unavailable: "Visit tracking is currently unavailable.",
+    analytics_operational: "Analytics and Home data sources are available.",
+    analytics_source_unavailable: "Analytics source data is currently unavailable.",
+    current_traffic_service_unavailable: "Current Traffic data is currently unavailable.",
+    home_activity_service_unavailable: "Home Activity data is currently unavailable.",
+    component_disabled: "This required function is disabled.",
+    health_read_failed: "There is not enough current evidence to confirm status.",
+  });
+  const HEALTH_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const BACKOFF = [60, 120, 300];
+
+  function object(value) { return value && typeof value === "object" && !Array.isArray(value); }
+  function utc(value) {
+    if (typeof value !== "string" || !HEALTH_TIMESTAMP.test(value)) return false;
+    const parsed = new Date(value);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+  }
+  function optionalUtc(value) { return value === null || utc(value); }
+  function aggregateStatus(components) {
+    if (components[0].status === "unavailable") return "unavailable";
+    if (components.some((item) => item.status === "degraded" || item.status === "unavailable")) return "degraded";
+    if (components.some((item) => item.status === "unknown")) return "unknown";
+    return "operational";
+  }
+  function validateHealth(payload, siteId) {
+    if (!object(payload) || payload.api_version !== API_VERSION || payload.site_id !== siteId
+      || !object(payload.result)) return null;
+    const result = payload.result;
+    if (result.health_version !== 1 || result.site_id !== siteId || !utc(result.evaluated_at)
+      || !STATUSES.has(result.status) || result.message !== AGGREGATE_MESSAGES[result.status]
+      || !Array.isArray(result.components) || result.components.length !== IDS.length) return null;
+    for (let index = 0; index < IDS.length; index += 1) {
+      const item = result.components[index];
+      const criticality = index === 0 ? "critical" : "feature";
+      const scopeType = index < 3 ? "site" : "global";
+      if (!object(item) || item.id !== IDS[index] || item.label !== LABELS[index]
+        || !STATUSES.has(item.status) || !(item.reason_code in REASON_MESSAGES)
+        || item.message !== REASON_MESSAGES[item.reason_code]
+        || item.criticality !== criticality
+        || !object(item.scope) || item.scope.type !== scopeType
+        || (item.scope.type === "site" && item.scope.site_id !== siteId)
+        || (item.scope.type === "global" && item.scope.site_id !== null)
+        || !optionalUtc(item.evidence_at) || !optionalUtc(item.last_success_at)) return null;
+    }
+    if (result.status !== aggregateStatus(result.components)) return null;
+    return result;
+  }
+  function claim(source, controller, generation) {
+    if (source.generation !== generation || source.controller !== null) return false;
+    source.controller = controller; return true;
+  }
+  function release(source, controller) {
+    if (source.controller === controller) source.controller = null;
+  }
+  function abort(source, reason) {
+    if (!source.controller) return false;
+    const controller = source.controller;
+    controller.abort(reason); release(source, controller); return true;
+  }
+  function classify(status, code, retryAfter) {
+    if (status === 401) return {global: true, kind: "session", retryAfter: 0};
+    if (status === 403) return {global: true, kind: "forbidden", retryAfter: 0};
+    if (status === 404) return {global: false, kind: "disabled", retryAfter: 0};
+    return {global: false, kind: code === "query_deadline" ? "timeout" : "unavailable", retryAfter: retryAfter || 0};
+  }
+  function legacyCoordinatorEnabled(homeLive, homeHealth) {
+    return homeLive !== "true" && homeHealth === "true";
+  }
+
+  if (typeof window !== "undefined") {
+    window.CaptivPortalHomeHealthTest = Object.freeze({
+      abort, claim, classify, legacyCoordinatorEnabled, release,
+      validateHealth,
+    });
+  }
+  if (typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  if (!root || root.dataset.page !== "home" || root.dataset.homeHealthEnabled !== "true") return;
+
+  const siteId = root.dataset.siteId;
+  const url = root.dataset.apiBase + "/home/health";
+  const interval = Number(root.dataset.homeHealthRefreshSeconds);
+  const timeoutMs = Number(root.dataset.homeHealthRequestTimeoutSeconds) * 1000;
+  const source = {generation: 0, controller: null, failureCount: 0, nextEligibleAt: 0, disabled: false};
+  let stopped = false;
+
+  function node(tag, className, text) {
+    const value = document.createElement(tag);
+    if (className) value.className = className;
+    if (text !== undefined) value.textContent = text;
+    return value;
+  }
+  function render(value) {
+    const panel = document.getElementById("home-health-state");
+    panel.dataset.state = value.status;
+    document.getElementById("home-health-status").textContent = value.status[0].toUpperCase() + value.status.slice(1);
+    document.getElementById("home-health-message").textContent = value.message;
+    document.getElementById("home-health-updated").textContent = `Last updated ${value.evaluated_at}`;
+    const target = document.getElementById("home-health-components");
+    target.replaceChildren();
+    value.components.forEach((item) => {
+      const row = node("article", "health-component");
+      row.dataset.state = item.status;
+      const heading = node("div", "data-row-header");
+      heading.append(node("strong", null, item.label), node("span", "badge", item.status));
+      const evidence = item.evidence_at ? `Evidence ${item.evidence_at}` : "Evidence unavailable";
+      const success = item.last_success_at ? `Last success ${item.last_success_at}` : "Last success unavailable";
+      row.append(heading, node("p", "live-detail", item.message), node("p", "live-detail", `${evidence} · ${success}`));
+      target.append(row);
+    });
+  }
+  function updateUnavailable() {
+    const panel = document.getElementById("home-health-state");
+    panel.dataset.state = "unknown";
+    document.getElementById("home-health-status").textContent = "Update unavailable";
+    document.getElementById("home-health-message").textContent = "The latest Health update could not be completed; previously rendered evidence remains timestamped.";
+  }
+  async function request(generation) {
+    const controller = new AbortController();
+    if (!claim(source, controller, generation)) throw {neutral: true};
+    const timer = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+    try {
+      const response = await fetch(url, {method: "GET", credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}, signal: controller.signal});
+      let payload = null; try { payload = await response.json(); } catch (_error) { payload = null; }
+      if (!response.ok) {
+        const code = payload && payload.error && payload.error.code;
+        const retry = Number(response.headers.get("Retry-After"));
+        throw {failure: classify(response.status, code, Number.isFinite(retry) && retry > 0 ? retry : 0)};
+      }
+      if (source.generation !== generation || stopped) throw {neutral: true};
+      return payload;
+    } catch (error) {
+      if (controller.signal.aborted && ["hidden", "pagehide", "superseded"].includes(controller.signal.reason)) throw {neutral: true};
+      if (error && (error.failure || error.neutral)) throw error;
+      throw {failure: {global: false, kind: "unavailable", retryAfter: 0}};
+    } finally {
+      window.clearTimeout(timer); release(source, controller);
+    }
+  }
+  async function run(manual) {
+    if (stopped || document.hidden || source.disabled) return;
+    const now = performance.now();
+    if (!manual && now < source.nextEligibleAt) return;
+    if (manual && source.failureCount > 0 && now < source.nextEligibleAt) return;
+    source.generation += 1; const generation = source.generation;
+    abort(source, "superseded");
+    try {
+      const payload = await request(generation);
+      const result = validateHealth(payload, siteId);
+      if (!result) throw {failure: {global: false, kind: "unavailable", retryAfter: 0}};
+      render(result); source.failureCount = 0; source.nextEligibleAt = performance.now() + interval * 1000;
+    } catch (error) {
+      if (error && error.neutral) return;
+      const failure = error && error.failure ? error.failure : {global: false, kind: "unavailable", retryAfter: 0};
+      if (failure.global) {
+        const coordinator = window.CaptivPortalHomeCoordinator;
+        if (coordinator) coordinator.stop(failure.kind);
+        else {
+          stopped = true;
+          source.disabled = true;
+          source.nextEligibleAt = Infinity;
+        }
+      } else if (failure.kind === "disabled") {
+        source.disabled = true; source.nextEligibleAt = Infinity;
+      } else {
+        source.failureCount += 1;
+        source.nextEligibleAt = performance.now() + Math.max(interval, BACKOFF[Math.min(source.failureCount - 1, 2)], failure.retryAfter || 0) * 1000;
+        updateUnavailable();
+      }
+    }
+  }
+  window.CaptivPortalHomeHealthCoordinator = Object.freeze({
+    abort: (reason) => abort(source, reason),
+    nextEligibleAt: () => source.nextEligibleAt,
+    run,
+  });
 }());
 
 (function () {
@@ -1074,8 +1345,8 @@
       ? {primary: "—", detail: "Other — · Unknown —", state: "Unavailable"}
       : {primary: "— / —", detail: "Other — · Unknown —", count: "Unavailable", state: "Unavailable"};
   }
-  function standaloneCoordinatorEnabled(homeLive, homeTraffic, homeActivity) {
-    return homeLive === "true" && homeTraffic !== "true" && homeActivity !== "true";
+  function standaloneCoordinatorEnabled(homeLive, homeTraffic, homeActivity, homeHealth) {
+    return homeLive === "true" && homeTraffic !== "true" && homeActivity !== "true" && homeHealth !== "true";
   }
 
   if (typeof window !== "undefined") {
@@ -1094,6 +1365,7 @@
     root.dataset.homeLiveEnabled,
     root.dataset.homeTrafficEnabled,
     root.dataset.homeActivityEnabled,
+    root.dataset.homeHealthEnabled,
   )) return;
 
   const siteId = root.dataset.siteId;
@@ -1116,6 +1388,8 @@
   };
   let stopped = false;
   let ageTimer = null;
+
+  function healthController() { return window.CaptivPortalHomeHealthCoordinator || null; }
 
   function node(tag, className, text) {
     const value = document.createElement(tag);
@@ -1141,6 +1415,8 @@
       if (source.timer !== null) window.clearTimeout(source.timer);
       source.timer = null;
     });
+    const health = healthController();
+    if (health) health.abort(reason);
     if (reason === "pagehide" && ageTimer !== null) window.clearTimeout(ageTimer);
   }
   function stop(kind) {
@@ -1395,6 +1671,10 @@
       if (!(error && error.neutral)) cleanRefresh = handleFailure(kind, error && error.liveFailure ? error.liveFailure : {global: false, retryable: true, kind: "unexpected", retryAfter: 0});
     } finally {
       refreshButton.disabled = false;
+    }
+    if (kind === "client") {
+      const health = healthController();
+      if (health && !stopped && !document.hidden) await health.run(manual);
     }
     if (cleanRefresh && canStartCleanRefresh(source, generation, stopped, document.hidden)) {
       await Promise.resolve();
@@ -1733,8 +2013,8 @@
   function pageFailureEffect(failure) {
     return failure && failure.status === 403 ? "preserve_summary_forbidden" : "retry_group";
   }
-  function combinedCoordinatorEnabled(homeLive, homeTraffic, homeActivity) {
-    return homeLive === "true" && (homeTraffic === "true" || homeActivity === "true");
+  function combinedCoordinatorEnabled(homeLive, homeTraffic, homeActivity, homeHealth) {
+    return homeLive === "true" && (homeTraffic === "true" || homeActivity === "true" || homeHealth === "true");
   }
 
   if (typeof window !== "undefined") {
@@ -1755,6 +2035,7 @@
     root.dataset.homeLiveEnabled,
     root.dataset.homeTrafficEnabled,
     root.dataset.homeActivityEnabled,
+    root.dataset.homeHealthEnabled,
   )) return;
 
   const live = window.CaptivPortalHomeLiveTest;
@@ -1800,10 +2081,13 @@
   }
   function clearGlobal() { globalPanel.hidden = true; }
   function activityController() { return window.CaptivPortalHomeActivityCoordinator || null; }
+  function healthController() { return window.CaptivPortalHomeHealthCoordinator || null; }
   function abortAll(reason) {
     Object.values(sources).forEach((source) => live.abortOwnedController(source, reason));
     const activity = activityController();
     if (activity) activity.abort(reason);
+    const health = healthController();
+    if (health) health.abort(reason);
   }
   function stopAll(kind) {
     stopped = true;
@@ -2112,6 +2396,11 @@
       const due = activity.nextEligibleAt();
       if (Number.isFinite(due)) finite.push(due);
     }
+    const health = healthController();
+    if (health) {
+      const due = health.nextEligibleAt();
+      if (Number.isFinite(due)) finite.push(due);
+    }
     if (!finite.length) return Math.min(liveRefresh, trafficRefresh) * 1000;
     return Math.max(1000, Math.min(...finite) - performance.now());
   }
@@ -2145,6 +2434,10 @@
       const activity = activityController();
       if (activity && !coordinator.pending && !stopped && !document.hidden) {
         await runActivityPhase(activity, coordinator.pendingActivity, manual);
+      }
+      const health = healthController();
+      if (health && !coordinator.pending && !stopped && !document.hidden) {
+        await health.run(manual);
       }
       document.getElementById("home-live-announcement").textContent = "Home current sources updated.";
     } finally {

@@ -62,6 +62,10 @@
         data-home-activity-unavailable="{{ 'true' if home_activity_unavailable else 'false' }}"
         data-home-activity-refresh-seconds="{{ home_activity_refresh_seconds }}"
         data-home-activity-request-timeout-seconds="{{ home_activity_request_timeout_seconds }}"
+        data-home-health-enabled="{{ 'true' if home_health_enabled else 'false' }}"
+        data-home-health-unavailable="{{ 'true' if home_health_unavailable else 'false' }}"
+        data-home-health-refresh-seconds="{{ home_health_refresh_seconds }}"
+        data-home-health-request-timeout-seconds="{{ home_health_request_timeout_seconds }}"
         {% endif %}
       >
         {% block page_body %}

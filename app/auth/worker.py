@@ -22,6 +22,12 @@ from app.visitor_registry.snapshot_models import (
 )
 from app.visitor_registry.protocols import VisitorSnapshotSubmitter
 from .manager import AuthSessionManager
+from .health import (
+    DISABLED_AUTHORIZATION_HEALTH_TRACKER,
+    OUTCOME_BLOCKING_FAILURE,
+    OUTCOME_RETRYABLE_FAILURE,
+    OUTCOME_VERIFIED_SUCCESS,
+)
 from .session import AuthSession, AuthStatus
 
 
@@ -110,6 +116,7 @@ class AuthWorker:
             VisitorSnapshotSubmitter
         ] = None,
         visit_start_submitter: Optional[VisitStartSubmitter] = None,
+        authorization_health_tracker: Any = None,
     ):
         self._provider = provider
         self._session_manager = session_manager
@@ -122,6 +129,11 @@ class AuthWorker:
             visit_start_submitter
             if visit_start_submitter is not None
             else DISABLED_VISIT_START_SUBMITTER
+        )
+        self._authorization_health_tracker = (
+            authorization_health_tracker
+            if authorization_health_tracker is not None
+            else DISABLED_AUTHORIZATION_HEALTH_TRACKER
         )
 
     def process(
@@ -616,6 +628,11 @@ class AuthWorker:
                 retryable=False,
                 run_number=run.run_number,
                 run_token=run.run_token,
+            )
+            self._record_authorization_health(
+                session,
+                run,
+                OUTCOME_BLOCKING_FAILURE,
             )
             metrics.final_reason = "WORKER_EXCEPTION"
             logger.exception(
@@ -1376,6 +1393,9 @@ class AuthWorker:
             run,
             "failed",
         )
+        outcome = self._health_failure_outcome(final_reason)
+        if outcome is not None:
+            self._record_authorization_health(session, run, outcome)
 
     def _mark_authorized(
         self,
@@ -1411,8 +1431,58 @@ class AuthWorker:
             run,
             "authorized",
         )
+        self._record_authorization_health(
+            session,
+            run,
+            OUTCOME_VERIFIED_SUCCESS,
+        )
         self._submit_authorized_snapshot(session, run)
         self._submit_authorized_visit(session, run)
+
+    @staticmethod
+    def _health_failure_outcome(final_reason: str) -> str | None:
+        if final_reason in {
+            "OMADA_REQUEST_TIMEOUT",
+            "OMADA_CONNECTION_ERROR",
+            "OMADA_UNAVAILABLE",
+            "OMADA_HTTP_5XX",
+            "AUTHORIZATION_TIMEOUT",
+        }:
+            return OUTCOME_RETRYABLE_FAILURE
+        if final_reason in {
+            "AUTH_PROVIDER_EXCEPTION",
+            "WORKER_EXCEPTION",
+            "AUTH_TOKEN_ERROR",
+            "OMADA_HTTP_403",
+            "CONFIGURATION_ERROR",
+            "RESET_REQUEST_FAILED",
+        }:
+            return OUTCOME_BLOCKING_FAILURE
+        return None
+
+    def _record_authorization_health(
+        self,
+        session: AuthSession,
+        run: _WorkerRun,
+        outcome: str,
+    ) -> None:
+        """Health evidence is best-effort and can never affect authorization."""
+        try:
+            run_state = self._session_manager.run_snapshot(
+                session, run.run_number
+            )
+            finished_at = None if run_state is None else run_state.get(
+                "finished_at"
+            )
+            if not isinstance(finished_at, str):
+                return
+            self._authorization_health_tracker.record(
+                session.site_id,
+                outcome,
+                datetime.fromisoformat(finished_at),
+            )
+        except Exception:
+            logger.error("authorization_health_evidence_record_failed")
 
     def _submit_authorized_snapshot(
         self,

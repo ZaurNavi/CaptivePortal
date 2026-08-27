@@ -91,7 +91,7 @@ def test_process_runtime_composes_admin_after_sources(monkeypatch):
     seen = {}
 
     class App:
-        extensions = {}
+        extensions = {"authorization_health_tracker": "auth-health"}
 
         def register_blueprint(self, blueprint):
             seen["blueprint"] = blueprint
@@ -104,6 +104,12 @@ def test_process_runtime_composes_admin_after_sources(monkeypatch):
             visits=visits,
             observations=observations,
             current_state=kwargs.get("current_state_read_service"),
+            authorization_health_tracker=kwargs.get(
+                "authorization_health_tracker"
+            ),
+            current_state_runtime=kwargs.get("current_state_runtime"),
+            observation_runtime=kwargs.get("observation_runtime"),
+            visit_runtime=kwargs.get("visit_runtime"),
         )
         return selected
 
@@ -117,6 +123,8 @@ def test_process_runtime_composes_admin_after_sources(monkeypatch):
         "_current_state_runtime",
         SimpleNamespace(read_service=current_read),
     )
+    monkeypatch.setattr(process_runtime, "_observation_foundation", "observation-runtime")
+    monkeypatch.setattr(process_runtime, "_visit_lifecycle", "visit-runtime")
     monkeypatch.setattr(process_runtime, "create_admin_web_runtime", create)
     process_runtime._configure_admin_web(App(), {"web_admin_enabled": "false"}, "registry")
     assert seen["analytics"] is analytics
@@ -124,6 +132,10 @@ def test_process_runtime_composes_admin_after_sources(monkeypatch):
     assert seen["visits"] == "visit-read"
     assert seen["observations"] == "obs-read"
     assert seen["current_state"] is current_read
+    assert seen["authorization_health_tracker"] == "auth-health"
+    assert seen["current_state_runtime"] is process_runtime._current_state_runtime
+    assert seen["observation_runtime"] == "observation-runtime"
+    assert seen["visit_runtime"] == "visit-runtime"
     assert seen["blueprint"] is selected.blueprint
 
 

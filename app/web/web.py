@@ -18,6 +18,7 @@ from app.auth.manager import (
     RetryOutcome,
 )
 from app.auth.worker import AuthWorker
+from app.auth.health import DISABLED_AUTHORIZATION_HEALTH_TRACKER
 from app.auth_telemetry import configure_auth_telemetry
 from app.auth_telemetry import events as telemetry_events
 from app.capport import (
@@ -108,6 +109,7 @@ def create_app(
     controller=None,
     visitor_snapshot_collector=None,
     visit_start_submitter=None,
+    authorization_health_tracker=None,
 ) -> Flask:
     """Create and configure the Flask application."""
     template_dir = os.path.abspath(
@@ -299,11 +301,19 @@ def create_app(
     app.extensions[
         "visitor_snapshot_collector"
     ] = visitor_snapshot_collector
+    if authorization_health_tracker is None:
+        authorization_health_tracker = (
+            DISABLED_AUTHORIZATION_HEALTH_TRACKER
+        )
+    app.extensions[
+        "authorization_health_tracker"
+    ] = authorization_health_tracker
     auth_worker = AuthWorker(
         provider=controller,
         session_manager=auth_manager,
         snapshot_collector=visitor_snapshot_collector,
         visit_start_submitter=visit_start_submitter,
+        authorization_health_tracker=authorization_health_tracker,
     )
     portal_entry_handler = PortalEntryHandler(
         session_manager=auth_manager,

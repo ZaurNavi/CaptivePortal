@@ -54,6 +54,12 @@ from .home_activity_ranges import (
     resolve_selected,
     resolve_today,
 )
+from .home_health import (
+    HomeHealthBusy,
+    HomeHealthDeadline,
+    HomeHealthValidationError,
+)
+from .home_health_serialization import serialize_home_health
 
 
 ADMIN_PREFIX = "/admin"
@@ -343,6 +349,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             home_traffic_page_size=config.home_traffic_page_size,
             home_activity_state=runtime.home_activity_state,
             home_activity_config=runtime.home_activity_config,
+            home_health_state=runtime.home_health_state,
+            home_health_config=runtime.home_health_config,
         )
 
     @blueprint.get("/admin/api/v1/session")
@@ -380,6 +388,48 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return _error("invalid_request", 400)
         code = 200 if runtime.state == "active" else 503
         return _success(None, {"status": runtime.state}, status_code=code)
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/home/health")
+    @authenticated
+    def api_home_health(site_id: str) -> Response:
+        if request.args:
+            return _error("invalid_request", 400)
+        try:
+            selected = resolver.resolve(site_id)
+        except AdminSiteContextError:
+            return _error("invalid_request", 400)
+        except AdminAccessDenied:
+            return _error("site_forbidden", 403)
+        if not policy.authorize(
+            g.admin_principal, "admin.read.overview", selected
+        ):
+            return _error("site_forbidden", 403)
+        if runtime.home_health_state == "disabled":
+            return _error("not_found", 404)
+        service = runtime.home_health_service
+        if runtime.home_health_state != "active" or service is None:
+            return _error("source_unavailable", 503)
+        try:
+            result = service.evaluate(selected)
+            payload = serialize_home_health(result)
+        except HomeHealthValidationError:
+            return _error("invalid_request", 400)
+        except HomeHealthBusy:
+            response = make_response(_error("concurrency_limit", 429))
+            response.headers["Retry-After"] = "1"
+            return response
+        except HomeHealthDeadline:
+            return _error("query_deadline", 503)
+        except Exception:
+            logger.error(
+                "admin.home_health_evaluation_failed",
+                extra={
+                    "event": "admin.home_health_evaluation_failed",
+                    "failure_category": "evaluation_error",
+                },
+            )
+            return _error("source_unavailable", 503)
+        return _success(selected, payload, enforce_size=True)
 
     @blueprint.get("/admin/api/v1/sites/<site_id>/summary/visits")
     @authenticated
