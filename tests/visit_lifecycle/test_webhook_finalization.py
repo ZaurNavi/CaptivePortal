@@ -99,6 +99,29 @@ def test_resolved_offline_closes_exact_site_mac_with_reported_context(
     assert source["ap_mac"] == "02:FF:EE:DD:CC:BB"
 
 
+def test_887_byte_estimate_preserves_existing_visit_finalization(
+    visit_config,
+    visit_repository,
+    visit_service,
+):
+    opened = visit_service.submit_authorized(make_request())
+    _write(
+        visit_config.webhook_source,
+        _record(event_id="webhook:887", reported_traffic_bytes_estimate=887),
+    )
+
+    assert _reader(
+        visit_config, visit_repository, visit_service
+    ).scan_once() is True
+
+    visit = visit_repository.get_visit("site-a", opened.visit_id)
+    assert visit.status == "closed"
+    assert visit.reported_traffic_total_bytes == 887
+    source = _source(visit_repository, "webhook:887")
+    assert source["processing_result"] == "closed"
+    assert source["visit_id"] == opened.visit_id
+
+
 @pytest.mark.parametrize(
     "status",
     ["site_missing", "site_unresolved", "mapping_invalid"],

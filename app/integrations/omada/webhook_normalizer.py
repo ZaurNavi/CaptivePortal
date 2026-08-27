@@ -109,7 +109,7 @@ DURATION_RE = re.compile(
 )
 TRAFFIC_RE = re.compile(
     r"^(?P<value>\d+(?:\.\d+)?)\s*"
-    r"(?P<unit>B|KB|MB|GB|TB)$",
+    r"(?P<unit>Bytes|B|KB|MB|GB|TB)$",
     re.IGNORECASE,
 )
 ADMINISTRATOR_RE = re.compile(
@@ -782,7 +782,8 @@ def _parse_traffic(value: str) -> dict[str, Any] | None:
                 MAX_TRAFFIC_NUMBER_DIGITS + 20,
             )
             decimal_value = Decimal(raw_number)
-            unit = match.group("unit").upper()
+            raw_unit = match.group("unit").upper()
+            unit = "B" if raw_unit == "BYTES" else raw_unit
             byte_value = (
                 decimal_value * TRAFFIC_MULTIPLIERS[unit]
             ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)

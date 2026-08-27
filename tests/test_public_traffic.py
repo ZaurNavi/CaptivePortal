@@ -162,6 +162,22 @@ def test_valid_offline_is_counted_regardless_of_parse_status(
     assert len(table_rows(repository.db_path, "processed_events")) == 1
 
 
+def test_887_bytes_is_accepted_by_existing_public_traffic_contract(tmp_path):
+    selected, repository, service, _, worker, _ = stack(tmp_path)
+    append_lines(
+        selected.source_log_path,
+        [offline("bytes-887", traffic=887)],
+    )
+
+    complete_backfill(worker)
+    snapshot = service.get_snapshot()
+
+    assert snapshot.total_bytes == 887
+    assert snapshot.today_bytes == 887
+    assert snapshot.completed_sessions_total == 1
+    assert len(table_rows(repository.db_path, "processed_events")) == 1
+
+
 def test_multiple_ssids_are_aggregated_separately(tmp_path):
     selected, repository, service, _, worker, _ = stack(tmp_path)
     append_lines(
