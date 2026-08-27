@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from app.common.mac import format_mac_colon
 
+from .ap_status import classify_ap_status_code
 from .models import MAX_SQLITE_INTEGER
 
 
@@ -164,11 +165,7 @@ def normalize_current_ap(raw: Any, *, cycle_id: str, site_id: str, observed_at: 
     status_raw = _first(raw, "status", "statusCode", "status_code")
     status_code = _strict_int(status_raw, nonnegative=False)
     values["status_code"] = status_code
-    values["status_classification"] = (
-        "online" if status_code == 1 else
-        "other" if status_code is not None else
-        "unknown"
-    )
+    values["status_classification"] = classify_ap_status_code(status_code)
     unknown = status_code is None
     if status_raw is not None and status_code is None:
         warning += 1

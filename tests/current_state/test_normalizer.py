@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from app.current_state.ap_status import classify_ap_status_code
 from app.current_state.normalizer import (
     canonical_scope,
     current_client_relevant,
@@ -83,15 +84,55 @@ def test_scope_is_canonical_and_hash_stable():
     assert json.loads(first_json)["ssids"] == ["a", "b"]
 
 
-@pytest.mark.parametrize(("status", "classification"), [(1, "online"), (0, "other"), (2, "other"), (None, "unknown"), ("1", "unknown")])
-def test_ap_status_is_conservative(status, classification):
+@pytest.mark.parametrize(
+    ("status", "classification"),
+    [
+        (1, "online"),
+        (0, "offline"),
+        (3, "other"),
+        (2, "other"),
+        (99, "other"),
+        (None, "unknown"),
+        ("0", "unknown"),
+        ("1", "unknown"),
+    ],
+)
+def test_ap_status_uses_canonical_mapper_after_existing_sanitation(status, classification):
     item = normalize_current_ap(
         {"type": "ap", "mac": "11-22-33-44-55-66", "status": status},
         cycle_id="ap", site_id=SITE, observed_at=NOW,
     )
     assert item is not None
+    assert item.values["status_code"] == (status if type(status) is int else None)
     assert item.values["status_classification"] == classification
-    assert item.values["status_classification"] != "offline"
+    assert item.warning_count == (1 if isinstance(status, str) else 0)
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "classification"),
+    [
+        (1, "online"),
+        (0, "offline"),
+        (3, "other"),
+        (2, "other"),
+        (99, "other"),
+        (-1, "other"),
+        (None, "unknown"),
+        (True, "unknown"),
+        (False, "unknown"),
+        ("0", "unknown"),
+        ("1", "unknown"),
+        (0.0, "unknown"),
+        (1.0, "unknown"),
+        (object(), "unknown"),
+    ],
+)
+def test_classify_ap_status_code_is_strict(raw_status, classification):
+    assert classify_ap_status_code(raw_status) == classification
+
+
+def test_status_three_is_not_offline():
+    assert classify_ap_status_code(3) == "other"
 
 
 def test_non_ap_and_invalid_ap_identity_are_not_stored():
