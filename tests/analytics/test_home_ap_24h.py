@@ -6,6 +6,7 @@ from contextlib import contextmanager
 
 import pytest
 
+from app.admin_web.home_ap_24h_serialization import serialize_home_ap_24h
 from app.analytics.home_ap_24h import (
     BUCKET_COUNT,
     HomeAp24ReadService,
@@ -130,6 +131,161 @@ def read(value):
         SITE, evaluated_at_utc=ANCHOR, limit=20,
         deadline=QueryDeadline.after(5),
     )
+
+
+def jittered_samples(anchor, *, first_index=-1, omit=None, state_at=None):
+    start = anchor - timedelta(hours=24)
+    pattern_ms = (137, 811, 49, 693, 421, 277, 959)
+    samples = []
+    for index in range(first_index, 1441):
+        moment = start + timedelta(
+            seconds=60 * index,
+            milliseconds=pattern_ms[index % len(pattern_ms)],
+        )
+        if moment >= anchor or (omit is not None and omit(moment, start)):
+            continue
+        state = "operational" if state_at is None else state_at(moment, start)
+        reason = (
+            "fresh_online_evidence"
+            if state == "operational"
+            else "controller_reported_offline"
+        )
+        samples.append((moment, state, reason, stamp(moment)))
+    return samples
+
+
+def read_injected_samples(samples, *, anchor):
+    source = HomeAp24ReadService(
+        object(), object(),
+        current_state_ap_interval_seconds=60,
+        quality_gap_seconds=180,
+        observation_dynamic_max_requests=200,
+    )
+    current = {
+        "samples": {AP: samples},
+        "roster": {AP},
+        "identity": {AP: (samples[0][0], "AP", "EAP")},
+        "source": {
+            "status": "operational",
+            "schema_version": 1,
+            "first_evidence_at": samples[0][3],
+            "last_evidence_at": samples[-1][3],
+            "complete_cycle_count": len(samples),
+            "partial_cycle_count": 0,
+            "failed_cycle_count": 0,
+            "max_gap_seconds": 61,
+        },
+    }
+    observations = {
+        "rows": {},
+        "aggregates": {},
+        "roster": set(),
+        "identity": {},
+        "source": {
+            "status": "unknown",
+            "schema_version": 1,
+            "first_evidence_at": None,
+            "last_evidence_at": None,
+            "complete_cycle_count": 0,
+            "partial_cycle_count": 0,
+            "failed_cycle_count": 0,
+            "max_gap_seconds": None,
+        },
+    }
+    source._read_current = lambda *_args, **_kwargs: current
+    source._read_observations = lambda *_args, **_kwargs: observations
+    return source.get_home_ap_24h(
+        SITE,
+        evaluated_at_utc=anchor,
+        limit=20,
+        deadline=QueryDeadline.after(5),
+    )
+
+
+def assert_exact_duration_partition(item):
+    history = item["history"]
+    assert sum(history[field] for field in (
+        "operational_seconds",
+        "unavailable_seconds",
+        "unknown_evidence_seconds",
+        "short_history_seconds",
+    )) == 86400
+    assert len(item["timeline"]) == 96
+    assert all(
+        sum(bucket[field] for field in (
+            "operational_seconds",
+            "unavailable_seconds",
+            "unknown_evidence_seconds",
+            "short_history_seconds",
+        )) == 900
+        for bucket in item["timeline"]
+    )
+    assert sum(
+        bucket[field]
+        for bucket in item["timeline"]
+        for field in (
+            "operational_seconds",
+            "unavailable_seconds",
+            "unknown_evidence_seconds",
+            "short_history_seconds",
+        )
+    ) == 86400
+
+
+def test_millisecond_jitter_continuous_history_partitions_exactly_and_serializes():
+    anchor = datetime(2026, 8, 28, 12, 17, 53, 791000, tzinfo=UTC)
+    result = read_injected_samples(jittered_samples(anchor), anchor=anchor)
+    item = result["items"][0]
+
+    assert item["history"]["operational_seconds"] == 86400
+    assert item["history"]["unavailable_seconds"] == 0
+    assert item["history"]["unknown_evidence_seconds"] == 0
+    assert item["history"]["short_history_seconds"] == 0
+    assert item["history"]["coverage_status"] == "complete"
+    assert_exact_duration_partition(item)
+    assert serialize_home_ap_24h(result)["items"][0]["timeline"]
+
+
+def test_millisecond_jitter_mixed_state_and_source_gap_partition_exactly():
+    anchor = datetime(2026, 8, 28, 12, 17, 53, 791000, tzinfo=UTC)
+
+    def omit(moment, start):
+        return start + timedelta(hours=6) <= moment < start + timedelta(
+            hours=6, minutes=10
+        )
+
+    def state_at(moment, start):
+        return (
+            "operational"
+            if moment < start + timedelta(hours=12)
+            else "unavailable"
+        )
+
+    result = read_injected_samples(
+        jittered_samples(anchor, omit=omit, state_at=state_at),
+        anchor=anchor,
+    )
+    item = result["items"][0]
+
+    assert item["history"]["operational_seconds"] > 0
+    assert item["history"]["unavailable_seconds"] > 0
+    assert item["history"]["unknown_evidence_seconds"] > 0
+    assert item["history"]["short_history_seconds"] == 0
+    assert_exact_duration_partition(item)
+
+
+def test_millisecond_jitter_first_evidence_preserves_short_history_partition():
+    anchor = datetime(2026, 8, 28, 12, 17, 53, 791000, tzinfo=UTC)
+    result = read_injected_samples(
+        jittered_samples(anchor, first_index=180),
+        anchor=anchor,
+    )
+    item = result["items"][0]
+
+    assert item["history"]["short_history_seconds"] > 0
+    assert item["history"]["unknown_evidence_seconds"] == 0
+    assert item["history"]["coverage_status"] == "complete"
+    assert_exact_duration_partition(item)
 
 
 def test_mapper_semantics_absence_reappearance_and_fixed_buckets(sources):

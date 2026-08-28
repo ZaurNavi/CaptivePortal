@@ -26,6 +26,7 @@ OBSERVATION_SCHEMA_VERSION = 1
 # Match the existing bounded Admin read gateways: frequent enough for prompt
 # cancellation without turning every large read into millions of Python calls.
 _PROGRESS_OPCODES = 10_000
+_MICROSECONDS_PER_SECOND = 1_000_000
 
 
 class HomeAp24Error(RuntimeError):
@@ -52,6 +53,34 @@ def _parse(value: object) -> datetime:
 
 def _seconds(start: datetime, end: datetime) -> int:
     return max(0, int(round((end - start).total_seconds())))
+
+
+def _quantized_boundary_second(window_start: datetime, value: datetime) -> int:
+    """Map one boundary onto the window's shared integer-second axis."""
+    delta = value - window_start
+    microseconds = (
+        (delta.days * 86400 + delta.seconds) * _MICROSECONDS_PER_SECOND
+        + delta.microseconds
+    )
+    if microseconds >= 0:
+        return (microseconds + _MICROSECONDS_PER_SECOND // 2) // _MICROSECONDS_PER_SECOND
+    return -(
+        (-microseconds + _MICROSECONDS_PER_SECOND // 2)
+        // _MICROSECONDS_PER_SECOND
+    )
+
+
+def _partition_seconds(
+    window_start: datetime,
+    left: datetime,
+    right: datetime,
+) -> int:
+    """Return a duration from consistently quantized shared boundaries."""
+    return max(
+        0,
+        _quantized_boundary_second(window_start, right)
+        - _quantized_boundary_second(window_start, left),
+    )
 
 
 def _max_gap(values: Iterable[datetime]) -> int | None:
@@ -607,7 +636,7 @@ class HomeAp24ReadService:
             valid_to = min(next_at, sample_at + timedelta(seconds=self._cs_gap), end)
             valid_from = max(sample_at, start)
             if valid_to > valid_from:
-                duration = _seconds(valid_from, valid_to)
+                duration = _partition_seconds(start, valid_from, valid_to)
                 if state == "operational":
                     operational += duration
                 elif state == "unavailable":
@@ -618,7 +647,7 @@ class HomeAp24ReadService:
                     _apply_interval(buckets, start, valid_from, valid_to, state, reason)
             gap_to = min(next_at, end)
             if gap_to > valid_to:
-                unknown += _seconds(valid_to, gap_to)
+                unknown += _partition_seconds(start, valid_to, gap_to)
                 has_source_gap = True
                 if include_timeline:
                     _apply_interval(
@@ -639,7 +668,7 @@ class HomeAp24ReadService:
                     buckets[bucket_index]["authoritative_state_sample_count"] += 1
             for bucket in buckets:
                 _reduce_state_bucket(bucket)
-        eligible = max(0, _seconds(max(first, start), end))
+        eligible = _partition_seconds(start, max(first, start), end)
         covered = operational + unavailable + unknown
         coverage = "insufficient_data" if not samples else (
             "complete" if covered >= eligible and not has_source_gap else "partial"
@@ -674,7 +703,7 @@ class HomeAp24ReadService:
             "operational_seconds": operational,
             "unavailable_seconds": unavailable,
             "unknown_evidence_seconds": unknown,
-            "short_history_seconds": _seconds(start, short_to),
+            "short_history_seconds": _partition_seconds(start, start, short_to),
             "max_gap_seconds": max_gap_seconds,
         }
         return buckets, history, current_value
@@ -879,16 +908,28 @@ def _empty_observation_bucket():
 def _apply_interval(buckets, window_start, left, right, state, reason):
     if right <= left:
         return
-    first = max(0, int((left - window_start).total_seconds() // BUCKET_SECONDS))
-    final = min(
-        len(buckets) - 1,
-        int(((right - window_start).total_seconds() - 0.000001) // BUCKET_SECONDS),
+    window_seconds = len(buckets) * BUCKET_SECONDS
+    left_second = min(
+        window_seconds,
+        max(0, _quantized_boundary_second(window_start, left)),
     )
+    right_second = min(
+        window_seconds,
+        max(0, _quantized_boundary_second(window_start, right)),
+    )
+    if right_second <= left_second:
+        return
+    first = left_second // BUCKET_SECONDS
+    final = min(len(buckets) - 1, (right_second - 1) // BUCKET_SECONDS)
     for index in range(first, final + 1):
         bucket = buckets[index]
-        bucket_start = window_start + timedelta(seconds=index * BUCKET_SECONDS)
-        bucket_end = bucket_start + timedelta(seconds=BUCKET_SECONDS)
-        overlap = _seconds(max(left, bucket_start), min(right, bucket_end))
+        bucket_start_second = index * BUCKET_SECONDS
+        bucket_end_second = bucket_start_second + BUCKET_SECONDS
+        overlap = max(
+            0,
+            min(right_second, bucket_end_second)
+            - max(left_second, bucket_start_second),
+        )
         if overlap <= 0:
             continue
         if state == "short":
