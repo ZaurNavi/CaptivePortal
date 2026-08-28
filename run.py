@@ -31,6 +31,9 @@ from app.current_state import create_current_state_runtime
 from app.analytics import create_analytics_runtime
 from app.analytics.api import API_PREFIX
 from app.admin_web import create_admin_web_runtime
+from app.admin_web.home_ap_24h_telemetry import (
+    create_home_ap_24h_telemetry_worker,
+)
 from app.web.web import create_app, auth_executor, auth_manager
 from app.auth.health import authorization_health_tracker_from_settings
 
@@ -46,6 +49,7 @@ _current_state_runtime = None
 _visit_lifecycle = None
 _analytics_runtime = None
 _admin_web_runtime = None
+_home_ap_24h_telemetry_worker = None
 
 
 def _safe_access_requestline(requestline: str) -> str:
@@ -94,6 +98,12 @@ def shutdown_handler() -> None:
         _shutdown_completed = True
 
     logger.info("Shutting down authentication worker executor...")
+
+    if _home_ap_24h_telemetry_worker is not None:
+        try:
+            _home_ap_24h_telemetry_worker.stop()
+        except Exception:
+            logger.exception("home_ap_24h_telemetry_stop_failed")
 
     if _admin_web_runtime is not None:
         try:
@@ -284,10 +294,43 @@ def _configure_admin_web(app, settings, registry_read_service) -> None:
         app.extensions["admin_web_runtime"] = _admin_web_runtime
         if _admin_web_runtime.blueprint is not None:
             app.register_blueprint(_admin_web_runtime.blueprint)
+        _configure_home_ap_24h_telemetry(app, settings)
     except Exception:
         _admin_web_runtime = None
         app.extensions["admin_web_runtime"] = None
+        app.extensions["home_ap_24h_telemetry_worker"] = None
         logger.exception("admin_runtime_configuration_failed")
+
+
+def _configure_home_ap_24h_telemetry(app, settings) -> None:
+    """Start AP-24H telemetry only after Admin composition succeeds."""
+    global _home_ap_24h_telemetry_worker
+
+    try:
+        _home_ap_24h_telemetry_worker = (
+            create_home_ap_24h_telemetry_worker(
+                settings,
+                admin_runtime=_admin_web_runtime,
+                telemetry=app.extensions.get("auth_telemetry"),
+                logger=logger,
+            )
+        )
+    except Exception:
+        _home_ap_24h_telemetry_worker = None
+        app.extensions["home_ap_24h_telemetry_worker"] = None
+        logger.exception("home_ap_24h_telemetry_composition_failed")
+        return
+    app.extensions["home_ap_24h_telemetry_worker"] = (
+        _home_ap_24h_telemetry_worker
+    )
+    if _home_ap_24h_telemetry_worker is None:
+        return
+    try:
+        _home_ap_24h_telemetry_worker.start()
+    except Exception:
+        logger.exception("home_ap_24h_telemetry_start_failed")
+        _home_ap_24h_telemetry_worker = None
+        app.extensions["home_ap_24h_telemetry_worker"] = None
 
 
 def _configure_current_state(app, settings, controller) -> None:
@@ -314,6 +357,7 @@ def main() -> None:
     global _pending_session_cleaner, _observation_foundation
     global _current_state_runtime
     global _visit_lifecycle, _analytics_runtime, _admin_web_runtime
+    global _home_ap_24h_telemetry_worker
 
     logger.info("Starting Captive Portal")
 

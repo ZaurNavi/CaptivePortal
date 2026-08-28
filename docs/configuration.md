@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-08-26
-Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-08-28
+Baseline: `main@d41888ade1814a2c0e965ff0cd51212e7dc4bd5f`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -179,6 +179,18 @@ Confirmed production Site context on 2026-08-26:
 - timezone `Asia/Baku`;
 - Visits coverage `2026-08-26T17:46:55.982Z`;
 - Traffic coverage `null`.
+
+### Home AP-24H telemetry
+
+Prefix: `WEB_ADMIN_HOME_AP_24H_TELEMETRY_*`.
+
+Repository default: `WEB_ADMIN_HOME_AP_24H_TELEMETRY_ENABLED=false`.
+
+The worker also requires active Admin Web, active Home AP-24H, the shared Admin
+query controls and available Authorization Telemetry. The initial delay is
+bounded to `0..3600` seconds and the fixed-delay interval to `60..3600`
+seconds; repository defaults are `15` and `120` seconds respectively. Invalid
+enabled telemetry configuration fails closed for this worker only.
 
 ### Pending Session Cleaner
 

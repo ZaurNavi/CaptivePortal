@@ -133,6 +133,11 @@ class AdminQueryExecutionControls:
         self._slots = threading.BoundedSemaphore(max_concurrent_queries)
         self._max_query_duration_seconds = max_query_duration_seconds
 
+    @property
+    def max_query_duration_seconds(self) -> int:
+        """Expose the authoritative bound for dependent shutdown joins."""
+        return self._max_query_duration_seconds
+
     def run(self, operation: Callable[[QueryDeadline], Any]):
         if not self._slots.acquire(blocking=False):
             raise AdminQueryBusy()

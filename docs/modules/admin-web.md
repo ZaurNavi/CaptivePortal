@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-08-26
-Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-08-28
+Baseline: `main@d41888ade1814a2c0e965ff0cd51212e7dc4bd5f`
 
 ## Boundary
 
@@ -14,7 +14,8 @@ Home, Devices, Device Detail, Visits, Observations.
 Current optional Home increments:
 - Home Live — Current State;
 - Home Traffic — Current Traffic;
-- Home Activity — Authorized Visits + completed-session Traffic.
+- Home Activity — Authorized Visits + completed-session Traffic;
+- Home AP-24H — persisted Current State and Observation history.
 
 Home Activity is current code. Repository default remains disabled; production activation is a separate fact.
 
@@ -79,6 +80,17 @@ Confirmed production Site context on 2026-08-26:
 
 ## Lifecycle
 
-Admin Web has no business worker. Shutdown clears process-local security/session state.
+Admin Web has no business-write worker. Optional AP-24H operational telemetry
+uses one process-local fixed-delay worker and the existing shared query
+concurrency/deadline controls. It calls the already-composed
+`HomeAp24ReadService`; it does not read SQLite, call Admin HTTP endpoints or
+contact Omada independently. Shutdown stops this worker before Current State
+and Observation sources, then clears process-local security/session state.
+
+AP-24H telemetry is repository-default-disabled, bounded to the first 20 AP
+details and emitted through the existing `auth_telemetry.log` pipeline. It is
+lossy/fail-open operational evidence, not the AP-24H source of truth. Missing
+telemetry does not prove missing persisted AP evidence, and downstream
+Grafana/Loki consumers must not recreate AP state from raw source events.
 
 Failure leaves `/admin` unavailable/degraded but must not abort guest authorization.

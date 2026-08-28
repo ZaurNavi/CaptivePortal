@@ -1,8 +1,8 @@
 # Logging, telemetry and data journals
 
 Status: current
-Updated: 2026-08-26
-Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-08-28
+Baseline: `main@d41888ade1814a2c0e965ff0cd51212e7dc4bd5f`
 
 ## Separation
 
@@ -35,6 +35,15 @@ Current operational events also exist for:
 - Public Traffic.
 
 Their telemetry does not replace their persisted source data.
+
+Home AP-24H may publish bounded `home_ap_24h.snapshot` and
+`home_ap_24h.ap_snapshot` operational events through the existing
+`AuthorizationTelemetry.safe_emit_system()` path into `auth_telemetry.log`.
+Loki/Grafana telemetry is not the AP-24H source of truth: calculations remain
+owned by `HomeAp24ReadService`. Publication is lossy and fail-open, so missing
+telemetry does not imply missing persisted AP evidence. Grafana must not
+reinterpret raw Current State or Observation evidence into a second AP-24H
+status calculation.
 
 ### Current State startup telemetry gap
 
