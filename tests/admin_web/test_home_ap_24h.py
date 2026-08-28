@@ -189,6 +189,34 @@ def test_disabled_route_is_canonical_404_after_authentication(admin_app):
     assert response.get_json()["error"]["code"] == "not_found"
 
 
+def test_home_page_uses_browser_compatible_ap24_dataset_contract(admin_app):
+    runtime = admin_app.extensions["admin_web_runtime"]
+    runtime.home_ap_24h_state = "active"
+    runtime.home_ap_24h_config = SimpleNamespace(
+        enabled=True,
+        refresh_seconds=121,
+        request_timeout_seconds=21,
+    )
+    client = admin_app.test_client()
+    login(client)
+
+    response = client.get(
+        f"/admin/sites/{SITE_ID}/",
+        base_url="https://localhost",
+    )
+
+    assert response.status_code == 200
+    text = response.get_data(as_text=True)
+    assert 'data-home-ap24h-enabled="true"' in text
+    assert 'data-home-ap24h-unavailable="false"' in text
+    assert 'data-home-ap24h-refresh-seconds="121"' in text
+    assert 'data-home-ap24h-request-timeout-seconds="21"' in text
+    assert "data-home-ap-24h-enabled" not in text
+    assert "data-home-ap-24h-unavailable" not in text
+    assert "data-home-ap-24h-refresh-seconds" not in text
+    assert "data-home-ap-24h-request-timeout-seconds" not in text
+
+
 def test_route_rejects_duplicate_or_unknown_parameters_before_source(admin_app):
     client = admin_app.test_client(); login(client)
     runtime = admin_app.extensions["admin_web_runtime"]
