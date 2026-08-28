@@ -139,6 +139,56 @@ def test_process_runtime_composes_admin_after_sources(monkeypatch):
     assert seen["blueprint"] is selected.blueprint
 
 
+def test_process_runtime_starts_ap24_telemetry_after_admin_composition(monkeypatch):
+    events = []
+    telemetry = object()
+    selected = SimpleNamespace(blueprint=None)
+
+    class Worker:
+        def start(self):
+            events.append("start")
+
+    worker = Worker()
+
+    class App:
+        extensions = {"auth_telemetry": telemetry}
+
+        def register_blueprint(self, _blueprint):
+            raise AssertionError("no blueprint expected")
+
+    def create(*_args, **_kwargs):
+        events.append("compose_admin")
+        return selected
+
+    def create_worker(settings, *, admin_runtime, telemetry, logger):
+        assert settings == {"web_admin_enabled": "true"}
+        assert admin_runtime is selected
+        assert telemetry is App.extensions["auth_telemetry"]
+        assert logger is process_runtime.logger
+        events.append("compose_worker")
+        return worker
+
+    monkeypatch.setattr(process_runtime, "_analytics_runtime", SimpleNamespace(
+        _source_services={"visits": None, "observations": None}
+    ))
+    monkeypatch.setattr(process_runtime, "_current_state_runtime", None)
+    monkeypatch.setattr(process_runtime, "_observation_foundation", None)
+    monkeypatch.setattr(process_runtime, "_visit_lifecycle", None)
+    monkeypatch.setattr(process_runtime, "create_admin_web_runtime", create)
+    monkeypatch.setattr(
+        process_runtime,
+        "create_home_ap_24h_telemetry_worker",
+        create_worker,
+    )
+
+    process_runtime._configure_admin_web(
+        App(), {"web_admin_enabled": "true"}, None
+    )
+
+    assert events == ["compose_admin", "compose_worker", "start"]
+    assert App.extensions["home_ap_24h_telemetry_worker"] is worker
+
+
 def test_process_runtime_admin_failure_is_fail_open(monkeypatch):
     class App:
         extensions = {}
@@ -153,6 +203,39 @@ def test_process_runtime_admin_failure_is_fail_open(monkeypatch):
     )
     process_runtime._configure_admin_web(App(), {}, None)
     assert process_runtime._admin_web_runtime is None
+
+
+def test_ap24_telemetry_composition_failure_does_not_disable_admin(monkeypatch):
+    selected = SimpleNamespace(blueprint=None)
+
+    class App:
+        extensions = {}
+
+        def register_blueprint(self, _blueprint):
+            raise AssertionError("no blueprint expected")
+
+    monkeypatch.setattr(process_runtime, "_analytics_runtime", SimpleNamespace(
+        _source_services={"visits": None, "observations": None}
+    ))
+    monkeypatch.setattr(process_runtime, "_current_state_runtime", None)
+    monkeypatch.setattr(process_runtime, "_observation_foundation", None)
+    monkeypatch.setattr(process_runtime, "_visit_lifecycle", None)
+    monkeypatch.setattr(
+        process_runtime,
+        "create_admin_web_runtime",
+        lambda *_args, **_kwargs: selected,
+    )
+    monkeypatch.setattr(
+        process_runtime,
+        "create_home_ap_24h_telemetry_worker",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    process_runtime._configure_admin_web(App(), {}, None)
+
+    assert process_runtime._admin_web_runtime is selected
+    assert App.extensions["admin_web_runtime"] is selected
+    assert App.extensions["home_ap_24h_telemetry_worker"] is None
 
 
 def test_access_handler_strips_all_admin_query_values_only():
@@ -186,6 +269,7 @@ def test_shutdown_clears_admin_security_state(monkeypatch):
         "_admin_web_runtime",
         SimpleNamespace(clear=lambda: calls.append("clear")),
     )
+    monkeypatch.setattr(process_runtime, "_home_ap_24h_telemetry_worker", None)
     monkeypatch.setattr(process_runtime, "_pending_session_cleaner", None)
     monkeypatch.setattr(process_runtime, "_observation_foundation", None)
     monkeypatch.setattr(process_runtime, "_public_traffic_worker", None)
@@ -200,3 +284,43 @@ def test_shutdown_clears_admin_security_state(monkeypatch):
     process_runtime.shutdown_handler()
     process_runtime.shutdown_handler()
     assert calls == ["clear"]
+
+
+def test_shutdown_stops_ap24_telemetry_before_read_sources(monkeypatch):
+    calls = []
+    monkeypatch.setattr(process_runtime, "_shutdown_completed", False)
+    monkeypatch.setattr(
+        process_runtime,
+        "_home_ap_24h_telemetry_worker",
+        SimpleNamespace(stop=lambda: calls.append("telemetry")),
+    )
+    monkeypatch.setattr(
+        process_runtime,
+        "_admin_web_runtime",
+        SimpleNamespace(clear=lambda: calls.append("admin")),
+    )
+    monkeypatch.setattr(process_runtime, "_pending_session_cleaner", None)
+    monkeypatch.setattr(
+        process_runtime,
+        "_observation_foundation",
+        SimpleNamespace(stop=lambda: calls.append("observations")),
+    )
+    monkeypatch.setattr(
+        process_runtime,
+        "_current_state_runtime",
+        SimpleNamespace(stop=lambda: calls.append("current_state")),
+    )
+    monkeypatch.setattr(process_runtime, "_public_traffic_worker", None)
+    monkeypatch.setattr(process_runtime, "_visit_lifecycle", None)
+    monkeypatch.setattr(process_runtime, "_visitor_snapshot_collector", None)
+    monkeypatch.setattr(process_runtime, "_visitor_registry", None)
+    monkeypatch.setattr(
+        process_runtime.auth_executor,
+        "shutdown",
+        lambda **_: calls.append("auth_executor"),
+    )
+
+    process_runtime.shutdown_handler()
+
+    assert calls.index("telemetry") < calls.index("observations")
+    assert calls.index("telemetry") < calls.index("current_state")
