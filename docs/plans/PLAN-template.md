@@ -20,9 +20,18 @@ Status: draft
 
 ## Targeted/module tests исполнителя
 
-## Central Lab full regression
+Только focused/minimal TASK/module execution.
 
-required / not-required; exact artifact/evidence reference when available
+## Cross-module / broader / Central Lab
+
+```text
+cross-module test: requested externally / prepared-not-run / not-required
+Central Lab: required / not-required
+exact artifact/evidence reference
+Coder Lab preparation delegated: yes/no + exact prep-only scope
+official Lab operator: Owner
+gate direction / PASS-FAIL: Tech Lead + Owner
+```
 
 ## Linux / production-compatible gate
 

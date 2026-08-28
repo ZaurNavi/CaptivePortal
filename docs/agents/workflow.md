@@ -1,7 +1,8 @@
 # Workflow coding agent
 
 Status: current
-Updated: 2026-08-26
+Updated: 2026-08-28
+Central Lab governance effective: 2026-08-27
 
 ## 1. Intake
 
@@ -34,34 +35,37 @@ Change-intent truth: FINAL TASK → PLAN → ADR.
 
 ### Coder / executor
 
-Runs task-scoped verification:
+Runs only minimum task-scoped verification:
 
-- targeted tests for changed modules/components;
-- new regression tests assigned by TASK;
-- repeated targeted tests needed during implementation/fixes;
+- focused tests for changed modules/components;
+- the minimum TASK-scoped automated set needed for local self-check;
+- new regression tests belonging to the implementation;
+- repeated runs of those same targeted tests during implementation/fixes;
 - relevant static/syntax/frontend checks;
 - `git diff --check`.
 
-The Coder does not run the whole CaptivPortal regression suite by default.
+Coder may create/change tests belonging to the implementation.
+
+Coder does not execute unrelated-module, cross-module, broader or full repository regression. If such proof is needed, Coder requests Owner/Tech Lead/Central Lab execution or prepares the test without running it.
 
 ### Tech Lead / Reviewer
 
-Reviews architecture, TASK/ADR conformance, DIFF, contracts, risk and the Coder's targeted-test evidence.
+Reviews architecture, TASK/ADR conformance, DIFF, contracts, risk and the Coder's focused test evidence.
 
-The Tech Lead does not personally rerun the full suite for ordinary review unless a separate concrete reason requires it.
+The Tech Lead owns technical direction of cross-module/broader/full testing and acceptance. The Owner is the default physical Central Lab operator.
 
 ### Central Lab
 
-Owns the controlled full-regression function:
+Canonical ownership is in `../testing.md`.
 
 ```text
-official full baseline
-Full Regression Gate
-final Test Evidence
-strict-regression confirmation
+Coder → TASK/module-scoped tests only
+Tech Lead → exact artifact / commands / criteria
+Owner → physical C:\CaptivPortal-Lab preparation + official execution
+Owner + Tech Lead → evidence analysis + PASS/FAIL
 ```
 
-Use the Central Lab evidence for the exact artifact rather than duplicating the same full run in multiple roles.
+Cross-module regression, broader regression, full repository suite, release/differential gates and official acceptance are not delegated to Coder.
 
 ### Linux pre-production
 
@@ -75,9 +79,13 @@ Normal flow:
 
 ```text
 Coder implementation
-→ targeted/module test evidence
+→ minimal TASK/module test evidence
+→ exact candidate / patch
 → Tech Lead review
-→ Central Lab full gate when required
+→ Tech Lead defines broader/full gate when required
+→ Owner prepares/verifies C:\CaptivPortal-Lab exact artifact
+→ Owner physically launches official Central Lab regression
+→ Owner + Tech Lead analyze evidence and issue PASS/FAIL
 → owner/release decision
 → separate Linux production-compatible gate when required
 → deploy/activation
@@ -106,4 +114,4 @@ Never silently choose the convenient source.
 
 Use `agents/handoff.md`.
 
-State exact artifact, files changed, Coder targeted checks, any Central Lab evidence reference, any separate Linux pre-production evidence, actual repository actions, open risks and owner actions. Never claim an operation that was not executed.
+State exact artifact, files changed, Coder focused/minimal checks, any cross-module test requested or prepared-but-not-run, any prep-only Central Lab action explicitly delegated to Coder, Owner/Tech Lead Central Lab evidence reference, any separate Linux pre-production evidence, actual repository actions, open risks and owner actions. Never claim an operation that was not executed.

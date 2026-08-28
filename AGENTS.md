@@ -1,7 +1,8 @@
 # CaptivPortal: правила для coding agents
 
 Status: current
-Updated: 2026-08-26
+Updated: 2026-08-28
+Central Lab governance effective: 2026-08-27
 
 ## Project
 
@@ -75,9 +76,11 @@ TASK задаёт scope и намерение изменения, но не ст
 - Не использовать Flask current_app из фонового thread.
 - Worker создаётся в composition root, не при import.
 - Не менять Alloy, Loki, Grafana, production systemd или reverse proxy без отдельного TASK.
-- Coder/исполнитель запускает TASK/module-scoped targeted tests, новые regression cases и релевантные static/syntax checks; он может повторять эти targeted-прогоны в процессе разработки.
-- Официальный full repository regression / current baseline / final Test Evidence является централизованной функцией Central Lab и не дублируется Coder или Tech Lead без отдельной причины.
-- Tech Lead проверяет архитектуру, TASK/ADR, DIFF и targeted evidence; полный suite не является его обычной ручной обязанностью.
+- Coder/исполнитель выполняет минимальные automated tests непосредственно в пределах текущего TASK / изменяемого модуля: focused tests, новые regression cases этого изменения и релевантные static/syntax checks; эти targeted-прогоны можно повторять в процессе разработки.
+- Coder может создавать/изменять automated tests только в пределах реализуемого изменения и не расширяет execution на unrelated modules, cross-module regression, broader regression или full repository suite.
+- Если proof требует test вне TASK/module boundary, Coder либо сообщает Owner/Tech Lead точный дополнительный test/gate для внешнего запуска, либо подготавливает/реализует такой test, но не запускает его.
+- `C:\CaptivPortal-Lab` и официальный Central Lab full repository regression cycle контролируются Owner / Tech Lead: Tech Lead определяет exact artifact, commands/gate procedure и acceptance criteria; Owner физически управляет Lab и запускает официальный regression; Owner + Tech Lead анализируют evidence и выдают PASS / FAIL / return-to-coder.
+- Coder не запускает официальный Central Lab gate, не выдаёт официальный PASS/FAIL и не считает собственные tests repository regression gate. По явному поручению Owner/Tech Lead Coder может только подготовить candidate/artifacts или пропатчить указанную Lab working directory; после подготовки цикл возвращается Owner/Tech Lead до запуска gate.
 - Windows Local Gate не заменяет отдельный Linux/production-compatible gate, когда такой gate требуется release/deploy contract.
 - Не исправлять несвязанные падения full suite.
 - Не утверждать, что test, commit, push, PR или deploy выполнен, если это не так.
@@ -94,17 +97,20 @@ TASK задаёт scope и намерение изменения, но не ст
 
 ## Проверки
 
-Targeted commands для Coder/исполнителя определяет TASK. Они проверяют изменённые модули, непосредственные контракты, новые regression-сценарии и необходимые static/syntax checks.
+Targeted commands для Coder/исполнителя определяет TASK. Они ограничены изменяемым модулем/TASK scope и проверяют непосредственные контракты, новые regression-сценарии этого изменения и необходимые static/syntax checks.
 
 Статические проверки, такие как `compileall`, проверка синтаксиса изменённого frontend-кода и `git diff --check`, не превращают targeted workflow Coder в официальный full regression.
 
-Полный repository suite не является обязанностью Coder и не является обычной ручной обязанностью Tech Lead. Официальный full-regression baseline и final Test Evidence предоставляет Central Lab для exact artifact, когда он требуется для продвижения изменения.
+Cross-module/broader/full execution не относится к Coder local self-check. Если такой test нужен, Coder передаёт точную необходимость Owner/Tech Lead либо подготавливает test без запуска.
+
+Официальный Central Lab cycle для exact artifact направляет Tech Lead, физически запускает Owner, а PASS/FAIL принимает Owner + Tech Lead.
 
 Current approved Windows Local Gate и его compatibility baseline описаны в `docs/testing.md`.
 
 Если перед production требуется Linux/full production-compatible gate, он выполняется отдельно по deploy/release contract. Windows gate его не заменяет.
 
 Если environment запрещает назначенную стороне проверку, укажи команду/требуемый gate, причину и owner action.
+
 ## Повторное использование результатов тестирования
 
 Reviewer / Tech Lead не должен повторно запускать идентичные targeted tests только для формального подтверждения результата исполнителя.
@@ -129,7 +135,7 @@ Reviewer / Tech Lead не должен повторно запускать ид�
 4. расследует неполный, противоречивый или сомнительный результат;
 5. прямо требуется утверждённым TASK, deploy/production gate или отдельной owner-командой.
 
-Full repository suite выполняется централизованно Central Lab и не повторяется другими ролями без новой причины после успешного gate на неизменённом exact artifact. Отдельный Linux production-compatible gate не считается дублированием, когда он требуется как platform-specific release acceptance.
+Cross-module/broader/full repository suite и официальный acceptance выполняются Owner/Tech Lead/Central Lab, а не Coder. После успешного gate на неизменённом exact artifact его не повторяют без новой причины. Отдельный Linux production-compatible gate не считается дублированием, когда он требуется как platform-specific release acceptance.
 
 Reviewer не должен утверждать, что лично выполнил targeted tests, если он использует результаты исполнителя.
 

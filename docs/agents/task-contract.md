@@ -1,7 +1,8 @@
 # Контракт TASK
 
 Status: current
-Updated: 2026-08-26
+Updated: 2026-08-28
+Central Lab governance effective: 2026-08-27
 
 TASK — высший источник change intent конкретной задачи и её scope contract. Он не является источником фактов о текущей реализации и не может молча отменить security или необратимые owner-only ограничения.
 
@@ -57,27 +58,37 @@ TASK определяет требуемое изменение относите
 
 ## TASK-scoped test responsibility
 
-Значения относятся к тестированию конкретного TASK/изменяемого модуля, а не к официальному full regression всего CaptivPortal:
+Значения относятся только к минимальному тестированию конкретного TASK/изменяемого модуля:
 
-- `agent`: агент создаёт/обновляет и запускает назначенные targeted/module tests;
-- `owner`: агент не добавляет назначенные tests, но описывает необходимые cases/actions;
-- `shared`: TASK делит конкретные targeted cases/actions;
+- `agent`: агент создаёт/обновляет и запускает focused/minimal TASK/module tests своего изменения;
+- `owner`: агент не запускает назначенные tests и описывает необходимые cases/actions;
+- `shared`: TASK делит конкретные TASK-scoped cases/actions;
 - `not-applicable`: TASK объясняет, почему TASK-scoped tests не требуются.
 
-По умолчанию full repository regression не назначается Coder/agent и не должен автоматически копироваться из исторических TASK.
+`agent` никогда не означает право запуска unrelated-module, cross-module, broader или full repository regression.
+
+Если необходим test вне границ текущего модуля, TASK должен выбрать: `request external execution` или `agent prepares test but does not run it`.
+
+Исторические TASK не переписываются только из-за новой governance-модели; current rule имеет приоритет для новых execution handoff.
 
 ## Official full regression
 
-Официальный full regression / current baseline / final Test Evidence является функцией Central Lab согласно `docs/testing.md`.
+Официальный cross-module/broader/full regression / current baseline / final Test Evidence следует ownership rule из `docs/testing.md`.
 
-TASK должен указать только:
+TASK должен указать:
 
 ```text
 fresh Central Lab baseline required: yes/no
 exact artifact to validate: <SHA/patch identity when known>
+cross-module test needed: yes/no
+if yes: external execution OR agent prepares-without-running
+Coder Lab preparation delegated: yes/no
+if yes: exact prep-only scope
+official Lab operator: Owner
+gate direction / PASS-FAIL ownership: Tech Lead + Owner
 ```
 
-Если для конкретной задачи действительно нужен exceptional full run в другой роли, это должно быть отдельным прямым owner requirement с причиной.
+TASK не назначает Coder исполнителем official Central Lab gate, broader/full regression или official acceptance.
 
 ## Linux / production-compatible gate
 

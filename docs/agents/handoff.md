@@ -1,7 +1,8 @@
 # Handoff contract
 
 Status: current
-Updated: 2026-08-26
+Updated: 2026-08-28
+Central Lab governance effective: 2026-08-27
 
 ## Обязательный итог
 
@@ -19,9 +20,19 @@ Updated: 2026-08-26
 
 ### TASK-scoped проверки исполнителя
 
-Точные targeted/module/static команды и результат: passed, skipped, failed. Не выполненные проверки — с причиной.
+Точные focused/minimal TASK/module/static команды и результат: passed, skipped, failed. Не выполненные проверки — с причиной.
 
-Не писать, что Coder выполнил full regression, если он только передаёт Central Lab evidence.
+Если для доказательства нужен test вне module/TASK boundary, указать отдельно одно из:
+
+```text
+cross-module test requested from Owner/Tech Lead/Central Lab
+```
+
+```text
+cross-module test prepared by Coder but NOT executed
+```
+
+Не писать, что Coder выполнил broader/full regression или official gate.
 
 ### Central Lab / official Test Evidence
 
@@ -29,11 +40,14 @@ Updated: 2026-08-26
 
 ```text
 not required for this handoff
-pending Central Lab gate
+pending Owner/Tech Lead Central Lab gate
+Coder Lab preparation only: <explicit delegated action>
 Central Lab evidence: <artifact/date/result/reference>
 ```
 
-Если официальный baseline существует, указать exact artifact и результат, но не приписывать выполнение Coder/Tech Lead.
+Coder не заявляет official Central Lab execution или PASS/FAIL. Если Coder получил prep-only доступ к `C:\CaptivPortal-Lab`, handoff перечисляет только подготовительные действия и явно возвращает gate Owner/Tech Lead.
+
+Для official evidence указывать exact artifact, Owner physical execution и Owner + Tech Lead PASS/FAIL.
 
 ### Linux / production-compatible evidence
 
@@ -60,7 +74,9 @@ Central Lab evidence: <artifact/date/result/reference>
     Files inspected:
     Files changed:
     Targeted/module tests:
-    Central Lab full regression: not-run-by-agent / evidence reference / not-required
+    Cross-module/broader test: requested / prepared-not-run / not-required
+    Central Lab preparation: none / explicitly delegated prep-only action
+    Central Lab full regression: not-run-by-agent / Owner+Tech Lead evidence reference / not-required
     Linux pre-production gate: separate / evidence reference / not-required
     Unexpected rework:
     Reason for additional context:

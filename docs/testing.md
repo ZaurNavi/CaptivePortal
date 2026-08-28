@@ -1,7 +1,8 @@
 # Testing
 
 Status: current
-Updated: 2026-08-26
+Updated: 2026-08-28
+Central Lab governance effective: 2026-08-27
 Documentation/current-state baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 Production deployed HEAD: `53f617b3ac0155d0d647e58e98309927f9a4d318`
 
@@ -13,60 +14,101 @@ The current project model is:
 
 ```text
 Coder / executor
-→ TASK/module-scoped testing
+→ minimal TASK/module-scoped automated tests
+→ tests created/changed for the implementation
+→ exact candidate / patch
 
-Central Lab
-→ full regression
-→ official baseline
-→ final Test Evidence
+Tech Lead
+→ defines exact artifact, official gate procedure/commands and acceptance criteria
+
+Owner
+→ physical operator of C:\CaptivPortal-Lab
+→ prepares/verifies exact Lab artifact
+→ physically launches official regression
+
+Owner + Tech Lead
+→ analyze evidence
+→ PASS / FAIL / return to Coder
 ```
 
-The purpose is to avoid repeating the same heavy regression suite in Coder, Tech Lead and owner workflows while preserving strong local verification of each implementation.
+Cross-module regression, broader regression, full repository suite, release gate, differential baseline/candidate gate and official acceptance are outside Coder test execution.
 
 ### Coder / executor
 
-The Coder keeps both the right and the responsibility to test the work being implemented.
+The Coder keeps both the right and the responsibility to perform the **minimum local automated verification of the work being implemented**.
 
-Expected Coder verification includes:
+Allowed Coder verification:
 
-- targeted tests for modules/components changed by the TASK;
-- tests for specific files/classes/scenarios affected by the change;
-- regression cases added with the implementation;
-- repeated local runs of those targeted tests during development/fixes;
+- focused tests for the module/component changed by the TASK;
+- the minimum TASK-scoped set needed for local self-check;
+- tests for files/classes/scenarios directly affected by the change;
+- regression cases created with the implementation;
+- repeated local runs of those same TASK/module-scoped tests during development/fixes;
 - relevant static/syntax/frontend checks;
 - `git diff --check`.
 
-The Coder does **not** run the full CaptivPortal repository regression suite by default after every implementation.
+Coder may create and modify automated tests that belong to the implemented change.
 
-A TASK may explicitly require an exceptional broader run when there is a concrete reason, but that exception must be stated; it is not inherited from old TASK wording.
+Coder must **not** independently expand execution to:
+
+- unrelated modules;
+- cross-module regression;
+- broader regression;
+- full `pytest` / full repository suite;
+- release gate;
+- differential baseline/candidate gate;
+- official acceptance.
+
+If a required proof test crosses the TASK/module boundary, exactly two normal paths exist:
+
+1. Coder identifies the additional test/gate and requests Owner/Tech Lead/Central Lab execution.
+2. Coder implements or prepares the required cross-module/regression test, but does **not** execute it; execution remains Owner/Tech Lead/Central Lab responsibility.
 
 ### Tech Lead / Reviewer
 
-The Tech Lead normally verifies:
+The Tech Lead normally verifies architecture, TASK/ADR conformance, implementation boundaries/DIFF, contracts, risk, Coder focused evidence and whether changed tests cover the intended behavior.
 
-- architecture and TASK/ADR conformance;
-- implementation boundaries and DIFF;
-- contracts, risk and regression surface;
-- Coder targeted-test evidence;
-- whether new/changed tests cover the intended behavior.
+The Tech Lead owns the technical direction of broad/system testing: exact artifact, gate procedure/commands, acceptance criteria and evidence analysis. The Owner is the default physical Central Lab operator.
 
-The Tech Lead is **not** required to personally execute the full repository suite for ordinary implementation review.
+Owner / Tech Lead / Central Lab own:
 
-When official full-baseline evidence is required, the Tech Lead requests/consumes the Central Lab result for the exact artifact.
+- cross-module regression;
+- broader regression;
+- full `pytest` / full repository suite;
+- release gate;
+- differential baseline/candidate gate;
+- official PASS / FAIL and acceptance.
 
-The Tech Lead may still run a targeted or broader test when it answers a specific unresolved question, platform delta or investigation need.
+### Central Lab ownership rule
 
-### Central Lab
+**CURRENT governance state, effective 2026-08-27.**
 
-The Central Lab is the controlled source for:
+`C:\CaptivPortal-Lab` and the official full repository regression cycle are controlled exclusively by **Owner / Tech Lead**.
 
-- official current full-regression baseline;
-- Full Regression Gate;
-- final Test Evidence before further promotion when required;
-- confirmation that no strict regression appeared;
-- reproducible evidence that can be consumed by Tech Lead, Coder and other roles.
+```text
+Tech Lead
+→ exact artifact
+→ gate procedure / commands
+→ acceptance criteria
+→ evidence analysis
 
-A successful full gate on an unchanged exact artifact must not be duplicated by another role merely for formality.
+Owner
+→ physical Lab operator
+→ prepares / verifies C:\CaptivPortal-Lab exact artifact
+→ launches official regression
+→ captures raw result/evidence
+
+Owner + Tech Lead
+→ PASS / FAIL / return to Coder
+```
+
+Coder is not an operator of the official Central Lab gate.
+
+Coder may touch `C:\CaptivPortal-Lab` only after an explicit Owner/Tech Lead prep-only instruction, for example to prepare an exact candidate, patch a specified Lab working directory, or place required artifacts. After that preparation Coder stops; the official cycle returns to Owner/Tech Lead **before execution**.
+
+Coder-run focused/module tests are development evidence, never the official repository regression gate.
+
+A successful full gate on an unchanged exact artifact must not be duplicated merely for formality.
 
 ## Official Windows Local Gate
 
@@ -75,6 +117,8 @@ Current approved tool:
 ```text
 C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
 ```
+
+This is an Owner-operated official Lab tool. Tech Lead directs the exact-artifact gate; Owner physically runs it. Coder does not execute it as the official gate.
 
 Owner-provided confirmed baseline date:
 

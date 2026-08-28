@@ -57,11 +57,11 @@ For the 2026-08-26 rollout at `main@53f617b3`, only one restart was performed (`
 
 ## Testing responsibility
 
-Coder targeted/module evidence is reused by Tech Lead and the release process.
+Coder focused/minimal TASK/module evidence is reused by Tech Lead and the release process. Coder does not execute cross-module/broader/full regression as part of implementation handoff.
 
-The official full-regression baseline / Full Regression Gate / final Test Evidence is supplied by Central Lab according to `docs/testing.md`. Tech Lead does not need to duplicate the same full suite for ordinary review.
+The official cross-module/broader/full-regression baseline / Full Regression Gate / final Test Evidence follows `docs/testing.md`: Tech Lead defines the exact artifact, commands and acceptance criteria; Owner physically operates `C:\CaptivPortal-Lab` and launches the official regression; Owner + Tech Lead issue PASS/FAIL.
 
-Before a production deployment/activation, the release owner decides whether the exact artifact requires a fresh Central Lab gate and whether a separate Linux/production-compatible gate is mandatory.
+Before production deployment/activation, the release owner decides whether the exact artifact requires a fresh Central Lab gate and whether a separate Linux/production-compatible gate is mandatory. Official gate execution is not delegated to Coder.
 
 The Windows Local Gate does **not** replace Linux acceptance when the deploy contract requires Linux. The Linux gate is executed separately by the executor named by the deploy/release TASK; it is not automatically Coder or Tech Lead responsibility.
 
