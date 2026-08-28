@@ -37,7 +37,8 @@ _CURRENT_REASONS = frozenset({
 _HISTORY_REASONS = frozenset({
     "operational_history", "mixed_operational_unavailable",
     "controller_reported_offline", "history_evidence_incomplete",
-    "unknown_state_evidence", "no_historical_evidence", "source_unavailable",
+    "unknown_state_evidence", "no_historical_evidence",
+    "current_state_source_gap", "source_unavailable",
 })
 _OBSERVATION_REASONS = frozenset({
     None, "ap_local_evidence_degraded", "observation_source_gap",

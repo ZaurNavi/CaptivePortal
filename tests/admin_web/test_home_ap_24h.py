@@ -249,6 +249,53 @@ def test_serializer_rejects_inconsistent_or_malformed_source_results(mutation):
         serialize_home_ap_24h(value)
 
 
+def test_serializer_accepts_known_before_window_source_gap_history():
+    value = deepcopy(result())
+    item = value["items"][0]
+    item["current"] = {
+        "status": "unknown",
+        "reason_code": "current_state_source_gap",
+        "observed_at": None,
+        "freshness_status": "unavailable",
+    }
+    item["history"].update({
+        "status": "unknown",
+        "reason_code": "current_state_source_gap",
+        "coverage_status": "insufficient_data",
+        "history_eligible_from": "2026-08-27T12:00:00.000Z",
+        "first_evidence_at": "2026-08-27T11:00:00.000Z",
+        "last_evidence_at": "2026-08-27T11:00:00.000Z",
+        "authoritative_sample_count": 0,
+        "operational_seconds": 0,
+        "unavailable_seconds": 0,
+        "unknown_evidence_seconds": 86400,
+        "short_history_seconds": 0,
+        "max_gap_seconds": None,
+        "current_vs_24h": "history_insufficient",
+    })
+    for bucket in item["timeline"]:
+        bucket.update({
+            "ap_state": "unknown",
+            "ap_state_reason": "current_state_source_gap",
+            "operational_seconds": 0,
+            "unavailable_seconds": 0,
+            "unknown_evidence_seconds": 900,
+            "short_history_seconds": 0,
+            "authoritative_state_sample_count": 0,
+        })
+    value["summary"]["current"] = {
+        "operational": 0, "degraded": 0, "unavailable": 0, "unknown": 1,
+    }
+    value["summary"]["history"] = dict(value["summary"]["current"])
+    value["summary"]["status_gap_ap_count"] = 1
+
+    serialized = serialize_home_ap_24h(value)
+
+    assert serialized["items"][0]["history"]["reason_code"] == (
+        "current_state_source_gap"
+    )
+
+
 def test_route_enforces_response_size_cap(admin_app):
     client = admin_app.test_client(); login(client)
     runtime = admin_app.extensions["admin_web_runtime"]
