@@ -44,6 +44,8 @@ def render_admin_page(
     home_activity_config: object | None = None,
     home_health_state: str = "disabled",
     home_health_config: object | None = None,
+    home_ap_24h_state: str = "disabled",
+    home_ap_24h_config: object | None = None,
 ) -> Response:
     """Render only canonical server context; business data is API-loaded."""
     return make_response(
@@ -84,6 +86,17 @@ def render_admin_page(
             ),
             home_health_request_timeout_seconds=getattr(
                 home_health_config, "request_timeout_seconds", 20
+            ),
+            home_ap_24h_enabled=(
+                home_ap_24h_state == "active"
+                and bool(getattr(home_ap_24h_config, "enabled", False))
+            ),
+            home_ap_24h_unavailable=home_ap_24h_state == "unavailable",
+            home_ap_24h_refresh_seconds=getattr(
+                home_ap_24h_config, "refresh_seconds", 120
+            ),
+            home_ap_24h_request_timeout_seconds=getattr(
+                home_ap_24h_config, "request_timeout_seconds", 20
             ),
         )
     )

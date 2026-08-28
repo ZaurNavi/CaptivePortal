@@ -507,6 +507,161 @@
 
 (function () {
   "use strict";
+  const STATUS = new Set(["operational", "degraded", "unavailable", "unknown"]);
+  const COVERAGE = new Set(["complete", "partial", "insufficient_data"]);
+  const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
+  function count(value) { return Number.isInteger(value) && value >= 0; }
+  function utc(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)); }
+  function counts(value, population) {
+    return value && Object.keys(value).length === 4 && ["operational", "degraded", "unavailable", "unknown"].every((key) => count(value[key]))
+      && Object.values(value).reduce((total, item) => total + item, 0) === population;
+  }
+  function validResult(payload, siteId) {
+    if (!payload || payload.api_version !== "admin.read.v1" || payload.site_id !== siteId || !payload.result) return null;
+    const value = payload.result;
+    if (value.contract_version !== "admin.home_ap_24h.v1" || !STATUS.has(value.block_status)) return null;
+    if (!value.window || value.window.kind !== "rolling_24h" || value.window.bucket_seconds !== 900 || value.window.bucket_count !== 96
+      || !utc(value.window.evaluated_at_utc) || !utc(value.window.from_utc) || !utc(value.window.to_utc)
+      || value.window.evaluated_at_utc !== value.window.to_utc
+      || Date.parse(value.window.to_utc) - Date.parse(value.window.from_utc) !== 86400000) return null;
+    if (!value.summary || !value.sources || !value.page || !Array.isArray(value.items)) return null;
+    const population = value.summary.ap_count_in_window;
+    if (!count(population) || !counts(value.summary.current, population) || !counts(value.summary.history, population)
+      || !counts(value.summary.observation_quality, population)
+      || !["short_history_ap_count", "status_gap_ap_count", "observation_problem_ap_count"].every((key) => count(value.summary[key]) && value.summary[key] <= population)) return null;
+    if (Object.keys(value.sources).length !== 2 || !["current_state", "observations"].every((key) => value.sources[key] && STATUS.has(value.sources[key].status))) return null;
+    if (!Number.isInteger(value.page.limit) || value.page.limit < 1 || value.page.limit > 20 || value.items.length > value.page.limit) return null;
+    if (!value.items.every((item) => item && typeof item.ap_mac === "string" && item.current && STATUS.has(item.current.status)
+      && FRESHNESS.has(item.current.freshness_status)
+      && item.history && STATUS.has(item.history.status) && COVERAGE.has(item.history.coverage_status)
+      && item.observation_quality && STATUS.has(item.observation_quality.status)
+      && Array.isArray(item.timeline) && item.timeline.length === 96
+      && item.timeline.every((bucket, index) => bucket && STATUS.has(bucket.ap_state) && STATUS.has(bucket.observation_quality)
+        && utc(bucket.from_utc) && utc(bucket.to_utc)
+        && Date.parse(bucket.from_utc) === Date.parse(value.window.from_utc) + index * 900000
+        && Date.parse(bucket.to_utc) === Date.parse(bucket.from_utc) + 900000
+        && ["operational_seconds", "unavailable_seconds", "unknown_evidence_seconds", "short_history_seconds"].every((key) => count(bucket[key]))
+        && bucket.operational_seconds + bucket.unavailable_seconds + bucket.unknown_evidence_seconds + bucket.short_history_seconds === 900
+        && ["authoritative_state_sample_count", "complete_observation_sample_count", "diagnostic_partial_observation_sample_count"].every((key) => count(bucket[key]))))) return null;
+    if (value.page.next_cursor !== null && typeof value.page.next_cursor !== "string") return null;
+    return value;
+  }
+  function retryDelay(failures, retryAfter) {
+    if (Number.isFinite(retryAfter) && retryAfter > 0) return retryAfter * 1000;
+    return Math.min(300000, 5000 * (2 ** Math.min(Math.max(0, failures - 1), 6)));
+  }
+  function controllerEnabled(root) { return root && root.dataset.homeAp24hEnabled === "true"; }
+  if (typeof window !== "undefined") window.CaptivPortalHomeAp24Test = Object.freeze({validResult, retryDelay, controllerEnabled});
+  if (typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  if (!root || root.dataset.page !== "home" || !controllerEnabled(root)) return;
+  const siteId = root.dataset.siteId;
+  const base = root.dataset.apiBase + "/home/ap-24h";
+  const refreshMs = Number(root.dataset.homeAp24hRefreshSeconds) * 1000;
+  const timeoutMs = Number(root.dataset.homeAp24hRequestTimeoutSeconds) * 1000;
+  const state = {generation: 0, controller: null, active: false, stopped: false, failures: 0, next: 0, cursor: null, timer: null};
+  const panel = document.getElementById("home-ap-24h-state");
+  const target = document.getElementById("home-ap-24h-items");
+  const more = document.getElementById("home-ap-24h-more");
+  function node(tag, className, text) {
+    const value = document.createElement(tag);
+    if (className) value.className = className;
+    if (text !== undefined) value.textContent = text === null || text === undefined ? "—" : String(text);
+    return value;
+  }
+  function setPanel(status, title, message) {
+    panel.dataset.state = status;
+    document.getElementById("home-ap-24h-status").textContent = title;
+    document.getElementById("home-ap-24h-message").textContent = message;
+  }
+  function renderSummary(value) {
+    const summary = document.getElementById("home-ap-24h-summary"); summary.replaceChildren();
+    const axes = [["Current", value.summary.current], ["24-hour state", value.summary.history], ["Observation evidence", value.summary.observation_quality]];
+    axes.forEach(([label, counts]) => {
+      const card = node("article", "health-component");
+      card.append(node("strong", null, label), node("p", "live-detail", `Operational ${counts.operational} · Degraded ${counts.degraded} · Unavailable ${counts.unavailable} · Unknown ${counts.unknown}`));
+      summary.append(card);
+    });
+    document.getElementById("home-ap-24h-window").textContent = `${value.window.from_utc} through ${value.window.to_utc} · ${value.summary.ap_count_in_window} AP(s)`;
+  }
+  function renderItems(items, append) {
+    if (!append) target.replaceChildren();
+    items.forEach((item) => {
+      const row = node("article", "data-row"); const heading = node("div", "data-row-header");
+      heading.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.current.status));
+      const detail = node("p", "live-detail", `${item.ap_mac} · 24h ${item.history.status} · unavailable ${item.history.unavailable_seconds}s · Observation ${item.observation_quality.status}`);
+      const timeline = node("div", "ap24-timeline");
+      item.timeline.forEach((bucket) => { const segment = node("span", "ap24-segment"); segment.dataset.state = bucket.ap_state; segment.title = `${bucket.from_utc} · ${bucket.ap_state} · Observation ${bucket.observation_quality}`; timeline.append(segment); });
+      row.append(heading, detail, timeline); target.append(row);
+    });
+  }
+  async function request(cursor, generation) {
+    const controller = new AbortController(); state.controller = controller;
+    const timeout = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+    try {
+      const params = new URLSearchParams({limit: "20"}); if (cursor) params.set("cursor", cursor);
+      const response = await fetch(`${base}?${params}`, {method: "GET", credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}, signal: controller.signal});
+      let payload = null; try { payload = await response.json(); } catch (_error) { payload = null; }
+      if (!response.ok) {
+        const failure = new Error("request failed"); failure.status = response.status;
+        failure.retryAfter = Number(response.headers.get("Retry-After")) || 0; throw failure;
+      }
+      if (state.stopped || generation !== state.generation) return null;
+      const value = validResult(payload, siteId); if (!value) throw new Error("malformed response");
+      return value;
+    } finally {
+      window.clearTimeout(timeout); if (state.controller === controller) state.controller = null;
+    }
+  }
+  function failure(error) {
+    if (error && error.status === 404) { state.stopped = true; target.replaceChildren(); more.hidden = true; setPanel("unavailable", "Feature unavailable", "AP 24-hour history is disabled."); return; }
+    state.failures += 1; state.next = performance.now() + retryDelay(state.failures, error && error.retryAfter);
+    setPanel("unavailable", "Update unavailable", "AP 24-hour evidence could not be refreshed. Other Home panels remain independent.");
+  }
+  async function run(manual) {
+    if (state.stopped || state.active || document.hidden) return;
+    if (performance.now() < state.next && (!manual || state.failures > 0)) return;
+    state.active = true; state.generation += 1; const generation = state.generation;
+    if (state.controller) state.controller.abort("superseded");
+    try {
+      const value = await request(null, generation); if (!value) return;
+      state.failures = 0; state.next = performance.now() + refreshMs; state.cursor = value.page.next_cursor;
+      renderSummary(value); renderItems(value.items, false); more.hidden = !state.cursor;
+      setPanel(value.block_status, value.block_status[0].toUpperCase() + value.block_status.slice(1), value.block_reason || "Persisted Current State and Observation evidence loaded.");
+    } catch (error) {
+      if (!(error && error.name === "AbortError")) failure(error);
+    } finally { state.active = false; }
+  }
+  async function loadMore() {
+    if (!state.cursor || state.active || state.stopped) return;
+    state.active = true; state.generation += 1; const generation = state.generation;
+    try {
+      const value = await request(state.cursor, generation); if (!value) return;
+      state.cursor = value.page.next_cursor; renderItems(value.items, true); more.hidden = !state.cursor;
+    } catch (error) { if (!(error && error.name === "AbortError")) failure(error); }
+    finally { state.active = false; }
+  }
+  function abort(reason) {
+    if (state.controller) {
+      state.generation += 1;
+      state.controller.abort(reason);
+    }
+  }
+  function nextEligibleAt() { return state.stopped ? Infinity : state.next; }
+  const api = Object.freeze({run, abort, nextEligibleAt}); window.CaptivPortalHomeAp24Coordinator = api;
+  more.addEventListener("click", loadMore);
+  const combined = root.dataset.homeLiveEnabled === "true" && [root.dataset.homeTrafficEnabled, root.dataset.homeActivityEnabled, root.dataset.homeHealthEnabled, root.dataset.homeAp24hEnabled].some((value) => value === "true");
+  if (!combined) {
+    const refresh = document.getElementById("refresh-button"); refresh.addEventListener("click", () => run(true));
+    function schedule() { if (state.timer !== null) window.clearTimeout(state.timer); if (!state.stopped && !document.hidden) state.timer = window.setTimeout(async () => { state.timer = null; await run(false); schedule(); }, Math.max(1000, state.next - performance.now())); }
+    document.addEventListener("visibilitychange", () => { if (document.hidden) { abort("hidden"); if (state.timer !== null) window.clearTimeout(state.timer); } else { run(false).then(schedule); } });
+    window.addEventListener("pagehide", () => { state.stopped = true; abort("pagehide"); });
+    run(true).then(schedule);
+  }
+}());
+
+(function () {
+  "use strict";
 
   const API_VERSION = "admin.read.v1";
   const IDS = ["guest_access", "live_network_state", "network_history", "visit_tracking", "analytics_home_data"];
@@ -2015,8 +2170,8 @@
   function pageFailureEffect(failure) {
     return failure && failure.status === 403 ? "preserve_summary_forbidden" : "retry_group";
   }
-  function combinedCoordinatorEnabled(homeLive, homeTraffic, homeActivity, homeHealth) {
-    return homeLive === "true" && (homeTraffic === "true" || homeActivity === "true" || homeHealth === "true");
+  function combinedCoordinatorEnabled(homeLive, homeTraffic, homeActivity, homeHealth, homeAp24h) {
+    return homeLive === "true" && (homeTraffic === "true" || homeActivity === "true" || homeHealth === "true" || homeAp24h === "true");
   }
 
   if (typeof window !== "undefined") {
@@ -2038,6 +2193,7 @@
     root.dataset.homeTrafficEnabled,
     root.dataset.homeActivityEnabled,
     root.dataset.homeHealthEnabled,
+    root.dataset.homeAp24hEnabled,
   )) return;
 
   const live = window.CaptivPortalHomeLiveTest;
@@ -2084,12 +2240,15 @@
   function clearGlobal() { globalPanel.hidden = true; }
   function activityController() { return window.CaptivPortalHomeActivityCoordinator || null; }
   function healthController() { return window.CaptivPortalHomeHealthCoordinator || null; }
+  function ap24Controller() { return window.CaptivPortalHomeAp24Coordinator || null; }
   function abortAll(reason) {
     Object.values(sources).forEach((source) => live.abortOwnedController(source, reason));
     const activity = activityController();
     if (activity) activity.abort(reason);
     const health = healthController();
     if (health) health.abort(reason);
+    const ap24 = ap24Controller();
+    if (ap24) ap24.abort(reason);
   }
   function stopAll(kind) {
     stopped = true;
@@ -2403,6 +2562,11 @@
       const due = health.nextEligibleAt();
       if (Number.isFinite(due)) finite.push(due);
     }
+    const ap24 = ap24Controller();
+    if (ap24) {
+      const due = ap24.nextEligibleAt();
+      if (Number.isFinite(due)) finite.push(due);
+    }
     if (!finite.length) return Math.min(liveRefresh, trafficRefresh) * 1000;
     return Math.max(1000, Math.min(...finite) - performance.now());
   }
@@ -2440,6 +2604,10 @@
       const health = healthController();
       if (health && !coordinator.pending && !stopped && !document.hidden) {
         await health.run(manual);
+      }
+      const ap24 = ap24Controller();
+      if (ap24 && !coordinator.pending && !stopped && !document.hidden) {
+        await ap24.run(manual);
       }
       document.getElementById("home-live-announcement").textContent = "Home current sources updated.";
     } finally {

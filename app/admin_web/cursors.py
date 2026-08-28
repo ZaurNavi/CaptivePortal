@@ -9,6 +9,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Mapping
 
+from app.common.mac import format_mac_colon
+
 
 _VERSION = 1
 
@@ -129,6 +131,10 @@ def _identity(value: object, kind: str) -> str | int:
         except (ValueError, AttributeError) as exc:
             raise AdminCursorError("cursor is malformed") from exc
         if canonical != value:
+            raise AdminCursorError("cursor is malformed")
+        return value
+    if kind == "mac":
+        if not isinstance(value, str) or format_mac_colon(value) != value:
             raise AdminCursorError("cursor is malformed")
         return value
     raise ValueError("unsupported cursor identity kind")

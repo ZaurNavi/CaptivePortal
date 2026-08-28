@@ -59,6 +59,17 @@ from .home_health_serialization import (
     HomeHealthSerializationError,
     serialize_home_health,
 )
+from .home_ap_24h_serialization import (
+    HomeAp24SerializationError,
+    serialize_home_ap_24h,
+)
+from app.analytics.home_ap_24h import (
+    CONTRACT_VERSION as HOME_AP_24H_CONTRACT_VERSION,
+    DEFAULT_PAGE_SIZE as HOME_AP_24H_DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE as HOME_AP_24H_MAX_PAGE_SIZE,
+    HomeAp24SourceUnavailable,
+    HomeAp24ValidationError,
+)
 
 
 class AdminQueryError(RuntimeError):
@@ -178,6 +189,7 @@ class AdminQueryService:
         current_traffic_read_service: Any | None = None,
         home_activity_read_service: Any | None = None,
         home_activity_config: Any | None = None,
+        home_ap_24h_read_service: Any | None = None,
         execution_controls: AdminQueryExecutionControls | None = None,
     ):
         self._config = config
@@ -189,6 +201,7 @@ class AdminQueryService:
         self._current_traffic = current_traffic_read_service
         self._home_activity = home_activity_read_service
         self._home_activity_config = home_activity_config
+        self._home_ap_24h = home_ap_24h_read_service
         self._execution_controls = execution_controls or (
             AdminQueryExecutionControls(
                 max_concurrent_queries=config.max_concurrent_queries,
@@ -197,6 +210,60 @@ class AdminQueryService:
                 ),
             )
         )
+
+    def home_ap_24h(self, principal, site_id, *, limit=None, cursor=None):
+        self._authorize(principal, "admin.read.overview", site_id)
+        source = self._home_ap_24h
+        if source is None:
+            raise AdminQueryUnavailable()
+        selected_limit = self._home_ap_24h_limit(limit)
+        filters = {
+            "limit": selected_limit,
+            "contract_version": HOME_AP_24H_CONTRACT_VERSION,
+            "window": "rolling_24h:900:96",
+        }
+        try:
+            decoded = decode_cursor(
+                cursor,
+                kind="home_ap_24h",
+                site_id=site_id,
+                filters=filters,
+                identity_kind="mac",
+                maximum_length=self._config.max_cursor_chars,
+            )
+        except AdminCursorError as exc:
+            raise AdminQueryValidationError() from exc
+        anchor = None if decoded is None else parse_utc(decoded[0], "cursor timestamp")
+        after = None if decoded is None else decoded[1]
+
+        def query(deadline):
+            try:
+                value = source.get_home_ap_24h(
+                    site_id,
+                    evaluated_at_utc=anchor,
+                    after_ap_mac=after,
+                    limit=selected_limit,
+                    deadline=deadline,
+                )
+                has_more = bool(value.get("page", {}).get("has_more"))
+                result = serialize_home_ap_24h(value)
+                next_cursor = None
+                if has_more and result["items"]:
+                    next_cursor = encode_cursor(
+                        kind="home_ap_24h",
+                        site_id=site_id,
+                        timestamp=result["window"]["evaluated_at_utc"],
+                        identity=result["items"][-1]["ap_mac"],
+                        filters=filters,
+                    )
+                result["page"]["next_cursor"] = next_cursor
+                return AdminQueryResponse(result)
+            except HomeAp24ValidationError as exc:
+                raise AdminQueryValidationError() from exc
+            except (HomeAp24SourceUnavailable, HomeAp24SerializationError) as exc:
+                raise AdminQueryUnavailable() from exc
+
+        return self._run(query)
 
     def home_activity(
         self,
@@ -768,6 +835,17 @@ class AdminQueryService:
             raise AdminQueryValidationError()
         parsed = int(value)
         if not 1 <= parsed <= 250:
+            raise AdminQueryValidationError()
+        return parsed
+
+    @staticmethod
+    def _home_ap_24h_limit(value) -> int:
+        if value is None:
+            return HOME_AP_24H_DEFAULT_PAGE_SIZE
+        if not isinstance(value, str) or not value.isascii() or not value.isdigit() or value.startswith("0"):
+            raise AdminQueryValidationError()
+        parsed = int(value)
+        if not 1 <= parsed <= HOME_AP_24H_MAX_PAGE_SIZE:
             raise AdminQueryValidationError()
         return parsed
 

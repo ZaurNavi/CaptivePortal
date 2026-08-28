@@ -345,6 +345,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             home_activity_config=runtime.home_activity_config,
             home_health_state=runtime.home_health_state,
             home_health_config=runtime.home_health_config,
+            home_ap_24h_state=runtime.home_ap_24h_state,
+            home_ap_24h_config=runtime.home_ap_24h_config,
         )
 
     @blueprint.get("/admin/api/v1/session")
@@ -427,6 +429,89 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             )
             return _error("source_unavailable", 503)
         return _success(selected, result.result, enforce_size=True)
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/home/ap-24h")
+    @authenticated
+    def api_home_ap_24h(site_id: str) -> Response:
+        allowed = frozenset({"limit", "cursor"})
+        if any(key not in allowed or len(request.args.getlist(key)) != 1 for key in request.args):
+            return _error("invalid_request", 400)
+        try:
+            selected = resolver.resolve(site_id)
+        except AdminSiteContextError:
+            return _error("invalid_request", 400)
+        except AdminAccessDenied:
+            return _error("site_forbidden", 403)
+        if not policy.authorize(g.admin_principal, "admin.read.overview", selected):
+            return _error("site_forbidden", 403)
+        if runtime.home_ap_24h_state == "disabled":
+            return _error("not_found", 404)
+        service = runtime.query_service
+        if runtime.home_ap_24h_state != "active" or service is None:
+            return _error("source_unavailable", 503)
+        started = time.monotonic()
+        status_code = 200
+        outcome = "success"
+        reason = None
+        result = None
+        try:
+            result = service.home_ap_24h(
+                g.admin_principal,
+                selected,
+                limit=request.args.get("limit"),
+                cursor=request.args.get("cursor"),
+            )
+        except AdminQueryValidationError:
+            status_code, outcome, reason = 400, "rejected", "invalid_request"
+        except AdminQueryForbidden:
+            status_code, outcome, reason = 403, "rejected", "site_forbidden"
+        except AdminQueryBusy:
+            status_code, outcome, reason = 429, "unavailable", "concurrency_limit"
+        except AdminQueryDeadline:
+            status_code, outcome, reason = 503, "unavailable", "query_deadline"
+        except AdminQueryUnavailable:
+            status_code, outcome, reason = 503, "unavailable", "source_unavailable"
+        except Exception:
+            logger.exception("admin.home_ap_24h_query_failed")
+            status_code, outcome, reason = 503, "unavailable", "source_unavailable"
+        if status_code != 200:
+            response = make_response(_error(reason or "source_unavailable", status_code))
+            if status_code == 429:
+                response.headers["Retry-After"] = "1"
+        else:
+            response = make_response(
+                _success(selected, result.result, enforce_size=True)
+            )
+            if response.status_code != 200:
+                status_code = response.status_code
+                outcome = "unavailable"
+                reason = "response_too_large"
+        try:
+            payload = None if result is None else result.result
+            logger.info(
+                "admin.home_ap_24h_query_completed",
+                extra={
+                    "event": "admin.home_ap_24h_query_completed",
+                    "site_id": selected,
+                    "status_code": status_code,
+                    "outcome": outcome,
+                    "reason": reason,
+                    "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                    "block_status": None if payload is None else payload.get("block_status"),
+                    "current_state_source_status": None if payload is None else payload.get("sources", {}).get("current_state", {}).get("status"),
+                    "observation_source_status": None if payload is None else payload.get("sources", {}).get("observations", {}).get("status"),
+                    "ap_count": None if payload is None else payload.get("summary", {}).get("ap_count_in_window"),
+                    "returned_count": None if payload is None else len(payload.get("items", [])),
+                    "has_next_page": None if payload is None else payload.get("page", {}).get("next_cursor") is not None,
+                    "response_size_category": None if payload is None else (
+                        "small" if len(payload.get("items", [])) <= 5 else
+                        "medium" if len(payload.get("items", [])) <= 10 else "large"
+                    ),
+                },
+            )
+        except Exception:
+            pass
+        return response
 
     @blueprint.get("/admin/api/v1/sites/<site_id>/summary/visits")
     @authenticated
