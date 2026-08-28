@@ -16,7 +16,7 @@ planning-only / implementation / review / publish / deploy
 
 agent / owner / shared / not-applicable
 
-> Это поле относится к targeted/module tests текущего TASK. Официальный full regression по умолчанию принадлежит Central Lab.
+> `agent` означает только focused/minimal automated tests текущего TASK/модуля. Cross-module/broader/full execution и official acceptance принадлежат Owner/Tech Lead/Central Lab.
 
 ## 6. Текущее состояние
 
@@ -56,16 +56,22 @@ agent / owner / shared / not-applicable
 
 ## 23. Targeted/module tests
 
-## 24. Official full regression / Central Lab
+## 24. Cross-module / broader / full regression
 
 Указать:
 
 ```text
+cross-module test needed: yes/no
+if yes: external execution OR agent prepares-without-running
 fresh Central Lab baseline required: yes/no
 exact artifact: <SHA/patch identity when known>
+Coder Lab preparation delegated: yes/no
+if yes: exact prep-only action
+official Lab operator: Owner
+gate direction / PASS-FAIL: Tech Lead + Owner
 ```
 
-Не назначать full repository suite Coder/Tech Lead автоматически.
+Не назначать Coder исполнителем cross-module/broader/full regression или official Central Lab gate.
 
 ## 25. Linux / production-compatible gate
 

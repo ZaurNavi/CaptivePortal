@@ -6,11 +6,14 @@ Do not reconstruct architecture from repository history when current docs exist.
 # GitHub Copilot adapter for CaptivPortal
 
 Status: current
-Updated: 2026-08-04
+Updated: 2026-08-28
+Central Lab governance effective: 2026-08-27
 
 Это только платформенный адаптер. Универсальные правила находятся в AGENTS.md и не дублируются здесь.
 
 Перед изменением открой только документы, перечисленные в TASK, проверь фактические связанные файлы и тесты и не расширяй scope.
+
+Testing boundary: Coder/Copilot запускает только focused/minimal TASK-scoped automated tests изменяемого модуля и может создавать/изменять tests этого implementation scope. Unrelated-module, cross-module, broader/full repository regression, release/differential gates и официальный PASS/FAIL принадлежат Owner/Tech Lead/Central Lab. Если cross-module proof нужен, Coder либо запрашивает внешний запуск, либо подготавливает test без запуска. `C:\CaptivPortal-Lab` не запускается Coder как официальный gate.
 
 Если implementation TASK отсутствует или не определяет execution mode, allowed files, repository actions либо test responsibility, запроси уточнение до изменений.
 
