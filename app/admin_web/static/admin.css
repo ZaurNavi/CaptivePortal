@@ -119,6 +119,13 @@ input[type="radio"] { width: auto; min-height: 0; }
 .health-component[data-state="degraded"] .badge,
 .health-component[data-state="unknown"] .badge { color: #734c00; background: #fef0c7; }
 .health-component[data-state="unavailable"] .badge { color: #7a271a; background: #fee4e2; }
+.ap24-section { margin-bottom: 1rem; }
+.ap24-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .65rem; margin-bottom: .8rem; }
+.ap24-timeline { display: grid; grid-template-columns: repeat(24, minmax(3px, 1fr)); gap: 2px; height: 16px; margin-top: .65rem; }
+.ap24-segment { border-radius: 2px; background: #98a2b3; }
+.ap24-segment[data-state="operational"] { background: #12a594; }
+.ap24-segment[data-state="degraded"] { background: #f4b740; }
+.ap24-segment[data-state="unavailable"] { background: #d92d20; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin: 1.25rem 0 .75rem; }
 .section-heading h2 { margin: 0; }
 .live-metric { grid-column: auto; }

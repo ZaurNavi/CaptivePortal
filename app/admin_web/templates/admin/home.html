@@ -127,6 +127,24 @@
   <div><strong>Visits and Traffic unavailable</strong><p>Activity configuration or its persisted read source is unavailable. Current panels remain independent.</p></div>
 </section>
 {% endif %}
+{% if home_ap_24h_enabled %}
+<section id="home-ap-24h" class="card card-wide ap24-section" aria-labelledby="home-ap-24h-title">
+  <div class="section-heading">
+    <div><h2 id="home-ap-24h-title">Access Points · Last 24 hours</h2><p id="home-ap-24h-window" class="live-detail">Loading rolling persisted evidence…</p></div>
+  </div>
+  <div id="home-ap-24h-state" class="state-panel" data-state="unknown" role="status" aria-live="polite">
+    <span class="state-dot" aria-hidden="true"></span><div><strong id="home-ap-24h-status">Loading</strong><p id="home-ap-24h-message">Reading Current State and Observation history.</p></div>
+  </div>
+  <div id="home-ap-24h-summary" class="ap24-summary" aria-live="polite"></div>
+  <div id="home-ap-24h-items" class="row-list" aria-live="polite"></div>
+  <div class="pagination"><button id="home-ap-24h-more" class="button button-secondary" type="button" hidden>Load more access points</button></div>
+  <p class="live-detail">Unavailable duration is controller-observed persisted evidence, not physical downtime SLA.</p>
+</section>
+{% elif home_ap_24h_unavailable %}
+<section class="state-panel" data-state="warning" aria-label="AP 24-hour history unavailable">
+  <span class="state-dot" aria-hidden="true"></span><div><strong>AP 24-hour history unavailable</strong><p>Other Home panels remain independent.</p></div>
+</section>
+{% endif %}
 <section class="card card-wide live-section" aria-labelledby="by-ap-title">
   <h2 id="by-ap-title">Devices by AP — Now</h2>
   <div id="live-devices-by-ap" class="live-bars"></div>

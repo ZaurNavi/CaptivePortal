@@ -14,6 +14,8 @@ from app.current_state.models import CurrentStateValidationError
 from app.current_state.normalizer import canonical_scope
 from app.current_state.read_service import CurrentStateReadService
 from app.current_state.repository import CurrentStateRepository
+from app.current_state import repository as repository_module
+from app.current_state.ap_status import classify_ap_status_code
 
 from .conftest import NOW, OTHER_SITE, SITE, ap_row, client_row, cycle
 
@@ -274,17 +276,65 @@ def test_ap_summary_and_page_keep_zero_client_inventory(service):
     publish_clients(service)
     rows = [
         ap_row(cycle_id="aps", mac="11:22:33:44:55:66", status_code=1, status_classification="online"),
-        ap_row(cycle_id="aps", mac="22:33:44:55:66:77", status_code=0, status_classification="other"),
-        ap_row(cycle_id="aps", mac="33:44:55:66:77:88", status_classification="unknown"),
+        ap_row(cycle_id="aps", mac="22:33:44:55:66:77", status_code=0, status_classification="offline"),
+        ap_row(cycle_id="aps", mac="33:44:55:66:77:88", status_code=3, status_classification="other"),
+        ap_row(cycle_id="aps", mac="44:55:66:77:88:99", status_classification="unknown"),
     ]
-    parent = cycle(kind="ap", cycle_id="aps", items_stored=3)
+    parent = cycle(kind="ap", cycle_id="aps", items_stored=4)
     service.repository.publish_cycle(parent, ap_rows=rows)
     summary = service.get_current_ap_summary(SITE, evaluated_at_utc=EVALUATED)
-    assert (summary.ap_total, summary.online_count, summary.offline_count, summary.other_count, summary.unknown_count) == (3, 1, 0, 1, 1)
+    assert (summary.ap_total, summary.online_count, summary.offline_count, summary.other_count, summary.unknown_count) == (4, 1, 1, 1, 1)
     page = service.list_current_aps(SITE, limit=2, evaluated_at_utc=EVALUATED)
     assert len(page.items) == 2 and page.next_cursor
     second = service.list_current_aps(SITE, limit=2, cursor=page.next_cursor, evaluated_at_utc=EVALUATED)
-    assert [item.ap_mac for item in second.items] == ["33:44:55:66:77:88"]
+    assert [item.ap_mac for item in second.items] == ["33:44:55:66:77:88", "44:55:66:77:88:99"]
+    assert [item.status_classification for item in page.items + second.items] == [
+        "online", "offline", "other", "unknown",
+    ]
+
+
+def test_offline_persistence_preserves_schema_v1_and_integrity(service):
+    row = ap_row(
+        cycle_id="offline-cycle",
+        status_code=0,
+        status_classification="offline",
+    )
+    service.repository.publish_cycle(
+        cycle(kind="ap", cycle_id="offline-cycle", items_stored=1),
+        ap_rows=[row],
+    )
+
+    with service.repository.read_connection() as connection:
+        stored = connection.execute(
+            "SELECT status_code, status_classification FROM current_ap_state WHERE cycle_id=?",
+            ("offline-cycle",),
+        ).fetchone()
+        assert tuple(stored) == (0, "offline")
+        assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert repository_module._schema_signature(connection) == repository_module._expected_schema_signature()
+
+
+def test_historical_other_row_is_not_backfilled(service):
+    historical = ap_row(
+        cycle_id="historical",
+        status_code=0,
+        status_classification="other",
+    )
+    service.repository.publish_cycle(
+        cycle(kind="ap", cycle_id="historical", items_stored=1),
+        ap_rows=[historical],
+    )
+
+    with service.repository.read_connection() as connection:
+        stored = connection.execute(
+            "SELECT status_code, status_classification FROM current_ap_state WHERE cycle_id=?",
+            ("historical",),
+        ).fetchone()
+
+    assert tuple(stored) == (0, "other")
+    assert classify_ap_status_code(stored[0]) == "offline"
 
 
 def test_history_quality_never_merges_scope_hashes(service):

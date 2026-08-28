@@ -77,8 +77,8 @@ def client_item(**changes):
     return replace(item, **changes)
 
 
-def ap_summary():
-    return CurrentApSummary(snapshot("ap"), 3, 1, 1, 0, 1)
+def ap_summary(*, total=3, online=1, offline=1, other=0, unknown=1):
+    return CurrentApSummary(snapshot("ap"), total, online, offline, other, unknown)
 
 
 def ap_item(status="online"):
@@ -231,6 +231,15 @@ def test_ap_product_mapping_never_exposes_offline(source_status, product):
 def test_ap_summary_maps_offline_to_other_and_checks_product_invariant():
     result = serialize_ap_summary(ap_summary(), SITE_ID)
     assert result["counts"] == {"total": 3, "online": 1, "other": 1, "unknown": 1}
+
+
+def test_ap_summary_combines_offline_and_other_for_product_contract():
+    result = serialize_ap_summary(
+        ap_summary(total=7, online=1, offline=2, other=3, unknown=1),
+        SITE_ID,
+    )
+    assert result["counts"] == {"total": 7, "online": 1, "other": 5, "unknown": 1}
+    assert "offline" not in result["counts"]
 
 
 def test_query_service_pre_post_deadline_and_exact_arguments():

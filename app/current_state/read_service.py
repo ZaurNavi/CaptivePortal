@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -43,6 +44,12 @@ class CurrentStateReadService:
     def __init__(self, repository: CurrentStateRepository):
         self.repository = repository
         self.config = repository.config
+
+    @contextmanager
+    def analytics_read_connection(self):
+        """Yield the repository's existing URI-mode read-only connection."""
+        with self.repository.read_connection() as connection:
+            yield connection
 
     def get_current_client_summary(self, site_id: str, *, evaluated_at_utc: datetime | str | None = None) -> CurrentClientSummary:
         site = require_site_id(site_id)

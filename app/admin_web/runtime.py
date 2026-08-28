@@ -21,6 +21,11 @@ from .home_health_config import (
     HomeHealthConfigError,
     home_health_config_from_settings,
 )
+from .home_ap_24h_config import (
+    HomeAp24Config,
+    HomeAp24ConfigError,
+    home_ap_24h_config_from_settings,
+)
 
 
 @dataclass(slots=True)
@@ -40,6 +45,9 @@ class AdminWebRuntime:
     home_health_state: str = "disabled"
     home_health_service: HomeHealthReadService | None = None
     home_health_query_service: Any | None = None
+    home_ap_24h_config: HomeAp24Config | None = None
+    home_ap_24h_state: str = "disabled"
+    home_ap_24h_service: Any | None = None
     blueprint: Any | None = None
 
     def clear(self) -> None:
@@ -138,6 +146,48 @@ def create_admin_web_runtime(
                 "failure_category": "configuration_error",
             },
         )
+    try:
+        ap24_config = home_ap_24h_config_from_settings(
+            settings, admin_config=config
+        )
+        ap24_state = "active" if ap24_config.enabled else "disabled"
+    except HomeAp24ConfigError:
+        ap24_config = None
+        ap24_state = "unavailable"
+        logger.error(
+            "admin.home_ap_24h_configuration_failed",
+            extra={
+                "event": "admin.home_ap_24h_configuration_failed",
+                "failure_category": "configuration_error",
+            },
+        )
+    ap24_service = None
+    if ap24_config is not None and ap24_config.enabled:
+        try:
+            from app.analytics.home_ap_24h import HomeAp24ReadService
+
+            ap24_service = HomeAp24ReadService(
+                current_state_read_service,
+                observation_read_service,
+                current_state_ap_interval_seconds=int(
+                    settings.get("current_state_ap_interval_seconds", 60)
+                ),
+                quality_gap_seconds=int(
+                    settings.get("analytics_quality_gap_threshold_seconds", 180)
+                ),
+                observation_dynamic_max_requests=int(
+                    settings.get("observation_ap_dynamic_max_requests_per_cycle", 200)
+                ),
+            )
+        except (TypeError, ValueError, AttributeError):
+            ap24_state = "unavailable"
+            logger.error(
+                "admin.home_ap_24h_composition_failed",
+                extra={
+                    "event": "admin.home_ap_24h_composition_failed",
+                    "failure_category": "composition_error",
+                },
+            )
     health_service = None
     if health_config is not None and health_config.enabled:
         try:
@@ -193,6 +243,7 @@ def create_admin_web_runtime(
             observation_read_service,
             current_state_read_service,
             activity_config,
+            ap24_service,
             execution_controls,
         )
     runtime = AdminWebRuntime(
@@ -218,6 +269,9 @@ def create_admin_web_runtime(
         home_health_state=health_state,
         home_health_service=health_service,
         home_health_query_service=health_query_service,
+        home_ap_24h_config=ap24_config,
+        home_ap_24h_state=ap24_state,
+        home_ap_24h_service=ap24_service,
     )
     from .routes import create_admin_web_blueprint
 
@@ -233,6 +287,7 @@ def _query_service(
     observation_read_service: Any,
     current_state_read_service: Any | None = None,
     home_activity_config: HomeActivityConfig | None = None,
+    home_ap_24h_service: Any | None = None,
     execution_controls: Any | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
@@ -266,6 +321,7 @@ def _query_service(
                 analytics_runtime, "home_activity_service", None
             ),
             home_activity_config=home_activity_config,
+            home_ap_24h_read_service=home_ap_24h_service,
             execution_controls=execution_controls,
         )
     except (AttributeError, TypeError):
