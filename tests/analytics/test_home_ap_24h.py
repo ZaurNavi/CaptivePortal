@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
@@ -92,6 +93,7 @@ def observation_cycle(
     *,
     partial=False,
     parent_partial=False,
+    parent_result=None,
     mac=AP,
     failed_section=None,
 ):
@@ -107,9 +109,10 @@ def observation_cycle(
         "overview_observed_at": stamp(moment), "wired_observed_at": stamp(moment),
         "lan_observed_at": stamp(moment), "name": "Observed AP", "model": "EAP",
     }, ())])
+    result = parent_result or ("partial" if parent_partial else "success")
     repository.finalize_cycle(
-        identifier, finished_at=stamp(moment), complete=not parent_partial,
-        result="partial" if parent_partial else "success", items_seen=1,
+        identifier, finished_at=stamp(moment), complete=result == "success",
+        result=result, items_seen=1,
         items_stored=1,
     )
 
@@ -250,6 +253,112 @@ def test_parent_partial_does_not_poison_complete_ap_local_row(sources):
     assert result["sources"]["observations"]["status"] == "degraded"
     assert result["items"][0]["observation_quality"]["status"] != "degraded"
     assert result["items"][0]["observation_quality"]["complete_sample_count"] == 1
+
+
+@pytest.mark.parametrize("parent_result", ["failed", "shutdown"])
+def test_failed_parent_never_supplies_complete_ap_local_evidence(
+    sources, parent_result
+):
+    current, observations = sources
+    current_cycle(current, ANCHOR - timedelta(minutes=2), [(AP, 1)])
+    observation_cycle(
+        observations,
+        ANCHOR - timedelta(minutes=2),
+        parent_result=parent_result,
+    )
+
+    result = read(service(current, observations))
+
+    source = result["sources"]["observations"]
+    quality = result["items"][0]["observation_quality"]
+    assert source["partial_cycle_count"] == 0
+    assert source["failed_cycle_count"] == 1
+    assert quality["complete_sample_count"] == 0
+    assert quality["status"] == "unknown"
+
+
+def test_observation_cycle_quality_categories_are_non_overlapping(sources):
+    current, observations = sources
+    current_cycle(current, ANCHOR - timedelta(minutes=2), [(AP, 1)])
+    observation_cycle(
+        observations,
+        ANCHOR - timedelta(minutes=3),
+        parent_partial=True,
+    )
+    observation_cycle(
+        observations,
+        ANCHOR - timedelta(minutes=2),
+        parent_result="failed",
+    )
+
+    source = read(service(current, observations))["sources"]["observations"]
+
+    assert source["partial_cycle_count"] == 1
+    assert source["failed_cycle_count"] == 1
+    assert source["status"] == "degraded"
+
+
+def test_running_cycle_requires_completed_history_before_operational(sources):
+    current, observations = sources
+    current_cycle(current, ANCHOR - timedelta(minutes=2), [(AP, 1)])
+    observations.create_cycle(
+        kind="ap_dynamic",
+        site_id=SITE,
+        started_at=stamp(ANCHOR - timedelta(minutes=1)),
+        cycle_id="running-only",
+    )
+
+    source = read(service(current, observations))["sources"]["observations"]
+
+    assert source["status"] == "unknown"
+    assert source["complete_cycle_count"] == 0
+    assert source["partial_cycle_count"] == 0
+    assert source["failed_cycle_count"] == 0
+
+
+def test_current_running_cycle_does_not_degrade_completed_history(sources):
+    current, observations = sources
+    current_cycle(current, ANCHOR - timedelta(minutes=2), [(AP, 1)])
+    observation_cycle(observations, ANCHOR - timedelta(minutes=2))
+    observations.create_cycle(
+        kind="ap_dynamic",
+        site_id=SITE,
+        started_at=stamp(ANCHOR - timedelta(minutes=1)),
+        cycle_id="current-running",
+    )
+
+    source = read(service(current, observations))["sources"]["observations"]
+
+    assert source["status"] == "operational"
+    assert source["complete_cycle_count"] == 1
+
+
+def test_abandoned_cycle_is_not_operational_history(sources):
+    current, observations = sources
+    current_cycle(current, ANCHOR - timedelta(minutes=2), [(AP, 1)])
+    abandoned_at = stamp(ANCHOR - timedelta(minutes=1))
+    observations.create_cycle(
+        kind="ap_dynamic",
+        site_id=SITE,
+        started_at=abandoned_at,
+        cycle_id="abandoned-only",
+    )
+    with sqlite3.connect(observations.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE observation_cycles
+            SET state='abandoned', abandoned_at=?, complete=0, updated_at=?
+            WHERE cycle_id='abandoned-only'
+            """,
+            (abandoned_at, abandoned_at),
+        )
+
+    source = read(service(current, observations))["sources"]["observations"]
+
+    assert source["status"] == "degraded"
+    assert source["complete_cycle_count"] == 0
+    assert source["partial_cycle_count"] == 0
+    assert source["failed_cycle_count"] == 0
 
 
 def test_ap_local_partial_is_diagnostic_only(sources):
@@ -433,14 +542,17 @@ def test_latest_complete_inventory_remains_in_roster_outside_history_window(sour
     assert [item["ap_mac"] for item in result["items"]] == [AP]
     assert result["items"][0]["current"] == {
         "status": "unknown",
-        "reason_code": "no_current_state_evidence",
+        "reason_code": "current_state_source_gap",
         "observed_at": None,
         "freshness_status": "unavailable",
     }
     assert result["items"][0]["history"]["coverage_status"] == "insufficient_data"
+    assert result["items"][0]["history"]["unknown_evidence_seconds"] == 86400
+    assert result["items"][0]["history"]["short_history_seconds"] == 0
     assert all(
-        bucket["short_history_seconds"] == 900
-        and bucket["unknown_evidence_seconds"] == 0
+        bucket["ap_state_reason"] == "current_state_source_gap"
+        and bucket["short_history_seconds"] == 0
+        and bucket["unknown_evidence_seconds"] == 900
         for bucket in result["items"][0]["timeline"]
     )
 

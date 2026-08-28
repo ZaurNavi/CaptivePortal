@@ -370,6 +370,7 @@ class HomeAp24ReadService:
                     JOIN observation_cycles c ON c.cycle_id=o.cycle_id
                     WHERE o.site_id=? AND c.kind='ap_dynamic'
                       AND c.state='completed'
+                      AND c.result IN ('success', 'partial')
                       AND o.observed_at>=? AND o.observed_at<?
                     ORDER BY o.observed_at
                     """,
@@ -467,12 +468,33 @@ class HomeAp24ReadService:
                 )
         completed = [row for row in cycles if row["state"] == "completed"]
         timestamps = [_parse(row["started_at"]) for row in completed]
-        partial = sum(1 for row in completed if row["result"] == "partial" or row["complete"] != 1)
+        partial = sum(1 for row in completed if row["result"] == "partial")
         failed = sum(1 for row in completed if row["result"] in {"failed", "shutdown"})
-        capacity = len(roster) > self._obs_capacity
-        source_status = "unknown" if not cycles else (
-            "degraded" if partial or failed or capacity or (_max_gap(timestamps) or 0) > self._obs_gap else "operational"
+        abandoned = any(row["state"] == "abandoned" for row in cycles)
+        successful = sum(
+            1 for row in completed
+            if row["result"] == "success" and row["complete"] == 1
         )
+        inconsistent_completed = any(
+            row["result"] == "success" and row["complete"] != 1
+            for row in completed
+        )
+        capacity = len(roster) > self._obs_capacity
+        if not completed and not abandoned:
+            # No completed history exists yet.  A normal in-flight cycle is
+            # not degradation evidence, but it is not operational history.
+            source_status = "unknown"
+        elif (
+            partial
+            or failed
+            or abandoned
+            or inconsistent_completed
+            or capacity
+            or (_max_gap(timestamps) or 0) > self._obs_gap
+        ):
+            source_status = "degraded"
+        else:
+            source_status = "operational" if successful else "unknown"
         reasons = ["observation_cycle_capacity_exceeded"] if capacity else []
         return {
             "rows": rows_by_ap,
@@ -484,7 +506,7 @@ class HomeAp24ReadService:
                 "schema_version": OBSERVATION_SCHEMA_VERSION,
                 "first_evidence_at": format_utc(min(timestamps)) if timestamps else None,
                 "last_evidence_at": format_utc(max(timestamps)) if timestamps else None,
-                "complete_cycle_count": sum(1 for row in completed if row["result"] == "success" and row["complete"] == 1),
+                "complete_cycle_count": successful,
                 "partial_cycle_count": partial,
                 "failed_cycle_count": failed,
                 "max_gap_seconds": _max_gap(timestamps),
@@ -542,6 +564,27 @@ class HomeAp24ReadService:
             return buckets, history, _unknown_current("source_unavailable")
         samples = current["samples"].get(mac, [])
         if not samples:
+            known_identity = current["identity"].get(mac)
+            if known_identity is not None and known_identity[0] < start:
+                for bucket in buckets:
+                    bucket["ap_state_reason"] = "current_state_source_gap"
+                    bucket["unknown_evidence_seconds"] = BUCKET_SECONDS
+                    bucket["short_history_seconds"] = 0
+                evidence_at = format_utc(known_identity[0])
+                history = _empty_history()
+                history.update({
+                    "reason_code": "current_state_source_gap",
+                    "history_eligible_from": format_utc(start),
+                    "first_evidence_at": evidence_at,
+                    "last_evidence_at": evidence_at,
+                    "unknown_evidence_seconds": WINDOW_SECONDS,
+                    "short_history_seconds": 0,
+                })
+                return (
+                    buckets,
+                    history,
+                    _unknown_current("current_state_source_gap"),
+                )
             for bucket in buckets:
                 bucket["short_history_seconds"] = BUCKET_SECONDS
             return buckets, _empty_history(), _unknown_current("no_current_state_evidence")
