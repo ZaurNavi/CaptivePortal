@@ -1,8 +1,8 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-08-26
-Runtime baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-08-29
+Runtime baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
 
 ## 1. Mental model
 
@@ -176,9 +176,11 @@ Forbidden browser paths:
 - internal Analytics bearer API.
 
 Current pages:
-Home, Devices, Device Detail, Visits, Observations.
+Home, Devices, Device Detail, Visits, Observations, Traffic.
 
-Home Live reads Current State. Home Traffic reads Current Traffic. Home Activity reads persisted Visit Lifecycle facts and reuses the canonical Current State guest SSID scope. All are optional/fail-open relative to guest authorization; Home Activity Visits and Traffic expose independent status/coverage.
+Home Live reads Current State. Home Traffic reads Current Traffic. Home Activity reads persisted Visit Lifecycle facts and reuses the canonical Current State guest SSID scope.
+
+Traffic is a separate Admin product surface. Its Current Network Throughput panel reuses `AdminQueryService.current_traffic_summary()` → `CurrentTrafficReadService` → canonical Current Traffic serialization. Traffic adds no direct Omada path, collector or second current-traffic calculation owner. Home Traffic and Traffic Current may be visually separate while remaining semantically identical for the same fixed source/evaluation context.
 
 ## 9. Shared OmadaProvider invariant
 

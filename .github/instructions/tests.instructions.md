@@ -11,5 +11,6 @@ applyTo: "tests/**/*.py"
 - `C:\CaptivPortal-Lab` не запускается Coder/agent как официальный gate. Prep-only изменение Lab directory допустимо только по явному Owner/Tech Lead поручению и заканчивается до official execution.
 - Не удаляй тесты, не ослабляй assertions и не исправляй несвязанные failures ради green result.
 - Для внешних API используй deterministic fakes/fixtures; production network запрещён без отдельного TASK.
-- Handoff содержит точную focused/minimal команду и числа passed, skipped, failed; cross-module/broader evidence и Central Lab evidence указываются отдельно и не приписываются agent.
+- Handoff обязан перечислять новые test files, изменённые test files, exact focused/minimal command и passed/skipped/failed.
+- Не считать старую focused/targeted command canonical после появления нового module/panel/API; Tech Lead пересматривает broader/targeted Central Lab set отдельно.
 - Environment failure отделяй от product failure.

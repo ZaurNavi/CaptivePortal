@@ -1,7 +1,7 @@
 # Handoff contract
 
 Status: current
-Updated: 2026-08-28
+Updated: 2026-08-29
 Central Lab governance effective: 2026-08-27
 
 ## Обязательный итог
@@ -20,7 +20,7 @@ Central Lab governance effective: 2026-08-27
 
 ### TASK-scoped проверки исполнителя
 
-Точные focused/minimal TASK/module/static команды и результат: passed, skipped, failed. Не выполненные проверки — с причиной.
+Сначала перечислить новые test files и существующие test files, изменённые TASK. Затем дать точные focused/minimal TASK/module/static команды и результат: passed, skipped, failed. Не выполненные проверки — с причиной.
 
 Если для доказательства нужен test вне module/TASK boundary, указать отдельно одно из:
 
@@ -42,7 +42,7 @@ cross-module test prepared by Coder but NOT executed
 not required for this handoff
 pending Owner/Tech Lead Central Lab gate
 Coder Lab preparation only: <explicit delegated action>
-Central Lab evidence: <artifact/date/result/reference>
+Central Lab evidence: <artifact/date/verified-runner/result/reference>
 ```
 
 Coder не заявляет official Central Lab execution или PASS/FAIL. Если Coder получил prep-only доступ к `C:\CaptivPortal-Lab`, handoff перечисляет только подготовительные действия и явно возвращает gate Owner/Tech Lead.
@@ -73,6 +73,8 @@ Coder не заявляет official Central Lab execution или PASS/FAIL. Е�
     Execution mode:
     Files inspected:
     Files changed:
+    New test files:
+    Modified test files:
     Targeted/module tests:
     Cross-module/broader test: requested / prepared-not-run / not-required
     Central Lab preparation: none / explicitly delegated prep-only action

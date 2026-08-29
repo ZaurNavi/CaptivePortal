@@ -1,9 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-08-26
-Current repository baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
-Confirmed production deployed HEAD: `53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-08-29
+Current repository baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
+Confirmed production deployed HEAD: `8f3ad59771f72c49834b1012963de6d94b9e0d18`
+Confirmed production tree: `2ef8bf264a008259242cde0778d0ebd20fa94b9e`
 
 ## Repository vs production
 
@@ -65,9 +66,40 @@ Before production deployment/activation, the release owner decides whether the e
 
 The Windows Local Gate does **not** replace Linux acceptance when the deploy contract requires Linux. The Linux gate is executed separately by the executor named by the deploy/release TASK; it is not automatically Coder or Tech Lead responsibility.
 
+## Traffic production checkpoint — 2026-08-29
+
+Owner-reported state:
+
+```text
+TRAFFIC-00: DONE / MERGED / PRODUCTION / ACTIVE
+TRAFFIC-01: DONE / MERGED / PRODUCTION / ACTIVE
+WEB_ADMIN_TRAFFIC_ENABLED=true
+WEB_ADMIN_HOME_TRAFFIC_ENABLED=true
+```
+
+Acceptance health:
+- service active;
+- CAPPORT 200;
+- Omada webhook 204;
+- Observation `complete=True`, `error_count=0`;
+- Admin Console PASS;
+- Traffic UI PASS.
+
+The two Traffic flags are separate feature boundaries.
+
+Pre-Traffic rollback checkpoint is retained:
+
+```text
+previous production HEAD: f5887758898b512747d2ea8bd51763389230dc2d
+```
+
+Owner also retained the previous production tree, `/etc/default/captive-portal`
+and the systemd service definition. Do not delete this checkpoint merely because
+Traffic acceptance passed.
+
 ## Feature activation
 
-Activation of Snapshot, Registry, Visit, Observation, Current State, Analytics/API, Admin Web/Home sections or Cleaner is owner-controlled and requires production configuration verification plus component-specific health evidence.
+Activation of Snapshot, Registry, Visit, Observation, Current State, Analytics/API, Admin Web/Home sections, Traffic Section or Cleaner is owner-controlled and requires production configuration verification plus component-specific health evidence.
 
 A repository `*_ENABLED=false` does not imply production disabled.
 

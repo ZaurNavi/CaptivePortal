@@ -1,8 +1,8 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-08-26
-Current-state baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-08-29
+Current-state baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -62,14 +62,31 @@ Historical reports, production acceptance и research сохраняют док�
 - `modules/analytics.md`
 - `modules/admin-web.md`
 - `modules/home-activity.md`
+- `modules/traffic.md`
 
 ## Current vs planned
 
-Home Live, Home Traffic и Home Activity находятся в current `main@53f617b3ac0155d0d647e58e98309927f9a4d318`.
+Home Live, Home Traffic, Home Activity, Traffic Section Foundation and Current Network Throughput are current at `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`.
 
-`TASK-HOME-ACTIVITY-01` имеет состояние: Implemented → Merged → Central Lab PASS → Production deployed → Core production acceptance PASS.
+Production on 2026-08-29 is reported at the same HEAD/tree with both:
 
-Текущий incident/postmortem: `postmortems/TASK-HOME-ACTIVITY-01-2026-08-26.md`.
+```text
+WEB_ADMIN_TRAFFIC_ENABLED=true
+WEB_ADMIN_HOME_TRAFFIC_ENABLED=true
+```
+
+The flags remain independent feature boundaries.
+
+Traffic sequence:
+
+```text
+TRAFFIC-00      DONE / MERGED / PRODUCTION / ACTIVE
+TRAFFIC-01      DONE / MERGED / PRODUCTION / ACTIVE
+TRAFFIC-02-READ NEXT / DRAFT REVIEW / IMPLEMENTATION NOT STARTED
+TRAFFIC-02+     NOT STARTED
+```
+
+`modules/traffic.md` is the current Traffic product/semantic contract. Historical FINAL TASKs retain traceability but do not describe current implementation state.
 
 ## Контекстная экономия
 

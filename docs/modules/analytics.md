@@ -1,8 +1,8 @@
 # Analytics
 
 Status: current module contract
-Updated: 2026-08-26
-Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-08-29
+Baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
 
 ## Purpose
 
@@ -48,6 +48,8 @@ Rules:
 - invalid integrity becomes unavailable.
 
 It is not Internet/WAN-only, guest-only, or SSID-only traffic.
+
+The same service remains the semantic owner for both Home Traffic and Traffic Section Current Network Throughput. No Traffic-section-specific calculation service exists.
 
 ## Internal API
 

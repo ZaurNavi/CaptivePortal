@@ -1,7 +1,7 @@
 # CaptivPortal: правила для coding agents
 
 Status: current
-Updated: 2026-08-28
+Updated: 2026-08-29
 Central Lab governance effective: 2026-08-27
 
 ## Project
@@ -99,17 +99,51 @@ TASK задаёт scope и намерение изменения, но не ст
 
 Targeted commands для Coder/исполнителя определяет TASK. Они ограничены изменяемым модулем/TASK scope и проверяют непосредственные контракты, новые regression-сценарии этого изменения и необходимые static/syntax checks.
 
-Статические проверки, такие как `compileall`, проверка синтаксиса изменённого frontend-кода и `git diff --check`, не превращают targeted workflow Coder в официальный full regression.
+Coder обязан в handoff перечислить:
+- новые test files;
+- изменённые существующие test files;
+- exact focused/minimal command;
+- фактический результат разрешённого focused запуска.
 
 Cross-module/broader/full execution не относится к Coder local self-check. Если такой test нужен, Coder передаёт точную необходимость Owner/Tech Lead либо подготавливает test без запуска.
 
+После каждого принятого нового TASK / panel / module / API / read-service Tech Lead обязан заново пересмотреть relevant targeted Central Lab regression block и текущий repository test set. Старый targeted command не становится canonical автоматически только потому, что раньше был корректен.
+
+Full Central Lab runner меняется только при изменении самого gate/compatibility/environment contract. Обычный новый pytest file, который автоматически попадает в full discovery, не требует механической правки runner.
+
 Официальный Central Lab cycle для exact artifact направляет Tech Lead, физически запускает Owner, а PASS/FAIL принимает Owner + Tech Lead.
 
-Current approved Windows Local Gate и его compatibility baseline описаны в `docs/testing.md`.
+### Windows Central Lab current environment
+
+Detailed source of truth: `docs/testing.md`.
+
+Current verified 2026-08-29:
+- repository: `C:\CaptivPortal-UI-Preview`;
+- support directory: `C:\CaptivPortal-Lab`;
+- manual pytest interpreter: `C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe`;
+- manual pytest uses explicit cleaned `C:\CaptivPortal-Lab\tmp\<run>` via `--basetemp`;
+- current verified full runner: `C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd`.
+
+Permanent anti-drift rule:
+
+```text
+documented gate version
+!=
+automatically current gate version
+```
+
+Before every official full gate Owner / Tech Lead verifies the actual approved runner against:
+- exact candidate;
+- exact baseline;
+- known compatibility baseline;
+- current test set;
+- TASK-specific/cross-surface acceptance invariants.
+
+Infrastructure failure before test logic (wrong interpreter, missing pytest, inaccessible temp directory, malformed Lab environment, dirty-candidate refusal) is not automatically an implementation regression. Restore the canonical Lab environment and repeat the same scope before classifying product failure.
+
+Official full gate requires a clean immutable candidate. A local detached `LAB ONLY` candidate commit is permitted for Central Lab acceptance; it is not pushed, PR'd, merged or deployed.
 
 Если перед production требуется Linux/full production-compatible gate, он выполняется отдельно по deploy/release contract. Windows gate его не заменяет.
-
-Если environment запрещает назначенную стороне проверку, укажи команду/требуемый gate, причину и owner action.
 
 ## Повторное использование результатов тестирования
 

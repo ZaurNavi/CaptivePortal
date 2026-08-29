@@ -1,7 +1,7 @@
 # Workflow coding agent
 
 Status: current
-Updated: 2026-08-28
+Updated: 2026-08-29
 Central Lab governance effective: 2026-08-27
 
 ## 1. Intake
@@ -71,7 +71,24 @@ Cross-module regression, broader regression, full repository suite, release/diff
 
 When production acceptance requires Linux/production-compatible execution, that is a separate exact-artifact gate defined by the deploy/release contract. Windows Local Gate does not replace it.
 
-Detailed policy and current Windows V4 baseline: `../testing.md`.
+Detailed policy, current Windows Lab environment, verified runner and anti-drift rule: `../testing.md`.
+
+## 4A. Test-set maintenance after each accepted TASK
+
+A previously correct targeted regression block is not evergreen.
+
+After every new accepted module/panel/API/read-service implementation, Tech Lead / Assistant Tech Lead reviews:
+- new and changed test files from Coder handoff;
+- current TASK-focused tests;
+- affected existing module regressions;
+- cross-surface invariants;
+- current targeted Central Lab command;
+- full repository discovery set;
+- whether the runner contract itself changed.
+
+Ordinary new pytest files discovered by full pytest do not require mechanical runner edits. Runner changes require an actual gate/compatibility/environment contract change.
+
+For an official Windows full gate, Owner/Tech Lead also re-verifies the current runner version instead of trusting a version string copied from an older TASK or KB page.
 
 ## 5. Promotion flow
 
@@ -82,6 +99,7 @@ Coder implementation
 → minimal TASK/module test evidence
 → exact candidate / patch
 → Tech Lead review
+→ Tech Lead refreshes relevant targeted regression/test-set block
 → Tech Lead defines broader/full gate when required
 → Owner prepares/verifies C:\CaptivPortal-Lab exact artifact
 → Owner physically launches official Central Lab regression
@@ -114,4 +132,4 @@ Never silently choose the convenient source.
 
 Use `agents/handoff.md`.
 
-State exact artifact, files changed, Coder focused/minimal checks, any cross-module test requested or prepared-but-not-run, any prep-only Central Lab action explicitly delegated to Coder, Owner/Tech Lead Central Lab evidence reference, any separate Linux pre-production evidence, actual repository actions, open risks and owner actions. Never claim an operation that was not executed.
+State exact artifact, files changed, new/changed test files, Coder focused/minimal checks, any cross-module test requested or prepared-but-not-run, any prep-only Central Lab action explicitly delegated to Coder, Owner/Tech Lead Central Lab runner/evidence reference, any separate Linux pre-production evidence, actual repository actions, open risks and owner actions. Never claim an operation that was not executed.

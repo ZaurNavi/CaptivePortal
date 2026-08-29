@@ -25,8 +25,9 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository / current-state checkpoint | `main@53f617b3ac0155d0d647e58e98309927f9a4d318` |
-| Production deployed HEAD | `53f617b3ac0155d0d647e58e98309927f9a4d318` |
+| Repository / current-state checkpoint | `main@8f3ad59771f72c49834b1012963de6d94b9e0d18` |
+| Production deployed HEAD | `8f3ad59771f72c49834b1012963de6d94b9e0d18` |
+| Production tree | `2ef8bf264a008259242cde0778d0ebd20fa94b9e` |
 | Home Activity production state | Реализован, merged, deployed; core production acceptance PASS |
 | Семейство Omada Controller в проекте | Omada Software Controller 5.14.31 |
 | Основная гостевая авторизация | Реализована |
@@ -41,6 +42,9 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | Home Live | Реализован |
 | Home Traffic / Current Traffic | Реализован |
 | Home Activity — Visits and Traffic | **Реализован / deployed** |
+| Traffic Section Foundation | **Реализован / production active** |
+| Current Network Throughput | **Реализован / production active** |
+| Следующий Traffic stage | `TRAFFIC-02-READ` — DRAFT review; implementation не начат |
 | Multi-Site / Tenant / RBAC | Будущая эволюция; намеренно не реализуется преждевременно |
 | Текущая topology | Один application process; HA/multi-process требует отдельного ADR |
 
@@ -82,7 +86,10 @@ flowchart LR
     H --> I[Home Live]
     I --> J[Home Traffic]
     J --> K[Home Activity]
-    K --> L{{СЛЕДУЮЩИЙ: Deeper product views}}
+    K --> T0[Traffic Section Foundation]
+    T0 --> T1[Current Network Throughput]
+    T1 --> T2{{СЛЕДУЮЩИЙ: Historical Network Traffic Read}}
+    T2 --> L[Следующие Traffic panels]
     L --> M[Реальный Multi-Site trigger]
     M --> N[Tenant / RBAC / Entitlements]
     N --> O[Managed Captive Portal Service]
@@ -126,6 +133,8 @@ Home Activity теперь является **current deployed product view по
 - Home Live с текущими clients/AP;
 - Home Traffic на persisted AP Observation facts;
 - Home Activity с независимыми Authorized Visits и completed-session Traffic coverage;
+- отдельный Traffic page/Foundation с одним frontend coordinator;
+- Current Network Throughput на тех же persisted CurrentTrafficReadService semantics, что и Home Traffic;
 - Grafana/Loki для engineering observability, отдельно от product UI.
 
 Для Omada API действует постоянное правило:
@@ -791,6 +800,8 @@ Writer владеет schema/migrations. Read consumers не изменяют so
 | Current Traffic | ✅ Current при healthy sources | AP traffic interpretation |
 | Home Traffic | ✅ Current, default disabled | Home presentation Current Traffic |
 | Home Activity | ✅ Current, default disabled | Visits и completed-session Traffic с independent coverage |
+| Traffic Section Foundation | ✅ Current, default disabled | Отдельный Site-scoped Traffic product shell/coordinator |
+| Current Network Throughput | ✅ Current, default disabled | Persisted AP/network Mbps через CurrentTrafficReadService |
 | GitHub Actions release CI | ⚠️ Отсутствует | Process debt |
 
 ---
@@ -844,8 +855,11 @@ flowchart LR
     W --> L[Home Live]:::done
     L --> T[Home Traffic]:::done
     T --> HA[Home Activity]:::done
-    HA --> D[Deeper product views]:::next
-    D --> MS[Multi-Site]:::future
+    HA --> T0[Traffic Foundation]:::done
+    T0 --> T1[Current Network Throughput]:::done
+    T1 --> T2[Historical Network Traffic Read]:::next
+    T2 --> TP[Следующие Traffic panels]:::future
+    TP --> MS[Multi-Site]:::future
     MS --> TN[Tenant/RBAC]:::future
     TN --> E[Entitlements]:::future
     E --> M[Managed Service]:::future
@@ -857,18 +871,20 @@ flowchart LR
 
 ## Near-term direction
 
-После Home Activity существующая foundation позволяет развивать продукт без повторного строительства backend-слоёв:
+Текущая позиция Traffic roadmap:
 
-- richer historical Home/Visits views;
-- dedicated Traffic page после отдельного product contract;
-- wireless quality views из persisted observations;
-- более глубокие device/visit drill-down;
-- product reports;
-- controlled administrative actions только после отдельного access-policy/security design.
+```text
+TRAFFIC-00      DONE
+TRAFFIC-01      DONE
+TRAFFIC-02-READ NEXT / DRAFT review / implementation НЕ НАЧАТ
+TRAFFIC-02+     NOT STARTED
+```
 
-Точный порядок следующих increments определяют approved TASKs, а не README.
+Следующий архитектурный этап — Historical Network Traffic Read Foundation.
+Он должен переиспользовать persisted Observation AP history и не создавать
+Admin/browser direct Omada path.
 
----
+Наличие DRAFT означает change-intent/review, а не начало реализации.
 
 ## Реальный второй Site как trigger
 
@@ -992,57 +1008,44 @@ Registry device identity сегодня не является автоматич
 
 # Testing и release discipline
 
-Текущая модель разделяет повседневное тестирование реализации и официальный full regression.
+Coder запускает только focused/minimal TASK/module tests. Cross-module, broader/full, differential и официальный acceptance принадлежат Owner + Tech Lead / Central Lab.
+
+Current Windows Central Lab подробно описан в [`docs/testing.md`](docs/testing.md).
+
+Verified state на 2026-08-29:
 
 ```text
-Coder
-→ targeted / module / TASK-scoped tests
-
-Tech Lead
-→ architecture / TASK / DIFF / targeted-evidence review
-
-Central Lab
-→ Full Regression Gate
-→ official current baseline
-→ final Test Evidence
+Lab repo: C:\CaptivPortal-UI-Preview
+manual interpreter: .venv\Scripts\python.exe
+Python: 3.10.11
+pytest: 9.1.1
+manual pytest: explicit C:\CaptivPortal-Lab\tmp\<run> --basetemp
+current verified full runner: C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd
 ```
 
-Кодер может и должен тестировать свою функциональность столько раз, сколько требуется для разработки и исправлений. Но ему не нужно после каждой реализации запускать весь CaptivPortal regression suite.
-
-Tech Lead не обязан дублировать тяжёлый full suite для обычного review. Когда нужен официальный baseline exact artifact, используется evidence Central Lab.
-
-### Official Windows Local Gate
-
-Текущий утверждённый инструмент:
+Постоянное правило:
 
 ```text
-C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
+documented gate version != automatically current gate version
 ```
 
-Подтверждённый exact-artifact baseline от **26 августа 2026 года**:
+Перед каждым official full gate Owner/Tech Lead заново сверяют runner, exact candidate/baseline, compatibility baseline и current test set.
+
+Последнее Traffic acceptance evidence:
 
 ```text
-Artifact: 53f617b3ac0155d0d647e58e98309927f9a4d318
-Production Python: 3.10.12
-Strict suite: 2100 passed / 30 skipped / 5 deselected
-STRICT_REGRESSIONS: 0
-Compatibility: 5 точечных cases → 2 WARN / 3 PASS
-RESULT: PASS
+artifact: 8f3ad59771f72c49834b1012963de6d94b9e0d18
+targeted: 66 passed
+V6-fixed: PASS
+strict regressions: 0
+fixed-context Home ↔ Traffic equality: PASS
 ```
 
-Два compatibility WARN относятся к SQLite infinity edge case и Node async harness timing. Три Visitor Registry Windows thread-timing cases в контрольном прогоне — PASS.
+Infrastructure failure до выполнения test logic сначала исправляется и повторяется в canonical Lab environment; он не считается candidate regression автоматически.
 
-Compatibility allowlist остаётся точечным. Новое падение вне этих явно зафиксированных cases считается strict regression до отдельного reviewed решения.
+После каждого принятого TASK Tech Lead пересматривает relevant targeted regression/test-set block. Обычный новый pytest file, который уже попадает в full discovery, сам по себе не требует правки runner.
 
-Windows Local Gate не заменяет Linux/production-compatible pre-production acceptance. Если release/deploy contract требует Linux full gate, он выполняется отдельно на exact artifact.
-
-Нельзя заявлять current full green baseline после runtime/test changes, опираясь только на старый прогон.
-
-Тесты не должны зависеть от реальных production Omada credentials или live production controller.
-
-На documented runtime checkpoint `.github/workflows` отсутствует, поэтому GitHub release CI остаётся отдельным process debt.
-
----
+Windows gate не заменяет отдельный Linux/production-compatible gate, если он требуется release/deploy contract.
 
 # Configuration
 
@@ -1068,6 +1071,7 @@ Analytics API
 Admin Web
 Home Live
 Home Traffic
+Traffic Section
 ```
 
 Production secrets не коммитятся в Git.
