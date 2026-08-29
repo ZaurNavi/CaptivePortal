@@ -32,6 +32,7 @@ from .pages import (
     DEVICES,
     HOME,
     OBSERVATIONS,
+    TRAFFIC,
     VISITS,
     canonical_device_id,
     render_admin_page,
@@ -317,6 +318,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     def site_observations(site_id: str) -> Response:
         return _site_page(site_id, OBSERVATIONS)
 
+    @blueprint.get("/admin/sites/<site_id>/traffic")
+    @authenticated
+    def site_traffic(site_id: str) -> Response:
+        return _site_page(site_id, TRAFFIC)
+
     def _site_page(site_id: str, page, *, device_id: str | None = None) -> Response:
         try:
             selected = resolver.resolve(site_id)
@@ -326,6 +332,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return _error("site_forbidden", 403)
         if not policy.authorize(g.admin_principal, "admin.read.context", selected):
             return _error("site_forbidden", 403)
+        if page.key == "traffic" and not config.traffic_enabled:
+            return _error("not_found", 404)
         return render_admin_page(
             page,
             site_id=selected,
@@ -341,6 +349,9 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             home_traffic_refresh_seconds=config.home_traffic_refresh_seconds,
             home_traffic_request_timeout_seconds=config.home_traffic_request_timeout_seconds,
             home_traffic_page_size=config.home_traffic_page_size,
+            traffic_enabled=config.traffic_enabled,
+            traffic_refresh_seconds=config.traffic_refresh_seconds,
+            traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
             home_activity_config=runtime.home_activity_config,
             home_health_state=runtime.home_health_state,

@@ -411,6 +411,7 @@
   }
 
   function configure() {
+    if (context.page === "traffic") return;
     if (context.page === "home" && root.dataset.homeLiveEnabled === "true") return;
     if (context.page === "home") {
       context.operation = () => loadHome();
@@ -503,6 +504,306 @@
   }
 
   configure();
+}());
+
+(function () {
+  "use strict";
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true") return;
+
+  const refreshButton = document.getElementById("refresh-button");
+  const globalState = document.getElementById("traffic-global-state");
+  const globalTitle = document.getElementById("traffic-global-state-title");
+  const globalMessage = document.getElementById("traffic-global-state-message");
+  const emptyState = document.getElementById("traffic-empty-state");
+  const panelsElement = document.getElementById("traffic-panels");
+  const siteId = root.dataset.siteId;
+  const apiBase = root.dataset.apiBase;
+  const refreshSeconds = Number(root.dataset.trafficRefreshSeconds);
+  const requestTimeoutSeconds = Number(root.dataset.trafficRequestTimeoutSeconds);
+  const panels = new Map();
+  const failureKinds = new Set(["session", "forbidden", "disabled", "invalid", "busy", "timeout", "unavailable", "unexpected"]);
+  let scheduler = null;
+  let stopped = false;
+  let globalPaused = false;
+
+  function now() {
+    return typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now() : Date.now();
+  }
+
+  function retryAfterSeconds(value) {
+    if (Number.isSafeInteger(value) && value >= 0) return value;
+    if (typeof value !== "string" || !/^[0-9]+$/.test(value)) return 0;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : 0;
+  }
+
+  function safeFailure(kind, status, code, retryAfter) {
+    const safeKind = failureKinds.has(kind) ? kind : "unexpected";
+    return Object.freeze({
+      kind: safeKind,
+      status: Number.isInteger(status) ? status : 0,
+      code: typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : null,
+      retryAfter: retryAfterSeconds(retryAfter),
+    });
+  }
+
+  function classifyTrafficHttp(status, payload, retryAfter) {
+    const code = payload && payload.error && typeof payload.error.code === "string"
+      ? payload.error.code : null;
+    if (status === 401) return safeFailure("session", status, code, retryAfter);
+    if (status === 403) return safeFailure("forbidden", status, code, retryAfter);
+    if (status === 404) return safeFailure("disabled", status, code, retryAfter);
+    if (status === 400) return safeFailure("invalid", status, code, retryAfter);
+    if (status === 429) return safeFailure("busy", status, code, retryAfter);
+    if (status === 503 && code === "query_deadline") return safeFailure("timeout", status, code, retryAfter);
+    if (status === 503) return safeFailure("unavailable", status, code, retryAfter);
+    return safeFailure("unexpected", status, code, retryAfter);
+  }
+
+  function neutralAbort(reason) {
+    return reason === "superseded" || reason === "hidden" || reason === "pagehide"
+      || reason === "session" || reason === "forbidden";
+  }
+
+  function validateSpec(spec) {
+    if (!spec || typeof spec !== "object" || Array.isArray(spec)) return false;
+    if (typeof spec.key !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(spec.key)) return false;
+    if (typeof spec.autoRefresh !== "boolean" || typeof spec.load !== "function" || typeof spec.render !== "function") return false;
+    return (spec.renderLoading === undefined || typeof spec.renderLoading === "function")
+      && (spec.renderFailure === undefined || typeof spec.renderFailure === "function");
+  }
+
+  function updateFoundationState() {
+    const empty = panels.size === 0;
+    emptyState.hidden = !empty;
+    refreshButton.disabled = empty || globalPaused || stopped;
+  }
+
+  function clearScheduler() {
+    if (scheduler !== null) window.clearTimeout(scheduler);
+    scheduler = null;
+  }
+
+  function abortPanel(state, reason) {
+    if (state.controller) state.controller.abort(reason);
+  }
+
+  function showGlobal(failure) {
+    globalPaused = true;
+    globalState.hidden = false;
+    globalState.dataset.state = "error";
+    globalTitle.textContent = failure.kind === "session" ? "Session expired" : "Access denied";
+    globalMessage.textContent = failure.kind === "session"
+      ? "Sign in again to continue."
+      : "This account cannot access Traffic for the current Site.";
+    clearScheduler();
+    panels.forEach((state) => abortPanel(state, failure.kind));
+    updateFoundationState();
+  }
+
+  function validateTrafficUrl(value) {
+    if (typeof value !== "string" || !value.startsWith("/")) {
+      throw {trafficFailure: safeFailure("invalid", 0, null, null)};
+    }
+    const resolved = new URL(value, window.location.origin);
+    const expectedPrefix = `${apiBase}/traffic/`;
+    if (resolved.origin !== window.location.origin || !resolved.pathname.startsWith(expectedPrefix)) {
+      throw {trafficFailure: safeFailure("invalid", 0, null, null)};
+    }
+    return resolved.pathname + resolved.search;
+  }
+
+  async function requestJson(value, state, generation, controller) {
+    const url = validateTrafficUrl(value);
+    const timeout = window.setTimeout(() => {
+      if (state.controller === controller && state.generation === generation) controller.abort("timeout");
+    }, requestTimeoutSeconds * 1000);
+    try {
+      let response;
+      try {
+        response = await fetch(url, {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {Accept: "application/json"},
+          signal: controller.signal,
+        });
+      } catch (_error) {
+        if (controller.signal.aborted) {
+          if (neutralAbort(controller.signal.reason)) throw {trafficNeutral: true};
+          if (controller.signal.reason === "timeout") throw {trafficFailure: safeFailure("timeout", 0, null, null)};
+        }
+        throw {trafficFailure: safeFailure("unavailable", 0, null, null)};
+      }
+      let payload;
+      try {
+        payload = await response.json();
+      } catch (_error) {
+        throw {trafficFailure: classifyTrafficHttp(response.status, null, response.headers.get("Retry-After"))};
+      }
+      if (!response.ok) {
+        const errorPayload = payload && typeof payload === "object" && !Array.isArray(payload)
+          ? payload : null;
+        throw {trafficFailure: classifyTrafficHttp(response.status, errorPayload, response.headers.get("Retry-After"))};
+      }
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        throw {trafficFailure: safeFailure("unexpected", response.status, null, null)};
+      }
+      if (!("result" in payload)) throw {trafficFailure: safeFailure("unexpected", response.status, null, null)};
+      return payload;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  function backoffMilliseconds(state, failure) {
+    const local = Math.min(300, refreshSeconds * (2 ** Math.max(0, state.failureCount - 1)));
+    return Math.max(failure.retryAfter, local) * 1000;
+  }
+
+  function schedule() {
+    clearScheduler();
+    if (stopped || globalPaused || document.hidden || panels.size === 0) return;
+    const eligible = Array.from(panels.values()).filter((state) => state.spec.autoRefresh && !state.inFlight && !state.suspended);
+    if (!eligible.length) return;
+    const nextAt = Math.min(...eligible.map((state) => state.nextEligibleAt));
+    scheduler = window.setTimeout(() => {
+      scheduler = null;
+      if (stopped || globalPaused || document.hidden) return;
+      const instant = now();
+      const runs = eligible.filter((state) => state.nextEligibleAt <= instant).map((state) => runPanel(state, {manual: false, initial: false}));
+      Promise.allSettled(runs).then(schedule);
+    }, Math.max(0, nextAt - now()));
+  }
+
+  function runPanel(state, options) {
+    const manual = options && options.manual === true;
+    const initial = options && options.initial === true;
+    if (stopped || globalPaused || document.hidden) return Promise.resolve(false);
+    const instant = now();
+    if (state.suspended) {
+      if (!manual) return Promise.resolve(false);
+      state.suspended = false;
+    }
+    if (!initial && instant < state.nextEligibleAt) return Promise.resolve(false);
+    if (state.inFlight) {
+      if (!manual) return state.inFlight;
+      abortPanel(state, "superseded");
+    }
+    state.generation += 1;
+    const generation = state.generation;
+    const controller = new AbortController();
+    state.controller = controller;
+    if (state.spec.renderLoading) state.spec.renderLoading();
+    const execution = Promise.resolve().then(() => state.spec.load(Object.freeze({
+      siteId,
+      apiBase,
+      manual,
+      generation,
+      requestJson: (url) => requestJson(url, state, generation, controller),
+    }))).then((value) => {
+      if (state.generation !== generation || controller.signal.aborted) return false;
+      state.spec.render(value);
+      state.initialComplete = true;
+      state.failureCount = 0;
+      state.nextEligibleAt = state.spec.autoRefresh ? now() + refreshSeconds * 1000 : 0;
+      return true;
+    }).catch((error) => {
+      if (error && error.trafficNeutral) return false;
+      if (state.generation !== generation || neutralAbort(controller.signal.reason)) return false;
+      const candidate = error && error.trafficFailure ? error.trafficFailure : null;
+      const failure = candidate
+        ? safeFailure(candidate.kind, candidate.status, candidate.code, candidate.retryAfter)
+        : safeFailure("unexpected", 0, null, null);
+      state.initialComplete = true;
+      if (failure.kind === "session" || failure.kind === "forbidden") {
+        showGlobal(failure);
+        return false;
+      }
+      if (state.spec.renderFailure) state.spec.renderFailure(failure);
+      if (failure.kind === "busy" || failure.kind === "timeout" || failure.kind === "unavailable") {
+        state.failureCount += 1;
+        state.nextEligibleAt = now() + backoffMilliseconds(state, failure);
+      } else {
+        state.suspended = true;
+      }
+      return false;
+    }).finally(() => {
+      if (state.controller === controller) state.controller = null;
+      if (state.inFlight === execution) state.inFlight = null;
+      schedule();
+    });
+    state.inFlight = execution;
+    return execution;
+  }
+
+  function registerPanel(spec) {
+    if (!validateSpec(spec)) throw new TypeError("Invalid Traffic panel registration");
+    if (panels.has(spec.key)) throw new Error("Duplicate Traffic panel key");
+    const state = {
+      spec: Object.freeze({...spec}),
+      generation: 0,
+      controller: null,
+      inFlight: null,
+      failureCount: 0,
+      nextEligibleAt: 0,
+      suspended: false,
+      initialComplete: false,
+    };
+    panels.set(spec.key, state);
+    updateFoundationState();
+    Promise.resolve().then(() => runPanel(state, {manual: false, initial: true}));
+    return true;
+  }
+
+  function refreshPanel(key, options) {
+    const state = typeof key === "string" ? panels.get(key) : null;
+    if (!state) return Promise.resolve(false);
+    return runPanel(state, {manual: Boolean(options && options.manual), initial: false});
+  }
+
+  function refreshAll(options) {
+    if (panels.size === 0) return Promise.resolve([]);
+    return Promise.all(Array.from(panels.values()).map((state) => (
+      runPanel(state, {manual: Boolean(options && options.manual), initial: false})
+    )));
+  }
+
+  refreshButton.addEventListener("click", () => refreshAll({manual: true}));
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearScheduler();
+      panels.forEach((state) => abortPanel(state, "hidden"));
+    } else {
+      const instant = now();
+      panels.forEach((state) => {
+        if (state.inFlight) {
+          state.inFlight.finally(() => {
+            if (!stopped && !globalPaused && !document.hidden && !state.inFlight
+                && (!state.initialComplete || (state.spec.autoRefresh && state.nextEligibleAt <= now()))) {
+              runPanel(state, {manual: false, initial: !state.initialComplete});
+            }
+          });
+          return;
+        }
+        if (!state.inFlight && (!state.initialComplete || (state.spec.autoRefresh && state.nextEligibleAt <= instant))) {
+          runPanel(state, {manual: false, initial: !state.initialComplete});
+        }
+      });
+      schedule();
+    }
+  });
+  window.addEventListener("pagehide", () => {
+    stopped = true;
+    clearScheduler();
+    panels.forEach((state) => abortPanel(state, "pagehide"));
+    updateFoundationState();
+  });
+  window.CaptivPortalTrafficCoordinator = Object.freeze({registerPanel, refreshPanel, refreshAll});
+  updateFoundationState();
 }());
 
 (function () {

@@ -22,6 +22,7 @@ VISITS = AdminPage("visits", "Visits", "admin/visits.html")
 OBSERVATIONS = AdminPage(
     "observations", "Observations", "admin/observations.html"
 )
+TRAFFIC = AdminPage("traffic", "Traffic", "admin/traffic.html")
 
 
 def render_admin_page(
@@ -40,6 +41,9 @@ def render_admin_page(
     home_traffic_refresh_seconds: int = 60,
     home_traffic_request_timeout_seconds: int = 20,
     home_traffic_page_size: int = 100,
+    traffic_enabled: bool = False,
+    traffic_refresh_seconds: int = 60,
+    traffic_request_timeout_seconds: int = 20,
     home_activity_state: str = "disabled",
     home_activity_config: object | None = None,
     home_health_state: str = "disabled",
@@ -65,6 +69,9 @@ def render_admin_page(
             home_traffic_refresh_seconds=home_traffic_refresh_seconds,
             home_traffic_request_timeout_seconds=home_traffic_request_timeout_seconds,
             home_traffic_page_size=home_traffic_page_size,
+            traffic_enabled=traffic_enabled,
+            traffic_refresh_seconds=traffic_refresh_seconds,
+            traffic_request_timeout_seconds=traffic_request_timeout_seconds,
             home_activity_enabled=(
                 home_activity_state == "active"
                 and bool(getattr(home_activity_config, "enabled", False))
