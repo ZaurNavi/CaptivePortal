@@ -25,8 +25,9 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository / current-state checkpoint | `main@53f617b3ac0155d0d647e58e98309927f9a4d318` |
-| Production deployed HEAD | `53f617b3ac0155d0d647e58e98309927f9a4d318` |
+| Repository / current-state checkpoint | `main@8f3ad59771f72c49834b1012963de6d94b9e0d18` |
+| Production deployed HEAD | `8f3ad59771f72c49834b1012963de6d94b9e0d18` |
+| Production tree | `2ef8bf264a008259242cde0778d0ebd20fa94b9e` |
 | Home Activity production state | Implemented, merged, deployed; core production acceptance PASS |
 | Omada Controller family used by the project | Omada Software Controller 5.14.31 |
 | Core guest authorization | Implemented |
@@ -41,6 +42,9 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Home Live | Implemented |
 | Home Traffic / Current Traffic | Implemented |
 | Home Activity — Visits and Traffic | **Implemented / deployed** |
+| Traffic Section Foundation | **Implemented / production active** |
+| Current Network Throughput | **Implemented / production active** |
+| Next Traffic stage | `TRAFFIC-02-READ` — DRAFT review; implementation not started |
 | Multi-Site / Tenant / RBAC | Future evolution, intentionally not prematurely implemented |
 | Current topology | Single application process; HA/multi-process requires a separate ADR |
 
@@ -82,7 +86,10 @@ flowchart LR
     H --> I[Home Live]
     I --> J[Home Traffic]
     J --> K[Home Activity]
-    K --> L{{NEXT: Deeper product views}}
+    K --> T0[Traffic Section Foundation]
+    T0 --> T1[Current Network Throughput]
+    T1 --> T2{{NEXT: Historical Network Traffic Read}}
+    T2 --> L[Later Traffic panels]
     L --> M[Real Multi-Site trigger]
     M --> N[Tenant / RBAC / Entitlements]
     N --> O[Managed Captive Portal Service]
@@ -126,6 +133,8 @@ At the current runtime checkpoint, the repository contains these major capabilit
 - Home Live current client/AP summary;
 - Home Traffic based on persisted AP Observation facts;
 - Home Activity with independent Authorized Visits and completed-session Traffic coverage;
+- dedicated Traffic page/Foundation with one frontend coordinator;
+- Current Network Throughput using the same persisted CurrentTrafficReadService semantics as Home Traffic;
 - internal Grafana/Loki observability kept separate from the product UI.
 
 A permanent Omada rule applies across the project:
@@ -792,6 +801,8 @@ The table below is deliberately about **repository implementation**, not a claim
 | Current Traffic | ✅ Current when sources healthy | AP traffic interpretation |
 | Home Traffic | ✅ Current, default disabled | Home presentation of Current Traffic |
 | Home Activity | ✅ Current, default disabled | Visits and completed-session Traffic with independent coverage |
+| Traffic Section Foundation | ✅ Current, default disabled | Dedicated Site-scoped Traffic product shell/coordinator |
+| Current Network Throughput | ✅ Current, default disabled | Persisted AP/network Mbps via CurrentTrafficReadService |
 | GitHub Actions release CI | ⚠️ Not present | Release gate remains process debt |
 
 ---
@@ -845,8 +856,11 @@ flowchart LR
     W --> L[Home Live]:::done
     L --> T[Home Traffic]:::done
     T --> HA[Home Activity]:::done
-    HA --> D[Deeper product views]:::next
-    D --> MS[Multi-Site]:::future
+    HA --> T0[Traffic Foundation]:::done
+    T0 --> T1[Current Network Throughput]:::done
+    T1 --> T2[Historical Network Traffic Read]:::next
+    T2 --> TP[Later Traffic panels]:::future
+    TP --> MS[Multi-Site]:::future
     MS --> TN[Tenant/RBAC]:::future
     TN --> E[Entitlements]:::future
     E --> M[Managed Service]:::future
@@ -858,18 +872,20 @@ flowchart LR
 
 ## Near-term direction
 
-After Home Activity, likely product growth can use already existing foundations instead of rebuilding them:
+Current Traffic roadmap position:
 
-- richer historical Home/Visits views;
-- dedicated Traffic page when a separate product contract is approved;
-- wireless quality views based on persisted observations;
-- clearer device/visit drill-downs;
-- product reports;
-- controlled administrative actions only under a separate security/access-policy design.
+```text
+TRAFFIC-00      DONE
+TRAFFIC-01      DONE
+TRAFFIC-02-READ NEXT / DRAFT review / implementation NOT STARTED
+TRAFFIC-02+     NOT STARTED
+```
 
-The exact ordering of those product increments is governed by current approved TASKs, not by this README.
+The next architectural stage is the historical Network Traffic read foundation.
+It must reuse persisted Observation AP history and must not introduce an Admin/browser
+direct Omada path.
 
----
+The existence of a DRAFT is change-intent, not implementation start.
 
 ## Real second Site as a trigger
 
@@ -995,57 +1011,44 @@ Current Registry device identity is not automatically a per-Site truth. Site-sco
 
 # Testing and release discipline
 
-The current model separates day-to-day implementation testing from the official full regression function.
+Coder runs focused/minimal TASK/module tests only. Owner + Tech Lead / Central Lab own cross-module, broader/full, differential and official acceptance.
+
+Current Windows Central Lab is described in [`docs/testing.md`](docs/testing.md).
+
+Verified 2026-08-29 state:
 
 ```text
-Coder
-→ targeted / module / TASK-scoped tests
-
-Tech Lead
-→ architecture / TASK / DIFF / targeted-evidence review
-
-Central Lab
-→ Full Regression Gate
-→ official current baseline
-→ final Test Evidence
+Lab repo: C:\CaptivPortal-UI-Preview
+manual interpreter: .venv\Scripts\python.exe
+Python: 3.10.11
+pytest: 9.1.1
+manual pytest: explicit C:\CaptivPortal-Lab\tmp\<run> --basetemp
+current verified full runner: C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd
 ```
 
-The Coder can and should rerun tests for the implemented functionality as often as development and fixes require. The Coder does not need to execute the whole CaptivPortal regression suite after every implementation.
-
-The Tech Lead does not need to duplicate the heavy full suite for ordinary review. When an official exact-artifact baseline is required, the team consumes Central Lab evidence.
-
-### Official Windows Local Gate
-
-Current approved tool:
+Permanent rule:
 
 ```text
-C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
+documented gate version != automatically current gate version
 ```
 
-Confirmed exact-artifact baseline from **26 August 2026**:
+Before each official full gate, Owner/Tech Lead re-verifies runner + exact candidate/baseline + compatibility baseline + current test set.
+
+Latest Traffic-stage evidence supplied by Owner:
 
 ```text
-Artifact: 53f617b3ac0155d0d647e58e98309927f9a4d318
-Production Python: 3.10.12
-Strict suite: 2100 passed / 30 skipped / 5 deselected
-STRICT_REGRESSIONS: 0
-Compatibility: 5 exact cases → 2 WARN / 3 PASS
-RESULT: PASS
+artifact: 8f3ad59771f72c49834b1012963de6d94b9e0d18
+targeted: 66 passed
+V6-fixed: PASS
+strict regressions: 0
+fixed-context Home ↔ Traffic equality: PASS
 ```
 
-The two compatibility WARNs are the SQLite infinity edge case and Node async harness timing. The three Visitor Registry Windows thread-timing cases passed in the control run.
+Infrastructure failures before test logic are repaired/retried in the canonical Lab environment before being classified as candidate regressions.
 
-The compatibility allowlist stays narrow. Any new failure outside the explicitly recorded cases is a strict regression until a separate reviewed decision reclassifies it.
+After every accepted TASK, Tech Lead refreshes the relevant targeted regression/test-set block. A new pytest file discovered by full pytest does not by itself require a runner edit.
 
-The Windows Local Gate does not replace Linux/production-compatible pre-production acceptance. If a release/deploy contract requires a Linux full gate, it is executed separately on the exact artifact.
-
-Do not present an old run as the current full green baseline after runtime/test changes.
-
-Tests must not depend on real production Omada credentials or a live production controller.
-
-At the documented runtime checkpoint `.github/workflows` is absent, so GitHub release CI remains separate process debt.
-
----
+Windows gate does not replace a separately required Linux/production-compatible gate.
 
 # Configuration
 
@@ -1071,6 +1074,7 @@ Analytics API
 Admin Web
 Home Live
 Home Traffic
+Traffic Section
 ```
 
 Production secrets are not committed to Git.

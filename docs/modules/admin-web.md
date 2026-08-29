@@ -1,15 +1,15 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-08-28
-Baseline: `main@d41888ade1814a2c0e965ff0cd51212e7dc4bd5f`
+Updated: 2026-08-29
+Baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
 
 ## Boundary
 
 Admin authentication is separate from guest Portal authentication.
 
 Current UI pages:
-Home, Devices, Device Detail, Visits, Observations.
+Home, Devices, Device Detail, Visits, Observations, Traffic.
 
 Current optional Home increments:
 - Home Live — Current State;
@@ -77,6 +77,34 @@ Confirmed production Site context on 2026-08-26:
 - Site `6a64f17630da7c70d232187a`, timezone `Asia/Baku`;
 - Visits coverage from `2026-08-26T17:46:55.982Z`;
 - Traffic coverage start remains `null`.
+
+## Traffic Section
+
+The Traffic page is a separate Site-scoped Admin product surface controlled by `WEB_ADMIN_TRAFFIC_ENABLED`.
+
+Current foundation owns one shared browser coordinator. Panels register into that coordinator; panels must not create competing page schedulers, visibility/pagehide owners or global Refresh owners.
+
+Current Network Throughput endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/current
+```
+
+No query parameters.
+
+Backend path:
+
+```text
+AdminQueryService.current_traffic_summary(...)
+→ CurrentTrafficReadService.get_current_site_traffic(...)
+→ serialize_current_traffic_summary(...)
+```
+
+The browser renders backend `total_mbps`; it does not recompute Total.
+
+Traffic and Home Traffic remain separate UI/feature flags while sharing the same Current Traffic semantic owner.
+
+Traffic Network Throughput is AP/network evidence and must not be labelled as WAN, Internet-only, billing, guest, SSID or Guest Session Traffic.
 
 ## Lifecycle
 

@@ -1,10 +1,10 @@
 # Testing
 
 Status: current
-Updated: 2026-08-28
+Updated: 2026-08-29
 Central Lab governance effective: 2026-08-27
-Documentation/current-state baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
-Production deployed HEAD: `53f617b3ac0155d0d647e58e98309927f9a4d318`
+Documentation/current-state baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
+Production deployed HEAD: `8f3ad59771f72c49834b1012963de6d94b9e0d18`
 
 ## Responsibility model
 
@@ -110,69 +110,300 @@ Coder-run focused/module tests are development evidence, never the official repo
 
 A successful full gate on an unchanged exact artifact must not be duplicated merely for formality.
 
-## Official Windows Local Gate
+## Official Windows Central Lab
 
-Current approved tool:
-
-```text
-C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
-```
-
-This is an Owner-operated official Lab tool. Tech Lead directs the exact-artifact gate; Owner physically runs it. Coder does not execute it as the official gate.
-
-Owner-provided confirmed baseline date:
+### Canonical directories
 
 ```text
-2026-08-26
+Central Lab repository:
+C:\CaptivPortal-UI-Preview
+
+Central Lab support directory:
+C:\CaptivPortal-Lab
 ```
 
-Strict-suite result for exact artifact `53f617b3ac0155d0d647e58e98309927f9a4d318`:
+### Manual pytest environment
+
+Current verified environment on 2026-08-29:
 
 ```text
-2100 passed
-30 skipped
-5 deselected
-STRICT_REGRESSIONS=0
+Python: 3.10.11
+pytest: 9.1.1
+canonical interpreter:
+C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe
 ```
 
-Production Python used by the deployed runtime: `3.10.12`. Compatibility evidence must cover the production Python version/family rather than assuming newer `sqlite3` module attributes are universal.
-
-Five compatibility cases are tracked separately and narrowly:
+Repository development dependencies are restored from:
 
 ```text
-WARN — SQLite infinity edge case
-WARN — Node async harness timing
-PASS — Visitor Registry Windows thread-timing case 1
-PASS — Visitor Registry Windows thread-timing case 2
-PASS — Visitor Registry Windows thread-timing case 3
+requirements-dev.txt
 ```
 
-Additional gate checks:
+Current repository constraint:
 
 ```text
-compileall          PASS
-git diff --check    PASS
-Windows Local Gate  PASS
+-r requirements.txt
+pytest>=8.0,<10.0
 ```
 
-`lab-test-v4-fixed.cmd` is the current official Windows Local Test Gate. It must not be loosened merely to make a new failure green.
+Recommended new CMD session:
 
-### Compatibility-baseline rule
+```bat
+cd /d C:\CaptivPortal-UI-Preview
+call .venv\Scripts\activate.bat
+where python
+```
 
-Compatibility handling is exact and case-specific.
+The first `where python` result must be:
 
-Forbidden:
+```text
+C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe
+```
 
-- excluding a whole module/file because one known case is environment-sensitive;
-- converting a new failure into WARN without reviewed evidence;
-- broadening the compatibility allowlist merely to preserve a green result;
-- weakening assertions or deleting tests to satisfy the gate.
+A user/system Python such as `...AppData\Local\Programs\Python\Python310\python.exe`
+is not the canonical Central Lab interpreter.
 
-Any new failure outside the explicitly recorded compatibility cases is a **strict regression** until investigated and reclassified through an explicit reviewed decision.
+Environment restore:
 
-The numeric baseline above is evidence from the confirmed 2026-08-26 run on exact local HEAD. Before accepting any Central Lab result, verify that the tested repository SHA equals the artifact being promoted. A stale PASS from an earlier HEAD is historical evidence only.
+```bat
+C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
 
-Production startup changes additionally require a first-restart acceptance gate. A second restart must not be used to hide a first-start defect; if a second restart occurs, preserve the first-restart evidence separately.
+Do not install an arbitrary pytest version separately when `requirements-dev.txt`
+already defines the supported range.
+
+### Manual pytest temp isolation
+
+Manual Central Lab pytest runs must use:
+
+```text
+repository .venv
++
+explicit --basetemp under C:\CaptivPortal-Lab\tmp\<run-name>
+```
+
+Example:
+
+```bat
+if exist "C:\CaptivPortal-Lab\tmp\traffic01-cross-surface" rmdir /s /q "C:\CaptivPortal-Lab\tmp\traffic01-cross-surface"
+mkdir "C:\CaptivPortal-Lab\tmp\traffic01-cross-surface"
+
+C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe -m pytest -q -rs ^
+  tests\admin_web ^
+  --basetemp="C:\CaptivPortal-Lab\tmp\traffic01-cross-surface"
+```
+
+Use a dedicated descriptive directory per independent run and clean it before reuse.
+
+### Current verified full runner
+
+As of 2026-08-29, the verified current Windows Central Lab runner is:
+
+```text
+C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd
+```
+
+Canonical invocation:
+
+```bat
+call C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd C:\CaptivPortal-UI-Preview
+```
+
+V6 owns its own isolated temp directory. Manual `--basetemp` policy must not be
+blindly injected into the runner if the runner already owns temp isolation.
+
+V4 is a historical previous runner. It must not be presented as the current/default
+gate.
+
+V6 is current because the reviewed Windows compatibility model now includes the
+known Home Health baseline case:
+
+```text
+tests/admin_web/test_home_health.py::test_unavailable_analytics_is_one_component_not_health_503
+```
+
+On the exact baseline this case has the same expected/observed delta and is treated
+as reviewed compatibility behavior rather than a new TASK regression. Compatibility
+handling must never be broadened merely to make a failing candidate green.
+
+### Gate-version anti-drift rule
+
+Permanent invariant:
+
+```text
+CURRENT GATE IS DISCOVERED AND VERIFIED,
+NOT BLINDLY TRUSTED FROM DOCUMENTATION.
+```
+
+Before every official full regression, Owner / Tech Lead must verify:
+
+1. exact candidate;
+2. exact approved baseline;
+3. actual runner files present in `C:\CaptivPortal-Lab`;
+4. which runner was last reviewed/approved successfully;
+5. runner strict/compatibility contract against the known compatibility baseline;
+6. whether a new reviewed compatibility case exists;
+7. current repository test set;
+8. TASK-specific / cross-surface acceptance invariants.
+
+Canonical state is the combination:
+
+```text
+TEST RUNNER
++
+REPOSITORY BASELINE
++
+KNOWN COMPATIBILITY BASELINE
++
+CURRENT TEST SET
++
+TASK-SPECIFIC / CROSS-SURFACE ACCEPTANCE INVARIANTS
+```
+
+A higher filename version is not automatically correct. A documented current version
+is not permanently current either.
+
+If documentation names an older runner than verified Lab state:
+
+```text
+classify as documentation/tooling drift
+→ use verified current runner
+→ update canonical KB
+```
+
+### Clean-candidate requirement
+
+The official full runner requires a clean candidate tree.
+
+A patch only applied through `git apply --index ...` is still a staged modification,
+not a clean immutable candidate.
+
+For Central Lab acceptance a local detached LAB ONLY candidate commit is allowed:
+
+```bat
+git -c user.name="CaptivPortal Central Lab" ^
+    -c user.email="central-lab@local.invalid" ^
+    commit -m "LAB ONLY: <TASK> candidate"
+```
+
+Required before gate:
+
+```text
+git status --short → empty
+HEAD^ → exact approved baseline
+```
+
+LAB ONLY commit:
+- is not pushed;
+- is not a PR;
+- is not merged;
+- does not change origin/main;
+- is not production deployment;
+- exists only to provide an immutable Central Lab candidate.
+
+Official repository publication remains a separate workflow.
+
+### Failure classification
+
+An infrastructure failure before test logic is not automatically a candidate regression.
+
+Infrastructure examples:
+- wrong Python interpreter;
+- pytest missing;
+- inaccessible pytest temp directory;
+- malformed Lab environment;
+- official runner refusing a dirty candidate.
+
+Canonical response:
+
+1. identify infrastructure cause;
+2. restore canonical Lab environment;
+3. rerun the same test scope;
+4. classify actual assertion/product-behavior failures as candidate regressions;
+5. if origin is disputed, compare candidate and exact baseline in the same environment.
+
+### Historical TRAFFIC-00 Windows incident
+
+During TRAFFIC-00 acceptance:
+- an initial manual `python -m pytest` resolved to system Python and returned `No module named pytest`;
+- repository `.venv` then confirmed Python 3.10.11 / pytest 9.1.1;
+- a shared Admin run later hit `PermissionError: [WinError 5]` in the user's pytest temp directory during fixture setup;
+- visible progress included 244 passed and 142 setup errors from the common temp infrastructure failure;
+- this was not classified as a TRAFFIC-00 product regression;
+- the rerun was moved to a dedicated `C:\CaptivPortal-Lab\tmp\...` basetemp.
+
+This is troubleshooting history, not a current product defect.
+
+### Latest Traffic acceptance evidence
+
+Owner-provided evidence for the TRAFFIC-00 + TRAFFIC-01 production stage:
+
+```text
+repository / production HEAD: 8f3ad59771f72c49834b1012963de6d94b9e0d18
+Central Lab targeted: 66 passed
+current runner: V6-fixed
+full gate: PASS
+strict regressions: 0
+fixed-context Home ↔ Traffic equality: PASS
+```
+
+The exact total full-discovery passed/skipped count was not supplied in this
+acceptance handoff and is therefore not invented here.
+
+The older 2026-08-26 V4 / `53f617b...` numeric run remains historical evidence only.
+
+## Test Set Maintenance Rule
+
+Every accepted TASK / module / Admin panel / API / read-service change requires a
+fresh review of the actual test set.
+
+Coder handoff must explicitly list:
+- new test files;
+- existing test files changed;
+- exact focused/minimal command;
+- result of the allowed focused run.
+
+After implementation handoff, Tech Lead / Assistant Tech Lead must determine:
+1. which new tests belong to TASK-focused verification;
+2. which existing modules belong to targeted Central Lab regression;
+3. which new cross-surface invariants exist;
+4. which test files belong in the current targeted regression command;
+5. whether the full repository test set changed;
+6. whether the Central Lab runner itself changed, or only the targeted command/test set changed.
+
+Permanent flow:
+
+```text
+NEW MODULE / PANEL / FEATURE
+→ NEW OR CHANGED TESTS
+→ TECH LEAD TEST-SET REVIEW
+→ UPDATED TARGETED REGRESSION COMMAND
+→ CENTRAL LAB ACCEPTANCE
+```
+
+Do not keep using an old targeted command merely because it was correct for the
+previous TASK.
+
+Adding an ordinary pytest file does not by itself require editing the full runner
+when normal full discovery already includes that file.
+
+Change the Central Lab runner only when its own contract changes, for example:
+- reviewed compatibility case/classification changes;
+- a new mandatory acceptance phase;
+- changed isolation/execution model;
+- repository/test-layout assumptions change;
+- new mandatory gate environment/dependency.
+
+Never add a new failure to compatibility merely to obtain a green candidate.
+
+For TRAFFIC-01 the current relevant test set includes at minimum:
+- Traffic Foundation regressions;
+- `tests/admin_web/test_traffic_current.py`;
+- `tests/admin_web/test_traffic_current_frontend.py`;
+- related Home Current Traffic regressions;
+- required fixed-context cross-surface invariants.
+
+The exact targeted command must still be reviewed again for the next Traffic TASK.
 
 ## Linux / production-compatible gate
 

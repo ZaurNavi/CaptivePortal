@@ -56,6 +56,8 @@ agent / owner / shared / not-applicable
 
 ## 23. Targeted/module tests
 
+Указать expected new/changed test files и exact focused/minimal command. После implementation handoff Tech Lead пересматривает relevant targeted Central Lab regression set; старый block не наследуется автоматически.
+
 ## 24. Cross-module / broader / full regression
 
 Указать:

@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-08-28
-Baseline: `main@d41888ade1814a2c0e965ff0cd51212e7dc4bd5f`
+Updated: 2026-08-29
+Baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -191,6 +191,45 @@ query controls and available Authorization Telemetry. The initial delay is
 bounded to `0..3600` seconds and the fixed-delay interval to `60..3600`
 seconds; repository defaults are `15` and `120` seconds respectively. Invalid
 enabled telemetry configuration fails closed for this worker only.
+
+### Traffic Section
+
+Prefix: `WEB_ADMIN_TRAFFIC_*`.
+
+Repository defaults:
+
+```text
+WEB_ADMIN_TRAFFIC_ENABLED=false
+WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
+WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20
+```
+
+This is the Traffic product/page exposure boundary and browser orchestration policy.
+
+It does **not** redefine Current Traffic freshness/source-selection semantics and does not start/stop shared data services.
+
+Production evidence supplied by Owner for 2026-08-29:
+
+```text
+WEB_ADMIN_TRAFFIC_ENABLED=true
+WEB_ADMIN_HOME_TRAFFIC_ENABLED=true
+```
+
+These two production flags are independent:
+
+```text
+Traffic Section flag
+!=
+Home Traffic flag
+```
+
+Current Network Throughput continues to use the existing shared Current Traffic policy:
+
+```text
+fresh max age = 90s
+stale boundary = 180s
+max AP skew = 60s
+```
 
 ### Pending Session Cleaner
 

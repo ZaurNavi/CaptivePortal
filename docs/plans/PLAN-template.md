@@ -22,6 +22,8 @@ Status: draft
 
 Только focused/minimal TASK/module execution.
 
+Перечислить expected new/changed test files и exact focused command. Отдельно отметить cross-surface invariants, которые потребуют Owner/Tech Lead/Central Lab execution.
+
 ## Cross-module / broader / Central Lab
 
 ```text

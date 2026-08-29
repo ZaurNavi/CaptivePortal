@@ -1,8 +1,8 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-08-26
-Runtime baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-08-29
+Runtime baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -29,10 +29,25 @@ Runtime baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
 | Current Traffic | current when Analytics sources healthy | `app/analytics/current_traffic.py` | `modules/analytics.md` | none | no |
 | Home Traffic | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
 | Home Activity | current; default disabled | `app/analytics/home_activity.py`, `app/admin_web/` | `modules/home-activity.md` | reads Visit Lifecycle | no |
+| Traffic Section Foundation | current; default disabled | `app/admin_web/` | `modules/traffic.md` | none | no |
+| Traffic Current Network Throughput | current; default disabled | `app/admin_web/`, `app/analytics/current_traffic.py` | `modules/traffic.md` | reads Observation facts | no |
 
 ## Current production evidence
 
-Home Activity is merged/deployed. Visits coverage is production-proven from `2026-08-26T17:46:55.982Z`; Traffic coverage start remains unproven (`null`).
+Owner-provided production checkpoint 2026-08-29:
+
+```text
+HEAD: 8f3ad59771f72c49834b1012963de6d94b9e0d18
+tree: 2ef8bf264a008259242cde0778d0ebd20fa94b9e
+TRAFFIC-00: active
+TRAFFIC-01: active
+WEB_ADMIN_TRAFFIC_ENABLED=true
+WEB_ADMIN_HOME_TRAFFIC_ENABLED=true
+```
+
+Traffic and Home Traffic feature flags are independent.
+
+Home Activity historical coverage evidence from 2026-08-26 remains valid for that evidence window but is not the current repository checkpoint.
 
 ## Production evidence rule
 

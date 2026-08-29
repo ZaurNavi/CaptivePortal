@@ -1,10 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-08-26
+Updated: 2026-08-29
 Branch: `main`
-Runtime commit: `53f617b3ac0155d0d647e58e98309927f9a4d318`
-Commit source: merge PR #72, 2026-08-26
+Runtime commit: `8f3ad59771f72c49834b1012963de6d94b9e0d18`
+Runtime tree: `2ef8bf264a008259242cde0778d0ebd20fa94b9e`
+Commit source: merge PR #84 / TASK-TRAFFIC-01, 2026-08-29
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -79,6 +80,8 @@ Analytics has no worker/write lifecycle to stop.
 | Current Traffic | `app/analytics/current_traffic.py` | persisted AP Observation facts | none | no |
 | Home Traffic | Admin Web | `CurrentTrafficReadService` | none | no |
 | Home Activity | `app/analytics/home_activity.py`, Admin Web | Visit Lifecycle persisted facts + Current State guest scope | none | no |
+| Traffic Section | `app/admin_web/` | Admin product shell + shared Traffic coordinator | none | no |
+| Traffic Current Network Throughput | Admin Web + `app/analytics/current_traffic.py` | persisted AP Observation facts via CurrentTrafficReadService | none | no |
 
 ## 5. Observation vs Current State
 
@@ -203,11 +206,24 @@ Current pages:
 - Device Detail
 - Visits
 - Observations
+- Traffic
 
 Home has optional current sections:
 - Home Live via `CurrentStateReadService`;
 - Home Traffic via `CurrentTrafficReadService`;
-- Home Activity via `HomeActivityReadService` with independent Visits/Traffic coverage.
+- Home Activity via `HomeActivityReadService`.
+
+Traffic currently contains:
+- shared Traffic Foundation/page coordinator;
+- Current Network Throughput panel via the same `CurrentTrafficReadService` semantic owner used by Home Traffic.
+
+Canonical Traffic endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/current
+```
+
+No query parameters.
 
 Browser flow:
 `browser → /admin + /admin/api/v1 → AdminQueryService/read gateways → read services`.
@@ -215,8 +231,10 @@ Browser flow:
 Prohibited:
 - browser → SQLite
 - browser → Omada
+- Admin Traffic request → Omada
 - browser → `/api/internal/analytics/v1`
 - browser → Loki/Grafana
+- second current Traffic collector/calculation owner/coordinator
 
 Business/data Admin API is GET-only. POST is used for Admin login/logout session security.
 
@@ -262,7 +280,7 @@ No second provider/token manager/OAuth cache without approved change intent.
 Exact variables/defaults are in `configuration.md`, `app/config.py`, `app/settings.py`, and `.env.example`.
 
 Groups:
-Core/Omada, Portal/CAPPORT, telemetry, counters, Snapshot, Registry, Webhook, Cleaner, Visit, Observation, Current State, Analytics/API, Admin Web/Home Live/Home Traffic/Home Activity.
+Core/Omada, Portal/CAPPORT, telemetry, counters, Snapshot, Registry, Webhook, Cleaner, Visit, Observation, Current State, Analytics/API, Admin Web/Home Live/Home Traffic/Home Activity, Traffic Section.
 
 Repository feature defaults are not production proof.
 
@@ -311,61 +329,82 @@ Fail-open means disabled/unavailable/degraded and safe omission — never fabric
 
 ## 18. Tests and CI
 
-`tests/` is the repository test root. Current groups cover Auth, CAPPORT, Omada/webhook, Visitor Registry, Pending Cleaner, Visit Lifecycle, Observation, Current State, Analytics and Admin Web.
+`tests/` is the repository test root.
 
-Current workflow separates test responsibilities:
-
-```text
-Coder → TASK/module-scoped targeted testing
-Central Lab → full regression / official baseline / final Test Evidence
-Tech Lead → architecture/DIFF/targeted-evidence review
-```
-
-Owner-provided current Windows Local Gate tool:
+Testing ownership remains:
 
 ```text
-C:\CaptivPortal-Lab\lab-test-v4-fixed.cmd
+Coder → focused/minimal TASK/module tests
+Owner + Tech Lead / Central Lab → cross-module/broader/full/differential/official acceptance
 ```
 
-Confirmed 2026-08-26 Windows evidence for exact artifact `53f617b3ac0155d0d647e58e98309927f9a4d318` on the production-compatible Python family:
+Current verified Windows Lab state is maintained in `testing.md`.
+
+As of 2026-08-29:
+- Lab repository: `C:\CaptivPortal-UI-Preview`;
+- canonical manual interpreter: repository `.venv` Python 3.10.11;
+- pytest: 9.1.1 under repository `requirements-dev.txt` constraint;
+- current verified full runner: `C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd`;
+- documented runner version must be re-verified before every official gate.
+
+Latest Traffic-stage evidence:
 
 ```text
-production Python: 3.10.12
-strict suite: 2100 passed / 30 skipped / 5 deselected
-STRICT_REGRESSIONS: 0
-compatibility: 2 WARN + 3 PASS (five exact tracked cases)
-overall Windows Local Gate: PASS
+artifact: 8f3ad59771f72c49834b1012963de6d94b9e0d18
+targeted: 66 passed
+V6-fixed: PASS
+strict regressions: 0
+fixed-context Home ↔ Traffic equality: PASS
 ```
 
-The compatibility baseline is narrow; a new failure outside the recorded cases is a strict regression until reviewed.
+The previous V4 / `53f617b...` numerical baseline is historical, not current.
 
-These numbers are operational test evidence, not a repository-derived evergreen count. After runtime/test changes a new exact-artifact Central Lab baseline is required before presenting them as current.
+After every accepted TASK Tech Lead reviews new/changed test files, the targeted Central Lab block, cross-surface invariants and whether the runner contract itself changed.
 
-`.github/workflows` is absent at the documented runtime baseline. GitHub release CI remains open process debt; the official full-regression source is currently the manual Central Lab.
-
-Windows Local Gate does not replace a separately required Linux/production-compatible pre-production gate.
+`.github/workflows` remains absent. Official full regression is manual Central Lab until a separately approved CI architecture changes that responsibility.
 
 ## 19. Current vs historical vs change-intent
 
-Current:
+Current repository implementation includes:
 - Visit Lifecycle
 - Observation
 - Analytics
 - Admin Web
 - Current State
 - Home Live
-- Current Traffic/Home Traffic
+- Current Traffic / Home Traffic
 - Home Activity
+- Traffic Section Foundation
+- Traffic Current Network Throughput
 
-Production evidence at `main@53f617b3`:
-- production HEAD equals repository main and working tree is clean;
-- Home Activity is deployed;
-- Visits coverage starts at `2026-08-26T17:46:55.982Z`;
-- 14/14 post-boundary Visits were verified guest, with 0 integrity anomalies and 0 unproven scope;
-- `traffic_coverage_from_utc=null`;
-- first-restart Current State acceptance PASS: 4/4 client cycles and 4/4 AP cycles success, no non-success cycle.
+Current production evidence supplied by Owner for 2026-08-29:
 
-Historical production numbers outside an explicitly dated evidence block remain historical and must not be presented as current counters.
+```text
+production HEAD: 8f3ad59771f72c49834b1012963de6d94b9e0d18
+production tree: 2ef8bf264a008259242cde0778d0ebd20fa94b9e
+working service: active
+TRAFFIC-00: production active
+TRAFFIC-01: production active
+WEB_ADMIN_TRAFFIC_ENABLED=true
+WEB_ADMIN_HOME_TRAFFIC_ENABLED=true
+CAPPORT=200
+Omada webhook=204
+Observation complete=True / error_count=0
+Admin Console=PASS
+Traffic UI=PASS
+```
+
+The Traffic acceptance Mbps/timestamps are sample evidence only, not configuration constants.
+
+Next Traffic change-intent:
+
+```text
+TRAFFIC-02-READ
+NEXT / DRAFT review
+implementation NOT STARTED
+```
+
+Historical production evidence remains historical and must not be presented as current counters/health merely because it is still true in Git history.
 
 ## 20. Repository-only unknowns
 
