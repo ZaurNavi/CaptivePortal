@@ -950,6 +950,296 @@
 }());
 /* TRAFFIC_CURRENT_PANEL_END */
 
+/* TRAFFIC_NETWORK_RANGE_CONTEXT_START */
+(function () {
+  "use strict";
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  const range24h = document.getElementById("traffic-network-range-24h");
+  const range7d = document.getElementById("traffic-network-range-7d");
+  if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
+      || !range24h || !range7d) return;
+  const allowed = new Set(["24h", "7d"]);
+  const listeners = new Set();
+  let selected = "24h";
+
+  function updateControls() {
+    range24h.setAttribute("aria-pressed", selected === "24h" ? "true" : "false");
+    range7d.setAttribute("aria-pressed", selected === "7d" ? "true" : "false");
+  }
+  function select(value) {
+    if (!allowed.has(value) || value === selected) return false;
+    selected = value;
+    updateControls();
+    listeners.forEach((listener) => listener(selected));
+    return true;
+  }
+  function subscribe(listener) {
+    if (typeof listener !== "function") throw new TypeError("Invalid Network range listener");
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+
+  range24h.addEventListener("click", () => select("24h"));
+  range7d.addEventListener("click", () => select("7d"));
+  updateControls();
+  window.CaptivPortalTrafficNetworkRange = Object.freeze({
+    selected: () => selected,
+    select,
+    subscribe,
+  });
+}());
+/* TRAFFIC_NETWORK_RANGE_CONTEXT_END */
+
+/* TRAFFIC_HISTORY_PANEL_START */
+(function () {
+  "use strict";
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  const coordinator = window.CaptivPortalTrafficCoordinator;
+  const rangeContext = window.CaptivPortalTrafficNetworkRange;
+  const panel = document.getElementById("traffic-history-panel");
+  if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
+      || !panel || panel.dataset.historyEnabled !== "true" || !coordinator
+      || typeof coordinator.registerPanel !== "function"
+      || typeof coordinator.refreshPanel !== "function" || !rangeContext
+      || typeof rangeContext.selected !== "function"
+      || typeof rangeContext.subscribe !== "function") return;
+
+  const elements = {
+    state: document.getElementById("traffic-history-state"),
+    title: document.getElementById("traffic-history-state-title"),
+    message: document.getElementById("traffic-history-state-message"),
+    applied: document.getElementById("traffic-history-applied-range"),
+    coverage: document.getElementById("traffic-history-coverage"),
+    watermark: document.getElementById("traffic-history-watermark"),
+    gaps: document.getElementById("traffic-history-gaps"),
+    transitions: document.getElementById("traffic-history-source-transitions"),
+    timezone: document.getElementById("traffic-history-timezone"),
+    chart: document.getElementById("traffic-history-chart-svg"),
+  };
+  if (Object.values(elements).some((value) => !value)) return;
+
+  const PANEL_KEY = "network-traffic-history";
+  const RANGE = Object.freeze({"24h": Object.freeze({seconds: 86400, bucket: 300, count: 288}), "7d": Object.freeze({seconds: 604800, bucket: 900, count: 672})});
+  const STATUSES = new Set(["ok", "partial", "insufficient_data"]);
+  const COVERAGE = new Set(["complete", "partial", "none"]);
+  const BUCKET = new Set(["complete", "partial", "none"]);
+  const SOURCE = new Set(["wired", "lan"]);
+  const HISTORY_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  let appliedRange = null;
+  let accepted = null;
+
+  function object(value) { return value && typeof value === "object" && !Array.isArray(value); }
+  function count(value) { return Number.isInteger(value) && value >= 0; }
+  function metric(value) { return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0); }
+  function utc(value) { return typeof value === "string" && HISTORY_UTC.test(value) && Number.isFinite(Date.parse(value)); }
+
+  function validate(payload, siteId) {
+    if (!object(payload) || payload.api_version !== "admin.read.v1" || payload.site_id !== siteId || !object(payload.result)) {
+      throw new Error("Invalid historical Traffic response");
+    }
+    const value = payload.result;
+    const range = value.range;
+    const coverage = value.coverage;
+    if (!STATUSES.has(value.status) || !object(range) || !RANGE[range.id]
+        || range.unit !== "Mbps" || range.metric_version !== "network_traffic_history.v1"
+        || range.aggregation !== "mean_of_complete_site_rate_samples"
+        || range.source_kind !== "observation_ap_dynamic"
+        || range.sample_timestamp_semantics !== "cycle_finished_at"
+        || range.bucket_alignment !== "range_start_utc" || range.max_site_history_buckets !== 720
+        || !utc(range.from_utc) || !utc(range.to_utc) || !utc(range.evaluated_at_utc)
+        || range.evaluated_at_utc !== range.to_utc
+        || range.bucket_seconds !== RANGE[range.id].bucket || range.bucket_count !== RANGE[range.id].count
+        || Date.parse(range.to_utc) - Date.parse(range.from_utc) !== RANGE[range.id].seconds * 1000
+        || !Array.isArray(value.buckets) || value.buckets.length !== range.bucket_count
+        || !object(coverage) || !COVERAGE.has(coverage.status) || coverage.bucket_count !== range.bucket_count
+        || !count(coverage.complete_bucket_count) || !count(coverage.partial_bucket_count)
+        || !count(coverage.missing_bucket_count)
+        || coverage.complete_bucket_count + coverage.partial_bucket_count + coverage.missing_bucket_count !== range.bucket_count
+        || !count(coverage.gap_bucket_count) || !count(coverage.source_transition_count)) {
+      throw new Error("Invalid historical Traffic response");
+    }
+    const expectedCoverage = value.status === "ok" ? "complete" : (value.status === "partial" ? "partial" : "none");
+    if (coverage.status !== expectedCoverage) throw new Error("Invalid historical Traffic response");
+    let cursor = range.from_utc;
+    const aggregate = {complete: 0, partial: 0, none: 0, samples: 0, excluded: 0, gaps: 0, transitions: 0};
+    for (const bucket of value.buckets) {
+      if (!object(bucket) || !BUCKET.has(bucket.status) || bucket.bucket_start_utc !== cursor
+          || !utc(bucket.bucket_end_utc) || Date.parse(bucket.bucket_end_utc) <= Date.parse(bucket.bucket_start_utc)
+          || Date.parse(bucket.bucket_end_utc) - Date.parse(bucket.bucket_start_utc) !== range.bucket_seconds * 1000
+          || !metric(bucket.download_mbps) || !metric(bucket.upload_mbps) || !metric(bucket.total_mbps)
+          || typeof bucket.selection_reason !== "string" || !bucket.selection_reason
+          || typeof bucket.source_changed_from_previous !== "boolean"
+          || !count(bucket.complete_site_sample_count) || !count(bucket.excluded_site_sample_count)
+          || !count(bucket.gap_count_over_threshold) || !count(bucket.selected_source_skew_excluded_sample_count)) {
+        throw new Error("Invalid historical Traffic response");
+      }
+      if (bucket.status === "none") {
+        if ((bucket.selected_source !== null && !SOURCE.has(bucket.selected_source))
+            || bucket.complete_site_sample_count !== 0
+            || (bucket.selected_source === null && bucket.selection_reason !== "no_canonical_samples")
+            || bucket.download_mbps !== null || bucket.upload_mbps !== null || bucket.total_mbps !== null) {
+          throw new Error("Invalid historical Traffic response");
+        }
+      } else if (!SOURCE.has(bucket.selected_source) || bucket.complete_site_sample_count === 0
+          || bucket.download_mbps === null || bucket.upload_mbps === null || bucket.total_mbps === null) {
+        throw new Error("Invalid historical Traffic response");
+      }
+      aggregate[bucket.status] += 1;
+      aggregate.samples += bucket.complete_site_sample_count;
+      aggregate.excluded += bucket.excluded_site_sample_count;
+      aggregate.gaps += bucket.gap_count_over_threshold > 0 ? 1 : 0;
+      aggregate.transitions += bucket.source_changed_from_previous === true ? 1 : 0;
+      cursor = bucket.bucket_end_utc;
+    }
+    if (cursor !== range.to_utc
+        || coverage.complete_bucket_count !== aggregate.complete
+        || coverage.partial_bucket_count !== aggregate.partial
+        || coverage.missing_bucket_count !== aggregate.none
+        || coverage.complete_site_sample_count !== aggregate.samples
+        || coverage.excluded_site_sample_count !== aggregate.excluded
+        || coverage.gap_bucket_count !== aggregate.gaps
+        || coverage.source_transition_count !== aggregate.transitions) {
+      throw new Error("Invalid historical Traffic response");
+    }
+    return Object.freeze(value);
+  }
+
+  function displayRange(value) { return value === "24h" ? "Last 24 hours" : "Last 7 days"; }
+  function displayZone() {
+    const candidate = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof candidate === "string" && candidate ? candidate : "UTC";
+  }
+  function displayTime(value) {
+    return utc(value) ? new Date(value).toLocaleString([], {
+      dateStyle: "medium", timeStyle: "medium", timeZone: displayZone(),
+    }) : "—";
+  }
+  function svgElement(name, attributes) {
+    const element = document.createElementNS(elements.chart.namespaceURI, name);
+    Object.entries(attributes || {}).forEach(([key, value]) => element.setAttribute(key, String(value)));
+    return element;
+  }
+  function paths(buckets, field, maximum, cssClass) {
+    const output = [];
+    let points = [];
+    function commit() {
+      if (!points.length) return;
+      output.push(svgElement("polyline", {
+        points: points.join(" "),
+        class: cssClass,
+      }));
+      points = [];
+    }
+    buckets.forEach((bucket, index) => {
+      const value = bucket[field];
+      if (value === null) { commit(); return; }
+      const x = 48 + (index / Math.max(1, buckets.length - 1)) * 888;
+      const y = 284 - (value / maximum) * 248;
+      points.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+    });
+    commit();
+    return output;
+  }
+  function partialMarkers(buckets, field, maximum, cssClass) {
+    const output = [];
+    buckets.forEach((bucket, index) => {
+      const value = bucket[field];
+      if (bucket.status !== "partial" || value === null) return;
+      const x = 48 + (index / Math.max(1, buckets.length - 1)) * 888;
+      const y = 284 - (value / maximum) * 248;
+      output.push(svgElement("circle", {
+        cx: x.toFixed(2), cy: y.toFixed(2), r: 4,
+        class: `traffic-history-partial-marker ${cssClass}`,
+      }));
+    });
+    return output;
+  }
+  function renderChart(value) {
+    const numeric = value.buckets.flatMap((bucket) => [bucket.download_mbps, bucket.upload_mbps]).filter((item) => item !== null);
+    const maximum = Math.max(1, ...numeric);
+    const title = svgElement("title", {id: "traffic-history-chart-title"});
+    title.textContent = `Download and Upload network traffic history for ${displayRange(value.range.id)}`;
+    const description = svgElement("desc", {id: "traffic-history-chart-description"});
+    description.textContent = `${value.coverage.complete_bucket_count} complete, ${value.coverage.partial_bucket_count} partial and ${value.coverage.missing_bucket_count} missing buckets. Missing values are rendered as gaps.`;
+    const xAxis = svgElement("line", {x1: 48, y1: 284, x2: 936, y2: 284, class: "traffic-history-axis"});
+    const yAxis = svgElement("line", {x1: 48, y1: 36, x2: 48, y2: 284, class: "traffic-history-axis"});
+    const zeroLabel = svgElement("text", {x: 40, y: 288, class: "traffic-history-axis-label", "text-anchor": "end"});
+    zeroLabel.textContent = "0";
+    const maximumLabel = svgElement("text", {x: 40, y: 42, class: "traffic-history-axis-label", "text-anchor": "end"});
+    maximumLabel.textContent = maximum.toFixed(2);
+    const unitLabel = svgElement("text", {x: 12, y: 22, class: "traffic-history-axis-label"});
+    unitLabel.textContent = "Mbps";
+    const startLabel = svgElement("text", {x: 48, y: 308, class: "traffic-history-axis-label", "text-anchor": "start"});
+    startLabel.textContent = displayTime(value.range.from_utc);
+    const endLabel = svgElement("text", {x: 936, y: 308, class: "traffic-history-axis-label", "text-anchor": "end"});
+    endLabel.textContent = displayTime(value.range.to_utc);
+    elements.chart.replaceChildren(title, description, xAxis, yAxis,
+      zeroLabel, maximumLabel, unitLabel, startLabel, endLabel,
+      ...paths(value.buckets, "download_mbps", maximum, "traffic-history-line-download"),
+      ...paths(value.buckets, "upload_mbps", maximum, "traffic-history-line-upload"),
+      ...partialMarkers(value.buckets, "download_mbps", maximum, "traffic-history-partial-marker-download"),
+      ...partialMarkers(value.buckets, "upload_mbps", maximum, "traffic-history-partial-marker-upload"));
+  }
+  function renderLoading() {
+    elements.state.dataset.state = "warning";
+    elements.title.textContent = accepted ? "Refreshing network traffic history…" : "Loading network traffic history…";
+    elements.message.textContent = accepted
+      ? `Previously loaded ${displayRange(appliedRange)} remains visible until replacement succeeds.`
+      : "Reading persisted AP traffic evidence.";
+  }
+  function render(value) {
+    accepted = value;
+    appliedRange = value.range.id;
+    const empty = value.status === "insufficient_data";
+    const partial = value.status === "partial";
+    elements.state.dataset.state = empty ? "warning" : (partial ? "warning" : "ready");
+    elements.title.textContent = empty ? "No historical data for this range"
+      : (partial ? "History partial" : "History ready");
+    elements.message.textContent = empty
+      ? "No canonical persisted traffic samples are available for the selected range."
+      : (partial ? "Accepted samples are shown; gaps and partial buckets remain visible."
+        : "Persisted traffic history has complete bucket coverage.");
+    elements.applied.textContent = displayRange(appliedRange);
+    elements.coverage.textContent = value.coverage.status === "complete" ? "Complete"
+      : (value.coverage.status === "partial" ? "Partial" : "No data");
+    elements.watermark.textContent = value.coverage.source_watermark_utc === null ? "—"
+      : `${displayTime(value.coverage.source_watermark_utc)} · ${value.coverage.source_age_seconds === null ? "age —" : `${Math.round(value.coverage.source_age_seconds)}s old`}`;
+    elements.gaps.textContent = String(value.coverage.gap_bucket_count);
+    elements.transitions.textContent = String(value.coverage.source_transition_count);
+    elements.timezone.textContent = displayZone();
+    renderChart(value);
+  }
+  function renderFailure(failure) {
+    elements.state.dataset.state = "error";
+    elements.title.textContent = failure && failure.kind === "busy" ? "History query is busy" : "History unavailable";
+    elements.message.textContent = accepted
+      ? `Previously loaded ${displayRange(appliedRange)} remains visible. Refresh when the source is available.`
+      : "Persisted network traffic history could not be loaded.";
+  }
+  function requestSelectedRange() {
+    coordinator.refreshPanel(PANEL_KEY, {manual: true});
+  }
+
+  rangeContext.subscribe(requestSelectedRange);
+  coordinator.registerPanel({
+    key: PANEL_KEY,
+    autoRefresh: false,
+    load: async (context) => {
+      const requestRange = rangeContext.selected();
+      return validate(
+        await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}`),
+        context.siteId,
+      );
+    },
+    render,
+    renderLoading,
+    renderFailure,
+  });
+}());
+/* TRAFFIC_HISTORY_PANEL_END */
+
 (function () {
   "use strict";
   const STATUS = new Set(["operational", "degraded", "unavailable", "unknown"]);

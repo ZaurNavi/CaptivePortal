@@ -77,6 +77,7 @@ class AdminWebConfig:
     home_traffic_stale_max_age_seconds: int
     home_traffic_max_ap_skew_seconds: int
     traffic_enabled: bool
+    traffic_history_enabled: bool
     traffic_refresh_seconds: int
     traffic_request_timeout_seconds: int
 
@@ -115,6 +116,10 @@ def admin_web_config_from_settings(
     traffic_enabled = _exact_bool(
         settings.get("web_admin_traffic_enabled", "false"),
         "WEB_ADMIN_TRAFFIC_ENABLED",
+    )
+    traffic_history_enabled = _exact_bool(
+        settings.get("web_admin_traffic_history_enabled", "false"),
+        "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED",
     )
     username = _string(settings.get("web_admin_username", ""), "WEB_ADMIN_USERNAME")
     password_hash = _string(
@@ -202,6 +207,11 @@ def admin_web_config_from_settings(
         raise AdminWebConfigError(
             "WEB_ADMIN_TRAFFIC_ENABLED requires WEB_ADMIN_ENABLED=true"
         )
+    if traffic_history_enabled and (not enabled or not traffic_enabled):
+        raise AdminWebConfigError(
+            "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED requires "
+            "WEB_ADMIN_ENABLED=true and WEB_ADMIN_TRAFFIC_ENABLED=true"
+        )
 
     if enabled:
         if USERNAME_PATTERN.fullmatch(username) is None:
@@ -231,6 +241,7 @@ def admin_web_config_from_settings(
         home_live_enabled=home_live_enabled,
         home_traffic_enabled=home_traffic_enabled,
         traffic_enabled=traffic_enabled,
+        traffic_history_enabled=traffic_history_enabled,
         **values,
     )
 

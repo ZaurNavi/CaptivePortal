@@ -317,6 +317,9 @@ def _query_service(
             current_traffic_read_service=getattr(
                 analytics_runtime, "current_traffic_service", None
             ),
+            historical_traffic_read_service=getattr(
+                analytics_runtime, "historical_traffic_service", None
+            ),
             home_activity_read_service=getattr(
                 analytics_runtime, "home_activity_service", None
             ),

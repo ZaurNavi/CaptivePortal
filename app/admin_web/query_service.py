@@ -6,7 +6,7 @@ import threading
 import uuid
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 from app.analytics.serialization import serialize_analytics_value
@@ -18,6 +18,8 @@ from app.analytics.validation import AnalyticsQueryValidationError, parse_utc
 from app.analytics import (
     CurrentTrafficSourceUnavailable,
     CurrentTrafficValidationError,
+    HistoricalTrafficSourceUnavailable,
+    HistoricalTrafficValidationError,
     HomeActivitySourceUnavailable,
     HomeActivityValidationError,
 )
@@ -58,6 +60,14 @@ from .home_health import HomeHealthValidationError
 from .home_health_serialization import (
     HomeHealthSerializationError,
     serialize_home_health,
+)
+from .historical_traffic_serialization import (
+    HistoricalTrafficSerializationError,
+    serialize_historical_traffic,
+)
+from .traffic_network_ranges import (
+    TrafficNetworkRangeError,
+    resolve_traffic_network_range,
 )
 from .home_ap_24h_serialization import (
     HomeAp24SerializationError,
@@ -192,6 +202,7 @@ class AdminQueryService:
         visit_analytics_service: Any,
         current_state_read_service: Any | None = None,
         current_traffic_read_service: Any | None = None,
+        historical_traffic_read_service: Any | None = None,
         home_activity_read_service: Any | None = None,
         home_activity_config: Any | None = None,
         home_ap_24h_read_service: Any | None = None,
@@ -204,6 +215,7 @@ class AdminQueryService:
         self._analytics = visit_analytics_service
         self._current_state = current_state_read_service
         self._current_traffic = current_traffic_read_service
+        self._historical_traffic = historical_traffic_read_service
         self._home_activity = home_activity_read_service
         self._home_activity_config = home_activity_config
         self._home_ap_24h = home_ap_24h_read_service
@@ -444,6 +456,43 @@ class AdminQueryService:
             except CurrentTrafficSerializationError as exc:
                 raise AdminQueryUnavailable() from exc
             return AdminQueryResponse(result)
+
+        return self._run(query)
+
+    def historical_traffic_history(self, principal, site_id, *, range_id):
+        self._authorize(principal, "admin.read.overview", site_id)
+        try:
+            resolved_range = resolve_traffic_network_range(
+                range_id, datetime.now(timezone.utc)
+            )
+        except TrafficNetworkRangeError as exc:
+            raise AdminQueryValidationError() from exc
+        source = self._historical_traffic
+        if source is None:
+            raise AdminQueryUnavailable()
+
+        def query(deadline):
+            try:
+                value = source.get_site_history(
+                    site_id,
+                    from_utc=resolved_range.from_utc,
+                    to_utc=resolved_range.to_utc,
+                    evaluated_at_utc=resolved_range.evaluated_at_utc,
+                    deadline=deadline,
+                )
+                result = serialize_historical_traffic(
+                    value, site_id, resolved_range=resolved_range
+                )
+                return AdminQueryResponse(result)
+            except HistoricalTrafficValidationError as exc:
+                raise AdminQueryValidationError() from exc
+            except (
+                HistoricalTrafficSourceUnavailable,
+                HistoricalTrafficSerializationError,
+                sqlite3.Error,
+                OSError,
+            ) as exc:
+                raise AdminQueryUnavailable() from exc
 
         return self._run(query)
 
