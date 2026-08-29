@@ -76,6 +76,9 @@ class AdminWebConfig:
     home_traffic_fresh_max_age_seconds: int
     home_traffic_stale_max_age_seconds: int
     home_traffic_max_ap_skew_seconds: int
+    traffic_enabled: bool
+    traffic_refresh_seconds: int
+    traffic_request_timeout_seconds: int
 
     def __repr__(self) -> str:
         return (
@@ -108,6 +111,10 @@ def admin_web_config_from_settings(
     home_traffic_enabled = _exact_bool(
         settings.get("web_admin_home_traffic_enabled", "false"),
         "WEB_ADMIN_HOME_TRAFFIC_ENABLED",
+    )
+    traffic_enabled = _exact_bool(
+        settings.get("web_admin_traffic_enabled", "false"),
+        "WEB_ADMIN_TRAFFIC_ENABLED",
     )
     username = _string(settings.get("web_admin_username", ""), "WEB_ADMIN_USERNAME")
     password_hash = _string(
@@ -160,6 +167,8 @@ def admin_web_config_from_settings(
         "home_traffic_fresh_max_age_seconds": _bounded_int(settings, "home_traffic_fresh_max_age_seconds", 90, 30, 300),
         "home_traffic_stale_max_age_seconds": _bounded_int(settings, "home_traffic_stale_max_age_seconds", 180, 30, 600),
         "home_traffic_max_ap_skew_seconds": _bounded_int(settings, "home_traffic_max_ap_skew_seconds", 60, 10, 180),
+        "traffic_refresh_seconds": _bounded_int(settings, "traffic_refresh_seconds", 60, 60, 300),
+        "traffic_request_timeout_seconds": _bounded_int(settings, "traffic_request_timeout_seconds", 20, 5, 60),
     }
     if values["session_absolute_seconds"] < values["session_idle_seconds"]:
         raise AdminWebConfigError(
@@ -173,6 +182,10 @@ def admin_web_config_from_settings(
         raise AdminWebConfigError(
             "WEB_ADMIN_HOME_TRAFFIC_REQUEST_TIMEOUT_SECONDS must exceed WEB_ADMIN_MAX_QUERY_DURATION_SECONDS"
         )
+    if values["traffic_request_timeout_seconds"] <= values["max_query_duration_seconds"]:
+        raise AdminWebConfigError(
+            "WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS must exceed WEB_ADMIN_MAX_QUERY_DURATION_SECONDS"
+        )
     if values["home_traffic_stale_max_age_seconds"] < values["home_traffic_fresh_max_age_seconds"]:
         raise AdminWebConfigError(
             "WEB_ADMIN_HOME_TRAFFIC_STALE_MAX_AGE_SECONDS must not be shorter than fresh"
@@ -184,6 +197,10 @@ def admin_web_config_from_settings(
     if home_traffic_enabled and (not enabled or not home_live_enabled):
         raise AdminWebConfigError(
             "WEB_ADMIN_HOME_TRAFFIC_ENABLED requires WEB_ADMIN_ENABLED=true and WEB_ADMIN_HOME_LIVE_ENABLED=true"
+        )
+    if traffic_enabled and not enabled:
+        raise AdminWebConfigError(
+            "WEB_ADMIN_TRAFFIC_ENABLED requires WEB_ADMIN_ENABLED=true"
         )
 
     if enabled:
@@ -213,6 +230,7 @@ def admin_web_config_from_settings(
         require_https=require_https,
         home_live_enabled=home_live_enabled,
         home_traffic_enabled=home_traffic_enabled,
+        traffic_enabled=traffic_enabled,
         **values,
     )
 

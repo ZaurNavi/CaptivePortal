@@ -1,0 +1,23 @@
+{% extends "admin/base.html" %}
+
+{% block subtitle %}
+<p class="page-subtitle">Site-scoped Traffic panels will appear here as they become available.</p>
+{% endblock %}
+
+{% block page_body %}
+<div id="traffic-global-state" class="state-panel" role="status" aria-live="polite" hidden>
+  <span class="state-dot" aria-hidden="true"></span>
+  <div>
+    <strong id="traffic-global-state-title">Traffic unavailable</strong>
+    <p id="traffic-global-state-message">Traffic panels cannot be refreshed right now.</p>
+  </div>
+</div>
+<div id="traffic-empty-state" class="state-panel" role="status" aria-live="polite">
+  <span class="state-dot" aria-hidden="true"></span>
+  <div>
+    <strong>Traffic section ready</strong>
+    <p>Traffic panels are not available in this foundation release.</p>
+  </div>
+</div>
+<div id="traffic-panels" class="content-grid" aria-live="polite"></div>
+{% endblock %}

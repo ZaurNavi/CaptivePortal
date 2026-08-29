@@ -32,6 +32,9 @@
       <a class="nav-link{% if page.key in ('devices', 'device') %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/devices">Devices</a>
       <a class="nav-link{% if page.key == 'visits' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/visits">Visits</a>
       <a class="nav-link{% if page.key == 'observations' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/observations">Observations</a>
+      {% if traffic_enabled %}
+      <a class="nav-link{% if page.key == 'traffic' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/traffic">Traffic</a>
+      {% endif %}
     </nav>
     <main id="main-content" class="content">
       <div class="page-heading">
@@ -40,7 +43,7 @@
           <h1>{{ page.title }}</h1>
           {% block subtitle %}{% endblock %}
         </div>
-        <button id="refresh-button" class="button" type="button">Refresh</button>
+        <button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>
       </div>
       <section
         id="admin-page"
@@ -49,6 +52,11 @@
         data-api-base="/admin/api/v1/sites/{{ site_id }}"
         {% if device_id %}data-device-id="{{ device_id }}"{% endif %}
         data-runtime-state="{{ runtime_state }}"
+        {% if page.key == 'traffic' %}
+        data-traffic-enabled="{{ 'true' if traffic_enabled else 'false' }}"
+        data-traffic-refresh-seconds="{{ traffic_refresh_seconds }}"
+        data-traffic-request-timeout-seconds="{{ traffic_request_timeout_seconds }}"
+        {% endif %}
         {% if page.key == 'home' %}
         data-home-live-enabled="{{ 'true' if home_live_enabled else 'false' }}"
         data-home-live-refresh-seconds="{{ home_live_refresh_seconds }}"
