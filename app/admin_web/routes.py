@@ -350,6 +350,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             home_traffic_request_timeout_seconds=config.home_traffic_request_timeout_seconds,
             home_traffic_page_size=config.home_traffic_page_size,
             traffic_enabled=config.traffic_enabled,
+            traffic_history_enabled=config.traffic_history_enabled,
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -757,6 +758,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             ),
         )
 
+    @blueprint.get("/admin/api/v1/sites/<site_id>/traffic/history")
+    @authenticated
+    def api_traffic_history(site_id: str) -> Response:
+        return _traffic_history_query(site_id)
+
     @blueprint.get("/admin/api/v1/sites/<site_id>/home-activity/today")
     @authenticated
     def api_home_activity_today(site_id: str) -> Response:
@@ -1153,6 +1159,126 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             except Exception:
                 pass
 
+    def _traffic_history_query(site_id: str) -> Response:
+        started = time.monotonic()
+        authorized_site = None
+        range_id = None
+        result_status = None
+        coverage_status = None
+        bucket_count = 0
+        gap_bucket_count = None
+        transition_count = None
+        reason = "internal_error"
+        response: Response
+        try:
+            try:
+                selected = resolver.resolve(site_id)
+            except AdminSiteContextError:
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            except AdminAccessDenied:
+                response = make_response(_error("site_forbidden", 403))
+                reason = "forbidden"
+                return response
+            except Exception:
+                response = make_response(_error("internal_error", 500))
+                return response
+            try:
+                authorized = policy.authorize(
+                    g.admin_principal, "admin.read.context", selected
+                )
+            except Exception:
+                response = make_response(_error("internal_error", 500))
+                return response
+            if not authorized:
+                response = make_response(_error("site_forbidden", 403))
+                reason = "forbidden"
+                return response
+            authorized_site = selected
+            if not config.traffic_enabled or not config.traffic_history_enabled:
+                response = make_response(_error("not_found", 404))
+                reason = "feature_disabled"
+                return response
+            if set(request.args) != {"range"} or len(request.args.getlist("range")) != 1:
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            range_id = request.args.get("range")
+            service = runtime.query_service
+            if service is None:
+                response = make_response(_error("source_unavailable", 503))
+                reason = "source_unavailable"
+                return response
+            try:
+                result = service.historical_traffic_history(
+                    g.admin_principal,
+                    selected,
+                    range_id=range_id,
+                )
+                result_status = result.result.get("status")
+                coverage = result.result.get("coverage", {})
+                coverage_status = coverage.get("status")
+                bucket_count = len(result.result.get("buckets", ()))
+                gap_bucket_count = coverage.get("gap_bucket_count")
+                transition_count = coverage.get("source_transition_count")
+                response = make_response(_success(
+                    selected,
+                    result.result,
+                    enforce_size=True,
+                ))
+                reason = "response_too_large" if response.status_code == 503 else "ok"
+                return response
+            except AdminQueryValidationError:
+                response = make_response(_error("invalid_request", 400))
+                reason = "invalid_request"
+                return response
+            except AdminQueryForbidden:
+                response = make_response(_error("site_forbidden", 403))
+                reason = "forbidden"
+                return response
+            except AdminQueryBusy:
+                response = make_response(_error("concurrency_limit", 429))
+                response.headers["Retry-After"] = "1"
+                reason = "busy"
+                return response
+            except AdminQueryDeadline:
+                response = make_response(_error("query_deadline", 503))
+                reason = "query_deadline"
+                return response
+            except AdminQueryUnavailable:
+                response = make_response(_error("source_unavailable", 503))
+                reason = "source_unavailable"
+                return response
+            except AdminQueryError:
+                response = make_response(_error("internal_error", 500))
+                return response
+            except Exception:
+                response = make_response(_error("internal_error", 500))
+                return response
+        finally:
+            status_code = response.status_code if "response" in locals() else 500
+            try:
+                _event(
+                    logger,
+                    "admin.traffic_history_query_completed",
+                    request_id=getattr(g, "admin_request_id", None),
+                    site_id=authorized_site,
+                    range_id=range_id if range_id in {"24h", "7d"} else None,
+                    http_status=status_code,
+                    outcome="success" if status_code == 200 else "error",
+                    reason=reason,
+                    duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                    result_status=result_status,
+                    coverage_status=coverage_status,
+                    bucket_count=bucket_count,
+                    gap_bucket_count=gap_bucket_count,
+                    source_transition_count=transition_count,
+                    response_bytes=getattr(response, "content_length", None),
+                )
+            except Exception:
+                pass
+
     def _current_state_query(
         site_id: str,
         *,
@@ -1411,6 +1537,7 @@ def _is_current_traffic_path(path: str) -> bool:
         and (
             "/current-traffic/" in path
             or path.endswith("/traffic/current")
+            or path.endswith("/traffic/history")
         )
     )
 

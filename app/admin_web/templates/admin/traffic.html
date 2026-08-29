@@ -57,5 +57,51 @@
       </article>
     </div>
   </section>
+  {% if traffic_history_enabled %}
+  <section
+    id="traffic-history-panel"
+    class="card card-wide traffic-history"
+    aria-labelledby="traffic-history-heading"
+    data-history-enabled="true"
+  >
+    <div class="card-heading traffic-history-heading-row">
+      <div>
+        <p class="eyebrow">Persisted history</p>
+        <h2 id="traffic-history-heading">Network Traffic History</h2>
+      </div>
+      <div id="traffic-network-range" class="traffic-range" role="group" aria-label="Network Traffic range">
+        <button id="traffic-network-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button>
+        <button id="traffic-network-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button>
+      </div>
+    </div>
+    <p class="live-detail">Historical Site AP/network throughput derived from persisted evidence. It may include local or service traffic and is not an Internet/WAN-only measurement. Download and Upload are bucket means from complete Site AP rate samples. Source selection is evaluated per bucket; Wired is primary and LAN may be used as fallback.</p>
+    <div id="traffic-history-state" class="state-panel" data-state="warning" role="status" aria-live="polite">
+      <span class="state-dot" aria-hidden="true"></span>
+      <div>
+        <strong id="traffic-history-state-title">Loading network traffic history…</strong>
+        <p id="traffic-history-state-message">Reading persisted AP traffic evidence.</p>
+      </div>
+    </div>
+    <div class="traffic-history-meta">
+      <p>Applied range <strong id="traffic-history-applied-range">—</strong></p>
+      <p>Coverage <strong id="traffic-history-coverage">—</strong></p>
+      <p>Watermark / age <strong id="traffic-history-watermark">—</strong></p>
+      <p>Gap buckets <strong id="traffic-history-gaps">—</strong></p>
+      <p>Source transitions <strong id="traffic-history-source-transitions">—</strong></p>
+      <p>Display timezone <strong id="traffic-history-timezone">—</strong></p>
+    </div>
+    <div id="traffic-history-legend" class="traffic-history-legend" aria-label="Chart legend">
+      <span><i class="traffic-history-key traffic-history-key-download" aria-hidden="true"></i>Download</span>
+      <span><i class="traffic-history-key traffic-history-key-upload" aria-hidden="true"></i>Upload</span>
+      <span><i class="traffic-history-key traffic-history-key-partial" aria-hidden="true"></i>Partial evidence</span>
+    </div>
+    <div id="traffic-history-chart" class="traffic-history-chart" role="group" aria-label="Network traffic history chart">
+      <svg id="traffic-history-chart-svg" viewBox="0 0 960 320" role="img" aria-labelledby="traffic-history-chart-title traffic-history-chart-description">
+        <title id="traffic-history-chart-title">Download and Upload network traffic history</title>
+        <desc id="traffic-history-chart-description">No accepted traffic history has loaded yet.</desc>
+      </svg>
+    </div>
+  </section>
+  {% endif %}
 </div>
 {% endblock %}
