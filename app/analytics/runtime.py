@@ -16,6 +16,7 @@ from .api_config import (
 from .config import AnalyticsConfig, AnalyticsConfigError, analytics_config_from_settings
 from .current_traffic import CurrentTrafficReadService
 from .home_activity import HomeActivityReadService
+from .historical_traffic import HistoricalTrafficReadService
 from .read_service import AnalyticsReadService
 from .source_gateway import AnalyticsSourceGateway, SOURCE_SCHEMA_VERSIONS
 from .telemetry import AnalyticsTelemetry
@@ -56,6 +57,7 @@ class AnalyticsRuntime:
         logger: logging.Logger,
         current_traffic_service: CurrentTrafficReadService | None = None,
         home_activity_service: HomeActivityReadService | None = None,
+        historical_traffic_service: HistoricalTrafficReadService | None = None,
         register_routes: bool = False,
     ):
         self.state = state
@@ -68,6 +70,7 @@ class AnalyticsRuntime:
         self.visit_service = visit_service
         self.current_traffic_service = current_traffic_service
         self.home_activity_service = home_activity_service
+        self.historical_traffic_service = historical_traffic_service
         self.blueprint = None
         if register_routes and api_config is not None:
             from .api import create_analytics_blueprint
@@ -202,6 +205,23 @@ def create_analytics_runtime(
     except Exception:
         home_activity_service = None
         _event(logger, "analytics.home_activity_unavailable", "construction_error")
+    try:
+        historical_traffic_service = HistoricalTrafficReadService(
+            gateway,
+            quality_gap_threshold_seconds=(
+                analytics_config.quality_gap_threshold_seconds
+            ),
+            max_query_duration_seconds=(
+                analytics_config.max_query_duration_seconds
+            ),
+        )
+    except Exception:
+        historical_traffic_service = None
+        _event(
+            logger,
+            "analytics.historical_traffic_unavailable",
+            "construction_error",
+        )
     runtime = AnalyticsRuntime(
         state="active",
         config=analytics_config,
@@ -219,6 +239,7 @@ def create_analytics_runtime(
         ),
         current_traffic_service=current_traffic_service,
         home_activity_service=home_activity_service,
+        historical_traffic_service=historical_traffic_service,
         logger=logger,
         register_routes=True,
     )

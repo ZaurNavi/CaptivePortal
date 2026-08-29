@@ -45,6 +45,12 @@ from .models import (
     HomeActivityResult,
     HomeActivityTraffic,
     HomeActivityVisits,
+    HistoricalSiteTraffic,
+    HistoricalTrafficBucket,
+    HistoricalTrafficCoverage,
+    HistoricalTrafficQuality,
+    HistoricalTrafficRange,
+    HistoricalTrafficSourceSelection,
 )
 from .current_traffic import (
     CurrentTrafficReadService,
@@ -55,6 +61,11 @@ from .home_activity import (
     HomeActivityReadService,
     HomeActivitySourceUnavailable,
     HomeActivityValidationError,
+)
+from .historical_traffic import (
+    HistoricalTrafficReadService,
+    HistoricalTrafficSourceUnavailable,
+    HistoricalTrafficValidationError,
 )
 from .read_service import AnalyticsReadService
 from .runtime import AnalyticsRuntime, create_analytics_runtime
@@ -112,6 +123,15 @@ __all__ = [
     "HomeActivityTraffic",
     "HomeActivityValidationError",
     "HomeActivityVisits",
+    "HistoricalSiteTraffic",
+    "HistoricalTrafficBucket",
+    "HistoricalTrafficCoverage",
+    "HistoricalTrafficQuality",
+    "HistoricalTrafficRange",
+    "HistoricalTrafficReadService",
+    "HistoricalTrafficSourceSelection",
+    "HistoricalTrafficSourceUnavailable",
+    "HistoricalTrafficValidationError",
     "VisitAnalyticsService",
     "WirelessAnalyticsService",
     "analytics_api_config_from_settings",

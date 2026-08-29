@@ -156,6 +156,245 @@ _CURRENT_TRAFFIC_STATS_SQL = f"""
     WHERE cycle_id=?
 """
 
+_HISTORICAL_WIRED_DOWN_OK = (
+    "(a.wired_download_rate_reason='ok' AND a.wired_observed_at IS NOT NULL "
+    "AND typeof(a.wired_download_mbps) IN ('integer','real') "
+    "AND a.wired_download_mbps>=0 "
+    "AND abs(a.wired_download_mbps)<=1.7976931348623157e308 "
+    "AND a.wired_observed_at>=c.started_at "
+    "AND a.wired_observed_at<=c.finished_at)"
+)
+_HISTORICAL_WIRED_UP_OK = _HISTORICAL_WIRED_DOWN_OK.replace(
+    "download", "upload"
+)
+_HISTORICAL_LAN_DOWN_OK = (
+    "(a.lan_rx_rate_reason='ok' AND a.lan_observed_at IS NOT NULL "
+    "AND typeof(a.lan_rx_mbps) IN ('integer','real') "
+    "AND a.lan_rx_mbps>=0 AND abs(a.lan_rx_mbps)<=1.7976931348623157e308 "
+    "AND a.lan_observed_at>=c.started_at "
+    "AND a.lan_observed_at<=c.finished_at)"
+)
+_HISTORICAL_LAN_UP_OK = _HISTORICAL_LAN_DOWN_OK.replace("lan_rx", "lan_tx")
+
+
+def _historical_rate_shape(value: str, reason: str, timestamp: str) -> str:
+    ok = (
+        f"({reason}='ok' AND {timestamp} IS NOT NULL "
+        f"AND typeof({value}) IN ('integer','real') AND {value}>=0 "
+        f"AND abs({value})<=1.7976931348623157e308)"
+    )
+    return (
+        f"COALESCE(({ok} OR ({reason} IN ({_NON_OK_RATE_REASONS_SQL}) "
+        f"AND {value} IS NULL)),0)"
+    )
+
+
+def _utc_epoch_ms_sql(column: str) -> str:
+    return (
+        f"(CAST(strftime('%s',{column}) AS INTEGER)*1000 "
+        f"+ CAST(substr({column},21,3) AS INTEGER))"
+    )
+
+
+_HISTORICAL_CYCLE_CTES = f"""
+    candidate_cycles AS (
+      SELECT c.*
+      FROM observation_cycles c INDEXED BY idx_cycles_site_kind_started
+      WHERE c.site_id=? AND c.kind='ap_dynamic'
+        AND c.state='completed' AND c.complete=1 AND c.result='success'
+        AND c.started_at<=? AND (c.finished_at IS NULL OR c.finished_at<=?)
+    ),
+    cycle_aggregates AS (
+      SELECT c.cycle_id, c.started_at, c.finished_at,
+        c.source_rows_reported, c.items_seen, c.items_stored,
+        c.items_skipped, c.error_count, c.data_quality_warning_count,
+        COUNT(a.row_id) AS stored_row_count,
+        COALESCE(SUM(CASE WHEN a.row_id IS NULL THEN 0
+          ELSE COALESCE(a.site_id<>?,1) END),0) AS bad_site_count,
+        COALESCE(SUM(CASE WHEN a.row_id IS NULL THEN 0
+          ELSE COALESCE(NOT ({_CANONICAL_MAC_SQL}),1) END),0)
+          AS bad_mac_count,
+        COUNT(a.row_id)-COUNT(DISTINCT a.ap_mac) AS duplicate_mac_count,
+        COALESCE(SUM(CASE WHEN a.row_id IS NULL THEN 0 ELSE
+          COALESCE(a.partial<>0,1) OR COALESCE(a.overview_ok<>1,1)
+          OR COALESCE(a.wired_uplink_ok<>1,1)
+          OR COALESCE(a.lan_traffic_ok<>1,1)
+          OR COALESCE(a.radios_ok<>1,1) END),0) AS bad_flag_count,
+        COALESCE(SUM(CASE WHEN a.row_id IS NULL THEN 0 ELSE
+          NOT ({_historical_rate_shape('a.wired_download_mbps', 'a.wired_download_rate_reason', 'a.wired_observed_at')})
+          OR NOT ({_historical_rate_shape('a.wired_upload_mbps', 'a.wired_upload_rate_reason', 'a.wired_observed_at')})
+          OR NOT ({_historical_rate_shape('a.lan_rx_mbps', 'a.lan_rx_rate_reason', 'a.lan_observed_at')})
+          OR NOT ({_historical_rate_shape('a.lan_tx_mbps', 'a.lan_tx_rate_reason', 'a.lan_observed_at')})
+          END),0) AS bad_rate_count,
+        COALESCE(SUM(CASE WHEN a.row_id IS NULL THEN 0 ELSE
+          a.wired_observed_at IS NULL OR a.lan_observed_at IS NULL
+          OR a.wired_observed_at<c.started_at
+          OR a.wired_observed_at>c.finished_at
+          OR a.lan_observed_at<c.started_at
+          OR a.lan_observed_at>c.finished_at END),0) AS bad_time_count,
+        COALESCE(SUM(({_HISTORICAL_WIRED_DOWN_OK})
+                     AND ({_HISTORICAL_WIRED_UP_OK})),0) AS wired_pair_count,
+        COALESCE(SUM(({_HISTORICAL_LAN_DOWN_OK})
+                     AND ({_HISTORICAL_LAN_UP_OK})),0) AS lan_pair_count,
+        MIN(a.wired_observed_at) AS wired_oldest,
+        MAX(a.wired_observed_at) AS wired_newest,
+        MIN(a.lan_observed_at) AS lan_oldest,
+        MAX(a.lan_observed_at) AS lan_newest,
+        COALESCE(SUM(a.wired_download_mbps),0.0) AS wired_download,
+        COALESCE(SUM(a.wired_upload_mbps),0.0) AS wired_upload,
+        COALESCE(SUM(a.lan_rx_mbps),0.0) AS lan_download,
+        COALESCE(SUM(a.lan_tx_mbps),0.0) AS lan_upload,
+        COALESCE(SUM(a.wired_download_rate_reason='no_baseline')
+          +SUM(a.wired_upload_rate_reason='no_baseline'),0) AS wired_no_baseline,
+        COALESCE(SUM(a.lan_rx_rate_reason='no_baseline')
+          +SUM(a.lan_tx_rate_reason='no_baseline'),0) AS lan_no_baseline,
+        COALESCE(SUM(a.wired_download_rate_reason='counter_reset')
+          +SUM(a.wired_upload_rate_reason='counter_reset'),0) AS wired_counter_reset,
+        COALESCE(SUM(a.lan_rx_rate_reason='counter_reset')
+          +SUM(a.lan_tx_rate_reason='counter_reset'),0) AS lan_counter_reset,
+        COALESCE(SUM(a.wired_download_rate_reason='gap_too_large')
+          +SUM(a.wired_upload_rate_reason='gap_too_large'),0) AS wired_gap_too_large,
+        COALESCE(SUM(a.lan_rx_rate_reason='gap_too_large')
+          +SUM(a.lan_tx_rate_reason='gap_too_large'),0) AS lan_gap_too_large,
+        COALESCE(SUM(a.wired_download_rate_reason='invalid_elapsed')
+          +SUM(a.wired_upload_rate_reason='invalid_elapsed'),0) AS wired_invalid_elapsed,
+        COALESCE(SUM(a.lan_rx_rate_reason='invalid_elapsed')
+          +SUM(a.lan_tx_rate_reason='invalid_elapsed'),0) AS lan_invalid_elapsed,
+        COALESCE(SUM(a.wired_download_rate_reason='source_unavailable')
+          +SUM(a.wired_upload_rate_reason='source_unavailable'),0) AS wired_source_unavailable,
+        COALESCE(SUM(a.lan_rx_rate_reason='source_unavailable')
+          +SUM(a.lan_tx_rate_reason='source_unavailable'),0) AS lan_source_unavailable
+        ,COALESCE(SUM(a.wired_download_rate_reason='ok')
+          +SUM(a.wired_upload_rate_reason='ok'),0) AS wired_ok
+        ,COALESCE(SUM(a.lan_rx_rate_reason='ok')
+          +SUM(a.lan_tx_rate_reason='ok'),0) AS lan_ok
+      FROM candidate_cycles c
+      LEFT JOIN ap_observations a INDEXED BY sqlite_autoindex_ap_observations_1
+        ON a.cycle_id=c.cycle_id
+      GROUP BY c.cycle_id
+    ),
+    validated_cycles AS (
+      SELECT *,
+        (COALESCE(source_rows_reported=items_seen,0)
+         AND finished_at IS NOT NULL AND finished_at>=started_at
+         AND COALESCE(items_seen=items_stored,0)
+         AND COALESCE(items_skipped=0,0)
+         AND COALESCE(error_count=0,0)
+         AND COALESCE(data_quality_warning_count=0,0)
+         AND COALESCE(stored_row_count=items_stored,0)
+         AND bad_site_count=0 AND bad_mac_count=0
+         AND duplicate_mac_count=0 AND bad_flag_count=0
+         AND bad_rate_count=0 AND bad_time_count=0) AS integrity_ok,
+        (stored_row_count=0 OR
+          (wired_pair_count=stored_row_count
+           AND {_utc_epoch_ms_sql('wired_newest')}
+               -{_utc_epoch_ms_sql('wired_oldest')}<=?))
+          AS wired_complete,
+        (stored_row_count=0 OR
+          (lan_pair_count=stored_row_count
+           AND {_utc_epoch_ms_sql('lan_newest')}
+               -{_utc_epoch_ms_sql('lan_oldest')}<=?))
+          AS lan_complete
+      FROM cycle_aggregates
+    )
+"""
+
+
+_HISTORICAL_BUCKET_SQL = f"""
+  WITH {_HISTORICAL_CYCLE_CTES},
+  ranged AS (
+    SELECT *, CAST((({_utc_epoch_ms_sql('finished_at')}
+      -{_utc_epoch_ms_sql('?')})/(?*1000)) AS INTEGER)
+      AS bucket_index
+    FROM validated_cycles
+    WHERE integrity_ok=1 AND finished_at>=? AND finished_at<?
+  ),
+  bucket_selection AS (
+    SELECT bucket_index, COUNT(*) canonical_cycle_count,
+      SUM(wired_complete) wired_complete_count,
+      SUM(lan_complete) lan_complete_count,
+      SUM(wired_pair_count) wired_pairs, SUM(lan_pair_count) lan_pairs,
+      SUM(stored_row_count) total_ap_opportunities,
+      SUM(stored_row_count=0) empty_cycle_count,
+      CASE
+        WHEN SUM(stored_row_count=0)=COUNT(*) THEN 'wired'
+        WHEN SUM(wired_complete)=COUNT(*) THEN 'wired'
+        WHEN SUM(lan_complete)=COUNT(*) THEN 'lan'
+        WHEN SUM(lan_complete)>SUM(wired_complete) THEN 'lan'
+        WHEN SUM(wired_complete)>SUM(lan_complete) THEN 'wired'
+        WHEN SUM(lan_pair_count)>SUM(wired_pair_count) THEN 'lan'
+        ELSE 'wired' END selected_source,
+      CASE
+        WHEN SUM(stored_row_count=0)=COUNT(*) THEN 'empty_population'
+        WHEN SUM(wired_complete)=COUNT(*) THEN 'primary_full_coverage'
+        WHEN SUM(lan_complete)=COUNT(*) THEN 'fallback_full_coverage'
+        WHEN SUM(lan_complete)>SUM(wired_complete) THEN 'fallback_higher_coverage'
+        WHEN SUM(wired_complete)>SUM(lan_complete) THEN 'primary_preferred_tie_or_higher'
+        WHEN SUM(lan_pair_count)>SUM(wired_pair_count) THEN 'fallback_higher_coverage'
+        ELSE 'primary_preferred_tie_or_higher' END selection_reason
+    FROM ranged GROUP BY bucket_index
+  ),
+  selected AS (
+    SELECT r.*, s.selected_source,
+      CASE WHEN s.selected_source='wired' THEN r.wired_download ELSE r.lan_download END download,
+      CASE WHEN s.selected_source='wired' THEN r.wired_upload ELSE r.lan_upload END upload
+    FROM ranged r JOIN bucket_selection s USING(bucket_index)
+    WHERE CASE WHEN s.selected_source='wired' THEN r.wired_complete ELSE r.lan_complete END
+  ),
+  ordered AS (
+    SELECT *, LAG(finished_at) OVER (
+      PARTITION BY bucket_index ORDER BY finished_at,cycle_id) previous_at
+    FROM selected
+  ),
+  sample_stats AS (
+    SELECT bucket_index, COUNT(*) complete_sample_count,
+      AVG(download) download_mbps, AVG(upload) upload_mbps,
+      MIN(finished_at) first_sample, MAX(finished_at) last_sample,
+      COALESCE(MAX(({_utc_epoch_ms_sql('finished_at')}
+        -{_utc_epoch_ms_sql('previous_at')})/1000.0),0.0)
+        max_inter_gap,
+      COALESCE(SUM((({_utc_epoch_ms_sql('finished_at')}
+        -{_utc_epoch_ms_sql('previous_at')})/1000.0)>?),0)
+        inter_gap_count
+    FROM ordered GROUP BY bucket_index
+  )
+  SELECT s.*,
+    COALESCE(x.complete_sample_count,0) complete_sample_count,
+    x.download_mbps, x.upload_mbps, x.first_sample, x.last_sample,
+    COALESCE(x.max_inter_gap,0.0) max_inter_gap,
+    COALESCE(x.inter_gap_count,0) inter_gap_count,
+    COALESCE(SUM(CASE WHEN s.selected_source='wired' THEN r.wired_no_baseline ELSE r.lan_no_baseline END),0) no_baseline_count,
+    COALESCE(SUM(CASE WHEN s.selected_source='wired' THEN r.wired_counter_reset ELSE r.lan_counter_reset END),0) counter_reset_count,
+    COALESCE(SUM(CASE WHEN s.selected_source='wired' THEN r.wired_gap_too_large ELSE r.lan_gap_too_large END),0) gap_too_large_count,
+    COALESCE(SUM(CASE WHEN s.selected_source='wired' THEN r.wired_invalid_elapsed ELSE r.lan_invalid_elapsed END),0) invalid_elapsed_count,
+    COALESCE(SUM(CASE WHEN s.selected_source='wired' THEN r.wired_source_unavailable ELSE r.lan_source_unavailable END),0) source_unavailable_count,
+    COALESCE(SUM(CASE WHEN s.selected_source='wired' THEN r.wired_ok ELSE r.lan_ok END),0) ok_count,
+    COALESCE(SUM(CASE WHEN s.selected_source='wired'
+      THEN r.wired_pair_count=r.stored_row_count AND NOT r.wired_complete
+      ELSE r.lan_pair_count=r.stored_row_count AND NOT r.lan_complete END),0)
+      skew_excluded_count
+  FROM bucket_selection s JOIN ranged r USING(bucket_index)
+  LEFT JOIN sample_stats x USING(bucket_index)
+  GROUP BY s.bucket_index
+  ORDER BY s.bucket_index
+"""
+
+
+_HISTORICAL_META_SQL = f"""
+  WITH {_HISTORICAL_CYCLE_CTES}
+  SELECT
+    COALESCE(SUM(NOT integrity_ok AND (
+      (finished_at>=? AND finished_at<?)
+      OR (finished_at IS NULL AND started_at>=? AND started_at<?))),0)
+      integrity_failure_count,
+    MIN(CASE WHEN integrity_ok AND (wired_complete OR lan_complete)
+             THEN finished_at END) available_from_utc,
+    MAX(CASE WHEN integrity_ok AND (wired_complete OR lan_complete)
+             THEN finished_at END) available_through_utc,
+    MAX(CASE WHEN integrity_ok THEN finished_at END) source_watermark_utc
+  FROM validated_cycles
+"""
+
 _CLIENT_MAC_SQL = (
     "client_mac GLOB "
     "'[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:"
@@ -476,6 +715,119 @@ class AnalyticsSourceGateway:
                 }
             finally:
                 connection.rollback()
+
+    def historical_traffic_data(
+        self,
+        *,
+        site_id: str,
+        from_utc: str,
+        to_utc: str,
+        evaluated_at_utc: str,
+        bucket_seconds: int,
+        gap_threshold_seconds: float,
+        max_site_sample_source_skew_seconds: int,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        """Return bounded historical AP-rate aggregates from one read snapshot."""
+        max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
+        cycle_parameters = (
+            site_id, evaluated_at_utc, evaluated_at_utc, site_id,
+            max_skew_milliseconds, max_skew_milliseconds,
+        )
+        with self._connection("observations", deadline) as connection:
+            connection.execute("BEGIN")
+            try:
+                meta = self._one(
+                    connection,
+                    _HISTORICAL_META_SQL,
+                    (
+                        *cycle_parameters,
+                        from_utc, to_utc, from_utc, to_utc,
+                    ),
+                    deadline,
+                )
+                rows = self._all(
+                    connection,
+                    _HISTORICAL_BUCKET_SQL,
+                    (
+                        *cycle_parameters,
+                        from_utc, from_utc,
+                        bucket_seconds,
+                        from_utc,
+                        to_utc,
+                        gap_threshold_seconds,
+                    ),
+                    deadline,
+                )
+                attempts = self._one(
+                    connection,
+                    """
+                    SELECT
+                      COALESCE(SUM(state='completed' AND result='partial'
+                        AND finished_at<=?),0)
+                        partial_cycle_count,
+                      COALESCE(SUM(state='completed' AND result='failed'
+                        AND finished_at<=?),0)
+                        failed_cycle_count,
+                      COALESCE(SUM(state='completed' AND result='shutdown'
+                        AND finished_at<=?),0)
+                        shutdown_cycle_count,
+                      COALESCE(SUM(state='abandoned' AND abandoned_at<=?),0)
+                        abandoned_cycle_count,
+                      COALESCE(SUM(
+                        state='running'
+                        OR (state='completed' AND finished_at>?)
+                        OR (state='abandoned' AND abandoned_at>?)
+                      ),0) running_cycle_count
+                    FROM observation_cycles INDEXED BY idx_cycles_site_kind_started
+                    WHERE site_id=? AND kind='ap_dynamic'
+                      AND started_at>=? AND started_at<? AND started_at<=?
+                    """,
+                    (
+                        evaluated_at_utc, evaluated_at_utc,
+                        evaluated_at_utc, evaluated_at_utc,
+                        evaluated_at_utc, evaluated_at_utc,
+                        site_id, from_utc, to_utc, evaluated_at_utc,
+                    ),
+                    deadline,
+                )
+                deadline.require_remaining()
+                return {
+                    "meta": dict(meta or {}),
+                    "buckets": tuple(dict(row) for row in rows),
+                    "attempts": dict(attempts or {}),
+                }
+            finally:
+                connection.rollback()
+
+    def explain_historical_traffic(
+        self,
+        *,
+        site_id: str,
+        from_utc: str,
+        to_utc: str,
+        evaluated_at_utc: str,
+        bucket_seconds: int,
+        gap_threshold_seconds: float,
+        max_site_sample_source_skew_seconds: int,
+        deadline: QueryDeadline,
+    ) -> tuple[str, ...]:
+        """Expose safe plan text for deterministic capacity/index evidence."""
+        max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
+        parameters = (
+            site_id, evaluated_at_utc, evaluated_at_utc, site_id,
+            max_skew_milliseconds, max_skew_milliseconds,
+            from_utc, from_utc, bucket_seconds, from_utc, to_utc,
+            gap_threshold_seconds,
+        )
+        with self._connection("observations", deadline) as connection:
+            rows = self._all(
+                connection,
+                "EXPLAIN QUERY PLAN " + _HISTORICAL_BUCKET_SQL,
+                parameters,
+                deadline,
+            )
+        return tuple(str(row[3]) for row in rows)
 
     def home_activity_data(
         self,
