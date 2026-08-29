@@ -806,6 +806,150 @@
   updateFoundationState();
 }());
 
+/* TRAFFIC_CURRENT_PANEL_START */
+(function () {
+  "use strict";
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  const coordinator = window.CaptivPortalTrafficCoordinator;
+  if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
+      || !coordinator || typeof coordinator.registerPanel !== "function") return;
+
+  const elements = {
+    panel: document.getElementById("traffic-current-panel"),
+    state: document.getElementById("traffic-current-state"),
+    title: document.getElementById("traffic-current-state-title"),
+    message: document.getElementById("traffic-current-state-message"),
+    download: document.getElementById("traffic-current-download"),
+    upload: document.getElementById("traffic-current-upload"),
+    total: document.getElementById("traffic-current-total"),
+    source: document.getElementById("traffic-current-source"),
+    freshness: document.getElementById("traffic-current-freshness"),
+    coverage: document.getElementById("traffic-current-coverage"),
+    updated: document.getElementById("traffic-current-updated"),
+  };
+  if (Object.values(elements).some((value) => !value)) return;
+
+  const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
+  const COVERAGE = new Set(["complete", "partial", "none"]);
+  const SOURCES = new Set(["wired", "lan"]);
+  const TRAFFIC_CURRENT_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  function object(value) {
+    return value && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function metric(value) {
+    return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+  }
+
+  function utc(value) {
+    return typeof value === "string"
+      && TRAFFIC_CURRENT_UTC.test(value)
+      && Number.isFinite(Date.parse(value));
+  }
+
+  function validate(payload, siteId) {
+    if (!object(payload) || payload.api_version !== "admin.read.v1" || payload.site_id !== siteId
+        || !object(payload.result)) throw new Error("Invalid current Traffic response");
+    const result = payload.result;
+    const traffic = result.traffic;
+    const snapshot = result.snapshot;
+    const selection = result.source_selection;
+    const coverage = result.coverage;
+    if (!object(traffic) || !object(snapshot) || !object(selection) || !object(coverage)
+        || traffic.unit !== "Mbps"
+        || !metric(traffic.download_mbps) || !metric(traffic.upload_mbps) || !metric(traffic.total_mbps)
+        || !FRESHNESS.has(snapshot.freshness_status)
+        || (snapshot.selected_source !== null && !SOURCES.has(snapshot.selected_source))
+        || selection.selected_source !== snapshot.selected_source
+        || selection.selection_reason !== snapshot.selection_reason
+        || !COVERAGE.has(coverage.coverage_status)
+        || !utc(snapshot.evaluated_at)
+        || (snapshot.observed_at !== null && !utc(snapshot.observed_at))) {
+      throw new Error("Invalid current Traffic response");
+    }
+    const unavailable = snapshot.freshness_status === "unavailable" || coverage.coverage_status === "none";
+    if (unavailable && [traffic.download_mbps, traffic.upload_mbps, traffic.total_mbps].some((value) => value !== null)) {
+      throw new Error("Invalid current Traffic response");
+    }
+    return Object.freeze({traffic, snapshot, coverage});
+  }
+
+  function formatMetric(value) {
+    return value === null ? "—" : `${value.toFixed(2)} Mbps`;
+  }
+
+  function formatTime(value) {
+    if (!utc(value)) return "—";
+    return new Date(value).toLocaleString([], {dateStyle: "medium", timeStyle: "medium"});
+  }
+
+  function setMetrics(traffic) {
+    elements.download.textContent = formatMetric(traffic ? traffic.download_mbps : null);
+    elements.upload.textContent = formatMetric(traffic ? traffic.upload_mbps : null);
+    elements.total.textContent = formatMetric(traffic ? traffic.total_mbps : null);
+  }
+
+  function renderLoading() {
+    elements.state.dataset.state = "warning";
+    elements.title.textContent = "Loading current network throughput…";
+    elements.message.textContent = "Reading the latest persisted AP traffic evidence.";
+    setMetrics(null);
+    elements.source.textContent = "—";
+    elements.freshness.textContent = "—";
+    elements.coverage.textContent = "—";
+    elements.updated.textContent = "—";
+  }
+
+  function render(value) {
+    const unavailable = value.snapshot.freshness_status === "unavailable"
+      || value.coverage.coverage_status === "none";
+    const degraded = !unavailable && (value.snapshot.freshness_status === "stale"
+      || value.coverage.coverage_status === "partial");
+    elements.state.dataset.state = unavailable ? "error" : (degraded ? "warning" : "ready");
+    elements.title.textContent = unavailable ? "Current throughput unavailable"
+      : (degraded ? "Current throughput has limited evidence" : "Current throughput ready");
+    elements.message.textContent = unavailable
+      ? "No usable persisted AP traffic estimate is available."
+      : (degraded ? "The estimate is based on stale or partial persisted evidence."
+        : "The latest persisted AP traffic estimate is complete and fresh.");
+    setMetrics(unavailable ? null : value.traffic);
+    elements.source.textContent = value.snapshot.selected_source === "wired" ? "Wired"
+      : (value.snapshot.selected_source === "lan" ? "LAN fallback" : "Source unavailable");
+    elements.freshness.textContent = value.snapshot.freshness_status === "fresh" ? "Fresh"
+      : (value.snapshot.freshness_status === "stale" ? "Stale" : "Unavailable");
+    elements.coverage.textContent = value.coverage.coverage_status === "complete" ? "Complete"
+      : (value.coverage.coverage_status === "partial" ? "Partial" : "Unavailable");
+    elements.updated.textContent = value.snapshot.observed_at === null
+      ? `Evaluated ${formatTime(value.snapshot.evaluated_at)} · observed —`
+      : `Evaluated ${formatTime(value.snapshot.evaluated_at)} · observed ${formatTime(value.snapshot.observed_at)}`;
+  }
+
+  function renderFailure(failure) {
+    renderLoading();
+    elements.state.dataset.state = "error";
+    elements.title.textContent = failure && failure.kind === "busy"
+      ? "Current throughput is busy" : "Current throughput unavailable";
+    elements.message.textContent = failure && failure.kind === "busy"
+      ? "Try Refresh again after the current query completes."
+      : "The current persisted estimate could not be loaded.";
+  }
+
+  coordinator.registerPanel({
+    key: "current-network-throughput",
+    autoRefresh: true,
+    load: async (context) => validate(
+      await context.requestJson(`${context.apiBase}/traffic/current`),
+      context.siteId,
+    ),
+    render,
+    renderLoading,
+    renderFailure,
+  });
+}());
+/* TRAFFIC_CURRENT_PANEL_END */
+
 (function () {
   "use strict";
   const STATUS = new Set(["operational", "degraded", "unavailable", "unknown"]);

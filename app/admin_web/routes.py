@@ -716,6 +716,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             site_id,
             route_name="current_traffic_summary",
             capability="admin.read.overview",
+            feature_enabled=config.home_traffic_enabled,
             allowed_parameters=frozenset(),
             required_parameters=frozenset(),
             operation=lambda service, selected: service.current_traffic_summary(
@@ -731,12 +732,28 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             site_id,
             route_name="current_traffic_ap_page",
             capability="admin.read.observations",
+            feature_enabled=config.home_traffic_enabled,
             allowed_parameters=allowed,
             required_parameters=frozenset({"cycle_id"}),
             operation=lambda service, selected: service.list_current_ap_traffic(
                 g.admin_principal,
                 selected,
                 **{key: request.args.get(key) for key in allowed},
+            ),
+        )
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/traffic/current")
+    @authenticated
+    def api_traffic_current(site_id: str) -> Response:
+        return _current_traffic_query(
+            site_id,
+            route_name="traffic_current",
+            capability="admin.read.context",
+            feature_enabled=config.traffic_enabled,
+            allowed_parameters=frozenset(),
+            required_parameters=frozenset(),
+            operation=lambda service, selected: service.current_traffic_summary(
+                g.admin_principal, selected
             ),
         )
 
@@ -995,6 +1012,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         *,
         route_name: str,
         capability: str,
+        feature_enabled: bool,
         allowed_parameters: frozenset[str],
         required_parameters: frozenset[str],
         operation: Callable[..., Any],
@@ -1032,7 +1050,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 reason = "forbidden"
                 return response
             authorized_site = selected
-            if not config.home_traffic_enabled:
+            if not feature_enabled:
                 response = make_response(_error("not_found", 404))
                 reason = "feature_disabled"
                 return response
@@ -1390,7 +1408,10 @@ def _is_current_state_path(path: str) -> bool:
 def _is_current_traffic_path(path: str) -> bool:
     return (
         path.startswith(ADMIN_API_PREFIX + "/sites/")
-        and "/current-traffic/" in path
+        and (
+            "/current-traffic/" in path
+            or path.endswith("/traffic/current")
+        )
     )
 
 
