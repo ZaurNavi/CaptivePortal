@@ -19,5 +19,43 @@
     <p>Traffic panels are not available in this foundation release.</p>
   </div>
 </div>
-<div id="traffic-panels" class="content-grid" aria-live="polite"></div>
+<div id="traffic-panels" class="content-grid" aria-live="polite">
+  <section id="traffic-current-panel" class="card card-wide" aria-labelledby="traffic-current-heading">
+    <div class="card-heading">
+      <div>
+        <p class="eyebrow">Live estimate</p>
+        <h2 id="traffic-current-heading">Current Network Throughput</h2>
+      </div>
+    </div>
+    <p class="live-detail">Derived from persisted AP traffic counters. May include local/service traffic and is not an Internet-only measurement.</p>
+    <div id="traffic-current-state" class="state-panel" data-state="warning" role="status" aria-live="polite">
+      <span class="state-dot" aria-hidden="true"></span>
+      <div>
+        <strong id="traffic-current-state-title">Loading current throughput</strong>
+        <p id="traffic-current-state-message">Reading the latest persisted AP traffic evidence.</p>
+      </div>
+    </div>
+    <div class="traffic-metrics">
+      <article class="card live-metric">
+        <p>Download Now</p>
+        <strong id="traffic-current-download">—</strong>
+      </article>
+      <article class="card live-metric">
+        <p>Upload Now</p>
+        <strong id="traffic-current-upload">—</strong>
+      </article>
+      <article class="card live-metric">
+        <p>Total Now</p>
+        <strong id="traffic-current-total">—</strong>
+      </article>
+      <article class="card traffic-quality">
+        <h3>Evidence</h3>
+        <p>Source <strong id="traffic-current-source">—</strong></p>
+        <p>Freshness <strong id="traffic-current-freshness">—</strong></p>
+        <p>Coverage <strong id="traffic-current-coverage">—</strong></p>
+        <p>Last evaluated / observed <strong id="traffic-current-updated">—</strong></p>
+      </article>
+    </div>
+  </section>
+</div>
 {% endblock %}
