@@ -196,14 +196,27 @@ def _utc_epoch_ms_sql(column: str) -> str:
     )
 
 
-_HISTORICAL_CYCLE_CTES = f"""
+_HISTORICAL_RANGE_CANDIDATES_CTE = """
     candidate_cycles AS (
       SELECT c.*
       FROM observation_cycles c INDEXED BY idx_cycles_site_kind_started
       WHERE c.site_id=? AND c.kind='ap_dynamic'
         AND c.state='completed' AND c.complete=1 AND c.result='success'
-        AND c.started_at<=? AND (c.finished_at IS NULL OR c.finished_at<=?)
-    ),
+        AND c.started_at>=? AND c.started_at<?
+        AND (c.finished_at IS NULL
+             OR (c.finished_at>=? AND c.finished_at<?))
+      UNION ALL
+      SELECT c.*
+      FROM observation_cycles c INDEXED BY idx_cycles_site_kind_started
+      WHERE c.site_id=? AND c.kind='ap_dynamic'
+        AND c.state='completed' AND c.complete=1 AND c.result='success'
+        AND c.started_at<?
+        AND c.finished_at>=? AND c.finished_at<?
+    )
+"""
+
+
+_HISTORICAL_VALIDATION_CTES = f"""
     cycle_aggregates AS (
       SELECT c.cycle_id, c.started_at, c.finished_at,
         c.source_rows_reported, c.items_seen, c.items_stored,
@@ -300,6 +313,13 @@ _HISTORICAL_CYCLE_CTES = f"""
 """
 
 
+_HISTORICAL_CYCLE_CTES = (
+    _HISTORICAL_RANGE_CANDIDATES_CTE
+    + ","
+    + _HISTORICAL_VALIDATION_CTES
+)
+
+
 _HISTORICAL_BUCKET_SQL = f"""
   WITH {_HISTORICAL_CYCLE_CTES},
   ranged AS (
@@ -386,14 +406,12 @@ _HISTORICAL_META_SQL = f"""
     COALESCE(SUM(NOT integrity_ok AND (
       (finished_at>=? AND finished_at<?)
       OR (finished_at IS NULL AND started_at>=? AND started_at<?))),0)
-      integrity_failure_count,
-    MIN(CASE WHEN integrity_ok AND (wired_complete OR lan_complete)
-             THEN finished_at END) available_from_utc,
-    MAX(CASE WHEN integrity_ok AND (wired_complete OR lan_complete)
-             THEN finished_at END) available_through_utc,
-    MAX(CASE WHEN integrity_ok THEN finished_at END) source_watermark_utc
+      integrity_failure_count
   FROM validated_cycles
 """
+
+
+_HISTORICAL_BOUNDARY_BATCH_SIZE = 64
 
 _CLIENT_MAC_SQL = (
     "client_mac GLOB "
@@ -716,6 +734,165 @@ class AnalyticsSourceGateway:
             finally:
                 connection.rollback()
 
+    def _historical_boundary_candidates(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        site_id: str,
+        evaluated_at_utc: str,
+        descending: bool,
+        cursor: tuple[str, str] | None,
+        deadline: QueryDeadline,
+    ) -> tuple[sqlite3.Row, ...]:
+        direction = "DESC" if descending else "ASC"
+        comparison = "<" if descending else ">"
+        cursor_clause = ""
+        parameters: list[Any] = [
+            site_id,
+            evaluated_at_utc,
+            evaluated_at_utc,
+        ]
+        if cursor is not None:
+            cursor_clause = (
+                f"AND (c.finished_at{comparison}? OR "
+                f"(c.finished_at=? AND c.cycle_id{comparison}?))"
+            )
+            parameters.extend((cursor[0], cursor[0], cursor[1]))
+        parameters.append(_HISTORICAL_BOUNDARY_BATCH_SIZE)
+        return self._all(
+            connection,
+            f"""
+            SELECT c.cycle_id, c.finished_at
+            FROM observation_cycles c INDEXED BY idx_cycles_site_kind_started
+            WHERE c.site_id=? AND c.kind='ap_dynamic'
+              AND c.state='completed' AND c.complete=1 AND c.result='success'
+              AND c.started_at<=? AND c.finished_at IS NOT NULL
+              AND c.finished_at<=?
+              {cursor_clause}
+            ORDER BY c.finished_at {direction}, c.cycle_id {direction}
+            LIMIT ?
+            """,
+            tuple(parameters),
+            deadline,
+        )
+
+    def _historical_validated_boundary_batch(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        site_id: str,
+        cycle_ids: Sequence[str],
+        max_skew_milliseconds: int,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, Mapping[str, Any]]:
+        placeholders = ",".join("?" for _ in cycle_ids)
+        rows = self._all(
+            connection,
+            f"""
+            WITH candidate_cycles AS (
+              SELECT c.*
+              FROM observation_cycles c
+              WHERE c.site_id=? AND c.kind='ap_dynamic'
+                AND c.cycle_id IN ({placeholders})
+            ),
+            {_HISTORICAL_VALIDATION_CTES}
+            SELECT cycle_id, finished_at, integrity_ok,
+                   wired_complete, lan_complete
+            FROM validated_cycles
+            """,
+            (
+                site_id,
+                *cycle_ids,
+                site_id,
+                max_skew_milliseconds,
+                max_skew_milliseconds,
+            ),
+            deadline,
+        )
+        return {str(row["cycle_id"]): dict(row) for row in rows}
+
+    def _historical_source_bounds(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        site_id: str,
+        evaluated_at_utc: str,
+        max_skew_milliseconds: int,
+        deadline: QueryDeadline,
+    ) -> Mapping[str, str | None]:
+        source_watermark: str | None = None
+        available_through: str | None = None
+        cursor: tuple[str, str] | None = None
+        while source_watermark is None or available_through is None:
+            candidates = self._historical_boundary_candidates(
+                connection,
+                site_id=site_id,
+                evaluated_at_utc=evaluated_at_utc,
+                descending=True,
+                cursor=cursor,
+                deadline=deadline,
+            )
+            if not candidates:
+                break
+            validated = self._historical_validated_boundary_batch(
+                connection,
+                site_id=site_id,
+                cycle_ids=tuple(str(row["cycle_id"]) for row in candidates),
+                max_skew_milliseconds=max_skew_milliseconds,
+                deadline=deadline,
+            )
+            for candidate in candidates:
+                row = validated[str(candidate["cycle_id"])]
+                if not bool(row["integrity_ok"]):
+                    continue
+                finished_at = str(row["finished_at"])
+                if source_watermark is None:
+                    source_watermark = finished_at
+                if available_through is None and (
+                    bool(row["wired_complete"]) or bool(row["lan_complete"])
+                ):
+                    available_through = finished_at
+                if source_watermark is not None and available_through is not None:
+                    break
+            last = candidates[-1]
+            cursor = (str(last["finished_at"]), str(last["cycle_id"]))
+
+        available_from: str | None = None
+        cursor = None
+        while available_from is None:
+            candidates = self._historical_boundary_candidates(
+                connection,
+                site_id=site_id,
+                evaluated_at_utc=evaluated_at_utc,
+                descending=False,
+                cursor=cursor,
+                deadline=deadline,
+            )
+            if not candidates:
+                break
+            validated = self._historical_validated_boundary_batch(
+                connection,
+                site_id=site_id,
+                cycle_ids=tuple(str(row["cycle_id"]) for row in candidates),
+                max_skew_milliseconds=max_skew_milliseconds,
+                deadline=deadline,
+            )
+            for candidate in candidates:
+                row = validated[str(candidate["cycle_id"])]
+                if bool(row["integrity_ok"]) and (
+                    bool(row["wired_complete"]) or bool(row["lan_complete"])
+                ):
+                    available_from = str(row["finished_at"])
+                    break
+            last = candidates[-1]
+            cursor = (str(last["finished_at"]), str(last["cycle_id"]))
+
+        return {
+            "available_from_utc": available_from,
+            "available_through_utc": available_through,
+            "source_watermark_utc": source_watermark,
+        }
+
     def historical_traffic_data(
         self,
         *,
@@ -731,7 +908,8 @@ class AnalyticsSourceGateway:
         """Return bounded historical AP-rate aggregates from one read snapshot."""
         max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
         cycle_parameters = (
-            site_id, evaluated_at_utc, evaluated_at_utc, site_id,
+            site_id, from_utc, to_utc, from_utc, to_utc,
+            site_id, from_utc, from_utc, to_utc, site_id,
             max_skew_milliseconds, max_skew_milliseconds,
         )
         with self._connection("observations", deadline) as connection:
@@ -746,6 +924,14 @@ class AnalyticsSourceGateway:
                     ),
                     deadline,
                 )
+                meta_values = dict(meta or {})
+                meta_values.update(self._historical_source_bounds(
+                    connection,
+                    site_id=site_id,
+                    evaluated_at_utc=evaluated_at_utc,
+                    max_skew_milliseconds=max_skew_milliseconds,
+                    deadline=deadline,
+                ))
                 rows = self._all(
                     connection,
                     _HISTORICAL_BUCKET_SQL,
@@ -793,7 +979,7 @@ class AnalyticsSourceGateway:
                 )
                 deadline.require_remaining()
                 return {
-                    "meta": dict(meta or {}),
+                    "meta": meta_values,
                     "buckets": tuple(dict(row) for row in rows),
                     "attempts": dict(attempts or {}),
                 }
@@ -815,7 +1001,8 @@ class AnalyticsSourceGateway:
         """Expose safe plan text for deterministic capacity/index evidence."""
         max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
         parameters = (
-            site_id, evaluated_at_utc, evaluated_at_utc, site_id,
+            site_id, from_utc, to_utc, from_utc, to_utc,
+            site_id, from_utc, from_utc, to_utc, site_id,
             max_skew_milliseconds, max_skew_milliseconds,
             from_utc, from_utc, bucket_seconds, from_utc, to_utc,
             gap_threshold_seconds,

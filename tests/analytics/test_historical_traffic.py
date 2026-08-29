@@ -29,7 +29,9 @@ def _service(stack, *, gap=180.0):
     )
 
 
-def _row(cycle_id, mac, observed, *, wired=(1.0, 2.0), lan=(3.0, 4.0)):
+def _row(
+    cycle_id, mac, observed, *, wired=(1.0, 2.0), lan=(3.0, 4.0), site=SITE
+):
     def values(pair):
         return (
             pair[0], pair[1],
@@ -39,7 +41,7 @@ def _row(cycle_id, mac, observed, *, wired=(1.0, 2.0), lan=(3.0, 4.0)):
     wd, wu, wdr, wur = values(wired)
     ld, lu, ldr, lur = values(lan)
     return {
-        "cycle_id": cycle_id, "observed_at": observed, "site_id": SITE,
+        "cycle_id": cycle_id, "observed_at": observed, "site_id": site,
         "ap_mac": mac, "partial": False, "overview_ok": True,
         "wired_uplink_ok": True, "lan_traffic_ok": True, "radios_ok": True,
         "wired_observed_at": observed, "wired_download_mbps": wd,
@@ -51,10 +53,10 @@ def _row(cycle_id, mac, observed, *, wired=(1.0, 2.0), lan=(3.0, 4.0)):
 
 
 def _cycle(stack, cycle_id, finished, rows=(), *, started=None, result="success",
-           complete=True):
+           complete=True, site=SITE):
     started = started or finished
     stack.observations.create_cycle(
-        kind="ap_dynamic", site_id=SITE, started_at=started, cycle_id=cycle_id
+        kind="ap_dynamic", site_id=site, started_at=started, cycle_id=cycle_id
     )
     entries = [(row, ()) for row in rows]
     if entries:
@@ -247,6 +249,128 @@ def test_half_open_range_and_exact_bucket_boundary_use_finished_at(analytics_sta
     assert [item.canonical_cycle_count for item in result.buckets] == [2, 1]
     assert result.buckets[0].first_complete_sample_at == cases[0][1]
     assert result.buckets[1].first_complete_sample_at == cases[2][1]
+    assert result.coverage.source_watermark_utc == cases[3][1]
+
+
+def test_cycle_started_before_range_and_finished_inside_is_preserved(analytics_stack):
+    timestamp = "2026-01-01T11:55:30.000Z"
+    _cycle(
+        analytics_stack,
+        "straddles-from",
+        timestamp,
+        [_row("straddles-from", "02:AA:BB:CC:DD:40", timestamp)],
+        started="2026-01-01T11:54:59.999Z",
+    )
+
+    bucket = _history(analytics_stack).buckets[0]
+
+    assert bucket.canonical_cycle_count == 1
+    assert bucket.first_complete_sample_at == timestamp
+
+
+def test_completed_success_with_null_finish_inside_range_fails_closed(analytics_stack):
+    timestamp = "2026-01-01T11:58:00.000Z"
+    _cycle(analytics_stack, "null-finish", timestamp)
+    with analytics_stack.observations._connect() as connection:
+        connection.execute("PRAGMA ignore_check_constraints=ON")
+        connection.execute(
+            "UPDATE observation_cycles SET finished_at=NULL "
+            "WHERE cycle_id='null-finish'"
+        )
+
+    with pytest.raises(HistoricalTrafficSourceUnavailable):
+        _history(analytics_stack)
+
+
+def test_cycles_outside_range_do_not_change_historical_result(analytics_stack):
+    for suffix, timestamp, wired in (
+        ("wired", "2026-01-01T11:55:30.000Z", (1.0, 2.0)),
+        ("none", "2026-01-01T11:57:30.000Z", (None, None)),
+        ("lan", "2026-01-01T11:59:30.000Z", (None, None)),
+    ):
+        cycle = "bounded-" + suffix
+        lan = (3.0, 4.0) if suffix == "lan" else (None, None)
+        _cycle(analytics_stack, cycle, timestamp, [
+            _row(
+                cycle,
+                f"02:AA:BB:CC:DD:{50 + len(suffix):02X}",
+                timestamp,
+                wired=wired,
+                lan=lan,
+            )
+        ])
+    _cycle(
+        analytics_stack,
+        "bounded-partial",
+        "2026-01-01T11:58:00.000Z",
+        result="partial",
+        complete=False,
+    )
+    before = _history(analytics_stack)
+
+    for cycle, timestamp, value in (
+        ("old-outside", "2025-12-01T00:00:00.000Z", (70.0, 80.0)),
+        ("at-to-outside", EVALUATED, (90.0, 100.0)),
+        ("after-to-outside", "2026-01-01T12:01:00.000Z", (110.0, 120.0)),
+    ):
+        _cycle(analytics_stack, cycle, timestamp, [
+            _row(cycle, "02:AA:BB:CC:DD:60", timestamp, wired=value)
+        ])
+    after = _history(analytics_stack)
+
+    assert after.buckets == before.buckets
+    assert after.quality == before.quality
+    assert after.coverage.canonical_cycle_count == before.coverage.canonical_cycle_count
+    assert (
+        after.coverage.complete_site_sample_count
+        == before.coverage.complete_site_sample_count
+    )
+    assert (
+        after.coverage.excluded_site_sample_count
+        == before.coverage.excluded_site_sample_count
+    )
+    assert after.coverage.source_transition_count == 0
+    assert [bucket.status for bucket in after.buckets] == ["partial"]
+    assert after.quality.partial_cycle_count == 1
+
+
+@pytest.mark.parametrize("days,bucket_seconds", [(1, 300), (7, 900)])
+def test_requested_window_bounds_candidate_aggregation(
+    analytics_stack, days, bucket_seconds
+):
+    site = f"bounded-site-{days}d"
+    start = datetime(2026, 1, 1, 12, tzinfo=UTC) - timedelta(days=days)
+    from_utc = start.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    in_range = "2026-01-01T11:59:00.000Z"
+    _cycle(analytics_stack, f"bounded-{days}d", in_range, [
+        _row(
+            f"bounded-{days}d",
+            "02:AA:BB:CC:DD:61",
+            in_range,
+            site=site,
+        )
+    ], site=site)
+    _cycle(analytics_stack, f"old-{days}d", "2025-01-01T00:00:00.000Z", [
+        _row(
+            f"old-{days}d",
+            "02:AA:BB:CC:DD:62",
+            "2025-01-01T00:00:00.000Z",
+            site=site,
+        )
+    ], site=site)
+
+    result = _service(analytics_stack, gap=999_999).get_site_history(
+        site,
+        from_utc=from_utc,
+        to_utc=EVALUATED,
+        evaluated_at_utc=EVALUATED,
+        bucket_seconds=bucket_seconds,
+    )
+
+    assert result.coverage.canonical_cycle_count == 1
+    assert result.coverage.available_from_utc == "2025-01-01T00:00:00.000Z"
+    assert result.coverage.available_through_utc == in_range
+    assert result.coverage.source_watermark_utc == in_range
 
 
 def test_final_bucket_uses_exact_short_range_end(analytics_stack):
