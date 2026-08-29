@@ -720,6 +720,112 @@ class CurrentApTrafficPage:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalTrafficRange:
+    site_id: str
+    from_utc: str
+    to_utc: str
+    evaluated_at_utc: str
+    bucket_seconds: int
+    bucket_count: int
+    max_site_sample_source_skew_seconds: int
+    bucket_alignment: str = "range_start_utc"
+    max_site_history_buckets: int = 720
+    unit: str = "Mbps"
+    aggregation: str = "mean_of_complete_site_rate_samples"
+    metric_version: str = "network_traffic_history.v1"
+    source_kind: str = "observation_ap_dynamic"
+    sample_timestamp_semantics: str = "cycle_finished_at"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficSourceSelection:
+    primary_source: str
+    selected_source: str | None
+    selection_reason: str
+    wired_complete_site_cycle_count: int
+    lan_complete_site_cycle_count: int
+    wired_pair_valid_ap_opportunities: int
+    lan_pair_valid_ap_opportunities: int
+    source_mixing_allowed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficBucket:
+    bucket_start_utc: str
+    bucket_end_utc: str
+    download_mbps: float | None
+    upload_mbps: float | None
+    total_mbps: float | None
+    status: str
+    selected_source: str | None
+    selection_reason: str
+    source_changed_from_previous: bool
+    canonical_cycle_count: int
+    complete_site_sample_count: int
+    excluded_site_sample_count: int
+    total_ap_opportunities: int
+    selected_pair_valid_ap_opportunities: int
+    first_complete_sample_at: str | None
+    last_complete_sample_at: str | None
+    leading_gap_seconds: float
+    trailing_gap_seconds: float
+    max_inter_sample_gap_seconds: float
+    gap_count_over_threshold: int
+    selected_source_skew_excluded_sample_count: int
+    rate_reason_counts: Mapping[str, int]
+    source_selection: HistoricalTrafficSourceSelection
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rate_reason_counts", freeze(self.rate_reason_counts))
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficCoverage:
+    status: str
+    available_from_utc: str | None
+    available_through_utc: str | None
+    source_watermark_utc: str | None
+    source_age_seconds: float | None
+    bucket_count: int
+    complete_bucket_count: int
+    partial_bucket_count: int
+    missing_bucket_count: int
+    canonical_cycle_count: int
+    complete_site_sample_count: int
+    excluded_site_sample_count: int
+    gap_bucket_count: int
+    source_transition_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficQuality:
+    partial_cycle_count: int
+    failed_cycle_count: int
+    shutdown_cycle_count: int
+    abandoned_cycle_count: int
+    running_cycle_count: int
+    no_baseline_count: int
+    counter_reset_count: int
+    gap_too_large_count: int
+    invalid_elapsed_count: int
+    source_unavailable_count: int
+    source_skew_excluded_sample_count: int
+    integrity_failure_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalSiteTraffic:
+    status: str
+    range: HistoricalTrafficRange
+    buckets: tuple[HistoricalTrafficBucket, ...]
+    coverage: HistoricalTrafficCoverage
+    quality: HistoricalTrafficQuality
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "buckets", tuple(self.buckets))
+
+
+@dataclass(frozen=True, slots=True)
 class HomeActivityCoverage:
     coverage_from_utc: str | None
     coverage_through_utc: str | None
