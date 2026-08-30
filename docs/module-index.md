@@ -1,8 +1,8 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-08-30
-Runtime baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
+Updated: 2026-08-31
+Runtime baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -34,32 +34,35 @@ Runtime baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
 | Historical Traffic Read Foundation | current | `app/analytics/historical_traffic.py`, source gateway | `modules/traffic.md` | reads Observation | no |
 | Traffic Network History | current; default disabled | `app/admin_web/`, Historical Traffic | `modules/traffic.md` | none | no |
 | Traffic Period Statistics | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
+| Traffic Peak Load | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
 
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-08-30:
+Owner-provided production checkpoint 2026-08-31:
 
 ```text
-HEAD: b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
-tree: 1d8b94590848f9505e45e653384dd8a7c18d4339
+HEAD: a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
+tree: f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
 TRAFFIC-00: active
 TRAFFIC-01: active
-TRAFFIC-02-READ: current accepted foundation
+TRAFFIC-02-READ: accepted foundation
 TRAFFIC-02 History: active
 TRAFFIC-02-PERF-01: accepted
 TRAFFIC-03 Period Statistics: active
+TRAFFIC-04 Peak Load: CLOSED / production PASS / active
 
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 ```
 
-Browser acceptance for Period Statistics: PASS.
+Production product acceptance for Peak Load: PASS for 24h and 7d.
 
 ## Next Traffic item
 
 ```text
-TRAFFIC-04 — Peak Load Period
+TRAFFIC-05 — Traffic by AP
 NEXT / NOT IMPLEMENTED
 ```
 

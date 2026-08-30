@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-08-30
-Current repository baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
-Confirmed production deployed HEAD: `b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
-Confirmed production tree: `1d8b94590848f9505e45e653384dd8a7c18d4339`
+Updated: 2026-08-31
+Current repository baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Confirmed production deployed HEAD: `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Confirmed production tree: `f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9`
 
 ## Repository vs production
 
@@ -165,48 +165,124 @@ Owner + Tech Lead issue official PASS/FAIL.
 All mandatory pre-publication gates must PASS before the normal publication
 commit/PR path.
 
-## Traffic production checkpoint — 2026-08-30
+## Traffic production checkpoint — 2026-08-31
 
 Owner-confirmed:
 
 ```text
-TASK-TRAFFIC-03:
-PRODUCTION ACCEPTANCE PASS / CLOSED
+TASK-TRAFFIC-04:
+CLOSED / PRODUCTION PASS
 
 production HEAD:
-b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
+a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
 
 production tree:
-1d8b94590848f9505e45e653384dd8a7c18d4339
+f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
 
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 
-Browser acceptance:
+Browser/product acceptance:
 PASS
 
 24h:
-PASS
+History / Statistics / Peak = PASS
 
 7d:
-PASS
+History / Statistics / Peak = PASS
 
-History/Statistics synchronized range switch:
+shared History/Statistics/Peak range:
 PASS
 ```
 
-Traffic Section production surface includes Current, History and Period Statistics.
+Traffic Section production surface includes Current, History, Period Statistics
+and Peak Load.
 
-## TRAFFIC-03 acceptance history
+## TRAFFIC-04 deployment and activation history
 
-PR #89 merged the accepted tree `1d8b94590848f9505e45e653384dd8a7c18d4339`.
+Previous production checkpoint:
 
-Initial candidate `d96ddbc6f8685be175ee9a48da9b8e15621f2161` / tree `5e6a28950c8079d805450dc2a7ecf652a8285820` passed functional/V6 but
-failed mandatory production-size PERF and is superseded.
+```text
+b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
+1d8b94590848f9505e45e653384dd8a7c18d4339
+```
 
-Final remediation candidate `79875aca61297c8de4c30b7119b15118079f26d0` preserved accepted tree `1d8b94590848f9505e45e653384dd8a7c18d4339`
-and passed all mandatory gates before the final accepted release path.
+Accepted candidate tree:
+
+```text
+f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
+```
+
+Publication / merge:
+
+```text
+branch: feature/traffic-peak-v1
+publication commit: 0343ac77a1a90c2ba8bc3ce1c969b6c1593e9759
+PR: #91
+merge commit: a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
+merge tree: f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
+```
+
+Deployment was performed **FROM GIT**. No SCP/manual source patch was used.
+
+Rollout remained two-stage:
+
+```text
+Stage 1:
+deploy accepted Git artifact
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
+→ dormant verification PASS
+
+Stage 2:
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
+→ separate controlled restart
+→ production product acceptance PASS
+```
+
+Post-activation evidence:
+
+```text
+service active/running
+NRestarts=0
+startup clean
+Observation cycles continue
+Omada webhook normal
+public portal endpoints normal
+```
+
+Peak-only rollback remains feature disable first:
+
+```text
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
+```
+
+History/Statistics/Current do not need to be disabled for a Peak-only rollback.
+
+## TRAFFIC-04 acceptance / PERF note
+
+Windows Central Lab V6 and Linux production-size PERF both passed on the accepted
+candidate tree.
+
+Controlled amendment #1 for this TASK changed only:
+
+```text
+Peak vs Candidate p50
+from max(0.50s, 20% C.p50)
+to   max(0.50s, 30% C.p50)
+```
+
+All p95/max/hard-headroom/deadline/browser-timeout limits remained unchanged.
+
+The Owner-approved actual execution did not use a separate pre-publication browser
+gate. Production product/browser acceptance was completed after Git deploy and
+separate activation. This historical execution detail does not change generic
+acceptance-before-publication governance.
+
+A one-time non-reproduced 7d visual-refresh observation was explicitly not accepted
+as a blocker/defect/debt. Follow-up History requests were HTTP 200 without observed
+429/503/query_deadline/concurrency failure.
 
 ## Feature activation
 

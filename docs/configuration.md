@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-08-30
-Baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
+Updated: 2026-08-31
+Baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -202,6 +202,7 @@ Repository defaults:
 WEB_ADMIN_TRAFFIC_ENABLED=false
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=false
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=false
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
 WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
 WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20
 ```
@@ -212,19 +213,33 @@ Feature hierarchy:
 Traffic master exposure
 → History subordinate exposure
 → Statistics subordinate exposure
+→ Peak subordinate exposure
 ```
 
-Statistics requires Traffic + History when enabled.
+Dependencies:
+
+```text
+History requires Traffic
+Statistics requires Traffic + History
+Peak requires Traffic + History + Statistics
+```
 
 These are product-exposure flags. They do not start/stop Observation,
 CurrentTrafficReadService or HistoricalTrafficReadService.
 
-Owner-confirmed production state 2026-08-30:
+Owner-confirmed production state 2026-08-31:
 
 ```text
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
+```
+
+Production environment source:
+
+```text
+/etc/default/captive-portal
 ```
 
 Repository default=false must not be rewritten as production disabled.
@@ -237,11 +252,18 @@ stale boundary = 180s
 max AP skew = 60s
 ```
 
-History/Statistics selected product ranges:
+History / Statistics / Peak selected product ranges:
 
 ```text
 24h
 7d
+```
+
+History range contract:
+
+```text
+24h → 5-minute buckets → 288
+7d  → 15-minute buckets → 672
 ```
 
 Browser orchestration values are not historical semantic/performance thresholds.

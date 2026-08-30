@@ -1,10 +1,10 @@
 # Testing
 
 Status: current
-Updated: 2026-08-30
+Updated: 2026-08-31
 Central Lab governance effective: 2026-08-27
-Documentation/current-state baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
-Production deployed HEAD: `b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
+Documentation/current-state baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Production deployed HEAD: `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
 
 ## Responsibility model
 
@@ -340,13 +340,19 @@ Current accepted Traffic artifact:
 
 ```text
 repository / production HEAD:
-b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
+a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
 
 accepted / production tree:
-1d8b94590848f9505e45e653384dd8a7c18d4339
+f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
 
-TASK-TRAFFIC-03:
-PRODUCTION ACCEPTANCE PASS / CLOSED
+TASK-TRAFFIC-04:
+CLOSED / PRODUCTION PASS
+
+PR:
+#91
+
+publication commit:
+0343ac77a1a90c2ba8bc3ce1c969b6c1593e9759
 
 Central Lab V6:
 PASS
@@ -354,50 +360,87 @@ PASS
 strict regressions:
 0
 
-production-size PERF:
+known compatibility warnings:
+5
+
+compileall:
 PASS
 
-Browser acceptance:
+branch diff:
+PASS
+
+exact artifact immutability:
+PASS
+
+Linux production-size PERF:
+PASS
+
+production product/browser acceptance:
 PASS
 ```
 
-TRAFFIC-03 final production-size matrix:
+Production acceptance covered both `24h` and `7d` History / Period Statistics /
+Peak Load, including Peak timestamps, Busiest History Bucket and Busiest 60 Minutes.
+Peak values matched Period Statistics and all historical panels shared the same
+applied range.
+
+#### TRAFFIC-04 controlled PERF amendment #1
+
+Original FINAL Peak-vs-Candidate p50 gate:
 
 ```text
-H24 p50 1.259407
-H24 p95 1.345084
-H24 max  1.351103
-
-S24 p50 1.278168
-S24 p95 1.537511
-S24 max  1.670745
-
-H7 p50 4.980485
-H7 p95 5.927953
-H7 max  6.304544
-
-S7 p50 5.570484
-S7 p95 6.542208
-S7 max  7.083732
+Δp50(P-C) <= max(0.50s, 20% of C.p50)
 ```
 
-Snapshot:
+Accepted amendment #1:
 
 ```text
-SHA256 bf90a989f156c39cbf8fd6fd1a3f5b9f14c36f039e5a14d121b193edaa2fe5a8
-size 256995328
-40/40 measured requests = 200
-deadlines = 0
-integrity failures = 0
-snapshot unchanged = YES
+Δp50(P-C) <= max(0.50s, 30% of C.p50)
 ```
 
-These timings are historical acceptance evidence for the exact accepted tree,
-not permanent thresholds unless a TASK/release contract explicitly reuses them.
+Only this relative p50 allowance changed.
 
-Initial candidate `d96ddbc6f8685be175ee9a48da9b8e15621f2161` / tree `5e6a28950c8079d805450dc2a7ecf652a8285820` passed functional/V6 but
-failed the mandatory production-size PERF gate. It is superseded and is not
-current implementation state.
+Unchanged limits:
+
+```text
+C vs B p50: max(0.50s, 20% B.p50)
+p95:       max(0.75s, 25%)
+max:       max(1.00s, 25%)
+Peak p95 <= 8s
+Peak max <= 9s
+QueryDeadline = 10s
+browser request timeout = 20s
+```
+
+The amendment is TASK-specific acceptance history, not a global performance-policy
+change.
+
+#### Actual TASK-04 gate execution
+
+Owner-approved closing path:
+
+```text
+Patch
+→ Windows Central Lab V6 PASS
+→ Linux production-size PERF PASS
+→ accepted candidate
+→ Git publication / PR #91
+→ Owner merge
+→ production deploy FROM GIT
+→ separate activation
+→ production product/browser acceptance PASS
+```
+
+A separate pre-publication controlled-browser gate described by the historical
+FINAL was not used in the actual closing execution. This does not weaken the
+permanent rule that all gates actually designated mandatory for a candidate must
+PASS before normal publication.
+
+Coder remains responsible only for focused/minimal TASK-scoped checks. Official
+Central Lab/PERF/PASS-FAIL acceptance belongs to Owner + Tech Lead.
+
+The one-time non-reproduced production 7d visual-refresh episode is not an open
+TASK-TRAFFIC-04 defect/debt.
 
 ## Test Set Maintenance Rule
 
@@ -443,14 +486,15 @@ Change the Central Lab runner only when its own contract changes, for example:
 
 Never add a new failure to compatibility merely to obtain a green candidate.
 
-For TRAFFIC-01 the current relevant test set includes at minimum:
-- Traffic Foundation regressions;
-- `tests/admin_web/test_traffic_current.py`;
-- `tests/admin_web/test_traffic_current_frontend.py`;
-- related Home Current Traffic regressions;
-- required fixed-context cross-surface invariants.
+For TRAFFIC-04 the current relevant test set includes at minimum:
+- `tests/analytics/test_historical_traffic_peak.py`;
+- `tests/admin_web/test_traffic_peak.py`;
+- `tests/admin_web/test_traffic_peak_frontend.py`;
+- related History / Statistics / PERF range-bounding regressions;
+- shared Traffic coordinator/config/routes/query regressions;
+- Peak value identity and shared-range invariants.
 
-The exact targeted command must still be reviewed again for the next Traffic TASK.
+The exact targeted command must still be reviewed again for TRAFFIC-05.
 
 ## Acceptance before Publication
 
