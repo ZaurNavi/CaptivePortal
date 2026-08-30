@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-08-30
+Updated: 2026-08-31
 Branch: `main`
-Runtime commit: `b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
-Runtime tree: `1d8b94590848f9505e45e653384dd8a7c18d4339`
-Commit source: merge PR #89 / TASK-TRAFFIC-03, 2026-08-30
+Runtime commit: `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Runtime tree: `f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9`
+Commit source: merge PR #91 / TASK-TRAFFIC-04, 2026-08-30
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -85,6 +85,7 @@ Analytics has no worker/write lifecycle to stop.
 | Historical Traffic Read | `app/analytics/historical_traffic.py`, source gateway | persisted AP Observation history | none | no |
 | Traffic Network History | Admin Web + Historical Traffic | shared 24h/7d historical read | none | no |
 | Traffic Period Statistics | Admin Web + Historical Traffic | shared History range/read execution | none | no |
+| Traffic Peak Load | Admin Web + Historical Traffic | same History range/read execution + Peak temporal projection | none | no |
 
 ## 5. Observation vs Current State
 
@@ -216,7 +217,8 @@ Traffic currently contains:
 - Traffic Foundation/shared coordinator;
 - Current Network Throughput;
 - Historical Network Throughput;
-- Period Statistics.
+- Period Statistics;
+- Peak Load.
 
 Current endpoint:
 
@@ -230,8 +232,15 @@ Historical endpoint family:
 GET /admin/api/v1/sites/<site_id>/traffic/history?range=24h|7d
 ```
 
-Statistics shares the History request/range; no independent heavy Statistics
-request/coordinator exists.
+Combined historical include forms:
+
+```text
+include=statistics
+include=statistics,peak
+```
+
+History, Statistics and Peak share one selected range and one historical read
+execution. No independent Peak heavy request/coordinator exists.
 
 Browser flow:
 `browser → /admin + /admin/api/v1 → AdminQueryService/read gateways → read services`.
@@ -349,31 +358,44 @@ Coder → focused/minimal TASK/module tests
 Owner + Tech Lead / Central Lab → cross-module/broader/full/official acceptance
 ```
 
-Acceptance before publication:
+Acceptance before publication remains:
 
 ```text
-all TASK/FINAL mandatory gates PASS
+all actually mandatory TASK/release gates PASS
 → accepted candidate
 → publication
 ```
 
-V6/full PASS alone is not sufficient if PERF/Linux/security/etc. remains mandatory.
-
 Current Traffic-stage final evidence:
 
 ```text
-artifact: b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
-tree: 1d8b94590848f9505e45e653384dd8a7c18d4339
-TASK-TRAFFIC-03: production acceptance PASS / CLOSED
-V6: PASS
+artifact: a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
+tree: f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
+TASK-TRAFFIC-04: CLOSED / production PASS
+Windows Central Lab V6: PASS
 strict regressions: 0
-production-size PERF: PASS
-40/40 measured requests: 200
-deadlines: 0
-integrity failures: 0
+known compatibility warnings: 5
+compileall: PASS
+branch diff: PASS
+exact-artifact immutability: PASS
+Linux production-size PERF: PASS
+production product/browser acceptance: PASS
 ```
 
-Initial candidate `d96ddbc6f8685be175ee9a48da9b8e15621f2161` failed mandatory PERF and is superseded.
+TRAFFIC-04 test-set review includes at minimum:
+
+```text
+tests/analytics/test_historical_traffic_peak.py
+tests/admin_web/test_traffic_peak.py
+tests/admin_web/test_traffic_peak_frontend.py
+related History / Statistics / PERF range-bounding regressions
+shared Traffic coordinator/config/routes/query regressions
+Peak value identity + shared-range invariants
+```
+
+Controlled PERF amendment #1 changed only Peak-vs-Candidate p50 relative allowance
+from 20% to 30% with the 0.50s floor retained. All other accepted limits remained
+unchanged.
 
 After each accepted TASK Tech Lead reviews changed tests, targeted regression set,
 cross-surface invariants and whether the runner contract changed.
@@ -397,34 +419,32 @@ Current repository implementation includes:
 - Historical Traffic Read Foundation
 - Traffic Network History
 - Traffic Period Statistics
+- Traffic Peak Load
 
 Owner-confirmed current production checkpoint:
 
 ```text
-production HEAD: b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
-production tree: 1d8b94590848f9505e45e653384dd8a7c18d4339
+production HEAD: a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
+production tree: f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
 
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 
-TASK-TRAFFIC-03:
-PRODUCTION ACCEPTANCE PASS / CLOSED
+TASK-TRAFFIC-04:
+CLOSED / PRODUCTION PASS
 ```
 
-Historical engineering evidence:
-- initial TRAFFIC-03 `d96ddbc6f8685be175ee9a48da9b8e15621f2161` / `5e6a28950c8079d805450dc2a7ecf652a8285820` = PERF FAIL / superseded;
-- final candidate `79875aca61297c8de4c30b7119b15118079f26d0` / `1d8b94590848f9505e45e653384dd8a7c18d4339` = all mandatory gates PASS.
+Historical engineering evidence includes TRAFFIC-03 remediation and the
+TRAFFIC-04 controlled PERF amendment. Historical FINAL TASKs are not rewritten.
 
 Next change-intent:
 
 ```text
-TRAFFIC-04 — Peak Load Period
+TRAFFIC-05 — Traffic by AP
 NEXT / NOT IMPLEMENTED
 ```
-
-Historical TASK/PR evidence must remain historical; it does not redefine current
-implementation or current governance.
 
 ## 20. Repository-only unknowns
 

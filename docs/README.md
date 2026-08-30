@@ -1,8 +1,8 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-08-30
-Current-state baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
+Updated: 2026-08-31
+Current-state baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -70,16 +70,17 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic sequence at `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`:
+Current Traffic sequence at `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`:
 
 ```text
-TRAFFIC-00        DONE
-TRAFFIC-01        DONE
-TRAFFIC-02-READ   DONE
-TRAFFIC-02        DONE
+TRAFFIC-00         DONE
+TRAFFIC-01         DONE
+TRAFFIC-02-READ    DONE
+TRAFFIC-02         DONE
 TRAFFIC-02-PERF-01 DONE
-TRAFFIC-03        DONE / PRODUCTION ACTIVE
-TRAFFIC-04        NEXT / NOT IMPLEMENTED
+TRAFFIC-03         DONE / PRODUCTION ACTIVE
+TRAFFIC-04         CLOSED / PRODUCTION PASS / ACTIVE
+TRAFFIC-05         NEXT / NOT IMPLEMENTED
 ```
 
 Owner-confirmed production Traffic flags:
@@ -88,16 +89,16 @@ Owner-confirmed production Traffic flags:
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 ```
 
 `modules/traffic.md` is the current Traffic product/semantic contract.
-Historical FINAL TASKs and superseded PERF candidates remain traceability
-evidence and do not replace current implementation state.
+Historical FINAL TASKs and superseded/amended acceptance evidence remain
+traceability evidence and do not replace current implementation state.
 
 ## Permanent promotion boundary
 
-Canonical workflow is defined in `agents/workflow.md`, `testing.md` and
-`deployment.md`:
+Canonical workflow remains:
 
 ```text
 Patch → Lab.

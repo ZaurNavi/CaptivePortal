@@ -1,8 +1,8 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-08-30
-Runtime baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
+Updated: 2026-08-31
+Runtime baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
 
 ## 1. Mental model
 
@@ -144,7 +144,7 @@ Prohibited:
 ### Historical
 
 `HistoricalTrafficReadService` owns historical Site Network Throughput semantics
-for History and Period Statistics.
+for History, Period Statistics and Peak Load.
 
 Canonical path:
 
@@ -152,8 +152,8 @@ Canonical path:
 persisted Observation AP history
 → HistoricalTrafficReadService
 → AdminQueryService
-→ shared History request
-→ History + Period Statistics
+→ one shared History request
+→ History + Period Statistics + Peak Load
 ```
 
 `TRAFFIC-02-PERF-01` requested-range bounded validation remains an architectural
@@ -167,6 +167,15 @@ Period Statistics:
 - statuses = `ok | partial | insufficient_data`;
 - same selected 24h/7d Network range as History.
 
+Peak Load:
+- reuses the Period Statistics Peak sample population;
+- peak timestamps use `cycle_finished_at`;
+- ties choose earliest accepted sample;
+- busiest bucket uses complete History buckets only;
+- busiest 60m is a complete rolling 3600s sample-hold Average Total window;
+- no busiest-hour `occurrence_count`;
+- same selected 24h/7d range and same read snapshot/execution as History/Statistics.
+
 No second historical semantic/calculation owner is allowed.
 
 ## 8. Admin Web
@@ -179,12 +188,16 @@ Home, Devices, Device Detail, Visits, Observations, Traffic.
 Traffic production-current functional surface:
 - Current Network Throughput;
 - Historical Network Throughput;
-- Period Statistics.
+- Period Statistics;
+- Peak Load.
 
 One shared Traffic coordinator owns page-level orchestration.
 
 Current Traffic and Home Traffic share `CurrentTrafficReadService`.
-History and Statistics share `HistoricalTrafficReadService`.
+History, Statistics and Peak share `HistoricalTrafficReadService`.
+
+Peak extends the existing History request (`include=statistics,peak`) and does not
+create a second loader/request/range selector.
 
 The current Traffic visual arrangement is not a final design invariant; later
 UI/design work may rearrange/polish cards without changing semantic owners.

@@ -25,14 +25,15 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository / current-state checkpoint | `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6` |
-| Production deployed HEAD | `b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6` |
-| Production tree | `1d8b94590848f9505e45e653384dd8a7c18d4339` |
+| Repository / current-state checkpoint | `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0` |
+| Production deployed HEAD | `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0` |
+| Production tree | `f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9` |
 | Traffic Section Foundation | **Implemented / production active** |
 | Current Network Throughput | **Implemented / production active** |
 | Historical Network Throughput | **Implemented / production active** |
 | Period Statistics | **Implemented / production active / acceptance PASS** |
-| Next Traffic stage | `TRAFFIC-04 — Peak Load Period` — NEXT / not implemented |
+| Peak Load | **Implemented / production active / acceptance PASS** |
+| Next Traffic stage | `TRAFFIC-05 — Traffic by AP` — NEXT / not implemented |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
 | Core guest authorization | Implemented |
 | RFC 8908 CAPPORT | Implemented |
@@ -51,7 +52,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 ## Where the project is now
 
-Most platform foundations and the first four Traffic increments now exist.
+Traffic implementation is production-active through Peak Load.
 
 ```mermaid
 flowchart LR
@@ -67,15 +68,14 @@ flowchart LR
     T1 --> T2R[Historical Traffic Read]
     T2R --> T2[Network Traffic History]
     T2 --> T3[Period Statistics]
-    T3 --> T4{{NEXT: Peak Load Period}}
-    T4 --> M[Later Traffic increments]
+    T3 --> T4[Peak Load]
+    T4 --> T5{{NEXT: Traffic by AP}}
+    T5 --> M[Later Traffic increments]
     M --> N[Real Multi-Site trigger]
 ```
 
-Traffic is now a production product surface rather than an empty shell.
-
-Current functional layout is accepted for functionality, but its visual
-composition is not frozen as final design.
+Traffic is a production product surface. Current functional layout is accepted
+for functionality, but its visual composition is not frozen as final design.
 
 ## What CaptivPortal does today
 
@@ -90,6 +90,7 @@ At the current runtime checkpoint, the platform includes:
 - Current Network Throughput;
 - Historical Network Throughput for 24h/7d;
 - Period Statistics for the same selected 24h/7d range;
+- Peak Load with Peak timestamps, busiest History bucket and busiest rolling 60m;
 - internal Grafana/Loki observability separate from product UI.
 
 Network Traffic remains AP/network Mbps evidence, not WAN/Internet/billing/SSID
@@ -806,8 +807,9 @@ flowchart LR
     T1 --> T2R[Historical Read]:::done
     T2R --> T2[History]:::done
     T2 --> T3[Period Statistics]:::done
-    T3 --> T4[Peak Load Period]:::next
-    T4 --> TP[Later Traffic panels]:::future
+    T3 --> T4[Peak Load]:::done
+    T4 --> T5[Traffic by AP]:::next
+    T5 --> TP[Later Traffic panels]:::future
     TP --> MS[Multi-Site]:::future
 
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
@@ -824,10 +826,11 @@ TRAFFIC-02-READ    DONE
 TRAFFIC-02         DONE
 TRAFFIC-02-PERF-01 DONE
 TRAFFIC-03         DONE / PRODUCTION ACTIVE
-TRAFFIC-04         NEXT / NOT IMPLEMENTED
+TRAFFIC-04         CLOSED / PRODUCTION PASS / ACTIVE
+TRAFFIC-05         NEXT / NOT IMPLEMENTED
 ```
 
-`TRAFFIC-04 — Peak Load Period` is the next planned increment.
+`TRAFFIC-05 — Traffic by AP` is the next planned increment.
 
 The current Traffic card arrangement is not a final UI composition. Functional
 semantics are accepted; visual rearrangement/polish belongs to a later UI/design

@@ -25,14 +25,15 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository / current-state checkpoint | `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6` |
-| Production deployed HEAD | `b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6` |
-| Production tree | `1d8b94590848f9505e45e653384dd8a7c18d4339` |
+| Repository / current-state checkpoint | `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0` |
+| Production deployed HEAD | `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0` |
+| Production tree | `f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9` |
 | Traffic Section Foundation | **Реализован / production active** |
 | Current Network Throughput | **Реализован / production active** |
 | Historical Network Throughput | **Реализован / production active** |
 | Period Statistics | **Реализован / production active / acceptance PASS** |
-| Следующий Traffic stage | `TRAFFIC-04 — Peak Load Period` — NEXT / не реализован |
+| Peak Load | **Реализован / production active / acceptance PASS** |
+| Следующий Traffic stage | `TRAFFIC-05 — Traffic by AP` — NEXT / не реализован |
 | Omada Controller family | Omada Software Controller 5.14.x |
 | Основная guest authorization | Реализована |
 | CAPPORT | Реализован |
@@ -46,7 +47,7 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 ## Где проект находится сейчас
 
-Основные platform foundations и первые Traffic increments уже работают.
+Traffic implementation production-active до Peak Load включительно.
 
 ```mermaid
 flowchart LR
@@ -62,15 +63,14 @@ flowchart LR
     T1 --> T2R[Historical Traffic Read]
     T2R --> T2[Network Traffic History]
     T2 --> T3[Period Statistics]
-    T3 --> T4{{СЛЕДУЮЩИЙ: Peak Load Period}}
-    T4 --> M[Следующие Traffic increments]
+    T3 --> T4[Peak Load]
+    T4 --> T5{{СЛЕДУЮЩИЙ: Traffic by AP}}
+    T5 --> M[Следующие Traffic increments]
     M --> N[Реальный Multi-Site trigger]
 ```
 
-Traffic теперь является production product surface.
-
-Текущая functional layout принимается, но не считается навсегда утверждённым
-финальным визуальным дизайном.
+Traffic является production product surface. Текущая functional layout принята,
+но не считается навсегда утверждённым финальным визуальным дизайном.
 
 ## Что CaptivPortal умеет сегодня
 
@@ -85,6 +85,7 @@ Traffic теперь является production product surface.
 - Current Network Throughput;
 - Historical Network Throughput 24h/7d;
 - Period Statistics для того же selected 24h/7d range;
+- Peak Load с Peak timestamps, busiest History bucket и busiest rolling 60m;
 - Grafana/Loki отдельно от product UI.
 
 Network Traffic — AP/network evidence в Mbps. Это не WAN/Internet/billing/SSID и
@@ -787,7 +788,7 @@ Controlled research на Omada 5.14.31 подтвердил:
 
 # Roadmap
 
-## Completed platform staircase
+## Уже пройденная лестница
 
 ```mermaid
 flowchart LR
@@ -800,8 +801,9 @@ flowchart LR
     T1 --> T2R[Historical Read]:::done
     T2R --> T2[History]:::done
     T2 --> T3[Period Statistics]:::done
-    T3 --> T4[Peak Load Period]:::next
-    T4 --> TP[Следующие Traffic panels]:::future
+    T3 --> T4[Peak Load]:::done
+    T4 --> T5[Traffic by AP]:::next
+    T5 --> TP[Следующие Traffic panels]:::future
     TP --> MS[Multi-Site]:::future
 
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
@@ -818,10 +820,11 @@ TRAFFIC-02-READ    DONE
 TRAFFIC-02         DONE
 TRAFFIC-02-PERF-01 DONE
 TRAFFIC-03         DONE / PRODUCTION ACTIVE
-TRAFFIC-04         NEXT / NOT IMPLEMENTED
+TRAFFIC-04         CLOSED / PRODUCTION PASS / ACTIVE
+TRAFFIC-05         NEXT / NOT IMPLEMENTED
 ```
 
-Следующий planned increment — `TRAFFIC-04 — Peak Load Period`.
+Следующий planned increment — `TRAFFIC-05 — Traffic by AP`.
 
 Текущее расположение Traffic cards не является финальным UI contract.
 Functional semantics приняты; visual rearrangement/polish выполняются отдельным
