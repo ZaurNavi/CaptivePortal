@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
 
-from app.analytics.historical_traffic import HistoricalTrafficReadService
+from app.analytics.historical_traffic import (
+    HistoricalTrafficReadService,
+    HistoricalTrafficSourceUnavailable,
+)
 from app.analytics.source_gateway import QueryDeadline
 
 
@@ -99,6 +103,82 @@ def test_statistics_are_opt_in_and_time_weight_right_endpoint_samples(analytics_
     assert evidence.interval_coverage_ratio == pytest.approx(.4)
     assert evidence.leading_unweighted_seconds == 0
     assert evidence.trailing_unweighted_seconds == 180
+
+
+def test_combined_history_is_exactly_equivalent_to_history_only(analytics_stack):
+    _cycle(
+        analytics_stack,
+        "equivalent-wired-a",
+        "2026-01-01T11:51:00.000Z",
+        wired=(1, 2),
+    )
+    _cycle(
+        analytics_stack,
+        "equivalent-wired-b",
+        "2026-01-01T11:52:00.000Z",
+        wired=(2, 3),
+    )
+    _cycle(
+        analytics_stack,
+        "equivalent-lan-a",
+        "2026-01-01T11:56:00.000Z",
+        wired=(None, None),
+        lan=(4, 2),
+    )
+    _cycle(
+        analytics_stack,
+        "equivalent-lan-empty",
+        "2026-01-01T11:57:00.000Z",
+        empty=True,
+    )
+
+    history = _read(
+        analytics_stack,
+        start="2026-01-01T11:50:00.000Z",
+        include=False,
+    )
+    combined = _read(
+        analytics_stack,
+        start="2026-01-01T11:50:00.000Z",
+        include=True,
+    )
+
+    assert combined.period_statistics is not None
+    assert replace(combined, period_statistics=None) == history
+
+
+def test_bucket_local_and_range_global_ordering_are_both_preserved(analytics_stack):
+    _cycle(
+        analytics_stack,
+        "ordering-first-bucket",
+        "2026-01-01T11:54:30.000Z",
+        wired=(1, 1),
+    )
+    _cycle(
+        analytics_stack,
+        "ordering-second-bucket",
+        "2026-01-01T11:55:30.000Z",
+        wired=(3, 2),
+    )
+
+    result = _read(
+        analytics_stack,
+        start="2026-01-01T11:50:00.000Z",
+    )
+
+    assert tuple(bucket.complete_site_sample_count for bucket in result.buckets) == (
+        1,
+        1,
+    )
+    assert tuple(
+        bucket.max_inter_sample_gap_seconds for bucket in result.buckets
+    ) == (0, 0)
+    statistics = result.period_statistics
+    assert statistics.interval_evidence.candidate_interval_count == 1
+    assert statistics.interval_evidence.accepted_interval_count == 1
+    assert statistics.interval_evidence.accepted_interval_seconds == 60
+    assert statistics.average.download_mbps == 3
+    assert statistics.peak.total_mbps == 5
 
 
 def test_statistics_peak_total_is_one_sample_not_directional_peak_sum(analytics_stack):
@@ -250,8 +330,27 @@ def test_site_isolation_and_half_open_boundary_are_preserved(analytics_stack):
     assert stats.interval_evidence.trailing_unweighted_seconds == 300
 
 
-def test_statistics_projection_plan_uses_existing_site_and_cycle_indexes(analytics_stack):
-    plan = analytics_stack.gateway.explain_historical_traffic_statistics(
+def test_combined_integrity_failure_remains_fail_closed(analytics_stack):
+    _cycle(
+        analytics_stack,
+        "combined-integrity",
+        "2026-01-01T11:58:00.000Z",
+    )
+    with analytics_stack.observations._connect() as connection:
+        connection.execute(
+            "UPDATE observation_cycles SET items_seen=2 WHERE cycle_id=?",
+            ("combined-integrity",),
+        )
+        connection.commit()
+
+    with pytest.raises(HistoricalTrafficSourceUnavailable):
+        _read(analytics_stack, include=True)
+
+
+def test_combined_projection_materializes_one_expensive_validation_path(
+    analytics_stack,
+):
+    plan = analytics_stack.gateway.explain_historical_traffic_combined(
         site_id=SITE,
         from_utc=START,
         to_utc=END,
@@ -264,6 +363,14 @@ def test_statistics_projection_plan_uses_existing_site_and_cycle_indexes(analyti
     text = "\n".join(plan)
     assert "idx_cycles_site_kind_started" in text
     assert "sqlite_autoindex_ap_observations_1" in text
+    assert text.count("MATERIALIZE candidate_cycles") == 1
+    assert text.count("MATERIALIZE cycle_aggregates") == 1
+    assert text.count("MATERIALIZE validated_cycles") == 1
+    assert text.count("MATERIALIZE ranged") == 1
+    assert text.count("MATERIALIZE bucket_selection") == 1
+    assert text.count(
+        "SEARCH a USING INDEX sqlite_autoindex_ap_observations_1"
+    ) == 1
 
 
 def test_statistics_share_query_only_snapshot_without_source_mutation(analytics_stack):
