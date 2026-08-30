@@ -814,12 +814,47 @@ class HistoricalTrafficQuality:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalTrafficPeriodValues:
+    download_mbps: float | None
+    upload_mbps: float | None
+    total_mbps: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficPeriodIntervalEvidence:
+    range_seconds: float
+    candidate_interval_count: int
+    accepted_interval_count: int
+    accepted_interval_seconds: float
+    interval_coverage_ratio: float
+    excluded_gap_interval_count: int
+    excluded_source_transition_interval_count: int
+    invalid_period_interval_count: int
+    accepted_peak_sample_count: int
+    leading_unweighted_seconds: float
+    trailing_unweighted_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficPeriodStatistics:
+    status: str
+    average: HistoricalTrafficPeriodValues
+    peak: HistoricalTrafficPeriodValues
+    interval_evidence: HistoricalTrafficPeriodIntervalEvidence
+    metric_version: str = "network_traffic_period_statistics.v1"
+    average_method: str = "right_endpoint_sample_hold_time_weighted.v1"
+    peak_method: str = "max_accepted_complete_site_sample.v1"
+    unit: str = "Mbps"
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalSiteTraffic:
     status: str
     range: HistoricalTrafficRange
     buckets: tuple[HistoricalTrafficBucket, ...]
     coverage: HistoricalTrafficCoverage
     quality: HistoricalTrafficQuality
+    period_statistics: HistoricalTrafficPeriodStatistics | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "buckets", tuple(self.buckets))

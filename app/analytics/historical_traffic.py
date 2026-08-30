@@ -10,6 +10,9 @@ from .models import (
     HistoricalSiteTraffic,
     HistoricalTrafficBucket,
     HistoricalTrafficCoverage,
+    HistoricalTrafficPeriodIntervalEvidence,
+    HistoricalTrafficPeriodStatistics,
+    HistoricalTrafficPeriodValues,
     HistoricalTrafficQuality,
     HistoricalTrafficRange,
     HistoricalTrafficSourceSelection,
@@ -71,7 +74,12 @@ class HistoricalTrafficReadService:
         evaluated_at_utc: str | None = None,
         bucket_seconds: int | None = None,
         deadline: QueryDeadline | None = None,
+        include_period_statistics: bool = False,
     ) -> HistoricalSiteTraffic:
+        if type(include_period_statistics) is not bool:
+            raise HistoricalTrafficValidationError(
+                "include_period_statistics must be a boolean"
+            )
         try:
             site = require_site(site_id)
             start = parse_utc(from_utc, "from_utc")
@@ -109,6 +117,7 @@ class HistoricalTrafficReadService:
                     MAX_SITE_SAMPLE_SOURCE_SKEW_SECONDS
                 ),
                 deadline=query_deadline,
+                include_period_statistics=include_period_statistics,
             )
         except AnalyticsQueryDeadlineExceeded:
             raise
@@ -203,15 +212,138 @@ class HistoricalTrafficReadService:
             ),
             integrity_failure_count=0,
         )
+        result_status = (
+            "insufficient_data" if coverage_status == "none" else
+            "ok" if coverage_status == "complete" else "partial"
+        )
+        period_statistics = None
+        if include_period_statistics:
+            period_statistics = self._period_statistics(
+                data.get("period_statistics"),
+                start=start,
+                end=end,
+                history_status=result_status,
+            )
         return HistoricalSiteTraffic(
-            status=(
-                "insufficient_data" if coverage_status == "none" else
-                "ok" if coverage_status == "complete" else "partial"
-            ),
+            status=result_status,
             range=traffic_range,
             buckets=tuple(buckets),
             coverage=coverage,
             quality=quality,
+            period_statistics=period_statistics,
+        )
+
+    def _period_statistics(
+        self,
+        raw: Any,
+        *,
+        start: datetime,
+        end: datetime,
+        history_status: str,
+    ) -> HistoricalTrafficPeriodStatistics:
+        if not isinstance(raw, Mapping):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Statistics aggregate is unavailable"
+            )
+        peak_count = _integer(raw.get("accepted_peak_sample_count"))
+        candidate_count = _integer(raw.get("candidate_interval_count"))
+        accepted_count = _integer(raw.get("accepted_interval_count"))
+        gap_count = _integer(raw.get("excluded_gap_interval_count"))
+        transition_count = _integer(
+            raw.get("excluded_source_transition_interval_count")
+        )
+        invalid_count = _integer(raw.get("invalid_period_interval_count"))
+        accepted_seconds = _finite_nonnegative(
+            raw.get("accepted_interval_seconds")
+        )
+        if (
+            candidate_count != max(peak_count - 1, 0)
+            or candidate_count
+            != accepted_count + gap_count + transition_count + invalid_count
+        ):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Statistics interval evidence is invalid"
+            )
+        duration = (end - start).total_seconds()
+        if accepted_seconds > duration:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Statistics interval duration is invalid"
+            )
+        first = _optional_utc(raw.get("first_sample_at"))
+        last = _optional_utc(raw.get("last_sample_at"))
+        if peak_count == 0:
+            if first is not None or last is not None:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Statistics sample boundary is invalid"
+                )
+            leading = trailing = duration
+            peak = HistoricalTrafficPeriodValues(None, None, None)
+        else:
+            if first is None or last is None:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Statistics sample boundary is invalid"
+                )
+            first_at = parse_utc(first, "first_sample_at")
+            last_at = parse_utc(last, "last_sample_at")
+            if first_at < start or last_at >= end or first_at > last_at:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Statistics sample boundary is invalid"
+                )
+            leading = (first_at - start).total_seconds()
+            trailing = (end - last_at).total_seconds()
+            peak = HistoricalTrafficPeriodValues(
+                _finite_nonnegative(raw.get("peak_download")),
+                _finite_nonnegative(raw.get("peak_upload")),
+                _finite_nonnegative(raw.get("peak_total")),
+            )
+        if accepted_count == 0:
+            if accepted_seconds != 0:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Statistics weighting is invalid"
+                )
+            average = HistoricalTrafficPeriodValues(None, None, None)
+        else:
+            if accepted_seconds <= 0:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Statistics weighting is invalid"
+                )
+            average = HistoricalTrafficPeriodValues(
+                _finite_nonnegative(raw.get("weighted_download"))
+                / accepted_seconds,
+                _finite_nonnegative(raw.get("weighted_upload"))
+                / accepted_seconds,
+                (
+                    _finite_nonnegative(raw.get("weighted_download"))
+                    + _finite_nonnegative(raw.get("weighted_upload"))
+                ) / accepted_seconds,
+            )
+        status = (
+            "insufficient_data" if peak_count == 0 else
+            "ok" if (
+                history_status == "ok"
+                and accepted_count > 0
+                and gap_count == 0
+                and transition_count == 0
+                and invalid_count == 0
+            ) else "partial"
+        )
+        return HistoricalTrafficPeriodStatistics(
+            status=status,
+            average=average,
+            peak=peak,
+            interval_evidence=HistoricalTrafficPeriodIntervalEvidence(
+                range_seconds=duration,
+                candidate_interval_count=candidate_count,
+                accepted_interval_count=accepted_count,
+                accepted_interval_seconds=accepted_seconds,
+                interval_coverage_ratio=accepted_seconds / duration,
+                excluded_gap_interval_count=gap_count,
+                excluded_source_transition_interval_count=transition_count,
+                invalid_period_interval_count=invalid_count,
+                accepted_peak_sample_count=peak_count,
+                leading_unweighted_seconds=leading,
+                trailing_unweighted_seconds=trailing,
+            ),
         )
 
     def _bucket(

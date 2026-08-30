@@ -1020,6 +1020,27 @@
   };
   if (Object.values(elements).some((value) => !value)) return;
 
+  const statisticsPanel = document.getElementById("traffic-statistics-panel");
+  const statisticsEnabled = Boolean(
+    statisticsPanel && statisticsPanel.dataset.statisticsEnabled === "true"
+  );
+  const statisticsElements = statisticsEnabled ? {
+    state: document.getElementById("traffic-statistics-state"),
+    title: document.getElementById("traffic-statistics-state-title"),
+    message: document.getElementById("traffic-statistics-state-message"),
+    averageDownload: document.getElementById("traffic-statistics-average-download"),
+    averageUpload: document.getElementById("traffic-statistics-average-upload"),
+    averageTotal: document.getElementById("traffic-statistics-average-total"),
+    peakDownload: document.getElementById("traffic-statistics-peak-download"),
+    peakUpload: document.getElementById("traffic-statistics-peak-upload"),
+    peakTotal: document.getElementById("traffic-statistics-peak-total"),
+    applied: document.getElementById("traffic-statistics-applied-range"),
+    coverage: document.getElementById("traffic-statistics-coverage"),
+    intervals: document.getElementById("traffic-statistics-interval-coverage"),
+    watermark: document.getElementById("traffic-statistics-watermark"),
+  } : null;
+  if (statisticsEnabled && Object.values(statisticsElements).some((value) => !value)) return;
+
   const PANEL_KEY = "network-traffic-history";
   const RANGE = Object.freeze({"24h": Object.freeze({seconds: 86400, bucket: 300, count: 288}), "7d": Object.freeze({seconds: 604800, bucket: 900, count: 672})});
   const STATUSES = new Set(["ok", "partial", "insufficient_data"]);
@@ -1034,6 +1055,72 @@
   function count(value) { return Number.isInteger(value) && value >= 0; }
   function metric(value) { return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0); }
   function utc(value) { return typeof value === "string" && HISTORY_UTC.test(value) && Number.isFinite(Date.parse(value)); }
+
+  function metricFamily(value) {
+    if (!object(value) || ![value.download_mbps, value.upload_mbps, value.total_mbps].every(metric)) return false;
+    const values = [value.download_mbps, value.upload_mbps, value.total_mbps];
+    return values.every((item) => item === null) || values.every((item) => item !== null);
+  }
+
+  function validateStatistics(value, history) {
+    if (!object(value) || !STATUSES.has(value.status)
+        || value.metric_version !== "network_traffic_period_statistics.v1"
+        || value.average_method !== "right_endpoint_sample_hold_time_weighted.v1"
+        || value.peak_method !== "max_accepted_complete_site_sample.v1"
+        || value.unit !== "Mbps" || !metricFamily(value.average) || !metricFamily(value.peak)
+        || !object(value.interval_evidence)) throw new Error("Invalid period Statistics response");
+    const evidence = value.interval_evidence;
+    const countFields = ["candidate_interval_count", "accepted_interval_count",
+      "excluded_gap_interval_count", "excluded_source_transition_interval_count",
+      "invalid_period_interval_count", "accepted_peak_sample_count"];
+    const durationFields = ["range_seconds", "accepted_interval_seconds",
+      "leading_unweighted_seconds", "trailing_unweighted_seconds"];
+    if (!countFields.every((key) => count(evidence[key]))
+        || !durationFields.every((key) => typeof evidence[key] === "number" && Number.isFinite(evidence[key]) && evidence[key] >= 0)
+        || typeof evidence.interval_coverage_ratio !== "number" || !Number.isFinite(evidence.interval_coverage_ratio)
+        || evidence.interval_coverage_ratio < 0 || evidence.interval_coverage_ratio > 1
+        || evidence.range_seconds !== RANGE[history.range.id].seconds
+        || evidence.accepted_interval_seconds > evidence.range_seconds
+        || evidence.leading_unweighted_seconds > evidence.range_seconds
+        || evidence.trailing_unweighted_seconds > evidence.range_seconds
+        || evidence.candidate_interval_count !== Math.max(evidence.accepted_peak_sample_count - 1, 0)
+        || evidence.candidate_interval_count !== evidence.accepted_interval_count
+          + evidence.invalid_period_interval_count
+          + evidence.excluded_source_transition_interval_count
+          + evidence.excluded_gap_interval_count
+        || evidence.accepted_peak_sample_count !== history.coverage.complete_site_sample_count
+        || Math.abs(evidence.interval_coverage_ratio
+          - evidence.accepted_interval_seconds / evidence.range_seconds) > 1e-9) {
+      throw new Error("Invalid period Statistics response");
+    }
+    const averageNumeric = value.average.download_mbps !== null;
+    const peakNumeric = value.peak.download_mbps !== null;
+    if (averageNumeric && (evidence.accepted_interval_count === 0 || evidence.accepted_interval_seconds <= 0
+        || Math.abs(value.average.total_mbps - value.average.download_mbps - value.average.upload_mbps) > 1e-9)) {
+      throw new Error("Invalid period Statistics response");
+    }
+    if (!averageNumeric && (evidence.accepted_interval_count !== 0 || evidence.accepted_interval_seconds !== 0)) {
+      throw new Error("Invalid period Statistics response");
+    }
+    if (peakNumeric && (evidence.accepted_peak_sample_count === 0
+        || value.peak.total_mbps + 1e-9 < value.peak.download_mbps
+        || value.peak.total_mbps + 1e-9 < value.peak.upload_mbps
+        || value.peak.total_mbps > value.peak.download_mbps + value.peak.upload_mbps + 1e-9)) {
+      throw new Error("Invalid period Statistics response");
+    }
+    if (!peakNumeric && evidence.accepted_peak_sample_count !== 0) throw new Error("Invalid period Statistics response");
+    const complete = history.status === "ok" && averageNumeric && peakNumeric
+      && evidence.excluded_gap_interval_count === 0
+      && evidence.excluded_source_transition_interval_count === 0
+      && evidence.invalid_period_interval_count === 0;
+    if ((value.status === "ok" && !complete)
+        || (value.status === "partial" && (complete || (!averageNumeric && !peakNumeric)))
+        || (value.status === "insufficient_data" && (averageNumeric || peakNumeric
+          || evidence.accepted_interval_count !== 0 || evidence.accepted_peak_sample_count !== 0))) {
+      throw new Error("Invalid period Statistics response");
+    }
+    return Object.freeze(value);
+  }
 
   function validate(payload, siteId) {
     if (!object(payload) || payload.api_version !== "admin.read.v1" || payload.site_id !== siteId || !object(payload.result)) {
@@ -1188,8 +1275,44 @@
     elements.message.textContent = accepted
       ? `Previously loaded ${displayRange(appliedRange)} remains visible until replacement succeeds.`
       : "Reading persisted AP traffic evidence.";
+    if (statisticsEnabled) {
+      statisticsElements.state.dataset.state = "warning";
+      statisticsElements.title.textContent = "Loading period statistics…";
+      statisticsElements.message.textContent = "Reading the combined persisted History result.";
+    }
   }
-  function render(value) {
+  function formatStatistic(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
+  function renderStatistics(value, history) {
+    if (value === null) {
+      statisticsElements.state.dataset.state = "error";
+      statisticsElements.title.textContent = "Period statistics unavailable";
+      statisticsElements.message.textContent = "History loaded, but its Statistics evidence was invalid.";
+      return;
+    }
+    const insufficient = value.status === "insufficient_data";
+    const partial = value.status === "partial";
+    statisticsElements.state.dataset.state = insufficient || partial ? "warning" : "ready";
+    statisticsElements.title.textContent = insufficient ? "Period statistics insufficient"
+      : (partial ? "Period statistics partial" : "Period statistics ready");
+    statisticsElements.message.textContent = insufficient
+      ? "No accepted numeric samples are available for this period."
+      : (partial ? "Trustworthy values are shown with incomplete interval evidence."
+        : "Accepted samples cover all comparable intervals in the History result.");
+    const values = [value.average.download_mbps, value.average.upload_mbps, value.average.total_mbps,
+      value.peak.download_mbps, value.peak.upload_mbps, value.peak.total_mbps];
+    [statisticsElements.averageDownload, statisticsElements.averageUpload, statisticsElements.averageTotal,
+      statisticsElements.peakDownload, statisticsElements.peakUpload, statisticsElements.peakTotal]
+      .forEach((element, index) => { element.textContent = formatStatistic(values[index]); });
+    statisticsElements.applied.textContent = displayRange(history.range.id);
+    statisticsElements.coverage.textContent = value.status === "ok" ? "Complete"
+      : (partial ? "Partial" : "Insufficient");
+    const evidence = value.interval_evidence;
+    statisticsElements.intervals.textContent = `${(evidence.interval_coverage_ratio * 100).toFixed(1)}% · ${evidence.accepted_interval_count}/${evidence.candidate_interval_count} intervals`;
+    statisticsElements.watermark.textContent = history.coverage.source_watermark_utc === null
+      ? "—" : displayTime(history.coverage.source_watermark_utc);
+  }
+  function render(result) {
+    const value = statisticsEnabled ? result.history : result;
     accepted = value;
     appliedRange = value.range.id;
     const empty = value.status === "insufficient_data";
@@ -1210,6 +1333,7 @@
     elements.transitions.textContent = String(value.coverage.source_transition_count);
     elements.timezone.textContent = displayZone();
     renderChart(value);
+    if (statisticsEnabled) renderStatistics(result.statistics, value);
   }
   function renderFailure(failure) {
     elements.state.dataset.state = "error";
@@ -1217,6 +1341,11 @@
     elements.message.textContent = accepted
       ? `Previously loaded ${displayRange(appliedRange)} remains visible. Refresh when the source is available.`
       : "Persisted network traffic history could not be loaded.";
+    if (statisticsEnabled) {
+      statisticsElements.state.dataset.state = "error";
+      statisticsElements.title.textContent = "Period statistics unavailable";
+      statisticsElements.message.textContent = "The combined persisted History request failed.";
+    }
   }
   function requestSelectedRange() {
     coordinator.refreshPanel(PANEL_KEY, {manual: true});
@@ -1228,10 +1357,15 @@
     autoRefresh: false,
     load: async (context) => {
       const requestRange = rangeContext.selected();
-      return validate(
-        await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}`),
+      const suffix = statisticsEnabled ? "&include=statistics" : "";
+      const value = validate(
+        await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}`),
         context.siteId,
       );
+      if (!statisticsEnabled) return value;
+      let statistics = null;
+      try { statistics = validateStatistics(value.period_statistics, value); } catch (_error) { statistics = null; }
+      return Object.freeze({history: value, statistics});
     },
     render,
     renderLoading,
