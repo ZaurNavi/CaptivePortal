@@ -1,8 +1,8 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-08-29
-Runtime baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
+Updated: 2026-08-30
+Runtime baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
 
 ## 1. Mental model
 
@@ -120,67 +120,80 @@ Reader/reconciliation health influences runtime `active/degraded`.
 Analytics reads persisted source facts only.
 
 ```text
-ObservationReadService
-VisitLifecycleReadService
-VisitorRegistryReadService
+Observation / Visit / Registry read boundaries
         ↓
 AnalyticsSourceGateway
         ↓
-Quality / Wireless / Visit / CurrentTraffic / HomeActivity services
+Quality / Wireless / Visit /
+CurrentTraffic / HistoricalTraffic / HomeActivity services
 ```
 
-Source boundaries validate SQLite schema version and require `PRAGMA query_only`.
+Source boundaries require read-only SQLite/query-only contracts.
 
 Prohibited:
 - Analytics → Omada;
-- Analytics → source INSERT/UPDATE/DELETE;
-- Analytics-owned source migrations/tables.
+- Analytics → source writes/migrations;
+- Admin/browser → direct raw source persistence.
 
-The protected internal Analytics API is an operator/service boundary, not browser authentication.
+## 7. Traffic analytics
 
-## 7. Current Traffic
+### Current
 
-`CurrentTrafficReadService` reads persisted AP Observation cycles.
+`CurrentTrafficReadService` owns current Site Network Throughput semantics.
 
-Integrity rules include:
-- current complete-success cycle;
-- expected item counts;
-- no cycle quality errors;
-- consistent timestamps/source;
-- one selected traffic source family for whole Site snapshot;
-- `wired` primary, `lan` fallback;
-- freshness and AP skew.
+### Historical
 
-Do not label this metric as Internet, WAN, guest, or SSID traffic unless a later source contract actually proves that scope.
+`HistoricalTrafficReadService` owns historical Site Network Throughput semantics
+for History and Period Statistics.
+
+Canonical path:
+
+```text
+persisted Observation AP history
+→ HistoricalTrafficReadService
+→ AdminQueryService
+→ shared History request
+→ History + Period Statistics
+```
+
+`TRAFFIC-02-PERF-01` requested-range bounded validation remains an architectural
+performance invariant.
+
+Period Statistics:
+- unit = Mbps;
+- Average = interval/time-aware accepted Site samples;
+- Peak = accepted complete Site sample maxima;
+- Peak Total is independent max of Total samples;
+- statuses = `ok | partial | insufficient_data`;
+- same selected 24h/7d Network range as History.
+
+No second historical semantic/calculation owner is allowed.
 
 ## 8. Admin Web
 
-Guest auth and Admin auth are separate boundaries.
+Guest auth and Admin auth remain separate.
 
-```text
-browser
-  ↓ same-origin
-/admin + /admin/api/v1
-  ↓
-Admin auth/network/Site policy
-  ↓
-AdminQueryService
-  ↓ bounded query slot/deadline
-read gateways/services
-```
+Current pages:
+Home, Devices, Device Detail, Visits, Observations, Traffic.
+
+Traffic production-current functional surface:
+- Current Network Throughput;
+- Historical Network Throughput;
+- Period Statistics.
+
+One shared Traffic coordinator owns page-level orchestration.
+
+Current Traffic and Home Traffic share `CurrentTrafficReadService`.
+History and Statistics share `HistoricalTrafficReadService`.
+
+The current Traffic visual arrangement is not a final design invariant; later
+UI/design work may rearrange/polish cards without changing semantic owners.
 
 Forbidden browser paths:
 - direct SQLite;
 - Omada;
 - Loki/Grafana;
 - internal Analytics bearer API.
-
-Current pages:
-Home, Devices, Device Detail, Visits, Observations, Traffic.
-
-Home Live reads Current State. Home Traffic reads Current Traffic. Home Activity reads persisted Visit Lifecycle facts and reuses the canonical Current State guest SSID scope.
-
-Traffic is a separate Admin product surface. Its Current Network Throughput panel reuses `AdminQueryService.current_traffic_summary()` → `CurrentTrafficReadService` → canonical Current Traffic serialization. Traffic adds no direct Omada path, collector or second current-traffic calculation owner. Home Traffic and Traffic Current may be visually separate while remaining semantically identical for the same fixed source/evaluation context.
 
 ## 9. Shared OmadaProvider invariant
 

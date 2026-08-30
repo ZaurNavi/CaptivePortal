@@ -1,10 +1,10 @@
 # Testing
 
 Status: current
-Updated: 2026-08-29
+Updated: 2026-08-30
 Central Lab governance effective: 2026-08-27
-Documentation/current-state baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
-Production deployed HEAD: `8f3ad59771f72c49834b1012963de6d94b9e0d18`
+Documentation/current-state baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
+Production deployed HEAD: `b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
 
 ## Responsibility model
 
@@ -336,21 +336,68 @@ This is troubleshooting history, not a current product defect.
 
 ### Latest Traffic acceptance evidence
 
-Owner-provided evidence for the TRAFFIC-00 + TRAFFIC-01 production stage:
+Current accepted Traffic artifact:
 
 ```text
-repository / production HEAD: 8f3ad59771f72c49834b1012963de6d94b9e0d18
-Central Lab targeted: 66 passed
-current runner: V6-fixed
-full gate: PASS
-strict regressions: 0
-fixed-context Home ↔ Traffic equality: PASS
+repository / production HEAD:
+b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
+
+accepted / production tree:
+1d8b94590848f9505e45e653384dd8a7c18d4339
+
+TASK-TRAFFIC-03:
+PRODUCTION ACCEPTANCE PASS / CLOSED
+
+Central Lab V6:
+PASS
+
+strict regressions:
+0
+
+production-size PERF:
+PASS
+
+Browser acceptance:
+PASS
 ```
 
-The exact total full-discovery passed/skipped count was not supplied in this
-acceptance handoff and is therefore not invented here.
+TRAFFIC-03 final production-size matrix:
 
-The older 2026-08-26 V4 / `53f617b...` numeric run remains historical evidence only.
+```text
+H24 p50 1.259407
+H24 p95 1.345084
+H24 max  1.351103
+
+S24 p50 1.278168
+S24 p95 1.537511
+S24 max  1.670745
+
+H7 p50 4.980485
+H7 p95 5.927953
+H7 max  6.304544
+
+S7 p50 5.570484
+S7 p95 6.542208
+S7 max  7.083732
+```
+
+Snapshot:
+
+```text
+SHA256 bf90a989f156c39cbf8fd6fd1a3f5b9f14c36f039e5a14d121b193edaa2fe5a8
+size 256995328
+40/40 measured requests = 200
+deadlines = 0
+integrity failures = 0
+snapshot unchanged = YES
+```
+
+These timings are historical acceptance evidence for the exact accepted tree,
+not permanent thresholds unless a TASK/release contract explicitly reuses them.
+
+Initial candidate `d96ddbc6f8685be175ee9a48da9b8e15621f2161` / tree `5e6a28950c8079d805450dc2a7ecf652a8285820` passed functional/V6 but
+failed the mandatory production-size PERF gate. It is superseded and is not
+current implementation state.
 
 ## Test Set Maintenance Rule
 
@@ -404,6 +451,110 @@ For TRAFFIC-01 the current relevant test set includes at minimum:
 - required fixed-context cross-surface invariants.
 
 The exact targeted command must still be reviewed again for the next Traffic TASK.
+
+## Acceptance before Publication
+
+This is permanent project governance.
+
+Candidate acceptance means:
+
+```text
+ALL mandatory gates required by TASK / FINAL / release contract
+PASS on the exact candidate tree
+```
+
+Mandatory gates may include:
+
+- focused / targeted;
+- Central Lab full/V6;
+- cross-surface regression;
+- Linux/production-compatible;
+- production-size PERF/capacity;
+- migration/schema compatibility;
+- security/browser acceptance;
+- any explicit TASK-specific gate.
+
+Canonical invariant:
+
+```text
+Patch → Lab.
+All mandatory gates → PASS.
+Accepted candidate → Git.
+Git → Production.
+Activation → separate step.
+```
+
+A successful V6/full gate does **not** by itself authorize publication when a
+mandatory PERF/Linux/security/etc. gate remains.
+
+Example:
+
+```text
+targeted PASS
+V6 PASS
+PERF FAIL
+=
+candidate REJECTED
+publication NOT AUTHORIZED
+```
+
+After remediation, a changed tree is a new candidate. Tech Lead determines the
+required rerun matrix; if FINAL requires the same official PERF matrix, it must be
+repeated before acceptance.
+
+### Linux / production-compatible mandatory gates
+
+A mandatory Linux/PERF gate is pre-publication acceptance.
+
+Normal workflow must not be:
+
+```text
+publish candidate to GitHub
+→ fetch on production
+→ perform still-pending mandatory acceptance
+```
+
+Use an isolated Linux Central Lab or equivalent controlled acceptance environment.
+
+Candidate transport may be patch/local bundle/controlled worktree materialization
+with exact tree verification. GitHub publication is not required as Lab transport.
+
+Production-size data may be supplied as an immutable/read-only snapshot. Evidence
+must prove candidate tree identity, snapshot identity, no production DB writes,
+snapshot unchanged after test, production checkout unchanged and service unchanged
+where the gate contract requires those checks.
+
+### Experimental publication exception
+
+A pre-acceptance GitHub publication is allowed only as explicit:
+
+```text
+TEST-ONLY / EXPERIMENTAL PUBLICATION
+NOT ACCEPTED
+NOT MERGEABLE
+NOT DEPLOYABLE
+```
+
+with Owner + Tech Lead authorization.
+
+It is not the normal release workflow.
+
+### Chain-of-custody after acceptance
+
+Where merge strategy preserves the tree:
+
+```text
+accepted candidate tree
+=
+publication commit tree
+=
+PR head tree
+=
+accepted merge tree
+```
+
+If a production/test file changes after acceptance, it is a new candidate tree
+and necessary gates must be reconsidered/repeated.
 
 ## Linux / production-compatible gate
 
@@ -465,7 +616,8 @@ Coverage groups include:
 - Observation;
 - Current State;
 - Analytics/API/Current Traffic;
-- Admin Web/Home Live/Home Traffic.
+- Admin Web/Home Live/Home Traffic;
+- Traffic Foundation / Current / History / Period Statistics.
 
 ## CI
 

@@ -1,8 +1,9 @@
 # Handoff contract
 
 Status: current
-Updated: 2026-08-29
+Updated: 2026-08-30
 Central Lab governance effective: 2026-08-27
+Acceptance-before-Publication governance effective: 2026-08-30
 
 ## Обязательный итог
 
@@ -16,54 +17,123 @@ Central Lab governance effective: 2026-08-27
 
 ### Контракты
 
-Изменились ли public API, config, events, persistence, lifecycle, security или architecture.
+Изменились ли public API, config, events, persistence, lifecycle, security or architecture.
+
+### Candidate identity
+
+Обязательно:
+
+```text
+baseline SHA/tree:
+candidate patch/commit identity:
+candidate tree:
+```
+
+Если tree менялся после acceptance evidence, это новый candidate и должно быть
+явно отмечено.
 
 ### TASK-scoped проверки исполнителя
 
-Сначала перечислить новые test files и существующие test files, изменённые TASK. Затем дать точные focused/minimal TASK/module/static команды и результат: passed, skipped, failed. Не выполненные проверки — с причиной.
+Перечислить:
+- new test files;
+- modified existing test files;
+- exact focused/minimal commands;
+- passed/skipped/failed.
 
-Если для доказательства нужен test вне module/TASK boundary, указать отдельно одно из:
+Если нужен cross-module proof:
 
 ```text
-cross-module test requested from Owner/Tech Lead/Central Lab
+requested from Owner/Tech Lead/Central Lab
 ```
+
+или:
 
 ```text
-cross-module test prepared by Coder but NOT executed
+prepared by Coder but NOT executed
 ```
 
-Не писать, что Coder выполнил broader/full regression или official gate.
+### Mandatory acceptance gate matrix
+
+Для каждого gate из TASK/FINAL/release contract:
+
+```text
+gate:
+required: yes/no
+environment:
+exact tree:
+result: PASS/FAIL/PENDING/NOT-APPLICABLE
+evidence reference:
+```
+
+Candidate нельзя называть accepted, пока любой mandatory gate = FAIL/PENDING.
 
 ### Central Lab / official Test Evidence
 
 Указать одно из:
 
 ```text
-not required for this handoff
-pending Owner/Tech Lead Central Lab gate
-Coder Lab preparation only: <explicit delegated action>
-Central Lab evidence: <artifact/date/verified-runner/result/reference>
+not required
+pending Owner/Tech Lead
+Coder Lab preparation only
+Central Lab evidence: <artifact/tree/date/verified-runner/result/reference>
 ```
 
-Coder не заявляет official Central Lab execution или PASS/FAIL. Если Coder получил prep-only доступ к `C:\CaptivPortal-Lab`, handoff перечисляет только подготовительные действия и явно возвращает gate Owner/Tech Lead.
+Official PASS/FAIL принадлежит Owner + Tech Lead.
 
-Для official evidence указывать exact artifact, Owner physical execution и Owner + Tech Lead PASS/FAIL.
+### Linux / production-compatible / PERF evidence
 
-### Linux / production-compatible evidence
+Если mandatory, это часть **pre-publication candidate acceptance**.
 
-Если применимо: environment, exact artifact, command/gate and result. Иначе явно `not applicable / separate release step`.
+Указать:
+- isolated environment;
+- exact candidate tree;
+- immutable production-size snapshot identity when used;
+- read-only proof;
+- result;
+- unchanged snapshot/production application/service evidence where required.
+
+### Acceptance status
+
+```text
+candidate accepted: YES/NO
+all mandatory gates PASS: YES/NO
+accepted candidate tree:
+```
+
+### Publication status
+
+Publication is separate from acceptance:
+
+```text
+publication commit:
+PR:
+PR head tree:
+merge:
+merge tree:
+chain-of-custody:
+```
+
+Do not describe TEST-ONLY experimental publication as accepted.
+
+### Deployment / activation
+
+```text
+production deploy source: Git SHA/tree / not executed
+production activation: executed / not executed / separate owner action
+production acceptance: PASS/FAIL/PENDING/not executed
+```
 
 ### Риски и ограничения
 
-Известные defects, environment limits, incomplete gates и assumptions.
+Known defects, environment limits, incomplete gates, assumptions.
 
 ### Repository actions
 
-Фактически выполненные branch, commit, push и PR; идентификаторы только если реально получены. Отдельно forbidden/not executed.
+Only actually executed branch/commit/push/PR actions.
 
 ### Owner actions
 
-Минимальные следующие действия с ответственным.
+Minimal next actions with responsible owner.
 
 ### Agent execution summary
 
@@ -76,14 +146,18 @@ Coder не заявляет official Central Lab execution или PASS/FAIL. Е�
     New test files:
     Modified test files:
     Targeted/module tests:
-    Cross-module/broader test: requested / prepared-not-run / not-required
-    Central Lab preparation: none / explicitly delegated prep-only action
-    Central Lab full regression: not-run-by-agent / Owner+Tech Lead evidence reference / not-required
-    Linux pre-production gate: separate / evidence reference / not-required
+    Cross-module/broader test:
+    Central Lab full regression:
+    Linux/PERF mandatory gate:
+    Candidate tree:
+    Candidate accepted:
+    Publication commit/PR:
+    Production deploy:
+    Production activation:
     Unexpected rework:
-    Reason for additional context:
     Repository actions:
 
 ## Запрещено
 
-Не прикладывать полную command history, многотысячные logs, secrets или неподтверждённые claims.
+Не прикладывать full command history, многотысячные logs, secrets или
+неподтверждённые claims.

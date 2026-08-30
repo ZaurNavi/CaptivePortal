@@ -1,7 +1,7 @@
 # Workflow coding agent
 
 Status: current
-Updated: 2026-08-29
+Updated: 2026-08-30
 Central Lab governance effective: 2026-08-27
 
 ## 1. Intake
@@ -92,24 +92,62 @@ For an official Windows full gate, Owner/Tech Lead also re-verifies the current 
 
 ## 5. Promotion flow
 
-Normal flow:
+Canonical normal flow:
 
 ```text
-Coder implementation
-→ minimal TASK/module test evidence
-→ exact candidate / patch
-→ Tech Lead review
-→ Tech Lead refreshes relevant targeted regression/test-set block
-→ Tech Lead defines broader/full gate when required
-→ Owner prepares/verifies C:\CaptivPortal-Lab exact artifact
-→ Owner physically launches official Central Lab regression
-→ Owner + Tech Lead analyze evidence and issue PASS/FAIL
-→ owner/release decision
-→ separate Linux production-compatible gate when required
-→ deploy/activation
+Coder implementation / patch
+→ Coder focused/minimal TASK/module evidence
+→ exact candidate materialized in Lab
+→ Tech Lead refreshes targeted/test-set block
+→ required targeted/cross-surface acceptance
+→ Owner runs official Central Lab full gate
+→ all other mandatory TASK/FINAL/release gates
+→ Linux / production-compatible / production-size PERF when required
+→ ALL MANDATORY GATES PASS
+→ ACCEPTED CANDIDATE
+→ publication commit
+→ GitHub feature branch / Draft PR
+→ verify accepted tree = publication/PR tree
+→ Owner-authorized merge
+→ verify merge tree / chain-of-custody
+→ production deploy FROM GIT
+→ separate Owner-controlled activation
+→ production acceptance
 ```
 
-Do not repeat an identical test run unless the rerun supplies new evidence: changed artifact, new risk, different platform, investigation or explicit release requirement.
+Short invariant:
+
+```text
+Patch → Lab.
+All mandatory gates → PASS.
+Accepted candidate → Git.
+Git → Production.
+Activation → separate step.
+```
+
+`Central Lab V6 PASS` is not equivalent to `candidate accepted` if TASK/FINAL
+also requires PERF/Linux/capacity/security/browser/etc.
+
+A mandatory gate is pre-publication acceptance.
+
+GitHub is publication/review/chain-of-custody, not the normal transport between
+acceptance environments.
+
+For mandatory production-compatible acceptance, use an isolated Linux Lab or
+equivalent controlled environment with exact candidate tree and immutable
+read-only production-size data snapshot when needed.
+
+A changed candidate tree after acceptance requires Tech Lead to determine/repeat
+the necessary gates.
+
+TEST-ONLY / EXPERIMENTAL publication before acceptance requires explicit Owner +
+Tech Lead authorization and remains NOT ACCEPTED / NOT MERGEABLE / NOT DEPLOYABLE.
+
+Production application code is deployed only from Git using explicit verified
+SHA/tree. Direct patch/source transfer is emergency-only and requires Owner +
+Tech Lead plus later repository reconciliation.
+
+Do not repeat an identical test run unless it supplies new evidence.
 
 ## 6. Repository actions
 

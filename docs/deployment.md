@@ -1,118 +1,228 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-08-29
-Current repository baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
-Confirmed production deployed HEAD: `8f3ad59771f72c49834b1012963de6d94b9e0d18`
-Confirmed production tree: `2ef8bf264a008259242cde0778d0ebd20fa94b9e`
+Updated: 2026-08-30
+Current repository baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
+Confirmed production deployed HEAD: `b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
+Confirmed production tree: `1d8b94590848f9505e45e653384dd8a7c18d4339`
 
 ## Repository vs production
 
-Repository establishes code/default contracts. It does not prove:
-- feature flags currently enabled in systemd;
-- current DB health/size;
-- process environment values;
-- reverse-proxy/systemd unit details.
+Repository establishes code/default contracts. It does not prove current
+production env values or current runtime health.
 
-Never print production secret values in deployment evidence.
+Never print production secret values.
 
 ## Core precondition
 
 Required Omada environment:
 `OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID`, `OMADA_CLIENT_SECRET`.
 
-Provider construction is fail-closed when core configuration is missing/invalid.
+## Permanent promotion and delivery invariant
+
+Canonical normal flow:
+
+```text
+Coder implementation / patch
+        ↓
+Central Lab exact materialization
+        ↓
+focused / targeted acceptance
+        ↓
+Central Lab full regression
+        ↓
+all other mandatory TASK/release gates
+        ↓
+Linux / production-compatible / production-size PERF when required
+        ↓
+ACCEPTED CANDIDATE
+        ↓
+publication commit
+        ↓
+GitHub branch / PR
+        ↓
+verified publication/PR/merge tree identity
+        ↓
+Owner-authorized merge
+        ↓
+production deploy FROM GIT
+        ↓
+separate production activation
+        ↓
+production acceptance
+```
+
+Short invariant:
+
+```text
+Patch → Lab.
+All mandatory gates → PASS.
+Accepted candidate → Git.
+Git → Production.
+Activation → separate step.
+```
+
+## Acceptance before Publication
+
+A candidate is **NOT ACCEPTED** while any mandatory TASK/FINAL/release gate is
+FAIL or PENDING.
+
+Mandatory gates may include functional, targeted, full/V6, Linux compatibility,
+production-size PERF/capacity, migration/schema, security/browser or other
+explicit acceptance.
+
+A mandatory gate must not require normal GitHub publication merely as transport.
+Use a controlled acceptance environment and exact tree identity.
+
+If production-size data is needed before publication, use an isolated
+production-compatible Lab plus a consistent immutable/read-only data snapshot.
+The production application checkout/service/DB must not be changed.
+
+TEST-ONLY / EXPERIMENTAL Git publication before acceptance requires explicit
+Owner + Tech Lead authorization and is not accepted/mergeable/deployable.
+
+## Git is the production code delivery boundary
+
+Normal production application code source:
+
+```text
+Git repository
++
+explicit verified target SHA/tree
+```
+
+Normal deploy uses:
+
+```text
+git fetch
+verify target SHA/tree
+controlled checkout/update from Git
+```
+
+Forbidden as normal production code delivery:
+
+- local patch;
+- SCP patch;
+- copied source files;
+- workstation ZIP/archive;
+- manual source replacement;
+- Central Lab worktree;
+- Coder worktree.
+
+Direct patch/source transfer is emergency-only with explicit Owner + Tech Lead
+authorization for the incident and mandatory later Git/repository reconciliation.
+
+## Chain-of-custody
+
+Expected, where merge strategy preserves tree:
+
+```text
+accepted candidate tree
+=
+publication commit tree
+=
+PR head tree
+=
+accepted merge tree
+```
+
+A production/test-file change after acceptance creates a new candidate tree and
+requires Tech Lead to determine/re-run the necessary acceptance gates.
+
+A LAB ONLY commit is an immutable test artifact only. It is not pushed and is
+not a production source.
 
 ## Deploy model
 
-Implementation and production activation are separate actions.
+Implementation, publication, deployment and activation are distinct actions.
 
-A deploy TASK must specify:
-target, approved commit, backup, exact config change, required test evidence, health checks, rollback and owner authorization.
+A deploy TASK specifies target, verified Git commit/tree, backup, config change,
+required acceptance evidence, health checks, rollback and Owner authorization.
 
-Repository feature defaults being `false` intentionally support code deployment before separate activation.
+Repository feature defaults being false intentionally support dormant code deploy
+before separate activation.
 
-## Current runtime startup health
+## Current runtime startup/shutdown
 
-Use current `run.py` ordering documented in `project-inventory.md`.
+Use `project-inventory.md` for current composition order.
 
-Health review should distinguish:
-- core portal/auth availability;
-- independent runtime state: disabled / active / degraded / unavailable;
-- no duplicate OmadaProvider;
-- expected single application process;
-- expected storage/journal permissions.
+Independent module failure must not break guest authorization where core auth
+dependencies remain healthy.
 
-## Current shutdown
-
-Expected order:
-Admin state clear → Cleaner → Observation → Current State → Public Traffic → stop Visit scheduling → drain Auth executor → stop Visit accepting/close → drain Snapshot → Registry final scan.
-
-Do not activate/deploy changes that break bounded shutdown.
-
-## First-restart acceptance
-
-A production startup/retry change is not accepted merely because a later restart succeeds. Capture the **first restart** after deployment: service state plus component-specific persisted/telemetry evidence. Do not use a second restart to mask a startup defect.
-
-For the 2026-08-26 rollout at `main@53f617b3`, only one restart was performed (`22:55:39 +04`). Service, CAPPORT, webhook and Observation were active; Current State persisted 4/4 successful client cycles and 4/4 successful AP cycles with no non-success result. First-restart startup acceptance: **PASS**.
+First-restart evidence must be preserved for startup/retry changes; a second
+restart must not mask a first-start defect.
 
 ## Testing responsibility
 
-Coder focused/minimal TASK/module evidence is reused by Tech Lead and the release process. Coder does not execute cross-module/broader/full regression as part of implementation handoff.
+Detailed acceptance ownership: `testing.md`.
 
-The official cross-module/broader/full-regression baseline / Full Regression Gate / final Test Evidence follows `docs/testing.md`: Tech Lead defines the exact artifact, commands and acceptance criteria; Owner physically operates `C:\CaptivPortal-Lab` and launches the official regression; Owner + Tech Lead issue PASS/FAIL.
+Coder supplies only focused/minimal TASK/module evidence.
 
-Before production deployment/activation, the release owner decides whether the exact artifact requires a fresh Central Lab gate and whether a separate Linux/production-compatible gate is mandatory. Official gate execution is not delegated to Coder.
+Tech Lead defines mandatory gates and exact acceptance artifact.
+Owner physically operates official Central Lab.
+Owner + Tech Lead issue official PASS/FAIL.
 
-The Windows Local Gate does **not** replace Linux acceptance when the deploy contract requires Linux. The Linux gate is executed separately by the executor named by the deploy/release TASK; it is not automatically Coder or Tech Lead responsibility.
+All mandatory pre-publication gates must PASS before the normal publication
+commit/PR path.
 
-## Traffic production checkpoint — 2026-08-29
+## Traffic production checkpoint — 2026-08-30
 
-Owner-reported state:
+Owner-confirmed:
 
 ```text
-TRAFFIC-00: DONE / MERGED / PRODUCTION / ACTIVE
-TRAFFIC-01: DONE / MERGED / PRODUCTION / ACTIVE
+TASK-TRAFFIC-03:
+PRODUCTION ACCEPTANCE PASS / CLOSED
+
+production HEAD:
+b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
+
+production tree:
+1d8b94590848f9505e45e653384dd8a7c18d4339
+
 WEB_ADMIN_TRAFFIC_ENABLED=true
-WEB_ADMIN_HOME_TRAFFIC_ENABLED=true
+WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
+WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
+
+Browser acceptance:
+PASS
+
+24h:
+PASS
+
+7d:
+PASS
+
+History/Statistics synchronized range switch:
+PASS
 ```
 
-Acceptance health:
-- service active;
-- CAPPORT 200;
-- Omada webhook 204;
-- Observation `complete=True`, `error_count=0`;
-- Admin Console PASS;
-- Traffic UI PASS.
+Traffic Section production surface includes Current, History and Period Statistics.
 
-The two Traffic flags are separate feature boundaries.
+## TRAFFIC-03 acceptance history
 
-Pre-Traffic rollback checkpoint is retained:
+PR #89 merged the accepted tree `1d8b94590848f9505e45e653384dd8a7c18d4339`.
 
-```text
-previous production HEAD: f5887758898b512747d2ea8bd51763389230dc2d
-```
+Initial candidate `d96ddbc6f8685be175ee9a48da9b8e15621f2161` / tree `5e6a28950c8079d805450dc2a7ecf652a8285820` passed functional/V6 but
+failed mandatory production-size PERF and is superseded.
 
-Owner also retained the previous production tree, `/etc/default/captive-portal`
-and the systemd service definition. Do not delete this checkpoint merely because
-Traffic acceptance passed.
+Final remediation candidate `79875aca61297c8de4c30b7119b15118079f26d0` preserved accepted tree `1d8b94590848f9505e45e653384dd8a7c18d4339`
+and passed all mandatory gates before the final accepted release path.
 
 ## Feature activation
 
-Activation of Snapshot, Registry, Visit, Observation, Current State, Analytics/API, Admin Web/Home sections, Traffic Section or Cleaner is owner-controlled and requires production configuration verification plus component-specific health evidence.
+Activation remains Owner-controlled and separate from code deployment.
 
-A repository `*_ENABLED=false` does not imply production disabled.
+For Traffic, the current production flags above are activation facts, not
+repository defaults.
 
 ## Rollback
 
-Prefer:
-1. disable affected feature in production environment;
-2. restart service where environment change requires it;
-3. verify core portal and component state;
-4. if necessary restore approved code/config/data backup.
+Prefer feature disable first where safe, then restart/health verification, then
+approved code/config/data restore if required.
 
-Never delete audit/history merely to make rollback look clean.
+Never delete audit/history to make rollback appear clean.
 
 ## Infrastructure boundary
 
-systemd, reverse proxy, Alloy, Loki and Grafana are outside normal application implementation scope and require their own deploy/infrastructure authorization.
+systemd, reverse proxy, Alloy, Loki and Grafana require their own
+deploy/infrastructure authorization.
