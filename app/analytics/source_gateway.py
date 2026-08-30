@@ -509,7 +509,67 @@ _HISTORICAL_STATISTICS_RESULT_FIELDS = (
     "last_sample_at",
 )
 
-_HISTORICAL_COMBINED_SQL = f"""
+_HISTORICAL_BUCKET_RESULT_FIELDS = (
+    "bucket_index",
+    "canonical_cycle_count",
+    "wired_complete_count",
+    "lan_complete_count",
+    "wired_pairs",
+    "lan_pairs",
+    "total_ap_opportunities",
+    "empty_cycle_count",
+    "selected_source",
+    "selection_reason",
+    "complete_sample_count",
+    "download_mbps",
+    "upload_mbps",
+    "first_sample",
+    "last_sample",
+    "max_inter_gap",
+    "inter_gap_count",
+    "no_baseline_count",
+    "counter_reset_count",
+    "gap_too_large_count",
+    "invalid_elapsed_count",
+    "source_unavailable_count",
+    "ok_count",
+    "skew_excluded_count",
+)
+
+_HISTORICAL_PEAK_SAMPLE_FIELDS = (
+    "peak_sample_finished_at",
+    "peak_sample_selected_source",
+    "peak_sample_download",
+    "peak_sample_upload",
+    "peak_sample_previous_at",
+    "peak_sample_interval_result",
+)
+
+_HISTORICAL_STATISTICS_AGGREGATES_SQL = """
+      COUNT(*) accepted_peak_sample_count,
+      CASE WHEN COUNT(*)=0 THEN 0 ELSE COUNT(*)-1 END
+        candidate_interval_count,
+      COALESCE(SUM(interval_result='accepted'),0) accepted_interval_count,
+      COALESCE(SUM(CASE WHEN interval_result='accepted'
+        THEN elapsed_seconds ELSE 0.0 END),0.0) accepted_interval_seconds,
+      COALESCE(SUM(interval_result='gap'),0) excluded_gap_interval_count,
+      COALESCE(SUM(interval_result='source_transition'),0)
+        excluded_source_transition_interval_count,
+      COALESCE(SUM(interval_result='invalid'),0)
+        invalid_period_interval_count,
+      SUM(CASE WHEN interval_result='accepted'
+        THEN download*elapsed_seconds END) weighted_download,
+      SUM(CASE WHEN interval_result='accepted'
+        THEN upload*elapsed_seconds END) weighted_upload,
+      MAX(download) peak_download,
+      MAX(upload) peak_upload,
+      MAX(download+upload) peak_total,
+      MIN(finished_at) first_sample_at,
+      MAX(finished_at) last_sample_at
+"""
+
+
+_HISTORICAL_COMBINED_CTES_SQL = f"""
   WITH {_HISTORICAL_COMBINED_CYCLE_CTES},
   integrity_meta AS MATERIALIZED (
     SELECT
@@ -590,6 +650,7 @@ _HISTORICAL_COMBINED_SQL = f"""
   ),
   statistics_ordered AS (
     SELECT *,
+      ROW_NUMBER() OVER (ORDER BY finished_at,cycle_id) sequence_no,
       LAG(finished_at) OVER (ORDER BY finished_at,cycle_id) previous_at,
       LAG(selected_source) OVER (
         ORDER BY finished_at,cycle_id) previous_source
@@ -614,33 +675,58 @@ _HISTORICAL_COMBINED_SQL = f"""
   ),
   statistics_row AS (
     SELECT
-      COUNT(*) accepted_peak_sample_count,
-      CASE WHEN COUNT(*)=0 THEN 0 ELSE COUNT(*)-1 END
-        candidate_interval_count,
-      COALESCE(SUM(interval_result='accepted'),0) accepted_interval_count,
-      COALESCE(SUM(CASE WHEN interval_result='accepted'
-        THEN elapsed_seconds ELSE 0.0 END),0.0) accepted_interval_seconds,
-      COALESCE(SUM(interval_result='gap'),0) excluded_gap_interval_count,
-      COALESCE(SUM(interval_result='source_transition'),0)
-        excluded_source_transition_interval_count,
-      COALESCE(SUM(interval_result='invalid'),0)
-        invalid_period_interval_count,
-      SUM(CASE WHEN interval_result='accepted'
-        THEN download*elapsed_seconds END) weighted_download,
-      SUM(CASE WHEN interval_result='accepted'
-        THEN upload*elapsed_seconds END) weighted_upload,
-      MAX(download) peak_download,
-      MAX(upload) peak_upload,
-      MAX(download+upload) peak_total,
-      MIN(finished_at) first_sample_at,
-      MAX(finished_at) last_sample_at
+      {_HISTORICAL_STATISTICS_AGGREGATES_SQL}
     FROM statistics_classified
   )
+"""
+
+_HISTORICAL_COMBINED_SQL = _HISTORICAL_COMBINED_CTES_SQL + """
   SELECT b.*, m.integrity_failure_count, p.*
   FROM integrity_meta m
   CROSS JOIN statistics_row p
   LEFT JOIN bucket_rows b ON 1=1
   ORDER BY b.bucket_index
+"""
+
+_HISTORICAL_PEAK_STATISTICS_SELECT_SQL = ",\n    ".join(
+    f"p.{field}" for field in _HISTORICAL_STATISTICS_RESULT_FIELDS
+)
+
+_HISTORICAL_PEAK_BUCKET_SELECT_SQL = ",\n    ".join(
+    f"b.{field}" for field in _HISTORICAL_BUCKET_RESULT_FIELDS
+)
+_HISTORICAL_PEAK_NULL_BUCKET_SELECT_SQL = ",\n    ".join(
+    f"NULL AS {field}" for field in _HISTORICAL_BUCKET_RESULT_FIELDS
+)
+_HISTORICAL_PEAK_NULL_STATISTICS_SELECT_SQL = ",\n    ".join(
+    f"NULL AS {field}" for field in _HISTORICAL_STATISTICS_RESULT_FIELDS
+)
+_HISTORICAL_PEAK_NULL_SAMPLE_SELECT_SQL = ",\n    ".join(
+    f"NULL AS {field}" for field in _HISTORICAL_PEAK_SAMPLE_FIELDS
+)
+
+_HISTORICAL_PEAK_COMBINED_SQL = _HISTORICAL_COMBINED_CTES_SQL + f"""
+  SELECT 0 AS projection_kind, b.bucket_index AS projection_order,
+    {_HISTORICAL_PEAK_BUCKET_SELECT_SQL},
+    m.integrity_failure_count,
+    {_HISTORICAL_PEAK_STATISTICS_SELECT_SQL},
+    {_HISTORICAL_PEAK_NULL_SAMPLE_SELECT_SQL}
+  FROM integrity_meta m
+  CROSS JOIN statistics_row p
+  LEFT JOIN bucket_rows b ON 1=1
+  UNION ALL
+  SELECT 1 AS projection_kind, s.sequence_no AS projection_order,
+    {_HISTORICAL_PEAK_NULL_BUCKET_SELECT_SQL},
+    NULL AS integrity_failure_count,
+    {_HISTORICAL_PEAK_NULL_STATISTICS_SELECT_SQL},
+    s.finished_at AS peak_sample_finished_at,
+    s.selected_source AS peak_sample_selected_source,
+    s.download AS peak_sample_download,
+    s.upload AS peak_sample_upload,
+    s.previous_at AS peak_sample_previous_at,
+    s.interval_result AS peak_sample_interval_result
+  FROM statistics_classified s
+  ORDER BY projection_kind, projection_order
 """
 
 
@@ -1149,6 +1235,7 @@ class AnalyticsSourceGateway:
         max_site_sample_source_skew_seconds: int,
         deadline: QueryDeadline,
         include_period_statistics: bool = False,
+        include_peak_load: bool = False,
     ) -> Mapping[str, Any]:
         """Return bounded historical AP-rate aggregates from one read snapshot."""
         max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
@@ -1163,7 +1250,11 @@ class AnalyticsSourceGateway:
                 if include_period_statistics:
                     combined_rows = self._all(
                         connection,
-                        _HISTORICAL_COMBINED_SQL,
+                        (
+                            _HISTORICAL_PEAK_COMBINED_SQL
+                            if include_peak_load
+                            else _HISTORICAL_COMBINED_SQL
+                        ),
                         (
                             *cycle_parameters,
                             from_utc, to_utc, from_utc, to_utc,
@@ -1180,8 +1271,11 @@ class AnalyticsSourceGateway:
                         raise AnalyticsSourceUnavailable(
                             "Historical traffic combined projection is unavailable"
                         )
-                    combined = tuple(dict(row) for row in combined_rows)
-                    first = combined[0]
+                    first = combined_rows[0]
+                    if include_peak_load and int(first["projection_kind"]) != 0:
+                        raise AnalyticsSourceUnavailable(
+                            "Historical traffic combined projection is unavailable"
+                        )
                     meta_values = {
                         "integrity_failure_count": first[
                             "integrity_failure_count"
@@ -1195,13 +1289,43 @@ class AnalyticsSourceGateway:
                         "integrity_failure_count",
                         *_HISTORICAL_STATISTICS_RESULT_FIELDS,
                     }
+                    if include_peak_load:
+                        auxiliary_fields.update((
+                            "projection_kind",
+                            "projection_order",
+                            *_HISTORICAL_PEAK_SAMPLE_FIELDS,
+                        ))
+                        peak_samples = tuple(
+                            {
+                                "finished_at": row["peak_sample_finished_at"],
+                                "selected_source": row[
+                                    "peak_sample_selected_source"
+                                ],
+                                "download": row["peak_sample_download"],
+                                "upload": row["peak_sample_upload"],
+                                "previous_at": row["peak_sample_previous_at"],
+                                "interval_result": row[
+                                    "peak_sample_interval_result"
+                                ],
+                            }
+                            for row in combined_rows
+                            if int(row["projection_kind"]) == 1
+                        )
+                        bucket_source_rows = (
+                            row for row in combined_rows
+                            if int(row["projection_kind"]) == 0
+                        )
+                    else:
+                        peak_samples = None
+                        bucket_source_rows = iter(combined_rows)
                     rows = tuple(
                         {
                             key: value
                             for key, value in row.items()
                             if key not in auxiliary_fields
                         }
-                        for row in combined
+                        for source_row in bucket_source_rows
+                        for row in (dict(source_row),)
                         if row["bucket_index"] is not None
                     )
                     meta_values.update(self._historical_source_bounds(
@@ -1243,6 +1367,7 @@ class AnalyticsSourceGateway:
                         deadline,
                     )
                     statistics = None
+                    peak_samples = None
                 attempts = self._one(
                     connection,
                     """
@@ -1283,6 +1408,7 @@ class AnalyticsSourceGateway:
                     "period_statistics": (
                         dict(statistics) if statistics is not None else None
                     ),
+                    "peak_samples": peak_samples,
                 }
             finally:
                 connection.rollback()
@@ -1358,6 +1484,7 @@ class AnalyticsSourceGateway:
         gap_threshold_seconds: float,
         max_site_sample_source_skew_seconds: int,
         deadline: QueryDeadline,
+        include_peak_load: bool = False,
     ) -> tuple[str, ...]:
         """Expose the single-pass combined History and Statistics plan."""
         max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
@@ -1372,7 +1499,11 @@ class AnalyticsSourceGateway:
         with self._connection("observations", deadline) as connection:
             rows = self._all(
                 connection,
-                "EXPLAIN QUERY PLAN " + _HISTORICAL_COMBINED_SQL,
+                "EXPLAIN QUERY PLAN " + (
+                    _HISTORICAL_PEAK_COMBINED_SQL
+                    if include_peak_load
+                    else _HISTORICAL_COMBINED_SQL
+                ),
                 parameters,
                 deadline,
             )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 from app.analytics.validation import parse_utc
 
@@ -77,6 +77,7 @@ def serialize_historical_traffic(
     *,
     resolved_range: TrafficNetworkRange,
     include_period_statistics: bool = False,
+    include_peak_load: bool = False,
 ) -> dict[str, Any]:
     """Validate immutable Analytics output and expose only product-safe fields."""
     if getattr(value, "status", None) not in _RESULT_COVERAGE:
@@ -230,7 +231,189 @@ def serialize_historical_traffic(
         raise HistoricalTrafficSerializationError(
             "unrequested period Statistics is invalid"
         )
+    peak_load = getattr(value, "peak_load", None)
+    if include_peak_load:
+        if not include_period_statistics:
+            raise HistoricalTrafficSerializationError(
+                "Peak Load requires period Statistics"
+            )
+        result["peak_load"] = _peak_load(
+            peak_load,
+            history_status=value.status,
+            range_start=start,
+            range_end=end,
+            buckets=projected_buckets,
+            statistics=result["period_statistics"],
+        )
+    elif peak_load is not None:
+        raise HistoricalTrafficSerializationError(
+            "unrequested Peak Load is invalid"
+        )
     return result
+
+
+def _peak_load(
+    value: Any,
+    *,
+    history_status: str,
+    range_start: datetime,
+    range_end: datetime,
+    buckets: list[dict[str, Any]],
+    statistics: dict[str, Any],
+) -> dict[str, Any]:
+    constants = {
+        "metric_version": "network_traffic_peak_load.v1",
+        "unit": "Mbps",
+        "peak_value_method": "max_accepted_complete_site_sample.v1",
+        "peak_tie_break_method": "earliest_peak_sample_at.v1",
+        "sample_timestamp_semantics": "cycle_finished_at",
+    }
+    status = getattr(value, "status", None)
+    if status not in _STATISTICS_STATUSES or any(
+        getattr(value, key, None) != expected
+        for key, expected in constants.items()
+    ):
+        raise HistoricalTrafficSerializationError("Peak Load contract is invalid")
+    raw_events = getattr(value, "events", None)
+    if not isinstance(raw_events, Mapping) or set(raw_events) != {"download", "upload", "total"}:
+        raise HistoricalTrafficSerializationError("Peak events are invalid")
+    events = {
+        name: _peak_event(raw_events[name], range_start, range_end)
+        for name in ("download", "upload", "total")
+    }
+    for name, statistic_name in (
+        ("download", "download_mbps"),
+        ("upload", "upload_mbps"),
+        ("total", "total_mbps"),
+    ):
+        event_value = events[name]["value_mbps"]
+        statistics_value = statistics["peak"][statistic_name]
+        if event_value is None or statistics_value is None:
+            if event_value is not statistics_value:
+                raise HistoricalTrafficSerializationError("Peak value identity is invalid")
+        elif not math.isclose(event_value, statistics_value, rel_tol=1e-9, abs_tol=1e-9):
+            raise HistoricalTrafficSerializationError("Peak value identity is invalid")
+    busiest_bucket = _peak_bucket(
+        getattr(value, "busiest_bucket", None),
+        buckets,
+    )
+    busiest_hour = _peak_hour(
+        getattr(value, "busiest_hour", None),
+        range_start,
+        range_end,
+    )
+    numeric_events = all(event["value_mbps"] is not None for event in events.values())
+    complete = (
+        history_status == "ok"
+        and statistics["status"] == "ok"
+        and numeric_events
+        and busiest_bucket["status"] == "ok"
+        and busiest_hour["status"] == "ok"
+    )
+    if status == "ok" and not complete:
+        raise HistoricalTrafficSerializationError("Peak Load ok state is invalid")
+    if status == "partial" and (complete or not numeric_events):
+        raise HistoricalTrafficSerializationError("Peak Load partial state is invalid")
+    if status == "insufficient_data" and (
+        numeric_events
+        or any(event["value_mbps"] is not None for event in events.values())
+        or busiest_bucket["status"] != "insufficient_data"
+        or busiest_hour["status"] != "insufficient_data"
+    ):
+        raise HistoricalTrafficSerializationError("Peak Load insufficient state is invalid")
+    return {
+        "status": status,
+        **constants,
+        "events": events,
+        "busiest_bucket": busiest_bucket,
+        "busiest_hour": busiest_hour,
+    }
+
+
+def _peak_event(value: Any, start: datetime, end: datetime) -> dict[str, Any]:
+    if value is None:
+        raise HistoricalTrafficSerializationError("Peak event is missing")
+    raw_value = getattr(value, "value_mbps", None)
+    sample_text = getattr(value, "sample_at_utc", None)
+    source = getattr(value, "selected_source", None)
+    occurrences = _count(getattr(value, "occurrence_count", None))
+    if raw_value is None:
+        if sample_text is not None or source is not None or occurrences != 0:
+            raise HistoricalTrafficSerializationError("Peak null event is invalid")
+        return {"value_mbps": None, "sample_at_utc": None, "selected_source": None, "occurrence_count": 0}
+    number = _number(raw_value)
+    sample = _utc(sample_text)
+    if not start <= sample < end or source not in _SOURCES or occurrences < 1:
+        raise HistoricalTrafficSerializationError("Peak event is invalid")
+    return {"value_mbps": number, "sample_at_utc": sample_text, "selected_source": source, "occurrence_count": occurrences}
+
+
+def _peak_bucket(value: Any, buckets: list[dict[str, Any]]) -> dict[str, Any]:
+    constants = {
+        "method": "max_complete_history_bucket_total_mean.v1",
+        "tie_break_method": "earliest_bucket_start.v1",
+    }
+    if value is None or any(getattr(value, key, None) != expected for key, expected in constants.items()):
+        raise HistoricalTrafficSerializationError("Peak bucket method is invalid")
+    status = getattr(value, "status", None)
+    occurrences = _count(getattr(value, "occurrence_count", None))
+    if status == "insufficient_data":
+        if any(getattr(value, key, None) is not None for key in (
+            "bucket_start_utc", "bucket_end_utc", "average_total_mbps", "selected_source"
+        )) or occurrences != 0:
+            raise HistoricalTrafficSerializationError("Peak bucket null shape is invalid")
+        return {"status": status, "bucket_start_utc": None, "bucket_end_utc": None, "average_total_mbps": None, "selected_source": None, "occurrence_count": 0, **constants}
+    if status != "ok":
+        raise HistoricalTrafficSerializationError("Peak bucket status is invalid")
+    start = getattr(value, "bucket_start_utc", None)
+    end = getattr(value, "bucket_end_utc", None)
+    total = _number(getattr(value, "average_total_mbps", None))
+    source = getattr(value, "selected_source", None)
+    complete = [item for item in buckets if item["status"] == "complete"]
+    maximum = max((item["total_mbps"] for item in complete), default=None)
+    winners = [item for item in complete if item["total_mbps"] == maximum]
+    canonical = winners[0] if winners else None
+    if (
+        canonical is None
+        or start != canonical["bucket_start_utc"]
+        or end != canonical["bucket_end_utc"]
+        or source != canonical["selected_source"]
+        or total != maximum
+        or source not in _SOURCES
+        or occurrences != len(winners)
+    ):
+        raise HistoricalTrafficSerializationError("Peak bucket is invalid")
+    return {"status": status, "bucket_start_utc": start, "bucket_end_utc": end, "average_total_mbps": total, "selected_source": source, "occurrence_count": occurrences, **constants}
+
+
+def _peak_hour(value: Any, start: datetime, end: datetime) -> dict[str, Any]:
+    constants = {
+        "duration_seconds": 3600,
+        "method": "max_complete_rolling_3600s_average_total_sample_hold.v1",
+        "average_method": "right_endpoint_sample_hold_time_weighted.v1",
+        "tie_break_method": "earliest_window_start.v1",
+    }
+    if value is None or any(getattr(value, key, None) != expected for key, expected in constants.items()):
+        raise HistoricalTrafficSerializationError("Peak hour method is invalid")
+    if hasattr(value, "occurrence_count"):
+        raise HistoricalTrafficSerializationError("Peak hour occurrence count is forbidden")
+    status = getattr(value, "status", None)
+    if status == "insufficient_data":
+        if any(getattr(value, key, None) is not None for key in (
+            "window_start_utc", "window_end_utc", "average_total_mbps", "accepted_interval_seconds", "selected_source"
+        )):
+            raise HistoricalTrafficSerializationError("Peak hour null shape is invalid")
+        return {"status": status, "window_start_utc": None, "window_end_utc": None, "average_total_mbps": None, "accepted_interval_seconds": None, "selected_source": None, **constants}
+    if status != "ok":
+        raise HistoricalTrafficSerializationError("Peak hour status is invalid")
+    window_start = _utc(getattr(value, "window_start_utc", None))
+    window_end = _utc(getattr(value, "window_end_utc", None))
+    average = _number(getattr(value, "average_total_mbps", None))
+    accepted = _number(getattr(value, "accepted_interval_seconds", None))
+    source = getattr(value, "selected_source", None)
+    if not start <= window_start < window_end <= end or (window_end-window_start).total_seconds() != 3600 or accepted != 3600 or source not in _SOURCES:
+        raise HistoricalTrafficSerializationError("Peak hour is invalid")
+    return {"status": status, "window_start_utc": getattr(value, "window_start_utc"), "window_end_utc": getattr(value, "window_end_utc"), "average_total_mbps": average, "accepted_interval_seconds": accepted, "selected_source": source, **constants}
 
 
 def _statistics(

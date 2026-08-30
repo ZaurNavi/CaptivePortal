@@ -848,6 +848,56 @@ class HistoricalTrafficPeriodStatistics:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalTrafficPeakEvent:
+    value_mbps: float | None
+    sample_at_utc: str | None
+    selected_source: str | None
+    occurrence_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficBusiestBucket:
+    status: str
+    bucket_start_utc: str | None
+    bucket_end_utc: str | None
+    average_total_mbps: float | None
+    selected_source: str | None
+    occurrence_count: int
+    method: str = "max_complete_history_bucket_total_mean.v1"
+    tie_break_method: str = "earliest_bucket_start.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficBusiestHour:
+    status: str
+    window_start_utc: str | None
+    window_end_utc: str | None
+    duration_seconds: int
+    average_total_mbps: float | None
+    accepted_interval_seconds: float | None
+    selected_source: str | None
+    method: str = "max_complete_rolling_3600s_average_total_sample_hold.v1"
+    average_method: str = "right_endpoint_sample_hold_time_weighted.v1"
+    tie_break_method: str = "earliest_window_start.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficPeakLoad:
+    status: str
+    events: Mapping[str, HistoricalTrafficPeakEvent]
+    busiest_bucket: HistoricalTrafficBusiestBucket
+    busiest_hour: HistoricalTrafficBusiestHour
+    metric_version: str = "network_traffic_peak_load.v1"
+    unit: str = "Mbps"
+    peak_value_method: str = "max_accepted_complete_site_sample.v1"
+    peak_tie_break_method: str = "earliest_peak_sample_at.v1"
+    sample_timestamp_semantics: str = "cycle_finished_at"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "events", MappingProxyType(dict(self.events)))
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalSiteTraffic:
     status: str
     range: HistoricalTrafficRange
@@ -855,6 +905,7 @@ class HistoricalSiteTraffic:
     coverage: HistoricalTrafficCoverage
     quality: HistoricalTrafficQuality
     period_statistics: HistoricalTrafficPeriodStatistics | None = None
+    peak_load: HistoricalTrafficPeakLoad | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "buckets", tuple(self.buckets))
