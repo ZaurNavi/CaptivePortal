@@ -16,7 +16,9 @@ planning-only / implementation / review / publish / deploy
 
 agent / owner / shared / not-applicable
 
-> `agent` означает только focused/minimal automated tests текущего TASK/модуля. Cross-module/broader/full execution и official acceptance принадлежат Owner/Tech Lead/Central Lab.
+> `agent` означает только focused/minimal automated tests текущего TASK/модуля.
+> Cross-module/broader/full execution и official acceptance принадлежат
+> Owner/Tech Lead/Central Lab.
 
 ## 6. Текущее состояние
 
@@ -26,7 +28,7 @@ agent / owner / shared / not-applicable
 
 ## 9. Связанные документы
 
-Указать 1–3 файла.
+Указать 1–3 current contracts.
 
 ## 10. Разрешённые файлы
 
@@ -56,33 +58,74 @@ agent / owner / shared / not-applicable
 
 ## 23. Targeted/module tests
 
-Указать expected new/changed test files и exact focused/minimal command. После implementation handoff Tech Lead пересматривает relevant targeted Central Lab regression set; старый block не наследуется автоматически.
+Указать expected new/changed test files и exact focused/minimal command.
+После implementation handoff Tech Lead пересматривает current targeted set.
 
 ## 24. Cross-module / broader / full regression
 
-Указать:
-
 ```text
 cross-module test needed: yes/no
-if yes: external execution OR agent prepares-without-running
 fresh Central Lab baseline required: yes/no
-exact artifact: <SHA/patch identity when known>
-Coder Lab preparation delegated: yes/no
-if yes: exact prep-only action
+exact candidate tree:
 official Lab operator: Owner
 gate direction / PASS-FAIL: Tech Lead + Owner
 ```
 
-Не назначать Coder исполнителем cross-module/broader/full regression или official Central Lab gate.
+## 25. Other mandatory acceptance gates
 
-## 25. Linux / production-compatible gate
+Explicitly list:
 
-required / not-required / separate deploy-release task
+```text
+Linux/production-compatible:
+PERF/capacity:
+migration/schema:
+security:
+browser:
+other:
+```
 
-## 26. Acceptance criteria
+Required gates are pre-publication acceptance.
 
-## 27. Stop conditions
+## 26. Acceptance-before-Publication
 
-## 28. Handoff format
+```text
+Patch → Lab.
+All mandatory gates → PASS.
+Accepted candidate → Git.
+Git → Production.
+Activation → separate step.
+```
 
-## 29. PR requirements
+Define exact conditions for `candidate accepted`.
+
+## 27. Publication / chain-of-custody
+
+```text
+normal publication before full acceptance: NO
+accepted candidate tree:
+publication commit/tree:
+PR head tree:
+merge tree:
+```
+
+TEST-ONLY experimental publication requires Owner + Tech Lead and must be marked
+NOT ACCEPTED / NOT MERGEABLE / NOT DEPLOYABLE.
+
+## 28. Production delivery / activation
+
+Normal application code deploy:
+
+```text
+FROM GIT
+verified SHA/tree
+```
+
+Activation is separate Owner-controlled action.
+
+## 29. Acceptance criteria
+
+## 30. Stop conditions
+
+## 31. Handoff format
+
+## 32. PR requirements

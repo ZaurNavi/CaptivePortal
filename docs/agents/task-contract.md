@@ -1,10 +1,13 @@
 # Контракт TASK
 
 Status: current
-Updated: 2026-08-28
+Updated: 2026-08-30
 Central Lab governance effective: 2026-08-27
+Acceptance-before-Publication governance effective: 2026-08-30
 
-TASK — высший источник change intent конкретной задачи и её scope contract. Он не является источником фактов о текущей реализации и не может молча отменить security или необратимые owner-only ограничения.
+TASK — высший источник change intent конкретной задачи и её scope contract.
+Он не является источником фактов о текущей реализации и не может молча отменить
+security, acceptance-before-publication или owner-only ограничения.
 
 ## Две модели истины
 
@@ -20,7 +23,9 @@ Change-intent truth:
 2. PLAN;
 3. ADR.
 
-TASK определяет требуемое изменение относительно подтверждённого current state. PLAN описывает способ выполнения TASK. ADR фиксирует устойчивое архитектурное решение, но не подменяет фактическую проверку кода и тестов.
+TASK определяет требуемое изменение относительно подтверждённого current state.
+PLAN описывает способ выполнения TASK. ADR фиксирует устойчивое архитектурное
+решение, но не подменяет фактическую проверку кода и тестов.
 
 ## Обязательные поля
 
@@ -28,72 +33,149 @@ TASK определяет требуемое изменение относите
 - execution mode;
 - исполнитель/platform;
 - capability assumptions;
-- TASK-scoped test responsibility: agent, owner, shared или not-applicable;
-- требуется ли свежий официальный Central Lab full-regression baseline для продвижения exact artifact;
-- требуется ли отдельный Linux/production-compatible gate;
+- TASK-scoped test responsibility;
+- **полный список mandatory acceptance gates**;
+- требуется ли fresh Central Lab full gate;
+- требуется ли Linux/production-compatible gate;
+- требуется ли production-size PERF/capacity/migration/security/browser gate;
+- exact candidate identity/tree rule;
 - текущее фактическое состояние;
 - out of scope;
 - 1–3 связанных документа;
-- allowed и forbidden files;
-- allowed, forbidden и owner-only repository actions;
-- входные и выходные contracts;
-- fail-open/fail-closed;
-- logging, persistence, lifecycle и security;
+- allowed/forbidden files;
+- allowed/forbidden/owner-only repository actions;
+- contracts, fail-open/fail-closed, logging, persistence, lifecycle, security;
 - targeted tests;
-- acceptance и stop conditions;
-- handoff и PR requirements.
+- acceptance and stop conditions;
+- publication authorization condition;
+- deploy/activation separation;
+- handoff and PR requirements.
 
 ## Scope rule
 
-Файл не становится разрешённым только потому, что его удобно отрефакторить. Если необходимый файл отсутствует в allowed list, агент останавливает эту часть и объясняет минимальное расширение.
-
-## Conflicts
-
-При противоречии внутри current-state truth, внутри change-intent truth или между ними агент:
-
-1. приводит точные факты;
-2. не выбирает молча одну сторону;
-3. продолжает независимые безопасные части;
-4. передаёт конфликт Architect/Tech Lead.
+Файл не становится разрешённым только потому, что его удобно отрефакторить.
+Если необходимый файл отсутствует в allowed list, исполнитель останавливает
+затронутую часть и объясняет минимальное расширение.
 
 ## TASK-scoped test responsibility
 
-Значения относятся только к минимальному тестированию конкретного TASK/изменяемого модуля:
+Значения относятся только к минимальному тестированию текущего TASK/модуля:
 
-- `agent`: агент создаёт/обновляет и запускает focused/minimal TASK/module tests своего изменения;
-- `owner`: агент не запускает назначенные tests и описывает необходимые cases/actions;
+- `agent`: focused/minimal TASK/module tests;
+- `owner`: agent не запускает назначенные tests;
 - `shared`: TASK делит конкретные TASK-scoped cases/actions;
-- `not-applicable`: TASK объясняет, почему TASK-scoped tests не требуются.
+- `not-applicable`: TASK объясняет отсутствие TASK-scoped tests.
 
-`agent` никогда не означает право запуска unrelated-module, cross-module, broader или full repository regression.
+`agent` никогда не означает право запуска unrelated-module, cross-module,
+broader/full repository regression или official acceptance.
 
-Если необходим test вне границ текущего модуля, TASK должен выбрать: `request external execution` или `agent prepares test but does not run it`.
+Если proof требует test вне module boundary, TASK выбирает:
+`request external execution` или `agent prepares test but does not run it`.
 
-Исторические TASK не переписываются только из-за новой governance-модели; current rule имеет приоритет для новых execution handoff.
+## Mandatory acceptance gates
+
+TASK обязан перечислить все обязательные до publication gates.
+
+Canonical rule:
+
+```text
+candidate accepted
+=
+all mandatory gates for exact candidate tree PASS
+```
+
+Например, если FINAL требует PERF:
+
+```text
+targeted PASS
+V6 PASS
+PERF FAIL
+→ candidate REJECTED
+→ publication NOT AUTHORIZED
+```
+
+После remediation новый tree — новый candidate. Tech Lead определяет, какие gates
+должны быть повторены; TASK/FINAL может требовать повтор всей официальной матрицы.
 
 ## Official full regression
 
-Официальный cross-module/broader/full regression / current baseline / final Test Evidence следует ownership rule из `docs/testing.md`.
+Cross-module/broader/full regression follows `docs/testing.md`.
 
-TASK должен указать:
+TASK указывает:
 
 ```text
 fresh Central Lab baseline required: yes/no
-exact artifact to validate: <SHA/patch identity when known>
+exact artifact/tree:
 cross-module test needed: yes/no
 if yes: external execution OR agent prepares-without-running
 Coder Lab preparation delegated: yes/no
-if yes: exact prep-only scope
 official Lab operator: Owner
 gate direction / PASS-FAIL ownership: Tech Lead + Owner
 ```
 
-TASK не назначает Coder исполнителем official Central Lab gate, broader/full regression или official acceptance.
+Coder не назначается operator official Central Lab gate.
 
-## Linux / production-compatible gate
+## Linux / production-compatible acceptance
 
-Linux gate — отдельная release/deploy acceptance boundary. TASK указывает необходимость и среду; он не назначается автоматически Coder или Tech Lead.
+If mandatory, Linux/production-compatible/PERF acceptance is part of
+**pre-publication candidate acceptance**, not post-publication testing.
+
+Preferred controlled environment is Linux Central Lab or another isolated
+production-compatible acceptance environment.
+
+Mandatory acceptance must not require normal GitHub publication merely as
+transport.
+
+Candidate may be transported as:
+
+```text
+patch
+local bundle
+controlled worktree materialization
+other controlled lab artifact
+```
+
+with exact tree verification.
+
+Production-size data may be supplied as a consistent immutable read-only
+snapshot with identity/hash and unchanged-after-test proof.
+
+## Acceptance before Publication
+
+Permanent sequence:
+
+```text
+Patch → Lab.
+All mandatory gates → PASS.
+Accepted candidate → Git.
+Git → Production.
+Activation → separate step.
+```
+
+Normal publication commit/branch/PR is not an acceptance prerequisite.
+
+A TEST-ONLY / EXPERIMENTAL publication exception requires explicit Owner +
+Tech Lead authorization and is not accepted/mergeable/deployable.
 
 ## Repository permissions
 
-Implementation mode не означает автоматический commit или push. Publish permissions всегда перечисляются явно.
+Implementation mode does not imply commit/push.
+
+Publication permissions are separate and become actionable only after acceptance
+unless a specifically authorized TEST-ONLY exception applies.
+
+Merge remains Owner-controlled.
+
+## Production boundary
+
+Normal production application deployment is Git-based and uses explicit verified
+SHA/tree identity. Direct patch/source copying to production is not a standard
+TASK path.
+
+Emergency exception requires Owner + Tech Lead and later repository reconciliation.
+
+## Historical TASK rule
+
+Historical FINAL TASKs are not rewritten merely because governance evolves.
+Current governance controls future execution and interpretation when an old TASK
+contains weaker process wording.

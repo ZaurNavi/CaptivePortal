@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-08-29
-Baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
+Updated: 2026-08-30
+Baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -200,36 +200,51 @@ Repository defaults:
 
 ```text
 WEB_ADMIN_TRAFFIC_ENABLED=false
+WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=false
+WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=false
 WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
 WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20
 ```
 
-This is the Traffic product/page exposure boundary and browser orchestration policy.
+Feature hierarchy:
 
-It does **not** redefine Current Traffic freshness/source-selection semantics and does not start/stop shared data services.
+```text
+Traffic master exposure
+→ History subordinate exposure
+→ Statistics subordinate exposure
+```
 
-Production evidence supplied by Owner for 2026-08-29:
+Statistics requires Traffic + History when enabled.
+
+These are product-exposure flags. They do not start/stop Observation,
+CurrentTrafficReadService or HistoricalTrafficReadService.
+
+Owner-confirmed production state 2026-08-30:
 
 ```text
 WEB_ADMIN_TRAFFIC_ENABLED=true
-WEB_ADMIN_HOME_TRAFFIC_ENABLED=true
+WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
+WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 ```
 
-These two production flags are independent:
+Repository default=false must not be rewritten as production disabled.
 
-```text
-Traffic Section flag
-!=
-Home Traffic flag
-```
-
-Current Network Throughput continues to use the existing shared Current Traffic policy:
+Current Network Throughput shared policy remains:
 
 ```text
 fresh max age = 90s
 stale boundary = 180s
 max AP skew = 60s
 ```
+
+History/Statistics selected product ranges:
+
+```text
+24h
+7d
+```
+
+Browser orchestration values are not historical semantic/performance thresholds.
 
 ### Pending Session Cleaner
 

@@ -1,8 +1,8 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-08-29
-Runtime baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
+Updated: 2026-08-30
+Runtime baseline: `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -26,29 +26,45 @@ Runtime baseline: `main@8f3ad59771f72c49834b1012963de6d94b9e0d18`
 | Analytics internal API | current; default disabled | `app/analytics/api.py` | `modules/analytics.md` | none | no |
 | Admin Web | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | process security state | **no** |
 | Home Live | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
-| Current Traffic | current when Analytics sources healthy | `app/analytics/current_traffic.py` | `modules/analytics.md` | none | no |
+| Current Traffic | current | `app/analytics/current_traffic.py` | `modules/analytics.md` | reads Observation | no |
 | Home Traffic | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
 | Home Activity | current; default disabled | `app/analytics/home_activity.py`, `app/admin_web/` | `modules/home-activity.md` | reads Visit Lifecycle | no |
 | Traffic Section Foundation | current; default disabled | `app/admin_web/` | `modules/traffic.md` | none | no |
-| Traffic Current Network Throughput | current; default disabled | `app/admin_web/`, `app/analytics/current_traffic.py` | `modules/traffic.md` | reads Observation facts | no |
+| Traffic Current Network Throughput | current; default disabled | `app/admin_web/`, `app/analytics/current_traffic.py` | `modules/traffic.md` | reads Observation | no |
+| Historical Traffic Read Foundation | current | `app/analytics/historical_traffic.py`, source gateway | `modules/traffic.md` | reads Observation | no |
+| Traffic Network History | current; default disabled | `app/admin_web/`, Historical Traffic | `modules/traffic.md` | none | no |
+| Traffic Period Statistics | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
 
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-08-29:
+Owner-provided production checkpoint 2026-08-30:
 
 ```text
-HEAD: 8f3ad59771f72c49834b1012963de6d94b9e0d18
-tree: 2ef8bf264a008259242cde0778d0ebd20fa94b9e
+HEAD: b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
+tree: 1d8b94590848f9505e45e653384dd8a7c18d4339
 TRAFFIC-00: active
 TRAFFIC-01: active
+TRAFFIC-02-READ: current accepted foundation
+TRAFFIC-02 History: active
+TRAFFIC-02-PERF-01: accepted
+TRAFFIC-03 Period Statistics: active
+
 WEB_ADMIN_TRAFFIC_ENABLED=true
-WEB_ADMIN_HOME_TRAFFIC_ENABLED=true
+WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
+WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 ```
 
-Traffic and Home Traffic feature flags are independent.
+Browser acceptance for Period Statistics: PASS.
 
-Home Activity historical coverage evidence from 2026-08-26 remains valid for that evidence window but is not the current repository checkpoint.
+## Next Traffic item
+
+```text
+TRAFFIC-04 — Peak Load Period
+NEXT / NOT IMPLEMENTED
+```
 
 ## Production evidence rule
 
-A historical production PASS can prove that a feature worked at a particular artifact/time. It does not convert repository defaults into current production configuration and does not prove current health.
+A historical production PASS proves a feature worked at a named artifact/time.
+It does not convert repository defaults into production configuration and does
+not prove current health after later changes.

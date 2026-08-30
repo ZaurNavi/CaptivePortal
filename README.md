@@ -25,11 +25,15 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository / current-state checkpoint | `main@8f3ad59771f72c49834b1012963de6d94b9e0d18` |
-| Production deployed HEAD | `8f3ad59771f72c49834b1012963de6d94b9e0d18` |
-| Production tree | `2ef8bf264a008259242cde0778d0ebd20fa94b9e` |
-| Home Activity production state | Implemented, merged, deployed; core production acceptance PASS |
-| Omada Controller family used by the project | Omada Software Controller 5.14.31 |
+| Repository / current-state checkpoint | `main@b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6` |
+| Production deployed HEAD | `b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6` |
+| Production tree | `1d8b94590848f9505e45e653384dd8a7c18d4339` |
+| Traffic Section Foundation | **Implemented / production active** |
+| Current Network Throughput | **Implemented / production active** |
+| Historical Network Throughput | **Implemented / production active** |
+| Period Statistics | **Implemented / production active / acceptance PASS** |
+| Next Traffic stage | `TRAFFIC-04 — Peak Load Period` — NEXT / not implemented |
+| Omada Controller family used by the project | Omada Software Controller 5.14.x |
 | Core guest authorization | Implemented |
 | RFC 8908 CAPPORT | Implemented |
 | Visitor Registry | Implemented |
@@ -39,40 +43,15 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Analytics | Implemented |
 | Protected internal Analytics API | Implemented |
 | Native Admin Web | Implemented |
-| Home Live | Implemented |
-| Home Traffic / Current Traffic | Implemented |
-| Home Activity — Visits and Traffic | **Implemented / deployed** |
-| Traffic Section Foundation | **Implemented / production active** |
-| Current Network Throughput | **Implemented / production active** |
-| Next Traffic stage | `TRAFFIC-02-READ` — DRAFT review; implementation not started |
-| Multi-Site / Tenant / RBAC | Future evolution, intentionally not prematurely implemented |
-| Current topology | Single application process; HA/multi-process requires a separate ADR |
+| Home Live / Home Traffic / Home Activity | Implemented |
+| Multi-Site / Tenant / RBAC | Future evolution |
+| Current topology | Single application process; HA/multi-process requires ADR |
 
-> Repository defaults, production-enabled state, and historical acceptance evidence are different facts. A feature being `*_ENABLED=false` by default does not prove that it is disabled in production.
-
----
+> Repository defaults, production enabled-state and dated acceptance evidence are different facts.
 
 ## Where the project is now
 
-The original development path was:
-
-```text
-Captive Portal
-    ↓
-Visitor data
-    ↓
-Observation Foundation
-    ↓
-Visit Lifecycle
-    ↓
-Analytics Foundation
-    ↓
-Web Foundation
-    ↓
-Admin Console
-```
-
-Most of that foundation now exists.
+Most platform foundations and the first four Traffic increments now exist.
 
 ```mermaid
 flowchart LR
@@ -81,67 +60,45 @@ flowchart LR
     C --> D[Observation Foundation]
     D --> E[Visit Lifecycle]
     E --> F[Analytics]
-    F --> G[Protected Analytics API]
-    G --> H[Web Foundation / Admin Web]
-    H --> I[Home Live]
-    I --> J[Home Traffic]
-    J --> K[Home Activity]
-    K --> T0[Traffic Section Foundation]
+    F --> G[Admin Web]
+    G --> H[Home]
+    H --> T0[Traffic Foundation]
     T0 --> T1[Current Network Throughput]
-    T1 --> T2{{NEXT: Historical Network Traffic Read}}
-    T2 --> L[Later Traffic panels]
-    L --> M[Real Multi-Site trigger]
-    M --> N[Tenant / RBAC / Entitlements]
-    N --> O[Managed Captive Portal Service]
+    T1 --> T2R[Historical Traffic Read]
+    T2R --> T2[Network Traffic History]
+    T2 --> T3[Period Statistics]
+    T3 --> T4{{NEXT: Peak Load Period}}
+    T4 --> M[Later Traffic increments]
+    M --> N[Real Multi-Site trigger]
 ```
 
-The project is therefore no longer “just a login page.” The current platform already separates:
+Traffic is now a production product surface rather than an empty shell.
 
-- guest authorization;
-- operational cleanup;
-- durable device history;
-- physical/logical visits;
-- periodic wireless facts;
-- near-real-time current state;
-- read-only analytics;
-- internal engineering observability;
-- product-facing Admin Web.
-
-Home Activity is now a **current deployed product view over persisted facts**. It was finalized through PR #67–#72 without introducing a new collector.
-
----
+Current functional layout is accepted for functionality, but its visual
+composition is not frozen as final design.
 
 ## What CaptivPortal does today
 
-At the current runtime checkpoint, the repository contains these major capabilities:
+At the current runtime checkpoint, the platform includes:
 
-- external captive-portal authorization for Omada;
-- RFC 8908 CAPPORT discovery/login integration;
-- one shared authorization engine for portal entry paths;
-- bounded client discovery and final authorization verification;
-- safe stale-pending-session cleanup;
-- structured authorization telemetry;
-- authorized-client snapshot capture;
-- persistent Visitor Registry;
-- normalized Omada webhook pipeline;
-- Site-aware Visit Lifecycle with durable start/close evidence;
-- periodic authorized-client and AP observations;
-- near-real-time active wireless Current State;
-- read-only data-quality, wireless, visit, and traffic analytics;
-- protected internal Analytics HTTP API;
-- native Admin Web security/session boundary;
-- Home Live current client/AP summary;
-- Home Traffic based on persisted AP Observation facts;
-- Home Activity with independent Authorized Visits and completed-session Traffic coverage;
-- dedicated Traffic page/Foundation with one frontend coordinator;
-- Current Network Throughput using the same persisted CurrentTrafficReadService semantics as Home Traffic;
-- internal Grafana/Loki observability kept separate from the product UI.
+- external portal/CAPPORT authorization;
+- Visitor Snapshot/Registry and Visit Lifecycle;
+- Observation and Current State;
+- Analytics and protected internal API;
+- native Admin Web and Home views;
+- Traffic Foundation with one shared coordinator;
+- Current Network Throughput;
+- Historical Network Throughput for 24h/7d;
+- Period Statistics for the same selected 24h/7d range;
+- internal Grafana/Loki observability separate from product UI.
 
-A permanent Omada rule applies across the project:
+Network Traffic remains AP/network Mbps evidence, not WAN/Internet/billing/SSID
+or Guest Session Traffic.
 
-> HTTP 200 alone is not success. CaptivPortal also validates Omada JSON `errorCode` and endpoint-specific response semantics.
+A permanent Omada rule applies:
 
----
+> HTTP 200 alone is not success. CaptivPortal also validates Omada JSON
+> `errorCode` and endpoint-specific semantics.
 
 # Architecture
 
@@ -838,32 +795,20 @@ See [`docs/api/omada-open-api.md`](docs/api/omada-open-api.md).
 
 ## Completed platform staircase
 
-The structural roadmap introduced the rule:
-
-```text
-Acquisition ≠ Analytics
-```
-
-and originally ordered the major layers as Observation → Visit → Analytics → Web. Those foundations are now implemented.
-
 ```mermaid
 flowchart LR
-    P[Portal/Auth]:::done --> S[Snapshot/Registry]:::done
-    S --> O[Observation]:::done
+    P[Portal/Auth]:::done --> O[Observation]:::done
     O --> V[Visit Lifecycle]:::done
     V --> A[Analytics]:::done
-    A --> W[Web Foundation]:::done
-    W --> L[Home Live]:::done
-    L --> T[Home Traffic]:::done
-    T --> HA[Home Activity]:::done
-    HA --> T0[Traffic Foundation]:::done
-    T0 --> T1[Current Network Throughput]:::done
-    T1 --> T2[Historical Network Traffic Read]:::next
-    T2 --> TP[Later Traffic panels]:::future
+    A --> W[Admin Web]:::done
+    W --> T0[Traffic Foundation]:::done
+    T0 --> T1[Current]:::done
+    T1 --> T2R[Historical Read]:::done
+    T2R --> T2[History]:::done
+    T2 --> T3[Period Statistics]:::done
+    T3 --> T4[Peak Load Period]:::next
+    T4 --> TP[Later Traffic panels]:::future
     TP --> MS[Multi-Site]:::future
-    MS --> TN[Tenant/RBAC]:::future
-    TN --> E[Entitlements]:::future
-    E --> M[Managed Service]:::future
 
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
     classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
@@ -872,20 +817,21 @@ flowchart LR
 
 ## Near-term direction
 
-Current Traffic roadmap position:
-
 ```text
-TRAFFIC-00      DONE
-TRAFFIC-01      DONE
-TRAFFIC-02-READ NEXT / DRAFT review / implementation NOT STARTED
-TRAFFIC-02+     NOT STARTED
+TRAFFIC-00         DONE
+TRAFFIC-01         DONE
+TRAFFIC-02-READ    DONE
+TRAFFIC-02         DONE
+TRAFFIC-02-PERF-01 DONE
+TRAFFIC-03         DONE / PRODUCTION ACTIVE
+TRAFFIC-04         NEXT / NOT IMPLEMENTED
 ```
 
-The next architectural stage is the historical Network Traffic read foundation.
-It must reuse persisted Observation AP history and must not introduce an Admin/browser
-direct Omada path.
+`TRAFFIC-04 — Peak Load Period` is the next planned increment.
 
-The existence of a DRAFT is change-intent, not implementation start.
+The current Traffic card arrangement is not a final UI composition. Functional
+semantics are accepted; visual rearrangement/polish belongs to a later UI/design
+stage.
 
 ## Real second Site as a trigger
 
@@ -1011,44 +957,29 @@ Current Registry device identity is not automatically a per-Site truth. Site-sco
 
 # Testing and release discipline
 
-Coder runs focused/minimal TASK/module tests only. Owner + Tech Lead / Central Lab own cross-module, broader/full, differential and official acceptance.
+Detailed authority: [`docs/testing.md`](docs/testing.md).
 
-Current Windows Central Lab is described in [`docs/testing.md`](docs/testing.md).
+Coder runs focused/minimal TASK/module tests only. Owner + Tech Lead/Central Lab
+own broader/full/official acceptance.
 
-Verified 2026-08-29 state:
-
-```text
-Lab repo: C:\CaptivPortal-UI-Preview
-manual interpreter: .venv\Scripts\python.exe
-Python: 3.10.11
-pytest: 9.1.1
-manual pytest: explicit C:\CaptivPortal-Lab\tmp\<run> --basetemp
-current verified full runner: C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd
-```
-
-Permanent rule:
+Permanent promotion rule:
 
 ```text
-documented gate version != automatically current gate version
+Patch → Lab.
+All mandatory gates → PASS.
+Accepted candidate → Git.
+Git → Production.
+Activation → separate step.
 ```
 
-Before each official full gate, Owner/Tech Lead re-verifies runner + exact candidate/baseline + compatibility baseline + current test set.
+A V6/full PASS does not authorize publication when TASK-specific PERF/Linux/
+security/browser/etc. acceptance remains mandatory.
 
-Latest Traffic-stage evidence supplied by Owner:
+Normal production application code is deployed only from Git using a verified
+SHA/tree. Patch is a Lab/handoff artifact, not production code identity.
 
-```text
-artifact: 8f3ad59771f72c49834b1012963de6d94b9e0d18
-targeted: 66 passed
-V6-fixed: PASS
-strict regressions: 0
-fixed-context Home ↔ Traffic equality: PASS
-```
-
-Infrastructure failures before test logic are repaired/retried in the canonical Lab environment before being classified as candidate regressions.
-
-After every accepted TASK, Tech Lead refreshes the relevant targeted regression/test-set block. A new pytest file discovered by full pytest does not by itself require a runner edit.
-
-Windows gate does not replace a separately required Linux/production-compatible gate.
+Current Windows Central Lab runner remains discovered/verified at execution time;
+documentation never makes a runner version permanently current.
 
 # Configuration
 

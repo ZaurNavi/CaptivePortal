@@ -1,7 +1,7 @@
 # CaptivPortal: правила для coding agents
 
 Status: current
-Updated: 2026-08-29
+Updated: 2026-08-30
 Central Lab governance effective: 2026-08-27
 
 ## Project
@@ -69,22 +69,60 @@ TASK задаёт scope и намерение изменения, но не ст
 - Не логировать Access Token, Client Secret, cookie, Authorization header и пароль SSID.
 - MAC в технических журналах не маскировать.
 - Проверять HTTP status и Omada JSON errorCode раздельно.
-- Использовать существующие app/config.py → app/settings.py:get_settings().
-- Использовать общий OmadaProvider и не создавать второй provider, token manager или механизм авторизации без утверждённого change intent.
-- CAPPORT обязан входить в общий PortalClientContext → AuthSessionManager → AuthWorker flow.
+- Использовать существующие `app/config.py → app/settings.py:get_settings()`.
+- Использовать общий OmadaProvider; второй provider/token manager/OAuth lifecycle требует approved change intent.
+- CAPPORT входит в общий `PortalClientContext → AuthSessionManager → AuthWorker` flow.
 - Независимый background component работает fail-open.
-- Не использовать Flask current_app из фонового thread.
 - Worker создаётся в composition root, не при import.
-- Не менять Alloy, Loki, Grafana, production systemd или reverse proxy без отдельного TASK.
-- Coder/исполнитель выполняет минимальные automated tests непосредственно в пределах текущего TASK / изменяемого модуля: focused tests, новые regression cases этого изменения и релевантные static/syntax checks; эти targeted-прогоны можно повторять в процессе разработки.
-- Coder может создавать/изменять automated tests только в пределах реализуемого изменения и не расширяет execution на unrelated modules, cross-module regression, broader regression или full repository suite.
-- Если proof требует test вне TASK/module boundary, Coder либо сообщает Owner/Tech Lead точный дополнительный test/gate для внешнего запуска, либо подготавливает/реализует такой test, но не запускает его.
-- `C:\CaptivPortal-Lab` и официальный Central Lab full repository regression cycle контролируются Owner / Tech Lead: Tech Lead определяет exact artifact, commands/gate procedure и acceptance criteria; Owner физически управляет Lab и запускает официальный regression; Owner + Tech Lead анализируют evidence и выдают PASS / FAIL / return-to-coder.
-- Coder не запускает официальный Central Lab gate, не выдаёт официальный PASS/FAIL и не считает собственные tests repository regression gate. По явному поручению Owner/Tech Lead Coder может только подготовить candidate/artifacts или пропатчить указанную Lab working directory; после подготовки цикл возвращается Owner/Tech Lead до запуска gate.
-- Windows Local Gate не заменяет отдельный Linux/production-compatible gate, когда такой gate требуется release/deploy contract.
+- Не менять Alloy/Loki/Grafana/systemd/reverse proxy без отдельного TASK.
+- Coder выполняет только focused/minimal TASK/module automated tests своего изменения.
+- Coder может создавать/изменять tests своего implementation scope, но не запускает unrelated/cross-module/broader/full regression.
+- Cross-module proof выполняет Owner/Tech Lead/Central Lab либо Coder подготавливает test без запуска.
+- `C:\CaptivPortal-Lab` official gate физически запускает Owner; Tech Lead задаёт exact artifact/commands/criteria; Owner + Tech Lead выдают PASS/FAIL.
+- После каждого нового TASK/panel/module Tech Lead пересматривает актуальный targeted regression/test-set block.
+- Full Central Lab runner меняется только при изменении gate/compatibility/environment contract, а не из-за обычного нового pytest file.
 - Не исправлять несвязанные падения full suite.
-- Не утверждать, что test, commit, push, PR или deploy выполнен, если это не так.
+- Не утверждать, что test/commit/push/PR/deploy выполнен, если это не так.
 - Merge, force push и production deploy — owner-only без прямого разрешения.
+
+### Acceptance before Publication
+
+Permanent invariant:
+
+```text
+Patch → Lab.
+All mandatory gates → PASS.
+Accepted candidate → Git.
+Git → Production.
+Activation → separate step.
+```
+
+Если TASK/FINAL требует PERF, Linux-compatible, capacity, migration, security,
+browser или другой mandatory gate, candidate не accepted до PASS этого gate.
+
+```text
+targeted PASS
+V6 PASS
+PERF FAIL
+→ candidate REJECTED
+→ normal publication NOT AUTHORIZED
+```
+
+Нормальный GitHub publication commit/PR создаётся после полного acceptance exact
+candidate tree. TEST-ONLY experimental publication требует отдельного Owner +
+Tech Lead разрешения и не является mergeable/deployable accepted artifact.
+
+### Git production delivery boundary
+
+Production получает новый application code только из Git по explicit verified
+SHA/tree. Patch является implementation/handoff/Lab transport artifact, а не
+production code source.
+
+Прямой patch/source copy на production — только emergency exception с явным
+Owner + Tech Lead разрешением и последующим repository reconciliation.
+
+LAB ONLY commit используется только для immutable Lab testing, не push'ится и не
+является publication/production identity.
 
 ## Архитектурные инварианты
 
