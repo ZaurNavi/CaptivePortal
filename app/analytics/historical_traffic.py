@@ -13,6 +13,10 @@ from .models import (
     HistoricalTrafficPeriodIntervalEvidence,
     HistoricalTrafficPeriodStatistics,
     HistoricalTrafficPeriodValues,
+    HistoricalTrafficPeakEvent,
+    HistoricalTrafficBusiestBucket,
+    HistoricalTrafficBusiestHour,
+    HistoricalTrafficPeakLoad,
     HistoricalTrafficQuality,
     HistoricalTrafficRange,
     HistoricalTrafficSourceSelection,
@@ -75,10 +79,19 @@ class HistoricalTrafficReadService:
         bucket_seconds: int | None = None,
         deadline: QueryDeadline | None = None,
         include_period_statistics: bool = False,
+        include_peak_load: bool = False,
     ) -> HistoricalSiteTraffic:
         if type(include_period_statistics) is not bool:
             raise HistoricalTrafficValidationError(
                 "include_period_statistics must be a boolean"
+            )
+        if type(include_peak_load) is not bool:
+            raise HistoricalTrafficValidationError(
+                "include_peak_load must be a boolean"
+            )
+        if include_peak_load and not include_period_statistics:
+            raise HistoricalTrafficValidationError(
+                "include_peak_load requires include_period_statistics"
             )
         try:
             site = require_site(site_id)
@@ -118,6 +131,7 @@ class HistoricalTrafficReadService:
                 ),
                 deadline=query_deadline,
                 include_period_statistics=include_period_statistics,
+                include_peak_load=include_peak_load,
             )
         except AnalyticsQueryDeadlineExceeded:
             raise
@@ -224,6 +238,19 @@ class HistoricalTrafficReadService:
                 end=end,
                 history_status=result_status,
             )
+        peak_load = None
+        if include_peak_load:
+            assert period_statistics is not None
+            query_deadline.require_remaining()
+            peak_load = self._peak_load(
+                data.get("peak_samples"),
+                buckets=tuple(buckets),
+                statistics=period_statistics,
+                start=start,
+                end=end,
+                history_status=result_status,
+            )
+            query_deadline.require_remaining()
         return HistoricalSiteTraffic(
             status=result_status,
             range=traffic_range,
@@ -231,6 +258,79 @@ class HistoricalTrafficReadService:
             coverage=coverage,
             quality=quality,
             period_statistics=period_statistics,
+            peak_load=peak_load,
+        )
+
+    def _peak_load(
+        self,
+        raw_samples: Any,
+        *,
+        buckets: tuple[HistoricalTrafficBucket, ...],
+        statistics: HistoricalTrafficPeriodStatistics,
+        start: datetime,
+        end: datetime,
+        history_status: str,
+    ) -> HistoricalTrafficPeakLoad:
+        if not isinstance(raw_samples, (tuple, list)):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak samples are unavailable"
+            )
+        samples = _peak_samples(
+            raw_samples,
+            start=start,
+            end=end,
+            gap_threshold=self._gap_threshold,
+        )
+        expected = statistics.interval_evidence.accepted_peak_sample_count
+        if len(samples) != expected:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak sample count is invalid"
+            )
+        events = {
+            name: _peak_event(samples, name)
+            for name in ("download", "upload", "total")
+        }
+        expected_peaks = statistics.peak
+        for name, expected_value in (
+            ("download", expected_peaks.download_mbps),
+            ("upload", expected_peaks.upload_mbps),
+            ("total", expected_peaks.total_mbps),
+        ):
+            actual = events[name].value_mbps
+            if actual is None or expected_value is None:
+                if actual is not expected_value:
+                    raise HistoricalTrafficSourceUnavailable(
+                        "Historical traffic Peak value is invalid"
+                    )
+            elif not math.isclose(actual, expected_value, rel_tol=1e-9, abs_tol=1e-9):
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Peak value is invalid"
+                )
+        busiest_bucket = _busiest_bucket(buckets)
+        busiest_hour = _busiest_hour(samples)
+        if not samples:
+            status = "insufficient_data"
+            if (
+                busiest_bucket.status != "insufficient_data"
+                or busiest_hour.status != "insufficient_data"
+            ):
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Peak insufficient state is invalid"
+                )
+        else:
+            status = (
+                "ok" if (
+                    history_status == "ok"
+                    and statistics.status == "ok"
+                    and busiest_bucket.status == "ok"
+                    and busiest_hour.status == "ok"
+                ) else "partial"
+            )
+        return HistoricalTrafficPeakLoad(
+            status=status,
+            events=events,
+            busiest_bucket=busiest_bucket,
+            busiest_hour=busiest_hour,
         )
 
     def _period_statistics(
@@ -425,6 +525,241 @@ class HistoricalTrafficReadService:
                 lan_pair_valid_ap_opportunities=lan_pairs,
             ),
         )
+
+
+def _peak_samples(
+    raw_samples: tuple[Any, ...] | list[Any],
+    *,
+    start: datetime,
+    end: datetime,
+    gap_threshold: float,
+) -> tuple[dict[str, Any], ...]:
+    result: list[dict[str, Any]] = []
+    previous_at: datetime | None = None
+    previous_source: str | None = None
+    for raw in raw_samples:
+        if not isinstance(raw, Mapping):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak sample is invalid"
+            )
+        sample_at_value = raw.get("finished_at")
+        source = raw.get("selected_source")
+        if not isinstance(sample_at_value, str) or source not in {"wired", "lan"}:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak sample is invalid"
+            )
+        try:
+            sample_at = parse_utc(sample_at_value, "sample_at")
+        except AnalyticsQueryValidationError as exc:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak sample is invalid"
+            ) from exc
+        sample_at_text = format_utc(sample_at)
+        if sample_at_text != sample_at_value:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak sample is invalid"
+            )
+        if sample_at < start or sample_at >= end:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak sample boundary is invalid"
+            )
+        persisted_previous = raw.get("previous_at")
+        expected_previous = None if previous_at is None else format_utc(previous_at)
+        if persisted_previous != expected_previous:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak sequence is invalid"
+            )
+        if previous_at is None:
+            expected_result = "first"
+        else:
+            elapsed = (sample_at - previous_at).total_seconds()
+            expected_result = (
+                "invalid" if elapsed <= 0 else
+                "source_transition" if source != previous_source else
+                "gap" if elapsed > gap_threshold else "accepted"
+            )
+        if raw.get("interval_result") != expected_result:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Peak interval is invalid"
+            )
+        download = _finite_nonnegative(raw.get("download"))
+        upload = _finite_nonnegative(raw.get("upload"))
+        result.append({
+            "sample_at": sample_at,
+            "sample_at_utc": sample_at_text,
+            "selected_source": source,
+            "download": download,
+            "upload": upload,
+            "total": download + upload,
+            "previous_at": previous_at,
+            "interval_result": expected_result,
+        })
+        previous_at = sample_at
+        previous_source = source
+    return tuple(result)
+
+
+def _peak_event(
+    samples: tuple[dict[str, Any], ...],
+    metric: str,
+) -> HistoricalTrafficPeakEvent:
+    if not samples:
+        return HistoricalTrafficPeakEvent(None, None, None, 0)
+    value = max(float(sample[metric]) for sample in samples)
+    matches = tuple(sample for sample in samples if sample[metric] == value)
+    winner = matches[0]
+    return HistoricalTrafficPeakEvent(
+        value_mbps=value,
+        sample_at_utc=str(winner["sample_at_utc"]),
+        selected_source=str(winner["selected_source"]),
+        occurrence_count=len(matches),
+    )
+
+
+def _busiest_bucket(
+    buckets: tuple[HistoricalTrafficBucket, ...],
+) -> HistoricalTrafficBusiestBucket:
+    usable = tuple(
+        bucket for bucket in buckets
+        if bucket.status == "complete" and bucket.total_mbps is not None
+    )
+    if not usable:
+        return HistoricalTrafficBusiestBucket(
+            "insufficient_data", None, None, None, None, 0
+        )
+    value = max(float(bucket.total_mbps) for bucket in usable)
+    matches = tuple(bucket for bucket in usable if bucket.total_mbps == value)
+    winner = matches[0]
+    return HistoricalTrafficBusiestBucket(
+        status="ok",
+        bucket_start_utc=winner.bucket_start_utc,
+        bucket_end_utc=winner.bucket_end_utc,
+        average_total_mbps=value,
+        selected_source=winner.selected_source,
+        occurrence_count=len(matches),
+    )
+
+
+def _busiest_hour(
+    samples: tuple[dict[str, Any], ...],
+) -> HistoricalTrafficBusiestHour:
+    window_seconds = 3600.0
+    chains: list[list[tuple[float, float, float, str]]] = []
+    current: list[tuple[float, float, float, str]] = []
+    for sample in samples:
+        if sample["interval_result"] != "accepted":
+            if current:
+                chains.append(current)
+                current = []
+            continue
+        previous = sample["previous_at"]
+        assert isinstance(previous, datetime)
+        interval = (
+            previous.timestamp(),
+            sample["sample_at"].timestamp(),
+            float(sample["total"]),
+            str(sample["selected_source"]),
+        )
+        if current and (
+            current[-1][1] != interval[0]
+            or current[-1][3] != interval[3]
+        ):
+            chains.append(current)
+            current = []
+        current.append(interval)
+    if current:
+        chains.append(current)
+
+    winner: tuple[float, float, str] | None = None
+    for chain in chains:
+        chain_start = chain[0][0]
+        chain_end = chain[-1][1]
+        if chain_end - chain_start < window_seconds:
+            continue
+        prefixes = [0.0]
+        for item in chain:
+            prefixes.append(prefixes[-1] + (item[1] - item[0]) * item[2])
+        latest_start = chain_end - window_seconds
+        start_candidate_index = 0
+        shifted_candidate_index = 0
+        start_area_index = 0
+        end_area_index = 0
+        prior_candidate: float | None = None
+
+        def area(at: float, index: int) -> tuple[float, int]:
+            while index + 1 < len(chain) and at > chain[index][1]:
+                index += 1
+            if at < chain[index][0] or at > chain[index][1]:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Peak rolling interval is invalid"
+                )
+            return (
+                prefixes[index] + (at - chain[index][0]) * chain[index][2],
+                index,
+            )
+
+        while True:
+            start_candidate = (
+                chain[start_candidate_index][0]
+                if start_candidate_index < len(chain)
+                and chain[start_candidate_index][0] <= latest_start
+                else None
+            )
+            while (
+                shifted_candidate_index < len(chain)
+                and chain[shifted_candidate_index][1] - window_seconds
+                < chain_start
+            ):
+                shifted_candidate_index += 1
+            shifted_candidate = (
+                chain[shifted_candidate_index][1] - window_seconds
+                if shifted_candidate_index < len(chain)
+                and chain[shifted_candidate_index][1] - window_seconds
+                <= latest_start
+                else None
+            )
+            if start_candidate is None and shifted_candidate is None:
+                break
+            candidate = (
+                shifted_candidate
+                if start_candidate is None else
+                start_candidate
+                if shifted_candidate is None else
+                min(start_candidate, shifted_candidate)
+            )
+            if start_candidate == candidate:
+                start_candidate_index += 1
+            if shifted_candidate == candidate:
+                shifted_candidate_index += 1
+            if candidate == prior_candidate:
+                continue
+            prior_candidate = candidate
+            start_area, start_area_index = area(candidate, start_area_index)
+            end_area, end_area_index = area(
+                candidate + window_seconds,
+                end_area_index,
+            )
+            average = (end_area - start_area) / window_seconds
+            possible = (average, candidate, chain[0][3])
+            if winner is None or average > winner[0] or (
+                average == winner[0] and candidate < winner[1]
+            ):
+                winner = possible
+    if winner is None:
+        return HistoricalTrafficBusiestHour(
+            "insufficient_data", None, None, 3600, None, None, None
+        )
+    average, window_start, source = winner
+    start_at = datetime.fromtimestamp(window_start, UTC)
+    return HistoricalTrafficBusiestHour(
+        status="ok",
+        window_start_utc=format_utc(start_at),
+        window_end_utc=format_utc(start_at + timedelta(seconds=3600)),
+        duration_seconds=3600,
+        average_total_mbps=average,
+        accepted_interval_seconds=3600.0,
+        selected_source=source,
+    )
 
 
 def _empty_bucket(

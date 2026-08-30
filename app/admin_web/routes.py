@@ -352,6 +352,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             traffic_enabled=config.traffic_enabled,
             traffic_history_enabled=config.traffic_history_enabled,
             traffic_statistics_enabled=config.traffic_statistics_enabled,
+            traffic_peak_enabled=config.traffic_peak_enabled,
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -1165,7 +1166,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         authorized_site = None
         range_id = None
         statistics_requested = False
+        peak_requested = False
         statistics_status = None
+        peak_status = None
+        busiest_bucket_status = None
+        busiest_hour_status = None
         result_status = None
         coverage_status = None
         bucket_count = 0
@@ -1217,12 +1222,18 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 return response
             range_id = request.args.get("range")
             if "include" in request.args:
-                if request.args.get("include") != "statistics":
+                include = request.args.get("include")
+                if include not in {"statistics", "statistics,peak"}:
                     response = make_response(_error("invalid_request", 400))
                     reason = "invalid_request"
                     return response
                 statistics_requested = True
                 if not config.traffic_statistics_enabled:
+                    response = make_response(_error("not_found", 404))
+                    reason = "feature_disabled"
+                    return response
+                peak_requested = include == "statistics,peak"
+                if peak_requested and not config.traffic_peak_enabled:
                     response = make_response(_error("not_found", 404))
                     reason = "feature_disabled"
                     return response
@@ -1237,6 +1248,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     selected,
                     range_id=range_id,
                     include_statistics=statistics_requested,
+                    include_peak=peak_requested,
                 )
                 result_status = result.result.get("status")
                 coverage = result.result.get("coverage", {})
@@ -1249,6 +1261,19 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     statistics.get("status")
                     if isinstance(statistics, dict) else None
                 )
+                peak = result.result.get("peak_load")
+                if isinstance(peak, dict):
+                    peak_status = peak.get("status")
+                    busiest_bucket = peak.get("busiest_bucket")
+                    busiest_hour = peak.get("busiest_hour")
+                    busiest_bucket_status = (
+                        busiest_bucket.get("status")
+                        if isinstance(busiest_bucket, dict) else None
+                    )
+                    busiest_hour_status = (
+                        busiest_hour.get("status")
+                        if isinstance(busiest_hour, dict) else None
+                    )
                 response = make_response(_success(
                     selected,
                     result.result,
@@ -1303,6 +1328,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     source_transition_count=transition_count,
                     statistics_requested=statistics_requested,
                     statistics_status=statistics_status,
+                    peak_requested=peak_requested,
+                    peak_status=peak_status,
+                    busiest_bucket_status=busiest_bucket_status,
+                    busiest_hour_status=busiest_hour_status,
                     response_bytes=getattr(response, "content_length", None),
                 )
             except Exception:

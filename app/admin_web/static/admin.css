@@ -129,6 +129,8 @@ input[type="radio"] { width: auto; min-height: 0; }
 .traffic-statistics-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-bottom: 1rem; }
 .traffic-statistics-groups h3 { margin-top: 0; }
 .traffic-statistics-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+.traffic-peak-events, .traffic-peak-periods { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; margin-top: 1rem; }
+.traffic-peak-events .live-metric span, .traffic-peak-periods p { display: block; margin-top: .4rem; color: var(--muted); }
 .activity-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-bottom: .75rem; }
 .activity-period .metric { margin-bottom: 0; }
 .activity-picker { display: grid; gap: .65rem; margin: .75rem 0; }

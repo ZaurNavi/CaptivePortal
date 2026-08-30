@@ -1040,6 +1040,28 @@
     watermark: document.getElementById("traffic-statistics-watermark"),
   } : null;
   if (statisticsEnabled && Object.values(statisticsElements).some((value) => !value)) return;
+  const peakPanel = document.getElementById("traffic-peak-panel");
+  const peakEnabled = Boolean(peakPanel && peakPanel.dataset.peakEnabled === "true");
+  const peakElements = peakEnabled ? {
+    state: document.getElementById("traffic-peak-state"),
+    title: document.getElementById("traffic-peak-state-title"),
+    message: document.getElementById("traffic-peak-state-message"),
+    download: document.getElementById("traffic-peak-download"),
+    downloadAt: document.getElementById("traffic-peak-download-at"),
+    upload: document.getElementById("traffic-peak-upload"),
+    uploadAt: document.getElementById("traffic-peak-upload-at"),
+    total: document.getElementById("traffic-peak-total"),
+    totalAt: document.getElementById("traffic-peak-total-at"),
+    bucket: document.getElementById("traffic-peak-bucket"),
+    bucketRange: document.getElementById("traffic-peak-bucket-range"),
+    hour: document.getElementById("traffic-peak-hour"),
+    hourRange: document.getElementById("traffic-peak-hour-range"),
+    applied: document.getElementById("traffic-peak-applied-range"),
+    coverage: document.getElementById("traffic-peak-coverage"),
+    watermark: document.getElementById("traffic-peak-watermark"),
+    transitions: document.getElementById("traffic-peak-source-transitions"),
+  } : null;
+  if (peakEnabled && (!statisticsEnabled || Object.values(peakElements).some((value) => !value))) return;
 
   const PANEL_KEY = "network-traffic-history";
   const RANGE = Object.freeze({"24h": Object.freeze({seconds: 86400, bucket: 300, count: 288}), "7d": Object.freeze({seconds: 604800, bucket: 900, count: 672})});
@@ -1119,6 +1141,53 @@
           || evidence.accepted_interval_count !== 0 || evidence.accepted_peak_sample_count !== 0))) {
       throw new Error("Invalid period Statistics response");
     }
+    return Object.freeze(value);
+  }
+
+  function validatePeak(value, history, statistics) {
+    if (!object(value) || !STATUSES.has(value.status)
+        || value.metric_version !== "network_traffic_peak_load.v1" || value.unit !== "Mbps"
+        || value.peak_value_method !== "max_accepted_complete_site_sample.v1"
+        || value.peak_tie_break_method !== "earliest_peak_sample_at.v1"
+        || value.sample_timestamp_semantics !== "cycle_finished_at" || !object(value.events)
+        || Object.keys(value.events).sort().join(",") !== "download,total,upload") throw new Error("Invalid Peak response");
+    for (const name of ["download", "upload", "total"]) {
+      const event = value.events[name];
+      const expected = statistics.peak[`${name}_mbps`];
+      if (!object(event) || !metric(event.value_mbps) || !count(event.occurrence_count)) throw new Error("Invalid Peak response");
+      if (event.value_mbps === null) {
+        if (event.sample_at_utc !== null || event.selected_source !== null || event.occurrence_count !== 0 || expected !== null) throw new Error("Invalid Peak response");
+      } else if (!utc(event.sample_at_utc) || Date.parse(event.sample_at_utc) < Date.parse(history.range.from_utc)
+          || Date.parse(event.sample_at_utc) >= Date.parse(history.range.to_utc) || !SOURCE.has(event.selected_source)
+          || event.occurrence_count < 1 || Math.abs(event.value_mbps - expected) > 1e-9) throw new Error("Invalid Peak response");
+    }
+    const bucket = value.busiest_bucket;
+    if (!object(bucket) || bucket.method !== "max_complete_history_bucket_total_mean.v1" || bucket.tie_break_method !== "earliest_bucket_start.v1" || !count(bucket.occurrence_count)) throw new Error("Invalid Peak response");
+    if (bucket.status === "ok") {
+      if (!utc(bucket.bucket_start_utc) || !utc(bucket.bucket_end_utc) || !metric(bucket.average_total_mbps)
+          || !SOURCE.has(bucket.selected_source) || bucket.occurrence_count < 1
+          || !history.buckets.some((item) => item.status === "complete" && item.bucket_start_utc === bucket.bucket_start_utc
+            && item.bucket_end_utc === bucket.bucket_end_utc && item.selected_source === bucket.selected_source
+            && Math.abs(item.total_mbps - bucket.average_total_mbps) <= 1e-9)) throw new Error("Invalid Peak response");
+    } else if (bucket.status !== "insufficient_data" || bucket.bucket_start_utc !== null || bucket.bucket_end_utc !== null
+        || bucket.average_total_mbps !== null || bucket.selected_source !== null || bucket.occurrence_count !== 0) throw new Error("Invalid Peak response");
+    const hour = value.busiest_hour;
+    if (!object(hour) || Object.prototype.hasOwnProperty.call(hour, "occurrence_count") || hour.duration_seconds !== 3600
+        || hour.method !== "max_complete_rolling_3600s_average_total_sample_hold.v1"
+        || hour.average_method !== "right_endpoint_sample_hold_time_weighted.v1"
+        || hour.tie_break_method !== "earliest_window_start.v1") throw new Error("Invalid Peak response");
+    if (hour.status === "ok") {
+      if (!utc(hour.window_start_utc) || !utc(hour.window_end_utc)
+          || Date.parse(hour.window_end_utc) - Date.parse(hour.window_start_utc) !== 3600000
+          || Date.parse(hour.window_start_utc) < Date.parse(history.range.from_utc)
+          || Date.parse(hour.window_end_utc) > Date.parse(history.range.to_utc)
+          || !metric(hour.average_total_mbps) || hour.accepted_interval_seconds !== 3600 || !SOURCE.has(hour.selected_source)) throw new Error("Invalid Peak response");
+    } else if (hour.status !== "insufficient_data" || hour.window_start_utc !== null || hour.window_end_utc !== null
+        || hour.average_total_mbps !== null || hour.accepted_interval_seconds !== null || hour.selected_source !== null) throw new Error("Invalid Peak response");
+    const numeric = value.events.download.value_mbps !== null;
+    const complete = history.status === "ok" && statistics.status === "ok" && numeric && bucket.status === "ok" && hour.status === "ok";
+    if ((value.status === "ok" && !complete) || (value.status === "partial" && (complete || !numeric))
+        || (value.status === "insufficient_data" && (numeric || bucket.status !== "insufficient_data" || hour.status !== "insufficient_data"))) throw new Error("Invalid Peak response");
     return Object.freeze(value);
   }
 
@@ -1280,6 +1349,11 @@
       statisticsElements.title.textContent = "Loading period statistics…";
       statisticsElements.message.textContent = "Reading the combined persisted History result.";
     }
+    if (peakEnabled) {
+      peakElements.state.dataset.state = "warning";
+      peakElements.title.textContent = "Loading peak evidence…";
+      peakElements.message.textContent = "Reading the combined persisted History result.";
+    }
   }
   function formatStatistic(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
   function renderStatistics(value, history) {
@@ -1311,6 +1385,50 @@
     statisticsElements.watermark.textContent = history.coverage.source_watermark_utc === null
       ? "—" : displayTime(history.coverage.source_watermark_utc);
   }
+  function renderPeak(value, history) {
+    if (value === null) {
+      peakElements.state.dataset.state = "error";
+      peakElements.title.textContent = "Peak Load unavailable";
+      peakElements.message.textContent = "History and Period Statistics remain available, but Peak evidence was invalid.";
+      [peakElements.download, peakElements.upload, peakElements.total, peakElements.bucket, peakElements.hour].forEach((element) => { element.textContent = "—"; });
+      [peakElements.downloadAt, peakElements.uploadAt, peakElements.totalAt, peakElements.bucketRange, peakElements.hourRange].forEach((element) => { element.textContent = "—"; });
+      peakElements.transitions.textContent = "—";
+      return;
+    }
+    const partial = value.status === "partial";
+    const insufficient = value.status === "insufficient_data";
+    peakElements.state.dataset.state = partial || insufficient ? "warning" : "ready";
+    peakElements.title.textContent = insufficient ? "Peak evidence insufficient" : (partial ? "Peak Load partial" : "Peak Load ready");
+    peakElements.message.textContent = insufficient ? "No accepted Peak samples are available for this period."
+      : (partial ? "Trustworthy Peak evidence is shown; one or more temporal products are incomplete."
+        : "Peak samples and complete period winners are ready.");
+    for (const [name, valueElement, timeElement] of [
+      ["download", peakElements.download, peakElements.downloadAt],
+      ["upload", peakElements.upload, peakElements.uploadAt],
+      ["total", peakElements.total, peakElements.totalAt],
+    ]) {
+      const event = value.events[name];
+      valueElement.textContent = formatStatistic(event.value_mbps);
+      timeElement.textContent = event.sample_at_utc === null ? "No accepted peak sample"
+        : `Observed at ${displayTime(event.sample_at_utc)}${event.occurrence_count > 1 ? ` · First of ${event.occurrence_count} equal peaks` : ""}`;
+    }
+    const bucket = value.busiest_bucket;
+    peakElements.bucket.textContent = formatStatistic(bucket.average_total_mbps);
+    peakElements.bucketRange.textContent = bucket.status === "ok"
+      ? `${displayTime(bucket.bucket_start_utc)} – ${displayTime(bucket.bucket_end_utc)}${bucket.occurrence_count > 1 ? ` · First of ${bucket.occurrence_count} equal buckets` : ""}`
+      : "No complete comparable bucket";
+    const hour = value.busiest_hour;
+    peakElements.hour.textContent = formatStatistic(hour.average_total_mbps);
+    peakElements.hourRange.textContent = hour.status === "ok"
+      ? `${displayTime(hour.window_start_utc)} – ${displayTime(hour.window_end_utc)}`
+      : "No complete comparable 60-minute period";
+    peakElements.applied.textContent = displayRange(history.range.id);
+    peakElements.coverage.textContent = history.coverage.status === "complete" ? "Complete"
+      : (history.coverage.status === "partial" ? "Partial" : "No data");
+    peakElements.watermark.textContent = history.coverage.source_watermark_utc === null ? "—"
+      : `${displayTime(history.coverage.source_watermark_utc)} · ${history.coverage.source_age_seconds === null ? "age —" : `${Math.round(history.coverage.source_age_seconds)}s old`}`;
+    peakElements.transitions.textContent = String(history.coverage.source_transition_count);
+  }
   function render(result) {
     const value = statisticsEnabled ? result.history : result;
     accepted = value;
@@ -1334,6 +1452,7 @@
     elements.timezone.textContent = displayZone();
     renderChart(value);
     if (statisticsEnabled) renderStatistics(result.statistics, value);
+    if (peakEnabled) renderPeak(result.peak, value);
   }
   function renderFailure(failure) {
     elements.state.dataset.state = "error";
@@ -1346,6 +1465,11 @@
       statisticsElements.title.textContent = "Period statistics unavailable";
       statisticsElements.message.textContent = "The combined persisted History request failed.";
     }
+    if (peakEnabled) {
+      peakElements.state.dataset.state = "error";
+      peakElements.title.textContent = "Peak Load unavailable";
+      peakElements.message.textContent = "The combined persisted History request failed.";
+    }
   }
   function requestSelectedRange() {
     coordinator.refreshPanel(PANEL_KEY, {manual: true});
@@ -1357,7 +1481,7 @@
     autoRefresh: false,
     load: async (context) => {
       const requestRange = rangeContext.selected();
-      const suffix = statisticsEnabled ? "&include=statistics" : "";
+      const suffix = peakEnabled ? "&include=statistics,peak" : (statisticsEnabled ? "&include=statistics" : "");
       const value = validate(
         await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}`),
         context.siteId,
@@ -1365,7 +1489,11 @@
       if (!statisticsEnabled) return value;
       let statistics = null;
       try { statistics = validateStatistics(value.period_statistics, value); } catch (_error) { statistics = null; }
-      return Object.freeze({history: value, statistics});
+      let peak = null;
+      if (peakEnabled && statistics !== null) {
+        try { peak = validatePeak(value.peak_load, value, statistics); } catch (_error) { peak = null; }
+      }
+      return Object.freeze({history: value, statistics, peak});
     },
     render,
     renderLoading,
