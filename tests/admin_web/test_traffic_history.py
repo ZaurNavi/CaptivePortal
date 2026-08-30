@@ -164,10 +164,11 @@ class HistorySource:
         return _result(range_id, evaluated=evaluated)
 
 
-def _app(tmp_path, source, *, master=True, history=True):
+def _app(tmp_path, source, *, master=True, history=True, statistics=False):
     settings = enabled_settings(
         web_admin_traffic_enabled=str(master).lower(),
         web_admin_traffic_history_enabled=str(history).lower(),
+        web_admin_traffic_statistics_enabled=str(statistics).lower(),
         web_admin_home_live_enabled="false",
         web_admin_home_traffic_enabled="false",
     )

@@ -158,7 +158,7 @@ def test_history_template_owns_shared_range_not_private_range():
     assert "traffic-network-range-24h" in template and "traffic-network-range-7d" in template
     assert "traffic-history-range-24h" not in template
     assert "Download" in template and "Upload" in template
-    assert "Period Average" not in template and "Peak" not in template
+    assert "Period Statistics" in template and "traffic-statistics-peak-total" in template
 
 
 def test_history_uses_foundation_for_one_initial_load_and_range_refresh(tmp_path):

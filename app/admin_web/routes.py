@@ -351,6 +351,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             home_traffic_page_size=config.home_traffic_page_size,
             traffic_enabled=config.traffic_enabled,
             traffic_history_enabled=config.traffic_history_enabled,
+            traffic_statistics_enabled=config.traffic_statistics_enabled,
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -1163,6 +1164,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         started = time.monotonic()
         authorized_site = None
         range_id = None
+        statistics_requested = False
+        statistics_status = None
         result_status = None
         coverage_status = None
         bucket_count = 0
@@ -1200,11 +1203,29 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 response = make_response(_error("not_found", 404))
                 reason = "feature_disabled"
                 return response
-            if set(request.args) != {"range"} or len(request.args.getlist("range")) != 1:
+            if (
+                not set(request.args).issubset({"range", "include"})
+                or "range" not in request.args
+                or len(request.args.getlist("range")) != 1
+                or (
+                    "include" in request.args
+                    and len(request.args.getlist("include")) != 1
+                )
+            ):
                 response = make_response(_error("invalid_request", 400))
                 reason = "invalid_request"
                 return response
             range_id = request.args.get("range")
+            if "include" in request.args:
+                if request.args.get("include") != "statistics":
+                    response = make_response(_error("invalid_request", 400))
+                    reason = "invalid_request"
+                    return response
+                statistics_requested = True
+                if not config.traffic_statistics_enabled:
+                    response = make_response(_error("not_found", 404))
+                    reason = "feature_disabled"
+                    return response
             service = runtime.query_service
             if service is None:
                 response = make_response(_error("source_unavailable", 503))
@@ -1215,6 +1236,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     g.admin_principal,
                     selected,
                     range_id=range_id,
+                    include_statistics=statistics_requested,
                 )
                 result_status = result.result.get("status")
                 coverage = result.result.get("coverage", {})
@@ -1222,6 +1244,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 bucket_count = len(result.result.get("buckets", ()))
                 gap_bucket_count = coverage.get("gap_bucket_count")
                 transition_count = coverage.get("source_transition_count")
+                statistics = result.result.get("period_statistics")
+                statistics_status = (
+                    statistics.get("status")
+                    if isinstance(statistics, dict) else None
+                )
                 response = make_response(_success(
                     selected,
                     result.result,
@@ -1274,6 +1301,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     bucket_count=bucket_count,
                     gap_bucket_count=gap_bucket_count,
                     source_transition_count=transition_count,
+                    statistics_requested=statistics_requested,
+                    statistics_status=statistics_status,
                     response_bytes=getattr(response, "content_length", None),
                 )
             except Exception:

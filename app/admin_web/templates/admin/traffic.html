@@ -102,6 +102,53 @@
       </svg>
     </div>
   </section>
+  {% if traffic_statistics_enabled %}
+  <section
+    id="traffic-statistics-panel"
+    class="card card-wide traffic-statistics"
+    aria-labelledby="traffic-statistics-heading"
+    data-statistics-enabled="true"
+  >
+    <div class="card-heading">
+      <div>
+        <p class="eyebrow">Selected period</p>
+        <h2 id="traffic-statistics-heading">Period Statistics</h2>
+      </div>
+    </div>
+    <p class="live-detail">How much Network Throughput was observed? Values use accepted persisted Site samples for the same applied History range.</p>
+    <div id="traffic-statistics-state" class="state-panel" data-state="warning" role="status" aria-live="polite">
+      <span class="state-dot" aria-hidden="true"></span>
+      <div>
+        <strong id="traffic-statistics-state-title">Loading period statistics…</strong>
+        <p id="traffic-statistics-state-message">Reading the combined persisted History result.</p>
+      </div>
+    </div>
+    <div class="traffic-statistics-groups">
+      <section aria-labelledby="traffic-statistics-average-heading">
+        <h3 id="traffic-statistics-average-heading">Average</h3>
+        <div class="traffic-statistics-metrics">
+          <article class="card live-metric"><p>Download</p><strong id="traffic-statistics-average-download">—</strong></article>
+          <article class="card live-metric"><p>Upload</p><strong id="traffic-statistics-average-upload">—</strong></article>
+          <article class="card live-metric"><p>Total</p><strong id="traffic-statistics-average-total">—</strong></article>
+        </div>
+      </section>
+      <section aria-labelledby="traffic-statistics-peak-heading">
+        <h3 id="traffic-statistics-peak-heading">Peak</h3>
+        <div class="traffic-statistics-metrics">
+          <article class="card live-metric"><p>Download</p><strong id="traffic-statistics-peak-download">—</strong></article>
+          <article class="card live-metric"><p>Upload</p><strong id="traffic-statistics-peak-upload">—</strong></article>
+          <article class="card live-metric"><p>Total</p><strong id="traffic-statistics-peak-total">—</strong></article>
+        </div>
+      </section>
+    </div>
+    <div class="traffic-history-meta">
+      <p>Applied range <strong id="traffic-statistics-applied-range">—</strong></p>
+      <p>Coverage <strong id="traffic-statistics-coverage">—</strong></p>
+      <p>Interval evidence <strong id="traffic-statistics-interval-coverage">—</strong></p>
+      <p>Watermark <strong id="traffic-statistics-watermark">—</strong></p>
+    </div>
+  </section>
+  {% endif %}
   {% endif %}
 </div>
 {% endblock %}

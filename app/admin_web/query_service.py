@@ -459,7 +459,9 @@ class AdminQueryService:
 
         return self._run(query)
 
-    def historical_traffic_history(self, principal, site_id, *, range_id):
+    def historical_traffic_history(
+        self, principal, site_id, *, range_id, include_statistics=False,
+    ):
         self._authorize(principal, "admin.read.overview", site_id)
         try:
             resolved_range = resolve_traffic_network_range(
@@ -479,9 +481,13 @@ class AdminQueryService:
                     to_utc=resolved_range.to_utc,
                     evaluated_at_utc=resolved_range.evaluated_at_utc,
                     deadline=deadline,
+                    include_period_statistics=include_statistics,
                 )
                 result = serialize_historical_traffic(
-                    value, site_id, resolved_range=resolved_range
+                    value,
+                    site_id,
+                    resolved_range=resolved_range,
+                    include_period_statistics=include_statistics,
                 )
                 return AdminQueryResponse(result)
             except HistoricalTrafficValidationError as exc:

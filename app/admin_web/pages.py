@@ -43,6 +43,7 @@ def render_admin_page(
     home_traffic_page_size: int = 100,
     traffic_enabled: bool = False,
     traffic_history_enabled: bool = False,
+    traffic_statistics_enabled: bool = False,
     traffic_refresh_seconds: int = 60,
     traffic_request_timeout_seconds: int = 20,
     home_activity_state: str = "disabled",
@@ -72,6 +73,7 @@ def render_admin_page(
             home_traffic_page_size=home_traffic_page_size,
             traffic_enabled=traffic_enabled,
             traffic_history_enabled=traffic_history_enabled,
+            traffic_statistics_enabled=traffic_statistics_enabled,
             traffic_refresh_seconds=traffic_refresh_seconds,
             traffic_request_timeout_seconds=traffic_request_timeout_seconds,
             home_activity_enabled=(

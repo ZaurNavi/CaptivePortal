@@ -320,8 +320,7 @@ _HISTORICAL_CYCLE_CTES = (
 )
 
 
-_HISTORICAL_BUCKET_SQL = f"""
-  WITH {_HISTORICAL_CYCLE_CTES},
+_HISTORICAL_RANGED_SELECTION_CTES = f"""
   ranged AS (
     SELECT *, CAST((({_utc_epoch_ms_sql('finished_at')}
       -{_utc_epoch_ms_sql('?')})/(?*1000)) AS INTEGER)
@@ -353,7 +352,13 @@ _HISTORICAL_BUCKET_SQL = f"""
         WHEN SUM(lan_pair_count)>SUM(wired_pair_count) THEN 'fallback_higher_coverage'
         ELSE 'primary_preferred_tie_or_higher' END selection_reason
     FROM ranged GROUP BY bucket_index
-  ),
+  )
+"""
+
+
+_HISTORICAL_BUCKET_SQL = f"""
+  WITH {_HISTORICAL_CYCLE_CTES},
+  {_HISTORICAL_RANGED_SELECTION_CTES},
   selected AS (
     SELECT r.*, s.selected_source,
       CASE WHEN s.selected_source='wired' THEN r.wired_download ELSE r.lan_download END download,
@@ -397,6 +402,245 @@ _HISTORICAL_BUCKET_SQL = f"""
   LEFT JOIN sample_stats x USING(bucket_index)
   GROUP BY s.bucket_index
   ORDER BY s.bucket_index
+"""
+
+
+_HISTORICAL_STATISTICS_SQL = f"""
+  WITH {_HISTORICAL_CYCLE_CTES},
+  {_HISTORICAL_RANGED_SELECTION_CTES},
+  selected AS (
+    SELECT r.cycle_id, r.finished_at, s.selected_source,
+      CASE WHEN s.selected_source='wired'
+        THEN r.wired_download ELSE r.lan_download END download,
+      CASE WHEN s.selected_source='wired'
+        THEN r.wired_upload ELSE r.lan_upload END upload
+    FROM ranged r JOIN bucket_selection s USING(bucket_index)
+    WHERE CASE WHEN s.selected_source='wired'
+      THEN r.wired_complete ELSE r.lan_complete END
+  ),
+  ordered AS (
+    SELECT *,
+      LAG(finished_at) OVER (ORDER BY finished_at,cycle_id) previous_at,
+      LAG(selected_source) OVER (ORDER BY finished_at,cycle_id) previous_source
+    FROM selected
+  ),
+  classified AS (
+    SELECT *,
+      ({_utc_epoch_ms_sql('finished_at')}
+       -{_utc_epoch_ms_sql('previous_at')})/1000.0 AS elapsed_seconds,
+      CASE
+        WHEN previous_at IS NULL THEN 'first'
+        WHEN {_utc_epoch_ms_sql('previous_at')} IS NULL
+          OR {_utc_epoch_ms_sql('finished_at')} IS NULL
+          OR {_utc_epoch_ms_sql('finished_at')}
+             -{_utc_epoch_ms_sql('previous_at')}<=0 THEN 'invalid'
+        WHEN selected_source<>previous_source THEN 'source_transition'
+        WHEN ({_utc_epoch_ms_sql('finished_at')}
+              -{_utc_epoch_ms_sql('previous_at')})/1000.0>? THEN 'gap'
+        ELSE 'accepted'
+      END interval_result
+    FROM ordered
+  )
+  SELECT
+    COUNT(*) accepted_peak_sample_count,
+    CASE WHEN COUNT(*)=0 THEN 0 ELSE COUNT(*)-1 END candidate_interval_count,
+    COALESCE(SUM(interval_result='accepted'),0) accepted_interval_count,
+    COALESCE(SUM(CASE WHEN interval_result='accepted'
+      THEN elapsed_seconds ELSE 0.0 END),0.0) accepted_interval_seconds,
+    COALESCE(SUM(interval_result='gap'),0) excluded_gap_interval_count,
+    COALESCE(SUM(interval_result='source_transition'),0)
+      excluded_source_transition_interval_count,
+    COALESCE(SUM(interval_result='invalid'),0) invalid_period_interval_count,
+    SUM(CASE WHEN interval_result='accepted'
+      THEN download*elapsed_seconds END) weighted_download,
+    SUM(CASE WHEN interval_result='accepted'
+      THEN upload*elapsed_seconds END) weighted_upload,
+    MAX(download) peak_download,
+    MAX(upload) peak_upload,
+    MAX(download+upload) peak_total,
+    MIN(finished_at) first_sample_at,
+    MAX(finished_at) last_sample_at
+  FROM classified
+"""
+
+
+_HISTORICAL_COMBINED_CYCLE_CTES = (
+    _HISTORICAL_CYCLE_CTES
+    .replace(
+        "candidate_cycles AS (",
+        "candidate_cycles AS MATERIALIZED (",
+        1,
+    )
+    .replace(
+        "cycle_aggregates AS (",
+        "cycle_aggregates AS MATERIALIZED (",
+        1,
+    )
+    .replace(
+        "validated_cycles AS (",
+        "validated_cycles AS MATERIALIZED (",
+        1,
+    )
+)
+_HISTORICAL_COMBINED_RANGED_SELECTION_CTES = (
+    _HISTORICAL_RANGED_SELECTION_CTES
+    .replace("ranged AS (", "ranged AS MATERIALIZED (", 1)
+    .replace(
+        "bucket_selection AS (",
+        "bucket_selection AS MATERIALIZED (",
+        1,
+    )
+)
+
+_HISTORICAL_STATISTICS_RESULT_FIELDS = (
+    "accepted_peak_sample_count",
+    "candidate_interval_count",
+    "accepted_interval_count",
+    "accepted_interval_seconds",
+    "excluded_gap_interval_count",
+    "excluded_source_transition_interval_count",
+    "invalid_period_interval_count",
+    "weighted_download",
+    "weighted_upload",
+    "peak_download",
+    "peak_upload",
+    "peak_total",
+    "first_sample_at",
+    "last_sample_at",
+)
+
+_HISTORICAL_COMBINED_SQL = f"""
+  WITH {_HISTORICAL_COMBINED_CYCLE_CTES},
+  integrity_meta AS MATERIALIZED (
+    SELECT
+      COALESCE(SUM(NOT integrity_ok AND (
+        (finished_at>=? AND finished_at<?)
+        OR (finished_at IS NULL AND started_at>=? AND started_at<?))),0)
+        integrity_failure_count
+    FROM validated_cycles
+  ),
+  {_HISTORICAL_COMBINED_RANGED_SELECTION_CTES},
+  bucket_selected AS (
+    SELECT r.*, s.selected_source,
+      CASE WHEN s.selected_source='wired'
+        THEN r.wired_download ELSE r.lan_download END download,
+      CASE WHEN s.selected_source='wired'
+        THEN r.wired_upload ELSE r.lan_upload END upload
+    FROM ranged r JOIN bucket_selection s USING(bucket_index)
+    WHERE CASE WHEN s.selected_source='wired'
+      THEN r.wired_complete ELSE r.lan_complete END
+  ),
+  bucket_ordered AS (
+    SELECT *, LAG(finished_at) OVER (
+      PARTITION BY bucket_index ORDER BY finished_at,cycle_id) previous_at
+    FROM bucket_selected
+  ),
+  bucket_sample_stats AS (
+    SELECT bucket_index, COUNT(*) complete_sample_count,
+      AVG(download) download_mbps, AVG(upload) upload_mbps,
+      MIN(finished_at) first_sample, MAX(finished_at) last_sample,
+      COALESCE(MAX(({_utc_epoch_ms_sql('finished_at')}
+        -{_utc_epoch_ms_sql('previous_at')})/1000.0),0.0)
+        max_inter_gap,
+      COALESCE(SUM((({_utc_epoch_ms_sql('finished_at')}
+        -{_utc_epoch_ms_sql('previous_at')})/1000.0)>?),0)
+        inter_gap_count
+    FROM bucket_ordered GROUP BY bucket_index
+  ),
+  bucket_rows AS (
+    SELECT s.*,
+      COALESCE(x.complete_sample_count,0) complete_sample_count,
+      x.download_mbps, x.upload_mbps, x.first_sample, x.last_sample,
+      COALESCE(x.max_inter_gap,0.0) max_inter_gap,
+      COALESCE(x.inter_gap_count,0) inter_gap_count,
+      COALESCE(SUM(CASE WHEN s.selected_source='wired'
+        THEN r.wired_no_baseline ELSE r.lan_no_baseline END),0)
+        no_baseline_count,
+      COALESCE(SUM(CASE WHEN s.selected_source='wired'
+        THEN r.wired_counter_reset ELSE r.lan_counter_reset END),0)
+        counter_reset_count,
+      COALESCE(SUM(CASE WHEN s.selected_source='wired'
+        THEN r.wired_gap_too_large ELSE r.lan_gap_too_large END),0)
+        gap_too_large_count,
+      COALESCE(SUM(CASE WHEN s.selected_source='wired'
+        THEN r.wired_invalid_elapsed ELSE r.lan_invalid_elapsed END),0)
+        invalid_elapsed_count,
+      COALESCE(SUM(CASE WHEN s.selected_source='wired'
+        THEN r.wired_source_unavailable ELSE r.lan_source_unavailable END),0)
+        source_unavailable_count,
+      COALESCE(SUM(CASE WHEN s.selected_source='wired'
+        THEN r.wired_ok ELSE r.lan_ok END),0) ok_count,
+      COALESCE(SUM(CASE WHEN s.selected_source='wired'
+        THEN r.wired_pair_count=r.stored_row_count AND NOT r.wired_complete
+        ELSE r.lan_pair_count=r.stored_row_count AND NOT r.lan_complete END),0)
+        skew_excluded_count
+    FROM bucket_selection s JOIN ranged r USING(bucket_index)
+    LEFT JOIN bucket_sample_stats x USING(bucket_index)
+    GROUP BY s.bucket_index
+  ),
+  statistics_selected AS (
+    SELECT r.cycle_id, r.finished_at, s.selected_source,
+      CASE WHEN s.selected_source='wired'
+        THEN r.wired_download ELSE r.lan_download END download,
+      CASE WHEN s.selected_source='wired'
+        THEN r.wired_upload ELSE r.lan_upload END upload
+    FROM ranged r JOIN bucket_selection s USING(bucket_index)
+    WHERE CASE WHEN s.selected_source='wired'
+      THEN r.wired_complete ELSE r.lan_complete END
+  ),
+  statistics_ordered AS (
+    SELECT *,
+      LAG(finished_at) OVER (ORDER BY finished_at,cycle_id) previous_at,
+      LAG(selected_source) OVER (
+        ORDER BY finished_at,cycle_id) previous_source
+    FROM statistics_selected
+  ),
+  statistics_classified AS (
+    SELECT *,
+      ({_utc_epoch_ms_sql('finished_at')}
+       -{_utc_epoch_ms_sql('previous_at')})/1000.0 AS elapsed_seconds,
+      CASE
+        WHEN previous_at IS NULL THEN 'first'
+        WHEN {_utc_epoch_ms_sql('previous_at')} IS NULL
+          OR {_utc_epoch_ms_sql('finished_at')} IS NULL
+          OR {_utc_epoch_ms_sql('finished_at')}
+             -{_utc_epoch_ms_sql('previous_at')}<=0 THEN 'invalid'
+        WHEN selected_source<>previous_source THEN 'source_transition'
+        WHEN ({_utc_epoch_ms_sql('finished_at')}
+              -{_utc_epoch_ms_sql('previous_at')})/1000.0>? THEN 'gap'
+        ELSE 'accepted'
+      END interval_result
+    FROM statistics_ordered
+  ),
+  statistics_row AS (
+    SELECT
+      COUNT(*) accepted_peak_sample_count,
+      CASE WHEN COUNT(*)=0 THEN 0 ELSE COUNT(*)-1 END
+        candidate_interval_count,
+      COALESCE(SUM(interval_result='accepted'),0) accepted_interval_count,
+      COALESCE(SUM(CASE WHEN interval_result='accepted'
+        THEN elapsed_seconds ELSE 0.0 END),0.0) accepted_interval_seconds,
+      COALESCE(SUM(interval_result='gap'),0) excluded_gap_interval_count,
+      COALESCE(SUM(interval_result='source_transition'),0)
+        excluded_source_transition_interval_count,
+      COALESCE(SUM(interval_result='invalid'),0)
+        invalid_period_interval_count,
+      SUM(CASE WHEN interval_result='accepted'
+        THEN download*elapsed_seconds END) weighted_download,
+      SUM(CASE WHEN interval_result='accepted'
+        THEN upload*elapsed_seconds END) weighted_upload,
+      MAX(download) peak_download,
+      MAX(upload) peak_upload,
+      MAX(download+upload) peak_total,
+      MIN(finished_at) first_sample_at,
+      MAX(finished_at) last_sample_at
+    FROM statistics_classified
+  )
+  SELECT b.*, m.integrity_failure_count, p.*
+  FROM integrity_meta m
+  CROSS JOIN statistics_row p
+  LEFT JOIN bucket_rows b ON 1=1
+  ORDER BY b.bucket_index
 """
 
 
@@ -904,6 +1148,7 @@ class AnalyticsSourceGateway:
         gap_threshold_seconds: float,
         max_site_sample_source_skew_seconds: int,
         deadline: QueryDeadline,
+        include_period_statistics: bool = False,
     ) -> Mapping[str, Any]:
         """Return bounded historical AP-rate aggregates from one read snapshot."""
         max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
@@ -915,36 +1160,89 @@ class AnalyticsSourceGateway:
         with self._connection("observations", deadline) as connection:
             connection.execute("BEGIN")
             try:
-                meta = self._one(
-                    connection,
-                    _HISTORICAL_META_SQL,
-                    (
-                        *cycle_parameters,
-                        from_utc, to_utc, from_utc, to_utc,
-                    ),
-                    deadline,
-                )
-                meta_values = dict(meta or {})
-                meta_values.update(self._historical_source_bounds(
-                    connection,
-                    site_id=site_id,
-                    evaluated_at_utc=evaluated_at_utc,
-                    max_skew_milliseconds=max_skew_milliseconds,
-                    deadline=deadline,
-                ))
-                rows = self._all(
-                    connection,
-                    _HISTORICAL_BUCKET_SQL,
-                    (
-                        *cycle_parameters,
-                        from_utc, from_utc,
-                        bucket_seconds,
-                        from_utc,
-                        to_utc,
-                        gap_threshold_seconds,
-                    ),
-                    deadline,
-                )
+                if include_period_statistics:
+                    combined_rows = self._all(
+                        connection,
+                        _HISTORICAL_COMBINED_SQL,
+                        (
+                            *cycle_parameters,
+                            from_utc, to_utc, from_utc, to_utc,
+                            from_utc, from_utc,
+                            bucket_seconds,
+                            from_utc,
+                            to_utc,
+                            gap_threshold_seconds,
+                            gap_threshold_seconds,
+                        ),
+                        deadline,
+                    )
+                    if not combined_rows:
+                        raise AnalyticsSourceUnavailable(
+                            "Historical traffic combined projection is unavailable"
+                        )
+                    combined = tuple(dict(row) for row in combined_rows)
+                    first = combined[0]
+                    meta_values = {
+                        "integrity_failure_count": first[
+                            "integrity_failure_count"
+                        ]
+                    }
+                    statistics = {
+                        field: first[field]
+                        for field in _HISTORICAL_STATISTICS_RESULT_FIELDS
+                    }
+                    auxiliary_fields = {
+                        "integrity_failure_count",
+                        *_HISTORICAL_STATISTICS_RESULT_FIELDS,
+                    }
+                    rows = tuple(
+                        {
+                            key: value
+                            for key, value in row.items()
+                            if key not in auxiliary_fields
+                        }
+                        for row in combined
+                        if row["bucket_index"] is not None
+                    )
+                    meta_values.update(self._historical_source_bounds(
+                        connection,
+                        site_id=site_id,
+                        evaluated_at_utc=evaluated_at_utc,
+                        max_skew_milliseconds=max_skew_milliseconds,
+                        deadline=deadline,
+                    ))
+                else:
+                    meta = self._one(
+                        connection,
+                        _HISTORICAL_META_SQL,
+                        (
+                            *cycle_parameters,
+                            from_utc, to_utc, from_utc, to_utc,
+                        ),
+                        deadline,
+                    )
+                    meta_values = dict(meta or {})
+                    meta_values.update(self._historical_source_bounds(
+                        connection,
+                        site_id=site_id,
+                        evaluated_at_utc=evaluated_at_utc,
+                        max_skew_milliseconds=max_skew_milliseconds,
+                        deadline=deadline,
+                    ))
+                    rows = self._all(
+                        connection,
+                        _HISTORICAL_BUCKET_SQL,
+                        (
+                            *cycle_parameters,
+                            from_utc, from_utc,
+                            bucket_seconds,
+                            from_utc,
+                            to_utc,
+                            gap_threshold_seconds,
+                        ),
+                        deadline,
+                    )
+                    statistics = None
                 attempts = self._one(
                     connection,
                     """
@@ -982,6 +1280,9 @@ class AnalyticsSourceGateway:
                     "meta": meta_values,
                     "buckets": tuple(dict(row) for row in rows),
                     "attempts": dict(attempts or {}),
+                    "period_statistics": (
+                        dict(statistics) if statistics is not None else None
+                    ),
                 }
             finally:
                 connection.rollback()
@@ -1011,6 +1312,67 @@ class AnalyticsSourceGateway:
             rows = self._all(
                 connection,
                 "EXPLAIN QUERY PLAN " + _HISTORICAL_BUCKET_SQL,
+                parameters,
+                deadline,
+            )
+        return tuple(str(row[3]) for row in rows)
+
+    def explain_historical_traffic_statistics(
+        self,
+        *,
+        site_id: str,
+        from_utc: str,
+        to_utc: str,
+        evaluated_at_utc: str,
+        bucket_seconds: int,
+        gap_threshold_seconds: float,
+        max_site_sample_source_skew_seconds: int,
+        deadline: QueryDeadline,
+    ) -> tuple[str, ...]:
+        """Expose the bounded Statistics projection plan."""
+        max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
+        parameters = (
+            site_id, from_utc, to_utc, from_utc, to_utc,
+            site_id, from_utc, from_utc, to_utc, site_id,
+            max_skew_milliseconds, max_skew_milliseconds,
+            from_utc, from_utc, bucket_seconds, from_utc, to_utc,
+            gap_threshold_seconds,
+        )
+        with self._connection("observations", deadline) as connection:
+            rows = self._all(
+                connection,
+                "EXPLAIN QUERY PLAN " + _HISTORICAL_STATISTICS_SQL,
+                parameters,
+                deadline,
+            )
+        return tuple(str(row[3]) for row in rows)
+
+    def explain_historical_traffic_combined(
+        self,
+        *,
+        site_id: str,
+        from_utc: str,
+        to_utc: str,
+        evaluated_at_utc: str,
+        bucket_seconds: int,
+        gap_threshold_seconds: float,
+        max_site_sample_source_skew_seconds: int,
+        deadline: QueryDeadline,
+    ) -> tuple[str, ...]:
+        """Expose the single-pass combined History and Statistics plan."""
+        max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
+        parameters = (
+            site_id, from_utc, to_utc, from_utc, to_utc,
+            site_id, from_utc, from_utc, to_utc, site_id,
+            max_skew_milliseconds, max_skew_milliseconds,
+            from_utc, to_utc, from_utc, to_utc,
+            from_utc, from_utc, bucket_seconds, from_utc, to_utc,
+            gap_threshold_seconds, gap_threshold_seconds,
+        )
+        with self._connection("observations", deadline) as connection:
+            rows = self._all(
+                connection,
+                "EXPLAIN QUERY PLAN " + _HISTORICAL_COMBINED_SQL,
                 parameters,
                 deadline,
             )

@@ -55,6 +55,20 @@ _BUCKET_COUNT_FIELDS = (
     "complete_site_sample_count", "excluded_site_sample_count",
     "gap_count_over_threshold", "selected_source_skew_excluded_sample_count",
 )
+_STATISTICS_STATUSES = frozenset({"ok", "partial", "insufficient_data"})
+_STATISTICS_CONSTANTS = {
+    "metric_version": "network_traffic_period_statistics.v1",
+    "average_method": "right_endpoint_sample_hold_time_weighted.v1",
+    "peak_method": "max_accepted_complete_site_sample.v1",
+    "unit": "Mbps",
+}
+_STATISTICS_VALUE_FIELDS = ("download_mbps", "upload_mbps", "total_mbps")
+_STATISTICS_COUNT_FIELDS = (
+    "candidate_interval_count", "accepted_interval_count",
+    "excluded_gap_interval_count",
+    "excluded_source_transition_interval_count",
+    "invalid_period_interval_count", "accepted_peak_sample_count",
+)
 
 
 def serialize_historical_traffic(
@@ -62,6 +76,7 @@ def serialize_historical_traffic(
     site_id: str,
     *,
     resolved_range: TrafficNetworkRange,
+    include_period_statistics: bool = False,
 ) -> dict[str, Any]:
     """Validate immutable Analytics output and expose only product-safe fields."""
     if getattr(value, "status", None) not in _RESULT_COVERAGE:
@@ -194,12 +209,182 @@ def serialize_historical_traffic(
     quality = _project(getattr(value, "quality", None), _QUALITY_FIELDS)
     quality = {key: _count(item) for key, item in quality.items()}
     range_result = {"id": resolved_range.id, **expected}
-    return {
+    result = {
         "status": value.status,
         "range": range_result,
         "buckets": projected_buckets,
         "coverage": coverage_result,
         "quality": quality,
+    }
+    statistics = getattr(value, "period_statistics", None)
+    if include_period_statistics:
+        result["period_statistics"] = _statistics(
+            statistics,
+            history_status=value.status,
+            range_seconds=float(expected_duration),
+            complete_site_sample_count=coverage_result[
+                "complete_site_sample_count"
+            ],
+        )
+    elif statistics is not None:
+        raise HistoricalTrafficSerializationError(
+            "unrequested period Statistics is invalid"
+        )
+    return result
+
+
+def _statistics(
+    value: Any,
+    *,
+    history_status: str,
+    range_seconds: float,
+    complete_site_sample_count: int,
+) -> dict[str, Any]:
+    if value is None or getattr(value, "status", None) not in _STATISTICS_STATUSES:
+        raise HistoricalTrafficSerializationError("Statistics status is invalid")
+    if any(
+        getattr(value, key, None) != expected
+        for key, expected in _STATISTICS_CONSTANTS.items()
+    ):
+        raise HistoricalTrafficSerializationError("Statistics method is invalid")
+    average = _statistics_values(getattr(value, "average", None))
+    peak = _statistics_values(getattr(value, "peak", None))
+    evidence = getattr(value, "interval_evidence", None)
+    if evidence is None:
+        raise HistoricalTrafficSerializationError(
+            "Statistics interval evidence is missing"
+        )
+    counts = {
+        name: _count(getattr(evidence, name, None))
+        for name in _STATISTICS_COUNT_FIELDS
+    }
+    durations = {
+        name: _number(getattr(evidence, name, None))
+        for name in (
+            "range_seconds", "accepted_interval_seconds",
+            "leading_unweighted_seconds", "trailing_unweighted_seconds",
+        )
+    }
+    ratio = _number(getattr(evidence, "interval_coverage_ratio", None))
+    if (
+        not math.isclose(
+            durations["range_seconds"], range_seconds,
+            rel_tol=0.0, abs_tol=1e-9,
+        )
+        or durations["accepted_interval_seconds"] > range_seconds
+        or durations["leading_unweighted_seconds"] > range_seconds
+        or durations["trailing_unweighted_seconds"] > range_seconds
+        or ratio > 1
+        or not math.isclose(
+            ratio,
+            durations["accepted_interval_seconds"] / range_seconds,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+    ):
+        raise HistoricalTrafficSerializationError(
+            "Statistics interval duration is invalid"
+        )
+    if (
+        counts["candidate_interval_count"]
+        != max(counts["accepted_peak_sample_count"] - 1, 0)
+        or counts["candidate_interval_count"]
+        != counts["accepted_interval_count"]
+        + counts["invalid_period_interval_count"]
+        + counts["excluded_source_transition_interval_count"]
+        + counts["excluded_gap_interval_count"]
+        or counts["accepted_interval_count"]
+        > counts["candidate_interval_count"]
+        or counts["accepted_peak_sample_count"] != complete_site_sample_count
+    ):
+        raise HistoricalTrafficSerializationError(
+            "Statistics interval accounting is invalid"
+        )
+    average_numeric = average["download_mbps"] is not None
+    peak_numeric = peak["download_mbps"] is not None
+    if average_numeric:
+        if (
+            counts["accepted_interval_count"] == 0
+            or durations["accepted_interval_seconds"] <= 0
+            or not math.isclose(
+                average["total_mbps"],
+                average["download_mbps"] + average["upload_mbps"],
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+        ):
+            raise HistoricalTrafficSerializationError(
+                "Statistics Average is invalid"
+            )
+    elif (
+        counts["accepted_interval_count"] != 0
+        or durations["accepted_interval_seconds"] != 0
+    ):
+        raise HistoricalTrafficSerializationError(
+            "Statistics Average evidence is invalid"
+        )
+    if peak_numeric:
+        if (
+            counts["accepted_peak_sample_count"] == 0
+            or peak["total_mbps"] + 1e-9 < peak["download_mbps"]
+            or peak["total_mbps"] + 1e-9 < peak["upload_mbps"]
+            or peak["total_mbps"]
+            > peak["download_mbps"] + peak["upload_mbps"] + 1e-9
+        ):
+            raise HistoricalTrafficSerializationError("Statistics Peak is invalid")
+    elif counts["accepted_peak_sample_count"] != 0:
+        raise HistoricalTrafficSerializationError(
+            "Statistics Peak evidence is invalid"
+        )
+    complete = (
+        history_status == "ok"
+        and average_numeric
+        and peak_numeric
+        and counts["excluded_gap_interval_count"] == 0
+        and counts["excluded_source_transition_interval_count"] == 0
+        and counts["invalid_period_interval_count"] == 0
+    )
+    status = value.status
+    if status == "ok" and not complete:
+        raise HistoricalTrafficSerializationError("Statistics ok state is invalid")
+    if status == "partial" and (complete or not (average_numeric or peak_numeric)):
+        raise HistoricalTrafficSerializationError(
+            "Statistics partial state is invalid"
+        )
+    if status == "insufficient_data" and (
+        average_numeric or peak_numeric
+        or counts["accepted_interval_count"] != 0
+        or counts["accepted_peak_sample_count"] != 0
+    ):
+        raise HistoricalTrafficSerializationError(
+            "Statistics insufficient state is invalid"
+        )
+    return {
+        "status": status,
+        **_STATISTICS_CONSTANTS,
+        "average": average,
+        "peak": peak,
+        "interval_evidence": {
+            **counts,
+            **durations,
+            "interval_coverage_ratio": ratio,
+        },
+    }
+
+
+def _statistics_values(value: Any) -> dict[str, float | None]:
+    if value is None:
+        raise HistoricalTrafficSerializationError("Statistics values are missing")
+    raw = tuple(getattr(value, name, None) for name in _STATISTICS_VALUE_FIELDS)
+    if all(item is None for item in raw):
+        return {name: None for name in _STATISTICS_VALUE_FIELDS}
+    if any(item is None for item in raw):
+        raise HistoricalTrafficSerializationError(
+            "Statistics metric family is incomplete"
+        )
+    return {
+        name: _number(item)
+        for name, item in zip(_STATISTICS_VALUE_FIELDS, raw)
     }
 
 
