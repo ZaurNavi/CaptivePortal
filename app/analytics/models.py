@@ -898,6 +898,98 @@ class HistoricalTrafficPeakLoad:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalTrafficApPopulation:
+    population_count: int
+    current_population_count: int
+    historical_population_count: int
+    supported_max_ap_count: int
+    returned_ap_count: int
+    population_complete: bool
+    population_method: str = "current_union_historical_validated.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficApSeries:
+    bucket_count: int
+    status: tuple[str, ...]
+    download_mbps: tuple[float | None, ...]
+    upload_mbps: tuple[float | None, ...]
+    encoding: str = "outer_history_bucket_aligned_du.v1"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "status", tuple(self.status))
+        object.__setattr__(self, "download_mbps", tuple(self.download_mbps))
+        object.__setattr__(self, "upload_mbps", tuple(self.upload_mbps))
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficApCoverage:
+    status: str
+    bucket_count: int
+    complete_bucket_count: int
+    partial_bucket_count: int
+    missing_bucket_count: int
+    sample_opportunity_count: int
+    accepted_sample_count: int
+    site_accepted_interval_seconds: float
+    ap_accepted_interval_seconds: float
+    ap_interval_coverage_ratio: float | None
+    no_baseline_count: int
+    counter_reset_count: int
+    gap_too_large_count: int
+    invalid_elapsed_count: int
+    source_unavailable_count: int
+    missing_selected_source_sample_count: int
+    source_transition_excluded_interval_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficApNow:
+    status: str
+    download_mbps: float | None
+    upload_mbps: float | None
+    total_mbps: float | None
+    download_reason: str
+    upload_reason: str
+    observed_at: str | None
+    age_seconds: float | None
+    selected_source: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficApItem:
+    ap_mac: str
+    display_name: str
+    display_name_source: str
+    status: str
+    series: HistoricalTrafficApSeries
+    average: HistoricalTrafficPeriodValues
+    peak: HistoricalTrafficPeriodValues
+    coverage: HistoricalTrafficApCoverage
+    now: HistoricalTrafficApNow
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficByAp:
+    status: str
+    population: HistoricalTrafficApPopulation
+    current_snapshot: CurrentTrafficSnapshot | None
+    items: tuple[HistoricalTrafficApItem, ...]
+    metric_version: str = "network_traffic_by_ap.v1"
+    unit: str = "Mbps"
+    history_series_encoding: str = "outer_history_bucket_aligned_du.v1"
+    history_bucket_method: str = (
+        "mean_of_accepted_ap_rates_for_canonical_site_bucket_samples.v1"
+    )
+    average_method: str = "right_endpoint_ap_sample_hold_time_weighted.v1"
+    peak_method: str = "max_accepted_complete_ap_sample.v1"
+    ap_order_method: str = "ap_mac_ascending.v1"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalSiteTraffic:
     status: str
     range: HistoricalTrafficRange
@@ -906,6 +998,7 @@ class HistoricalSiteTraffic:
     quality: HistoricalTrafficQuality
     period_statistics: HistoricalTrafficPeriodStatistics | None = None
     peak_load: HistoricalTrafficPeakLoad | None = None
+    ap_traffic: HistoricalTrafficByAp | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "buckets", tuple(self.buckets))

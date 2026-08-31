@@ -461,7 +461,7 @@ class AdminQueryService:
 
     def historical_traffic_history(
         self, principal, site_id, *, range_id, include_statistics=False,
-        include_peak=False,
+        include_peak=False, include_aps=False,
     ):
         self._authorize(principal, "admin.read.overview", site_id)
         try:
@@ -476,6 +476,59 @@ class AdminQueryService:
 
         def query(deadline):
             try:
+                current_snapshot = None
+                current_population_count = 0
+                current_items = ()
+                current_cycle_id = None
+                if include_aps and self._current_traffic is not None:
+                    try:
+                        current = self._current_traffic.get_current_site_traffic(
+                            site_id,
+                            evaluated_at_utc=resolved_range.evaluated_at_utc,
+                            fresh_max_age_seconds=(
+                                self._config.home_traffic_fresh_max_age_seconds
+                            ),
+                            stale_max_age_seconds=(
+                                self._config.home_traffic_stale_max_age_seconds
+                            ),
+                            max_ap_skew_seconds=(
+                                self._config.home_traffic_max_ap_skew_seconds
+                            ),
+                            deadline=deadline,
+                        )
+                        current_snapshot = current.snapshot
+                        current_population_count = current.coverage.total_ap_count
+                        current_cycle_id = current.snapshot.cycle_id
+                        if current_cycle_id is not None and current_population_count <= 12:
+                            page = self._current_traffic.list_current_ap_traffic(
+                                site_id,
+                                cycle_id=current_cycle_id,
+                                evaluated_at_utc=resolved_range.evaluated_at_utc,
+                                fresh_max_age_seconds=(
+                                    self._config.home_traffic_fresh_max_age_seconds
+                                ),
+                                stale_max_age_seconds=(
+                                    self._config.home_traffic_stale_max_age_seconds
+                                ),
+                                max_ap_skew_seconds=(
+                                    self._config.home_traffic_max_ap_skew_seconds
+                                ),
+                                limit=12,
+                                deadline=deadline,
+                            )
+                            if page.page.next_cursor is not None:
+                                raise HistoricalTrafficSourceUnavailable(
+                                    "Current AP population projection is incomplete"
+                                )
+                            current_items = page.items
+                    except (
+                        CurrentTrafficSourceUnavailable,
+                        CurrentTrafficValidationError,
+                    ):
+                        current_snapshot = None
+                        current_population_count = 0
+                        current_items = ()
+                        current_cycle_id = None
                 value = source.get_site_history(
                     site_id,
                     from_utc=resolved_range.from_utc,
@@ -484,13 +537,23 @@ class AdminQueryService:
                     deadline=deadline,
                     include_period_statistics=include_statistics,
                     include_peak_load=include_peak,
+                    include_ap_traffic=include_aps,
+                    current_cycle_id=current_cycle_id,
                 )
+                if include_aps:
+                    value = source.compose_current_ap_traffic(
+                        value,
+                        current_snapshot=current_snapshot,
+                        current_population_count=current_population_count,
+                        current_items=tuple(current_items),
+                    )
                 result = serialize_historical_traffic(
                     value,
                     site_id,
                     resolved_range=resolved_range,
                     include_period_statistics=include_statistics,
                     include_peak_load=include_peak,
+                    include_ap_traffic=include_aps,
                 )
                 return AdminQueryResponse(result)
             except HistoricalTrafficValidationError as exc:

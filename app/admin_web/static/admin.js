@@ -1062,6 +1062,19 @@
     transitions: document.getElementById("traffic-peak-source-transitions"),
   } : null;
   if (peakEnabled && (!statisticsEnabled || Object.values(peakElements).some((value) => !value))) return;
+  const apPanel = document.getElementById("traffic-ap-panel");
+  const apEnabled = Boolean(apPanel && apPanel.dataset.apEnabled === "true");
+  const apElements = apEnabled ? {
+    state: document.getElementById("traffic-ap-state"),
+    title: document.getElementById("traffic-ap-state-title"),
+    message: document.getElementById("traffic-ap-state-message"),
+    applied: document.getElementById("traffic-ap-applied-range"),
+    population: document.getElementById("traffic-ap-population"),
+    coverage: document.getElementById("traffic-ap-coverage"),
+    current: document.getElementById("traffic-ap-current"),
+    items: document.getElementById("traffic-ap-items"),
+  } : null;
+  if (apEnabled && Object.values(apElements).some((value) => !value)) return;
 
   const PANEL_KEY = "network-traffic-history";
   const RANGE = Object.freeze({"24h": Object.freeze({seconds: 86400, bucket: 300, count: 288}), "7d": Object.freeze({seconds: 604800, bucket: 900, count: 672})});
@@ -1188,6 +1201,182 @@
     const complete = history.status === "ok" && statistics.status === "ok" && numeric && bucket.status === "ok" && hour.status === "ok";
     if ((value.status === "ok" && !complete) || (value.status === "partial" && (complete || !numeric))
         || (value.status === "insufficient_data" && (numeric || bucket.status !== "insufficient_data" || hour.status !== "insufficient_data"))) throw new Error("Invalid Peak response");
+    return Object.freeze(value);
+  }
+
+  function validateApTraffic(value, history) {
+    const statuses = new Set(["ok", "partial", "insufficient_data", "unsupported_population"]);
+    const itemStatuses = new Set(["complete", "partial", "insufficient_data"]);
+    const pointStatuses = new Set(["complete", "partial", "none"]);
+    const nowStatuses = new Set(["valid", "partial", "unavailable"]);
+    const rateReasons = new Set(["ok", "no_baseline", "counter_reset", "gap_too_large", "invalid_elapsed", "source_unavailable"]);
+    const freshness = new Set(["fresh", "stale", "unavailable"]);
+    const freshnessReasons = new Set(["within_freshness_window", "within_stale_window", "age_exceeded", "clock_anomaly", "no_complete_snapshot", "source_unavailable"]);
+    if (!object(value) || !statuses.has(value.status)
+        || value.metric_version !== "network_traffic_by_ap.v1" || value.unit !== "Mbps"
+        || value.history_series_encoding !== "outer_history_bucket_aligned_du.v1"
+        || value.history_bucket_method !== "mean_of_accepted_ap_rates_for_canonical_site_bucket_samples.v1"
+        || value.average_method !== "right_endpoint_ap_sample_hold_time_weighted.v1"
+        || value.peak_method !== "max_accepted_complete_ap_sample.v1"
+        || value.ap_order_method !== "ap_mac_ascending.v1"
+        || !object(value.population) || !Array.isArray(value.items)) {
+      throw new Error("Invalid AP Traffic response");
+    }
+    const population = value.population;
+    if (population.population_method !== "current_union_historical_validated.v1"
+        || !count(population.population_count) || !count(population.current_population_count)
+        || !count(population.historical_population_count) || population.supported_max_ap_count !== 12
+        || !count(population.returned_ap_count) || typeof population.population_complete !== "boolean"
+        || population.current_population_count > population.population_count
+        || population.historical_population_count > population.population_count) {
+      throw new Error("Invalid AP Traffic response");
+    }
+    if (value.status === "unsupported_population") {
+      if (population.population_count <= 12 || population.returned_ap_count !== 0
+          || population.population_complete !== false || value.items.length !== 0
+          || value.current_snapshot !== null) throw new Error("Invalid AP Traffic response");
+      return Object.freeze(value);
+    }
+    if (population.population_count > 12 || population.returned_ap_count !== population.population_count
+        || population.population_complete !== true || value.items.length !== population.population_count) {
+      throw new Error("Invalid AP Traffic response");
+    }
+    const snapshot = value.current_snapshot;
+    if (snapshot !== null && (!object(snapshot)
+        || snapshot.source_kind !== "observation_ap_dynamic"
+        || typeof snapshot.cycle_id !== "string" || !snapshot.cycle_id
+        || !utc(snapshot.evaluated_at)
+        || ((snapshot.observed_at === null) !== (snapshot.newest_observed_at === null))
+        || (snapshot.observed_at !== null && (!utc(snapshot.observed_at)
+          || !utc(snapshot.newest_observed_at)
+          || Date.parse(snapshot.observed_at) > Date.parse(snapshot.newest_observed_at)
+          || Date.parse(snapshot.newest_observed_at) > Date.parse(snapshot.evaluated_at)))
+        || !freshness.has(snapshot.freshness_status)
+        || !freshnessReasons.has(snapshot.freshness_reason)
+        || !SOURCE.has(snapshot.selected_source))) {
+      throw new Error("Invalid AP Traffic response");
+    }
+    let previousMac = null;
+    let anyNumeric = false;
+    let allComplete = true;
+    for (const item of value.items) {
+      if (!object(item) || !/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(item.ap_mac)
+          || (previousMac !== null && item.ap_mac <= previousMac)
+          || typeof item.display_name !== "string" || !item.display_name || item.display_name.length > 256
+          || !new Set(["current", "historical", "mac_fallback"]).has(item.display_name_source)
+          || (item.display_name_source === "mac_fallback" && item.display_name !== item.ap_mac)
+          || !itemStatuses.has(item.status) || !object(item.history) || !object(item.now)) {
+        throw new Error("Invalid AP Traffic response");
+      }
+      previousMac = item.ap_mac;
+      const series = item.history.series;
+      const coverage = item.history.coverage;
+      if (!object(series) || series.encoding !== "outer_history_bucket_aligned_du.v1"
+          || series.bucket_count !== history.range.bucket_count
+          || !Array.isArray(series.status) || !Array.isArray(series.download_mbps)
+          || !Array.isArray(series.upload_mbps)
+          || series.status.length !== series.bucket_count
+          || series.download_mbps.length !== series.bucket_count
+          || series.upload_mbps.length !== series.bucket_count || !object(coverage)) {
+        throw new Error("Invalid AP Traffic response");
+      }
+      for (let index = 0; index < series.bucket_count; index += 1) {
+        const point = series.status[index];
+        const download = series.download_mbps[index];
+        const upload = series.upload_mbps[index];
+        if (!pointStatuses.has(point) || !metric(download) || !metric(upload)
+            || (point === "none" && (download !== null || upload !== null))
+            || (point !== "none" && (download === null || upload === null))) {
+          throw new Error("Invalid AP Traffic response");
+        }
+      }
+      if (!["complete", "partial", "insufficient_data"].includes(item.history.status)
+          || item.history.status !== coverage.status || !metricFamily(item.history.average)
+          || !metricFamily(item.history.peak) || coverage.bucket_count !== series.bucket_count
+          || !count(coverage.complete_bucket_count) || !count(coverage.partial_bucket_count)
+          || !count(coverage.missing_bucket_count)
+          || coverage.complete_bucket_count + coverage.partial_bucket_count + coverage.missing_bucket_count !== series.bucket_count
+          || !count(coverage.sample_opportunity_count) || !count(coverage.accepted_sample_count)
+          || coverage.accepted_sample_count > coverage.sample_opportunity_count
+          || typeof coverage.site_accepted_interval_seconds !== "number"
+          || typeof coverage.ap_accepted_interval_seconds !== "number"
+          || coverage.ap_accepted_interval_seconds < 0
+          || coverage.ap_accepted_interval_seconds > coverage.site_accepted_interval_seconds
+          || (coverage.ap_interval_coverage_ratio !== null
+              && (typeof coverage.ap_interval_coverage_ratio !== "number"
+                  || coverage.ap_interval_coverage_ratio < 0 || coverage.ap_interval_coverage_ratio > 1))) {
+        throw new Error("Invalid AP Traffic response");
+      }
+      const completePoints = series.status.filter((entry) => entry === "complete").length;
+      const partialPoints = series.status.filter((entry) => entry === "partial").length;
+      const missingPoints = series.status.filter((entry) => entry === "none").length;
+      const expectedRatio = coverage.site_accepted_interval_seconds === 0 ? null
+        : coverage.ap_accepted_interval_seconds / coverage.site_accepted_interval_seconds;
+      const qualityCounts = ["no_baseline_count", "counter_reset_count", "gap_too_large_count",
+        "invalid_elapsed_count", "source_unavailable_count", "missing_selected_source_sample_count",
+        "source_transition_excluded_interval_count"];
+      if (coverage.complete_bucket_count !== completePoints
+          || coverage.partial_bucket_count !== partialPoints
+          || coverage.missing_bucket_count !== missingPoints
+          || !qualityCounts.every((key) => count(coverage[key]))
+          || (expectedRatio === null ? coverage.ap_interval_coverage_ratio !== null
+            : Math.abs(coverage.ap_interval_coverage_ratio - expectedRatio) > 1e-9)) {
+        throw new Error("Invalid AP Traffic response");
+      }
+      const averageNumeric = item.history.average.download_mbps !== null;
+      const peakNumeric = item.history.peak.download_mbps !== null;
+      if ((averageNumeric !== (coverage.ap_accepted_interval_seconds > 0))
+          || (peakNumeric !== (coverage.accepted_sample_count > 0))
+          || (averageNumeric && Math.abs(item.history.average.total_mbps
+            - item.history.average.download_mbps - item.history.average.upload_mbps) > 1e-9)
+          || (peakNumeric && (item.history.peak.total_mbps + 1e-9 < item.history.peak.download_mbps
+            || item.history.peak.total_mbps + 1e-9 < item.history.peak.upload_mbps
+            || item.history.peak.total_mbps
+              > item.history.peak.download_mbps + item.history.peak.upload_mbps + 1e-9))) {
+        throw new Error("Invalid AP Traffic response");
+      }
+      const now = item.now;
+      if (!nowStatuses.has(now.status) || !metric(now.download_mbps) || !metric(now.upload_mbps)
+          || !metric(now.total_mbps) || (now.selected_source !== null && !SOURCE.has(now.selected_source))
+          || !rateReasons.has(now.download_reason) || !rateReasons.has(now.upload_reason)
+          || (now.observed_at !== null && !utc(now.observed_at))
+          || (now.age_seconds !== null && !metric(now.age_seconds))
+          || (now.total_mbps !== null && (now.download_mbps === null
+            || now.upload_mbps === null || Math.abs(now.total_mbps
+              - now.download_mbps - now.upload_mbps) > 1e-9))
+          || (now.status === "valid" && (now.download_mbps === null || now.upload_mbps === null
+              || now.total_mbps === null || !SOURCE.has(now.selected_source)
+              || now.observed_at === null || now.age_seconds === null))
+          || (now.status === "partial" && ((now.download_mbps === null && now.upload_mbps === null)
+              || !SOURCE.has(now.selected_source) || now.observed_at === null || now.age_seconds === null))
+          || (now.status === "unavailable" && (now.download_mbps !== null
+              || now.upload_mbps !== null || now.total_mbps !== null))) {
+        throw new Error("Invalid AP Traffic response");
+      }
+      const historicalNumeric = coverage.accepted_sample_count > 0;
+      const currentNumeric = now.download_mbps !== null || now.upload_mbps !== null;
+      if (currentNumeric && (snapshot === null || snapshot.observed_at === null
+          || Date.parse(now.observed_at) < Date.parse(snapshot.observed_at)
+          || Date.parse(now.observed_at) > Date.parse(snapshot.newest_observed_at))) {
+        throw new Error("Invalid AP Traffic response");
+      }
+      const itemComplete = coverage.status === "complete" && now.status === "valid"
+        && snapshot !== null && snapshot.freshness_status === "fresh";
+      if ((item.status === "complete" && !itemComplete)
+          || (item.status === "partial" && (itemComplete || (!historicalNumeric && !currentNumeric)))
+          || (item.status === "insufficient_data" && (historicalNumeric || currentNumeric))) {
+        throw new Error("Invalid AP Traffic response");
+      }
+      anyNumeric = anyNumeric || historicalNumeric || currentNumeric;
+      allComplete = allComplete && item.status === "complete";
+    }
+    const complete = population.population_count > 0 && history.status === "ok" && snapshot !== null
+      && snapshot.freshness_status === "fresh" && allComplete;
+    if ((value.status === "ok" && !complete)
+        || (value.status === "partial" && (complete || !anyNumeric))
+        || (value.status === "insufficient_data" && anyNumeric)) {
+      throw new Error("Invalid AP Traffic response");
+    }
     return Object.freeze(value);
   }
 
@@ -1354,6 +1543,11 @@
       peakElements.title.textContent = "Loading peak evidence…";
       peakElements.message.textContent = "Reading the combined persisted History result.";
     }
+    if (apEnabled) {
+      apElements.state.dataset.state = "warning";
+      apElements.title.textContent = "Loading AP traffic…";
+      apElements.message.textContent = "Reading the combined persisted History result and current AP evidence.";
+    }
   }
   function formatStatistic(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
   function renderStatistics(value, history) {
@@ -1429,8 +1623,85 @@
       : `${displayTime(history.coverage.source_watermark_utc)} · ${history.coverage.source_age_seconds === null ? "age —" : `${Math.round(history.coverage.source_age_seconds)}s old`}`;
     peakElements.transitions.textContent = String(history.coverage.source_transition_count);
   }
+  function apPath(values, statuses, maximum) {
+    let path = "";
+    let open = false;
+    values.forEach((value, index) => {
+      if (value === null || statuses[index] === "none") { open = false; return; }
+      const x = 12 + (index / Math.max(1, values.length - 1)) * 456;
+      const y = 108 - (value / maximum) * 92;
+      path += `${open ? " L" : "M"}${x.toFixed(2)} ${y.toFixed(2)}`;
+      open = true;
+    });
+    return path;
+  }
+  function apMetric(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
+  function renderApTraffic(value, history) {
+    apElements.items.replaceChildren();
+    apElements.applied.textContent = displayRange(history.range.id);
+    apElements.population.textContent = `${value.population.population_count} AP`;
+    if (value.status === "unsupported_population") {
+      apElements.state.dataset.state = "warning";
+      apElements.title.textContent = "AP population is not supported";
+      apElements.message.textContent = `${value.population.population_count} APs are in this Site/range; v1 supports up to 12 without truncation.`;
+      apElements.coverage.textContent = "Unsupported population";
+      apElements.current.textContent = "—";
+      return;
+    }
+    apElements.state.dataset.state = value.status === "ok" ? "ready" : "warning";
+    apElements.title.textContent = value.status === "ok" ? "AP traffic ready"
+      : (value.status === "partial" ? "AP traffic partial" : "AP traffic insufficient");
+    apElements.message.textContent = value.status === "ok"
+      ? "All supported Site AP evidence is complete."
+      : "All supported Site APs are shown; missing evidence remains unavailable.";
+    apElements.coverage.textContent = value.status === "ok" ? "Complete"
+      : (value.status === "partial" ? "Partial" : "Insufficient");
+    apElements.current.textContent = value.current_snapshot === null ? "Unavailable"
+      : `${displayTime(value.current_snapshot.evaluated_at)} · ${value.current_snapshot.freshness_status} · ${value.current_snapshot.selected_source}`;
+    for (const item of value.items) {
+      const card = document.createElement("article");
+      card.className = "card traffic-ap-card";
+      card.dataset.apMac = item.ap_mac;
+      const heading = document.createElement("h3");
+      heading.textContent = item.display_name;
+      const identity = document.createElement("p");
+      identity.className = "traffic-ap-identity";
+      identity.textContent = item.ap_mac;
+      const svg = document.createElementNS(elements.chart.namespaceURI, "svg");
+      svg.setAttribute("viewBox", "0 0 480 120");
+      svg.setAttribute("role", "img");
+      svg.setAttribute("aria-label", `${item.display_name} Download and Upload history`);
+      const numeric = [...item.history.series.download_mbps, ...item.history.series.upload_mbps]
+        .filter((entry) => entry !== null);
+      const maximum = Math.max(1, ...numeric);
+      const downloadPath = document.createElementNS(elements.chart.namespaceURI, "path");
+      downloadPath.setAttribute("class", "traffic-history-line-download");
+      downloadPath.setAttribute("d", apPath(item.history.series.download_mbps, item.history.series.status, maximum));
+      const uploadPath = document.createElementNS(elements.chart.namespaceURI, "path");
+      uploadPath.setAttribute("class", "traffic-history-line-upload");
+      uploadPath.setAttribute("d", apPath(item.history.series.upload_mbps, item.history.series.status, maximum));
+      svg.replaceChildren(downloadPath, uploadPath);
+      const metrics = document.createElement("div");
+      metrics.className = "traffic-ap-metrics";
+      for (const [label, family] of [
+        ["Now", item.now], ["Average", item.history.average], ["Peak", item.history.peak],
+      ]) {
+        const group = document.createElement("p");
+        group.textContent = `${label}: D ${apMetric(family.download_mbps)} · U ${apMetric(family.upload_mbps)} · Total ${apMetric(family.total_mbps)}`;
+        metrics.appendChild(group);
+      }
+      const evidence = document.createElement("p");
+      evidence.className = "traffic-ap-evidence";
+      const ratio = item.history.coverage.ap_interval_coverage_ratio;
+      const nowAt = item.now.observed_at === null ? "observed —" : `observed ${displayTime(item.now.observed_at)}`;
+      const nowAge = item.now.age_seconds === null ? "age —" : `age ${Math.round(item.now.age_seconds)}s`;
+      evidence.textContent = `Coverage ${ratio === null ? "—" : `${(ratio * 100).toFixed(1)}%`} · ${item.history.status} · Now ${item.now.status} · D ${item.now.download_reason} / U ${item.now.upload_reason} · ${item.now.selected_source || "source —"} · ${nowAt} · ${nowAge}`;
+      card.replaceChildren(heading, identity, svg, metrics, evidence);
+      apElements.items.appendChild(card);
+    }
+  }
   function render(result) {
-    const value = statisticsEnabled ? result.history : result;
+    const value = statisticsEnabled || apEnabled ? result.history : result;
     accepted = value;
     appliedRange = value.range.id;
     const empty = value.status === "insufficient_data";
@@ -1453,6 +1724,7 @@
     renderChart(value);
     if (statisticsEnabled) renderStatistics(result.statistics, value);
     if (peakEnabled) renderPeak(result.peak, value);
+    if (apEnabled) renderApTraffic(result.ap, value);
   }
   function renderFailure(failure) {
     elements.state.dataset.state = "error";
@@ -1470,6 +1742,11 @@
       peakElements.title.textContent = "Peak Load unavailable";
       peakElements.message.textContent = "The combined persisted History request failed.";
     }
+    if (apEnabled) {
+      apElements.state.dataset.state = "error";
+      apElements.title.textContent = "AP traffic unavailable";
+      apElements.message.textContent = "The combined persisted History request failed.";
+    }
   }
   function requestSelectedRange() {
     coordinator.refreshPanel(PANEL_KEY, {manual: true});
@@ -1481,19 +1758,24 @@
     autoRefresh: false,
     load: async (context) => {
       const requestRange = rangeContext.selected();
-      const suffix = peakEnabled ? "&include=statistics,peak" : (statisticsEnabled ? "&include=statistics" : "");
+      const include = peakEnabled ? (apEnabled ? "statistics,peak,aps" : "statistics,peak")
+        : (statisticsEnabled ? (apEnabled ? "statistics,aps" : "statistics")
+          : (apEnabled ? "aps" : null));
+      const suffix = include === null ? "" : `&include=${encodeURIComponent(include)}`;
       const value = validate(
         await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}`),
         context.siteId,
       );
-      if (!statisticsEnabled) return value;
+      let ap = null;
+      if (apEnabled) ap = validateApTraffic(value.ap_traffic, value);
+      if (!statisticsEnabled && !apEnabled) return value;
       let statistics = null;
       try { statistics = validateStatistics(value.period_statistics, value); } catch (_error) { statistics = null; }
       let peak = null;
       if (peakEnabled && statistics !== null) {
         try { peak = validatePeak(value.peak_load, value, statistics); } catch (_error) { peak = null; }
       }
-      return Object.freeze({history: value, statistics, peak});
+      return Object.freeze({history: value, statistics, peak, ap});
     },
     render,
     renderLoading,

@@ -15,7 +15,8 @@ from .test_traffic_history_frontend import (
 
 def test_statistics_is_passive_history_consumer_without_new_lifecycle_owner():
     panel = _panel_source()
-    assert "&include=statistics" in panel
+    assert '"statistics"' in panel
+    assert "encodeURIComponent(include)" in panel
     assert panel.count("coordinator.registerPanel(") == 1
     assert "fetch(" not in panel
     assert "setTimeout(" not in panel and "setInterval(" not in panel

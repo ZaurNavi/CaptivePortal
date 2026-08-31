@@ -353,6 +353,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             traffic_history_enabled=config.traffic_history_enabled,
             traffic_statistics_enabled=config.traffic_statistics_enabled,
             traffic_peak_enabled=config.traffic_peak_enabled,
+            traffic_by_ap_enabled=config.traffic_by_ap_enabled,
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -1167,8 +1168,12 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         range_id = None
         statistics_requested = False
         peak_requested = False
+        aps_requested = False
         statistics_status = None
         peak_status = None
+        ap_traffic_status = None
+        ap_population_count = None
+        ap_returned_count = None
         busiest_bucket_status = None
         busiest_hour_status = None
         result_status = None
@@ -1223,17 +1228,25 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             range_id = request.args.get("range")
             if "include" in request.args:
                 include = request.args.get("include")
-                if include not in {"statistics", "statistics,peak"}:
+                if include not in {
+                    "statistics", "statistics,peak", "aps",
+                    "statistics,aps", "statistics,peak,aps",
+                }:
                     response = make_response(_error("invalid_request", 400))
                     reason = "invalid_request"
                     return response
-                statistics_requested = True
-                if not config.traffic_statistics_enabled:
+                statistics_requested = include.startswith("statistics")
+                peak_requested = include.startswith("statistics,peak")
+                aps_requested = include.endswith("aps")
+                if statistics_requested and not config.traffic_statistics_enabled:
                     response = make_response(_error("not_found", 404))
                     reason = "feature_disabled"
                     return response
-                peak_requested = include == "statistics,peak"
                 if peak_requested and not config.traffic_peak_enabled:
+                    response = make_response(_error("not_found", 404))
+                    reason = "feature_disabled"
+                    return response
+                if aps_requested and not config.traffic_by_ap_enabled:
                     response = make_response(_error("not_found", 404))
                     reason = "feature_disabled"
                     return response
@@ -1249,6 +1262,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     range_id=range_id,
                     include_statistics=statistics_requested,
                     include_peak=peak_requested,
+                    include_aps=aps_requested,
                 )
                 result_status = result.result.get("status")
                 coverage = result.result.get("coverage", {})
@@ -1274,6 +1288,13 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                         busiest_hour.get("status")
                         if isinstance(busiest_hour, dict) else None
                     )
+                ap_traffic = result.result.get("ap_traffic")
+                if isinstance(ap_traffic, dict):
+                    ap_traffic_status = ap_traffic.get("status")
+                    population = ap_traffic.get("population")
+                    if isinstance(population, dict):
+                        ap_population_count = population.get("population_count")
+                        ap_returned_count = population.get("returned_ap_count")
                 response = make_response(_success(
                     selected,
                     result.result,
@@ -1330,6 +1351,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     statistics_status=statistics_status,
                     peak_requested=peak_requested,
                     peak_status=peak_status,
+                    ap_traffic_requested=aps_requested,
+                    ap_traffic_status=ap_traffic_status,
+                    ap_population_count=ap_population_count,
+                    ap_returned_count=ap_returned_count,
+                    ap_supported_max=12 if aps_requested else None,
                     busiest_bucket_status=busiest_bucket_status,
                     busiest_hour_status=busiest_hour_status,
                     response_bytes=getattr(response, "content_length", None),
