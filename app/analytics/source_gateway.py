@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from datetime import datetime
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Mapping, Sequence
@@ -545,6 +546,33 @@ _HISTORICAL_PEAK_SAMPLE_FIELDS = (
     "peak_sample_interval_result",
 )
 
+_HISTORICAL_AP_RESULT_FIELDS = (
+    "ap_mac",
+    "ap_current_name",
+    "ap_historical_name",
+    "ap_bucket_index",
+    "ap_bucket_opportunity_count",
+    "ap_bucket_accepted_count",
+    "ap_bucket_download",
+    "ap_bucket_upload",
+    "ap_sample_opportunity_count",
+    "ap_accepted_sample_count",
+    "ap_site_accepted_interval_seconds",
+    "ap_accepted_interval_seconds",
+    "ap_weighted_download",
+    "ap_weighted_upload",
+    "ap_peak_download",
+    "ap_peak_upload",
+    "ap_peak_total",
+    "ap_no_baseline_count",
+    "ap_counter_reset_count",
+    "ap_gap_too_large_count",
+    "ap_invalid_elapsed_count",
+    "ap_source_unavailable_count",
+    "ap_missing_selected_source_sample_count",
+    "ap_source_transition_excluded_interval_count",
+)
+
 _HISTORICAL_STATISTICS_AGGREGATES_SQL = """
       COUNT(*) accepted_peak_sample_count,
       CASE WHEN COUNT(*)=0 THEN 0 ELSE COUNT(*)-1 END
@@ -729,7 +757,713 @@ _HISTORICAL_PEAK_COMBINED_SQL = _HISTORICAL_COMBINED_CTES_SQL + f"""
   ORDER BY projection_kind, projection_order
 """
 
+_HISTORICAL_AP_NULL_RESULT_SELECT_SQL = ",\n    ".join(
+    f"NULL AS {field}" for field in _HISTORICAL_AP_RESULT_FIELDS
+)
+_HISTORICAL_AP_RESULT_SELECT_SQL = ",\n    ".join(
+    f"x.{field}" for field in _HISTORICAL_AP_RESULT_FIELDS
+)
 
+_HISTORICAL_AP_CTES_SQL = _HISTORICAL_COMBINED_CTES_SQL + f""",
+  ap_request AS MATERIALIZED (
+    SELECT ? AS current_cycle_id, ? AS site_id
+  ),
+  ap_population_evidence AS MATERIALIZED (
+    SELECT a.ap_mac,
+      MAX(a.cycle_id=q.current_cycle_id) AS current_member,
+      MAX(r.cycle_id IS NOT NULL) AS historical_member,
+      MAX(CASE WHEN a.cycle_id=q.current_cycle_id
+        AND a.name IS NOT NULL AND trim(a.name)<>'' THEN a.name END)
+        AS current_name
+    FROM ap_observations a
+    CROSS JOIN ap_request q
+    LEFT JOIN ranged r ON r.cycle_id=a.cycle_id
+    WHERE a.site_id=q.site_id
+      AND (a.cycle_id=q.current_cycle_id OR r.cycle_id IS NOT NULL)
+    GROUP BY a.ap_mac
+  ),
+  ap_historical_names_ranked AS MATERIALIZED (
+    SELECT a.ap_mac, a.name,
+      ROW_NUMBER() OVER (
+        PARTITION BY a.ap_mac ORDER BY r.finished_at DESC, r.cycle_id DESC
+      ) AS name_rank
+    FROM ranged r
+    JOIN ap_observations a ON a.cycle_id=r.cycle_id
+    CROSS JOIN ap_request q
+    WHERE a.site_id=q.site_id AND a.name IS NOT NULL AND trim(a.name)<>''
+  ),
+  ap_population AS MATERIALIZED (
+    SELECT e.ap_mac, e.current_member, e.historical_member,
+      e.current_name, n.name AS historical_name
+    FROM ap_population_evidence e
+    LEFT JOIN ap_historical_names_ranked n
+      ON n.ap_mac=e.ap_mac AND n.name_rank=1
+  ),
+  ap_population_meta AS MATERIALIZED (
+    SELECT COUNT(*) AS population_count,
+      COALESCE(SUM(current_member),0) AS current_population_count,
+      COALESCE(SUM(historical_member),0) AS historical_population_count
+    FROM ap_population
+  ),
+  ap_supported_population AS MATERIALIZED (
+    SELECT p.* FROM ap_population p CROSS JOIN ap_population_meta m
+    WHERE m.population_count<=12
+  ),
+  ap_bucket_rows AS MATERIALIZED (
+    SELECT p.ap_mac, s.bucket_index,
+      COUNT(b.cycle_id) AS opportunity_count,
+      COUNT(a.row_id) AS accepted_count,
+      AVG(CASE WHEN b.selected_source='wired'
+        THEN a.wired_download_mbps ELSE a.lan_rx_mbps END) AS download,
+      AVG(CASE WHEN b.selected_source='wired'
+        THEN a.wired_upload_mbps ELSE a.lan_tx_mbps END) AS upload
+    FROM ap_supported_population p
+    CROSS JOIN bucket_selection s
+    LEFT JOIN bucket_selected b ON b.bucket_index=s.bucket_index
+    LEFT JOIN ap_observations a
+      ON a.cycle_id=b.cycle_id AND a.ap_mac=p.ap_mac
+    GROUP BY p.ap_mac, s.bucket_index
+  ),
+  ap_sample_rows AS MATERIALIZED (
+    SELECT p.ap_mac, s.cycle_id, s.selected_source, s.interval_result,
+      s.elapsed_seconds,
+      a.row_id,
+      CASE WHEN s.selected_source='wired'
+        THEN a.wired_download_mbps ELSE a.lan_rx_mbps END AS download,
+      CASE WHEN s.selected_source='wired'
+        THEN a.wired_upload_mbps ELSE a.lan_tx_mbps END AS upload
+    FROM ap_supported_population p
+    CROSS JOIN statistics_classified s
+    LEFT JOIN ap_observations a
+      ON a.cycle_id=s.cycle_id AND a.ap_mac=p.ap_mac
+  ),
+  ap_quality_rows AS MATERIALIZED (
+    SELECT p.ap_mac, r.cycle_id, s.selected_source, a.row_id,
+      CASE WHEN s.selected_source='wired'
+        THEN a.wired_download_rate_reason ELSE a.lan_rx_rate_reason END
+        AS download_reason,
+      CASE WHEN s.selected_source='wired'
+        THEN a.wired_upload_rate_reason ELSE a.lan_tx_rate_reason END
+        AS upload_reason
+    FROM ap_supported_population p
+    CROSS JOIN ranged r
+    JOIN bucket_selection s USING(bucket_index)
+    LEFT JOIN ap_observations a
+      ON a.cycle_id=r.cycle_id AND a.ap_mac=p.ap_mac
+  ),
+  ap_quality_aggregates AS MATERIALIZED (
+    SELECT ap_mac,
+      COALESCE(SUM(download_reason='no_baseline')
+        +SUM(upload_reason='no_baseline'),0) AS no_baseline_count,
+      COALESCE(SUM(download_reason='counter_reset')
+        +SUM(upload_reason='counter_reset'),0) AS counter_reset_count,
+      COALESCE(SUM(download_reason='gap_too_large')
+        +SUM(upload_reason='gap_too_large'),0) AS gap_too_large_count,
+      COALESCE(SUM(download_reason='invalid_elapsed')
+        +SUM(upload_reason='invalid_elapsed'),0) AS invalid_elapsed_count,
+      COALESCE(SUM(download_reason='source_unavailable')
+        +SUM(upload_reason='source_unavailable'),0) AS source_unavailable_count
+    FROM ap_quality_rows GROUP BY ap_mac
+  ),
+  ap_aggregates AS MATERIALIZED (
+    SELECT p.ap_mac,
+      COUNT(s.cycle_id) AS sample_opportunity_count,
+      COUNT(s.row_id) AS accepted_sample_count,
+      COALESCE(SUM(CASE WHEN s.interval_result='accepted'
+        THEN s.elapsed_seconds ELSE 0 END),0.0)
+        AS site_accepted_interval_seconds,
+      COALESCE(SUM(CASE WHEN s.interval_result='accepted' AND s.row_id IS NOT NULL
+        THEN s.elapsed_seconds ELSE 0 END),0.0)
+        AS accepted_interval_seconds,
+      SUM(CASE WHEN s.interval_result='accepted' AND s.row_id IS NOT NULL
+        THEN s.download*s.elapsed_seconds END) AS weighted_download,
+      SUM(CASE WHEN s.interval_result='accepted' AND s.row_id IS NOT NULL
+        THEN s.upload*s.elapsed_seconds END) AS weighted_upload,
+      MAX(CASE WHEN s.row_id IS NOT NULL THEN s.download END) AS peak_download,
+      MAX(CASE WHEN s.row_id IS NOT NULL THEN s.upload END) AS peak_upload,
+      MAX(CASE WHEN s.row_id IS NOT NULL THEN s.download+s.upload END)
+        AS peak_total,
+      COUNT(s.cycle_id)-COUNT(s.row_id) AS missing_selected_source_sample_count,
+      COALESCE(SUM(s.interval_result='source_transition'
+        AND s.row_id IS NOT NULL),0) AS source_transition_excluded_interval_count
+    FROM ap_supported_population p
+    LEFT JOIN ap_sample_rows s ON s.ap_mac=p.ap_mac
+    GROUP BY p.ap_mac
+  ),
+  ap_result_rows AS MATERIALIZED (
+    SELECT p.ap_mac, p.current_name AS ap_current_name,
+      p.historical_name AS ap_historical_name,
+      b.bucket_index AS ap_bucket_index,
+      b.opportunity_count AS ap_bucket_opportunity_count,
+      b.accepted_count AS ap_bucket_accepted_count,
+      b.download AS ap_bucket_download,
+      b.upload AS ap_bucket_upload,
+      g.sample_opportunity_count AS ap_sample_opportunity_count,
+      g.accepted_sample_count AS ap_accepted_sample_count,
+      g.site_accepted_interval_seconds AS ap_site_accepted_interval_seconds,
+      g.accepted_interval_seconds AS ap_accepted_interval_seconds,
+      g.weighted_download AS ap_weighted_download,
+      g.weighted_upload AS ap_weighted_upload,
+      g.peak_download AS ap_peak_download,
+      g.peak_upload AS ap_peak_upload,
+      g.peak_total AS ap_peak_total,
+      COALESCE(q.no_baseline_count,0) AS ap_no_baseline_count,
+      COALESCE(q.counter_reset_count,0) AS ap_counter_reset_count,
+      COALESCE(q.gap_too_large_count,0) AS ap_gap_too_large_count,
+      COALESCE(q.invalid_elapsed_count,0) AS ap_invalid_elapsed_count,
+      COALESCE(q.source_unavailable_count,0) AS ap_source_unavailable_count,
+      g.missing_selected_source_sample_count
+        AS ap_missing_selected_source_sample_count,
+      g.source_transition_excluded_interval_count
+        AS ap_source_transition_excluded_interval_count
+    FROM ap_supported_population p
+    JOIN ap_aggregates g USING(ap_mac)
+    LEFT JOIN ap_quality_aggregates q USING(ap_mac)
+    LEFT JOIN ap_bucket_rows b USING(ap_mac)
+  )
+"""
+
+_HISTORICAL_AP_BASE_SELECT_SQL = f"""
+  SELECT 0 AS projection_kind, b.bucket_index AS projection_order,
+    {_HISTORICAL_PEAK_BUCKET_SELECT_SQL},
+    m.integrity_failure_count,
+    {_HISTORICAL_PEAK_STATISTICS_SELECT_SQL},
+    {_HISTORICAL_PEAK_NULL_SAMPLE_SELECT_SQL},
+    pm.population_count AS ap_population_count,
+    pm.current_population_count AS ap_current_population_count,
+    pm.historical_population_count AS ap_historical_population_count,
+    {_HISTORICAL_AP_NULL_RESULT_SELECT_SQL}
+  FROM integrity_meta m
+  CROSS JOIN statistics_row p
+  CROSS JOIN ap_population_meta pm
+  LEFT JOIN bucket_rows b ON 1=1
+"""
+
+_HISTORICAL_AP_ROWS_SELECT_SQL = f"""
+  SELECT 2 AS projection_kind,
+    ROW_NUMBER() OVER (ORDER BY x.ap_mac, x.ap_bucket_index) AS projection_order,
+    {_HISTORICAL_PEAK_NULL_BUCKET_SELECT_SQL},
+    NULL AS integrity_failure_count,
+    {_HISTORICAL_PEAK_NULL_STATISTICS_SELECT_SQL},
+    {_HISTORICAL_PEAK_NULL_SAMPLE_SELECT_SQL},
+    pm.population_count AS ap_population_count,
+    pm.current_population_count AS ap_current_population_count,
+    pm.historical_population_count AS ap_historical_population_count,
+    {_HISTORICAL_AP_RESULT_SELECT_SQL}
+  FROM ap_population_meta pm
+  JOIN ap_result_rows x ON 1=1
+"""
+
+_HISTORICAL_AP_COMBINED_SQL = _HISTORICAL_AP_CTES_SQL + f"""
+  {_HISTORICAL_AP_BASE_SELECT_SQL}
+  UNION ALL
+  {_HISTORICAL_AP_ROWS_SELECT_SQL}
+  ORDER BY projection_kind, projection_order
+"""
+
+_HISTORICAL_AP_PEAK_COMBINED_SQL = _HISTORICAL_AP_CTES_SQL + f"""
+  {_HISTORICAL_AP_BASE_SELECT_SQL}
+  UNION ALL
+  SELECT 1 AS projection_kind, s.sequence_no AS projection_order,
+    {_HISTORICAL_PEAK_NULL_BUCKET_SELECT_SQL},
+    NULL AS integrity_failure_count,
+    {_HISTORICAL_PEAK_NULL_STATISTICS_SELECT_SQL},
+    s.finished_at AS peak_sample_finished_at,
+    s.selected_source AS peak_sample_selected_source,
+    s.download AS peak_sample_download,
+    s.upload AS peak_sample_upload,
+    s.previous_at AS peak_sample_previous_at,
+    s.interval_result AS peak_sample_interval_result,
+    pm.population_count AS ap_population_count,
+    pm.current_population_count AS ap_current_population_count,
+    pm.historical_population_count AS ap_historical_population_count,
+    {_HISTORICAL_AP_NULL_RESULT_SELECT_SQL}
+  FROM statistics_classified s CROSS JOIN ap_population_meta pm
+  UNION ALL
+  {_HISTORICAL_AP_ROWS_SELECT_SQL}
+  ORDER BY projection_kind, projection_order
+"""
+
+
+
+# TASK-TRAFFIC-05 R6: lean AP support reuses the existing Site
+# History/Statistics projection. Only cycle identity/bucket support is added;
+# AP identity is discovered before the heavier bounded raw-rate projection.
+_HISTORICAL_AP_LEAN_CTES_SQL = _HISTORICAL_COMBINED_CTES_SQL.replace(
+    "SELECT r.cycle_id, r.finished_at, s.selected_source,",
+    "SELECT r.cycle_id, r.finished_at, r.bucket_index, s.selected_source,",
+    1,
+)
+
+_HISTORICAL_AP_LEAN_COMBINED_SQL = _HISTORICAL_AP_LEAN_CTES_SQL + f"""
+  SELECT 0 AS projection_kind, b.bucket_index AS projection_order,
+    {_HISTORICAL_PEAK_BUCKET_SELECT_SQL},
+    m.integrity_failure_count,
+    {_HISTORICAL_PEAK_STATISTICS_SELECT_SQL},
+    {_HISTORICAL_PEAK_NULL_SAMPLE_SELECT_SQL},
+    NULL AS ap_support_cycle_id,
+    NULL AS ap_support_bucket_index
+  FROM integrity_meta m
+  CROSS JOIN statistics_row p
+  LEFT JOIN bucket_rows b ON 1=1
+
+  UNION ALL
+
+  SELECT 1 AS projection_kind, s.sequence_no AS projection_order,
+    {_HISTORICAL_PEAK_NULL_BUCKET_SELECT_SQL},
+    NULL AS integrity_failure_count,
+    {_HISTORICAL_PEAK_NULL_STATISTICS_SELECT_SQL},
+    s.finished_at AS peak_sample_finished_at,
+    s.selected_source AS peak_sample_selected_source,
+    s.download AS peak_sample_download,
+    s.upload AS peak_sample_upload,
+    s.previous_at AS peak_sample_previous_at,
+    s.interval_result AS peak_sample_interval_result,
+    s.cycle_id AS ap_support_cycle_id,
+    s.bucket_index AS ap_support_bucket_index
+  FROM statistics_classified s
+
+  UNION ALL
+
+  SELECT 2 AS projection_kind,
+    ROW_NUMBER() OVER (ORDER BY r.finished_at,r.cycle_id)
+      AS projection_order,
+    {_HISTORICAL_PEAK_NULL_BUCKET_SELECT_SQL},
+    NULL AS integrity_failure_count,
+    {_HISTORICAL_PEAK_NULL_STATISTICS_SELECT_SQL},
+    r.finished_at AS peak_sample_finished_at,
+    s.selected_source AS peak_sample_selected_source,
+    NULL AS peak_sample_download,
+    NULL AS peak_sample_upload,
+    NULL AS peak_sample_previous_at,
+    NULL AS peak_sample_interval_result,
+    r.cycle_id AS ap_support_cycle_id,
+    r.bucket_index AS ap_support_bucket_index
+  FROM ranged r
+  JOIN bucket_selection s USING(bucket_index)
+  WHERE NOT CASE WHEN s.selected_source='wired'
+    THEN r.wired_complete ELSE r.lan_complete END
+
+  ORDER BY projection_kind, projection_order
+"""
+
+_HISTORICAL_AP_CANDIDATES_MATERIALIZED_CTE = (
+    _HISTORICAL_RANGE_CANDIDATES_CTE.replace(
+        "candidate_cycles AS (",
+        "candidate_cycles AS MATERIALIZED (",
+        1,
+    )
+)
+
+_HISTORICAL_AP_IDENTITY_SQL = f"""
+  WITH {_HISTORICAL_AP_CANDIDATES_MATERIALIZED_CTE}
+  SELECT c.cycle_id, a.ap_mac
+  FROM candidate_cycles c
+  CROSS JOIN ap_observations a
+    INDEXED BY sqlite_autoindex_ap_observations_1
+  WHERE a.cycle_id=c.cycle_id AND a.site_id=?
+"""
+
+_HISTORICAL_AP_RAW_SQL = f"""
+  WITH {_HISTORICAL_AP_CANDIDATES_MATERIALIZED_CTE}
+  SELECT c.cycle_id, c.finished_at,
+    a.ap_mac, a.row_id, a.name,
+    a.wired_download_mbps, a.wired_upload_mbps,
+    a.wired_download_rate_reason, a.wired_upload_rate_reason,
+    a.lan_rx_mbps, a.lan_tx_mbps,
+    a.lan_rx_rate_reason, a.lan_tx_rate_reason
+  FROM candidate_cycles c
+  CROSS JOIN ap_observations a
+    INDEXED BY sqlite_autoindex_ap_observations_1
+  WHERE a.cycle_id=c.cycle_id AND a.site_id=?
+"""
+
+_HISTORICAL_AP_CURRENT_IDENTITY_SQL = """
+  SELECT a.ap_mac, a.name
+  FROM ap_observations a
+    INDEXED BY sqlite_autoindex_ap_observations_1
+  WHERE a.cycle_id=? AND a.site_id=?
+  ORDER BY a.ap_mac
+"""
+
+
+def _historical_ap_epoch_ms(value: str) -> int:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return int(parsed.timestamp()) * 1000 + parsed.microsecond // 1000
+
+
+_HISTORICAL_AP_QUALITY_REASONS = frozenset((
+    "no_baseline",
+    "counter_reset",
+    "gap_too_large",
+    "invalid_elapsed",
+    "source_unavailable",
+))
+
+
+def _historical_ap_population_and_rows(
+    *,
+    support_rows: Sequence[Mapping[str, Any]],
+    identity_rows: Sequence[Mapping[str, Any]],
+    raw_rows: Sequence[Mapping[str, Any]],
+    current_identity_rows: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, int], tuple[Mapping[str, Any], ...]]:
+    """Compose the exact R3 AP aggregate-row contract in one raw-row pass."""
+    support: dict[str, dict[str, Any]] = {}
+    complete_support: list[dict[str, Any]] = []
+    bucket_opportunity_count: dict[int, int] = {}
+    site_accepted_interval_seconds = 0.0
+
+    for source_row in support_rows:
+        row = source_row
+        kind = int(row["projection_kind"])
+        if kind not in (1, 2):
+            continue
+
+        cycle_id = row["ap_support_cycle_id"]
+        bucket_index = row["ap_support_bucket_index"]
+        finished_at = row["peak_sample_finished_at"]
+        selected_source = row["peak_sample_selected_source"]
+        if (
+            not isinstance(cycle_id, str)
+            or not cycle_id
+            or type(bucket_index) is not int
+            or bucket_index < 0
+            or not isinstance(finished_at, str)
+            or not finished_at
+            or selected_source not in {"wired", "lan"}
+            or cycle_id in support
+        ):
+            raise AnalyticsSourceUnavailable(
+                "Historical AP lean support is unavailable"
+            )
+
+        previous_at = row["peak_sample_previous_at"]
+        interval_result = row["peak_sample_interval_result"]
+        elapsed: float | None = None
+
+        if kind == 1:
+            if interval_result not in {
+                "first", "accepted", "gap", "source_transition", "invalid"
+            }:
+                raise AnalyticsSourceUnavailable(
+                    "Historical AP interval support is unavailable"
+                )
+            if isinstance(previous_at, str) and previous_at:
+                elapsed = (
+                    _historical_ap_epoch_ms(finished_at)
+                    - _historical_ap_epoch_ms(previous_at)
+                ) / 1000.0
+            if interval_result == "accepted":
+                if elapsed is None or elapsed <= 0:
+                    raise AnalyticsSourceUnavailable(
+                        "Historical AP accepted interval is unavailable"
+                    )
+                site_accepted_interval_seconds += elapsed
+            bucket_opportunity_count[bucket_index] = (
+                bucket_opportunity_count.get(bucket_index, 0) + 1
+            )
+
+        item = {
+            "cycle_id": cycle_id,
+            "bucket_index": bucket_index,
+            "finished_at": finished_at,
+            "selected_source": selected_source,
+            "selected_complete": kind == 1,
+            "interval_result": interval_result,
+            "elapsed": elapsed,
+        }
+        support[cycle_id] = item
+        if kind == 1:
+            complete_support.append(item)
+
+    support_ids = set(support)
+    sample_opportunity_count = len(complete_support)
+    bucket_indexes = sorted({
+        int(item["bucket_index"]) for item in support.values()
+    })
+
+    historical_macs: set[str] = set()
+    seen_identity_keys: set[tuple[str, str]] = set()
+    for source_row in identity_rows:
+        row = source_row
+        cycle_id = row["cycle_id"]
+        mac = row["ap_mac"]
+        if not isinstance(cycle_id, str) or not isinstance(mac, str):
+            raise AnalyticsSourceUnavailable(
+                "Historical AP identity projection is unavailable"
+            )
+        if cycle_id not in support_ids:
+            continue
+        key = (cycle_id, mac)
+        if key in seen_identity_keys:
+            raise AnalyticsSourceUnavailable(
+                "Historical AP identity projection contains duplicates"
+            )
+        seen_identity_keys.add(key)
+        historical_macs.add(mac)
+
+    current_names: dict[str, str | None] = {}
+    for source_row in current_identity_rows:
+        row = source_row
+        mac = row["ap_mac"]
+        if not isinstance(mac, str) or not mac or mac in current_names:
+            raise AnalyticsSourceUnavailable(
+                "Current AP identity projection is unavailable"
+            )
+        name = row["name"]
+        current_names[mac] = (
+            name if isinstance(name, str) and name.strip() else None
+        )
+
+    population_macs = set(current_names) | historical_macs
+    population = {
+        "population_count": len(population_macs),
+        "current_population_count": len(current_names),
+        "historical_population_count": len(historical_macs),
+    }
+
+    if len(population_macs) > 12:
+        if raw_rows:
+            raise AnalyticsSourceUnavailable(
+                "Unsupported AP population was materialized"
+            )
+        return population, ()
+
+    if not population_macs:
+        if raw_rows:
+            raise AnalyticsSourceUnavailable(
+                "Historical AP raw projection is unexpected"
+            )
+        return population, ()
+
+    def new_state() -> dict[str, Any]:
+        return {
+            "accepted_sample_count": 0,
+            "accepted_interval_seconds": 0.0,
+            "weighted_download": 0.0,
+            "weighted_upload": 0.0,
+            "peak_download": None,
+            "peak_upload": None,
+            "peak_total": None,
+            "no_baseline": 0,
+            "counter_reset": 0,
+            "gap_too_large": 0,
+            "invalid_elapsed": 0,
+            "source_unavailable": 0,
+            "source_transition_excluded_interval_count": 0,
+            "historical_name": None,
+            "historical_name_key": None,
+            "buckets": {},
+        }
+
+    states: dict[str, dict[str, Any]] = {
+        mac: new_state() for mac in population_macs
+    }
+    raw_historical_macs: set[str] = set()
+    seen_raw_keys: set[tuple[str, str]] = set()
+
+    for source_row in raw_rows:
+        row = source_row
+        cycle_id = row["cycle_id"]
+        mac = row["ap_mac"]
+        if not isinstance(cycle_id, str) or not isinstance(mac, str):
+            raise AnalyticsSourceUnavailable(
+                "Historical AP raw projection is unavailable"
+            )
+
+        item = support.get(cycle_id)
+        if item is None:
+            continue
+
+        key = (cycle_id, mac)
+        if key in seen_raw_keys:
+            raise AnalyticsSourceUnavailable(
+                "Historical AP raw projection contains duplicates"
+            )
+        seen_raw_keys.add(key)
+        raw_historical_macs.add(mac)
+
+        state = states.get(mac)
+        if state is None:
+            raise AnalyticsSourceUnavailable(
+                "Historical AP raw population projection is inconsistent"
+            )
+
+        selected_source = str(item["selected_source"])
+        if selected_source == "wired":
+            download = row["wired_download_mbps"]
+            upload = row["wired_upload_mbps"]
+            down_reason = row["wired_download_rate_reason"]
+            up_reason = row["wired_upload_rate_reason"]
+        else:
+            download = row["lan_rx_mbps"]
+            upload = row["lan_tx_mbps"]
+            down_reason = row["lan_rx_rate_reason"]
+            up_reason = row["lan_tx_rate_reason"]
+
+        if down_reason in _HISTORICAL_AP_QUALITY_REASONS:
+            state[down_reason] += 1
+        if up_reason in _HISTORICAL_AP_QUALITY_REASONS:
+            state[up_reason] += 1
+
+        name = row["name"]
+        if isinstance(name, str) and name.strip():
+            name_key = (str(item["finished_at"]), cycle_id)
+            if (
+                state["historical_name_key"] is None
+                or name_key > state["historical_name_key"]
+            ):
+                state["historical_name_key"] = name_key
+                state["historical_name"] = name
+
+        # Incomplete support cycles are valid quality/name evidence, but
+        # their bucket-selected rate may legitimately be unavailable.
+        # R3 validates D/U only for selected-complete samples.
+        if not item["selected_complete"]:
+            continue
+
+        if (
+            type(download) not in (int, float)
+            or isinstance(download, bool)
+            or type(upload) not in (int, float)
+            or isinstance(upload, bool)
+            or float(download) < 0
+            or float(upload) < 0
+        ):
+            raise AnalyticsSourceUnavailable(
+                "Historical AP selected rate is unavailable"
+            )
+
+        download = float(download)
+        upload = float(upload)
+
+        state["accepted_sample_count"] += 1
+        state["peak_download"] = (
+            download
+            if state["peak_download"] is None
+            else max(state["peak_download"], download)
+        )
+        state["peak_upload"] = (
+            upload
+            if state["peak_upload"] is None
+            else max(state["peak_upload"], upload)
+        )
+        total = download + upload
+        state["peak_total"] = (
+            total
+            if state["peak_total"] is None
+            else max(state["peak_total"], total)
+        )
+
+        interval_result = item["interval_result"]
+        if interval_result == "accepted":
+            elapsed = item["elapsed"]
+            if elapsed is None:
+                raise AnalyticsSourceUnavailable(
+                    "Historical AP accepted interval is unavailable"
+                )
+            state["accepted_interval_seconds"] += elapsed
+            state["weighted_download"] += download * elapsed
+            state["weighted_upload"] += upload * elapsed
+        elif interval_result == "source_transition":
+            state["source_transition_excluded_interval_count"] += 1
+
+        bucket_index = int(item["bucket_index"])
+        bucket = state["buckets"].get(bucket_index)
+        if bucket is None:
+            state["buckets"][bucket_index] = [1, download, upload]
+        else:
+            bucket[0] += 1
+            bucket[1] += download
+            bucket[2] += upload
+
+    if raw_historical_macs != historical_macs:
+        raise AnalyticsSourceUnavailable(
+            "Historical AP raw population projection is incomplete"
+        )
+
+    result_rows: list[Mapping[str, Any]] = []
+
+    for mac in sorted(population_macs):
+        state = states[mac]
+        accepted_interval_seconds = float(
+            state["accepted_interval_seconds"]
+        )
+
+        aggregate = {
+            "ap_current_name": current_names.get(mac),
+            "ap_historical_name": state["historical_name"],
+            "ap_sample_opportunity_count": sample_opportunity_count,
+            "ap_accepted_sample_count": state["accepted_sample_count"],
+            "ap_site_accepted_interval_seconds": (
+                site_accepted_interval_seconds
+            ),
+            "ap_accepted_interval_seconds": accepted_interval_seconds,
+            "ap_weighted_download": (
+                state["weighted_download"]
+                if accepted_interval_seconds > 0
+                else None
+            ),
+            "ap_weighted_upload": (
+                state["weighted_upload"]
+                if accepted_interval_seconds > 0
+                else None
+            ),
+            "ap_peak_download": state["peak_download"],
+            "ap_peak_upload": state["peak_upload"],
+            "ap_peak_total": state["peak_total"],
+            "ap_no_baseline_count": state["no_baseline"],
+            "ap_counter_reset_count": state["counter_reset"],
+            "ap_gap_too_large_count": state["gap_too_large"],
+            "ap_invalid_elapsed_count": state["invalid_elapsed"],
+            "ap_source_unavailable_count": state["source_unavailable"],
+            "ap_missing_selected_source_sample_count": (
+                sample_opportunity_count
+                - state["accepted_sample_count"]
+            ),
+            "ap_source_transition_excluded_interval_count": state[
+                "source_transition_excluded_interval_count"
+            ],
+        }
+
+        if not bucket_indexes:
+            result_rows.append({
+                "ap_mac": mac,
+                **aggregate,
+                "ap_bucket_index": None,
+                "ap_bucket_opportunity_count": 0,
+                "ap_bucket_accepted_count": 0,
+                "ap_bucket_download": None,
+                "ap_bucket_upload": None,
+            })
+            continue
+
+        bucket_state = state["buckets"]
+        for bucket_index in bucket_indexes:
+            values = bucket_state.get(bucket_index)
+            if values is None:
+                accepted_count = 0
+                bucket_download = None
+                bucket_upload = None
+            else:
+                accepted_count = int(values[0])
+                bucket_download = float(values[1]) / accepted_count
+                bucket_upload = float(values[2]) / accepted_count
+
+            result_rows.append({
+                "ap_mac": mac,
+                **aggregate,
+                "ap_bucket_index": bucket_index,
+                "ap_bucket_opportunity_count": (
+                    bucket_opportunity_count.get(bucket_index, 0)
+                ),
+                "ap_bucket_accepted_count": accepted_count,
+                "ap_bucket_download": bucket_download,
+                "ap_bucket_upload": bucket_upload,
+            })
+
+    return population, tuple(result_rows)
 _HISTORICAL_META_SQL = f"""
   WITH {_HISTORICAL_CYCLE_CTES}
   SELECT
@@ -1236,6 +1970,8 @@ class AnalyticsSourceGateway:
         deadline: QueryDeadline,
         include_period_statistics: bool = False,
         include_peak_load: bool = False,
+        include_ap_traffic: bool = False,
+        current_cycle_id: str | None = None,
     ) -> Mapping[str, Any]:
         """Return bounded historical AP-rate aggregates from one read snapshot."""
         max_skew_milliseconds = max_site_sample_source_skew_seconds * 1000
@@ -1247,15 +1983,10 @@ class AnalyticsSourceGateway:
         with self._connection("observations", deadline) as connection:
             connection.execute("BEGIN")
             try:
-                if include_period_statistics:
-                    combined_rows = self._all(
-                        connection,
-                        (
-                            _HISTORICAL_PEAK_COMBINED_SQL
-                            if include_peak_load
-                            else _HISTORICAL_COMBINED_SQL
-                        ),
-                        (
+                if include_period_statistics or include_ap_traffic:
+                    if include_ap_traffic:
+                        combined_sql = _HISTORICAL_AP_LEAN_COMBINED_SQL
+                        combined_parameters = (
                             *cycle_parameters,
                             from_utc, to_utc, from_utc, to_utc,
                             from_utc, from_utc,
@@ -1264,7 +1995,28 @@ class AnalyticsSourceGateway:
                             to_utc,
                             gap_threshold_seconds,
                             gap_threshold_seconds,
-                        ),
+                        )
+                    else:
+                        combined_sql = (
+                            _HISTORICAL_PEAK_COMBINED_SQL
+                            if include_peak_load
+                            else _HISTORICAL_COMBINED_SQL
+                        )
+                        combined_parameters = (
+                            *cycle_parameters,
+                            from_utc, to_utc, from_utc, to_utc,
+                            from_utc, from_utc,
+                            bucket_seconds,
+                            from_utc,
+                            to_utc,
+                            gap_threshold_seconds,
+                            gap_threshold_seconds,
+                        )
+
+                    combined_rows = self._all(
+                        connection,
+                        combined_sql,
+                        combined_parameters,
                         deadline,
                     )
                     if not combined_rows:
@@ -1272,7 +2024,10 @@ class AnalyticsSourceGateway:
                             "Historical traffic combined projection is unavailable"
                         )
                     first = combined_rows[0]
-                    if include_peak_load and int(first["projection_kind"]) != 0:
+                    if (
+                        (include_peak_load or include_ap_traffic)
+                        and int(first["projection_kind"]) != 0
+                    ):
                         raise AnalyticsSourceUnavailable(
                             "Historical traffic combined projection is unavailable"
                         )
@@ -1281,7 +2036,7 @@ class AnalyticsSourceGateway:
                             "integrity_failure_count"
                         ]
                     }
-                    statistics = {
+                    combined_statistics = {
                         field: first[field]
                         for field in _HISTORICAL_STATISTICS_RESULT_FIELDS
                     }
@@ -1289,21 +2044,34 @@ class AnalyticsSourceGateway:
                         "integrity_failure_count",
                         *_HISTORICAL_STATISTICS_RESULT_FIELDS,
                     }
-                    if include_peak_load:
+
+                    projected = include_peak_load or include_ap_traffic
+                    if projected:
                         auxiliary_fields.update((
                             "projection_kind",
                             "projection_order",
                             *_HISTORICAL_PEAK_SAMPLE_FIELDS,
                         ))
+                    if include_ap_traffic:
+                        auxiliary_fields.update((
+                            "ap_support_cycle_id",
+                            "ap_support_bucket_index",
+                        ))
+
+                    if include_peak_load:
                         peak_samples = tuple(
                             {
-                                "finished_at": row["peak_sample_finished_at"],
+                                "finished_at": row[
+                                    "peak_sample_finished_at"
+                                ],
                                 "selected_source": row[
                                     "peak_sample_selected_source"
                                 ],
                                 "download": row["peak_sample_download"],
                                 "upload": row["peak_sample_upload"],
-                                "previous_at": row["peak_sample_previous_at"],
+                                "previous_at": row[
+                                    "peak_sample_previous_at"
+                                ],
                                 "interval_result": row[
                                     "peak_sample_interval_result"
                                 ],
@@ -1311,13 +2079,17 @@ class AnalyticsSourceGateway:
                             for row in combined_rows
                             if int(row["projection_kind"]) == 1
                         )
-                        bucket_source_rows = (
+                    else:
+                        peak_samples = None
+
+                    bucket_source_rows = (
+                        (
                             row for row in combined_rows
                             if int(row["projection_kind"]) == 0
                         )
-                    else:
-                        peak_samples = None
-                        bucket_source_rows = iter(combined_rows)
+                        if projected
+                        else iter(combined_rows)
+                    )
                     rows = tuple(
                         {
                             key: value
@@ -1328,6 +2100,80 @@ class AnalyticsSourceGateway:
                         for row in (dict(source_row),)
                         if row["bucket_index"] is not None
                     )
+                    statistics = (
+                        combined_statistics
+                        if include_period_statistics else None
+                    )
+
+                    if include_ap_traffic:
+                        support_rows = tuple(
+                            row for row in combined_rows
+                            if int(row["projection_kind"]) in (1, 2)
+                        )
+                        support_cycle_ids = {
+                            str(row["ap_support_cycle_id"])
+                            for row in support_rows
+                        }
+                        identity_parameters = (
+                            site_id, from_utc, to_utc, from_utc, to_utc,
+                            site_id, from_utc, from_utc, to_utc, site_id,
+                        )
+                        identity_rows = (
+                            self._all(
+                                connection,
+                                _HISTORICAL_AP_IDENTITY_SQL,
+                                identity_parameters,
+                                deadline,
+                            )
+                            if support_cycle_ids else ()
+                        )
+                        current_identity_rows = (
+                            ()
+                            if current_cycle_id is None
+                            else self._all(
+                                connection,
+                                _HISTORICAL_AP_CURRENT_IDENTITY_SQL,
+                                (current_cycle_id, site_id),
+                                deadline,
+                            )
+                        )
+                        historical_macs = {
+                            str(row["ap_mac"])
+                            for row in identity_rows
+                            if str(row["cycle_id"]) in support_cycle_ids
+                        }
+                        current_macs = {
+                            str(row["ap_mac"])
+                            for row in current_identity_rows
+                        }
+                        population_count = len(
+                            historical_macs | current_macs
+                        )
+                        raw_rows = (
+                            self._all(
+                                connection,
+                                _HISTORICAL_AP_RAW_SQL,
+                                identity_parameters,
+                                deadline,
+                            )
+                            if (
+                                population_count <= 12
+                                and bool(historical_macs)
+                            )
+                            else ()
+                        )
+                        population, ap_rows = (
+                            _historical_ap_population_and_rows(
+                                support_rows=support_rows,
+                                identity_rows=identity_rows,
+                                raw_rows=raw_rows,
+                                current_identity_rows=current_identity_rows,
+                            )
+                        )
+                    else:
+                        population = None
+                        ap_rows = None
+
                     meta_values.update(self._historical_source_bounds(
                         connection,
                         site_id=site_id,
@@ -1368,6 +2214,9 @@ class AnalyticsSourceGateway:
                     )
                     statistics = None
                     peak_samples = None
+                    population = None
+                    ap_rows = None
+
                 attempts = self._one(
                     connection,
                     """
@@ -1409,6 +2258,8 @@ class AnalyticsSourceGateway:
                         dict(statistics) if statistics is not None else None
                     ),
                     "peak_samples": peak_samples,
+                    "ap_population": population,
+                    "ap_rows": ap_rows,
                 }
             finally:
                 connection.rollback()

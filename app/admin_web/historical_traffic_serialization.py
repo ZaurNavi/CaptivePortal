@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -69,6 +70,24 @@ _STATISTICS_COUNT_FIELDS = (
     "excluded_source_transition_interval_count",
     "invalid_period_interval_count", "accepted_peak_sample_count",
 )
+_AP_STATUSES = frozenset({
+    "ok", "partial", "insufficient_data", "unsupported_population",
+})
+_AP_ITEM_STATUSES = frozenset({"complete", "partial", "insufficient_data"})
+_AP_HISTORY_STATUSES = frozenset({"complete", "partial", "insufficient_data"})
+_AP_POINT_STATUSES = frozenset({"complete", "partial", "none"})
+_AP_NOW_STATUSES = frozenset({"valid", "partial", "unavailable"})
+_AP_NAME_SOURCES = frozenset({"current", "historical", "mac_fallback"})
+_AP_RATE_REASONS = frozenset({
+    "ok", "no_baseline", "counter_reset", "gap_too_large",
+    "invalid_elapsed", "source_unavailable",
+})
+_AP_FRESHNESS = frozenset({"fresh", "stale", "unavailable"})
+_AP_FRESHNESS_REASONS = frozenset({
+    "within_freshness_window", "within_stale_window", "age_exceeded",
+    "clock_anomaly", "no_complete_snapshot", "source_unavailable",
+})
+_AP_MAC = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
 
 
 def serialize_historical_traffic(
@@ -78,6 +97,7 @@ def serialize_historical_traffic(
     resolved_range: TrafficNetworkRange,
     include_period_statistics: bool = False,
     include_peak_load: bool = False,
+    include_ap_traffic: bool = False,
 ) -> dict[str, Any]:
     """Validate immutable Analytics output and expose only product-safe fields."""
     if getattr(value, "status", None) not in _RESULT_COVERAGE:
@@ -249,7 +269,376 @@ def serialize_historical_traffic(
         raise HistoricalTrafficSerializationError(
             "unrequested Peak Load is invalid"
         )
+    ap_traffic = getattr(value, "ap_traffic", None)
+    if include_ap_traffic:
+        result["ap_traffic"] = _ap_traffic(
+            ap_traffic,
+            bucket_count=len(projected_buckets),
+            history_status=value.status,
+            site_id=site_id,
+        )
+    elif ap_traffic is not None:
+        raise HistoricalTrafficSerializationError(
+            "unrequested AP Traffic is invalid"
+        )
     return result
+
+
+def _ap_traffic(
+    value: Any, *, bucket_count: int, history_status: str, site_id: str,
+) -> dict[str, Any]:
+    constants = {
+        "metric_version": "network_traffic_by_ap.v1",
+        "unit": "Mbps",
+        "history_series_encoding": "outer_history_bucket_aligned_du.v1",
+        "history_bucket_method": (
+            "mean_of_accepted_ap_rates_for_canonical_site_bucket_samples.v1"
+        ),
+        "average_method": "right_endpoint_ap_sample_hold_time_weighted.v1",
+        "peak_method": "max_accepted_complete_ap_sample.v1",
+        "ap_order_method": "ap_mac_ascending.v1",
+    }
+    if value is None or getattr(value, "status", None) not in _AP_STATUSES or any(
+        getattr(value, key, None) != expected for key, expected in constants.items()
+    ):
+        raise HistoricalTrafficSerializationError("AP Traffic contract is invalid")
+    population = getattr(value, "population", None)
+    if population is None or getattr(
+        population, "population_method", None
+    ) != "current_union_historical_validated.v1":
+        raise HistoricalTrafficSerializationError("AP population method is invalid")
+    population_result = {
+        "population_method": population.population_method,
+        "population_count": _count(getattr(population, "population_count", None)),
+        "current_population_count": _count(
+            getattr(population, "current_population_count", None)
+        ),
+        "historical_population_count": _count(
+            getattr(population, "historical_population_count", None)
+        ),
+        "supported_max_ap_count": _count(
+            getattr(population, "supported_max_ap_count", None)
+        ),
+        "returned_ap_count": _count(
+            getattr(population, "returned_ap_count", None)
+        ),
+        "population_complete": _boolean(
+            getattr(population, "population_complete", None)
+        ),
+    }
+    if (
+        population_result["supported_max_ap_count"] != 12
+        or population_result["current_population_count"]
+        > population_result["population_count"]
+        or population_result["historical_population_count"]
+        > population_result["population_count"]
+    ):
+        raise HistoricalTrafficSerializationError("AP population is invalid")
+    items = tuple(getattr(value, "items", ()))
+    if value.status == "unsupported_population":
+        if (
+            population_result["population_count"] <= 12
+            or population_result["returned_ap_count"] != 0
+            or population_result["population_complete"] is not False
+            or items
+            or getattr(value, "current_snapshot", None) is not None
+        ):
+            raise HistoricalTrafficSerializationError(
+                "unsupported AP population is invalid"
+            )
+        return {
+            "status": value.status,
+            **constants,
+            "population": population_result,
+            "current_snapshot": None,
+            "items": [],
+        }
+    if (
+        population_result["population_count"] > 12
+        or population_result["returned_ap_count"]
+        != population_result["population_count"]
+        or population_result["population_complete"] is not True
+        or len(items) != population_result["population_count"]
+    ):
+        raise HistoricalTrafficSerializationError("supported AP population is invalid")
+    projected = [_ap_item(item, bucket_count) for item in items]
+    macs = [item["ap_mac"] for item in projected]
+    if macs != sorted(macs) or len(set(macs)) != len(macs):
+        raise HistoricalTrafficSerializationError("AP order is invalid")
+    any_numeric = any(
+        item["history"]["coverage"]["accepted_sample_count"] > 0
+        or item["now"]["download_mbps"] is not None
+        or item["now"]["upload_mbps"] is not None
+        for item in projected
+    )
+    snapshot = _ap_snapshot(getattr(value, "current_snapshot", None), site_id)
+    for item in projected:
+        observed = item["now"]["observed_at"]
+        if observed is None:
+            continue
+        if snapshot is None or snapshot["observed_at"] is None or not (
+            _utc(snapshot["observed_at"])
+            <= _utc(observed)
+            <= _utc(snapshot["newest_observed_at"])
+        ):
+            raise HistoricalTrafficSerializationError(
+                "AP Now snapshot boundary is invalid"
+            )
+    complete = (
+        history_status == "ok"
+        and population_result["population_count"] > 0
+        and all(item["status"] == "complete" for item in projected)
+        and snapshot is not None
+        and snapshot["freshness_status"] == "fresh"
+    )
+    if (
+        (value.status == "ok" and not complete)
+        or (value.status == "partial" and (complete or not any_numeric))
+        or (value.status == "insufficient_data" and any_numeric)
+    ):
+        raise HistoricalTrafficSerializationError("AP Traffic status is invalid")
+    return {
+        "status": value.status,
+        **constants,
+        "population": population_result,
+        "current_snapshot": snapshot,
+        "items": projected,
+    }
+
+
+def _ap_item(value: Any, bucket_count: int) -> dict[str, Any]:
+    mac = getattr(value, "ap_mac", None)
+    name = getattr(value, "display_name", None)
+    name_source = getattr(value, "display_name_source", None)
+    status = getattr(value, "status", None)
+    if (
+        not isinstance(mac, str) or _AP_MAC.fullmatch(mac) is None
+        or not isinstance(name, str) or not name or len(name) > 256
+        or any(ord(character) < 32 for character in name)
+        or name_source not in _AP_NAME_SOURCES
+        or status not in _AP_ITEM_STATUSES
+        or (name_source == "mac_fallback" and name != mac)
+    ):
+        raise HistoricalTrafficSerializationError("AP item identity is invalid")
+    series = getattr(value, "series", None)
+    if (
+        series is None
+        or getattr(series, "encoding", None)
+        != "outer_history_bucket_aligned_du.v1"
+        or getattr(series, "bucket_count", None) != bucket_count
+    ):
+        raise HistoricalTrafficSerializationError("AP series contract is invalid")
+    statuses = tuple(getattr(series, "status", ()))
+    downloads = tuple(getattr(series, "download_mbps", ()))
+    uploads = tuple(getattr(series, "upload_mbps", ()))
+    if not (len(statuses) == len(downloads) == len(uploads) == bucket_count):
+        raise HistoricalTrafficSerializationError("AP series length is invalid")
+    for point_status, download, upload in zip(statuses, downloads, uploads):
+        if point_status not in _AP_POINT_STATUSES:
+            raise HistoricalTrafficSerializationError("AP point status is invalid")
+        if point_status == "none":
+            if download is not None or upload is not None:
+                raise HistoricalTrafficSerializationError("AP missing point has values")
+        else:
+            _number(download)
+            _number(upload)
+    average = _statistics_values(getattr(value, "average", None))
+    peak = _statistics_values(getattr(value, "peak", None))
+    coverage = _ap_coverage(getattr(value, "coverage", None), statuses)
+    now = _ap_now(getattr(value, "now", None))
+    historical_numeric = coverage["accepted_sample_count"] > 0
+    current_numeric = now["download_mbps"] is not None or now["upload_mbps"] is not None
+    if (
+        (coverage["ap_accepted_interval_seconds"] == 0
+         and any(item is not None for item in average.values()))
+        or (coverage["ap_accepted_interval_seconds"] > 0
+            and any(item is None for item in average.values()))
+        or (coverage["accepted_sample_count"] == 0
+            and any(item is not None for item in peak.values()))
+        or (coverage["accepted_sample_count"] > 0
+            and any(item is None for item in peak.values()))
+    ):
+        raise HistoricalTrafficSerializationError("AP aggregate values are invalid")
+    if average["download_mbps"] is not None and not math.isclose(
+        average["total_mbps"],
+        average["download_mbps"] + average["upload_mbps"],
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise HistoricalTrafficSerializationError("AP Average total is invalid")
+    if peak["download_mbps"] is not None and (
+        peak["total_mbps"] + 1e-9 < peak["download_mbps"]
+        or peak["total_mbps"] + 1e-9 < peak["upload_mbps"]
+        or peak["total_mbps"]
+        > peak["download_mbps"] + peak["upload_mbps"] + 1e-9
+    ):
+        raise HistoricalTrafficSerializationError("AP Peak total is invalid")
+    complete = coverage["status"] == "complete" and now["status"] == "valid"
+    if (
+        (status == "complete" and not complete)
+        or (status == "partial" and (complete or not (historical_numeric or current_numeric)))
+        or (status == "insufficient_data" and (historical_numeric or current_numeric))
+    ):
+        raise HistoricalTrafficSerializationError("AP item status is invalid")
+    return {
+        "ap_mac": mac,
+        "display_name": name,
+        "display_name_source": name_source,
+        "status": status,
+        "history": {
+            "status": coverage["status"],
+            "series": {
+                "encoding": series.encoding,
+                "bucket_count": bucket_count,
+                "status": list(statuses),
+                "download_mbps": list(downloads),
+                "upload_mbps": list(uploads),
+            },
+            "average": average,
+            "peak": peak,
+            "coverage": coverage,
+        },
+        "now": now,
+    }
+
+
+def _ap_coverage(value: Any, statuses: tuple[str, ...]) -> dict[str, Any]:
+    if value is None or getattr(value, "status", None) not in _AP_HISTORY_STATUSES:
+        raise HistoricalTrafficSerializationError("AP coverage status is invalid")
+    count_fields = (
+        "bucket_count", "complete_bucket_count", "partial_bucket_count",
+        "missing_bucket_count", "sample_opportunity_count", "accepted_sample_count",
+        "no_baseline_count", "counter_reset_count", "gap_too_large_count",
+        "invalid_elapsed_count", "source_unavailable_count",
+        "missing_selected_source_sample_count",
+        "source_transition_excluded_interval_count",
+    )
+    result = {name: _count(getattr(value, name, None)) for name in count_fields}
+    result["status"] = value.status
+    result["site_accepted_interval_seconds"] = _number(
+        getattr(value, "site_accepted_interval_seconds", None)
+    )
+    result["ap_accepted_interval_seconds"] = _number(
+        getattr(value, "ap_accepted_interval_seconds", None)
+    )
+    ratio = getattr(value, "ap_interval_coverage_ratio", None)
+    result["ap_interval_coverage_ratio"] = (
+        None if ratio is None else _number(ratio)
+    )
+    expected_counts = {
+        "complete": statuses.count("complete"),
+        "partial": statuses.count("partial"),
+        "none": statuses.count("none"),
+    }
+    if (
+        result["bucket_count"] != len(statuses)
+        or result["complete_bucket_count"] != expected_counts["complete"]
+        or result["partial_bucket_count"] != expected_counts["partial"]
+        or result["missing_bucket_count"] != expected_counts["none"]
+        or result["accepted_sample_count"] > result["sample_opportunity_count"]
+        or result["ap_accepted_interval_seconds"]
+        > result["site_accepted_interval_seconds"]
+    ):
+        raise HistoricalTrafficSerializationError("AP coverage evidence is invalid")
+    site_seconds = result["site_accepted_interval_seconds"]
+    expected_ratio = (
+        result["ap_accepted_interval_seconds"] / site_seconds
+        if site_seconds else None
+    )
+    if ratio is None:
+        if expected_ratio is not None:
+            raise HistoricalTrafficSerializationError("AP coverage ratio is invalid")
+    elif expected_ratio is None or not math.isclose(
+        float(ratio), expected_ratio, rel_tol=1e-9, abs_tol=1e-9
+    ):
+        raise HistoricalTrafficSerializationError("AP coverage ratio is invalid")
+    return result
+
+
+def _ap_now(value: Any) -> dict[str, Any]:
+    if value is None or getattr(value, "status", None) not in _AP_NOW_STATUSES:
+        raise HistoricalTrafficSerializationError("AP Now status is invalid")
+    download = _optional_number(getattr(value, "download_mbps", None))
+    upload = _optional_number(getattr(value, "upload_mbps", None))
+    total = _optional_number(getattr(value, "total_mbps", None))
+    download_reason = getattr(value, "download_reason", None)
+    upload_reason = getattr(value, "upload_reason", None)
+    selected = getattr(value, "selected_source", None)
+    observed = _optional_utc(getattr(value, "observed_at", None))
+    age = _optional_number(getattr(value, "age_seconds", None))
+    if download_reason not in _AP_RATE_REASONS or upload_reason not in _AP_RATE_REASONS:
+        raise HistoricalTrafficSerializationError("AP Now reason is invalid")
+    if total is not None and (
+        download is None or upload is None
+        or not math.isclose(total, download + upload, rel_tol=1e-9, abs_tol=1e-9)
+    ):
+        raise HistoricalTrafficSerializationError("AP Now total is invalid")
+    if value.status == "valid" and (
+        download is None or upload is None or total is None or selected not in _SOURCES
+        or observed is None or age is None
+    ):
+        raise HistoricalTrafficSerializationError("AP valid Now is invalid")
+    if value.status == "partial" and (
+        (download is None and upload is None) or selected not in _SOURCES
+        or observed is None or age is None
+    ):
+        raise HistoricalTrafficSerializationError("AP partial Now is invalid")
+    if value.status == "unavailable" and any(
+        item is not None for item in (download, upload, total)
+    ):
+        raise HistoricalTrafficSerializationError("AP unavailable Now has values")
+    if selected is not None and selected not in _SOURCES:
+        raise HistoricalTrafficSerializationError("AP Now source is invalid")
+    return {
+        "status": value.status,
+        "download_mbps": download,
+        "upload_mbps": upload,
+        "total_mbps": total,
+        "download_reason": download_reason,
+        "upload_reason": upload_reason,
+        "observed_at": observed,
+        "age_seconds": age,
+        "selected_source": selected,
+    }
+
+
+def _ap_snapshot(value: Any, site_id: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    cycle_id = getattr(value, "cycle_id", None)
+    freshness = getattr(value, "freshness_status", None)
+    reason = getattr(value, "freshness_reason", None)
+    selected = getattr(value, "selected_source", None)
+    if (
+        not isinstance(cycle_id, str) or not cycle_id
+        or getattr(value, "source_kind", None) != "observation_ap_dynamic"
+        or getattr(value, "site_id", None) != site_id
+        or getattr(value, "complete", None) is not True
+        or freshness not in _AP_FRESHNESS
+        or reason not in _AP_FRESHNESS_REASONS
+        or selected not in _SOURCES
+    ):
+        raise HistoricalTrafficSerializationError("AP current snapshot is invalid")
+    evaluated = getattr(value, "evaluated_at", None)
+    _utc(evaluated)
+    observed = _optional_utc(getattr(value, "observed_at", None))
+    newest = _optional_utc(getattr(value, "newest_observed_at", None))
+    if (observed is None) != (newest is None):
+        raise HistoricalTrafficSerializationError("AP snapshot timestamps are invalid")
+    if observed is not None and not (
+        _utc(observed) <= _utc(newest) <= _utc(evaluated)
+    ):
+        raise HistoricalTrafficSerializationError("AP snapshot timestamps are invalid")
+    return {
+        "source_kind": "observation_ap_dynamic",
+        "cycle_id": cycle_id,
+        "evaluated_at": evaluated,
+        "observed_at": observed,
+        "newest_observed_at": newest,
+        "freshness_status": freshness,
+        "freshness_reason": reason,
+        "selected_source": selected,
+    }
 
 
 def _peak_load(

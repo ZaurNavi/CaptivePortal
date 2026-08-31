@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import math
+import re
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from .models import (
+    CurrentApTrafficItem,
+    CurrentTrafficSnapshot,
     HistoricalSiteTraffic,
+    HistoricalTrafficApCoverage,
+    HistoricalTrafficApItem,
+    HistoricalTrafficApNow,
+    HistoricalTrafficApPopulation,
+    HistoricalTrafficApSeries,
+    HistoricalTrafficByAp,
     HistoricalTrafficBucket,
     HistoricalTrafficCoverage,
     HistoricalTrafficPeriodIntervalEvidence,
@@ -33,12 +43,14 @@ from .validation import AnalyticsQueryValidationError, format_utc, parse_utc, re
 UTC = timezone.utc
 MAX_SITE_HISTORY_BUCKETS = 720
 MAX_SITE_SAMPLE_SOURCE_SKEW_SECONDS = 60
+MAX_TRAFFIC_BY_AP_SUPPORTED_APS = 12
 _AUTO_BUCKET_SECONDS = (300, 900, 3600, 21600, 86400, 604800, 2592000)
 _QUALITY_REASONS = (
     "no_baseline", "counter_reset", "gap_too_large",
     "invalid_elapsed", "source_unavailable",
 )
 _BUCKET_REASONS = ("ok", *_QUALITY_REASONS)
+_MAC_PATTERN = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
 
 
 class HistoricalTrafficValidationError(ValueError):
@@ -80,6 +92,8 @@ class HistoricalTrafficReadService:
         deadline: QueryDeadline | None = None,
         include_period_statistics: bool = False,
         include_peak_load: bool = False,
+        include_ap_traffic: bool = False,
+        current_cycle_id: str | None = None,
     ) -> HistoricalSiteTraffic:
         if type(include_period_statistics) is not bool:
             raise HistoricalTrafficValidationError(
@@ -93,6 +107,14 @@ class HistoricalTrafficReadService:
             raise HistoricalTrafficValidationError(
                 "include_peak_load requires include_period_statistics"
             )
+        if type(include_ap_traffic) is not bool:
+            raise HistoricalTrafficValidationError(
+                "include_ap_traffic must be a boolean"
+            )
+        if current_cycle_id is not None and (
+            not isinstance(current_cycle_id, str) or not current_cycle_id
+        ):
+            raise HistoricalTrafficValidationError("current_cycle_id is invalid")
         try:
             site = require_site(site_id)
             start = parse_utc(from_utc, "from_utc")
@@ -132,6 +154,8 @@ class HistoricalTrafficReadService:
                 deadline=query_deadline,
                 include_period_statistics=include_period_statistics,
                 include_peak_load=include_peak_load,
+                include_ap_traffic=include_ap_traffic,
+                current_cycle_id=current_cycle_id,
             )
         except AnalyticsQueryDeadlineExceeded:
             raise
@@ -251,6 +275,15 @@ class HistoricalTrafficReadService:
                 history_status=result_status,
             )
             query_deadline.require_remaining()
+        ap_traffic = None
+        if include_ap_traffic:
+            ap_traffic = self._ap_traffic(
+                data.get("ap_population"),
+                data.get("ap_rows"),
+                buckets=tuple(buckets),
+                history_status=result_status,
+            )
+            query_deadline.require_remaining()
         return HistoricalSiteTraffic(
             status=result_status,
             range=traffic_range,
@@ -259,6 +292,325 @@ class HistoricalTrafficReadService:
             quality=quality,
             period_statistics=period_statistics,
             peak_load=peak_load,
+            ap_traffic=ap_traffic,
+        )
+
+    def compose_current_ap_traffic(
+        self,
+        value: HistoricalSiteTraffic,
+        *,
+        current_snapshot: CurrentTrafficSnapshot | None,
+        current_population_count: int,
+        current_items: tuple[CurrentApTrafficItem, ...],
+    ) -> HistoricalSiteTraffic:
+        """Attach bounded Current-owner evidence without changing History facts."""
+        ap_traffic = value.ap_traffic
+        if ap_traffic is None:
+            raise HistoricalTrafficValidationError("AP Traffic was not requested")
+        if ap_traffic.population.current_population_count != current_population_count:
+            raise HistoricalTrafficSourceUnavailable(
+                "Current AP population identity is unavailable"
+            )
+        if ap_traffic.status == "unsupported_population":
+            if ap_traffic.items:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Unsupported AP population contains items"
+                )
+            return value
+        current = {item.ap_mac: item for item in current_items}
+        if len(current) != len(current_items) or len(current) != current_population_count:
+            raise HistoricalTrafficSourceUnavailable(
+                "Current AP population projection is unavailable"
+            )
+        projected: list[HistoricalTrafficApItem] = []
+        any_numeric = False
+        for item in ap_traffic.items:
+            source = current.get(item.ap_mac)
+            if source is None:
+                now = _unavailable_now()
+                display_name = item.display_name
+                display_source = item.display_name_source
+            else:
+                now = HistoricalTrafficApNow(
+                    status=source.rate_status,
+                    download_mbps=source.download_mbps,
+                    upload_mbps=source.upload_mbps,
+                    total_mbps=source.total_mbps,
+                    download_reason=source.download_reason,
+                    upload_reason=source.upload_reason,
+                    observed_at=source.observed_at,
+                    age_seconds=source.age_seconds,
+                    selected_source=source.selected_source,
+                )
+                if isinstance(source.name, str) and source.name.strip():
+                    display_name = source.name.strip()
+                    display_source = "current"
+                else:
+                    display_name = item.display_name
+                    display_source = item.display_name_source
+            historical_numeric = item.coverage.accepted_sample_count > 0
+            current_numeric = now.download_mbps is not None or now.upload_mbps is not None
+            any_numeric = any_numeric or historical_numeric or current_numeric
+            complete = (
+                item.coverage.status == "complete"
+                and current_snapshot is not None
+                and current_snapshot.freshness_status == "fresh"
+                and now.status == "valid"
+            )
+            status = "complete" if complete else (
+                "partial" if historical_numeric or current_numeric
+                else "insufficient_data"
+            )
+            projected.append(replace(
+                item,
+                display_name=display_name,
+                display_name_source=display_source,
+                status=status,
+                now=now,
+            ))
+        complete = (
+            value.status == "ok"
+            and ap_traffic.population.population_count > 0
+            and current_snapshot is not None
+            and current_snapshot.freshness_status == "fresh"
+            and all(item.status == "complete" for item in projected)
+        )
+        status = "ok" if complete else (
+            "partial" if any_numeric else "insufficient_data"
+        )
+        return replace(value, ap_traffic=replace(
+            ap_traffic,
+            status=status,
+            current_snapshot=current_snapshot,
+            items=tuple(projected),
+        ))
+
+    def _ap_traffic(
+        self,
+        raw_population: Any,
+        raw_rows: Any,
+        *,
+        buckets: tuple[HistoricalTrafficBucket, ...],
+        history_status: str,
+    ) -> HistoricalTrafficByAp:
+        if not isinstance(raw_population, Mapping) or not isinstance(
+            raw_rows, (tuple, list)
+        ):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP Traffic projection is unavailable"
+            )
+        population_count = _integer(raw_population.get("population_count"))
+        current_count = _integer(raw_population.get("current_population_count"))
+        historical_count = _integer(
+            raw_population.get("historical_population_count")
+        )
+        if current_count > population_count or historical_count > population_count:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP population is invalid"
+            )
+        supported = population_count <= MAX_TRAFFIC_BY_AP_SUPPORTED_APS
+        population = HistoricalTrafficApPopulation(
+            population_count=population_count,
+            current_population_count=current_count,
+            historical_population_count=historical_count,
+            supported_max_ap_count=MAX_TRAFFIC_BY_AP_SUPPORTED_APS,
+            returned_ap_count=population_count if supported else 0,
+            population_complete=supported,
+        )
+        if not supported:
+            if raw_rows:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Unsupported AP population was materialized"
+                )
+            return HistoricalTrafficByAp(
+                status="unsupported_population",
+                population=population,
+                current_snapshot=None,
+                items=(),
+            )
+        grouped: dict[str, list[Mapping[str, Any]]] = {}
+        for raw in raw_rows:
+            if not isinstance(raw, Mapping):
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP Traffic row is invalid"
+                )
+            mac = raw.get("ap_mac")
+            if not isinstance(mac, str) or _MAC_PATTERN.fullmatch(mac) is None:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP identity is invalid"
+                )
+            grouped.setdefault(mac, []).append(raw)
+        if len(grouped) != population_count:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP population projection is incomplete"
+            )
+        items = tuple(
+            self._ap_item(mac, grouped[mac], buckets, history_status)
+            for mac in sorted(grouped)
+        )
+        any_numeric = any(item.coverage.accepted_sample_count > 0 for item in items)
+        return HistoricalTrafficByAp(
+            status="partial" if any_numeric else "insufficient_data",
+            population=population,
+            current_snapshot=None,
+            items=items,
+        )
+
+    def _ap_item(
+        self,
+        mac: str,
+        rows: list[Mapping[str, Any]],
+        buckets: tuple[HistoricalTrafficBucket, ...],
+        history_status: str,
+    ) -> HistoricalTrafficApItem:
+        first = rows[0]
+        aggregate_fields = (
+            "ap_current_name", "ap_historical_name",
+            "ap_sample_opportunity_count", "ap_accepted_sample_count",
+            "ap_site_accepted_interval_seconds", "ap_accepted_interval_seconds",
+            "ap_weighted_download", "ap_weighted_upload", "ap_peak_download",
+            "ap_peak_upload", "ap_peak_total", "ap_no_baseline_count",
+            "ap_counter_reset_count", "ap_gap_too_large_count",
+            "ap_invalid_elapsed_count", "ap_source_unavailable_count",
+            "ap_missing_selected_source_sample_count",
+            "ap_source_transition_excluded_interval_count",
+        )
+        if any(
+            row.get(field) != first.get(field)
+            for row in rows for field in aggregate_fields
+        ):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP aggregate is inconsistent"
+            )
+        statuses = ["none"] * len(buckets)
+        download: list[float | None] = [None] * len(buckets)
+        upload: list[float | None] = [None] * len(buckets)
+        seen: set[int] = set()
+        for row in rows:
+            raw_index = row.get("ap_bucket_index")
+            if raw_index is None:
+                continue
+            index = _integer(raw_index)
+            if index >= len(buckets) or index in seen:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP bucket alignment is invalid"
+                )
+            seen.add(index)
+            opportunity = _integer(row.get("ap_bucket_opportunity_count"))
+            accepted = _integer(row.get("ap_bucket_accepted_count"))
+            if accepted > opportunity:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP bucket evidence is invalid"
+                )
+            if accepted:
+                download[index] = _finite_nonnegative(row.get("ap_bucket_download"))
+                upload[index] = _finite_nonnegative(row.get("ap_bucket_upload"))
+                statuses[index] = "complete" if accepted == opportunity else "partial"
+            elif row.get("ap_bucket_download") is not None or row.get("ap_bucket_upload") is not None:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP missing bucket contains values"
+                )
+        complete_count = statuses.count("complete")
+        partial_count = statuses.count("partial")
+        missing_count = statuses.count("none")
+        sample_opportunities = _integer(first.get("ap_sample_opportunity_count"))
+        accepted_samples = _integer(first.get("ap_accepted_sample_count"))
+        if accepted_samples > sample_opportunities:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP sample evidence is invalid"
+            )
+        site_seconds = _finite_nonnegative(
+            first.get("ap_site_accepted_interval_seconds")
+        )
+        ap_seconds = _finite_nonnegative(first.get("ap_accepted_interval_seconds"))
+        if ap_seconds > site_seconds:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP interval evidence is invalid"
+            )
+        if ap_seconds:
+            weighted_download = _finite_nonnegative(first.get("ap_weighted_download"))
+            weighted_upload = _finite_nonnegative(first.get("ap_weighted_upload"))
+            average = HistoricalTrafficPeriodValues(
+                weighted_download / ap_seconds,
+                weighted_upload / ap_seconds,
+                (weighted_download + weighted_upload) / ap_seconds,
+            )
+        else:
+            if first.get("ap_weighted_download") is not None or first.get("ap_weighted_upload") is not None:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP weighting is invalid"
+                )
+            average = HistoricalTrafficPeriodValues(None, None, None)
+        if accepted_samples:
+            peak = HistoricalTrafficPeriodValues(
+                _finite_nonnegative(first.get("ap_peak_download")),
+                _finite_nonnegative(first.get("ap_peak_upload")),
+                _finite_nonnegative(first.get("ap_peak_total")),
+            )
+        else:
+            if any(first.get(field) is not None for field in (
+                "ap_peak_download", "ap_peak_upload", "ap_peak_total"
+            )):
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP Peak is invalid"
+                )
+            peak = HistoricalTrafficPeriodValues(None, None, None)
+        history_numeric = accepted_samples > 0
+        coverage_status = (
+            "insufficient_data" if not history_numeric else
+            "complete" if history_status == "ok" and complete_count == len(buckets)
+            and ap_seconds == site_seconds else "partial"
+        )
+        coverage = HistoricalTrafficApCoverage(
+            status=coverage_status,
+            bucket_count=len(buckets),
+            complete_bucket_count=complete_count,
+            partial_bucket_count=partial_count,
+            missing_bucket_count=missing_count,
+            sample_opportunity_count=sample_opportunities,
+            accepted_sample_count=accepted_samples,
+            site_accepted_interval_seconds=site_seconds,
+            ap_accepted_interval_seconds=ap_seconds,
+            ap_interval_coverage_ratio=(
+                ap_seconds / site_seconds if site_seconds else None
+            ),
+            no_baseline_count=_integer(first.get("ap_no_baseline_count")),
+            counter_reset_count=_integer(first.get("ap_counter_reset_count")),
+            gap_too_large_count=_integer(first.get("ap_gap_too_large_count")),
+            invalid_elapsed_count=_integer(first.get("ap_invalid_elapsed_count")),
+            source_unavailable_count=_integer(
+                first.get("ap_source_unavailable_count")
+            ),
+            missing_selected_source_sample_count=_integer(
+                first.get("ap_missing_selected_source_sample_count")
+            ),
+            source_transition_excluded_interval_count=_integer(
+                first.get("ap_source_transition_excluded_interval_count")
+            ),
+        )
+        current_name = _display_name(first.get("ap_current_name"))
+        historical_name = _display_name(first.get("ap_historical_name"))
+        if current_name is not None:
+            name, name_source = current_name, "current"
+        elif historical_name is not None:
+            name, name_source = historical_name, "historical"
+        else:
+            name, name_source = mac, "mac_fallback"
+        return HistoricalTrafficApItem(
+            ap_mac=mac,
+            display_name=name,
+            display_name_source=name_source,
+            status=coverage_status,
+            series=HistoricalTrafficApSeries(
+                bucket_count=len(buckets),
+                status=tuple(statuses),
+                download_mbps=tuple(download),
+                upload_mbps=tuple(upload),
+            ),
+            average=average,
+            peak=peak,
+            coverage=coverage,
+            now=_unavailable_now(),
         )
 
     def _peak_load(
@@ -819,6 +1171,37 @@ def _optional_utc(value: Any) -> str | None:
         raise HistoricalTrafficSourceUnavailable(
             "Historical traffic source timestamp is invalid"
         ) from exc
+
+
+def _display_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HistoricalTrafficSourceUnavailable(
+            "Historical AP display name is invalid"
+        )
+    result = value.strip()
+    if not result:
+        return None
+    if len(result) > 256 or any(ord(character) < 32 for character in result):
+        raise HistoricalTrafficSourceUnavailable(
+            "Historical AP display name is invalid"
+        )
+    return result
+
+
+def _unavailable_now() -> HistoricalTrafficApNow:
+    return HistoricalTrafficApNow(
+        status="unavailable",
+        download_mbps=None,
+        upload_mbps=None,
+        total_mbps=None,
+        download_reason="source_unavailable",
+        upload_reason="source_unavailable",
+        observed_at=None,
+        age_seconds=None,
+        selected_source=None,
+    )
 
 
 def _integer(value: Any) -> int:

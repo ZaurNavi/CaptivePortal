@@ -171,6 +171,20 @@
   </section>
   {% endif %}
   {% endif %}
+  {% if traffic_by_ap_enabled %}
+  <section id="traffic-ap-panel" class="card card-wide traffic-ap" aria-labelledby="traffic-ap-heading" data-ap-enabled="true">
+    <div class="card-heading"><div><p class="eyebrow">Selected period</p><h2 id="traffic-ap-heading">Traffic by AP</h2></div></div>
+    <p class="live-detail">All supported Site APs are shown together for the applied Network range. Historical values inherit the canonical Site source selected for each bucket.</p>
+    <div id="traffic-ap-state" class="state-panel" data-state="warning" role="status" aria-live="polite"><span class="state-dot" aria-hidden="true"></span><div><strong id="traffic-ap-state-title">Loading AP traffic…</strong><p id="traffic-ap-state-message">Reading the combined persisted History result and current AP evidence.</p></div></div>
+    <div class="traffic-history-meta">
+      <p>Applied range <strong id="traffic-ap-applied-range">—</strong></p>
+      <p>Population <strong id="traffic-ap-population">—</strong></p>
+      <p>Coverage <strong id="traffic-ap-coverage">—</strong></p>
+      <p>Current snapshot <strong id="traffic-ap-current">—</strong></p>
+    </div>
+    <div id="traffic-ap-items" class="traffic-ap-items" aria-live="polite"></div>
+  </section>
+  {% endif %}
   {% endif %}
 </div>
 {% endblock %}
