@@ -3,9 +3,9 @@
 Status: current
 Updated: 2026-09-01
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
-Production deployed HEAD: `daf68e91fc759188980cf8741913e6b60a58eb62`
-Production tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
+Documentation/current-state implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Production deployed HEAD: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Production tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
 
 ## Responsibility model
 
@@ -340,134 +340,55 @@ This is troubleshooting history, not a current product defect.
 Current accepted repository / production artifact:
 
 ```text
-HEAD:
-daf68e91fc759188980cf8741913e6b60a58eb62
-
-tree:
-b0e2f028eecf6aec9d86e35542c33e7105209335
-
-TASK-TRAFFIC-05:
-DONE / PRODUCTION ACTIVE
-
-TASK-TRAFFIC-RANGE-01:
-DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
-
-PR #94:
-merged
+HEAD: c5f9dc39bbf399847f147526c9c7ae15769a198c
+tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+TASK-TRAFFIC-06: DONE / PRODUCTION ACTIVE
+PR #96: merged
+production activation / browser acceptance: PASS
 ```
 
-Final RANGE-01 gate matrix:
+Gate matrix:
 
 ```text
-focused TASK gate:
-PASS
-
-targeted Traffic regression:
-PASS WITH REVIEWED COMPATIBILITY
-
-Windows Central Lab V6-FIXED:
-PASS
-
-Linux production-size §97 PERF:
-PASS
-
-production dormant acceptance:
-PASS
-
-production feature activation:
-PASS
-
-production browser/product acceptance:
-PASS
+Tech Lead Static Review: PASS
+Targeted Traffic Regression: PASS WITH REVIEWED COMPATIBILITY
+Candidate regressions: 0
+Windows Central Lab V6-FIXED: PASS
+Strict regressions: 0
+Exact-artifact immutability: PASS
+Linux production-size PERF: PASS
+CORE_PERF_GATE=PASS
+ALL24_CAPABILITY=PASS
+G1_G2_FALLBACK_CAPABILITY=PASS
+IMMUTABILITY=PASS
+RESULT=PASS
 ```
 
-The known Windows SQLite infinity compatibility behavior reproduces on the exact
-approved baseline and is not classified as a TASK regression.
-
-#### Production-size §97 evidence
-
-Immutable snapshot:
+Production-size snapshot:
 
 ```text
-bytes:
-273235968
-
-SHA256:
-b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
+bytes: 273235968
+SHA256: b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
 ```
 
-Backward-compatible 24h:
+Key measured p95/max:
 
 ```text
-B24 p50 0.537377s
-B24 p95 0.543665s
-B24 max  0.543820s
-
-C24 p50 0.536886s
-C24 p95 0.545050s
-C24 max  0.549600s
-
-relative backward-compatibility gates:
-PASS
-
-B24 ↔ C24 semantic identity:
-PASS
+SH24 0.614524s / 0.698018s
+SH7  2.751386s / 2.795773s
+CA7  3.057368s / 3.291041s
+AS7  3.099320s / 3.113963s
+E24-C 0.740699s / 0.830057s
+ALL24 0.584355s / 0.595118s
 ```
 
-Product-scoped matrix:
+All measured variants completed `10/10` successfully with `query_deadline=0`, `source_integrity=0`, `unexpected_5xx=0`; semantic stability PASS.
 
-```text
-H24 PASS
-H7  PASS
-S24 PASS
-S7  PASS
-P24 PASS
-P7  PASS
-A24 PASS
-A7  PASS
-```
+Accepted ALL24 grouping: `history,statistics,peak,aps,apshare`.
 
-A7:
+The reviewed Windows compatibility cases are not candidate regressions.
 
-```text
-p50 2.444160s
-p95 2.469994s
-max  2.472858s
-query_deadline=0
-source_integrity=0
-unexpected 5xx=0
-```
-
-The accepted architecture preserved:
-
-```text
-WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=10
-browser request timeout=20s
-Admin concurrency=unchanged
-```
-
-The performance remediation was product-scoped/independent-range/sequential
-admission rather than deadline expansion.
-
-#### Accepted execution sequence
-
-```text
-Implementation candidate
-→ focused gate PASS
-→ targeted Traffic regression PASS WITH REVIEWED COMPATIBILITY
-→ Windows Central Lab V6-FIXED PASS
-→ Linux production-size §97 PERF PASS
-→ Git publication
-→ PR #94
-→ Owner merge
-→ deploy FROM GIT
-→ dormant production acceptance PASS
-→ separate feature activation
-→ production browser/product acceptance PASS
-```
-
-Coder remains responsible for focused/minimal TASK-scoped implementation checks.
-Official Central Lab/PERF/PASS-FAIL acceptance belongs to Owner + Tech Lead.
+Production closure: deploy FROM GIT → dormant PASS → separate activation → browser/product PASS.
 
 ## Test Set Maintenance Rule
 
@@ -513,22 +434,17 @@ Change the Central Lab runner only when its own contract changes, for example:
 
 Never add a new failure to compatibility merely to obtain a green candidate.
 
-For the current TRAFFIC-05 / TRAFFIC-RANGE-01 state, the relevant Traffic test set
-includes at minimum:
+For the current TRAFFIC-06 state, the relevant Traffic test set includes at minimum:
 
-- `tests/analytics/test_historical_traffic_ap.py`;
-- `tests/admin_web/test_traffic_ap.py`;
-- `tests/admin_web/test_traffic_ap_frontend.py`;
-- `tests/admin_web/test_traffic_independent_ranges.py`;
-- `tests/admin_web/test_traffic_independent_ranges_frontend.py`;
-- existing History / Statistics / Peak frontend regressions touched by RANGE-01;
-- Traffic Foundation/coordinator/config/routes/query regressions;
-- product-projection validation;
-- AP population/payload invariants;
-- independent selected/applied/generation/coalescing/admission invariants;
-- product-scoped PERF and B24 ↔ C24 semantic identity.
+- `tests/analytics/test_historical_traffic_ap_share.py`;
+- `tests/admin_web/test_traffic_ap_share.py`;
+- `tests/admin_web/test_traffic_ap_share_frontend.py`;
+- existing Current Traffic and historical product regressions touched by TRAFFIC-06;
+- independent-range broker/coordinator/admission regressions;
+- product projection/order and AP Share conservation/evidence invariants;
+- production-size PERF capability matrix.
 
-The exact targeted command must be reviewed again for `TRAFFIC-06`.
+The exact targeted command must be reviewed again for `TRAFFIC-07` or conditional `TRAFFIC-07-READ`.
 
 ## Acceptance before Publication
 

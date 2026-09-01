@@ -2,8 +2,8 @@
 
 Status: current
 Updated: 2026-09-01
-Current-state implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
-Current implementation tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
+Current-state implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Current implementation tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -71,7 +71,7 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic state at implementation baseline `main@daf68e91fc759188980cf8741913e6b60a58eb62`:
+Current Traffic state at implementation baseline `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`:
 
 ```text
 TRAFFIC-00         DONE
@@ -83,7 +83,8 @@ TRAFFIC-03         DONE / PRODUCTION ACTIVE
 TRAFFIC-04         DONE / PRODUCTION ACTIVE
 TRAFFIC-05         DONE / PRODUCTION ACTIVE
 TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
-TRAFFIC-06         NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
+TRAFFIC-06         DONE / PRODUCTION ACTIVE
+TRAFFIC-07         NEXT / NOT IMPLEMENTED
 ```
 
 Owner-confirmed production Traffic flags:
@@ -95,9 +96,10 @@ WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 ```
 
-Historical Traffic panels now have independent page-local `24h | 7d` ranges.
+Historical Traffic panels, including AP Traffic Share, have independent page-local `24h | 7d` ranges.
 
 `modules/traffic.md` is the current Traffic product/semantic contract.
 Historical FINAL TASKs and acceptance evidence remain traceability evidence and

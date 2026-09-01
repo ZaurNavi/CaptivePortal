@@ -2,9 +2,9 @@
 
 Status: current contract; production details remain host-verified
 Updated: 2026-09-01
-Current repository implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
-Confirmed production deployed HEAD: `daf68e91fc759188980cf8741913e6b60a58eb62`
-Confirmed production tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
+Current repository implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Confirmed production deployed HEAD: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Confirmed production tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
 
 ## Repository vs production
 
@@ -171,10 +171,10 @@ Owner-confirmed current state:
 
 ```text
 repository / production HEAD:
-daf68e91fc759188980cf8741913e6b60a58eb62
+c5f9dc39bbf399847f147526c9c7ae15769a198c
 
 repository / production tree:
-b0e2f028eecf6aec9d86e35542c33e7105209335
+0831ecf598b5760e8ede2e9e94a25b926480c2dd
 
 captive-portal.service:
 active
@@ -188,6 +188,7 @@ Network Traffic History
 Period Statistics
 Peak Load
 Traffic by AP
+AP Traffic Share
 ```
 
 Production flags:
@@ -199,72 +200,62 @@ WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 ```
 
-Repository defaults for these feature flags remain `false`.
+Repository defaults remain false, including `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false`.
 
-## TRAFFIC-05 publication history
+## TRAFFIC-06 deployment / activation history
 
 ```text
-TASK-TRAFFIC-05 — Traffic by AP
-publication commit: 85edc14214e3a271a300249b5b1062be31547c95
-PR: #93
-merge commit: 8a5c4db899406eeb1f737abe63495247be1ee75a
-merge tree: 6837dd729dedb0df6414b3f979657a3f6f55d0ab
-current production status: DONE / PRODUCTION ACTIVE
+development baseline: 022c8666ef58f0a6d4bef9dd72696199ebd5719f
+accepted tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+publication commit: 1d4e373262a236cb1c6dded82fe6b9789c9110a7
+PR: #96
+merge / production commit: c5f9dc39bbf399847f147526c9c7ae15769a198c
+production tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
 ```
 
-## TRAFFIC-RANGE-01 deployment / activation history
-
-Accepted candidate tree:
+Deployment was performed **FROM GIT** without SCP/manual source replacement.
 
 ```text
-b0e2f028eecf6aec9d86e35542c33e7105209335
+dormant deploy with AP Share disabled → PASS
+separate WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true activation → PASS
+production browser/product acceptance → PASS
 ```
 
-Publication / merge:
+Post-activation:
 
 ```text
-publication commit: 355b413e9167bafb8ca9547af08c037eef86b189
-PR: #94
-merge commit: daf68e91fc759188980cf8741913e6b60a58eb62
-merge tree: b0e2f028eecf6aec9d86e35542c33e7105209335
+NRestarts=0
+ExecMainStatus=0
+Admin Traffic API=HTTP 200
+Omada webhook=HTTP 204
+Observation complete=True
+Observation error_count=0
+Observation failure_category=None
 ```
 
-Production deployment was performed **FROM GIT**. Application source was not
-delivered by SCP/manual patch.
+Existing Omada `InsecureRequestWarning` and Flask development-server warning are pre-existing and are not TRAFFIC-06 regressions.
 
-Owner-approved closing sequence:
+## TRAFFIC-06 acceptance history
 
 ```text
-Implementation candidate
-→ focused gate PASS
-→ targeted Traffic regression PASS WITH REVIEWED COMPATIBILITY
-→ Windows Central Lab V6-FIXED PASS
-→ Linux production-size §97 PERF PASS
-→ Git publication
-→ PR #94
-→ Owner merge
-→ deploy FROM GIT
-→ dormant production acceptance PASS
-→ separate feature activation
-→ production browser/product acceptance PASS
+Tech Lead Static Review = PASS
+Targeted Traffic Regression = PASS WITH REVIEWED COMPATIBILITY
+candidate regressions = 0
+Windows Central Lab V6-FIXED = PASS
+strict regressions = 0
+exact-artifact immutability = PASS
+Linux production-size PERF = PASS
+CORE_PERF_GATE=PASS
+ALL24_CAPABILITY=PASS
+G1_G2_FALLBACK_CAPABILITY=PASS
+IMMUTABILITY=PASS
+RESULT=PASS
 ```
 
-Activation and deployment remained separate operations.
-
-Independent-range activation current fact:
-
-```text
-WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
-```
-
-Traffic by AP current fact:
-
-```text
-WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
-```
-
+Accepted ALL24 product group: `history,statistics,peak,aps,apshare`.
 ## Production architecture outcome
 
 The production fix for heavy shared 7d historical work did **not** increase the

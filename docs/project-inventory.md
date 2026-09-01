@@ -3,9 +3,9 @@
 Status: current runtime snapshot
 Updated: 2026-09-01
 Branch: `main`
-Runtime commit: `daf68e91fc759188980cf8741913e6b60a58eb62`
-Runtime tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
-Commit source: merge PR #94 / TASK-TRAFFIC-RANGE-01, 2026-09-01
+Runtime commit: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Runtime tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Commit source: merge PR #96 / TASK-TRAFFIC-06, 2026-09-01
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -88,6 +88,7 @@ Analytics has no worker/write lifecycle to stop.
 | Traffic Peak Load | Admin Web + Historical Traffic | product-scoped Peak projection | none | no |
 | Traffic by AP | Admin Web + Historical Traffic | product-scoped AP projection | none | no |
 | Independent Traffic Range per Panel | Admin Web frontend | page-local product range/intent orchestration | page-local memory only | no |
+| AP Traffic Share | Admin Web + Historical Traffic | accepted interval-integrated AP contribution ratio | none | no |
 
 ## 5. Observation vs Current State
 
@@ -222,6 +223,7 @@ Traffic currently contains:
 - Period Statistics;
 - Peak Load;
 - Traffic by AP;
+- AP Traffic Share;
 - independent historical panel ranges.
 
 Current endpoint:
@@ -239,7 +241,7 @@ GET /admin/api/v1/sites/<site_id>/traffic/history
 Canonical product projection:
 
 ```text
-products=history,statistics,peak,aps
+products=history,statistics,peak,aps,apshare
 ```
 
 Legacy `include=` remains temporary backward compatibility. `include + products`
@@ -356,120 +358,61 @@ Fail-open means disabled/unavailable/degraded and safe omission — never fabric
 
 `tests/` is the repository test root.
 
-Testing ownership:
+Testing ownership remains:
 
 ```text
 Coder → focused/minimal TASK/module tests
 Owner + Tech Lead / Central Lab → cross-module/broader/full/official acceptance
 ```
 
-Current Traffic acceptance artifact:
+Current Traffic closure evidence:
 
 ```text
-artifact: daf68e91fc759188980cf8741913e6b60a58eb62
-tree: b0e2f028eecf6aec9d86e35542c33e7105209335
-
-TASK-TRAFFIC-05: DONE / PRODUCTION ACTIVE
-TASK-TRAFFIC-RANGE-01: DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
-
-focused gate: PASS
+artifact: c5f9dc39bbf399847f147526c9c7ae15769a198c
+tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+TASK-TRAFFIC-06: DONE / PRODUCTION ACTIVE
+Tech Lead Static Review: PASS
 targeted Traffic regression: PASS WITH REVIEWED COMPATIBILITY
 Windows Central Lab V6-FIXED: PASS
-Linux production-size §97 PERF: PASS
-production browser/product acceptance: PASS
+Linux production-size PERF: PASS
+strict regressions: 0
 ```
 
-Known Windows SQLite infinity compatibility reproduces on the exact approved
-baseline and is not a TASK regression.
+All PERF measured variants were 10/10 successful with zero query deadlines, source-integrity failures and unexpected 5xx responses.
 
-Production-size RANGE-01 evidence:
-
-```text
-snapshot bytes: 273235968
-snapshot SHA256: b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
-
-B24 p50/p95/max: 0.537377 / 0.543665 / 0.543820 s
-C24 p50/p95/max: 0.536886 / 0.545050 / 0.549600 s
-B24 ↔ C24 semantic identity: PASS
-
-A7 p50/p95/max: 2.444160 / 2.469994 / 2.472858 s
-A7 query_deadline: 0
-A7 source_integrity: 0
-A7 unexpected 5xx: 0
-```
-
-Product-scoped H24/H7/S24/S7/P24/P7/A24/A7 gates: PASS.
-
-Current relevant test set includes Traffic by AP, independent ranges, frontend
-History/Statistics/Peak/AP regressions, product projection, broker/coordinator
-admission/coalescing and product-scoped PERF invariants.
-
-After each accepted TASK Tech Lead reviews changed tests, targeted regression set,
-cross-surface invariants and whether the runner contract changed.
-
-`.github/workflows` remains absent; official full regression remains manual
-Central Lab until separately changed.
+After each accepted TASK Tech Lead reviews changed tests, targeted regression set, cross-surface invariants and whether the runner contract changed.
 
 ## 19. Current vs historical vs change-intent
 
-Current repository implementation includes:
-- Visit Lifecycle;
-- Observation;
-- Analytics;
-- Admin Web;
-- Current State;
-- Home Live / Home Traffic / Home Activity;
-- Traffic Foundation;
+Current repository/production Traffic implementation includes:
 - Current Network Throughput;
-- Historical Traffic Read Foundation;
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
 - Traffic by AP;
-- Independent Traffic Range per Panel.
+- Independent Traffic Range per Panel;
+- AP Traffic Share.
 
-Owner-confirmed current production checkpoint:
+Owner-confirmed production checkpoint:
 
 ```text
-production HEAD: daf68e91fc759188980cf8741913e6b60a58eb62
-production tree: b0e2f028eecf6aec9d86e35542c33e7105209335
-
-WEB_ADMIN_TRAFFIC_ENABLED=true
-WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
-WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
-WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
-WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
-WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
-
+production HEAD: c5f9dc39bbf399847f147526c9c7ae15769a198c
+production tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 captive-portal.service=active
-
-TRAFFIC-05:
-DONE / PRODUCTION ACTIVE
-
-TRAFFIC-RANGE-01:
-DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06: DONE / PRODUCTION ACTIVE
 ```
 
-Historical engineering evidence from earlier Traffic TASKs remains historical and
-must not override current independent-range architecture.
-
-Next change-intent:
+Next product change-intent:
 
 ```text
-TRAFFIC-06 — AP Traffic Share
-NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
+TRAFFIC-07 — Online Guests Traffic
+NEXT / NOT IMPLEMENTED
 ```
 
-Current idea only: share of accepted Network Traffic evidence within selected
-range.
+`TRAFFIC-07-READ` is CONDITIONAL / NOT IMPLEMENTED and is created only if Current Rate requires substantial backend foundation.
 
-Permanent reminder:
-
-```text
-sample count != traffic share
-```
-
-No unaccepted TRAFFIC-06 formula or FINAL architecture is current.
+Historical TASK/PR evidence remains historical and does not override current production truth.
 
 ## 20. Repository-only unknowns
 

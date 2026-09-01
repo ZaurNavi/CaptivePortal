@@ -2,7 +2,7 @@
 
 Status: current module contract
 Updated: 2026-09-01
-Baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
+Baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
 
 ## Boundary
 
@@ -49,6 +49,7 @@ WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=false
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=false
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false
 ```
 
 Owner-confirmed production state:
@@ -60,6 +61,7 @@ WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 ```
 
 Current functional panels:
@@ -68,11 +70,12 @@ Current functional panels:
 2. Network Traffic History;
 3. Period Statistics;
 4. Peak Load;
-5. Traffic by AP.
+5. Traffic by AP;
+6. AP Traffic Share.
 
 Current Network Throughput is range-insensitive.
 
-History, Statistics, Peak and Traffic by AP each own an independent `24h | 7d`
+History, Statistics, Peak, Traffic by AP and AP Traffic Share each own an independent `24h | 7d`
 selected/applied range when independent ranges are active.
 
 ## Historical endpoint
@@ -86,7 +89,7 @@ GET /admin/api/v1/sites/<site_id>/traffic/history
 Canonical projection:
 
 ```text
-products=history,statistics,peak,aps
+products=history,statistics,peak,aps,apshare
 ```
 
 Tokens are optional by product but must remain in canonical order. Invalid,
@@ -179,9 +182,13 @@ Manual retry, Global Refresh and 503 do not bypass the guard.
 
 ## Traffic by AP
 
-Current production Traffic by AP uses `network_traffic_by_ap.v1` in Mbps and
-shares the historical Network Traffic semantic foundation. It is not AP Traffic
-Share.
+Current production Traffic by AP uses `network_traffic_by_ap.v1` in Mbps and shares the historical Network Traffic semantic foundation.
+
+## AP Traffic Share
+
+Current production AP Traffic Share uses `network_traffic_ap_share.v1`; internal unit is `fraction`, display unit is `percent`, and product token is `apshare`.
+
+AP Share requires Admin + Traffic + History + Independent Ranges. It has its own page-local `24h | 7d` selected/applied range and uses the existing broker/coordinator/admission path.
 
 ## UI/design status
 
@@ -190,7 +197,7 @@ permanently frozen final Traffic visual design.
 
 ## Semantic restrictions
 
-Network Throughput/History/Statistics/Peak/Traffic by AP are AP/network evidence.
+Network Throughput/History/Statistics/Peak/Traffic by AP/AP Traffic Share are AP/network evidence.
 Do not label them as WAN, Internet-only, billing, guest, SSID or Guest Session Traffic.
 
 ## Lifecycle

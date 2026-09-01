@@ -2,7 +2,7 @@
 
 Status: current repository contract
 Updated: 2026-09-01
-Baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
+Baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -205,6 +205,7 @@ WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=false
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=false
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false
 WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
 WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20
 ```
@@ -218,6 +219,7 @@ WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 ```
 
 Feature dependencies:
@@ -228,6 +230,7 @@ Statistics requires Admin + Traffic + History.
 Peak requires Admin + Traffic + History + Statistics.
 Traffic by AP requires Admin + Traffic + History.
 Independent ranges requires Admin + Traffic + History.
+AP Traffic Share requires Admin + Traffic + History + Independent ranges.
 ```
 
 Independent ranges does **not** require every optional historical product to be
@@ -252,9 +255,7 @@ Historical product ranges:
 7d
 ```
 
-With independent ranges enabled, History, Statistics, Peak and Traffic by AP each
-own independent page-local selected/applied range state. Current Network
-Throughput remains range-insensitive.
+With independent ranges enabled, History, Statistics, Peak, Traffic by AP and AP Traffic Share each own independent page-local selected/applied range state. Current Network Throughput remains range-insensitive.
 
 Permanent historical admission guard:
 
