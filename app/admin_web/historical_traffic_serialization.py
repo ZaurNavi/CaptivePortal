@@ -95,9 +95,11 @@ def serialize_historical_traffic(
     site_id: str,
     *,
     resolved_range: TrafficNetworkRange,
+    include_history: bool = True,
     include_period_statistics: bool = False,
     include_peak_load: bool = False,
     include_ap_traffic: bool = False,
+    requested_products: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Validate immutable Analytics output and expose only product-safe fields."""
     if getattr(value, "status", None) not in _RESULT_COVERAGE:
@@ -230,16 +232,34 @@ def serialize_historical_traffic(
     quality = _project(getattr(value, "quality", None), _QUALITY_FIELDS)
     quality = {key: _count(item) for key, item in quality.items()}
     range_result = {"id": resolved_range.id, **expected}
+    expected_products = tuple(
+        product for product, enabled in (
+            ("history", include_history),
+            ("statistics", include_period_statistics),
+            ("peak", include_peak_load),
+            ("aps", include_ap_traffic),
+        ) if enabled
+    )
+    if not expected_products:
+        raise HistoricalTrafficSerializationError("product projection is empty")
+    if requested_products is not None and requested_products != expected_products:
+        raise HistoricalTrafficSerializationError(
+            "requested product projection is invalid"
+        )
     result = {
         "status": value.status,
         "range": range_result,
-        "buckets": projected_buckets,
         "coverage": coverage_result,
         "quality": quality,
     }
+    if requested_products is not None:
+        result["requested_products"] = list(requested_products)
+    if include_history:
+        result["buckets"] = projected_buckets
     statistics = getattr(value, "period_statistics", None)
+    projected_statistics = None
     if include_period_statistics:
-        result["period_statistics"] = _statistics(
+        projected_statistics = _statistics(
             statistics,
             history_status=value.status,
             range_seconds=float(expected_duration),
@@ -247,23 +267,20 @@ def serialize_historical_traffic(
                 "complete_site_sample_count"
             ],
         )
+        result["period_statistics"] = projected_statistics
     elif statistics is not None:
         raise HistoricalTrafficSerializationError(
             "unrequested period Statistics is invalid"
         )
     peak_load = getattr(value, "peak_load", None)
     if include_peak_load:
-        if not include_period_statistics:
-            raise HistoricalTrafficSerializationError(
-                "Peak Load requires period Statistics"
-            )
         result["peak_load"] = _peak_load(
             peak_load,
             history_status=value.status,
             range_start=start,
             range_end=end,
             buckets=projected_buckets,
-            statistics=result["period_statistics"],
+            statistics=projected_statistics,
         )
     elif peak_load is not None:
         raise HistoricalTrafficSerializationError(
@@ -271,6 +288,13 @@ def serialize_historical_traffic(
         )
     ap_traffic = getattr(value, "ap_traffic", None)
     if include_ap_traffic:
+        result["ap_bucket_axis"] = {
+            "bucket_count": expected_bucket_count,
+            "bucket_seconds": expected_bucket_seconds,
+            "bucket_start_utc": [
+                bucket["bucket_start_utc"] for bucket in projected_buckets
+            ],
+        }
         result["ap_traffic"] = _ap_traffic(
             ap_traffic,
             bucket_count=len(projected_buckets),
@@ -648,7 +672,7 @@ def _peak_load(
     range_start: datetime,
     range_end: datetime,
     buckets: list[dict[str, Any]],
-    statistics: dict[str, Any],
+    statistics: dict[str, Any] | None,
 ) -> dict[str, Any]:
     constants = {
         "metric_version": "network_traffic_peak_load.v1",
@@ -670,18 +694,19 @@ def _peak_load(
         name: _peak_event(raw_events[name], range_start, range_end)
         for name in ("download", "upload", "total")
     }
-    for name, statistic_name in (
-        ("download", "download_mbps"),
-        ("upload", "upload_mbps"),
-        ("total", "total_mbps"),
-    ):
-        event_value = events[name]["value_mbps"]
-        statistics_value = statistics["peak"][statistic_name]
-        if event_value is None or statistics_value is None:
-            if event_value is not statistics_value:
+    if statistics is not None:
+        for name, statistic_name in (
+            ("download", "download_mbps"),
+            ("upload", "upload_mbps"),
+            ("total", "total_mbps"),
+        ):
+            event_value = events[name]["value_mbps"]
+            statistics_value = statistics["peak"][statistic_name]
+            if event_value is None or statistics_value is None:
+                if event_value is not statistics_value:
+                    raise HistoricalTrafficSerializationError("Peak value identity is invalid")
+            elif not math.isclose(event_value, statistics_value, rel_tol=1e-9, abs_tol=1e-9):
                 raise HistoricalTrafficSerializationError("Peak value identity is invalid")
-        elif not math.isclose(event_value, statistics_value, rel_tol=1e-9, abs_tol=1e-9):
-            raise HistoricalTrafficSerializationError("Peak value identity is invalid")
     busiest_bucket = _peak_bucket(
         getattr(value, "busiest_bucket", None),
         buckets,
@@ -694,7 +719,7 @@ def _peak_load(
     numeric_events = all(event["value_mbps"] is not None for event in events.values())
     complete = (
         history_status == "ok"
-        and statistics["status"] == "ok"
+        and (statistics is None or statistics["status"] == "ok")
         and numeric_events
         and busiest_bucket["status"] == "ok"
         and busiest_hour["status"] == "ok"

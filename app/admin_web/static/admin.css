@@ -109,6 +109,9 @@ input[type="radio"] { width: auto; min-height: 0; }
 .traffic-history-heading-row { align-items: flex-start; gap: 1rem; }
 .traffic-range { display: flex; gap: .5rem; }
 .traffic-range .button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.traffic-range .button[data-applied="true"][aria-pressed="false"] {
+  box-shadow: inset 0 0 0 2px var(--muted);
+}
 .traffic-history-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem 1rem; margin: 0 0 1rem; }
 .traffic-history-meta p { margin: 0; color: var(--muted); }
 .traffic-history-legend { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: .5rem; color: var(--muted); }

@@ -153,10 +153,13 @@ function makePayload(rangeId,mode="ok"){
     assert "TRAFFIC_HISTORY_PANEL_OK" in output
 
 
-def test_history_template_owns_shared_range_not_private_range():
+def test_history_template_selects_legacy_shared_or_independent_range_controls():
     template = (ROOT / "app" / "admin_web" / "templates" / "admin" / "traffic.html").read_text(encoding="utf-8")
     assert "traffic-network-range-24h" in template and "traffic-network-range-7d" in template
-    assert "traffic-history-range-24h" not in template
+    assert "traffic-history-range-24h" in template and "traffic-history-range-7d" in template
+    assert "'traffic-history-range' if traffic_independent_ranges_enabled else 'traffic-network-range'" in template
+    assert "'traffic-history-range-24h' if traffic_independent_ranges_enabled else 'traffic-network-range-24h'" in template
+    assert "'traffic-history-range-7d' if traffic_independent_ranges_enabled else 'traffic-network-range-7d'" in template
     assert "Download" in template and "Upload" in template
     assert "Period Statistics" in template and "traffic-statistics-peak-total" in template
 

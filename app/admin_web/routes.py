@@ -354,6 +354,9 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             traffic_statistics_enabled=config.traffic_statistics_enabled,
             traffic_peak_enabled=config.traffic_peak_enabled,
             traffic_by_ap_enabled=config.traffic_by_ap_enabled,
+            traffic_independent_ranges_enabled=(
+                config.traffic_independent_ranges_enabled
+            ),
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -1166,6 +1169,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         started = time.monotonic()
         authorized_site = None
         range_id = None
+        requested_products = None
+        include_history = True
         statistics_requested = False
         peak_requested = False
         aps_requested = False
@@ -1214,19 +1219,51 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 reason = "feature_disabled"
                 return response
             if (
-                not set(request.args).issubset({"range", "include"})
+                not set(request.args).issubset({"range", "include", "products"})
                 or "range" not in request.args
                 or len(request.args.getlist("range")) != 1
                 or (
                     "include" in request.args
                     and len(request.args.getlist("include")) != 1
                 )
+                or (
+                    "products" in request.args
+                    and len(request.args.getlist("products")) != 1
+                )
+                or ("include" in request.args and "products" in request.args)
             ):
                 response = make_response(_error("invalid_request", 400))
                 reason = "invalid_request"
                 return response
             range_id = request.args.get("range")
-            if "include" in request.args:
+            if "products" in request.args:
+                if not config.traffic_independent_ranges_enabled:
+                    response = make_response(_error("not_found", 404))
+                    reason = "feature_disabled"
+                    return response
+                products_text = request.args.get("products")
+                tokens = (
+                    products_text.split(",")
+                    if isinstance(products_text, str) and products_text
+                    else []
+                )
+                canonical = ("history", "statistics", "peak", "aps")
+                requested_products = tuple(
+                    product for product in canonical if product in tokens
+                )
+                if (
+                    not tokens
+                    or len(tokens) != len(set(tokens))
+                    or ",".join(requested_products) != products_text
+                ):
+                    response = make_response(_error("invalid_request", 400))
+                    reason = "invalid_request"
+                    return response
+                include_history = "history" in requested_products
+                statistics_requested = "statistics" in requested_products
+                peak_requested = "peak" in requested_products
+                aps_requested = "aps" in requested_products
+            elif "include" in request.args:
                 include = request.args.get("include")
                 if include not in {
                     "statistics", "statistics,peak", "aps",
@@ -1238,18 +1275,18 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 statistics_requested = include.startswith("statistics")
                 peak_requested = include.startswith("statistics,peak")
                 aps_requested = include.endswith("aps")
-                if statistics_requested and not config.traffic_statistics_enabled:
-                    response = make_response(_error("not_found", 404))
-                    reason = "feature_disabled"
-                    return response
-                if peak_requested and not config.traffic_peak_enabled:
-                    response = make_response(_error("not_found", 404))
-                    reason = "feature_disabled"
-                    return response
-                if aps_requested and not config.traffic_by_ap_enabled:
-                    response = make_response(_error("not_found", 404))
-                    reason = "feature_disabled"
-                    return response
+            if statistics_requested and not config.traffic_statistics_enabled:
+                response = make_response(_error("not_found", 404))
+                reason = "feature_disabled"
+                return response
+            if peak_requested and not config.traffic_peak_enabled:
+                response = make_response(_error("not_found", 404))
+                reason = "feature_disabled"
+                return response
+            if aps_requested and not config.traffic_by_ap_enabled:
+                response = make_response(_error("not_found", 404))
+                reason = "feature_disabled"
+                return response
             service = runtime.query_service
             if service is None:
                 response = make_response(_error("source_unavailable", 503))
@@ -1260,14 +1297,16 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     g.admin_principal,
                     selected,
                     range_id=range_id,
+                    include_history=include_history,
                     include_statistics=statistics_requested,
                     include_peak=peak_requested,
                     include_aps=aps_requested,
+                    requested_products=requested_products,
                 )
                 result_status = result.result.get("status")
                 coverage = result.result.get("coverage", {})
                 coverage_status = coverage.get("status")
-                bucket_count = len(result.result.get("buckets", ()))
+                bucket_count = coverage.get("bucket_count", 0)
                 gap_bucket_count = coverage.get("gap_bucket_count")
                 transition_count = coverage.get("source_transition_count")
                 statistics = result.result.get("period_statistics")
@@ -1359,6 +1398,14 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     busiest_bucket_status=busiest_bucket_status,
                     busiest_hour_status=busiest_hour_status,
                     response_bytes=getattr(response, "content_length", None),
+                    requested_products=(
+                        ",".join(requested_products)
+                        if requested_products is not None else None
+                    ),
+                    product_count=(
+                        len(requested_products)
+                        if requested_products is not None else None
+                    ),
                 )
             except Exception:
                 pass

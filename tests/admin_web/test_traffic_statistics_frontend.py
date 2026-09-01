@@ -17,7 +17,13 @@ def test_statistics_is_passive_history_consumer_without_new_lifecycle_owner():
     panel = _panel_source()
     assert '"statistics"' in panel
     assert "encodeURIComponent(include)" in panel
-    assert panel.count("coordinator.registerPanel(") == 1
+    assert panel.count("coordinator.registerPanel({") == 2
+    assert "if (!independentRanges) {" in panel
+    assert "const PRODUCT_ORDER" in panel
+    assert "&products=${encodeURIComponent(products)}" in panel
+    assert panel.count("const PANEL_KEY = \"network-traffic-history\"") == 1
+    assert panel.count("key: PANEL_KEY") == 2
+    assert "    return;\n  }\n\n  const PRODUCT_ORDER" in panel
     assert "fetch(" not in panel
     assert "setTimeout(" not in panel and "setInterval(" not in panel
     assert "AbortController" not in panel
@@ -90,7 +96,7 @@ function payload(mode="ok"){
     assert "TRAFFIC_STATISTICS_PANEL_OK" in output
 
 
-def test_statistics_template_has_six_metrics_and_no_second_range_selector():
+def test_statistics_template_has_six_metrics_and_dual_mode_range_selector():
     template = (
         ROOT / "app" / "admin_web" / "templates" / "admin" / "traffic.html"
     ).read_text(encoding="utf-8")
@@ -101,7 +107,9 @@ def test_statistics_template_has_six_metrics_and_no_second_range_selector():
     ):
         assert identity in template
     assert template.count("traffic-network-range-24h") == 1
-    assert "traffic-statistics-range" not in template
+    assert "traffic-statistics-range-24h" in template
+    assert "traffic-statistics-range-7d" in template
+    assert "{% if traffic_independent_ranges_enabled %}" in template
     assert _node()
 
 

@@ -62,7 +62,7 @@ global.fetch=async(url,options)=>{fetchCalls.push({url,options}); const item=fet
 require(process.argv[2]);
 const coordinator=window.CaptivPortalTrafficCoordinator;
 assert(coordinator && Object.isFrozen(coordinator),"frozen coordinator exposed");
-assert(Object.keys(coordinator).sort().join(",")==="refreshAll,refreshPanel,registerPanel","public API is narrow");
+assert(Object.keys(coordinator).sort().join(",")==="queuePanel,refreshAll,refreshPanel,registerPanel","public API is narrow");
 assert(elements["traffic-empty-state"].hidden===false,"zero-panel empty state visible");
 assert(elements["refresh-button"].disabled===true,"zero-panel refresh disabled");
 assert(fetchCalls.length===0 && timers.size===0,"zero panels produce no fetch or timer");

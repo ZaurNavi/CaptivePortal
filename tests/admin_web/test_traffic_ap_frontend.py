@@ -8,10 +8,17 @@ def test_ap_frontend_uses_combined_history_loader_and_bounded_safe_dom():
     assert '"statistics,peak,aps"' in source
     assert "encodeURIComponent(include)" in source
     assert 'apEnabled ? "aps" : null' in source
-    assert source.count("registerPanel({") == 1
+    assert source.count("coordinator.registerPanel({") == 2
+    assert "if (!independentRanges) {" in source
+    assert "const PRODUCT_ORDER" in source
+    assert "&products=${encodeURIComponent(products)}" in source
+    assert source.count("const PANEL_KEY = \"network-traffic-history\"") == 1
+    assert source.count("key: PANEL_KEY") == 2
+    assert "    return;\n  }\n\n  const PRODUCT_ORDER" in source
     assert "fetch(" not in source
     assert "AbortController" not in source
     assert "setInterval(" not in source and "setTimeout(" not in source
+    assert "visibilitychange" not in source and "pagehide" not in source
     assert "innerHTML" not in source
     assert "ap_limit" not in source and "ap_cursor" not in source
     assert "traffic-ap-selector" not in source

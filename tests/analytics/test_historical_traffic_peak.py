@@ -7,13 +7,13 @@ import pytest
 
 from app.analytics.historical_traffic import (
     HistoricalTrafficReadService,
-    HistoricalTrafficValidationError,
     _busiest_bucket,
     _busiest_hour,
 )
 from app.analytics.source_gateway import (
     QueryDeadline,
     _HISTORICAL_PEAK_COMBINED_SQL,
+    _HISTORICAL_PEAK_ONLY_COMBINED_SQL,
 )
 
 from .test_historical_traffic_statistics import SITE, _cycle
@@ -22,7 +22,7 @@ from .test_historical_traffic_statistics import SITE, _cycle
 UTC = timezone.utc
 
 
-def _read(stack, start, end, *, peak=True, bucket_seconds=300):
+def _read(stack, start, end, *, peak=True, statistics=True, bucket_seconds=300):
     return HistoricalTrafficReadService(
         stack.gateway,
         quality_gap_threshold_seconds=180,
@@ -33,7 +33,7 @@ def _read(stack, start, end, *, peak=True, bucket_seconds=300):
         to_utc=end,
         evaluated_at_utc=end,
         bucket_seconds=bucket_seconds,
-        include_period_statistics=True,
+        include_period_statistics=statistics,
         include_peak_load=peak,
     )
 
@@ -114,16 +114,50 @@ def test_peak_real_zero_is_not_missing_and_no_samples_are_insufficient(analytics
     assert empty.busiest_hour.status == "insufficient_data"
 
 
-def test_peak_requires_statistics_and_statistics_only_stays_unchanged(analytics_stack):
-    service = HistoricalTrafficReadService(analytics_stack.gateway)
-    with pytest.raises(HistoricalTrafficValidationError, match="requires"):
-        service.get_site_history(
-            SITE,
-            from_utc="2026-01-01T11:00:00.000Z",
-            to_utc="2026-01-01T12:00:00.000Z",
-            evaluated_at_utc="2026-01-01T12:00:00.000Z",
-            include_peak_load=True,
-        )
+def test_peak_only_does_not_compute_or_expose_period_average(
+    analytics_stack, monkeypatch,
+):
+    _cycle(analytics_stack, "peak-only", "2026-01-01T11:30:00.000Z")
+    service = HistoricalTrafficReadService(
+        analytics_stack.gateway,
+        clock=lambda: datetime(2026, 1, 1, 12, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        service,
+        "_period_statistics",
+        lambda *_args, **_kwargs: pytest.fail("Peak-only computed Period Average"),
+    )
+    peak_only = service.get_site_history(
+        SITE,
+        from_utc="2026-01-01T11:00:00.000Z",
+        to_utc="2026-01-01T12:00:00.000Z",
+        evaluated_at_utc="2026-01-01T12:00:00.000Z",
+        bucket_seconds=300,
+        include_peak_load=True,
+    )
+    assert peak_only.peak_load is not None
+    assert peak_only.period_statistics is None
+    statistics = _read(
+        analytics_stack,
+        "2026-01-01T11:00:00.000Z",
+        "2026-01-01T12:00:00.000Z",
+        peak=False,
+    ).period_statistics
+    assert statistics is not None
+    assert tuple(
+        peak_only.peak_load.events[name].value_mbps
+        for name in ("download", "upload", "total")
+    ) == (
+        statistics.peak.download_mbps,
+        statistics.peak.upload_mbps,
+        statistics.peak.total_mbps,
+    )
+    assert "THEN download*elapsed_seconds" not in _HISTORICAL_PEAK_ONLY_COMBINED_SQL
+    assert "THEN upload*elapsed_seconds" not in _HISTORICAL_PEAK_ONLY_COMBINED_SQL
+    assert "THEN download*elapsed_seconds" in _HISTORICAL_PEAK_COMBINED_SQL
+
+
+def test_statistics_only_stays_unchanged(analytics_stack):
     _cycle(analytics_stack, "statistics-only", "2026-01-01T11:30:00.000Z")
     result = _read(
         analytics_stack,

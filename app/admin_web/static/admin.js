@@ -573,7 +573,8 @@
     if (typeof spec.key !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(spec.key)) return false;
     if (typeof spec.autoRefresh !== "boolean" || typeof spec.load !== "function" || typeof spec.render !== "function") return false;
     return (spec.renderLoading === undefined || typeof spec.renderLoading === "function")
-      && (spec.renderFailure === undefined || typeof spec.renderFailure === "function");
+      && (spec.renderFailure === undefined || typeof spec.renderFailure === "function")
+      && (spec.prepareRefresh === undefined || typeof spec.prepareRefresh === "function");
   }
 
   function updateFoundationState() {
@@ -667,7 +668,9 @@
   function schedule() {
     clearScheduler();
     if (stopped || globalPaused || document.hidden || panels.size === 0) return;
-    const eligible = Array.from(panels.values()).filter((state) => state.spec.autoRefresh && !state.inFlight && !state.suspended);
+    const eligible = Array.from(panels.values()).filter((state) => (
+      (state.spec.autoRefresh || state.pending) && !state.inFlight && !state.suspended
+    ));
     if (!eligible.length) return;
     const nextAt = Math.min(...eligible.map((state) => state.nextEligibleAt));
     scheduler = window.setTimeout(() => {
@@ -688,12 +691,16 @@
       if (!manual) return Promise.resolve(false);
       state.suspended = false;
     }
-    if (!initial && instant < state.nextEligibleAt) return Promise.resolve(false);
+    if (instant < state.nextEligibleAt) {
+      schedule();
+      return Promise.resolve(false);
+    }
     if (state.inFlight) {
       if (!manual) return state.inFlight;
       abortPanel(state, "superseded");
     }
     state.generation += 1;
+    state.pending = false;
     const generation = state.generation;
     const controller = new AbortController();
     state.controller = controller;
@@ -709,7 +716,10 @@
       state.spec.render(value);
       state.initialComplete = true;
       state.failureCount = 0;
-      state.nextEligibleAt = state.spec.autoRefresh ? now() + refreshSeconds * 1000 : 0;
+      state.nextEligibleAt = Math.max(
+        state.nextEligibleAt,
+        state.spec.autoRefresh ? now() + refreshSeconds * 1000 : 0,
+      );
       return true;
     }).catch((error) => {
       if (error && error.trafficNeutral) return false;
@@ -726,7 +736,10 @@
       if (state.spec.renderFailure) state.spec.renderFailure(failure);
       if (failure.kind === "busy" || failure.kind === "timeout" || failure.kind === "unavailable") {
         state.failureCount += 1;
-        state.nextEligibleAt = now() + backoffMilliseconds(state, failure);
+        state.nextEligibleAt = Math.max(
+          state.nextEligibleAt,
+          now() + backoffMilliseconds(state, failure),
+        );
       } else {
         state.suspended = true;
       }
@@ -752,6 +765,7 @@
       nextEligibleAt: 0,
       suspended: false,
       initialComplete: false,
+      pending: false,
     };
     panels.set(spec.key, state);
     updateFoundationState();
@@ -765,11 +779,29 @@
     return runPanel(state, {manual: Boolean(options && options.manual), initial: false});
   }
 
+  function queuePanel(key, options) {
+    const state = typeof key === "string" ? panels.get(key) : null;
+    if (!state || stopped || globalPaused) return false;
+    const notBefore = options && Number.isFinite(options.notBefore)
+      ? Math.max(0, options.notBefore) : 0;
+    state.suspended = false;
+    state.pending = true;
+    state.nextEligibleAt = Math.max(state.nextEligibleAt, notBefore);
+    schedule();
+    return true;
+  }
+
   function refreshAll(options) {
     if (panels.size === 0) return Promise.resolve([]);
-    return Promise.all(Array.from(panels.values()).map((state) => (
-      runPanel(state, {manual: Boolean(options && options.manual), initial: false})
-    )));
+    return Promise.all(Array.from(panels.values()).map((state) => {
+      const manual = Boolean(options && options.manual);
+      if (state.spec.prepareRefresh) {
+        const notBefore = state.spec.prepareRefresh({manual});
+        queuePanel(state.spec.key, {notBefore});
+        return Promise.resolve(true);
+      }
+      return runPanel(state, {manual, initial: false});
+    }));
   }
 
   refreshButton.addEventListener("click", () => refreshAll({manual: true}));
@@ -802,7 +834,9 @@
     panels.forEach((state) => abortPanel(state, "pagehide"));
     updateFoundationState();
   });
-  window.CaptivPortalTrafficCoordinator = Object.freeze({registerPanel, refreshPanel, refreshAll});
+  window.CaptivPortalTrafficCoordinator = Object.freeze({
+    registerPanel, refreshPanel, refreshAll, queuePanel,
+  });
   updateFoundationState();
 }());
 
@@ -955,6 +989,7 @@
   "use strict";
   if (typeof window === "undefined" || typeof document === "undefined") return;
   const root = document.getElementById("admin-page");
+  if (root && root.dataset.trafficIndependentRangesEnabled === "true") return;
   const range24h = document.getElementById("traffic-network-range-24h");
   const range7d = document.getElementById("traffic-network-range-7d");
   if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
@@ -997,14 +1032,20 @@
   if (typeof window === "undefined" || typeof document === "undefined") return;
   const root = document.getElementById("admin-page");
   const coordinator = window.CaptivPortalTrafficCoordinator;
-  const rangeContext = window.CaptivPortalTrafficNetworkRange;
+  const independentRanges = Boolean(
+    root && root.dataset.trafficIndependentRangesEnabled === "true"
+  );
+  const rangeContext = independentRanges
+    ? null : window.CaptivPortalTrafficNetworkRange;
   const panel = document.getElementById("traffic-history-panel");
   if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
       || !panel || panel.dataset.historyEnabled !== "true" || !coordinator
       || typeof coordinator.registerPanel !== "function"
-      || typeof coordinator.refreshPanel !== "function" || !rangeContext
-      || typeof rangeContext.selected !== "function"
-      || typeof rangeContext.subscribe !== "function") return;
+      || typeof coordinator.refreshPanel !== "function"
+      || (independentRanges && typeof coordinator.queuePanel !== "function")
+      || (!independentRanges && (!rangeContext
+        || typeof rangeContext.selected !== "function"
+        || typeof rangeContext.subscribe !== "function"))) return;
 
   const elements = {
     state: document.getElementById("traffic-history-state"),
@@ -1157,6 +1198,106 @@
     return Object.freeze(value);
   }
 
+  function validateCommonProjection(payload, siteId, requestedProducts) {
+    if (!object(payload) || payload.api_version !== "admin.read.v1"
+        || payload.site_id !== siteId || !object(payload.result)) {
+      throw new Error("Invalid historical Traffic projection");
+    }
+    const value = payload.result;
+    const range = value.range;
+    const coverage = value.coverage;
+    if (!Array.isArray(value.requested_products)
+        || value.requested_products.join(",") !== requestedProducts.join(",")
+        || !STATUSES.has(value.status) || !object(range) || !RANGE[range.id]
+        || range.unit !== "Mbps" || range.metric_version !== "network_traffic_history.v1"
+        || range.aggregation !== "mean_of_complete_site_rate_samples"
+        || range.source_kind !== "observation_ap_dynamic"
+        || range.sample_timestamp_semantics !== "cycle_finished_at"
+        || range.bucket_alignment !== "range_start_utc"
+        || range.max_site_history_buckets !== 720
+        || !utc(range.from_utc) || !utc(range.to_utc)
+        || !utc(range.evaluated_at_utc) || range.evaluated_at_utc !== range.to_utc
+        || range.bucket_seconds !== RANGE[range.id].bucket
+        || range.bucket_count !== RANGE[range.id].count
+        || Date.parse(range.to_utc) - Date.parse(range.from_utc)
+          !== RANGE[range.id].seconds * 1000
+        || !object(coverage) || !COVERAGE.has(coverage.status)
+        || coverage.bucket_count !== range.bucket_count
+        || !count(coverage.complete_bucket_count)
+        || !count(coverage.partial_bucket_count)
+        || !count(coverage.missing_bucket_count)
+        || coverage.complete_bucket_count + coverage.partial_bucket_count
+          + coverage.missing_bucket_count !== range.bucket_count
+        || !count(coverage.canonical_cycle_count)
+        || !count(coverage.complete_site_sample_count)
+        || !count(coverage.excluded_site_sample_count)
+        || !count(coverage.gap_bucket_count)
+        || !count(coverage.source_transition_count)
+        || !object(value.quality)
+        || !Object.values(value.quality).every(count)) {
+      throw new Error("Invalid historical Traffic projection");
+    }
+    const expectedCoverage = value.status === "ok" ? "complete"
+      : (value.status === "partial" ? "partial" : "none");
+    if (coverage.status !== expectedCoverage) {
+      throw new Error("Invalid historical Traffic projection");
+    }
+    const fields = {
+      history: "buckets",
+      statistics: "period_statistics",
+      peak: "peak_load",
+      aps: "ap_traffic",
+    };
+    for (const [product, field] of Object.entries(fields)) {
+      if (Object.prototype.hasOwnProperty.call(value, field)
+          !== requestedProducts.includes(product)) {
+        throw new Error("Invalid historical Traffic product projection");
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "ap_bucket_axis")
+        !== requestedProducts.includes("aps")) {
+      throw new Error("Invalid historical Traffic AP axis projection");
+    }
+    return value;
+  }
+
+  function validateApAxis(axis, history) {
+    if (!object(axis) || axis.bucket_count !== history.range.bucket_count
+        || axis.bucket_seconds !== history.range.bucket_seconds
+        || !Array.isArray(axis.bucket_start_utc)
+        || axis.bucket_start_utc.length !== axis.bucket_count) {
+      throw new Error("Invalid AP bucket axis");
+    }
+    let expected = Date.parse(history.range.from_utc);
+    for (const value of axis.bucket_start_utc) {
+      if (!utc(value) || Date.parse(value) !== expected) {
+        throw new Error("Invalid AP bucket axis");
+      }
+      expected += axis.bucket_seconds * 1000;
+    }
+    if (expected !== Date.parse(history.range.to_utc)) {
+      throw new Error("Invalid AP bucket axis");
+    }
+    return Object.freeze(axis);
+  }
+
+  function validateProjection(payload, siteId, requestedProducts) {
+    const common = validateCommonProjection(payload, siteId, requestedProducts);
+    const history = requestedProducts.includes("history")
+      ? validate(payload, siteId) : Object.freeze(common);
+    const statistics = requestedProducts.includes("statistics")
+      ? validateStatistics(common.period_statistics, common) : null;
+    const peak = requestedProducts.includes("peak")
+      ? validatePeak(common.peak_load, common, statistics) : null;
+    let ap = null;
+    let axis = null;
+    if (requestedProducts.includes("aps")) {
+      axis = validateApAxis(common.ap_bucket_axis, common);
+      ap = validateApTraffic(common.ap_traffic, common);
+    }
+    return Object.freeze({common, history, statistics, peak, ap, axis});
+  }
+
   function validatePeak(value, history, statistics) {
     if (!object(value) || !STATUSES.has(value.status)
         || value.metric_version !== "network_traffic_peak_load.v1" || value.unit !== "Mbps"
@@ -1166,22 +1307,29 @@
         || Object.keys(value.events).sort().join(",") !== "download,total,upload") throw new Error("Invalid Peak response");
     for (const name of ["download", "upload", "total"]) {
       const event = value.events[name];
-      const expected = statistics.peak[`${name}_mbps`];
+      const expected = statistics === null
+        ? event.value_mbps : statistics.peak[`${name}_mbps`];
       if (!object(event) || !metric(event.value_mbps) || !count(event.occurrence_count)) throw new Error("Invalid Peak response");
       if (event.value_mbps === null) {
         if (event.sample_at_utc !== null || event.selected_source !== null || event.occurrence_count !== 0 || expected !== null) throw new Error("Invalid Peak response");
       } else if (!utc(event.sample_at_utc) || Date.parse(event.sample_at_utc) < Date.parse(history.range.from_utc)
           || Date.parse(event.sample_at_utc) >= Date.parse(history.range.to_utc) || !SOURCE.has(event.selected_source)
-          || event.occurrence_count < 1 || Math.abs(event.value_mbps - expected) > 1e-9) throw new Error("Invalid Peak response");
+          || event.occurrence_count < 1
+          || (statistics !== null && Math.abs(event.value_mbps - expected) > 1e-9)) throw new Error("Invalid Peak response");
     }
     const bucket = value.busiest_bucket;
     if (!object(bucket) || bucket.method !== "max_complete_history_bucket_total_mean.v1" || bucket.tie_break_method !== "earliest_bucket_start.v1" || !count(bucket.occurrence_count)) throw new Error("Invalid Peak response");
     if (bucket.status === "ok") {
       if (!utc(bucket.bucket_start_utc) || !utc(bucket.bucket_end_utc) || !metric(bucket.average_total_mbps)
           || !SOURCE.has(bucket.selected_source) || bucket.occurrence_count < 1
-          || !history.buckets.some((item) => item.status === "complete" && item.bucket_start_utc === bucket.bucket_start_utc
-            && item.bucket_end_utc === bucket.bucket_end_utc && item.selected_source === bucket.selected_source
-            && Math.abs(item.total_mbps - bucket.average_total_mbps) <= 1e-9)) throw new Error("Invalid Peak response");
+          || (Array.isArray(history.buckets)
+            ? !history.buckets.some((item) => item.status === "complete" && item.bucket_start_utc === bucket.bucket_start_utc
+              && item.bucket_end_utc === bucket.bucket_end_utc && item.selected_source === bucket.selected_source
+              && Math.abs(item.total_mbps - bucket.average_total_mbps) <= 1e-9)
+            : (Date.parse(bucket.bucket_end_utc) - Date.parse(bucket.bucket_start_utc)
+                !== history.range.bucket_seconds * 1000
+              || Date.parse(bucket.bucket_start_utc) < Date.parse(history.range.from_utc)
+              || Date.parse(bucket.bucket_end_utc) > Date.parse(history.range.to_utc)))) throw new Error("Invalid Peak response");
     } else if (bucket.status !== "insufficient_data" || bucket.bucket_start_utc !== null || bucket.bucket_end_utc !== null
         || bucket.average_total_mbps !== null || bucket.selected_source !== null || bucket.occurrence_count !== 0) throw new Error("Invalid Peak response");
     const hour = value.busiest_hour;
@@ -1198,7 +1346,9 @@
     } else if (hour.status !== "insufficient_data" || hour.window_start_utc !== null || hour.window_end_utc !== null
         || hour.average_total_mbps !== null || hour.accepted_interval_seconds !== null || hour.selected_source !== null) throw new Error("Invalid Peak response");
     const numeric = value.events.download.value_mbps !== null;
-    const complete = history.status === "ok" && statistics.status === "ok" && numeric && bucket.status === "ok" && hour.status === "ok";
+    const complete = history.status === "ok"
+      && (statistics === null || statistics.status === "ok")
+      && numeric && bucket.status === "ok" && hour.status === "ok";
     if ((value.status === "ok" && !complete) || (value.status === "partial" && (complete || !numeric))
         || (value.status === "insufficient_data" && (numeric || bucket.status !== "insufficient_data" || hour.status !== "insufficient_data"))) throw new Error("Invalid Peak response");
     return Object.freeze(value);
@@ -1700,8 +1850,7 @@
       apElements.items.appendChild(card);
     }
   }
-  function render(result) {
-    const value = statisticsEnabled || apEnabled ? result.history : result;
+  function renderHistory(value) {
     accepted = value;
     appliedRange = value.range.id;
     const empty = value.status === "insufficient_data";
@@ -1722,6 +1871,10 @@
     elements.transitions.textContent = String(value.coverage.source_transition_count);
     elements.timezone.textContent = displayZone();
     renderChart(value);
+  }
+  function render(result) {
+    const value = statisticsEnabled || apEnabled ? result.history : result;
+    renderHistory(value);
     if (statisticsEnabled) renderStatistics(result.statistics, value);
     if (peakEnabled) renderPeak(result.peak, value);
     if (apEnabled) renderApTraffic(result.ap, value);
@@ -1752,34 +1905,283 @@
     coordinator.refreshPanel(PANEL_KEY, {manual: true});
   }
 
-  rangeContext.subscribe(requestSelectedRange);
+  if (!independentRanges) {
+    rangeContext.subscribe(requestSelectedRange);
+    coordinator.registerPanel({
+      key: PANEL_KEY,
+      autoRefresh: false,
+      load: async (context) => {
+        const requestRange = rangeContext.selected();
+        const include = peakEnabled ? (apEnabled ? "statistics,peak,aps" : "statistics,peak")
+          : (statisticsEnabled ? (apEnabled ? "statistics,aps" : "statistics")
+            : (apEnabled ? "aps" : null));
+        const suffix = include === null ? "" : `&include=${encodeURIComponent(include)}`;
+        const value = validate(
+          await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}`),
+          context.siteId,
+        );
+        let ap = null;
+        if (apEnabled) ap = validateApTraffic(value.ap_traffic, value);
+        if (!statisticsEnabled && !apEnabled) return value;
+        let statistics = null;
+        try { statistics = validateStatistics(value.period_statistics, value); } catch (_error) { statistics = null; }
+        let peak = null;
+        if (peakEnabled && statistics !== null) {
+          try { peak = validatePeak(value.peak_load, value, statistics); } catch (_error) { peak = null; }
+        }
+        return Object.freeze({history: value, statistics, peak, ap});
+      },
+      render,
+      renderLoading,
+      renderFailure,
+    });
+    return;
+  }
+
+  const PRODUCT_ORDER = Object.freeze(["history", "statistics", "peak", "aps"]);
+  const ADMISSION_GUARD_MILLISECONDS = 10000;
+  const productUi = {
+    history: {state: elements.state, title: elements.title, message: elements.message},
+    statistics: statisticsEnabled ? {
+      state: statisticsElements.state, title: statisticsElements.title,
+      message: statisticsElements.message,
+    } : null,
+    peak: peakEnabled ? {
+      state: peakElements.state, title: peakElements.title,
+      message: peakElements.message,
+    } : null,
+    aps: apEnabled ? {
+      state: apElements.state, title: apElements.title,
+      message: apElements.message,
+    } : null,
+  };
+  const enabledProducts = PRODUCT_ORDER.filter((product) => productUi[product]);
+  const states = new Map(enabledProducts.map((product) => [product, {
+    product,
+    selectedRange: "24h",
+    appliedRange: null,
+    phase: "initial",
+    lastSuccessfulPayload: null,
+    lastError: null,
+    intentGeneration: 1,
+  }]));
+  const pending = new Map();
+  let sequence = 0;
+  let lastDispatchMonotonic = null;
+  let activeBatch = null;
+
+  function monotonicNow() {
+    return typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now() : Date.now();
+  }
+
+  function controls(product) {
+    return {
+      range24h: document.getElementById(`traffic-${product === "aps" ? "ap" : product}-range-24h`),
+      range7d: document.getElementById(`traffic-${product === "aps" ? "ap" : product}-range-7d`),
+    };
+  }
+
+  function updateControls(state) {
+    const pair = controls(state.product);
+    if (!pair.range24h || !pair.range7d) throw new Error("Missing Traffic range controls");
+    pair.range24h.setAttribute("aria-pressed", state.selectedRange === "24h" ? "true" : "false");
+    pair.range7d.setAttribute("aria-pressed", state.selectedRange === "7d" ? "true" : "false");
+    pair.range24h.dataset.applied = state.appliedRange === "24h" ? "true" : "false";
+    pair.range7d.dataset.applied = state.appliedRange === "7d" ? "true" : "false";
+  }
+
+  function phaseText(product, phase, state, failure) {
+    const label = product === "history" ? "History" : product === "statistics"
+      ? "Period statistics" : product === "peak" ? "Peak Load" : "AP traffic";
+    if (phase === "waiting") return [
+      `${label} waiting for request admission`,
+      state.appliedRange === null
+        ? `${displayRange(state.selectedRange)} is queued.`
+        : `${displayRange(state.selectedRange)} is queued; ${displayRange(state.appliedRange)} remains visible.`,
+    ];
+    if (phase === "loading") return [
+      `Loading ${label.toLowerCase()}…`,
+      state.appliedRange === null
+        ? `Reading ${displayRange(state.selectedRange)} persisted evidence.`
+        : `${displayRange(state.appliedRange)} remains visible until ${displayRange(state.selectedRange)} succeeds.`,
+    ];
+    const busy = failure && failure.kind === "busy";
+    return [
+      busy ? `${label} query is busy` : `${label} unavailable`,
+      state.appliedRange === null
+        ? `${displayRange(state.selectedRange)} could not be loaded.`
+        : `${displayRange(state.selectedRange)} could not be loaded; showing ${displayRange(state.appliedRange)}.`,
+    ];
+  }
+
+  function renderPhase(state, phase, failure) {
+    state.phase = phase;
+    const ui = productUi[state.product];
+    const [title, message] = phaseText(state.product, phase, state, failure);
+    ui.state.dataset.state = phase.startsWith("error") ? "error" : "warning";
+    ui.title.textContent = title;
+    ui.message.textContent = message;
+    updateControls(state);
+  }
+
+  function enqueue(product, range, priority, force) {
+    const state = states.get(product);
+    if (!state || !RANGE[range] || (!force && state.selectedRange === range)) return false;
+    state.selectedRange = range;
+    state.intentGeneration += 1;
+    state.lastError = null;
+    pending.set(product, {
+      product,
+      range,
+      generation: state.intentGeneration,
+      priority,
+      sequence: sequence += 1,
+    });
+    renderPhase(state, "waiting", null);
+    return true;
+  }
+
+  function enqueueRefresh() {
+    enabledProducts.forEach((product) => {
+      const state = states.get(product);
+      const existing = pending.get(product);
+      if (existing && existing.priority > 1) return;
+      enqueue(product, state.selectedRange, 1, true);
+    });
+  }
+
+  function nextAdmissionAt() {
+    return lastDispatchMonotonic === null
+      ? 0 : lastDispatchMonotonic + ADMISSION_GUARD_MILLISECONDS;
+  }
+
+  function nextBatch() {
+    if (!pending.size) return null;
+    const intents = Array.from(pending.values()).sort((left, right) => (
+      right.priority - left.priority || left.sequence - right.sequence
+    ));
+    const first = intents[0];
+    const selected = PRODUCT_ORDER.map((product) => pending.get(product))
+      .filter((intent) => intent && intent.range === first.range);
+    selected.forEach((intent) => pending.delete(intent.product));
+    selected.forEach((intent) => renderPhase(states.get(intent.product), "loading", null));
+    return Object.freeze({
+      range: first.range,
+      products: Object.freeze(selected.map((intent) => intent.product)),
+      intents: Object.freeze(selected),
+    });
+  }
+
+  function restoreBatch(batch) {
+    for (const intent of batch.intents) {
+      const state = states.get(intent.product);
+      if (state.intentGeneration !== intent.generation
+          || state.selectedRange !== intent.range || pending.has(intent.product)) continue;
+      pending.set(intent.product, intent);
+      renderPhase(state, "waiting", null);
+    }
+  }
+
+  function schedulePending() {
+    if (pending.size) coordinator.queuePanel(PANEL_KEY, {notBefore: nextAdmissionAt()});
+  }
+
+  function applyBatch(batch, projected) {
+    for (const intent of batch.intents) {
+      const state = states.get(intent.product);
+      if (state.intentGeneration !== intent.generation
+          || state.selectedRange !== intent.range) continue;
+      if (intent.product === "history") renderHistory(projected.history);
+      if (intent.product === "statistics") {
+        renderStatistics(projected.statistics, projected.common);
+      }
+      if (intent.product === "peak") renderPeak(projected.peak, projected.common);
+      if (intent.product === "aps") renderApTraffic(projected.ap, projected.common);
+      state.appliedRange = projected.common.range.id;
+      state.phase = "ready";
+      state.lastSuccessfulPayload = projected[intent.product === "aps" ? "ap" : intent.product];
+      state.lastError = null;
+      updateControls(state);
+    }
+  }
+
+  function failBatch(batch, failure) {
+    for (const intent of batch.intents) {
+      const state = states.get(intent.product);
+      if (state.intentGeneration !== intent.generation
+          || state.selectedRange !== intent.range) continue;
+      state.lastError = failure;
+      renderPhase(
+        state,
+        state.lastSuccessfulPayload === null ? "error_empty" : "error_with_previous",
+        failure,
+      );
+    }
+  }
+
+  function selectProductRange(product, range) {
+    if (!enqueue(product, range, 2, false)) return;
+    coordinator.queuePanel(PANEL_KEY, {notBefore: nextAdmissionAt()});
+  }
+
+  enabledProducts.forEach((product) => {
+    const pair = controls(product);
+    if (!pair.range24h || !pair.range7d) throw new Error("Missing Traffic range controls");
+    pair.range24h.addEventListener("click", () => selectProductRange(product, "24h"));
+    pair.range7d.addEventListener("click", () => selectProductRange(product, "7d"));
+    updateControls(states.get(product));
+    pending.set(product, {
+      product,
+      range: "24h",
+      generation: states.get(product).intentGeneration,
+      priority: 0,
+      sequence: sequence += 1,
+    });
+  });
+
   coordinator.registerPanel({
     key: PANEL_KEY,
     autoRefresh: false,
-    load: async (context) => {
-      const requestRange = rangeContext.selected();
-      const include = peakEnabled ? (apEnabled ? "statistics,peak,aps" : "statistics,peak")
-        : (statisticsEnabled ? (apEnabled ? "statistics,aps" : "statistics")
-          : (apEnabled ? "aps" : null));
-      const suffix = include === null ? "" : `&include=${encodeURIComponent(include)}`;
-      const value = validate(
-        await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}`),
-        context.siteId,
-      );
-      let ap = null;
-      if (apEnabled) ap = validateApTraffic(value.ap_traffic, value);
-      if (!statisticsEnabled && !apEnabled) return value;
-      let statistics = null;
-      try { statistics = validateStatistics(value.period_statistics, value); } catch (_error) { statistics = null; }
-      let peak = null;
-      if (peakEnabled && statistics !== null) {
-        try { peak = validatePeak(value.peak_load, value, statistics); } catch (_error) { peak = null; }
-      }
-      return Object.freeze({history: value, statistics, peak, ap});
+    prepareRefresh: () => {
+      enqueueRefresh();
+      return nextAdmissionAt();
     },
-    render,
-    renderLoading,
-    renderFailure,
+    load: async (context) => {
+      const batch = nextBatch();
+      if (batch === null) return null;
+      activeBatch = batch;
+      lastDispatchMonotonic = monotonicNow();
+      const products = batch.products.join(",");
+      try {
+        const payload = await context.requestJson(
+          `${context.apiBase}/traffic/history?range=${encodeURIComponent(batch.range)}&products=${encodeURIComponent(products)}`,
+        );
+        return Object.freeze({
+          batch,
+          projected: validateProjection(payload, context.siteId, batch.products),
+        });
+      } catch (error) {
+        if (error && error.trafficNeutral) {
+          restoreBatch(batch);
+          activeBatch = null;
+          schedulePending();
+        }
+        throw error;
+      }
+    },
+    render: (value) => {
+      if (value === null) return;
+      applyBatch(value.batch, value.projected);
+      activeBatch = null;
+      schedulePending();
+    },
+    renderLoading: () => {},
+    renderFailure: (failure) => {
+      if (activeBatch !== null) failBatch(activeBatch, failure);
+      activeBatch = null;
+      schedulePending();
+    },
   });
 }());
 /* TRAFFIC_HISTORY_PANEL_END */

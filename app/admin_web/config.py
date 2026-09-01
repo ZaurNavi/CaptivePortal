@@ -81,6 +81,7 @@ class AdminWebConfig:
     traffic_statistics_enabled: bool
     traffic_peak_enabled: bool
     traffic_by_ap_enabled: bool
+    traffic_independent_ranges_enabled: bool
     traffic_refresh_seconds: int
     traffic_request_timeout_seconds: int
 
@@ -135,6 +136,10 @@ def admin_web_config_from_settings(
     traffic_by_ap_enabled = _exact_bool(
         settings.get("web_admin_traffic_by_ap_enabled", "false"),
         "WEB_ADMIN_TRAFFIC_BY_AP_ENABLED",
+    )
+    traffic_independent_ranges_enabled = _exact_bool(
+        settings.get("web_admin_traffic_independent_ranges_enabled", "false"),
+        "WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED",
     )
     username = _string(settings.get("web_admin_username", ""), "WEB_ADMIN_USERNAME")
     password_hash = _string(
@@ -255,6 +260,14 @@ def admin_web_config_from_settings(
             "WEB_ADMIN_TRAFFIC_ENABLED=true and "
             "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true"
         )
+    if traffic_independent_ranges_enabled and (
+        not enabled or not traffic_enabled or not traffic_history_enabled
+    ):
+        raise AdminWebConfigError(
+            "WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED requires "
+            "WEB_ADMIN_ENABLED=true, WEB_ADMIN_TRAFFIC_ENABLED=true and "
+            "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true"
+        )
 
     if enabled:
         if USERNAME_PATTERN.fullmatch(username) is None:
@@ -288,6 +301,7 @@ def admin_web_config_from_settings(
         traffic_statistics_enabled=traffic_statistics_enabled,
         traffic_peak_enabled=traffic_peak_enabled,
         traffic_by_ap_enabled=traffic_by_ap_enabled,
+        traffic_independent_ranges_enabled=traffic_independent_ranges_enabled,
         **values,
     )
 
