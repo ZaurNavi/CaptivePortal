@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-08-31
-Current repository baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
-Confirmed production deployed HEAD: `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
-Confirmed production tree: `f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9`
+Updated: 2026-09-01
+Current repository implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
+Confirmed production deployed HEAD: `daf68e91fc759188980cf8741913e6b60a58eb62`
+Confirmed production tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
 
 ## Repository vs production
 
@@ -165,124 +165,156 @@ Owner + Tech Lead issue official PASS/FAIL.
 All mandatory pre-publication gates must PASS before the normal publication
 commit/PR path.
 
-## Traffic production checkpoint — 2026-08-31
+## Traffic production checkpoint — 2026-09-01
 
-Owner-confirmed:
+Owner-confirmed current state:
 
 ```text
-TASK-TRAFFIC-04:
-CLOSED / PRODUCTION PASS
+repository / production HEAD:
+daf68e91fc759188980cf8741913e6b60a58eb62
 
-production HEAD:
-a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
+repository / production tree:
+b0e2f028eecf6aec9d86e35542c33e7105209335
 
-production tree:
-f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
+captive-portal.service:
+active
+```
 
+Current production Traffic surface:
+
+```text
+Current Network Throughput
+Network Traffic History
+Period Statistics
+Peak Load
+Traffic by AP
+```
+
+Production flags:
+
+```text
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
-
-Browser/product acceptance:
-PASS
-
-24h:
-History / Statistics / Peak = PASS
-
-7d:
-History / Statistics / Peak = PASS
-
-shared History/Statistics/Peak range:
-PASS
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 ```
 
-Traffic Section production surface includes Current, History, Period Statistics
-and Peak Load.
+Repository defaults for these feature flags remain `false`.
 
-## TRAFFIC-04 deployment and activation history
-
-Previous production checkpoint:
+## TRAFFIC-05 publication history
 
 ```text
-b92efbfabb38f912550526bc5a3d1f2f1a8ae4d6
-1d8b94590848f9505e45e653384dd8a7c18d4339
+TASK-TRAFFIC-05 — Traffic by AP
+publication commit: 85edc14214e3a271a300249b5b1062be31547c95
+PR: #93
+merge commit: 8a5c4db899406eeb1f737abe63495247be1ee75a
+merge tree: 6837dd729dedb0df6414b3f979657a3f6f55d0ab
+current production status: DONE / PRODUCTION ACTIVE
 ```
+
+## TRAFFIC-RANGE-01 deployment / activation history
 
 Accepted candidate tree:
 
 ```text
-f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
+b0e2f028eecf6aec9d86e35542c33e7105209335
 ```
 
 Publication / merge:
 
 ```text
-branch: feature/traffic-peak-v1
-publication commit: 0343ac77a1a90c2ba8bc3ce1c969b6c1593e9759
-PR: #91
-merge commit: a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
-merge tree: f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
+publication commit: 355b413e9167bafb8ca9547af08c037eef86b189
+PR: #94
+merge commit: daf68e91fc759188980cf8741913e6b60a58eb62
+merge tree: b0e2f028eecf6aec9d86e35542c33e7105209335
 ```
 
-Deployment was performed **FROM GIT**. No SCP/manual source patch was used.
+Production deployment was performed **FROM GIT**. Application source was not
+delivered by SCP/manual patch.
 
-Rollout remained two-stage:
+Owner-approved closing sequence:
 
 ```text
-Stage 1:
-deploy accepted Git artifact
-WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
-→ dormant verification PASS
-
-Stage 2:
-WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
-→ separate controlled restart
-→ production product acceptance PASS
+Implementation candidate
+→ focused gate PASS
+→ targeted Traffic regression PASS WITH REVIEWED COMPATIBILITY
+→ Windows Central Lab V6-FIXED PASS
+→ Linux production-size §97 PERF PASS
+→ Git publication
+→ PR #94
+→ Owner merge
+→ deploy FROM GIT
+→ dormant production acceptance PASS
+→ separate feature activation
+→ production browser/product acceptance PASS
 ```
 
-Post-activation evidence:
+Activation and deployment remained separate operations.
+
+Independent-range activation current fact:
 
 ```text
-service active/running
-NRestarts=0
-startup clean
-Observation cycles continue
-Omada webhook normal
-public portal endpoints normal
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 ```
 
-Peak-only rollback remains feature disable first:
+Traffic by AP current fact:
 
 ```text
-WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 ```
 
-History/Statistics/Current do not need to be disabled for a Peak-only rollback.
+## Production architecture outcome
 
-## TRAFFIC-04 acceptance / PERF note
+The production fix for heavy shared 7d historical work did **not** increase the
+Admin query deadline.
 
-Windows Central Lab V6 and Linux production-size PERF both passed on the accepted
-candidate tree.
-
-Controlled amendment #1 for this TASK changed only:
+Preserved:
 
 ```text
-Peak vs Candidate p50
-from max(0.50s, 20% C.p50)
-to   max(0.50s, 30% C.p50)
+WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=10
+Traffic browser request timeout=20s
+Admin concurrency=unchanged
 ```
 
-All p95/max/hard-headroom/deadline/browser-timeout limits remained unchanged.
+Accepted remediation:
+- canonical product-scoped `products=` requests;
+- independent panel intent;
+- at most one historical HTTP request in flight;
+- sequential historical admission;
+- permanent 10-second admission guard.
 
-The Owner-approved actual execution did not use a separate pre-publication browser
-gate. Production product/browser acceptance was completed after Git deploy and
-separate activation. This historical execution detail does not change generic
-acceptance-before-publication governance.
+## TRAFFIC-RANGE-01 production-size acceptance
 
-A one-time non-reproduced 7d visual-refresh observation was explicitly not accepted
-as a blocker/defect/debt. Follow-up History requests were HTTP 200 without observed
-429/503/query_deadline/concurrency failure.
+Linux §97 PERF:
+
+```text
+PASS
+```
+
+A7 hard evidence:
+
+```text
+p50 2.444160s
+p95 2.469994s
+max  2.472858s
+query_deadline=0
+source_integrity=0
+unexpected 5xx=0
+```
+
+B24 ↔ C24 semantic identity: PASS.
+
+Immutable snapshot:
+
+```text
+bytes=273235968
+SHA256=b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
+```
+
+The reviewed Windows SQLite infinity compatibility case is known compatibility,
+not a TASK regression.
 
 ## Feature activation
 

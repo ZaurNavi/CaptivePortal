@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-08-31
+Updated: 2026-09-01
 Branch: `main`
-Runtime commit: `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
-Runtime tree: `f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9`
-Commit source: merge PR #91 / TASK-TRAFFIC-04, 2026-08-30
+Runtime commit: `daf68e91fc759188980cf8741913e6b60a58eb62`
+Runtime tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
+Commit source: merge PR #94 / TASK-TRAFFIC-RANGE-01, 2026-09-01
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -84,8 +84,10 @@ Analytics has no worker/write lifecycle to stop.
 | Traffic Current Network Throughput | Admin Web + `app/analytics/current_traffic.py` | persisted AP Observation facts via CurrentTrafficReadService | none | no |
 | Historical Traffic Read | `app/analytics/historical_traffic.py`, source gateway | persisted AP Observation history | none | no |
 | Traffic Network History | Admin Web + Historical Traffic | shared 24h/7d historical read | none | no |
-| Traffic Period Statistics | Admin Web + Historical Traffic | shared History range/read execution | none | no |
-| Traffic Peak Load | Admin Web + Historical Traffic | same History range/read execution + Peak temporal projection | none | no |
+| Traffic Period Statistics | Admin Web + Historical Traffic | product-scoped Historical Traffic projection | none | no |
+| Traffic Peak Load | Admin Web + Historical Traffic | product-scoped Peak projection | none | no |
+| Traffic by AP | Admin Web + Historical Traffic | product-scoped AP projection | none | no |
+| Independent Traffic Range per Panel | Admin Web frontend | page-local product range/intent orchestration | page-local memory only | no |
 
 ## 5. Observation vs Current State
 
@@ -214,11 +216,13 @@ Current pages:
 - Traffic
 
 Traffic currently contains:
-- Traffic Foundation/shared coordinator;
+- Traffic Foundation / `CaptivPortalTrafficCoordinator`;
 - Current Network Throughput;
-- Historical Network Throughput;
+- Network Traffic History;
 - Period Statistics;
-- Peak Load.
+- Peak Load;
+- Traffic by AP;
+- independent historical panel ranges.
 
 Current endpoint:
 
@@ -226,35 +230,36 @@ Current endpoint:
 GET /admin/api/v1/sites/<site_id>/traffic/current
 ```
 
-Historical endpoint family:
+Historical endpoint:
 
 ```text
-GET /admin/api/v1/sites/<site_id>/traffic/history?range=24h|7d
+GET /admin/api/v1/sites/<site_id>/traffic/history
 ```
 
-Combined historical include forms:
+Canonical product projection:
 
 ```text
-include=statistics
-include=statistics,peak
+products=history,statistics,peak,aps
 ```
 
-History, Statistics and Peak share one selected range and one historical read
-execution. No independent Peak heavy request/coordinator exists.
+Legacy `include=` remains temporary backward compatibility. `include + products`
+and malformed/duplicate/out-of-order/unknown/empty projections return `400`.
 
-Browser flow:
-`browser → /admin + /admin/api/v1 → AdminQueryService/read gateways → read services`.
+History, Statistics, Peak and Traffic by AP each own independent page-local
+`24h | 7d` selected/applied state.
 
-Prohibited:
-- browser → SQLite
-- browser → Omada
-- Admin Traffic request → Omada
-- browser → `/api/internal/analytics/v1`
-- browser → Loki/Grafana
-- second Traffic current/historical calculation owner/coordinator
+`TrafficHistoricalRequestBroker` is the historical page-local intent/coalescing/
+response-mapping layer. `CaptivPortalTrafficCoordinator` remains scheduler and
+lifecycle owner.
 
-Current layout is production-current functional layout, not final approved visual
-composition.
+Permanent invariant:
+
+```text
+max historical HTTP requests in flight from one page = 1
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+```
+
+Current Network Throughput remains range-insensitive.
 
 Business/data Admin API remains read-only.
 
@@ -358,44 +363,46 @@ Coder → focused/minimal TASK/module tests
 Owner + Tech Lead / Central Lab → cross-module/broader/full/official acceptance
 ```
 
-Acceptance before publication remains:
+Current Traffic acceptance artifact:
 
 ```text
-all actually mandatory TASK/release gates PASS
-→ accepted candidate
-→ publication
+artifact: daf68e91fc759188980cf8741913e6b60a58eb62
+tree: b0e2f028eecf6aec9d86e35542c33e7105209335
+
+TASK-TRAFFIC-05: DONE / PRODUCTION ACTIVE
+TASK-TRAFFIC-RANGE-01: DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+
+focused gate: PASS
+targeted Traffic regression: PASS WITH REVIEWED COMPATIBILITY
+Windows Central Lab V6-FIXED: PASS
+Linux production-size §97 PERF: PASS
+production browser/product acceptance: PASS
 ```
 
-Current Traffic-stage final evidence:
+Known Windows SQLite infinity compatibility reproduces on the exact approved
+baseline and is not a TASK regression.
+
+Production-size RANGE-01 evidence:
 
 ```text
-artifact: a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
-tree: f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
-TASK-TRAFFIC-04: CLOSED / production PASS
-Windows Central Lab V6: PASS
-strict regressions: 0
-known compatibility warnings: 5
-compileall: PASS
-branch diff: PASS
-exact-artifact immutability: PASS
-Linux production-size PERF: PASS
-production product/browser acceptance: PASS
+snapshot bytes: 273235968
+snapshot SHA256: b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
+
+B24 p50/p95/max: 0.537377 / 0.543665 / 0.543820 s
+C24 p50/p95/max: 0.536886 / 0.545050 / 0.549600 s
+B24 ↔ C24 semantic identity: PASS
+
+A7 p50/p95/max: 2.444160 / 2.469994 / 2.472858 s
+A7 query_deadline: 0
+A7 source_integrity: 0
+A7 unexpected 5xx: 0
 ```
 
-TRAFFIC-04 test-set review includes at minimum:
+Product-scoped H24/H7/S24/S7/P24/P7/A24/A7 gates: PASS.
 
-```text
-tests/analytics/test_historical_traffic_peak.py
-tests/admin_web/test_traffic_peak.py
-tests/admin_web/test_traffic_peak_frontend.py
-related History / Statistics / PERF range-bounding regressions
-shared Traffic coordinator/config/routes/query regressions
-Peak value identity + shared-range invariants
-```
-
-Controlled PERF amendment #1 changed only Peak-vs-Candidate p50 relative allowance
-from 20% to 30% with the 0.50s floor retained. All other accepted limits remained
-unchanged.
+Current relevant test set includes Traffic by AP, independent ranges, frontend
+History/Statistics/Peak/AP regressions, product projection, broker/coordinator
+admission/coalescing and product-scoped PERF invariants.
 
 After each accepted TASK Tech Lead reviews changed tests, targeted regression set,
 cross-surface invariants and whether the runner contract changed.
@@ -406,45 +413,63 @@ Central Lab until separately changed.
 ## 19. Current vs historical vs change-intent
 
 Current repository implementation includes:
-- Visit Lifecycle
-- Observation
-- Analytics
-- Admin Web
-- Current State
-- Home Live
-- Current Traffic / Home Traffic
-- Home Activity
-- Traffic Foundation
-- Traffic Current Network Throughput
-- Historical Traffic Read Foundation
-- Traffic Network History
-- Traffic Period Statistics
-- Traffic Peak Load
+- Visit Lifecycle;
+- Observation;
+- Analytics;
+- Admin Web;
+- Current State;
+- Home Live / Home Traffic / Home Activity;
+- Traffic Foundation;
+- Current Network Throughput;
+- Historical Traffic Read Foundation;
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP;
+- Independent Traffic Range per Panel.
 
 Owner-confirmed current production checkpoint:
 
 ```text
-production HEAD: a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
-production tree: f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
+production HEAD: daf68e91fc759188980cf8741913e6b60a58eb62
+production tree: b0e2f028eecf6aec9d86e35542c33e7105209335
 
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 
-TASK-TRAFFIC-04:
-CLOSED / PRODUCTION PASS
+captive-portal.service=active
+
+TRAFFIC-05:
+DONE / PRODUCTION ACTIVE
+
+TRAFFIC-RANGE-01:
+DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 ```
 
-Historical engineering evidence includes TRAFFIC-03 remediation and the
-TRAFFIC-04 controlled PERF amendment. Historical FINAL TASKs are not rewritten.
+Historical engineering evidence from earlier Traffic TASKs remains historical and
+must not override current independent-range architecture.
 
 Next change-intent:
 
 ```text
-TRAFFIC-05 — Traffic by AP
-NEXT / NOT IMPLEMENTED
+TRAFFIC-06 — AP Traffic Share
+NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
 ```
+
+Current idea only: share of accepted Network Traffic evidence within selected
+range.
+
+Permanent reminder:
+
+```text
+sample count != traffic share
+```
+
+No unaccepted TRAFFIC-06 formula or FINAL architecture is current.
 
 ## 20. Repository-only unknowns
 

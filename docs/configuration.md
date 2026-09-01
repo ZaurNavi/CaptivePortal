@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-08-31
-Baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Updated: 2026-09-01
+Baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -203,46 +203,39 @@ WEB_ADMIN_TRAFFIC_ENABLED=false
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=false
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=false
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=false
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
 WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
 WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20
 ```
 
-Feature hierarchy:
-
-```text
-Traffic master exposure
-→ History subordinate exposure
-→ Statistics subordinate exposure
-→ Peak subordinate exposure
-```
-
-Dependencies:
-
-```text
-History requires Traffic
-Statistics requires Traffic + History
-Peak requires Traffic + History + Statistics
-```
-
-These are product-exposure flags. They do not start/stop Observation,
-CurrentTrafficReadService or HistoricalTrafficReadService.
-
-Owner-confirmed production state 2026-08-31:
+Production state 2026-09-01:
 
 ```text
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 ```
 
-Production environment source:
+Feature dependencies:
 
 ```text
-/etc/default/captive-portal
+History requires Admin + Traffic.
+Statistics requires Admin + Traffic + History.
+Peak requires Admin + Traffic + History + Statistics.
+Traffic by AP requires Admin + Traffic + History.
+Independent ranges requires Admin + Traffic + History.
 ```
 
-Repository default=false must not be rewritten as production disabled.
+Independent ranges does **not** require every optional historical product to be
+enabled. It changes historical product range/request orchestration for whichever
+historical products are enabled.
+
+These are product-exposure/orchestration flags. They do not start/stop Observation,
+`CurrentTrafficReadService` or `HistoricalTrafficReadService`.
 
 Current Network Throughput shared policy remains:
 
@@ -252,21 +245,33 @@ stale boundary = 180s
 max AP skew = 60s
 ```
 
-History / Statistics / Peak selected product ranges:
+Historical product ranges:
 
 ```text
 24h
 7d
 ```
 
-History range contract:
+With independent ranges enabled, History, Statistics, Peak and Traffic by AP each
+own independent page-local selected/applied range state. Current Network
+Throughput remains range-insensitive.
+
+Permanent historical admission guard:
 
 ```text
-24h → 5-minute buckets → 288
-7d  → 15-minute buckets → 672
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
 ```
 
-Browser orchestration values are not historical semantic/performance thresholds.
+Admin query deadline remains:
+
+```text
+WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=10
+```
+
+Traffic browser request timeout remains `20s`. No accepted RANGE-01 change
+increased query deadline, browser timeout or Admin concurrency.
+
+Repository default=false must not be rewritten as production disabled.
 
 ### Pending Session Cleaner
 
