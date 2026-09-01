@@ -69,9 +69,9 @@
         <p class="eyebrow">Persisted history</p>
         <h2 id="traffic-history-heading">Network Traffic History</h2>
       </div>
-      <div id="traffic-network-range" class="traffic-range" role="group" aria-label="Network Traffic range">
-        <button id="traffic-network-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button>
-        <button id="traffic-network-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button>
+      <div id="{{ 'traffic-history-range' if traffic_independent_ranges_enabled else 'traffic-network-range' }}" class="traffic-range" role="group" aria-label="Network Traffic History range">
+        <button id="{{ 'traffic-history-range-24h' if traffic_independent_ranges_enabled else 'traffic-network-range-24h' }}" class="button button-small" type="button" aria-pressed="true">24h</button>
+        <button id="{{ 'traffic-history-range-7d' if traffic_independent_ranges_enabled else 'traffic-network-range-7d' }}" class="button button-small" type="button" aria-pressed="false">7d</button>
       </div>
     </div>
     <p class="live-detail">Historical Site AP/network throughput derived from persisted evidence. It may include local or service traffic and is not an Internet/WAN-only measurement. Download and Upload are bucket means from complete Site AP rate samples. Source selection is evaluated per bucket; Wired is primary and LAN may be used as fallback.</p>
@@ -109,11 +109,17 @@
     aria-labelledby="traffic-statistics-heading"
     data-statistics-enabled="true"
   >
-    <div class="card-heading">
+    <div class="card-heading traffic-history-heading-row">
       <div>
         <p class="eyebrow">Selected period</p>
         <h2 id="traffic-statistics-heading">Period Statistics</h2>
       </div>
+      {% if traffic_independent_ranges_enabled %}
+      <div id="traffic-statistics-range" class="traffic-range" role="group" aria-label="Period Statistics range">
+        <button id="traffic-statistics-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button>
+        <button id="traffic-statistics-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button>
+      </div>
+      {% endif %}
     </div>
     <p class="live-detail">How much Network Throughput was observed? Values use accepted persisted Site samples for the same applied History range.</p>
     <div id="traffic-statistics-state" class="state-panel" data-state="warning" role="status" aria-live="polite">
@@ -150,7 +156,7 @@
   </section>
   {% if traffic_peak_enabled %}
   <section id="traffic-peak-panel" class="card card-wide traffic-peak" aria-labelledby="traffic-peak-heading" data-peak-enabled="true">
-    <div class="card-heading"><div><p class="eyebrow">Selected period</p><h2 id="traffic-peak-heading">Peak Load</h2></div></div>
+    <div class="card-heading traffic-history-heading-row"><div><p class="eyebrow">Selected period</p><h2 id="traffic-peak-heading">Peak Load</h2></div>{% if traffic_independent_ranges_enabled %}<div id="traffic-peak-range" class="traffic-range" role="group" aria-label="Peak Load range"><button id="traffic-peak-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button><button id="traffic-peak-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button></div>{% endif %}</div>
     <p class="live-detail">When was Network Throughput highest? Peak samples, the busiest complete History bucket and the busiest complete rolling 60 minutes share the applied History range.</p>
     <div id="traffic-peak-state" class="state-panel" data-state="warning" role="status" aria-live="polite"><span class="state-dot" aria-hidden="true"></span><div><strong id="traffic-peak-state-title">Loading peak evidence…</strong><p id="traffic-peak-state-message">Reading the combined persisted History result.</p></div></div>
     <div class="traffic-peak-events">
@@ -173,7 +179,7 @@
   {% endif %}
   {% if traffic_by_ap_enabled %}
   <section id="traffic-ap-panel" class="card card-wide traffic-ap" aria-labelledby="traffic-ap-heading" data-ap-enabled="true">
-    <div class="card-heading"><div><p class="eyebrow">Selected period</p><h2 id="traffic-ap-heading">Traffic by AP</h2></div></div>
+    <div class="card-heading traffic-history-heading-row"><div><p class="eyebrow">Selected period</p><h2 id="traffic-ap-heading">Traffic by AP</h2></div>{% if traffic_independent_ranges_enabled %}<div id="traffic-ap-range" class="traffic-range" role="group" aria-label="Traffic by AP range"><button id="traffic-ap-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button><button id="traffic-ap-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button></div>{% endif %}</div>
     <p class="live-detail">All supported Site APs are shown together for the applied Network range. Historical values inherit the canonical Site source selected for each bucket.</p>
     <div id="traffic-ap-state" class="state-panel" data-state="warning" role="status" aria-live="polite"><span class="state-dot" aria-hidden="true"></span><div><strong id="traffic-ap-state-title">Loading AP traffic…</strong><p id="traffic-ap-state-message">Reading the combined persisted History result and current AP evidence.</p></div></div>
     <div class="traffic-history-meta">

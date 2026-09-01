@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -61,6 +61,13 @@ class HistoricalTrafficSourceUnavailable(RuntimeError):
     """Persisted facts cannot safely satisfy Historical Traffic."""
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoricalTrafficPeakValues:
+    status: str
+    peak: HistoricalTrafficPeriodValues
+    interval_evidence: HistoricalTrafficPeriodIntervalEvidence
+
+
 class HistoricalTrafficReadService:
     """Read canonical traffic buckets without polling or source writes."""
 
@@ -102,10 +109,6 @@ class HistoricalTrafficReadService:
         if type(include_peak_load) is not bool:
             raise HistoricalTrafficValidationError(
                 "include_peak_load must be a boolean"
-            )
-        if include_peak_load and not include_period_statistics:
-            raise HistoricalTrafficValidationError(
-                "include_peak_load requires include_period_statistics"
             )
         if type(include_ap_traffic) is not bool:
             raise HistoricalTrafficValidationError(
@@ -255,21 +258,28 @@ class HistoricalTrafficReadService:
             "ok" if coverage_status == "complete" else "partial"
         )
         period_statistics = None
-        if include_period_statistics:
-            period_statistics = self._period_statistics(
+        peak_values = None
+        if include_period_statistics or include_peak_load:
+            peak_values = self._peak_values(
                 data.get("period_statistics"),
                 start=start,
                 end=end,
                 history_status=result_status,
             )
+        if include_period_statistics:
+            assert peak_values is not None
+            period_statistics = self._period_statistics(
+                data.get("period_statistics"),
+                peak_values=peak_values,
+            )
         peak_load = None
         if include_peak_load:
-            assert period_statistics is not None
+            assert peak_values is not None
             query_deadline.require_remaining()
             peak_load = self._peak_load(
                 data.get("peak_samples"),
                 buckets=tuple(buckets),
-                statistics=period_statistics,
+                peak_values=peak_values,
                 start=start,
                 end=end,
                 history_status=result_status,
@@ -618,7 +628,7 @@ class HistoricalTrafficReadService:
         raw_samples: Any,
         *,
         buckets: tuple[HistoricalTrafficBucket, ...],
-        statistics: HistoricalTrafficPeriodStatistics,
+        peak_values: _HistoricalTrafficPeakValues,
         start: datetime,
         end: datetime,
         history_status: str,
@@ -633,7 +643,7 @@ class HistoricalTrafficReadService:
             end=end,
             gap_threshold=self._gap_threshold,
         )
-        expected = statistics.interval_evidence.accepted_peak_sample_count
+        expected = peak_values.interval_evidence.accepted_peak_sample_count
         if len(samples) != expected:
             raise HistoricalTrafficSourceUnavailable(
                 "Historical traffic Peak sample count is invalid"
@@ -642,7 +652,7 @@ class HistoricalTrafficReadService:
             name: _peak_event(samples, name)
             for name in ("download", "upload", "total")
         }
-        expected_peaks = statistics.peak
+        expected_peaks = peak_values.peak
         for name, expected_value in (
             ("download", expected_peaks.download_mbps),
             ("upload", expected_peaks.upload_mbps),
@@ -673,7 +683,7 @@ class HistoricalTrafficReadService:
             status = (
                 "ok" if (
                     history_status == "ok"
-                    and statistics.status == "ok"
+                    and peak_values.status == "ok"
                     and busiest_bucket.status == "ok"
                     and busiest_hour.status == "ok"
                 ) else "partial"
@@ -685,14 +695,14 @@ class HistoricalTrafficReadService:
             busiest_hour=busiest_hour,
         )
 
-    def _period_statistics(
+    def _peak_values(
         self,
         raw: Any,
         *,
         start: datetime,
         end: datetime,
         history_status: str,
-    ) -> HistoricalTrafficPeriodStatistics:
+    ) -> _HistoricalTrafficPeakValues:
         if not isinstance(raw, Mapping):
             raise HistoricalTrafficSourceUnavailable(
                 "Historical traffic Statistics aggregate is unavailable"
@@ -748,27 +758,6 @@ class HistoricalTrafficReadService:
                 _finite_nonnegative(raw.get("peak_upload")),
                 _finite_nonnegative(raw.get("peak_total")),
             )
-        if accepted_count == 0:
-            if accepted_seconds != 0:
-                raise HistoricalTrafficSourceUnavailable(
-                    "Historical traffic Statistics weighting is invalid"
-                )
-            average = HistoricalTrafficPeriodValues(None, None, None)
-        else:
-            if accepted_seconds <= 0:
-                raise HistoricalTrafficSourceUnavailable(
-                    "Historical traffic Statistics weighting is invalid"
-                )
-            average = HistoricalTrafficPeriodValues(
-                _finite_nonnegative(raw.get("weighted_download"))
-                / accepted_seconds,
-                _finite_nonnegative(raw.get("weighted_upload"))
-                / accepted_seconds,
-                (
-                    _finite_nonnegative(raw.get("weighted_download"))
-                    + _finite_nonnegative(raw.get("weighted_upload"))
-                ) / accepted_seconds,
-            )
         status = (
             "insufficient_data" if peak_count == 0 else
             "ok" if (
@@ -779,9 +768,8 @@ class HistoricalTrafficReadService:
                 and invalid_count == 0
             ) else "partial"
         )
-        return HistoricalTrafficPeriodStatistics(
+        return _HistoricalTrafficPeakValues(
             status=status,
-            average=average,
             peak=peak,
             interval_evidence=HistoricalTrafficPeriodIntervalEvidence(
                 range_seconds=duration,
@@ -796,6 +784,43 @@ class HistoricalTrafficReadService:
                 leading_unweighted_seconds=leading,
                 trailing_unweighted_seconds=trailing,
             ),
+        )
+
+    def _period_statistics(
+        self,
+        raw: Any,
+        *,
+        peak_values: _HistoricalTrafficPeakValues,
+    ) -> HistoricalTrafficPeriodStatistics:
+        if not isinstance(raw, Mapping):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical traffic Statistics aggregate is unavailable"
+            )
+        evidence = peak_values.interval_evidence
+        if evidence.accepted_interval_count == 0:
+            if evidence.accepted_interval_seconds != 0:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Statistics weighting is invalid"
+                )
+            average = HistoricalTrafficPeriodValues(None, None, None)
+        else:
+            if evidence.accepted_interval_seconds <= 0:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical traffic Statistics weighting is invalid"
+                )
+            weighted_download = _finite_nonnegative(raw.get("weighted_download"))
+            weighted_upload = _finite_nonnegative(raw.get("weighted_upload"))
+            average = HistoricalTrafficPeriodValues(
+                weighted_download / evidence.accepted_interval_seconds,
+                weighted_upload / evidence.accepted_interval_seconds,
+                (weighted_download + weighted_upload)
+                / evidence.accepted_interval_seconds,
+            )
+        return HistoricalTrafficPeriodStatistics(
+            status=peak_values.status,
+            average=average,
+            peak=peak_values.peak,
+            interval_evidence=evidence,
         )
 
     def _bucket(

@@ -596,6 +596,27 @@ _HISTORICAL_STATISTICS_AGGREGATES_SQL = """
       MAX(finished_at) last_sample_at
 """
 
+_HISTORICAL_PEAK_VALUES_AGGREGATES_SQL = """
+      COUNT(*) accepted_peak_sample_count,
+      CASE WHEN COUNT(*)=0 THEN 0 ELSE COUNT(*)-1 END
+        candidate_interval_count,
+      COALESCE(SUM(interval_result='accepted'),0) accepted_interval_count,
+      COALESCE(SUM(CASE WHEN interval_result='accepted'
+        THEN elapsed_seconds ELSE 0.0 END),0.0) accepted_interval_seconds,
+      COALESCE(SUM(interval_result='gap'),0) excluded_gap_interval_count,
+      COALESCE(SUM(interval_result='source_transition'),0)
+        excluded_source_transition_interval_count,
+      COALESCE(SUM(interval_result='invalid'),0)
+        invalid_period_interval_count,
+      NULL AS weighted_download,
+      NULL AS weighted_upload,
+      MAX(download) peak_download,
+      MAX(upload) peak_upload,
+      MAX(download+upload) peak_total,
+      MIN(finished_at) first_sample_at,
+      MAX(finished_at) last_sample_at
+"""
+
 
 _HISTORICAL_COMBINED_CTES_SQL = f"""
   WITH {_HISTORICAL_COMBINED_CYCLE_CTES},
@@ -716,6 +737,14 @@ _HISTORICAL_COMBINED_SQL = _HISTORICAL_COMBINED_CTES_SQL + """
   ORDER BY b.bucket_index
 """
 
+_HISTORICAL_PEAK_ONLY_COMBINED_CTES_SQL = (
+    _HISTORICAL_COMBINED_CTES_SQL.replace(
+        _HISTORICAL_STATISTICS_AGGREGATES_SQL,
+        _HISTORICAL_PEAK_VALUES_AGGREGATES_SQL,
+        1,
+    )
+)
+
 _HISTORICAL_PEAK_STATISTICS_SELECT_SQL = ",\n    ".join(
     f"p.{field}" for field in _HISTORICAL_STATISTICS_RESULT_FIELDS
 )
@@ -756,6 +785,11 @@ _HISTORICAL_PEAK_COMBINED_SQL = _HISTORICAL_COMBINED_CTES_SQL + f"""
   FROM statistics_classified s
   ORDER BY projection_kind, projection_order
 """
+
+_HISTORICAL_PEAK_ONLY_COMBINED_SQL = (
+    _HISTORICAL_PEAK_ONLY_COMBINED_CTES_SQL
+    + _HISTORICAL_PEAK_COMBINED_SQL[len(_HISTORICAL_COMBINED_CTES_SQL):]
+)
 
 _HISTORICAL_AP_NULL_RESULT_SELECT_SQL = ",\n    ".join(
     f"NULL AS {field}" for field in _HISTORICAL_AP_RESULT_FIELDS
@@ -1983,7 +2017,11 @@ class AnalyticsSourceGateway:
         with self._connection("observations", deadline) as connection:
             connection.execute("BEGIN")
             try:
-                if include_period_statistics or include_ap_traffic:
+                if (
+                    include_period_statistics
+                    or include_peak_load
+                    or include_ap_traffic
+                ):
                     if include_ap_traffic:
                         combined_sql = _HISTORICAL_AP_LEAN_COMBINED_SQL
                         combined_parameters = (
@@ -1998,9 +2036,12 @@ class AnalyticsSourceGateway:
                         )
                     else:
                         combined_sql = (
-                            _HISTORICAL_PEAK_COMBINED_SQL
-                            if include_peak_load
-                            else _HISTORICAL_COMBINED_SQL
+                            (
+                                _HISTORICAL_PEAK_COMBINED_SQL
+                                if include_period_statistics
+                                else _HISTORICAL_PEAK_ONLY_COMBINED_SQL
+                            )
+                            if include_peak_load else _HISTORICAL_COMBINED_SQL
                         )
                         combined_parameters = (
                             *cycle_parameters,
@@ -2102,7 +2143,8 @@ class AnalyticsSourceGateway:
                     )
                     statistics = (
                         combined_statistics
-                        if include_period_statistics else None
+                        if include_period_statistics or include_peak_load
+                        else None
                     )
 
                     if include_ap_traffic:

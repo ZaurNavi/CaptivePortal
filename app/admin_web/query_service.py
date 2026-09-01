@@ -461,7 +461,8 @@ class AdminQueryService:
 
     def historical_traffic_history(
         self, principal, site_id, *, range_id, include_statistics=False,
-        include_peak=False, include_aps=False,
+        include_peak=False, include_aps=False, include_history=True,
+        requested_products=None,
     ):
         self._authorize(principal, "admin.read.overview", site_id)
         try:
@@ -551,9 +552,11 @@ class AdminQueryService:
                     value,
                     site_id,
                     resolved_range=resolved_range,
+                    include_history=include_history,
                     include_period_statistics=include_statistics,
                     include_peak_load=include_peak,
                     include_ap_traffic=include_aps,
+                    requested_products=requested_products,
                 )
                 return AdminQueryResponse(result)
             except HistoricalTrafficValidationError as exc:

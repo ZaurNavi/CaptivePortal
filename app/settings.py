@@ -164,6 +164,7 @@ from app.config import (
     WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED,
     WEB_ADMIN_TRAFFIC_PEAK_ENABLED,
     WEB_ADMIN_TRAFFIC_BY_AP_ENABLED,
+    WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED,
     WEB_ADMIN_TRAFFIC_REFRESH_SECONDS,
     WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
@@ -598,6 +599,9 @@ def get_settings() -> dict:
         "web_admin_traffic_statistics_enabled": WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED,
         "web_admin_traffic_peak_enabled": WEB_ADMIN_TRAFFIC_PEAK_ENABLED,
         "web_admin_traffic_by_ap_enabled": WEB_ADMIN_TRAFFIC_BY_AP_ENABLED,
+        "web_admin_traffic_independent_ranges_enabled": (
+            WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED
+        ),
         "web_admin_traffic_refresh_seconds": WEB_ADMIN_TRAFFIC_REFRESH_SECONDS,
         "web_admin_traffic_request_timeout_seconds": WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS,
         "capport_enabled": CAPPORT_ENABLED,

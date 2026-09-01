@@ -29,7 +29,13 @@ def test_peak_is_passive_and_uses_the_one_combined_history_request():
     assert "visibilitychange" not in panel and "pagehide" not in panel
     assert '"statistics,peak"' in panel
     assert "encodeURIComponent(include)" in panel
-    assert panel.count("registerPanel({") == 1
+    assert panel.count("coordinator.registerPanel({") == 2
+    assert "if (!independentRanges) {" in panel
+    assert "const PRODUCT_ORDER" in panel
+    assert "&products=${encodeURIComponent(products)}" in panel
+    assert panel.count("const PANEL_KEY = \"network-traffic-history\"") == 1
+    assert panel.count("key: PANEL_KEY") == 2
+    assert "    return;\n  }\n\n  const PRODUCT_ORDER" in panel
     assert "innerHTML" not in panel
 
 
