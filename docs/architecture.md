@@ -1,8 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-08-31
-Runtime baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Updated: 2026-09-01
+Runtime implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
+Runtime tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
 
 ## 1. Mental model
 
@@ -141,10 +142,17 @@ Prohibited:
 
 `CurrentTrafficReadService` owns current Site Network Throughput semantics.
 
+Current Network Throughput is range-insensitive.
+
 ### Historical
 
-`HistoricalTrafficReadService` owns historical Site Network Throughput semantics
-for History, Period Statistics and Peak Load.
+`HistoricalTrafficReadService` is the single historical Network Traffic semantic
+owner for:
+
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP.
 
 Canonical path:
 
@@ -152,31 +160,61 @@ Canonical path:
 persisted Observation AP history
 → HistoricalTrafficReadService
 → AdminQueryService
-→ one shared History request
-→ History + Period Statistics + Peak Load
+→ product-scoped historical API projection
+→ Traffic historical frontend orchestration
 ```
 
 `TRAFFIC-02-PERF-01` requested-range bounded validation remains an architectural
 performance invariant.
 
-Period Statistics:
-- unit = Mbps;
-- Average = interval/time-aware accepted Site samples;
-- Peak = accepted complete Site sample maxima;
-- Peak Total is independent max of Total samples;
-- statuses = `ok | partial | insufficient_data`;
-- same selected 24h/7d Network range as History.
+Canonical product projection order:
 
-Peak Load:
-- reuses the Period Statistics Peak sample population;
-- peak timestamps use `cycle_finished_at`;
-- ties choose earliest accepted sample;
-- busiest bucket uses complete History buckets only;
-- busiest 60m is a complete rolling 3600s sample-hold Average Total window;
-- no busiest-hour `occurrence_count`;
-- same selected 24h/7d range and same read snapshot/execution as History/Statistics.
+```text
+history,statistics,peak,aps
+```
 
-No second historical semantic/calculation owner is allowed.
+Product-scoped reads execute only requested product-specific calculations while
+reusing common range/integrity/source facts.
+
+Traffic by AP uses the same historical Network Traffic semantic foundation and
+does not introduce a second collector/database/semantic owner.
+
+### Independent historical panel ranges
+
+`TASK-TRAFFIC-RANGE-01` moves range intent to each historical product panel.
+
+Each panel owns page-local:
+
+```text
+selected_range
+applied_range
+phase
+last successful payload
+error
+intent generation
+```
+
+Failed selection preserves prior successful payload.
+
+The page-local `TrafficHistoricalRequestBroker` owns intent/coalescing/response
+mapping. It is **not** scheduler owner.
+
+`CaptivPortalTrafficCoordinator` remains the sole page scheduler/lifecycle owner.
+
+Permanent invariant:
+
+```text
+max historical HTTP requests in flight from one page = 1
+```
+
+Admission guard:
+
+```text
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+```
+
+No QueryDeadline, browser-timeout or Admin-concurrency increase is part of this
+architecture.
 
 ## 8. Admin Web
 
@@ -187,17 +225,22 @@ Home, Devices, Device Detail, Visits, Observations, Traffic.
 
 Traffic production-current functional surface:
 - Current Network Throughput;
-- Historical Network Throughput;
+- Network Traffic History;
 - Period Statistics;
-- Peak Load.
+- Peak Load;
+- Traffic by AP.
 
-One shared Traffic coordinator owns page-level orchestration.
+Historical panels have independent `24h | 7d` selectors.
+Current Network Throughput has none.
 
-Current Traffic and Home Traffic share `CurrentTrafficReadService`.
-History, Statistics and Peak share `HistoricalTrafficReadService`.
+Canonical historical API remains:
 
-Peak extends the existing History request (`include=statistics,peak`) and does not
-create a second loader/request/range selector.
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/history
+```
+
+Canonical projection is `products=`; legacy `include=` remains temporary
+backward compatibility. AP-only response uses `ap_bucket_axis`.
 
 The current Traffic visual arrangement is not a final design invariant; later
 UI/design work may rearrange/polish cards without changing semantic owners.

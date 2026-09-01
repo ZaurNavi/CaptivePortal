@@ -25,15 +25,17 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository / current-state checkpoint | `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0` |
-| Production deployed HEAD | `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0` |
-| Production tree | `f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9` |
-| Traffic Section Foundation | **Implemented / production active** |
-| Current Network Throughput | **Implemented / production active** |
-| Historical Network Throughput | **Implemented / production active** |
-| Period Statistics | **Implemented / production active / acceptance PASS** |
-| Peak Load | **Implemented / production active / acceptance PASS** |
-| Next Traffic stage | `TRAFFIC-05 — Traffic by AP` — NEXT / not implemented |
+| Repository implementation checkpoint | `main@daf68e91fc759188980cf8741913e6b60a58eb62` |
+| Repository tree | `b0e2f028eecf6aec9d86e35542c33e7105209335` |
+| Production deployed HEAD | `daf68e91fc759188980cf8741913e6b60a58eb62` |
+| Production tree | `b0e2f028eecf6aec9d86e35542c33e7105209335` |
+| Current Network Throughput | **Production active** |
+| Network Traffic History | **Production active** |
+| Period Statistics | **Production active** |
+| Peak Load | **Production active** |
+| Traffic by AP | **Production active** |
+| Independent historical ranges | **Production active / acceptance PASS** |
+| Next Traffic stage | `TRAFFIC-06 — AP Traffic Share` — NEXT / DRAFT REQUESTED / not implemented |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
 | Core guest authorization | Implemented |
 | RFC 8908 CAPPORT | Implemented |
@@ -41,10 +43,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Visit Lifecycle | Implemented, schema v2 |
 | Observation Foundation | Implemented, schema v1 |
 | Current State | Implemented, schema v1 |
-| Analytics | Implemented |
-| Protected internal Analytics API | Implemented |
-| Native Admin Web | Implemented |
-| Home Live / Home Traffic / Home Activity | Implemented |
+| Analytics / Admin Web | Implemented |
 | Multi-Site / Tenant / RBAC | Future evolution |
 | Current topology | Single application process; HA/multi-process requires ADR |
 
@@ -52,30 +51,27 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 ## Where the project is now
 
-Traffic implementation is production-active through Peak Load.
+Traffic is production-active through Traffic by AP, with independent historical
+24h/7d ranges.
 
 ```mermaid
 flowchart LR
     A[Portal / Auth] --> B[CAPPORT]
-    B --> C[Visitor Snapshot / Registry]
-    C --> D[Observation Foundation]
-    D --> E[Visit Lifecycle]
-    E --> F[Analytics]
-    F --> G[Admin Web]
-    G --> H[Home]
-    H --> T0[Traffic Foundation]
-    T0 --> T1[Current Network Throughput]
-    T1 --> T2R[Historical Traffic Read]
-    T2R --> T2[Network Traffic History]
-    T2 --> T3[Period Statistics]
-    T3 --> T4[Peak Load]
-    T4 --> T5{{NEXT: Traffic by AP}}
-    T5 --> M[Later Traffic increments]
-    M --> N[Real Multi-Site trigger]
+    B --> C[Observation / Visit]
+    C --> D[Analytics]
+    D --> E[Admin Web]
+    E --> T0[Traffic Foundation]
+    T0 --> T1[Current]
+    T1 --> T2[History]
+    T2 --> T3[Statistics]
+    T3 --> T4[Peak]
+    T4 --> T5[Traffic by AP]
+    T5 --> R[Independent panel ranges]
+    R --> T6{{NEXT: AP Traffic Share}}
 ```
 
-Traffic is a production product surface. Current functional layout is accepted
-for functionality, but its visual composition is not frozen as final design.
+Current functional layout remains production-current, not a frozen final visual
+composition.
 
 ## What CaptivPortal does today
 
@@ -86,20 +82,19 @@ At the current runtime checkpoint, the platform includes:
 - Observation and Current State;
 - Analytics and protected internal API;
 - native Admin Web and Home views;
-- Traffic Foundation with one shared coordinator;
 - Current Network Throughput;
-- Historical Network Throughput for 24h/7d;
-- Period Statistics for the same selected 24h/7d range;
-- Peak Load with Peak timestamps, busiest History bucket and busiest rolling 60m;
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP;
+- independent page-local `24h | 7d` selectors for all historical Traffic panels;
+- one historical request in flight at a time with a 10-second dispatch admission guard;
 - internal Grafana/Loki observability separate from product UI.
+
+Current Network Throughput is range-insensitive.
 
 Network Traffic remains AP/network Mbps evidence, not WAN/Internet/billing/SSID
 or Guest Session Traffic.
-
-A permanent Omada rule applies:
-
-> HTTP 200 alone is not success. CaptivPortal also validates Omada JSON
-> `errorCode` and endpoint-specific semantics.
 
 # Architecture
 
@@ -799,17 +794,17 @@ See [`docs/api/omada-open-api.md`](docs/api/omada-open-api.md).
 ```mermaid
 flowchart LR
     P[Portal/Auth]:::done --> O[Observation]:::done
-    O --> V[Visit Lifecycle]:::done
-    V --> A[Analytics]:::done
+    O --> A[Analytics]:::done
     A --> W[Admin Web]:::done
     W --> T0[Traffic Foundation]:::done
     T0 --> T1[Current]:::done
-    T1 --> T2R[Historical Read]:::done
-    T2R --> T2[History]:::done
+    T1 --> T2[History]:::done
     T2 --> T3[Period Statistics]:::done
     T3 --> T4[Peak Load]:::done
-    T4 --> T5[Traffic by AP]:::next
-    T5 --> TP[Later Traffic panels]:::future
+    T4 --> T5[Traffic by AP]:::done
+    T5 --> R[Independent ranges]:::done
+    R --> T6[AP Traffic Share]:::next
+    T6 --> TP[Later Traffic panels]:::future
     TP --> MS[Multi-Site]:::future
 
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
@@ -821,20 +816,20 @@ flowchart LR
 
 ```text
 TRAFFIC-00         DONE
-TRAFFIC-01         DONE
+TRAFFIC-01         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-READ    DONE
-TRAFFIC-02         DONE
+TRAFFIC-02         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-PERF-01 DONE
 TRAFFIC-03         DONE / PRODUCTION ACTIVE
-TRAFFIC-04         CLOSED / PRODUCTION PASS / ACTIVE
-TRAFFIC-05         NEXT / NOT IMPLEMENTED
+TRAFFIC-04         DONE / PRODUCTION ACTIVE
+TRAFFIC-05         DONE / PRODUCTION ACTIVE
+TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06         NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
 ```
 
-`TRAFFIC-05 — Traffic by AP` is the next planned increment.
-
-The current Traffic card arrangement is not a final UI composition. Functional
-semantics are accepted; visual rearrangement/polish belongs to a later UI/design
-stage.
+`TRAFFIC-06 — AP Traffic Share` is next change-intent. Its current idea is share
+of accepted Network Traffic evidence within the selected range; `sample count !=
+traffic share`. Exact design remains subject to DRAFT → review → FINAL.
 
 ## Real second Site as a trigger
 

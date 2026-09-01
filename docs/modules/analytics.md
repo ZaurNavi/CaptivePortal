@@ -1,8 +1,8 @@
 # Analytics
 
 Status: current module contract
-Updated: 2026-08-31
-Baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Updated: 2026-09-01
+Baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
 
 ## Purpose
 
@@ -16,7 +16,7 @@ source DBs.
 `ObservationReadService`, `VisitLifecycleReadService`, `VisitorRegistryReadService`
 → `AnalyticsSourceGateway`.
 
-Source health checks expected schema and SQLite `PRAGMA query_only`.
+Source health checks validate expected schema and SQLite `PRAGMA query_only`.
 
 ## Services
 
@@ -36,26 +36,26 @@ remains a separate completed-session domain and is not Network Traffic.
 
 ## Current Traffic
 
-`CurrentTrafficReadService` reads persisted AP Observation facts and remains the
-semantic owner for Home Traffic and Traffic Current Network Throughput.
+`CurrentTrafficReadService` owns current Site Network Throughput semantics for
+Home Traffic and Traffic Current Network Throughput.
 
 Rules:
-- complete-success source cycles only;
+- persisted AP Observation facts only;
+- complete-success source cycles;
 - strict source integrity;
 - `wired` primary, `lan` fallback;
 - one source family per Site result;
-- freshness/AP skew explicit.
+- explicit freshness/AP skew.
 
 ## Historical Network Traffic
 
 `HistoricalTrafficReadService` is the single historical Network Traffic semantic
 owner used by:
 
-```text
-Traffic History
-Period Statistics
-Peak Load
-```
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP.
 
 Canonical source:
 
@@ -63,17 +63,40 @@ Canonical source:
 persisted AP Observation history
 ```
 
-It owns Site/range validation, accepted complete Site samples, source-family
-selection, coverage/quality/watermark, bounded query/deadline behavior, History
-buckets, Period Statistics and Peak Load temporal projections.
+It owns:
+- Site/range validation;
+- canonical 24h/7d range semantics;
+- accepted complete Site samples;
+- source-family selection;
+- coverage/quality/watermark;
+- bounded query/deadline behavior;
+- History buckets;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP.
 
 `TRAFFIC-02-PERF-01` requested-range bounding remains mandatory.
 
-No second Traffic historical collector/DB/algorithm owner exists.
+## Product-scoped historical projection
+
+`TASK-TRAFFIC-RANGE-01` adds product-scoped execution without adding another
+historical semantic owner.
+
+Canonical product order:
+
+```text
+history,statistics,peak,aps
+```
+
+A request executes only the requested product-specific projections. Shared range,
+coverage, integrity and source-boundary facts may still be reused where required.
+
+AP-only projection remains self-contained through `ap_bucket_axis`.
+
+Independent browser ranges do not create independent Analytics services. Every
+historical panel continues to read the same persisted Network Traffic foundation.
 
 ## Period Statistics
-
-Production-current at `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`.
 
 Metrics in Mbps:
 
@@ -83,19 +106,20 @@ Peak Download / Upload / Total
 ```
 
 Average:
-`right_endpoint_sample_hold_time_weighted.v1`.
+
+```text
+right_endpoint_sample_hold_time_weighted.v1
+```
 
 Peak:
-`max_accepted_complete_site_sample.v1`.
 
-Peak Total is a direct maximum of accepted Total samples, not
-`Peak Download + Peak Upload`.
+```text
+max_accepted_complete_site_sample.v1
+```
 
 ## Peak Load
 
-Production-current at `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`.
-
-Canonical method identities:
+Canonical methods:
 
 ```text
 metric: network_traffic_peak_load.v1
@@ -109,13 +133,45 @@ busiest 60m: max_complete_rolling_3600s_average_total_sample_hold.v1
 hour tie: earliest_window_start.v1
 ```
 
-Peak values are cross-validated against Period Statistics in the same response.
 Busiest 60 Minutes has no `occurrence_count` contract.
 
-History / Statistics / Peak share one 24h/7d range and one Historical read
-execution. No independent Peak request/scheduler exists.
+## Traffic by AP
 
-Statuses remain product-safe `ok | partial | insufficient_data` where applicable.
+Current metric:
+
+```text
+network_traffic_by_ap.v1
+unit = Mbps
+```
+
+Canonical AP semantics include:
+
+```text
+population = current_union_historical_validated.v1
+series = outer_history_bucket_aligned_du.v1
+bucket method = mean_of_accepted_ap_rates_for_canonical_site_bucket_samples.v1
+Average = right_endpoint_ap_sample_hold_time_weighted.v1
+Peak = max_accepted_complete_ap_sample.v1
+order = ap_mac_ascending.v1
+supported population cap = 12 APs
+```
+
+Traffic by AP is per-AP Network Traffic evidence. It is not `TRAFFIC-06 AP Traffic
+Share`; no share formula is current.
+
+Historical product status models remain product-specific. Where applicable,
+`ok | partial | insufficient_data` semantics remain explicit and safe.
+
+## Performance boundary
+
+The accepted independent-range remediation preserves:
+
+```text
+WEB_ADMIN_MAX_QUERY_DURATION_SECONDS = 10
+```
+
+No query deadline, browser timeout or Admin concurrency increase is part of this
+architecture.
 
 ## Internal API
 

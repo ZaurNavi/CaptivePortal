@@ -1,8 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-08-31
-Runtime baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Updated: 2026-09-01
+Runtime implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
+Runtime tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -35,36 +36,46 @@ Runtime baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
 | Traffic Network History | current; default disabled | `app/admin_web/`, Historical Traffic | `modules/traffic.md` | none | no |
 | Traffic Period Statistics | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
 | Traffic Peak Load | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
+| Traffic by AP | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
+| Independent Traffic Range per Panel | current; default disabled | `app/admin_web/` | `modules/traffic.md` | page-local memory only | no |
 
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-08-31:
+Owner-provided production checkpoint 2026-09-01:
 
 ```text
-HEAD: a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
-tree: f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
-TRAFFIC-00: active
-TRAFFIC-01: active
-TRAFFIC-02-READ: accepted foundation
-TRAFFIC-02 History: active
-TRAFFIC-02-PERF-01: accepted
-TRAFFIC-03 Period Statistics: active
-TRAFFIC-04 Peak Load: CLOSED / production PASS / active
+HEAD: daf68e91fc759188980cf8741913e6b60a58eb62
+tree: b0e2f028eecf6aec9d86e35542c33e7105209335
+
+TRAFFIC-00: DONE
+TRAFFIC-01 Current: production active
+TRAFFIC-02-READ: DONE
+TRAFFIC-02 History: production active
+TRAFFIC-02-PERF-01: DONE
+TRAFFIC-03 Statistics: production active
+TRAFFIC-04 Peak: production active
+TRAFFIC-05 Traffic by AP: production active
+TRAFFIC-RANGE-01: production active / production acceptance PASS
 
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
-```
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 
-Production product acceptance for Peak Load: PASS for 24h and 7d.
+captive-portal.service=active
+```
 
 ## Next Traffic item
 
 ```text
-TRAFFIC-05 — Traffic by AP
-NEXT / NOT IMPLEMENTED
+TRAFFIC-06 — AP Traffic Share
+NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
 ```
+
+Current idea only: share of accepted Network Traffic evidence within selected
+range. `sample count != traffic share`.
 
 ## Production evidence rule
 

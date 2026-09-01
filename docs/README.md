@@ -1,8 +1,9 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-08-31
-Current-state baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Updated: 2026-09-01
+Current-state implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
+Current implementation tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -70,17 +71,19 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic sequence at `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`:
+Current Traffic state at implementation baseline `main@daf68e91fc759188980cf8741913e6b60a58eb62`:
 
 ```text
 TRAFFIC-00         DONE
-TRAFFIC-01         DONE
+TRAFFIC-01         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-READ    DONE
-TRAFFIC-02         DONE
+TRAFFIC-02         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-PERF-01 DONE
 TRAFFIC-03         DONE / PRODUCTION ACTIVE
-TRAFFIC-04         CLOSED / PRODUCTION PASS / ACTIVE
-TRAFFIC-05         NEXT / NOT IMPLEMENTED
+TRAFFIC-04         DONE / PRODUCTION ACTIVE
+TRAFFIC-05         DONE / PRODUCTION ACTIVE
+TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06         NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
 ```
 
 Owner-confirmed production Traffic flags:
@@ -90,11 +93,15 @@ WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 ```
 
+Historical Traffic panels now have independent page-local `24h | 7d` ranges.
+
 `modules/traffic.md` is the current Traffic product/semantic contract.
-Historical FINAL TASKs and superseded/amended acceptance evidence remain
-traceability evidence and do not replace current implementation state.
+Historical FINAL TASKs and acceptance evidence remain traceability evidence and
+do not override current implementation state.
 
 ## Permanent promotion boundary
 

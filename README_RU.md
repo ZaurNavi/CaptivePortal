@@ -25,15 +25,17 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository / current-state checkpoint | `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0` |
-| Production deployed HEAD | `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0` |
-| Production tree | `f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9` |
-| Traffic Section Foundation | **Реализован / production active** |
-| Current Network Throughput | **Реализован / production active** |
-| Historical Network Throughput | **Реализован / production active** |
-| Period Statistics | **Реализован / production active / acceptance PASS** |
-| Peak Load | **Реализован / production active / acceptance PASS** |
-| Следующий Traffic stage | `TRAFFIC-05 — Traffic by AP` — NEXT / не реализован |
+| Repository implementation checkpoint | `main@daf68e91fc759188980cf8741913e6b60a58eb62` |
+| Repository tree | `b0e2f028eecf6aec9d86e35542c33e7105209335` |
+| Production deployed HEAD | `daf68e91fc759188980cf8741913e6b60a58eb62` |
+| Production tree | `b0e2f028eecf6aec9d86e35542c33e7105209335` |
+| Current Network Throughput | **Production active** |
+| Network Traffic History | **Production active** |
+| Period Statistics | **Production active** |
+| Peak Load | **Production active** |
+| Traffic by AP | **Production active** |
+| Independent historical ranges | **Production active / acceptance PASS** |
+| Следующий Traffic stage | `TRAFFIC-06 — AP Traffic Share` — NEXT / DRAFT REQUESTED / не реализован |
 | Omada Controller family | Omada Software Controller 5.14.x |
 | Основная guest authorization | Реализована |
 | CAPPORT | Реализован |
@@ -47,30 +49,27 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 ## Где проект находится сейчас
 
-Traffic implementation production-active до Peak Load включительно.
+Traffic production-active до Traffic by AP включительно; historical панели имеют
+независимые диапазоны 24h/7d.
 
 ```mermaid
 flowchart LR
     A[Portal / Auth] --> B[CAPPORT]
-    B --> C[Visitor Snapshot / Registry]
-    C --> D[Observation Foundation]
-    D --> E[Visit Lifecycle]
-    E --> F[Analytics]
-    F --> G[Admin Web]
-    G --> H[Home]
-    H --> T0[Traffic Foundation]
-    T0 --> T1[Current Network Throughput]
-    T1 --> T2R[Historical Traffic Read]
-    T2R --> T2[Network Traffic History]
-    T2 --> T3[Period Statistics]
-    T3 --> T4[Peak Load]
-    T4 --> T5{{СЛЕДУЮЩИЙ: Traffic by AP}}
-    T5 --> M[Следующие Traffic increments]
-    M --> N[Реальный Multi-Site trigger]
+    B --> C[Observation / Visit]
+    C --> D[Analytics]
+    D --> E[Admin Web]
+    E --> T0[Traffic Foundation]
+    T0 --> T1[Current]
+    T1 --> T2[History]
+    T2 --> T3[Statistics]
+    T3 --> T4[Peak]
+    T4 --> T5[Traffic by AP]
+    T5 --> R[Independent panel ranges]
+    R --> T6{{СЛЕДУЮЩИЙ: AP Traffic Share}}
 ```
 
-Traffic является production product surface. Текущая functional layout принята,
-но не считается навсегда утверждённым финальным визуальным дизайном.
+Текущая functional layout является production-current, но не зафиксирована как
+окончательный визуальный дизайн.
 
 ## Что CaptivPortal умеет сегодня
 
@@ -81,20 +80,19 @@ Traffic является production product surface. Текущая functional l
 - Observation и Current State;
 - Analytics и protected internal API;
 - Admin Web/Home;
-- Traffic Foundation с одним coordinator;
 - Current Network Throughput;
-- Historical Network Throughput 24h/7d;
-- Period Statistics для того же selected 24h/7d range;
-- Peak Load с Peak timestamps, busiest History bucket и busiest rolling 60m;
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP;
+- независимые page-local `24h | 7d` selectors для всех historical Traffic panels;
+- не более одного historical HTTP request одновременно и 10-second admission guard;
 - Grafana/Loki отдельно от product UI.
+
+Current Network Throughput range-insensitive.
 
 Network Traffic — AP/network evidence в Mbps. Это не WAN/Internet/billing/SSID и
 не Guest Session Traffic.
-
-Для Omada API действует постоянное правило:
-
-> HTTP 200 сам по себе не является успехом; проверяется также Omada `errorCode`
-> и семантика endpoint.
 
 # Архитектура
 
@@ -793,17 +791,17 @@ Controlled research на Omada 5.14.31 подтвердил:
 ```mermaid
 flowchart LR
     P[Portal/Auth]:::done --> O[Observation]:::done
-    O --> V[Visit Lifecycle]:::done
-    V --> A[Analytics]:::done
+    O --> A[Analytics]:::done
     A --> W[Admin Web]:::done
     W --> T0[Traffic Foundation]:::done
     T0 --> T1[Current]:::done
-    T1 --> T2R[Historical Read]:::done
-    T2R --> T2[History]:::done
+    T1 --> T2[History]:::done
     T2 --> T3[Period Statistics]:::done
     T3 --> T4[Peak Load]:::done
-    T4 --> T5[Traffic by AP]:::next
-    T5 --> TP[Следующие Traffic panels]:::future
+    T4 --> T5[Traffic by AP]:::done
+    T5 --> R[Independent ranges]:::done
+    R --> T6[AP Traffic Share]:::next
+    T6 --> TP[Следующие Traffic panels]:::future
     TP --> MS[Multi-Site]:::future
 
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
@@ -815,20 +813,20 @@ flowchart LR
 
 ```text
 TRAFFIC-00         DONE
-TRAFFIC-01         DONE
+TRAFFIC-01         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-READ    DONE
-TRAFFIC-02         DONE
+TRAFFIC-02         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-PERF-01 DONE
 TRAFFIC-03         DONE / PRODUCTION ACTIVE
-TRAFFIC-04         CLOSED / PRODUCTION PASS / ACTIVE
-TRAFFIC-05         NEXT / NOT IMPLEMENTED
+TRAFFIC-04         DONE / PRODUCTION ACTIVE
+TRAFFIC-05         DONE / PRODUCTION ACTIVE
+TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06         NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
 ```
 
-Следующий planned increment — `TRAFFIC-05 — Traffic by AP`.
-
-Текущее расположение Traffic cards не является финальным UI contract.
-Functional semantics приняты; visual rearrangement/polish выполняются отдельным
-будущим UI/design этапом.
+Следующий change-intent — `TRAFFIC-06 — AP Traffic Share`: доля accepted Network
+Traffic evidence в выбранном диапазоне. `sample count != traffic share`.
+Точные детали должны появиться только после DRAFT → review → FINAL.
 
 ## Реальный второй Site как trigger
 

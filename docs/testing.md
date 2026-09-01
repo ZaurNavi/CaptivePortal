@@ -1,10 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-08-31
+Updated: 2026-09-01
 Central Lab governance effective: 2026-08-27
-Documentation/current-state baseline: `main@a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
-Production deployed HEAD: `a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0`
+Documentation/current-state implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
+Production deployed HEAD: `daf68e91fc759188980cf8741913e6b60a58eb62`
+Production tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
 
 ## Responsibility model
 
@@ -336,111 +337,137 @@ This is troubleshooting history, not a current product defect.
 
 ### Latest Traffic acceptance evidence
 
-Current accepted Traffic artifact:
+Current accepted repository / production artifact:
 
 ```text
-repository / production HEAD:
-a9cd8a9b9b9efc46bc82d315385ebbd1a3bf63b0
+HEAD:
+daf68e91fc759188980cf8741913e6b60a58eb62
 
-accepted / production tree:
-f53f204cf3ebf7cecf4e872ce450b4f3f4265cc9
+tree:
+b0e2f028eecf6aec9d86e35542c33e7105209335
 
-TASK-TRAFFIC-04:
-CLOSED / PRODUCTION PASS
+TASK-TRAFFIC-05:
+DONE / PRODUCTION ACTIVE
 
-PR:
-#91
+TASK-TRAFFIC-RANGE-01:
+DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 
-publication commit:
-0343ac77a1a90c2ba8bc3ce1c969b6c1593e9759
+PR #94:
+merged
+```
 
-Central Lab V6:
+Final RANGE-01 gate matrix:
+
+```text
+focused TASK gate:
 PASS
 
-strict regressions:
-0
+targeted Traffic regression:
+PASS WITH REVIEWED COMPATIBILITY
 
-known compatibility warnings:
-5
-
-compileall:
+Windows Central Lab V6-FIXED:
 PASS
 
-branch diff:
+Linux production-size §97 PERF:
 PASS
 
-exact artifact immutability:
+production dormant acceptance:
 PASS
 
-Linux production-size PERF:
+production feature activation:
 PASS
 
-production product/browser acceptance:
+production browser/product acceptance:
 PASS
 ```
 
-Production acceptance covered both `24h` and `7d` History / Period Statistics /
-Peak Load, including Peak timestamps, Busiest History Bucket and Busiest 60 Minutes.
-Peak values matched Period Statistics and all historical panels shared the same
-applied range.
+The known Windows SQLite infinity compatibility behavior reproduces on the exact
+approved baseline and is not classified as a TASK regression.
 
-#### TRAFFIC-04 controlled PERF amendment #1
+#### Production-size §97 evidence
 
-Original FINAL Peak-vs-Candidate p50 gate:
+Immutable snapshot:
 
 ```text
-Δp50(P-C) <= max(0.50s, 20% of C.p50)
+bytes:
+273235968
+
+SHA256:
+b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
 ```
 
-Accepted amendment #1:
+Backward-compatible 24h:
 
 ```text
-Δp50(P-C) <= max(0.50s, 30% of C.p50)
+B24 p50 0.537377s
+B24 p95 0.543665s
+B24 max  0.543820s
+
+C24 p50 0.536886s
+C24 p95 0.545050s
+C24 max  0.549600s
+
+relative backward-compatibility gates:
+PASS
+
+B24 ↔ C24 semantic identity:
+PASS
 ```
 
-Only this relative p50 allowance changed.
-
-Unchanged limits:
+Product-scoped matrix:
 
 ```text
-C vs B p50: max(0.50s, 20% B.p50)
-p95:       max(0.75s, 25%)
-max:       max(1.00s, 25%)
-Peak p95 <= 8s
-Peak max <= 9s
-QueryDeadline = 10s
-browser request timeout = 20s
+H24 PASS
+H7  PASS
+S24 PASS
+S7  PASS
+P24 PASS
+P7  PASS
+A24 PASS
+A7  PASS
 ```
 
-The amendment is TASK-specific acceptance history, not a global performance-policy
-change.
-
-#### Actual TASK-04 gate execution
-
-Owner-approved closing path:
+A7:
 
 ```text
-Patch
-→ Windows Central Lab V6 PASS
-→ Linux production-size PERF PASS
-→ accepted candidate
-→ Git publication / PR #91
+p50 2.444160s
+p95 2.469994s
+max  2.472858s
+query_deadline=0
+source_integrity=0
+unexpected 5xx=0
+```
+
+The accepted architecture preserved:
+
+```text
+WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=10
+browser request timeout=20s
+Admin concurrency=unchanged
+```
+
+The performance remediation was product-scoped/independent-range/sequential
+admission rather than deadline expansion.
+
+#### Accepted execution sequence
+
+```text
+Implementation candidate
+→ focused gate PASS
+→ targeted Traffic regression PASS WITH REVIEWED COMPATIBILITY
+→ Windows Central Lab V6-FIXED PASS
+→ Linux production-size §97 PERF PASS
+→ Git publication
+→ PR #94
 → Owner merge
-→ production deploy FROM GIT
-→ separate activation
-→ production product/browser acceptance PASS
+→ deploy FROM GIT
+→ dormant production acceptance PASS
+→ separate feature activation
+→ production browser/product acceptance PASS
 ```
 
-A separate pre-publication controlled-browser gate described by the historical
-FINAL was not used in the actual closing execution. This does not weaken the
-permanent rule that all gates actually designated mandatory for a candidate must
-PASS before normal publication.
-
-Coder remains responsible only for focused/minimal TASK-scoped checks. Official
-Central Lab/PERF/PASS-FAIL acceptance belongs to Owner + Tech Lead.
-
-The one-time non-reproduced production 7d visual-refresh episode is not an open
-TASK-TRAFFIC-04 defect/debt.
+Coder remains responsible for focused/minimal TASK-scoped implementation checks.
+Official Central Lab/PERF/PASS-FAIL acceptance belongs to Owner + Tech Lead.
 
 ## Test Set Maintenance Rule
 
@@ -486,15 +513,22 @@ Change the Central Lab runner only when its own contract changes, for example:
 
 Never add a new failure to compatibility merely to obtain a green candidate.
 
-For TRAFFIC-04 the current relevant test set includes at minimum:
-- `tests/analytics/test_historical_traffic_peak.py`;
-- `tests/admin_web/test_traffic_peak.py`;
-- `tests/admin_web/test_traffic_peak_frontend.py`;
-- related History / Statistics / PERF range-bounding regressions;
-- shared Traffic coordinator/config/routes/query regressions;
-- Peak value identity and shared-range invariants.
+For the current TRAFFIC-05 / TRAFFIC-RANGE-01 state, the relevant Traffic test set
+includes at minimum:
 
-The exact targeted command must still be reviewed again for TRAFFIC-05.
+- `tests/analytics/test_historical_traffic_ap.py`;
+- `tests/admin_web/test_traffic_ap.py`;
+- `tests/admin_web/test_traffic_ap_frontend.py`;
+- `tests/admin_web/test_traffic_independent_ranges.py`;
+- `tests/admin_web/test_traffic_independent_ranges_frontend.py`;
+- existing History / Statistics / Peak frontend regressions touched by RANGE-01;
+- Traffic Foundation/coordinator/config/routes/query regressions;
+- product-projection validation;
+- AP population/payload invariants;
+- independent selected/applied/generation/coalescing/admission invariants;
+- product-scoped PERF and B24 ↔ C24 semantic identity.
+
+The exact targeted command must be reviewed again for `TRAFFIC-06`.
 
 ## Acceptance before Publication
 
