@@ -191,6 +191,28 @@
     <div id="traffic-ap-items" class="traffic-ap-items" aria-live="polite"></div>
   </section>
   {% endif %}
+  {% if traffic_ap_share_enabled %}
+  <section id="traffic-apshare-panel" class="card card-wide traffic-ap" aria-labelledby="traffic-apshare-heading" data-apshare-enabled="true">
+    <div class="card-heading traffic-history-heading-row">
+      <div><p class="eyebrow">Selected period</p><h2 id="traffic-apshare-heading">AP Traffic Share</h2></div>
+      <div id="traffic-apshare-range" class="traffic-range" role="group" aria-label="AP Traffic Share range">
+        <button id="traffic-apshare-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button>
+        <button id="traffic-apshare-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button>
+      </div>
+    </div>
+    <p class="live-detail">Share of accepted Site Network Traffic evidence within this panel's applied range. Percentages are not Internet, WAN, volume, sample or client share.</p>
+    <div id="traffic-apshare-state" class="state-panel" data-state="warning" role="status" aria-live="polite">
+      <span class="state-dot" aria-hidden="true"></span><div><strong id="traffic-apshare-state-title">Loading AP Traffic Share…</strong><p id="traffic-apshare-state-message">Reading accepted persisted AP contribution evidence.</p></div>
+    </div>
+    <div class="traffic-history-meta">
+      <p>Applied range <strong id="traffic-apshare-applied-range">—</strong></p>
+      <p>Population <strong id="traffic-apshare-population">—</strong></p>
+      <p>Coverage <strong id="traffic-apshare-coverage">—</strong></p>
+      <p>Current population <strong id="traffic-apshare-current">—</strong></p>
+    </div>
+    <div id="traffic-apshare-items" class="traffic-ap-items" aria-live="polite"></div>
+  </section>
+  {% endif %}
   {% endif %}
 </div>
 {% endblock %}

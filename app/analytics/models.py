@@ -990,6 +990,72 @@ class HistoricalTrafficByAp:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalTrafficApSharePopulation:
+    population_count: int
+    historical_population_count: int
+    current_population_status: str
+    current_population_count: int | None
+    supported_max_ap_count: int
+    returned_ap_count: int
+    population_complete: bool
+    population_method: str = "current_union_historical_validated.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficApShareDenominators:
+    download_status: str
+    upload_status: str
+    total_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficApShareItem:
+    ap_mac: str
+    display_name: str
+    display_name_source: str
+    range_presence_proven: bool
+    evidence_status: str
+    accepted_presence_interval_count: int
+    accepted_presence_seconds: float
+    download_share_fraction: float | None
+    upload_share_fraction: float | None
+    total_share_fraction: float | None
+    # Internal conservation evidence. The Admin serializer never exposes these.
+    download_weight: float | None
+    upload_weight: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficApShare:
+    status: str
+    population: HistoricalTrafficApSharePopulation
+    interval_evidence: HistoricalTrafficPeriodIntervalEvidence
+    denominators: HistoricalTrafficApShareDenominators
+    items: tuple[HistoricalTrafficApShareItem, ...]
+    site_download_weight: float | None
+    site_upload_weight: float | None
+    metric_version: str = "network_traffic_ap_share.v1"
+    unit: str = "fraction"
+    display_unit: str = "percent"
+    share_method: str = (
+        "accepted_site_interval_integrated_ap_contribution_ratio.v1"
+    )
+    temporal_method: str = "right_endpoint_sample_hold_time_weighted.v1"
+    presence_method: str = (
+        "accepted_selected_source_historical_presence_in_range.v1"
+    )
+    absence_method: str = (
+        "proven_population_member_absent_from_trusted_complete_site_sample_"
+        "zero_contribution.v1"
+    )
+    population_method: str = "current_union_historical_validated.v1"
+    order_method: str = "total_share_desc_nulls_last_ap_mac_ascending.v1"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalSiteTraffic:
     status: str
     range: HistoricalTrafficRange
@@ -999,6 +1065,7 @@ class HistoricalSiteTraffic:
     period_statistics: HistoricalTrafficPeriodStatistics | None = None
     peak_load: HistoricalTrafficPeakLoad | None = None
     ap_traffic: HistoricalTrafficByAp | None = None
+    ap_traffic_share: HistoricalTrafficApShare | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "buckets", tuple(self.buckets))

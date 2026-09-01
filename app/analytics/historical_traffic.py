@@ -18,6 +18,10 @@ from .models import (
     HistoricalTrafficApPopulation,
     HistoricalTrafficApSeries,
     HistoricalTrafficByAp,
+    HistoricalTrafficApShare,
+    HistoricalTrafficApShareDenominators,
+    HistoricalTrafficApShareItem,
+    HistoricalTrafficApSharePopulation,
     HistoricalTrafficBucket,
     HistoricalTrafficCoverage,
     HistoricalTrafficPeriodIntervalEvidence,
@@ -61,11 +65,28 @@ class HistoricalTrafficSourceUnavailable(RuntimeError):
     """Persisted facts cannot safely satisfy Historical Traffic."""
 
 
+class HistoricalTrafficIntegrityUnavailable(HistoricalTrafficSourceUnavailable):
+    """Returned Historical Traffic facts are internally contradictory."""
+
+
 @dataclass(frozen=True, slots=True)
 class _HistoricalTrafficPeakValues:
     status: str
     peak: HistoricalTrafficPeriodValues
     interval_evidence: HistoricalTrafficPeriodIntervalEvidence
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoricalApContribution:
+    ap_mac: str
+    current_name: str | None
+    historical_name: str | None
+    accepted_sample_count: int
+    accepted_interval_count: int
+    site_accepted_interval_seconds: float
+    accepted_interval_seconds: float
+    weighted_download: float | None
+    weighted_upload: float | None
 
 
 class HistoricalTrafficReadService:
@@ -100,6 +121,8 @@ class HistoricalTrafficReadService:
         include_period_statistics: bool = False,
         include_peak_load: bool = False,
         include_ap_traffic: bool = False,
+        include_ap_share: bool = False,
+        current_population_status: str = "available",
         current_cycle_id: str | None = None,
     ) -> HistoricalSiteTraffic:
         if type(include_period_statistics) is not bool:
@@ -113,6 +136,22 @@ class HistoricalTrafficReadService:
         if type(include_ap_traffic) is not bool:
             raise HistoricalTrafficValidationError(
                 "include_ap_traffic must be a boolean"
+            )
+        if type(include_ap_share) is not bool:
+            raise HistoricalTrafficValidationError(
+                "include_ap_share must be a boolean"
+            )
+        if current_population_status not in {"available", "unavailable"}:
+            raise HistoricalTrafficValidationError(
+                "current_population_status is invalid"
+            )
+        if not include_ap_share and current_population_status != "available":
+            raise HistoricalTrafficValidationError(
+                "current_population_status requires AP Share"
+            )
+        if current_population_status == "unavailable" and current_cycle_id is not None:
+            raise HistoricalTrafficValidationError(
+                "unavailable current population cannot have a cycle"
             )
         if current_cycle_id is not None and (
             not isinstance(current_cycle_id, str) or not current_cycle_id
@@ -158,6 +197,7 @@ class HistoricalTrafficReadService:
                 include_period_statistics=include_period_statistics,
                 include_peak_load=include_peak_load,
                 include_ap_traffic=include_ap_traffic,
+                include_ap_share=include_ap_share,
                 current_cycle_id=current_cycle_id,
             )
         except AnalyticsQueryDeadlineExceeded:
@@ -259,13 +299,20 @@ class HistoricalTrafficReadService:
         )
         period_statistics = None
         peak_values = None
-        if include_period_statistics or include_peak_load:
-            peak_values = self._peak_values(
-                data.get("period_statistics"),
-                start=start,
-                end=end,
-                history_status=result_status,
-            )
+        if include_period_statistics or include_peak_load or include_ap_share:
+            try:
+                peak_values = self._peak_values(
+                    data.get("period_statistics"),
+                    start=start,
+                    end=end,
+                    history_status=result_status,
+                )
+            except HistoricalTrafficSourceUnavailable as exc:
+                if include_ap_share:
+                    raise HistoricalTrafficIntegrityUnavailable(
+                        "Historical AP Share evidence is contradictory"
+                    ) from exc
+                raise
         if include_period_statistics:
             assert peak_values is not None
             period_statistics = self._period_statistics(
@@ -294,6 +341,23 @@ class HistoricalTrafficReadService:
                 history_status=result_status,
             )
             query_deadline.require_remaining()
+        ap_traffic_share = None
+        if include_ap_share:
+            assert peak_values is not None
+            try:
+                ap_traffic_share = self._ap_share(
+                    data.get("ap_population"),
+                    data.get("ap_rows"),
+                    data.get("period_statistics"),
+                    interval_evidence=peak_values.interval_evidence,
+                    history_status=result_status,
+                    current_population_status=current_population_status,
+                )
+            except HistoricalTrafficSourceUnavailable as exc:
+                raise HistoricalTrafficIntegrityUnavailable(
+                    "Historical AP Share evidence is contradictory"
+                ) from exc
+            query_deadline.require_remaining()
         return HistoricalSiteTraffic(
             status=result_status,
             range=traffic_range,
@@ -303,6 +367,7 @@ class HistoricalTrafficReadService:
             period_statistics=period_statistics,
             peak_load=peak_load,
             ap_traffic=ap_traffic,
+            ap_traffic_share=ap_traffic_share,
         )
 
     def compose_current_ap_traffic(
@@ -466,22 +531,286 @@ class HistoricalTrafficReadService:
             items=items,
         )
 
-    def _ap_item(
+    def _ap_share(
         self,
-        mac: str,
-        rows: list[Mapping[str, Any]],
-        buckets: tuple[HistoricalTrafficBucket, ...],
+        raw_population: Any,
+        raw_rows: Any,
+        raw_statistics: Any,
+        *,
+        interval_evidence: HistoricalTrafficPeriodIntervalEvidence,
         history_status: str,
-    ) -> HistoricalTrafficApItem:
+        current_population_status: str,
+    ) -> HistoricalTrafficApShare:
+        """Project Share from the exact AP facts already consumed by TRAFFIC-05."""
+        if not isinstance(raw_population, Mapping) or not isinstance(
+            raw_rows, (tuple, list)
+        ) or not isinstance(raw_statistics, Mapping):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP Share projection is unavailable"
+            )
+        raw_population_count = _integer(raw_population.get("population_count"))
+        raw_current_count = _integer(
+            raw_population.get("current_population_count")
+        )
+        historical_count = _integer(
+            raw_population.get("historical_population_count")
+        )
+        if (
+            raw_current_count > raw_population_count
+            or historical_count > raw_population_count
+            or (
+                current_population_status == "unavailable"
+                and raw_current_count != 0
+            )
+        ):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP Share population is invalid"
+            )
+        current_count = (
+            raw_current_count
+            if current_population_status == "available"
+            else None
+        )
+        population_count = (
+            raw_population_count
+            if current_population_status == "available"
+            else historical_count
+        )
+        supported = population_count <= MAX_TRAFFIC_BY_AP_SUPPORTED_APS
+        population = HistoricalTrafficApSharePopulation(
+            population_count=population_count,
+            historical_population_count=historical_count,
+            current_population_status=current_population_status,
+            current_population_count=current_count,
+            supported_max_ap_count=MAX_TRAFFIC_BY_AP_SUPPORTED_APS,
+            returned_ap_count=population_count if supported else 0,
+            population_complete=(
+                supported and current_population_status == "available"
+            ),
+        )
+        empty_denominators = HistoricalTrafficApShareDenominators(
+            "insufficient_data", "insufficient_data", "insufficient_data"
+        )
+        if not supported:
+            if raw_rows:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Unsupported AP Share population was materialized"
+                )
+            return HistoricalTrafficApShare(
+                status="unsupported_population",
+                population=population,
+                interval_evidence=interval_evidence,
+                denominators=empty_denominators,
+                items=(),
+                site_download_weight=None,
+                site_upload_weight=None,
+            )
+
+        grouped: dict[str, list[Mapping[str, Any]]] = {}
+        for raw in raw_rows:
+            if not isinstance(raw, Mapping):
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP Share row is invalid"
+                )
+            mac = raw.get("ap_mac")
+            if not isinstance(mac, str) or _MAC_PATTERN.fullmatch(mac) is None:
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP Share identity is invalid"
+                )
+            grouped.setdefault(mac, []).append(raw)
+        if len(grouped) != population_count:
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP Share population projection is incomplete"
+            )
+        contributions = tuple(
+            self._ap_contribution(mac, grouped[mac]) for mac in sorted(grouped)
+        )
+        if any(
+            not math.isclose(
+                item.site_accepted_interval_seconds,
+                interval_evidence.accepted_interval_seconds,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            for item in contributions
+        ):
+            raise HistoricalTrafficSourceUnavailable(
+                "AP Share interval identity is unavailable"
+            )
+
+        accepted = interval_evidence.accepted_interval_count
+        if accepted == 0:
+            if (
+                raw_statistics.get("weighted_download") is not None
+                or raw_statistics.get("weighted_upload") is not None
+            ):
+                raise HistoricalTrafficSourceUnavailable(
+                    "AP Share denominator is invalid"
+                )
+            site_download = None
+            site_upload = None
+        else:
+            site_download = _finite_nonnegative(
+                raw_statistics.get("weighted_download")
+            )
+            site_upload = _finite_nonnegative(
+                raw_statistics.get("weighted_upload")
+            )
+
+        prepared: list[tuple[_HistoricalApContribution, bool, float | None, float | None]] = []
+        for contribution in contributions:
+            presence = contribution.accepted_sample_count > 0
+            if not presence:
+                if (
+                    contribution.accepted_interval_count != 0
+                    or contribution.accepted_interval_seconds != 0
+                    or contribution.weighted_download is not None
+                    or contribution.weighted_upload is not None
+                ):
+                    raise HistoricalTrafficSourceUnavailable(
+                        "Unproven AP contribution contains a numeric weight"
+                    )
+                download_weight = None
+                upload_weight = None
+            else:
+                download_weight = (
+                    contribution.weighted_download
+                    if contribution.weighted_download is not None else 0.0
+                )
+                upload_weight = (
+                    contribution.weighted_upload
+                    if contribution.weighted_upload is not None else 0.0
+                )
+            prepared.append((
+                contribution, presence, download_weight, upload_weight
+            ))
+
+        if accepted > 0:
+            assert site_download is not None and site_upload is not None
+            ap_download = math.fsum(
+                item[2] for item in prepared if item[1] and item[2] is not None
+            )
+            ap_upload = math.fsum(
+                item[3] for item in prepared if item[1] and item[3] is not None
+            )
+            if (
+                not math.isclose(
+                    ap_download, site_download, rel_tol=1e-9, abs_tol=1e-9
+                )
+                or not math.isclose(
+                    ap_upload, site_upload, rel_tol=1e-9, abs_tol=1e-9
+                )
+                or not math.isclose(
+                    ap_download + ap_upload,
+                    site_download + site_upload,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise HistoricalTrafficSourceUnavailable(
+                    "AP Share conservation is unavailable"
+                )
+
+        def denominator(weight: float | None) -> str:
+            if accepted == 0:
+                return "insufficient_data"
+            assert weight is not None
+            return "zero_traffic" if weight == 0 else "positive"
+
+        denominators = HistoricalTrafficApShareDenominators(
+            denominator(site_download),
+            denominator(site_upload),
+            denominator(
+                None if accepted == 0 else site_download + site_upload
+            ),
+        )
+        any_presence = any(item[1] for item in prepared)
+        if population_count == 0 or accepted == 0 or not any_presence:
+            status = "insufficient_data"
+            denominators = empty_denominators
+        else:
+            partial = (
+                history_status != "ok"
+                or current_population_status == "unavailable"
+                or interval_evidence.excluded_gap_interval_count > 0
+                or interval_evidence.excluded_source_transition_interval_count > 0
+                or interval_evidence.invalid_period_interval_count > 0
+            )
+            status = "partial" if partial else "ok"
+
+        items: list[HistoricalTrafficApShareItem] = []
+        for contribution, presence, download_weight, upload_weight in prepared:
+            current_name = contribution.current_name
+            historical_name = contribution.historical_name
+            if current_name is not None:
+                name, name_source = current_name, "current"
+            elif historical_name is not None:
+                name, name_source = historical_name, "historical"
+            else:
+                name, name_source = contribution.ap_mac, "mac_fallback"
+            if status in {"insufficient_data", "unsupported_population"} or not presence:
+                download_share = upload_share = total_share = None
+            else:
+                assert site_download is not None and site_upload is not None
+                assert download_weight is not None and upload_weight is not None
+                download_share = (
+                    download_weight / site_download if site_download > 0 else None
+                )
+                upload_share = (
+                    upload_weight / site_upload if site_upload > 0 else None
+                )
+                site_total = site_download + site_upload
+                total_share = (
+                    (download_weight + upload_weight) / site_total
+                    if site_total > 0 else None
+                )
+            items.append(HistoricalTrafficApShareItem(
+                ap_mac=contribution.ap_mac,
+                display_name=name,
+                display_name_source=name_source,
+                range_presence_proven=presence,
+                evidence_status="accepted" if presence else "insufficient_data",
+                accepted_presence_interval_count=(
+                    contribution.accepted_interval_count if presence else 0
+                ),
+                accepted_presence_seconds=(
+                    contribution.accepted_interval_seconds if presence else 0.0
+                ),
+                download_share_fraction=download_share,
+                upload_share_fraction=upload_share,
+                total_share_fraction=total_share,
+                download_weight=download_weight,
+                upload_weight=upload_weight,
+            ))
+        items.sort(key=lambda item: (
+            item.total_share_fraction is None,
+            -(item.total_share_fraction or 0.0),
+            item.ap_mac,
+        ))
+        return HistoricalTrafficApShare(
+            status=status,
+            population=population,
+            interval_evidence=interval_evidence,
+            denominators=denominators,
+            items=tuple(items),
+            site_download_weight=site_download,
+            site_upload_weight=site_upload,
+        )
+
+    @staticmethod
+    def _ap_contribution(
+        mac: str, rows: list[Mapping[str, Any]]
+    ) -> _HistoricalApContribution:
         first = rows[0]
         aggregate_fields = (
             "ap_current_name", "ap_historical_name",
             "ap_sample_opportunity_count", "ap_accepted_sample_count",
-            "ap_site_accepted_interval_seconds", "ap_accepted_interval_seconds",
-            "ap_weighted_download", "ap_weighted_upload", "ap_peak_download",
-            "ap_peak_upload", "ap_peak_total", "ap_no_baseline_count",
-            "ap_counter_reset_count", "ap_gap_too_large_count",
-            "ap_invalid_elapsed_count", "ap_source_unavailable_count",
+            "ap_site_accepted_interval_seconds", "ap_accepted_interval_count",
+            "ap_accepted_interval_seconds", "ap_weighted_download",
+            "ap_weighted_upload", "ap_peak_download", "ap_peak_upload",
+            "ap_peak_total", "ap_no_baseline_count", "ap_counter_reset_count",
+            "ap_gap_too_large_count", "ap_invalid_elapsed_count",
+            "ap_source_unavailable_count",
             "ap_missing_selected_source_sample_count",
             "ap_source_transition_excluded_interval_count",
         )
@@ -492,6 +821,61 @@ class HistoricalTrafficReadService:
             raise HistoricalTrafficSourceUnavailable(
                 "Historical AP aggregate is inconsistent"
             )
+        sample_opportunities = _integer(first.get("ap_sample_opportunity_count"))
+        accepted_samples = _integer(first.get("ap_accepted_sample_count"))
+        accepted_interval_count = _integer(
+            first.get("ap_accepted_interval_count")
+        )
+        site_seconds = _finite_nonnegative(
+            first.get("ap_site_accepted_interval_seconds")
+        )
+        ap_seconds = _finite_nonnegative(first.get("ap_accepted_interval_seconds"))
+        if (
+            accepted_samples > sample_opportunities
+            or accepted_interval_count > accepted_samples
+            or ap_seconds > site_seconds
+            or (accepted_interval_count == 0) != (ap_seconds == 0)
+        ):
+            raise HistoricalTrafficSourceUnavailable(
+                "Historical AP contribution evidence is invalid"
+            )
+        if ap_seconds:
+            weighted_download = _finite_nonnegative(
+                first.get("ap_weighted_download")
+            )
+            weighted_upload = _finite_nonnegative(
+                first.get("ap_weighted_upload")
+            )
+        else:
+            if (
+                first.get("ap_weighted_download") is not None
+                or first.get("ap_weighted_upload") is not None
+            ):
+                raise HistoricalTrafficSourceUnavailable(
+                    "Historical AP weighting is invalid"
+                )
+            weighted_download = weighted_upload = None
+        return _HistoricalApContribution(
+            ap_mac=mac,
+            current_name=_display_name(first.get("ap_current_name")),
+            historical_name=_display_name(first.get("ap_historical_name")),
+            accepted_sample_count=accepted_samples,
+            accepted_interval_count=accepted_interval_count,
+            site_accepted_interval_seconds=site_seconds,
+            accepted_interval_seconds=ap_seconds,
+            weighted_download=weighted_download,
+            weighted_upload=weighted_upload,
+        )
+
+    def _ap_item(
+        self,
+        mac: str,
+        rows: list[Mapping[str, Any]],
+        buckets: tuple[HistoricalTrafficBucket, ...],
+        history_status: str,
+    ) -> HistoricalTrafficApItem:
+        first = rows[0]
+        contribution = self._ap_contribution(mac, rows)
         statuses = ["none"] * len(buckets)
         download: list[float | None] = [None] * len(buckets)
         upload: list[float | None] = [None] * len(buckets)
@@ -524,22 +908,14 @@ class HistoricalTrafficReadService:
         partial_count = statuses.count("partial")
         missing_count = statuses.count("none")
         sample_opportunities = _integer(first.get("ap_sample_opportunity_count"))
-        accepted_samples = _integer(first.get("ap_accepted_sample_count"))
-        if accepted_samples > sample_opportunities:
-            raise HistoricalTrafficSourceUnavailable(
-                "Historical AP sample evidence is invalid"
-            )
-        site_seconds = _finite_nonnegative(
-            first.get("ap_site_accepted_interval_seconds")
-        )
-        ap_seconds = _finite_nonnegative(first.get("ap_accepted_interval_seconds"))
-        if ap_seconds > site_seconds:
-            raise HistoricalTrafficSourceUnavailable(
-                "Historical AP interval evidence is invalid"
-            )
+        accepted_samples = contribution.accepted_sample_count
+        site_seconds = contribution.site_accepted_interval_seconds
+        ap_seconds = contribution.accepted_interval_seconds
         if ap_seconds:
-            weighted_download = _finite_nonnegative(first.get("ap_weighted_download"))
-            weighted_upload = _finite_nonnegative(first.get("ap_weighted_upload"))
+            assert contribution.weighted_download is not None
+            assert contribution.weighted_upload is not None
+            weighted_download = contribution.weighted_download
+            weighted_upload = contribution.weighted_upload
             average = HistoricalTrafficPeriodValues(
                 weighted_download / ap_seconds,
                 weighted_upload / ap_seconds,
@@ -598,8 +974,8 @@ class HistoricalTrafficReadService:
                 first.get("ap_source_transition_excluded_interval_count")
             ),
         )
-        current_name = _display_name(first.get("ap_current_name"))
-        historical_name = _display_name(first.get("ap_historical_name"))
+        current_name = contribution.current_name
+        historical_name = contribution.historical_name
         if current_name is not None:
             name, name_source = current_name, "current"
         elif historical_name is not None:

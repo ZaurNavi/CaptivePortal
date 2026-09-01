@@ -47,6 +47,7 @@ def render_admin_page(
     traffic_peak_enabled: bool = False,
     traffic_by_ap_enabled: bool = False,
     traffic_independent_ranges_enabled: bool = False,
+    traffic_ap_share_enabled: bool = False,
     traffic_refresh_seconds: int = 60,
     traffic_request_timeout_seconds: int = 20,
     home_activity_state: str = "disabled",
@@ -82,6 +83,7 @@ def render_admin_page(
             traffic_independent_ranges_enabled=(
                 traffic_independent_ranges_enabled
             ),
+            traffic_ap_share_enabled=traffic_ap_share_enabled,
             traffic_refresh_seconds=traffic_refresh_seconds,
             traffic_request_timeout_seconds=traffic_request_timeout_seconds,
             home_activity_enabled=(
