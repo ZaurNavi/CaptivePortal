@@ -2,7 +2,7 @@
 
 Status: current module contract
 Updated: 2026-09-01
-Baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
+Baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
 
 ## Purpose
 
@@ -55,7 +55,8 @@ owner used by:
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
-- Traffic by AP.
+- Traffic by AP;
+- AP Traffic Share.
 
 Canonical source:
 
@@ -73,7 +74,8 @@ It owns:
 - History buckets;
 - Period Statistics;
 - Peak Load;
-- Traffic by AP.
+- Traffic by AP;
+- AP Traffic Share.
 
 `TRAFFIC-02-PERF-01` requested-range bounding remains mandatory.
 
@@ -85,7 +87,7 @@ historical semantic owner.
 Canonical product order:
 
 ```text
-history,statistics,peak,aps
+history,statistics,peak,aps,apshare
 ```
 
 A request executes only the requested product-specific projections. Shared range,
@@ -156,8 +158,23 @@ order = ap_mac_ascending.v1
 supported population cap = 12 APs
 ```
 
-Traffic by AP is per-AP Network Traffic evidence. It is not `TRAFFIC-06 AP Traffic
-Share`; no share formula is current.
+Traffic by AP remains per-AP Network Traffic evidence in Mbps.
+
+## AP Traffic Share
+
+`TRAFFIC-06` is current production functionality.
+
+```text
+metric = network_traffic_ap_share.v1
+unit = fraction
+display unit = percent
+share = accepted_site_interval_integrated_ap_contribution_ratio.v1
+temporal = right_endpoint_sample_hold_time_weighted.v1
+presence = accepted_selected_source_historical_presence_in_range.v1
+absence = proven_population_member_absent_from_trusted_complete_site_sample_zero_contribution.v1
+```
+
+AP Share reuses accepted HistoricalTrafficReadService interval/AP contribution facts. `sample count != traffic share`; browser code does not derive Share from sample counts. Current status family includes `ok | partial | insufficient_data | unsupported_population`. Safe current-source unavailability may yield truthful partial historical Share; malformed/contradictory current evidence fails closed.
 
 Historical product status models remain product-specific. Where applicable,
 `ok | partial | insufficient_data` semantics remain explicit and safe.

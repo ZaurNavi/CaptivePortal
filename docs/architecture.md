@@ -2,8 +2,8 @@
 
 Status: current
 Updated: 2026-09-01
-Runtime implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
-Runtime tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
+Runtime implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Runtime tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
 
 ## 1. Mental model
 
@@ -152,7 +152,8 @@ owner for:
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
-- Traffic by AP.
+- Traffic by AP;
+- AP Traffic Share.
 
 Canonical path:
 
@@ -170,14 +171,15 @@ performance invariant.
 Canonical product projection order:
 
 ```text
-history,statistics,peak,aps
+history,statistics,peak,aps,apshare
 ```
 
 Product-scoped reads execute only requested product-specific calculations while
 reusing common range/integrity/source facts.
 
-Traffic by AP uses the same historical Network Traffic semantic foundation and
-does not introduce a second collector/database/semantic owner.
+Traffic by AP and AP Traffic Share use the same Historical Traffic semantic foundation and do not introduce a second collector/database/semantic owner.
+
+AP Traffic Share uses interval-integrated accepted AP contribution evidence (`network_traffic_ap_share.v1`), not sample counts. Internal unit is fraction and display unit is percent.
 
 ### Independent historical panel ranges
 
@@ -228,7 +230,8 @@ Traffic production-current functional surface:
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
-- Traffic by AP.
+- Traffic by AP;
+- AP Traffic Share.
 
 Historical panels have independent `24h | 7d` selectors.
 Current Network Throughput has none.

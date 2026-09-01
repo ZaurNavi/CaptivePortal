@@ -25,76 +25,45 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@daf68e91fc759188980cf8741913e6b60a58eb62` |
-| Repository tree | `b0e2f028eecf6aec9d86e35542c33e7105209335` |
-| Production deployed HEAD | `daf68e91fc759188980cf8741913e6b60a58eb62` |
-| Production tree | `b0e2f028eecf6aec9d86e35542c33e7105209335` |
-| Current Network Throughput | **Production active** |
-| Network Traffic History | **Production active** |
-| Period Statistics | **Production active** |
-| Peak Load | **Production active** |
+| Repository implementation checkpoint | `main@c5f9dc39bbf399847f147526c9c7ae15769a198c` |
+| Repository tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
+| Production deployed HEAD | `c5f9dc39bbf399847f147526c9c7ae15769a198c` |
+| Production tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
+| Current / History / Statistics / Peak | **Production active** |
 | Traffic by AP | **Production active** |
 | Independent historical ranges | **Production active / acceptance PASS** |
-| Next Traffic stage | `TRAFFIC-06 — AP Traffic Share` — NEXT / DRAFT REQUESTED / not implemented |
+| AP Traffic Share | **Production active / acceptance PASS** |
+| Next Traffic stage | `TRAFFIC-07 — Online Guests Traffic` — NEXT / not implemented |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
-| Core guest authorization | Implemented |
-| RFC 8908 CAPPORT | Implemented |
-| Visitor Registry | Implemented |
-| Visit Lifecycle | Implemented, schema v2 |
-| Observation Foundation | Implemented, schema v1 |
-| Current State | Implemented, schema v1 |
+| Core guest authorization / CAPPORT | Implemented |
+| Observation / Current State / Visit Lifecycle | Implemented |
 | Analytics / Admin Web | Implemented |
 | Multi-Site / Tenant / RBAC | Future evolution |
-| Current topology | Single application process; HA/multi-process requires ADR |
 
 > Repository defaults, production enabled-state and dated acceptance evidence are different facts.
 
 ## Where the project is now
 
-Traffic is production-active through Traffic by AP, with independent historical
-24h/7d ranges.
+Traffic is production-active through AP Traffic Share, with independent historical `24h | 7d` ranges.
 
 ```mermaid
 flowchart LR
-    A[Portal / Auth] --> B[CAPPORT]
-    B --> C[Observation / Visit]
-    C --> D[Analytics]
-    D --> E[Admin Web]
-    E --> T0[Traffic Foundation]
-    T0 --> T1[Current]
-    T1 --> T2[History]
-    T2 --> T3[Statistics]
-    T3 --> T4[Peak]
-    T4 --> T5[Traffic by AP]
-    T5 --> R[Independent panel ranges]
-    R --> T6{{NEXT: AP Traffic Share}}
+    T1[Current] --> T2[History] --> T3[Statistics] --> T4[Peak] --> T5[Traffic by AP]
+    T5 --> R[Independent ranges] --> T6[AP Traffic Share]
+    T6 --> T7{{NEXT: Online Guests Traffic}}
 ```
 
-Current functional layout remains production-current, not a frozen final visual
-composition.
+Current functional layout remains production-current, not a frozen final visual composition.
 
 ## What CaptivPortal does today
 
-At the current runtime checkpoint, the platform includes:
+Current Traffic capabilities include Current Network Throughput, Network Traffic History, Period Statistics, Peak Load, Traffic by AP and AP Traffic Share.
 
-- external portal/CAPPORT authorization;
-- Visitor Snapshot/Registry and Visit Lifecycle;
-- Observation and Current State;
-- Analytics and protected internal API;
-- native Admin Web and Home views;
-- Current Network Throughput;
-- Network Traffic History;
-- Period Statistics;
-- Peak Load;
-- Traffic by AP;
-- independent page-local `24h | 7d` selectors for all historical Traffic panels;
-- one historical request in flight at a time with a 10-second dispatch admission guard;
-- internal Grafana/Loki observability separate from product UI.
+All historical Traffic panels have independent page-local `24h | 7d` range state. Current Network Throughput is range-insensitive. Historical requests remain product-scoped, sequentially admitted, and limited to one HTTP request in flight per page.
 
-Current Network Throughput is range-insensitive.
+AP Traffic Share displays percent share derived from accepted interval-integrated Network Traffic evidence. It is not a sample-count ratio.
 
-Network Traffic remains AP/network Mbps evidence, not WAN/Internet/billing/SSID
-or Guest Session Traffic.
+Network Traffic remains AP/network evidence, not WAN/Internet/billing/SSID or Guest Session Traffic.
 
 # Architecture
 
@@ -793,43 +762,27 @@ See [`docs/api/omada-open-api.md`](docs/api/omada-open-api.md).
 
 ```mermaid
 flowchart LR
-    P[Portal/Auth]:::done --> O[Observation]:::done
-    O --> A[Analytics]:::done
-    A --> W[Admin Web]:::done
-    W --> T0[Traffic Foundation]:::done
-    T0 --> T1[Current]:::done
-    T1 --> T2[History]:::done
-    T2 --> T3[Period Statistics]:::done
-    T3 --> T4[Peak Load]:::done
-    T4 --> T5[Traffic by AP]:::done
-    T5 --> R[Independent ranges]:::done
-    R --> T6[AP Traffic Share]:::next
-    T6 --> TP[Later Traffic panels]:::future
-    TP --> MS[Multi-Site]:::future
-
+    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::next
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
     classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
-    classDef future fill:#eeeeee,stroke:#777,color:#000;
 ```
 
 ## Near-term direction
 
 ```text
-TRAFFIC-00         DONE
-TRAFFIC-01         DONE / PRODUCTION ACTIVE
-TRAFFIC-02-READ    DONE
-TRAFFIC-02         DONE / PRODUCTION ACTIVE
+TRAFFIC-00 DONE
+TRAFFIC-01 DONE / PRODUCTION ACTIVE
+TRAFFIC-02-READ DONE
+TRAFFIC-02 DONE / PRODUCTION ACTIVE
 TRAFFIC-02-PERF-01 DONE
-TRAFFIC-03         DONE / PRODUCTION ACTIVE
-TRAFFIC-04         DONE / PRODUCTION ACTIVE
-TRAFFIC-05         DONE / PRODUCTION ACTIVE
-TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
-TRAFFIC-06         NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
+TRAFFIC-03 DONE / PRODUCTION ACTIVE
+TRAFFIC-04 DONE / PRODUCTION ACTIVE
+TRAFFIC-05 DONE / PRODUCTION ACTIVE
+TRAFFIC-RANGE-01 DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06 DONE / PRODUCTION ACTIVE
+TRAFFIC-07 NEXT / NOT IMPLEMENTED
+TRAFFIC-07-READ CONDITIONAL / NOT IMPLEMENTED
 ```
-
-`TRAFFIC-06 — AP Traffic Share` is next change-intent. Its current idea is share
-of accepted Network Traffic evidence within the selected range; `sample count !=
-traffic share`. Exact design remains subject to DRAFT → review → FINAL.
 
 ## Real second Site as a trigger
 

@@ -2,11 +2,11 @@
 
 Status: current production module contract
 Updated: 2026-09-01
-Repository implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
-Repository tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
-Production deployed HEAD: `daf68e91fc759188980cf8741913e6b60a58eb62`
-Production tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
-Latest production acceptance: `TASK-TRAFFIC-RANGE-01 — Independent Traffic Range per Panel — PASS / CLOSED`
+Repository implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Repository tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Production deployed HEAD: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Production tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Latest production acceptance: `TASK-TRAFFIC-06 — AP Traffic Share — PRODUCTION PASS / CLOSED`
 
 ## Current roadmap state
 
@@ -39,12 +39,16 @@ TASK-TRAFFIC-RANGE-01 — Independent Traffic Range per Panel
 DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 
 TRAFFIC-06 — AP Traffic Share
-NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
+DONE / PRODUCTION ACTIVE
+
+TRAFFIC-07 — Online Guests Traffic
+NEXT / NOT IMPLEMENTED
+
+TRAFFIC-07-READ — Current Rate backend foundation
+CONDITIONAL / NOT IMPLEMENTED
 ```
 
-`TRAFFIC-06` is change-intent only. Do not describe it as implemented, merged,
-production-active or FINAL architecture until a separate DRAFT → review → FINAL
-cycle and accepted implementation prove that state.
+`TRAFFIC-07` is the next product roadmap item. `TRAFFIC-07-READ` is conditional and is created only if Current Rate requires substantial backend foundation.
 
 ## Production feature state — 2026-09-01
 
@@ -57,20 +61,10 @@ WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 ```
 
-Repository defaults remain:
-
-```text
-WEB_ADMIN_TRAFFIC_ENABLED=false
-WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=false
-WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=false
-WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
-WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=false
-WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
-```
-
-Repository defaults and production activation are separate facts.
+Repository defaults remain `false` for these feature flags, including `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false`.
 
 ## Current Traffic product surface
 
@@ -80,134 +74,53 @@ Production Traffic contains:
 2. Network Traffic History;
 3. Period Statistics;
 4. Peak Load;
-5. Traffic by AP.
+5. Traffic by AP;
+6. AP Traffic Share.
 
-Current layout is **production-current functional layout**, not a permanently
-approved final visual composition.
+Current layout is production-current functional layout, not a permanently approved final visual composition.
 
 ## Domain boundary
 
-Network Traffic means persisted AP/network throughput evidence in **Mbps**.
+Network Traffic means persisted AP/network throughput evidence. Current/History/Statistics/Peak/Traffic by AP use Mbps evidence. AP Traffic Share expresses accepted contribution as fraction/percent.
 
 It is not WAN, Internet-only, billing, guest-only, SSID or Guest Session Traffic.
-Radio is not a Site Network Traffic total source.
 
 ## Canonical architecture
 
 ```text
 Omada AP traffic primitives
-        ↓
-Observation acquisition
-        ↓
-persisted AP traffic facts
-        ↓
-CurrentTrafficReadService / HistoricalTrafficReadService
-        ↓
-AdminQueryService
-        ↓
-Admin Traffic API
-        ↓
-CaptivPortalTrafficCoordinator
-        ↓
-TrafficHistoricalRequestBroker (historical page-local layer)
-        ↓
-historical product panels
+→ Observation acquisition
+→ persisted AP traffic facts
+→ CurrentTrafficReadService / HistoricalTrafficReadService
+→ AdminQueryService
+→ Admin Traffic API
+→ CaptivPortalTrafficCoordinator
+→ TrafficHistoricalRequestBroker
+→ historical product panels
 ```
 
-Forbidden:
-- browser → Omada;
-- Admin request → Omada;
-- second Traffic collector;
-- second current/historical semantic owner;
-- second scheduler/lifecycle owner;
-- browser-side recomputation of canonical traffic analytics.
+Forbidden: browser/Admin direct Omada, second Traffic collector/database, second historical semantic owner, second scheduler/lifecycle owner, browser-side manufacture of canonical traffic analytics.
 
 ## Current Network Throughput
 
-Canonical endpoint:
-
-```text
-GET /admin/api/v1/sites/<site_id>/traffic/current
-```
-
-Current Network Throughput is **range-insensitive** and has no 24h/7d selector.
-
-Semantic owner: `CurrentTrafficReadService`.
-
-Shared current policy remains:
-
-```text
-fresh max age = 90s
-stale boundary = 180s
-max AP skew = 60s
-primary source = wired
-fallback source = lan
-radio = excluded
-```
-
-Backend Total is canonical. Browser does not recompute it.
+`GET /admin/api/v1/sites/<site_id>/traffic/current` is range-insensitive. `CurrentTrafficReadService` remains semantic owner. Current source policy remains wired primary, lan fallback, radio excluded, freshness 90s, stale boundary 180s, max AP skew 60s.
 
 ## Historical Traffic range contract
 
-Historical products:
+Historical products with independent selectors:
 
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
-- Traffic by AP.
-
-Each has an **independent** selector:
-
-```text
-24h | 7d
-```
-
-Range/bucket contracts:
+- Traffic by AP;
+- AP Traffic Share.
 
 ```text
-24h → 5-minute buckets  → 288 buckets
+24h → 5-minute buckets → 288 buckets
 7d  → 15-minute buckets → 672 buckets
 ```
 
-Server owns canonical UTC `[from_utc,to_utc)` boundaries.
-
-## Per-panel range state
-
-Every historical panel owns its own page-lifetime state:
-
-```text
-selected_range
-applied_range
-phase / request state
-last successful payload
-error
-intent generation
-```
-
-`selected_range` and `applied_range` are intentionally different concepts:
-
-- `selected_range` = current user intent;
-- `applied_range` = range represented by the last successfully applied payload.
-
-A failed range switch does **not** erase the previous successful payload. The
-previous `applied_range` remains visible while the new `selected_range` is shown
-as waiting/loading/error state.
-
-Page reload resets every historical panel selector to:
-
-```text
-24h
-```
-
-Selector state is page-lifetime / memory-only. It is not persisted in:
-
-```text
-localStorage
-sessionStorage
-cookie
-URL
-server state
-```
+Each historical panel owns page-lifetime `selected_range`, `applied_range`, phase/request state, last successful payload, error and intent generation. Failed switches preserve the previous successful payload. Reload resets selectors to 24h. State is not persisted in localStorage/sessionStorage/cookie/URL/server state.
 
 ## Historical API current contract
 
@@ -217,407 +130,143 @@ Canonical endpoint:
 GET /admin/api/v1/sites/<site_id>/traffic/history
 ```
 
-Required range remains:
+Canonical ordered projection tokens:
 
 ```text
-range=24h|7d
+history,statistics,peak,aps,apshare
 ```
 
-Canonical product projection:
-
-```text
-products=
-```
-
-Canonical tokens and order:
-
-```text
-history,statistics,peak,aps
-```
-
-Examples:
-
-```text
-?range=24h&products=history
-?range=7d&products=statistics
-?range=24h&products=peak
-?range=7d&products=aps
-?range=24h&products=history,statistics,peak,aps
-```
-
-Legacy `include=` is temporarily retained for backward compatibility.
-
-Validation rules:
-
-```text
-include + products              → 400
-empty products                  → 400
-duplicate tokens                → 400
-out-of-order tokens             → 400
-unknown tokens                  → 400
-whitespace / malformed products → 400
-```
-
-A product-scoped request must not execute unrelated product-specific
-calculations.
-
-For AP-only projection, the response includes compact self-contained:
-
-```text
-ap_bucket_axis
-```
-
-so the AP series can be interpreted without returning full History buckets.
+`include=` remains temporary backward compatibility. `include + products`, empty, malformed, duplicate, out-of-order, whitespace or unknown products return 400. Product-scoped requests do not execute unrelated product-specific calculations. AP-only `aps` projection remains self-contained through `ap_bucket_axis`.
 
 ## Period Statistics
 
-`TRAFFIC-03` remains production-active.
-
-Metrics in Mbps:
-
-```text
-Average Download / Upload / Total
-Peak Download / Upload / Total
-```
-
-Average method:
-
-```text
-right_endpoint_sample_hold_time_weighted.v1
-```
-
-Peak method:
-
-```text
-max_accepted_complete_site_sample.v1
-```
-
-Peak Total is the maximum observed Total of one accepted Site sample, not
-`Peak Download + Peak Upload`.
-
-Statuses remain:
-
-```text
-ok
-partial
-insufficient_data
-```
+`TRAFFIC-03` remains production-active. Average uses `right_endpoint_sample_hold_time_weighted.v1`; Peak uses `max_accepted_complete_site_sample.v1`. Peak Total remains one accepted Site-sample maximum, not Peak Download + Peak Upload.
 
 ## Peak Load
 
-`TRAFFIC-04` remains production-active.
-
-Canonical methods:
-
-```text
-metric version:
-network_traffic_peak_load.v1
-
-peak:
-max_accepted_complete_site_sample.v1
-
-peak tie:
-earliest_peak_sample_at.v1
-
-sample timestamp semantics:
-cycle_finished_at
-
-busiest bucket:
-max_complete_history_bucket_total_mean.v1
-
-bucket tie:
-earliest_bucket_start.v1
-
-busiest 60 minutes:
-max_complete_rolling_3600s_average_total_sample_hold.v1
-
-average:
-right_endpoint_sample_hold_time_weighted.v1
-
-hour tie:
-earliest_window_start.v1
-```
-
-Busiest 60 Minutes does not use or expose `occurrence_count`.
+`TRAFFIC-04` remains production-active. Canonical identities remain `network_traffic_peak_load.v1`, `max_accepted_complete_site_sample.v1`, `earliest_peak_sample_at.v1`, `cycle_finished_at`, `max_complete_history_bucket_total_mean.v1`, `earliest_bucket_start.v1`, `max_complete_rolling_3600s_average_total_sample_hold.v1`, `right_endpoint_sample_hold_time_weighted.v1`, `earliest_window_start.v1`.
 
 ## Traffic by AP
 
-`TRAFFIC-05` is current production functionality.
+`TRAFFIC-05` remains production-active with `network_traffic_by_ap.v1` in Mbps, population `current_union_historical_validated.v1`, series `outer_history_bucket_aligned_du.v1`, AP order `ap_mac_ascending.v1`, Average `right_endpoint_ap_sample_hold_time_weighted.v1`, Peak `max_accepted_complete_ap_sample.v1`, supported population cap 12 APs.
 
-Canonical metric:
+Traffic by AP and AP Traffic Share are distinct current products: one reports per-AP Mbps evidence, the other contribution share.
+
+## AP Traffic Share
+
+`TRAFFIC-06` is current production functionality.
 
 ```text
-network_traffic_by_ap.v1
-unit = Mbps
+metric version = network_traffic_ap_share.v1
+unit = fraction
+display unit = percent
+share method = accepted_site_interval_integrated_ap_contribution_ratio.v1
+temporal method = right_endpoint_sample_hold_time_weighted.v1
+presence method = accepted_selected_source_historical_presence_in_range.v1
+absence method = proven_population_member_absent_from_trusted_complete_site_sample_zero_contribution.v1
 ```
 
-Current accepted product semantics include:
+Permanent semantic invariant:
 
 ```text
-population:
-current_union_historical_validated.v1
-
-AP order:
-ap_mac_ascending.v1
-
-historical series encoding:
-outer_history_bucket_aligned_du.v1
-
-historical bucket method:
-mean_of_accepted_ap_rates_for_canonical_site_bucket_samples.v1
-
-Average:
-right_endpoint_ap_sample_hold_time_weighted.v1
-
-Peak:
-max_accepted_complete_ap_sample.v1
+sample count != traffic share
 ```
 
-The current supported population cap is:
+Share is accepted interval-integrated Network Traffic contribution over common comparable evidence. It is not user count, sample count, Internet share, SSID share or billing share. The panel uses its own independent 24h/7d selected/applied range and the `apshare` product projection. It reuses `HistoricalTrafficReadService` and adds no collector, Traffic DB, schema/index, cache/rollup or Omada path.
+
+Current status family includes `ok | partial | insufficient_data | unsupported_population`. Safe current-source unavailability may produce truthful partial historical Share; malformed/contradictory current evidence and impossible pagination fail closed; generic source outage is not relabelled as an integrity failure.
+
+## Historical request broker / admission
+
+`TrafficHistoricalRequestBroker` remains page-local intent/coalescing/response-mapping. `CaptivPortalTrafficCoordinator` remains scheduler/lifecycle owner.
+
+Permanent invariants:
 
 ```text
-12 APs
-```
-
-Traffic by AP exposes all supported Site APs for the panel's **applied** Network
-range, with aligned historical series, per-AP Average/Peak/coverage and current
-AP evidence.
-
-Current AP product status family includes:
-
-```text
-ok
-partial
-insufficient_data
-unsupported_population
-```
-
-Traffic by AP is not AP Traffic Share. It reports per-AP traffic evidence and
-does not define the future share metric.
-
-## Historical request broker
-
-Canonical architectural name:
-
-```text
-TrafficHistoricalRequestBroker
-```
-
-This is the page-local layer that owns:
-
-- historical panel intent queueing;
-- same-range coalescing;
-- response-to-panel mapping;
-- generation/supersession protection;
-- panel-local selected/applied state coordination.
-
-It is **not** the scheduler/lifecycle owner.
-
-Canonical scheduler/lifecycle owner remains:
-
-```text
-CaptivPortalTrafficCoordinator
-```
-
-Permanent invariant:
-
-```text
-max historical HTTP requests in flight from one Traffic page = 1
-```
-
-### Dispatch / coalescing rules
-
-- Initial all-24h state may coalesce enabled products into one combined request.
-- A panel range click queues only the product represented by that panel.
-- Global Refresh groups work by selected range and historical work is dispatched sequentially.
-- Explicit panel intent has priority over queued Global Refresh intent.
-- Multiple pending intents for the same panel collapse to the latest intent.
-- Products with the same range may coalesce into one canonical `products=` request.
-- A shared in-flight batch is not aborted solely because one included panel is superseded.
-- A response is applied to a panel only when both its intent generation and selected range are still current.
-
-## Historical Request Admission Guard
-
-Permanent production invariant:
-
-```text
+max historical HTTP requests in flight from one page = 1
 HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
 ```
 
-Canonical eligibility formula:
+Initial same-range products may coalesce; explicit panel intent outranks queued Global Refresh; same-panel pending intents collapse to latest; shared in-flight batches are not aborted because one panel is superseded; response applies only if generation and selected range remain current. Guard is measured from actual dispatch and never shortens Retry-After/backoff/lifecycle eligibility.
+
+## TRAFFIC-06 accepted artifact / production acceptance
 
 ```text
-next_dispatch >= max(
-    previous_request_completion,
-    previous_dispatch + 10s,
-    coordinator backoff / Retry-After / lifecycle eligibility
-)
+development baseline: 022c8666ef58f0a6d4bef9dd72696199ebd5719f
+accepted candidate tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+publication commit: 1d4e373262a236cb1c6dded82fe6b9789c9110a7
+PR: #96
+merge commit: c5f9dc39bbf399847f147526c9c7ae15769a198c
+production HEAD: c5f9dc39bbf399847f147526c9c7ae15769a198c
+production tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+accepted candidate tree = publication tree = PR head tree = merge tree = production tree
 ```
 
-Guard timing is measured from **actual dispatch**, not from completion.
-
-Rules:
-- first request on a fresh Traffic page may dispatch immediately;
-- `waiting` = queued / admission blocked, no historical HTTP request currently dispatched for that panel intent;
-- `loading` = real historical HTTP request is in flight;
-- Global Refresh does not bypass the guard;
-- manual retry does not bypass the guard;
-- HTTP 503 does not bypass the guard;
-- guard never shortens Retry-After, coordinator backoff or lifecycle eligibility;
-- guard state is page-local / memory-only.
-
-## Why Independent Traffic Range exists
-
-Before `TASK-TRAFFIC-RANGE-01`, a shared 7d combined historical request could
-reach the production query deadline when several expensive products were coupled
-to one range switch.
-
-The accepted remediation was **not** a larger deadline.
-
-Preserved limits:
+Acceptance gates:
 
 ```text
-WEB_ADMIN_MAX_QUERY_DURATION_SECONDS = 10
-Traffic browser request timeout = 20s
-Admin query concurrency = unchanged
+Tech Lead Static Review: PASS
+Targeted Traffic Regression: PASS WITH REVIEWED COMPATIBILITY
+candidate regressions: 0
+Windows Central Lab V6-FIXED: PASS
+strict regressions: 0
+exact-artifact immutability: PASS
+Linux production-size PERF: PASS
+CORE_PERF_GATE=PASS
+ALL24_CAPABILITY=PASS
+G1_G2_FALLBACK_CAPABILITY=PASS
+IMMUTABILITY=PASS
+RESULT=PASS
 ```
 
-The problem was addressed by:
+Key PERF evidence:
 
 ```text
-product-scoped historical projection
-+
-independent panel intent
-+
-one-request-in-flight scheduling
-+
-sequential admission
-+
-10-second admission guard
+SH24 p95 0.614524s / max 0.698018s
+SH7  p95 2.751386s / max 2.795773s
+CA7  p95 3.057368s / max 3.291041s
+AS7  p95 3.099320s / max 3.113963s
+E24-C p95 0.740699s / max 0.830057s
+ALL24 p95 0.584355s / max 0.595118s
+all measured variants: 10/10 success
+query_deadline=0
+source_integrity=0
+unexpected_5xx=0
+semantic stability=PASS
 ```
 
-No new collector, Traffic DB, schema/index, cache/rollup or Omada request path was
-introduced.
+Accepted ALL24 grouping is `history,statistics,peak,aps,apshare`. G1→G2 fallback remains accepted capability evidence but was not required for this candidate.
 
-## TRAFFIC-RANGE-01 production-size §97 PERF evidence
+Immutable snapshot: `273235968` bytes, SHA256 `b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb`.
 
-Result:
+Production deploy was FROM GIT. Dormant acceptance passed with AP Share disabled, then activation separately set `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true`.
+
+Post-activation runtime:
 
 ```text
-PASS
+captive-portal.service=active
+NRestarts=0
+ExecMainStatus=0
+Admin Traffic API=HTTP 200
+Omada webhook=HTTP 204
+Observation complete=True
+Observation error_count=0
+Observation failure_category=None
 ```
 
-Backward-compatibility 24h:
+Existing Omada InsecureRequestWarning and Flask development-server warning are pre-existing warnings, not TRAFFIC-06 regressions.
+
+Owner browser acceptance: PASS. AP Traffic Share ready, applied range Last 24 hours, population 2 AP, coverage 99.9% · 2500/2500 intervals, and independent `24h → 7d → 24h` switching PASS.
+
+Accepted 24h UI evidence:
 
 ```text
-B24:
-p50 0.537377s
-p95 0.543665s
-max  0.543820s
-
-C24:
-p50 0.536886s
-p95 0.545050s
-max  0.549600s
-
-relative backward-compatibility gates:
-PASS
-
-B24 ↔ C24 semantic identity:
-PASS
+EC:75:0C:18:6F:F8 total 71.38% / download 71.38% / upload 71.43%
+DC:62:79:1B:4A:68 total 28.62% / download 28.62% / upload 28.57%
+Total Share = 100.00%
+accepted intervals per AP = 2500
+accepted seconds per AP = 86345s
 ```
-
-Product-scoped matrix:
-
-```text
-H24 PASS
-H7  PASS
-S24 PASS
-S7  PASS
-P24 PASS
-P7  PASS
-A24 PASS
-A7  PASS
-```
-
-A7:
-
-```text
-p50 2.444160s
-p95 2.469994s
-max  2.472858s
-query_deadline = 0
-source_integrity = 0
-unexpected 5xx = 0
-```
-
-Immutable production-size snapshot:
-
-```text
-bytes:
-273235968
-
-SHA256:
-b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
-```
-
-These timings are dated acceptance evidence, not runtime SLO constants.
-
-## Acceptance / publication history
-
-### TRAFFIC-05
-
-```text
-TASK-TRAFFIC-05 — Traffic by AP
-PR #93
-publication commit: 85edc14214e3a271a300249b5b1062be31547c95
-merge commit: 8a5c4db899406eeb1f737abe63495247be1ee75a
-merge tree: 6837dd729dedb0df6414b3f979657a3f6f55d0ab
-status: DONE / PRODUCTION ACTIVE
-```
-
-### TRAFFIC-RANGE-01
-
-Accepted repository/production tree:
-
-```text
-b0e2f028eecf6aec9d86e35542c33e7105209335
-```
-
-Publication:
-
-```text
-publication commit: 355b413e9167bafb8ca9547af08c037eef86b189
-PR #94
-merge commit: daf68e91fc759188980cf8741913e6b60a58eb62
-```
-
-Accepted closing sequence:
-
-```text
-Implementation candidate
-→ focused gate PASS
-→ targeted Traffic regression PASS WITH REVIEWED COMPATIBILITY
-→ Windows Central Lab V6-FIXED PASS
-→ Linux production-size §97 PERF PASS
-→ Git publication
-→ PR #94
-→ Owner merge
-→ production deploy FROM GIT
-→ dormant production acceptance PASS
-→ separate feature activation
-→ production browser/product acceptance PASS
-```
-
-The reviewed Windows SQLite infinity compatibility case reproduces on the exact
-approved baseline and is **not** a TASK regression.
-
-Current production service:
-
-```text
-captive-portal.service = active
-```
-
 ## Historical accepted Traffic evidence
 
 The following TRAFFIC-03 / TRAFFIC-04 material is retained as historical
@@ -852,37 +501,27 @@ Do not list this one-time observation as an open current defect or technical deb
 ## Cross-surface and ownership invariants
 
 - Current Traffic and Home Traffic share `CurrentTrafficReadService`.
-- All historical Traffic products reuse `HistoricalTrafficReadService` and persisted Observation evidence.
+- All historical Traffic products, including AP Traffic Share, reuse `HistoricalTrafficReadService` and persisted Observation evidence.
 - Independent panel selectors do not create independent historical semantic owners.
 - `TrafficHistoricalRequestBroker` is not a second scheduler.
-- `CaptivPortalTrafficCoordinator` remains the scheduler/lifecycle owner.
+- `CaptivPortalTrafficCoordinator` remains scheduler/lifecycle owner.
 - Browser does not manufacture Traffic analytics.
 - Missing/invalid/gap evidence is never silently converted to zero.
 - Feature exposure flags do not start/stop Observation or shared Analytics services.
 
 ## Next step
 
-Next roadmap item:
+Next product roadmap item:
 
 ```text
-TASK-TRAFFIC-06 — AP Traffic Share
-NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
+TRAFFIC-07 — Online Guests Traffic
+NEXT / NOT IMPLEMENTED
 ```
 
-Current canonical idea only:
+Conditional preparatory foundation:
 
 ```text
-share of accepted Network Traffic evidence within selected range
+TRAFFIC-07-READ — CONDITIONAL / NOT IMPLEMENTED
 ```
 
-It is not user count and not sample count.
-
-Permanent reminder:
-
-```text
-sample count != traffic share
-```
-
-`TRAFFIC-06` must reuse the existing historical Network Traffic semantic
-foundation. Exact formulas, product contract and architecture remain undefined
-until separate DRAFT → review → FINAL.
+`TRAFFIC-07-READ` is created only if Current Rate requires substantial backend foundation. No unaccepted TRAFFIC-07 detail is promoted to current architecture.

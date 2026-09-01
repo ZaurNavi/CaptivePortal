@@ -2,8 +2,8 @@
 
 Status: current
 Updated: 2026-09-01
-Runtime implementation baseline: `main@daf68e91fc759188980cf8741913e6b60a58eb62`
-Runtime tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
+Runtime implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Runtime tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -38,6 +38,7 @@ Runtime tree: `b0e2f028eecf6aec9d86e35542c33e7105209335`
 | Traffic Peak Load | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
 | Traffic by AP | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
 | Independent Traffic Range per Panel | current; default disabled | `app/admin_web/` | `modules/traffic.md` | page-local memory only | no |
+| AP Traffic Share | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
 
 ## Current production evidence
 
@@ -45,7 +46,7 @@ Owner-provided production checkpoint 2026-09-01:
 
 ```text
 HEAD: daf68e91fc759188980cf8741913e6b60a58eb62
-tree: b0e2f028eecf6aec9d86e35542c33e7105209335
+tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -56,6 +57,7 @@ TRAFFIC-03 Statistics: production active
 TRAFFIC-04 Peak: production active
 TRAFFIC-05 Traffic by AP: production active
 TRAFFIC-RANGE-01: production active / production acceptance PASS
+TRAFFIC-06 AP Traffic Share: production active / production acceptance PASS
 
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
@@ -63,6 +65,7 @@ WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
 WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 
 captive-portal.service=active
 ```
@@ -70,12 +73,11 @@ captive-portal.service=active
 ## Next Traffic item
 
 ```text
-TRAFFIC-06 — AP Traffic Share
-NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
+TRAFFIC-07 — Online Guests Traffic
+NEXT / NOT IMPLEMENTED
 ```
 
-Current idea only: share of accepted Network Traffic evidence within selected
-range. `sample count != traffic share`.
+`TRAFFIC-07-READ` is conditional and is created only if Current Rate requires substantial backend foundation.
 
 ## Production evidence rule
 

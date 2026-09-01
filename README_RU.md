@@ -25,74 +25,44 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@daf68e91fc759188980cf8741913e6b60a58eb62` |
-| Repository tree | `b0e2f028eecf6aec9d86e35542c33e7105209335` |
-| Production deployed HEAD | `daf68e91fc759188980cf8741913e6b60a58eb62` |
-| Production tree | `b0e2f028eecf6aec9d86e35542c33e7105209335` |
-| Current Network Throughput | **Production active** |
-| Network Traffic History | **Production active** |
-| Period Statistics | **Production active** |
-| Peak Load | **Production active** |
+| Repository implementation checkpoint | `main@c5f9dc39bbf399847f147526c9c7ae15769a198c` |
+| Repository tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
+| Production deployed HEAD | `c5f9dc39bbf399847f147526c9c7ae15769a198c` |
+| Production tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
+| Current / History / Statistics / Peak | **Production active** |
 | Traffic by AP | **Production active** |
 | Independent historical ranges | **Production active / acceptance PASS** |
-| Следующий Traffic stage | `TRAFFIC-06 — AP Traffic Share` — NEXT / DRAFT REQUESTED / не реализован |
+| AP Traffic Share | **Production active / acceptance PASS** |
+| Следующий Traffic stage | `TRAFFIC-07 — Online Guests Traffic` — NEXT / не реализован |
 | Omada Controller family | Omada Software Controller 5.14.x |
-| Основная guest authorization | Реализована |
-| CAPPORT | Реализован |
-| Visitor Registry / Visit Lifecycle | Реализованы |
-| Observation / Current State | Реализованы |
+| Core guest authorization / CAPPORT | Реализованы |
+| Observation / Current State / Visit Lifecycle | Реализованы |
 | Analytics / Admin Web | Реализованы |
-| Multi-Site / Tenant / RBAC | Future evolution |
-| Текущая topology | Один application process; HA/multi-process требует ADR |
 
 > Repository defaults, production enabled-state и dated acceptance evidence — разные факты.
 
 ## Где проект находится сейчас
 
-Traffic production-active до Traffic by AP включительно; historical панели имеют
-независимые диапазоны 24h/7d.
+Traffic production-active до AP Traffic Share включительно; historical панели имеют независимые `24h | 7d` диапазоны.
 
 ```mermaid
 flowchart LR
-    A[Portal / Auth] --> B[CAPPORT]
-    B --> C[Observation / Visit]
-    C --> D[Analytics]
-    D --> E[Admin Web]
-    E --> T0[Traffic Foundation]
-    T0 --> T1[Current]
-    T1 --> T2[History]
-    T2 --> T3[Statistics]
-    T3 --> T4[Peak]
-    T4 --> T5[Traffic by AP]
-    T5 --> R[Independent panel ranges]
-    R --> T6{{СЛЕДУЮЩИЙ: AP Traffic Share}}
+    T1[Current] --> T2[History] --> T3[Statistics] --> T4[Peak] --> T5[Traffic by AP]
+    T5 --> R[Independent ranges] --> T6[AP Traffic Share]
+    T6 --> T7{{СЛЕДУЮЩИЙ: Online Guests Traffic}}
 ```
 
-Текущая functional layout является production-current, но не зафиксирована как
-окончательный визуальный дизайн.
+Текущая functional layout является production-current, но не финальным визуальным дизайном.
 
 ## Что CaptivPortal умеет сегодня
 
-Текущий runtime включает:
+Current Traffic surface: Current Network Throughput, Network Traffic History, Period Statistics, Peak Load, Traffic by AP и AP Traffic Share.
 
-- external portal/CAPPORT authorization;
-- Snapshot/Registry и Visit Lifecycle;
-- Observation и Current State;
-- Analytics и protected internal API;
-- Admin Web/Home;
-- Current Network Throughput;
-- Network Traffic History;
-- Period Statistics;
-- Peak Load;
-- Traffic by AP;
-- независимые page-local `24h | 7d` selectors для всех historical Traffic panels;
-- не более одного historical HTTP request одновременно и 10-second admission guard;
-- Grafana/Loki отдельно от product UI.
+Все historical Traffic panels имеют независимый page-local `24h | 7d` range state. Current Network Throughput range-insensitive. Historical requests остаются product-scoped, sequentially admitted и ограничены одним HTTP request in-flight на страницу.
 
-Current Network Throughput range-insensitive.
+AP Traffic Share показывает процентную долю accepted interval-integrated Network Traffic evidence; это не отношение sample counts.
 
-Network Traffic — AP/network evidence в Mbps. Это не WAN/Internet/billing/SSID и
-не Guest Session Traffic.
+Network Traffic — AP/network evidence, не WAN/Internet/billing/SSID и не Guest Session Traffic.
 
 # Архитектура
 
@@ -790,43 +760,27 @@ Controlled research на Omada 5.14.31 подтвердил:
 
 ```mermaid
 flowchart LR
-    P[Portal/Auth]:::done --> O[Observation]:::done
-    O --> A[Analytics]:::done
-    A --> W[Admin Web]:::done
-    W --> T0[Traffic Foundation]:::done
-    T0 --> T1[Current]:::done
-    T1 --> T2[History]:::done
-    T2 --> T3[Period Statistics]:::done
-    T3 --> T4[Peak Load]:::done
-    T4 --> T5[Traffic by AP]:::done
-    T5 --> R[Independent ranges]:::done
-    R --> T6[AP Traffic Share]:::next
-    T6 --> TP[Следующие Traffic panels]:::future
-    TP --> MS[Multi-Site]:::future
-
+    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::next
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
     classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
-    classDef future fill:#eeeeee,stroke:#777,color:#000;
 ```
 
 ## Near-term direction
 
 ```text
-TRAFFIC-00         DONE
-TRAFFIC-01         DONE / PRODUCTION ACTIVE
-TRAFFIC-02-READ    DONE
-TRAFFIC-02         DONE / PRODUCTION ACTIVE
+TRAFFIC-00 DONE
+TRAFFIC-01 DONE / PRODUCTION ACTIVE
+TRAFFIC-02-READ DONE
+TRAFFIC-02 DONE / PRODUCTION ACTIVE
 TRAFFIC-02-PERF-01 DONE
-TRAFFIC-03         DONE / PRODUCTION ACTIVE
-TRAFFIC-04         DONE / PRODUCTION ACTIVE
-TRAFFIC-05         DONE / PRODUCTION ACTIVE
-TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
-TRAFFIC-06         NEXT / DRAFT REQUESTED / NOT IMPLEMENTED
+TRAFFIC-03 DONE / PRODUCTION ACTIVE
+TRAFFIC-04 DONE / PRODUCTION ACTIVE
+TRAFFIC-05 DONE / PRODUCTION ACTIVE
+TRAFFIC-RANGE-01 DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06 DONE / PRODUCTION ACTIVE
+TRAFFIC-07 NEXT / NOT IMPLEMENTED
+TRAFFIC-07-READ CONDITIONAL / NOT IMPLEMENTED
 ```
-
-Следующий change-intent — `TRAFFIC-06 — AP Traffic Share`: доля accepted Network
-Traffic evidence в выбранном диапазоне. `sample count != traffic share`.
-Точные детали должны появиться только после DRAFT → review → FINAL.
 
 ## Реальный второй Site как trigger
 
