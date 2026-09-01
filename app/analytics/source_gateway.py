@@ -558,6 +558,7 @@ _HISTORICAL_AP_RESULT_FIELDS = (
     "ap_sample_opportunity_count",
     "ap_accepted_sample_count",
     "ap_site_accepted_interval_seconds",
+    "ap_accepted_interval_count",
     "ap_accepted_interval_seconds",
     "ap_weighted_download",
     "ap_weighted_upload",
@@ -909,6 +910,8 @@ _HISTORICAL_AP_CTES_SQL = _HISTORICAL_COMBINED_CTES_SQL + f""",
       COALESCE(SUM(CASE WHEN s.interval_result='accepted' AND s.row_id IS NOT NULL
         THEN s.elapsed_seconds ELSE 0 END),0.0)
         AS accepted_interval_seconds,
+      COALESCE(SUM(s.interval_result='accepted' AND s.row_id IS NOT NULL),0)
+        AS accepted_interval_count,
       SUM(CASE WHEN s.interval_result='accepted' AND s.row_id IS NOT NULL
         THEN s.download*s.elapsed_seconds END) AS weighted_download,
       SUM(CASE WHEN s.interval_result='accepted' AND s.row_id IS NOT NULL
@@ -935,6 +938,7 @@ _HISTORICAL_AP_CTES_SQL = _HISTORICAL_COMBINED_CTES_SQL + f""",
       g.sample_opportunity_count AS ap_sample_opportunity_count,
       g.accepted_sample_count AS ap_accepted_sample_count,
       g.site_accepted_interval_seconds AS ap_site_accepted_interval_seconds,
+      g.accepted_interval_count AS ap_accepted_interval_count,
       g.accepted_interval_seconds AS ap_accepted_interval_seconds,
       g.weighted_download AS ap_weighted_download,
       g.weighted_upload AS ap_weighted_upload,
@@ -1275,6 +1279,7 @@ def _historical_ap_population_and_rows(
         return {
             "accepted_sample_count": 0,
             "accepted_interval_seconds": 0.0,
+            "accepted_interval_count": 0,
             "weighted_download": 0.0,
             "weighted_upload": 0.0,
             "peak_download": None,
@@ -1398,6 +1403,7 @@ def _historical_ap_population_and_rows(
                     "Historical AP accepted interval is unavailable"
                 )
             state["accepted_interval_seconds"] += elapsed
+            state["accepted_interval_count"] += 1
             state["weighted_download"] += download * elapsed
             state["weighted_upload"] += upload * elapsed
         elif interval_result == "source_transition":
@@ -1433,6 +1439,7 @@ def _historical_ap_population_and_rows(
             "ap_site_accepted_interval_seconds": (
                 site_accepted_interval_seconds
             ),
+            "ap_accepted_interval_count": state["accepted_interval_count"],
             "ap_accepted_interval_seconds": accepted_interval_seconds,
             "ap_weighted_download": (
                 state["weighted_download"]
@@ -2005,6 +2012,7 @@ class AnalyticsSourceGateway:
         include_period_statistics: bool = False,
         include_peak_load: bool = False,
         include_ap_traffic: bool = False,
+        include_ap_share: bool = False,
         current_cycle_id: str | None = None,
     ) -> Mapping[str, Any]:
         """Return bounded historical AP-rate aggregates from one read snapshot."""
@@ -2021,8 +2029,9 @@ class AnalyticsSourceGateway:
                     include_period_statistics
                     or include_peak_load
                     or include_ap_traffic
+                    or include_ap_share
                 ):
-                    if include_ap_traffic:
+                    if include_ap_traffic or include_ap_share:
                         combined_sql = _HISTORICAL_AP_LEAN_COMBINED_SQL
                         combined_parameters = (
                             *cycle_parameters,
@@ -2066,7 +2075,7 @@ class AnalyticsSourceGateway:
                         )
                     first = combined_rows[0]
                     if (
-                        (include_peak_load or include_ap_traffic)
+                        (include_peak_load or include_ap_traffic or include_ap_share)
                         and int(first["projection_kind"]) != 0
                     ):
                         raise AnalyticsSourceUnavailable(
@@ -2086,14 +2095,16 @@ class AnalyticsSourceGateway:
                         *_HISTORICAL_STATISTICS_RESULT_FIELDS,
                     }
 
-                    projected = include_peak_load or include_ap_traffic
+                    projected = (
+                        include_peak_load or include_ap_traffic or include_ap_share
+                    )
                     if projected:
                         auxiliary_fields.update((
                             "projection_kind",
                             "projection_order",
                             *_HISTORICAL_PEAK_SAMPLE_FIELDS,
                         ))
-                    if include_ap_traffic:
+                    if include_ap_traffic or include_ap_share:
                         auxiliary_fields.update((
                             "ap_support_cycle_id",
                             "ap_support_bucket_index",
@@ -2143,11 +2154,15 @@ class AnalyticsSourceGateway:
                     )
                     statistics = (
                         combined_statistics
-                        if include_period_statistics or include_peak_load
+                        if (
+                            include_period_statistics
+                            or include_peak_load
+                            or include_ap_share
+                        )
                         else None
                     )
 
-                    if include_ap_traffic:
+                    if include_ap_traffic or include_ap_share:
                         support_rows = tuple(
                             row for row in combined_rows
                             if int(row["projection_kind"]) in (1, 2)

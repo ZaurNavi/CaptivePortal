@@ -16,8 +16,10 @@ from app.analytics.source_gateway import (
 )
 from app.analytics.validation import AnalyticsQueryValidationError, parse_utc
 from app.analytics import (
+    CurrentTrafficIntegrityUnavailable,
     CurrentTrafficSourceUnavailable,
     CurrentTrafficValidationError,
+    HistoricalTrafficIntegrityUnavailable,
     HistoricalTrafficSourceUnavailable,
     HistoricalTrafficValidationError,
     HomeActivitySourceUnavailable,
@@ -104,6 +106,10 @@ class AdminQueryBusy(AdminQueryError):
 
 class AdminQueryUnavailable(AdminQueryError):
     code = "source_unavailable"
+
+
+class AdminQueryIntegrityUnavailable(AdminQueryUnavailable):
+    """A returned source/product projection contradicted its safe contract."""
 
 
 class AdminQueryDeadline(AdminQueryError):
@@ -461,7 +467,8 @@ class AdminQueryService:
 
     def historical_traffic_history(
         self, principal, site_id, *, range_id, include_statistics=False,
-        include_peak=False, include_aps=False, include_history=True,
+        include_peak=False, include_aps=False, include_ap_share=False,
+        include_history=True,
         requested_products=None,
     ):
         self._authorize(principal, "admin.read.overview", site_id)
@@ -481,7 +488,10 @@ class AdminQueryService:
                 current_population_count = 0
                 current_items = ()
                 current_cycle_id = None
-                if include_aps and self._current_traffic is not None:
+                current_population_status = (
+                    "unavailable" if include_ap_share else "available"
+                )
+                if (include_aps or include_ap_share) and self._current_traffic is not None:
                     try:
                         current = self._current_traffic.get_current_site_traffic(
                             site_id,
@@ -500,36 +510,80 @@ class AdminQueryService:
                         current_snapshot = current.snapshot
                         current_population_count = current.coverage.total_ap_count
                         current_cycle_id = current.snapshot.cycle_id
-                        if current_cycle_id is not None and current_population_count <= 12:
-                            page = self._current_traffic.list_current_ap_traffic(
-                                site_id,
-                                cycle_id=current_cycle_id,
-                                evaluated_at_utc=resolved_range.evaluated_at_utc,
-                                fresh_max_age_seconds=(
-                                    self._config.home_traffic_fresh_max_age_seconds
-                                ),
-                                stale_max_age_seconds=(
-                                    self._config.home_traffic_stale_max_age_seconds
-                                ),
-                                max_ap_skew_seconds=(
-                                    self._config.home_traffic_max_ap_skew_seconds
-                                ),
-                                limit=12,
-                                deadline=deadline,
+                        current_population_status = (
+                            "available"
+                            if (
+                                current_cycle_id is not None
+                                and current.snapshot.complete is True
+                                and current.snapshot.freshness_status
+                                in {"fresh", "stale"}
                             )
-                            if page.page.next_cursor is not None:
-                                raise HistoricalTrafficSourceUnavailable(
-                                    "Current AP population projection is incomplete"
+                            else (
+                                "unavailable" if include_ap_share else "available"
+                            )
+                        )
+                        if include_ap_share and current_population_status == "unavailable":
+                            current_snapshot = None
+                            current_population_count = 0
+                            current_cycle_id = None
+                        if current_cycle_id is not None and current_population_count <= 12:
+                            try:
+                                page = self._current_traffic.list_current_ap_traffic(
+                                    site_id,
+                                    cycle_id=current_cycle_id,
+                                    evaluated_at_utc=resolved_range.evaluated_at_utc,
+                                    fresh_max_age_seconds=(
+                                        self._config.home_traffic_fresh_max_age_seconds
+                                    ),
+                                    stale_max_age_seconds=(
+                                        self._config.home_traffic_stale_max_age_seconds
+                                    ),
+                                    max_ap_skew_seconds=(
+                                        self._config.home_traffic_max_ap_skew_seconds
+                                    ),
+                                    limit=12,
+                                    deadline=deadline,
                                 )
-                            current_items = page.items
+                                if page.page.next_cursor is not None:
+                                    raise AdminQueryIntegrityUnavailable(
+                                        "Current AP population projection is incomplete"
+                                    )
+                                current_items = page.items
+                            except (
+                                CurrentTrafficIntegrityUnavailable,
+                                CurrentTrafficValidationError,
+                            ) as exc:
+                                if include_ap_share:
+                                    raise AdminQueryIntegrityUnavailable() from exc
+                                raise
+                            except CurrentTrafficSourceUnavailable:
+                                if include_ap_share:
+                                    current_snapshot = None
+                                    current_population_count = 0
+                                    current_items = ()
+                                    current_cycle_id = None
+                                    current_population_status = "unavailable"
+                                else:
+                                    raise
                     except (
-                        CurrentTrafficSourceUnavailable,
+                        CurrentTrafficIntegrityUnavailable,
                         CurrentTrafficValidationError,
-                    ):
+                    ) as exc:
+                        if include_ap_share:
+                            raise AdminQueryIntegrityUnavailable() from exc
                         current_snapshot = None
                         current_population_count = 0
                         current_items = ()
                         current_cycle_id = None
+                        current_population_status = "available"
+                    except CurrentTrafficSourceUnavailable:
+                        current_snapshot = None
+                        current_population_count = 0
+                        current_items = ()
+                        current_cycle_id = None
+                        current_population_status = (
+                            "unavailable" if include_ap_share else "available"
+                        )
                 value = source.get_site_history(
                     site_id,
                     from_utc=resolved_range.from_utc,
@@ -539,6 +593,8 @@ class AdminQueryService:
                     include_period_statistics=include_statistics,
                     include_peak_load=include_peak,
                     include_ap_traffic=include_aps,
+                    include_ap_share=include_ap_share,
+                    current_population_status=current_population_status,
                     current_cycle_id=current_cycle_id,
                 )
                 if include_aps:
@@ -556,14 +612,21 @@ class AdminQueryService:
                     include_period_statistics=include_statistics,
                     include_peak_load=include_peak,
                     include_ap_traffic=include_aps,
+                    include_ap_share=include_ap_share,
                     requested_products=requested_products,
                 )
                 return AdminQueryResponse(result)
             except HistoricalTrafficValidationError as exc:
                 raise AdminQueryValidationError() from exc
             except (
-                HistoricalTrafficSourceUnavailable,
+                HistoricalTrafficIntegrityUnavailable,
                 HistoricalTrafficSerializationError,
+            ) as exc:
+                if include_ap_share:
+                    raise AdminQueryIntegrityUnavailable() from exc
+                raise AdminQueryUnavailable() from exc
+            except (
+                HistoricalTrafficSourceUnavailable,
                 sqlite3.Error,
                 OSError,
             ) as exc:

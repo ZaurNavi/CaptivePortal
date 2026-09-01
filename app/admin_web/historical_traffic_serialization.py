@@ -88,6 +88,13 @@ _AP_FRESHNESS_REASONS = frozenset({
     "clock_anomaly", "no_complete_snapshot", "source_unavailable",
 })
 _AP_MAC = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
+_AP_SHARE_STATUSES = frozenset({
+    "ok", "partial", "insufficient_data", "unsupported_population",
+})
+_AP_SHARE_DENOMINATORS = frozenset({
+    "positive", "zero_traffic", "insufficient_data",
+})
+_AP_SHARE_EVIDENCE = frozenset({"accepted", "insufficient_data"})
 
 
 def serialize_historical_traffic(
@@ -99,6 +106,7 @@ def serialize_historical_traffic(
     include_period_statistics: bool = False,
     include_peak_load: bool = False,
     include_ap_traffic: bool = False,
+    include_ap_share: bool = False,
     requested_products: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Validate immutable Analytics output and expose only product-safe fields."""
@@ -238,6 +246,7 @@ def serialize_historical_traffic(
             ("statistics", include_period_statistics),
             ("peak", include_peak_load),
             ("aps", include_ap_traffic),
+            ("apshare", include_ap_share),
         ) if enabled
     )
     if not expected_products:
@@ -305,7 +314,357 @@ def serialize_historical_traffic(
         raise HistoricalTrafficSerializationError(
             "unrequested AP Traffic is invalid"
         )
+    ap_share = getattr(value, "ap_traffic_share", None)
+    if include_ap_share:
+        result["ap_traffic_share"] = _ap_share(
+            ap_share,
+            history_status=value.status,
+            range_seconds=float(expected_duration),
+        )
+    elif ap_share is not None:
+        raise HistoricalTrafficSerializationError(
+            "unrequested AP Share is invalid"
+        )
     return result
+
+
+def _ap_share(
+    value: Any, *, history_status: str, range_seconds: float,
+) -> dict[str, Any]:
+    constants = {
+        "metric_version": "network_traffic_ap_share.v1",
+        "unit": "fraction",
+        "display_unit": "percent",
+        "share_method": (
+            "accepted_site_interval_integrated_ap_contribution_ratio.v1"
+        ),
+        "temporal_method": "right_endpoint_sample_hold_time_weighted.v1",
+        "presence_method": (
+            "accepted_selected_source_historical_presence_in_range.v1"
+        ),
+        "absence_method": (
+            "proven_population_member_absent_from_trusted_complete_site_sample_"
+            "zero_contribution.v1"
+        ),
+        "population_method": "current_union_historical_validated.v1",
+        "order_method": "total_share_desc_nulls_last_ap_mac_ascending.v1",
+    }
+    if value is None or getattr(value, "status", None) not in _AP_SHARE_STATUSES:
+        raise HistoricalTrafficSerializationError("AP Share contract is invalid")
+    if any(getattr(value, key, None) != expected for key, expected in constants.items()):
+        raise HistoricalTrafficSerializationError("AP Share method is invalid")
+    population = getattr(value, "population", None)
+    if population is None or getattr(
+        population, "population_method", None
+    ) != constants["population_method"]:
+        raise HistoricalTrafficSerializationError("AP Share population is invalid")
+    current_status = getattr(population, "current_population_status", None)
+    current_count = getattr(population, "current_population_count", None)
+    if current_status == "available":
+        current_count = _count(current_count)
+    elif current_status == "unavailable":
+        if current_count is not None:
+            raise HistoricalTrafficSerializationError(
+                "AP Share unavailable current population is invalid"
+            )
+    else:
+        raise HistoricalTrafficSerializationError(
+            "AP Share current population status is invalid"
+        )
+    population_result = {
+        "population_method": population.population_method,
+        "population_count": _count(getattr(population, "population_count", None)),
+        "historical_population_count": _count(
+            getattr(population, "historical_population_count", None)
+        ),
+        "current_population_status": current_status,
+        "current_population_count": current_count,
+        "supported_max_ap_count": _count(
+            getattr(population, "supported_max_ap_count", None)
+        ),
+        "returned_ap_count": _count(
+            getattr(population, "returned_ap_count", None)
+        ),
+        "population_complete": _boolean(
+            getattr(population, "population_complete", None)
+        ),
+    }
+    if (
+        population_result["supported_max_ap_count"] != 12
+        or population_result["historical_population_count"]
+        > population_result["population_count"]
+        or (
+            current_status == "available"
+            and current_count > population_result["population_count"]
+        )
+        or (
+            current_status == "unavailable"
+            and (
+                population_result["population_complete"]
+                or population_result["population_count"]
+                != population_result["historical_population_count"]
+            )
+        )
+    ):
+        raise HistoricalTrafficSerializationError("AP Share population is invalid")
+
+    evidence = getattr(value, "interval_evidence", None)
+    if evidence is None:
+        raise HistoricalTrafficSerializationError("AP Share coverage is invalid")
+    count_fields = (
+        "candidate_interval_count", "accepted_interval_count",
+        "excluded_gap_interval_count",
+        "excluded_source_transition_interval_count",
+        "invalid_period_interval_count",
+    )
+    coverage = {name: _count(getattr(evidence, name, None)) for name in count_fields}
+    coverage["accepted_endpoint_sample_count"] = _count(
+        getattr(evidence, "accepted_peak_sample_count", None)
+    )
+    for name in (
+        "range_seconds", "accepted_interval_seconds",
+        "leading_unweighted_seconds", "trailing_unweighted_seconds",
+    ):
+        coverage[name] = _number(getattr(evidence, name, None))
+    coverage["interval_coverage_ratio"] = _number(
+        getattr(evidence, "interval_coverage_ratio", None)
+    )
+    if (
+        not math.isclose(coverage["range_seconds"], range_seconds)
+        or coverage["accepted_interval_seconds"] > range_seconds
+        or coverage["interval_coverage_ratio"] > 1
+        or coverage["candidate_interval_count"]
+        != coverage["accepted_interval_count"]
+        + coverage["excluded_gap_interval_count"]
+        + coverage["excluded_source_transition_interval_count"]
+        + coverage["invalid_period_interval_count"]
+        or coverage["candidate_interval_count"]
+        != max(coverage["accepted_endpoint_sample_count"] - 1, 0)
+        or not math.isclose(
+            coverage["interval_coverage_ratio"],
+            coverage["accepted_interval_seconds"] / range_seconds,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+    ):
+        raise HistoricalTrafficSerializationError("AP Share coverage is invalid")
+
+    denominators = getattr(value, "denominators", None)
+    denominator_result = {
+        name: getattr(denominators, name, None)
+        for name in ("download_status", "upload_status", "total_status")
+    }
+    if not all(item in _AP_SHARE_DENOMINATORS for item in denominator_result.values()):
+        raise HistoricalTrafficSerializationError("AP Share denominator is invalid")
+    site_download = _optional_number(getattr(value, "site_download_weight", None))
+    site_upload = _optional_number(getattr(value, "site_upload_weight", None))
+    site_total = (
+        None if site_download is None or site_upload is None
+        else site_download + site_upload
+    )
+    expected_denominators = {
+        "download_status": (
+            "insufficient_data" if coverage["accepted_interval_count"] == 0
+            else "zero_traffic" if site_download == 0 else "positive"
+        ),
+        "upload_status": (
+            "insufficient_data" if coverage["accepted_interval_count"] == 0
+            else "zero_traffic" if site_upload == 0 else "positive"
+        ),
+        "total_status": (
+            "insufficient_data" if coverage["accepted_interval_count"] == 0
+            else "zero_traffic" if site_total == 0 else "positive"
+        ),
+    }
+    if value.status in {"insufficient_data", "unsupported_population"}:
+        expected_denominators = dict.fromkeys(expected_denominators, "insufficient_data")
+    if denominator_result != expected_denominators:
+        raise HistoricalTrafficSerializationError("AP Share denominator is invalid")
+
+    source_items = tuple(getattr(value, "items", ()))
+    if value.status == "unsupported_population":
+        if (
+            population_result["population_count"] <= 12
+            or population_result["returned_ap_count"] != 0
+            or population_result["population_complete"]
+            or source_items
+        ):
+            raise HistoricalTrafficSerializationError(
+                "unsupported AP Share population is invalid"
+            )
+        return {
+            "status": value.status, **constants,
+            "population": population_result,
+            "coverage": coverage,
+            "denominators": denominator_result,
+            "items": [],
+        }
+    if (
+        population_result["population_count"] > 12
+        or population_result["returned_ap_count"]
+        != population_result["population_count"]
+        or len(source_items) != population_result["population_count"]
+        or (
+            current_status == "available"
+            and not population_result["population_complete"]
+        )
+    ):
+        raise HistoricalTrafficSerializationError("AP Share population is invalid")
+
+    projected: list[dict[str, Any]] = []
+    numeric_weights = {"download": [], "upload": []}
+    numeric_shares = {"download": [], "upload": [], "total": []}
+    for item in source_items:
+        mac = getattr(item, "ap_mac", None)
+        name = getattr(item, "display_name", None)
+        name_source = getattr(item, "display_name_source", None)
+        presence = getattr(item, "range_presence_proven", None)
+        evidence_status = getattr(item, "evidence_status", None)
+        if (
+            not isinstance(mac, str) or _AP_MAC.fullmatch(mac) is None
+            or not isinstance(name, str) or not name or len(name) > 256
+            or any(ord(character) < 32 for character in name)
+            or name_source not in _AP_NAME_SOURCES
+            or (name_source == "mac_fallback" and name != mac)
+            or type(presence) is not bool
+            or evidence_status not in _AP_SHARE_EVIDENCE
+        ):
+            raise HistoricalTrafficSerializationError("AP Share item is invalid")
+        presence_count = _count(
+            getattr(item, "accepted_presence_interval_count", None)
+        )
+        presence_seconds = _number(
+            getattr(item, "accepted_presence_seconds", None)
+        )
+        if (
+            presence_count > coverage["accepted_interval_count"]
+            or presence_seconds > coverage["accepted_interval_seconds"] + 1e-9
+            or ((presence_count == 0) != math.isclose(
+                presence_seconds, 0.0, rel_tol=0.0, abs_tol=1e-9
+            ))
+        ):
+            raise HistoricalTrafficSerializationError(
+                "AP Share presence evidence is invalid"
+            )
+        shares = {
+            name: _optional_number(getattr(item, f"{name}_share_fraction", None))
+            for name in ("download", "upload", "total")
+        }
+        weights = {
+            "download": _optional_number(getattr(item, "download_weight", None)),
+            "upload": _optional_number(getattr(item, "upload_weight", None)),
+        }
+        if not presence:
+            if (
+                evidence_status != "insufficient_data"
+                or presence_count != 0 or presence_seconds != 0
+                or any(value is not None for value in shares.values())
+                or any(value is not None for value in weights.values())
+            ):
+                raise HistoricalTrafficSerializationError(
+                    "unproven AP Share contribution is invalid"
+                )
+        else:
+            if evidence_status != "accepted":
+                raise HistoricalTrafficSerializationError(
+                    "proven AP Share contribution is invalid"
+                )
+            for direction in ("download", "upload"):
+                if weights[direction] is None:
+                    raise HistoricalTrafficSerializationError(
+                        "AP Share weight is invalid"
+                    )
+                numeric_weights[direction].append(weights[direction])
+            for direction, status in denominator_result.items():
+                metric_name = direction.removesuffix("_status")
+                share = shares[metric_name]
+                if status == "positive":
+                    if share is None or share > 1:
+                        raise HistoricalTrafficSerializationError(
+                            "AP Share fraction is invalid"
+                        )
+                    numeric_shares[metric_name].append(share)
+                elif share is not None:
+                    raise HistoricalTrafficSerializationError(
+                        "AP Share null denominator is invalid"
+                    )
+            if denominator_result["download_status"] == "positive" and not math.isclose(
+                shares["download"], weights["download"] / site_download,
+                rel_tol=1e-9, abs_tol=1e-9,
+            ):
+                raise HistoricalTrafficSerializationError("AP Share fraction is invalid")
+            if denominator_result["upload_status"] == "positive" and not math.isclose(
+                shares["upload"], weights["upload"] / site_upload,
+                rel_tol=1e-9, abs_tol=1e-9,
+            ):
+                raise HistoricalTrafficSerializationError("AP Share fraction is invalid")
+            if denominator_result["total_status"] == "positive" and not math.isclose(
+                shares["total"],
+                (weights["download"] + weights["upload"]) / site_total,
+                rel_tol=1e-9, abs_tol=1e-9,
+            ):
+                raise HistoricalTrafficSerializationError("AP Share total is invalid")
+        projected.append({
+            "ap_mac": mac,
+            "display_name": name,
+            "display_name_source": name_source,
+            "range_presence_proven": presence,
+            "evidence_status": evidence_status,
+            "accepted_presence_interval_count": presence_count,
+            "accepted_presence_seconds": presence_seconds,
+            "download_share_fraction": shares["download"],
+            "upload_share_fraction": shares["upload"],
+            "total_share_fraction": shares["total"],
+        })
+    expected_order = sorted(projected, key=lambda item: (
+        item["total_share_fraction"] is None,
+        -(item["total_share_fraction"] or 0.0),
+        item["ap_mac"],
+    ))
+    if projected != expected_order or len({item["ap_mac"] for item in projected}) != len(projected):
+        raise HistoricalTrafficSerializationError("AP Share order is invalid")
+    if coverage["accepted_interval_count"] > 0:
+        if not math.isclose(math.fsum(numeric_weights["download"]), site_download, rel_tol=1e-9, abs_tol=1e-9):
+            raise HistoricalTrafficSerializationError("AP Share conservation is invalid")
+        if not math.isclose(math.fsum(numeric_weights["upload"]), site_upload, rel_tol=1e-9, abs_tol=1e-9):
+            raise HistoricalTrafficSerializationError("AP Share conservation is invalid")
+    for direction, status in denominator_result.items():
+        metric_name = direction.removesuffix("_status")
+        if status == "positive" and not math.isclose(
+            math.fsum(numeric_shares[metric_name]), 1.0,
+            rel_tol=1e-9, abs_tol=1e-9,
+        ):
+            raise HistoricalTrafficSerializationError("AP Share sum is invalid")
+    complete = (
+        history_status == "ok"
+        and current_status == "available"
+        and population_result["population_count"] > 0
+        and coverage["accepted_interval_count"] > 0
+        and coverage["excluded_gap_interval_count"] == 0
+        and coverage["excluded_source_transition_interval_count"] == 0
+        and coverage["invalid_period_interval_count"] == 0
+    )
+    if (
+        (value.status == "ok" and not complete)
+        or (value.status == "partial" and (complete or not any(
+            item["range_presence_proven"] for item in projected
+        )))
+        or (value.status == "insufficient_data" and any(
+            share is not None for item in projected for share in (
+                item["download_share_fraction"], item["upload_share_fraction"],
+                item["total_share_fraction"],
+            )
+        ))
+    ):
+        raise HistoricalTrafficSerializationError("AP Share status is invalid")
+    return {
+        "status": value.status,
+        **constants,
+        "population": population_result,
+        "coverage": coverage,
+        "denominators": denominator_result,
+        "items": projected,
+    }
 
 
 def _ap_traffic(

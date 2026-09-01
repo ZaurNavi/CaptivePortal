@@ -55,6 +55,10 @@ class CurrentTrafficSourceUnavailable(RuntimeError):
     """Persisted source facts cannot safely describe current traffic."""
 
 
+class CurrentTrafficIntegrityUnavailable(CurrentTrafficSourceUnavailable):
+    """Returned persisted facts are malformed or internally contradictory."""
+
+
 class CurrentTrafficReadService:
     """Derive current AP traffic without polling or writing source storage."""
 
@@ -87,17 +91,24 @@ class CurrentTrafficReadService:
             page_limit=None,
             deadline=query_deadline,
         )
-        cycle = data["cycle"]
-        latest = data["latest"]
-        if cycle is None:
-            return _no_snapshot(site, latest, policy, evaluated_text)
+        try:
+            cycle = data["cycle"]
+            latest = data["latest"]
+            if cycle is None:
+                return _no_snapshot(site, latest, policy, evaluated_text)
 
-        rows = tuple(dict(row) for row in data["rows"])
-        context = _context_or_unavailable(
-            site, dict(cycle), dict(data["stats"]), rows,
-            latest, evaluated, evaluated_text, policy,
-        )
-        return _site_result(context, rows)
+            rows = tuple(dict(row) for row in data["rows"])
+            context = _context_or_unavailable(
+                site, dict(cycle), dict(data["stats"]), rows,
+                latest, evaluated, evaluated_text, policy,
+            )
+            return _site_result(context, rows)
+        except CurrentTrafficIntegrityUnavailable:
+            raise
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise CurrentTrafficIntegrityUnavailable(
+                "Current traffic source integrity is unavailable"
+            ) from exc
 
     def list_current_ap_traffic(
         self,
@@ -136,37 +147,44 @@ class CurrentTrafficReadService:
             page_limit=page_limit,
             deadline=deadline or QueryDeadline.after(10.0),
         )
-        if data["cycle"] is None:
-            raise CurrentTrafficValidationError("traffic cycle is unavailable")
-        rows = tuple(dict(row) for row in data["rows"])
-        context = _context_or_unavailable(
-            site, dict(data["cycle"]), dict(data["stats"]), rows,
-            data["latest"], evaluated, evaluated_text, policy,
-            validate_page_rows_only=True,
-        )
-        selected = context["selected_source"]
-        if cursor_data is not None and cursor_data["selected_source"] != selected:
-            raise CurrentTrafficValidationError("traffic cursor source mismatch")
-        has_more = len(rows) > page_limit
-        visible = rows[:page_limit]
-        items = tuple(_ap_item(row, selected, context) for row in visible)
-        next_cursor = None
-        if has_more:
-            next_cursor = _encode_cursor(
-                site, cycle, selected, str(visible[-1]["ap_mac"])
+        try:
+            if data["cycle"] is None:
+                raise CurrentTrafficValidationError("traffic cycle is unavailable")
+            rows = tuple(dict(row) for row in data["rows"])
+            context = _context_or_unavailable(
+                site, dict(data["cycle"]), dict(data["stats"]), rows,
+                data["latest"], evaluated, evaluated_text, policy,
+                validate_page_rows_only=True,
             )
-        return CurrentApTrafficPage(
-            snapshot=context["snapshot"],
-            freshness_policy=policy,
-            source_selection=context["source_selection"],
-            items=items,
-            page=CurrentTrafficPageMetadata(
-                limit=page_limit,
-                next_cursor=next_cursor,
-                cycle_id=cycle,
-                selected_source=selected,
-            ),
-        )
+            selected = context["selected_source"]
+            if cursor_data is not None and cursor_data["selected_source"] != selected:
+                raise CurrentTrafficValidationError("traffic cursor source mismatch")
+            has_more = len(rows) > page_limit
+            visible = rows[:page_limit]
+            items = tuple(_ap_item(row, selected, context) for row in visible)
+            next_cursor = None
+            if has_more:
+                next_cursor = _encode_cursor(
+                    site, cycle, selected, str(visible[-1]["ap_mac"])
+                )
+            return CurrentApTrafficPage(
+                snapshot=context["snapshot"],
+                freshness_policy=policy,
+                source_selection=context["source_selection"],
+                items=items,
+                page=CurrentTrafficPageMetadata(
+                    limit=page_limit,
+                    next_cursor=next_cursor,
+                    cycle_id=cycle,
+                    selected_source=selected,
+                ),
+            )
+        except (CurrentTrafficValidationError, CurrentTrafficIntegrityUnavailable):
+            raise
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise CurrentTrafficIntegrityUnavailable(
+                "Current traffic source integrity is unavailable"
+            ) from exc
 
     def _read(self, **kwargs: Any) -> Mapping[str, Any]:
         try:
@@ -182,10 +200,10 @@ class CurrentTrafficReadService:
 def _context_or_unavailable(*args: Any, **kwargs: Any) -> dict[str, Any]:
     try:
         return _validated_context(*args, **kwargs)
-    except CurrentTrafficSourceUnavailable:
+    except CurrentTrafficIntegrityUnavailable:
         raise
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic source integrity is unavailable"
         ) from exc
 
@@ -206,7 +224,7 @@ def _validated_context(
         started = parse_utc(cycle["started_at"], "cycle started_at")
         finished = parse_utc(cycle["finished_at"], "cycle finished_at")
     except (KeyError, AnalyticsQueryValidationError) as exc:
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic cycle timestamp is invalid"
         ) from exc
     expected_count = int(cycle["items_stored"])
@@ -228,7 +246,7 @@ def _validated_context(
             "missing_lan_time_count",
         ))
     ):
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic source integrity is unavailable"
         )
     for row in rows:
@@ -259,7 +277,7 @@ def _validated_context(
             oldest = parse_utc(oldest_text, "traffic observed_at")
             newest = parse_utc(newest_text, "traffic newest_observed_at")
         except AnalyticsQueryValidationError as exc:
-            raise CurrentTrafficSourceUnavailable(
+            raise CurrentTrafficIntegrityUnavailable(
                 "Current traffic timestamp is invalid"
             ) from exc
         temporal_anomaly = temporal_anomaly or not (
@@ -371,7 +389,7 @@ def _site_result(
         if source == "wired" else int(context["lan_pairs"])
     )
     if pair_count != expected_pairs:
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic source integrity is unavailable"
         )
     download = sum(down_values) if down_values else None
@@ -471,7 +489,7 @@ def _validate_row(row: Mapping[str, Any], site: str, cycle_id: str) -> None:
             ("lan_traffic_ok", 1), ("radios_ok", 1),
         ))
     ):
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic AP identity is unavailable"
         )
     for source in SOURCES:
@@ -591,17 +609,17 @@ def _latest_attempt(
         started_text = latest["started_at"]
         finished_text = latest["finished_at"]
     except KeyError as exc:
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic latest attempt is unavailable"
         ) from exc
     if not isinstance(state, str) or state not in _LATEST_STATES:
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic latest attempt is unavailable"
         )
     if result is not None and (
         not isinstance(result, str) or result not in _LATEST_RESULTS
     ):
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic latest attempt is unavailable"
         )
     try:
@@ -611,7 +629,7 @@ def _latest_attempt(
             if finished_text is not None else None
         )
     except AnalyticsQueryValidationError as exc:
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic latest attempt is unavailable"
         ) from exc
     valid_combination = (
@@ -623,7 +641,7 @@ def _latest_attempt(
         or (state == "abandoned" and result is None and finished is None)
     )
     if not valid_combination:
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic latest attempt is unavailable"
         )
     attempt_at = finished_text if finished_text is not None else started_text
@@ -678,7 +696,7 @@ def _source_datetime(value: str) -> datetime:
     try:
         return parse_utc(value, "source observed_at")
     except AnalyticsQueryValidationError as exc:
-        raise CurrentTrafficSourceUnavailable(
+        raise CurrentTrafficIntegrityUnavailable(
             "Current traffic timestamp is invalid"
         ) from exc
 

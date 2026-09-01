@@ -1116,6 +1116,22 @@
     items: document.getElementById("traffic-ap-items"),
   } : null;
   if (apEnabled && Object.values(apElements).some((value) => !value)) return;
+  const apSharePanel = document.getElementById("traffic-apshare-panel");
+  const apShareEnabled = Boolean(
+    apSharePanel && apSharePanel.dataset.apshareEnabled === "true"
+  );
+  const apShareElements = apShareEnabled ? {
+    state: document.getElementById("traffic-apshare-state"),
+    title: document.getElementById("traffic-apshare-state-title"),
+    message: document.getElementById("traffic-apshare-state-message"),
+    applied: document.getElementById("traffic-apshare-applied-range"),
+    population: document.getElementById("traffic-apshare-population"),
+    coverage: document.getElementById("traffic-apshare-coverage"),
+    current: document.getElementById("traffic-apshare-current"),
+    items: document.getElementById("traffic-apshare-items"),
+  } : null;
+  if (apShareEnabled && (!independentRanges
+      || Object.values(apShareElements).some((value) => !value))) return;
 
   const PANEL_KEY = "network-traffic-history";
   const RANGE = Object.freeze({"24h": Object.freeze({seconds: 86400, bucket: 300, count: 288}), "7d": Object.freeze({seconds: 604800, bucket: 900, count: 672})});
@@ -1247,6 +1263,7 @@
       statistics: "period_statistics",
       peak: "peak_load",
       aps: "ap_traffic",
+      apshare: "ap_traffic_share",
     };
     for (const [product, field] of Object.entries(fields)) {
       if (Object.prototype.hasOwnProperty.call(value, field)
@@ -1295,7 +1312,9 @@
       axis = validateApAxis(common.ap_bucket_axis, common);
       ap = validateApTraffic(common.ap_traffic, common);
     }
-    return Object.freeze({common, history, statistics, peak, ap, axis});
+    const apShare = requestedProducts.includes("apshare")
+      ? validateApShare(common.ap_traffic_share, common) : null;
+    return Object.freeze({common, history, statistics, peak, ap, axis, apshare: apShare});
   }
 
   function validatePeak(value, history, statistics) {
@@ -1530,6 +1549,165 @@
     return Object.freeze(value);
   }
 
+  function validateApShare(value, history) {
+    const statuses = new Set(["ok", "partial", "insufficient_data", "unsupported_population"]);
+    const denominatorStatuses = new Set(["positive", "zero_traffic", "insufficient_data"]);
+    if (!object(value) || !statuses.has(value.status)
+        || value.metric_version !== "network_traffic_ap_share.v1"
+        || value.unit !== "fraction" || value.display_unit !== "percent"
+        || value.share_method !== "accepted_site_interval_integrated_ap_contribution_ratio.v1"
+        || value.temporal_method !== "right_endpoint_sample_hold_time_weighted.v1"
+        || value.presence_method !== "accepted_selected_source_historical_presence_in_range.v1"
+        || value.absence_method !== "proven_population_member_absent_from_trusted_complete_site_sample_zero_contribution.v1"
+        || value.population_method !== "current_union_historical_validated.v1"
+        || value.order_method !== "total_share_desc_nulls_last_ap_mac_ascending.v1"
+        || !object(value.population) || !object(value.coverage)
+        || !object(value.denominators) || !Array.isArray(value.items)) {
+      throw new Error("Invalid AP Traffic Share response");
+    }
+    const population = value.population;
+    const currentAvailable = population.current_population_status === "available";
+    if (population.population_method !== value.population_method
+        || !count(population.population_count)
+        || !count(population.historical_population_count)
+        || !["available", "unavailable"].includes(population.current_population_status)
+        || (currentAvailable ? !count(population.current_population_count)
+          : population.current_population_count !== null)
+        || population.supported_max_ap_count !== 12
+        || !count(population.returned_ap_count)
+        || typeof population.population_complete !== "boolean"
+        || population.historical_population_count > population.population_count
+        || (currentAvailable && population.current_population_count > population.population_count)
+        || (!currentAvailable && (population.population_complete
+          || population.population_count !== population.historical_population_count))) {
+      throw new Error("Invalid AP Traffic Share response");
+    }
+    const coverage = value.coverage;
+    const coverageCounts = ["candidate_interval_count", "accepted_interval_count",
+      "excluded_gap_interval_count", "excluded_source_transition_interval_count",
+      "invalid_period_interval_count", "accepted_endpoint_sample_count"];
+    const coverageDurations = ["range_seconds", "accepted_interval_seconds",
+      "leading_unweighted_seconds", "trailing_unweighted_seconds"];
+    if (!coverageCounts.every((key) => count(coverage[key]))
+        || !coverageDurations.every((key) => typeof coverage[key] === "number"
+          && Number.isFinite(coverage[key]) && coverage[key] >= 0)
+        || typeof coverage.interval_coverage_ratio !== "number"
+        || !Number.isFinite(coverage.interval_coverage_ratio)
+        || coverage.interval_coverage_ratio < 0 || coverage.interval_coverage_ratio > 1
+        || coverage.range_seconds !== RANGE[history.range.id].seconds
+        || coverage.accepted_interval_seconds > coverage.range_seconds
+        || coverage.candidate_interval_count !== Math.max(coverage.accepted_endpoint_sample_count - 1, 0)
+        || coverage.candidate_interval_count !== coverage.accepted_interval_count
+          + coverage.excluded_gap_interval_count
+          + coverage.excluded_source_transition_interval_count
+          + coverage.invalid_period_interval_count
+        || coverage.accepted_endpoint_sample_count !== history.coverage.complete_site_sample_count
+        || Math.abs(coverage.interval_coverage_ratio
+          - coverage.accepted_interval_seconds / coverage.range_seconds) > 1e-9) {
+      throw new Error("Invalid AP Traffic Share response");
+    }
+    const denominators = value.denominators;
+    if (!["download_status", "upload_status", "total_status"].every(
+      (key) => denominatorStatuses.has(denominators[key])
+    )) throw new Error("Invalid AP Traffic Share response");
+    if (value.status === "unsupported_population") {
+      if (population.population_count <= 12 || population.returned_ap_count !== 0
+          || population.population_complete || value.items.length !== 0
+          || !Object.values(denominators).every((status) => status === "insufficient_data")) {
+        throw new Error("Invalid AP Traffic Share response");
+      }
+      return Object.freeze(value);
+    }
+    if (population.population_count > 12
+        || population.returned_ap_count !== population.population_count
+        || value.items.length !== population.population_count
+        || (currentAvailable && !population.population_complete)) {
+      throw new Error("Invalid AP Traffic Share response");
+    }
+    let previous = null;
+    const fractionSums = {download: 0, upload: 0, total: 0};
+    const fractionCounts = {download: 0, upload: 0, total: 0};
+    for (const item of value.items) {
+      if (!object(item) || !/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(item.ap_mac)
+          || typeof item.display_name !== "string" || !item.display_name
+          || !["current", "historical", "mac_fallback"].includes(item.display_name_source)
+          || typeof item.range_presence_proven !== "boolean"
+          || !["accepted", "insufficient_data"].includes(item.evidence_status)
+          || !count(item.accepted_presence_interval_count)
+          || typeof item.accepted_presence_seconds !== "number"
+          || !Number.isFinite(item.accepted_presence_seconds)
+          || item.accepted_presence_seconds < 0
+          || item.accepted_presence_interval_count > coverage.accepted_interval_count
+          || item.accepted_presence_seconds > coverage.accepted_interval_seconds + 1e-9
+          || ((item.accepted_presence_interval_count === 0)
+            !== (Math.abs(item.accepted_presence_seconds) <= 1e-9))) {
+        throw new Error("Invalid AP Traffic Share response");
+      }
+      const fractions = {
+        download: item.download_share_fraction,
+        upload: item.upload_share_fraction,
+        total: item.total_share_fraction,
+      };
+      for (const [direction, fraction] of Object.entries(fractions)) {
+        const status = denominators[`${direction}_status`];
+        if (fraction !== null && (typeof fraction !== "number"
+            || !Number.isFinite(fraction) || fraction < 0 || fraction > 1)) {
+          throw new Error("Invalid AP Traffic Share response");
+        }
+        if (!item.range_presence_proven || status !== "positive") {
+          if (fraction !== null) throw new Error("Invalid AP Traffic Share response");
+        } else {
+          if (fraction === null) throw new Error("Invalid AP Traffic Share response");
+          fractionSums[direction] += fraction;
+          fractionCounts[direction] += 1;
+        }
+      }
+      if (!item.range_presence_proven && (item.evidence_status !== "insufficient_data"
+          || item.accepted_presence_interval_count !== 0
+          || item.accepted_presence_seconds !== 0)) {
+        throw new Error("Invalid AP Traffic Share response");
+      }
+      if (item.range_presence_proven && item.evidence_status !== "accepted") {
+        throw new Error("Invalid AP Traffic Share response");
+      }
+      const order = [item.total_share_fraction === null ? 1 : 0,
+        -(item.total_share_fraction || 0), item.ap_mac];
+      if (previous !== null && (order[0] < previous[0]
+          || (order[0] === previous[0] && (order[1] < previous[1]
+            || (order[1] === previous[1] && order[2] <= previous[2]))))) {
+        throw new Error("Invalid AP Traffic Share response");
+      }
+      previous = order;
+    }
+    for (const direction of ["download", "upload", "total"]) {
+      if (denominators[`${direction}_status`] === "positive"
+          && (fractionCounts[direction] === 0
+            || Math.abs(fractionSums[direction] - 1) > 1e-9)) {
+        throw new Error("Invalid AP Traffic Share response");
+      }
+    }
+    if (coverage.accepted_interval_count === 0
+        && !Object.values(denominators).every((status) => status === "insufficient_data")) {
+      throw new Error("Invalid AP Traffic Share response");
+    }
+    const complete = history.status === "ok" && currentAvailable
+      && population.population_count > 0 && coverage.accepted_interval_count > 0
+      && coverage.excluded_gap_interval_count === 0
+      && coverage.excluded_source_transition_interval_count === 0
+      && coverage.invalid_period_interval_count === 0;
+    const anyPresence = value.items.some((item) => item.range_presence_proven);
+    if ((value.status === "ok" && !complete)
+        || (value.status === "partial" && (complete || !anyPresence))
+        || (value.status === "insufficient_data" && (
+          (population.population_count > 0 && coverage.accepted_interval_count > 0 && anyPresence)
+          || !Object.values(denominators).every((status) => status === "insufficient_data")
+          || value.items.some((item) => item.download_share_fraction !== null
+            || item.upload_share_fraction !== null || item.total_share_fraction !== null)))) {
+      throw new Error("Invalid AP Traffic Share response");
+    }
+    return Object.freeze(value);
+  }
+
   function validate(payload, siteId) {
     if (!object(payload) || payload.api_version !== "admin.read.v1" || payload.site_id !== siteId || !object(payload.result)) {
       throw new Error("Invalid historical Traffic response");
@@ -1698,6 +1876,11 @@
       apElements.title.textContent = "Loading AP traffic…";
       apElements.message.textContent = "Reading the combined persisted History result and current AP evidence.";
     }
+    if (apShareEnabled) {
+      apShareElements.state.dataset.state = "warning";
+      apShareElements.title.textContent = "Loading AP Traffic Share…";
+      apShareElements.message.textContent = "Reading accepted persisted AP contribution evidence.";
+    }
   }
   function formatStatistic(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
   function renderStatistics(value, history) {
@@ -1850,6 +2033,69 @@
       apElements.items.appendChild(card);
     }
   }
+  function shareMetric(value) {
+    if (value === null) return "—";
+    const percent = value * 100;
+    if (percent > 0 && percent < 0.01) return "<0.01%";
+    return `${percent.toFixed(2)}%`;
+  }
+  function renderApShare(value, history) {
+    apShareElements.items.replaceChildren();
+    apShareElements.applied.textContent = displayRange(history.range.id);
+    apShareElements.population.textContent = `${value.population.population_count} AP`;
+    apShareElements.current.textContent = value.population.current_population_status === "available"
+      ? `${value.population.current_population_count} current AP`
+      : "Unavailable · historical population only";
+    if (value.status === "unsupported_population") {
+      apShareElements.state.dataset.state = "warning";
+      apShareElements.title.textContent = "AP Traffic Share is not supported";
+      apShareElements.message.textContent = "This Site/range population exceeds the supported 12 AP limit; no subset is shown.";
+      apShareElements.coverage.textContent = "Unsupported population";
+      return;
+    }
+    const partial = value.status === "partial";
+    const insufficient = value.status === "insufficient_data";
+    apShareElements.state.dataset.state = partial || insufficient ? "warning" : "ready";
+    apShareElements.title.textContent = insufficient ? "AP Traffic Share is insufficient"
+      : (partial ? "AP Traffic Share is partial" : "AP Traffic Share ready");
+    const zeroTraffic = value.denominators.total_status === "zero_traffic";
+    apShareElements.message.textContent = zeroTraffic
+      ? "No accepted Network Traffic was observed in this range."
+      : (insufficient
+        ? "No sufficient comparable Network Traffic evidence is available for this range."
+        : (partial
+          ? "Shares cover accepted comparable historical evidence; current population or range evidence is incomplete."
+          : "Shares cover accepted Site Network Traffic evidence for the applied range."));
+    apShareElements.coverage.textContent = `${(value.coverage.interval_coverage_ratio * 100).toFixed(1)}% · ${value.coverage.accepted_interval_count}/${value.coverage.candidate_interval_count} intervals`;
+    for (const item of value.items) {
+      const card = document.createElement("article");
+      card.className = "card traffic-ap-card";
+      card.dataset.apMac = item.ap_mac;
+      const heading = document.createElement("h3");
+      heading.textContent = item.display_name;
+      const identity = document.createElement("p");
+      identity.className = "traffic-ap-identity";
+      identity.textContent = item.ap_mac;
+      const metrics = document.createElement("div");
+      metrics.className = "traffic-ap-metrics";
+      for (const [label, metric] of [
+        ["Total Share", item.total_share_fraction],
+        ["Download Share", item.download_share_fraction],
+        ["Upload Share", item.upload_share_fraction],
+      ]) {
+        const row = document.createElement("p");
+        row.textContent = `${label}: ${shareMetric(metric)}`;
+        metrics.appendChild(row);
+      }
+      const evidence = document.createElement("p");
+      evidence.className = "traffic-ap-evidence";
+      evidence.textContent = item.range_presence_proven
+        ? `${item.evidence_status} · ${item.accepted_presence_interval_count} accepted intervals · ${Math.round(item.accepted_presence_seconds)}s`
+        : "Insufficient accepted historical contribution evidence";
+      card.replaceChildren(heading, identity, metrics, evidence);
+      apShareElements.items.appendChild(card);
+    }
+  }
   function renderHistory(value) {
     accepted = value;
     appliedRange = value.range.id;
@@ -1873,11 +2119,12 @@
     renderChart(value);
   }
   function render(result) {
-    const value = statisticsEnabled || apEnabled ? result.history : result;
+    const value = statisticsEnabled || apEnabled || apShareEnabled ? result.history : result;
     renderHistory(value);
     if (statisticsEnabled) renderStatistics(result.statistics, value);
     if (peakEnabled) renderPeak(result.peak, value);
     if (apEnabled) renderApTraffic(result.ap, value);
+    if (apShareEnabled) renderApShare(result.apshare, value);
   }
   function renderFailure(failure) {
     elements.state.dataset.state = "error";
@@ -1899,6 +2146,11 @@
       apElements.state.dataset.state = "error";
       apElements.title.textContent = "AP traffic unavailable";
       apElements.message.textContent = "The combined persisted History request failed.";
+    }
+    if (apShareEnabled) {
+      apShareElements.state.dataset.state = "error";
+      apShareElements.title.textContent = "AP Traffic Share unavailable";
+      apShareElements.message.textContent = "The accepted historical Share request failed.";
     }
   }
   function requestSelectedRange() {
@@ -1938,7 +2190,7 @@
     return;
   }
 
-  const PRODUCT_ORDER = Object.freeze(["history", "statistics", "peak", "aps"]);
+  const PRODUCT_ORDER = Object.freeze(["history", "statistics", "peak", "aps", "apshare"]);
   const ADMISSION_GUARD_MILLISECONDS = 10000;
   const productUi = {
     history: {state: elements.state, title: elements.title, message: elements.message},
@@ -1953,6 +2205,10 @@
     aps: apEnabled ? {
       state: apElements.state, title: apElements.title,
       message: apElements.message,
+    } : null,
+    apshare: apShareEnabled ? {
+      state: apShareElements.state, title: apShareElements.title,
+      message: apShareElements.message,
     } : null,
   };
   const enabledProducts = PRODUCT_ORDER.filter((product) => productUi[product]);
@@ -1993,7 +2249,8 @@
 
   function phaseText(product, phase, state, failure) {
     const label = product === "history" ? "History" : product === "statistics"
-      ? "Period statistics" : product === "peak" ? "Peak Load" : "AP traffic";
+      ? "Period statistics" : product === "peak" ? "Peak Load"
+        : product === "aps" ? "AP traffic" : "AP Traffic Share";
     if (phase === "waiting") return [
       `${label} waiting for request admission`,
       state.appliedRange === null
@@ -2098,6 +2355,7 @@
       }
       if (intent.product === "peak") renderPeak(projected.peak, projected.common);
       if (intent.product === "aps") renderApTraffic(projected.ap, projected.common);
+      if (intent.product === "apshare") renderApShare(projected.apshare, projected.common);
       state.appliedRange = projected.common.range.id;
       state.phase = "ready";
       state.lastSuccessfulPayload = projected[intent.product === "aps" ? "ap" : intent.product];

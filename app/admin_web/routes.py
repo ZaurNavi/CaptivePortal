@@ -44,6 +44,7 @@ from .query_service import (
     AdminQueryDeadline,
     AdminQueryError,
     AdminQueryForbidden,
+    AdminQueryIntegrityUnavailable,
     AdminQueryNotFound,
     AdminQueryUnavailable,
     AdminQueryValidationError,
@@ -357,6 +358,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             traffic_independent_ranges_enabled=(
                 config.traffic_independent_ranges_enabled
             ),
+            traffic_ap_share_enabled=config.traffic_ap_share_enabled,
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -1174,11 +1176,25 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         statistics_requested = False
         peak_requested = False
         aps_requested = False
+        ap_share_requested = False
         statistics_status = None
         peak_status = None
         ap_traffic_status = None
         ap_population_count = None
         ap_returned_count = None
+        ap_share_status = None
+        ap_share_population_count = None
+        ap_share_historical_population_count = None
+        ap_share_current_population_status = None
+        ap_share_current_population_count = None
+        ap_share_returned_count = None
+        ap_share_population_complete = None
+        ap_share_accepted_interval_count = None
+        ap_share_accepted_interval_seconds = None
+        ap_share_download_denominator_status = None
+        ap_share_upload_denominator_status = None
+        ap_share_total_denominator_status = None
+        ap_share_unproven_count = None
         busiest_bucket_status = None
         busiest_hour_status = None
         result_status = None
@@ -1247,7 +1263,9 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     if isinstance(products_text, str) and products_text
                     else []
                 )
-                canonical = ("history", "statistics", "peak", "aps")
+                canonical = (
+                    "history", "statistics", "peak", "aps", "apshare"
+                )
                 requested_products = tuple(
                     product for product in canonical if product in tokens
                 )
@@ -1263,6 +1281,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 statistics_requested = "statistics" in requested_products
                 peak_requested = "peak" in requested_products
                 aps_requested = "aps" in requested_products
+                ap_share_requested = "apshare" in requested_products
             elif "include" in request.args:
                 include = request.args.get("include")
                 if include not in {
@@ -1287,6 +1306,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 response = make_response(_error("not_found", 404))
                 reason = "feature_disabled"
                 return response
+            if ap_share_requested and not config.traffic_ap_share_enabled:
+                response = make_response(_error("not_found", 404))
+                reason = "feature_disabled"
+                return response
             service = runtime.query_service
             if service is None:
                 response = make_response(_error("source_unavailable", 503))
@@ -1301,6 +1324,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     include_statistics=statistics_requested,
                     include_peak=peak_requested,
                     include_aps=aps_requested,
+                    include_ap_share=ap_share_requested,
                     requested_products=requested_products,
                 )
                 result_status = result.result.get("status")
@@ -1334,6 +1358,54 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     if isinstance(population, dict):
                         ap_population_count = population.get("population_count")
                         ap_returned_count = population.get("returned_ap_count")
+                ap_share = result.result.get("ap_traffic_share")
+                if isinstance(ap_share, dict):
+                    ap_share_status = ap_share.get("status")
+                    share_population = ap_share.get("population")
+                    if isinstance(share_population, dict):
+                        ap_share_population_count = share_population.get(
+                            "population_count"
+                        )
+                        ap_share_historical_population_count = share_population.get(
+                            "historical_population_count"
+                        )
+                        ap_share_current_population_status = share_population.get(
+                            "current_population_status"
+                        )
+                        ap_share_current_population_count = share_population.get(
+                            "current_population_count"
+                        )
+                        ap_share_returned_count = share_population.get(
+                            "returned_ap_count"
+                        )
+                        ap_share_population_complete = share_population.get(
+                            "population_complete"
+                        )
+                    share_coverage = ap_share.get("coverage")
+                    if isinstance(share_coverage, dict):
+                        ap_share_accepted_interval_count = share_coverage.get(
+                            "accepted_interval_count"
+                        )
+                        ap_share_accepted_interval_seconds = share_coverage.get(
+                            "accepted_interval_seconds"
+                        )
+                    share_denominators = ap_share.get("denominators")
+                    if isinstance(share_denominators, dict):
+                        ap_share_download_denominator_status = share_denominators.get(
+                            "download_status"
+                        )
+                        ap_share_upload_denominator_status = share_denominators.get(
+                            "upload_status"
+                        )
+                        ap_share_total_denominator_status = share_denominators.get(
+                            "total_status"
+                        )
+                    share_items = ap_share.get("items")
+                    if isinstance(share_items, list):
+                        ap_share_unproven_count = sum(
+                            item.get("range_presence_proven") is False
+                            for item in share_items if isinstance(item, dict)
+                        )
                 response = make_response(_success(
                     selected,
                     result.result,
@@ -1357,6 +1429,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             except AdminQueryDeadline:
                 response = make_response(_error("query_deadline", 503))
                 reason = "query_deadline"
+                return response
+            except AdminQueryIntegrityUnavailable:
+                response = make_response(_error("source_unavailable", 503))
+                reason = "source_integrity"
                 return response
             except AdminQueryUnavailable:
                 response = make_response(_error("source_unavailable", 503))
@@ -1395,6 +1471,52 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     ap_population_count=ap_population_count,
                     ap_returned_count=ap_returned_count,
                     ap_supported_max=12 if aps_requested else None,
+                    ap_share_requested=ap_share_requested,
+                    share_status=ap_share_status,
+                    share_population_count=ap_share_population_count,
+                    share_historical_population_count=(
+                        ap_share_historical_population_count
+                    ),
+                    share_current_population_status=(
+                        ap_share_current_population_status
+                    ),
+                    share_current_population_count=(
+                        ap_share_current_population_count
+                    ),
+                    share_returned_ap_count=ap_share_returned_count,
+                    share_supported_max_ap_count=(
+                        12 if ap_share_requested else None
+                    ),
+                    share_population_complete=ap_share_population_complete,
+                    share_coverage_status=(
+                        coverage_status if ap_share_requested else None
+                    ),
+                    share_accepted_interval_count=(
+                        ap_share_accepted_interval_count
+                    ),
+                    share_accepted_interval_seconds=(
+                        ap_share_accepted_interval_seconds
+                    ),
+                    share_download_denominator_status=(
+                        ap_share_download_denominator_status
+                    ),
+                    share_upload_denominator_status=(
+                        ap_share_upload_denominator_status
+                    ),
+                    share_total_denominator_status=(
+                        ap_share_total_denominator_status
+                    ),
+                    share_unproven_contribution_ap_count=(
+                        ap_share_unproven_count
+                    ),
+                    share_unsupported_population=(
+                        ap_share_status == "unsupported_population"
+                        if ap_share_requested else None
+                    ),
+                    share_integrity_failure=(
+                        reason == "source_integrity"
+                        if ap_share_requested else None
+                    ),
                     busiest_bucket_status=busiest_bucket_status,
                     busiest_hour_status=busiest_hour_status,
                     response_bytes=getattr(response, "content_length", None),

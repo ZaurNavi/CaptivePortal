@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from app.analytics.current_traffic import (
+    CurrentTrafficIntegrityUnavailable,
     CurrentTrafficReadService,
     CurrentTrafficSourceUnavailable,
     CurrentTrafficValidationError,
@@ -15,6 +16,7 @@ from app.analytics.current_traffic import (
 )
 from app.analytics.source_gateway import (
     AnalyticsQueryDeadlineExceeded,
+    AnalyticsSourceUnavailable,
     QueryDeadline,
     _CURRENT_TRAFFIC_STATS_SQL,
 )
@@ -107,6 +109,20 @@ class _PayloadGateway:
 
     def current_traffic_data(self, **kwargs):
         return copy.deepcopy(self.payload)
+
+
+class _UnavailableGateway:
+    def current_traffic_data(self, **kwargs):
+        raise AnalyticsSourceUnavailable("gateway unavailable")
+
+
+def test_gateway_outage_remains_base_source_unavailable():
+    service = CurrentTrafficReadService(_UnavailableGateway())
+    with pytest.raises(CurrentTrafficSourceUnavailable) as caught:
+        service.get_current_site_traffic(
+            SITE, evaluated_at_utc=EVALUATED, **POLICY
+        )
+    assert type(caught.value) is CurrentTrafficSourceUnavailable
 
 
 def _latest_only_result(latest):
@@ -297,7 +313,7 @@ def test_rate_matrix_contradictions_are_source_unavailable(
     _cycle(analytics_stack, "bad-rate", [
         _row("bad-rate", "02:AA:BB:CC:DD:13", wired=wired)
     ])
-    with pytest.raises(CurrentTrafficSourceUnavailable):
+    with pytest.raises(CurrentTrafficIntegrityUnavailable):
         _summary(analytics_stack)
 
 
@@ -307,7 +323,7 @@ def test_missing_ok_timestamp_is_unavailable_and_non_ok_null_is_valid(
     row = _row("missing-time", "02:AA:BB:CC:DD:30")
     row["wired_observed_at"] = None
     _cycle(analytics_stack, "missing-time", [row])
-    with pytest.raises(CurrentTrafficSourceUnavailable):
+    with pytest.raises(CurrentTrafficIntegrityUnavailable):
         _summary(analytics_stack)
 
 
@@ -462,7 +478,7 @@ def test_newer_abandoned_attempt_uses_started_at(analytics_stack):
     ],
 )
 def test_invalid_latest_attempt_metadata_is_source_unavailable(latest):
-    with pytest.raises(CurrentTrafficSourceUnavailable):
+    with pytest.raises(CurrentTrafficIntegrityUnavailable):
         _latest_only_result(latest)
 
 
@@ -474,7 +490,7 @@ def test_integrity_counter_contradiction_is_source_unavailable(analytics_stack):
         connection.execute(
             "UPDATE observation_cycles SET items_seen=2 WHERE cycle_id='bad-count'"
         )
-    with pytest.raises(CurrentTrafficSourceUnavailable):
+    with pytest.raises(CurrentTrafficIntegrityUnavailable):
         _summary(analytics_stack)
 
 
@@ -516,7 +532,7 @@ def test_controlled_corrupted_source_matrix_is_unavailable(
         payload["rows"][0][field] = value
     else:
         payload[target][field] = value
-    with pytest.raises(CurrentTrafficSourceUnavailable):
+    with pytest.raises(CurrentTrafficIntegrityUnavailable):
         _summary_from_payload(payload)
 
 
