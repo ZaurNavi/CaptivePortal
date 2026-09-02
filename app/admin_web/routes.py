@@ -41,6 +41,7 @@ from .policy import AdminAccessDenied, AdminSiteContextError
 from .tokens import is_canonical_token, token_matches
 from .query_service import (
     AdminQueryBusy,
+    AdminQueryCursorExpired,
     AdminQueryDeadline,
     AdminQueryError,
     AdminQueryForbidden,
@@ -335,6 +336,14 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return _error("site_forbidden", 403)
         if page.key == "traffic" and not config.traffic_enabled:
             return _error("not_found", 404)
+        online_guests_allowed = False
+        if page.key == "traffic" and config.traffic_online_guests_enabled:
+            try:
+                online_guests_allowed = policy.authorize(
+                    g.admin_principal, "admin.read.devices", selected
+                )
+            except Exception:
+                online_guests_allowed = False
         return render_admin_page(
             page,
             site_id=selected,
@@ -359,6 +368,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 config.traffic_independent_ranges_enabled
             ),
             traffic_ap_share_enabled=config.traffic_ap_share_enabled,
+            traffic_online_guests_state=(
+                runtime.traffic_online_guests_state
+                if config.traffic_online_guests_enabled else "disabled"
+            ),
+            traffic_online_guests_allowed=online_guests_allowed,
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -771,6 +785,26 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     def api_traffic_history(site_id: str) -> Response:
         return _traffic_history_query(site_id)
 
+    @blueprint.get(
+        "/admin/api/v1/sites/<site_id>/traffic/online-guests/current"
+    )
+    @authenticated
+    def api_traffic_online_guests(site_id: str) -> Response:
+        allowed = frozenset({"limit", "cursor"})
+        return _current_traffic_query(
+            site_id,
+            route_name="traffic_online_guests",
+            capability="admin.read.devices",
+            feature_enabled=config.traffic_online_guests_enabled,
+            allowed_parameters=allowed,
+            required_parameters=frozenset(),
+            operation=lambda service, selected: service.current_guest_traffic(
+                g.admin_principal,
+                selected,
+                **{key: request.args.get(key) for key in allowed},
+            ),
+        )
+
     @blueprint.get("/admin/api/v1/sites/<site_id>/home-activity/today")
     @authenticated
     def api_home_activity_today(site_id: str) -> Response:
@@ -1036,6 +1070,13 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         item_count = 0
         coverage_status = None
         freshness_status = None
+        product_status = None
+        product_source_health_status = None
+        product_rate_evidence_status = None
+        product_population_complete = None
+        product_counts: dict[str, Any] = {}
+        product_has_next_page = None
+        response_bytes = None
         response: Response
         reason = "internal_error"
         try:
@@ -1085,6 +1126,23 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             try:
                 result = operation(service, selected)
                 if isinstance(result.result, dict):
+                    if route_name == "traffic_online_guests":
+                        product_status = result.result.get("status")
+                        product_source_health_status = result.result.get(
+                            "source_health_status"
+                        )
+                        product_rate_evidence_status = result.result.get(
+                            "rate_evidence_status"
+                        )
+                        product_population_complete = result.result.get(
+                            "population_complete"
+                        )
+                        for field in (
+                            "scoped_client_row_count", "known_authorized_count",
+                            "unknown_auth_count", "rate_valid_count",
+                            "rate_partial_count", "rate_unavailable_count",
+                        ):
+                            product_counts[field] = result.result.get(field)
                     snapshot = result.result.get("snapshot")
                     if isinstance(snapshot, dict):
                         freshness_status = snapshot.get("freshness_status")
@@ -1100,6 +1158,9 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     page=result.page,
                     enforce_size=True,
                 ))
+                response_bytes = len(response.get_data())
+                if route_name == "traffic_online_guests" and isinstance(result.page, dict):
+                    product_has_next_page = result.page.get("next_cursor") is not None
                 if response.status_code == 503:
                     reason = "response_too_large"
                 elif response.status_code == 200:
@@ -1108,6 +1169,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                         if freshness_status in {"fresh", "stale", "unavailable"}
                         else "ok"
                     )
+                return response
+            except AdminQueryCursorExpired:
+                response = make_response(_error("cursor_expired", 400))
+                reason = "cursor_expired"
                 return response
             except AdminQueryValidationError:
                 response = make_response(_error("invalid_request", 400))
@@ -1150,9 +1215,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         finally:
             status_code = response.status_code if "response" in locals() else 500
             try:
-                _event(
-                    logger,
-                    "admin.current_traffic_query_completed",
+                fields = dict(
                     request_id=getattr(g, "admin_request_id", None),
                     route_name=route_name,
                     site_id=authorized_site,
@@ -1163,6 +1226,24 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     coverage_status=coverage_status,
                     freshness_status=freshness_status,
                     item_count=item_count,
+                )
+                if route_name == "traffic_online_guests":
+                    fields.update({
+                        "product": "online_guests_traffic",
+                        "status": product_status,
+                        "source_health_status": product_source_health_status,
+                        "rate_evidence_status": product_rate_evidence_status,
+                        "population_complete": product_population_complete,
+                        **product_counts,
+                        "returned_count": item_count,
+                        "has_next_page": product_has_next_page,
+                        "response_bytes": response_bytes,
+                        "cursor_used": "cursor" in request.args,
+                    })
+                _event(
+                    logger,
+                    "admin.current_traffic_query_completed",
+                    **fields,
                 )
             except Exception:
                 pass
@@ -1791,6 +1872,7 @@ def _is_current_traffic_path(path: str) -> bool:
             "/current-traffic/" in path
             or path.endswith("/traffic/current")
             or path.endswith("/traffic/history")
+            or path.endswith("/traffic/online-guests/current")
         )
     )
 

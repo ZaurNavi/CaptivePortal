@@ -83,6 +83,7 @@ class AdminWebConfig:
     traffic_by_ap_enabled: bool
     traffic_independent_ranges_enabled: bool
     traffic_ap_share_enabled: bool
+    traffic_online_guests_enabled: bool
     traffic_refresh_seconds: int
     traffic_request_timeout_seconds: int
 
@@ -145,6 +146,10 @@ def admin_web_config_from_settings(
     traffic_ap_share_enabled = _exact_bool(
         settings.get("web_admin_traffic_ap_share_enabled", "false"),
         "WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED",
+    )
+    traffic_online_guests_enabled = _exact_bool(
+        settings.get("web_admin_traffic_online_guests_enabled", "false"),
+        "WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED",
     )
     username = _string(settings.get("web_admin_username", ""), "WEB_ADMIN_USERNAME")
     password_hash = _string(
@@ -285,6 +290,11 @@ def admin_web_config_from_settings(
             "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true and "
             "WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true"
         )
+    if traffic_online_guests_enabled and (not enabled or not traffic_enabled):
+        raise AdminWebConfigError(
+            "WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED requires "
+            "WEB_ADMIN_ENABLED=true and WEB_ADMIN_TRAFFIC_ENABLED=true"
+        )
 
     if enabled:
         if USERNAME_PATTERN.fullmatch(username) is None:
@@ -320,6 +330,7 @@ def admin_web_config_from_settings(
         traffic_by_ap_enabled=traffic_by_ap_enabled,
         traffic_independent_ranges_enabled=traffic_independent_ranges_enabled,
         traffic_ap_share_enabled=traffic_ap_share_enabled,
+        traffic_online_guests_enabled=traffic_online_guests_enabled,
         **values,
     )
 

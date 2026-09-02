@@ -206,6 +206,7 @@ WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=false
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false
 WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
 WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20
 ```
@@ -231,6 +232,8 @@ Peak requires Admin + Traffic + History + Statistics.
 Traffic by AP requires Admin + Traffic + History.
 Independent ranges requires Admin + Traffic + History.
 AP Traffic Share requires Admin + Traffic + History + Independent ranges.
+Online Guests Traffic requires Admin + Traffic only and remains repository-default
+off until a separate Owner-controlled production activation.
 ```
 
 Independent ranges does **not** require every optional historical product to be

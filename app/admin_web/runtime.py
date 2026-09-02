@@ -48,6 +48,8 @@ class AdminWebRuntime:
     home_ap_24h_config: HomeAp24Config | None = None
     home_ap_24h_state: str = "disabled"
     home_ap_24h_service: Any | None = None
+    traffic_online_guests_state: str = "disabled"
+    traffic_online_guests_service: Any | None = None
     blueprint: Any | None = None
 
     def clear(self) -> None:
@@ -188,6 +190,28 @@ def create_admin_web_runtime(
                     "failure_category": "composition_error",
                 },
             )
+    online_guests_state = (
+        "active" if config.traffic_online_guests_enabled else "disabled"
+    )
+    online_guests_service = None
+    if config.traffic_online_guests_enabled:
+        try:
+            from app.analytics.current_guest_traffic import (
+                CurrentGuestTrafficReadService,
+            )
+
+            online_guests_service = CurrentGuestTrafficReadService(
+                current_state_read_service
+            )
+        except Exception:
+            online_guests_state = "unavailable"
+            logger.error(
+                "admin.traffic_online_guests_composition_failed",
+                extra={
+                    "event": "admin.traffic_online_guests_composition_failed",
+                    "failure_category": "composition_error",
+                },
+            )
     health_service = None
     if health_config is not None and health_config.enabled:
         try:
@@ -244,6 +268,7 @@ def create_admin_web_runtime(
             current_state_read_service,
             activity_config,
             ap24_service,
+            online_guests_service,
             execution_controls,
         )
     runtime = AdminWebRuntime(
@@ -272,6 +297,8 @@ def create_admin_web_runtime(
         home_ap_24h_config=ap24_config,
         home_ap_24h_state=ap24_state,
         home_ap_24h_service=ap24_service,
+        traffic_online_guests_state=online_guests_state,
+        traffic_online_guests_service=online_guests_service,
     )
     from .routes import create_admin_web_blueprint
 
@@ -288,6 +315,7 @@ def _query_service(
     current_state_read_service: Any | None = None,
     home_activity_config: HomeActivityConfig | None = None,
     home_ap_24h_service: Any | None = None,
+    online_guests_service: Any | None = None,
     execution_controls: Any | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
@@ -325,6 +353,7 @@ def _query_service(
             ),
             home_activity_config=home_activity_config,
             home_ap_24h_read_service=home_ap_24h_service,
+            current_guest_traffic_read_service=online_guests_service,
             execution_controls=execution_controls,
         )
     except (AttributeError, TypeError):

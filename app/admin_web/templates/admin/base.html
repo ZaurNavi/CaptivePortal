@@ -58,6 +58,7 @@
         data-traffic-request-timeout-seconds="{{ traffic_request_timeout_seconds }}"
         data-traffic-independent-ranges-enabled="{{ 'true' if traffic_independent_ranges_enabled else 'false' }}"
         data-traffic-ap-share-enabled="{{ 'true' if traffic_ap_share_enabled else 'false' }}"
+        data-traffic-online-guests-enabled="{{ 'true' if traffic_online_guests_enabled and traffic_online_guests_allowed else 'false' }}"
         {% endif %}
         {% if page.key == 'home' %}
         data-home-live-enabled="{{ 'true' if home_live_enabled else 'false' }}"
