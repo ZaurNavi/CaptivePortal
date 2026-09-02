@@ -6,6 +6,7 @@ import base64
 import json
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -38,6 +39,27 @@ MAX_CURSOR_LENGTH = 2048
 MAX_PAGE_SIZE = 500
 
 
+class CurrentGuestRateCursorExpired(CurrentStateValidationError):
+    """A pinned Current Guest Traffic cycle was removed by retention."""
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentGuestRateEvidence:
+    """Bounded raw Current State evidence captured in one read transaction."""
+
+    site_id: str
+    source_scope_hash: str
+    evaluated_at_utc: str
+    current_cycle: Mapping[str, Any] | None
+    newer_attempt: Mapping[str, Any] | None
+    baseline_cycle: Mapping[str, Any] | None
+    scoped_client_row_count: int | None
+    known_authorized_count: int | None
+    unknown_auth_count: int | None
+    current_rows: tuple[Mapping[str, Any], ...]
+    baseline_rows: tuple[Mapping[str, Any], ...]
+
+
 class CurrentStateReadService:
     """Read persisted current facts without Omada calls or writes."""
 
@@ -50,6 +72,220 @@ class CurrentStateReadService:
         """Yield the repository's existing URI-mode read-only connection."""
         with self.repository.read_connection() as connection:
             yield connection
+
+    def read_current_guest_rate_evidence(
+        self,
+        site_id: str,
+        *,
+        evaluated_at_utc: datetime | str | None = None,
+        current_cycle_id: str | None = None,
+        baseline_cycle_id: str | None = None,
+        newer_attempt_cycle_id: str | None = None,
+        pinned: bool = False,
+        supported_max_population: int = 10_000,
+    ) -> CurrentGuestRateEvidence:
+        """Read one bounded current/baseline client pair without writes or polling.
+
+        ``pinned`` distinguishes an initial read from a cursor-chain read.  A
+        pinned missing cycle is an explicit expiry and is never silently
+        replaced by a newer cycle.
+        """
+
+        site = require_site_id(site_id)
+        if site not in self.config.site_ids:
+            raise CurrentStateValidationError("site_id is not configured")
+        evaluated = _evaluated(evaluated_at_utc)
+        if type(supported_max_population) is not int or supported_max_population < 1:
+            raise CurrentStateValidationError("supported population bound is invalid")
+        scope_hash = self._current_client_scope_hash(site)
+        if current_cycle_id is not None:
+            current_cycle_id = require_cycle_id(current_cycle_id)
+        if baseline_cycle_id is not None:
+            baseline_cycle_id = require_cycle_id(baseline_cycle_id)
+        if newer_attempt_cycle_id is not None:
+            newer_attempt_cycle_id = require_cycle_id(newer_attempt_cycle_id)
+        if pinned and current_cycle_id is None:
+            raise CurrentStateValidationError("pinned current cycle is required")
+
+        with self.repository.read_connection() as connection:
+            connection.execute("BEGIN")
+            if current_cycle_id is None:
+                current = connection.execute(
+                    """
+                    SELECT * FROM current_state_cycles
+                    WHERE site_id=? AND kind='client'
+                      AND source_scope_hash=?
+                      AND result='success' AND complete=1
+                    ORDER BY capture_started_at DESC, cycle_id DESC
+                    LIMIT 1
+                    """,
+                    (site, scope_hash),
+                ).fetchone()
+            else:
+                current = connection.execute(
+                    """
+                    SELECT * FROM current_state_cycles
+                    WHERE cycle_id=? AND site_id=? AND kind='client'
+                      AND source_scope_hash=?
+                      AND result='success' AND complete=1
+                    """,
+                    (current_cycle_id, site, scope_hash),
+                ).fetchone()
+                if current is None and pinned:
+                    raise CurrentGuestRateCursorExpired("current guest traffic cursor expired")
+
+            if current is None:
+                return CurrentGuestRateEvidence(
+                    site, scope_hash, evaluated, None, None, None,
+                    None, None, None, (), (),
+                )
+
+            if pinned and newer_attempt_cycle_id is None:
+                newer = None
+            elif pinned:
+                newer = connection.execute(
+                    "SELECT * FROM current_state_cycles WHERE cycle_id=?",
+                    (newer_attempt_cycle_id,),
+                ).fetchone()
+                if newer is None:
+                    raise CurrentGuestRateCursorExpired(
+                        "current guest traffic cursor expired"
+                    )
+                if not _pinned_newer_attempt_matches(
+                    newer, current, site, scope_hash, evaluated
+                ):
+                    raise CurrentStateValidationError(
+                        "pinned newer attempt context is invalid"
+                    )
+            else:
+                newer = connection.execute(
+                    """
+                    SELECT * FROM current_state_cycles
+                    WHERE site_id=? AND kind='client' AND source_scope_hash=?
+                      AND capture_started_at<=?
+                      AND (
+                        capture_started_at>?
+                        OR (capture_started_at=? AND cycle_id>?)
+                      )
+                    ORDER BY capture_started_at DESC, cycle_id DESC
+                    LIMIT 1
+                    """,
+                    (
+                        site, scope_hash, evaluated,
+                        current["capture_started_at"], current["capture_started_at"],
+                        current["cycle_id"],
+                    ),
+                ).fetchone()
+            counts = connection.execute(
+                """
+                SELECT COUNT(*) AS scoped_count,
+                       SUM(auth_classification='authorized') AS authorized_count,
+                       SUM(auth_classification='unknown') AS unknown_count
+                FROM current_client_state
+                WHERE cycle_id=? AND site_id=?
+                """,
+                (current["cycle_id"], site),
+            ).fetchone()
+            scoped_count = int(counts["scoped_count"] or 0)
+            authorized_count = int(counts["authorized_count"] or 0)
+            unknown_count = int(counts["unknown_count"] or 0)
+
+            if scoped_count > supported_max_population:
+                return CurrentGuestRateEvidence(
+                    site, scope_hash, evaluated, dict(current),
+                    dict(newer) if newer is not None else None, None,
+                    scoped_count, authorized_count, unknown_count, (), (),
+                )
+
+            try:
+                current_age = (
+                    parse_utc(evaluated, "evaluated_at_utc")
+                    - parse_utc(str(current["capture_started_at"]), "capture_started_at")
+                ).total_seconds()
+            except CurrentStateValidationError:
+                current_age = None
+            if current_age is not None and (
+                current_age < 0
+                or current_age > self.config.client_fresh_max_age_seconds
+            ):
+                return CurrentGuestRateEvidence(
+                    site, scope_hash, evaluated, dict(current),
+                    dict(newer) if newer is not None else None, None,
+                    scoped_count, authorized_count, unknown_count, (), (),
+                )
+
+            current_rows = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM current_client_state
+                    WHERE cycle_id=? AND site_id=?
+                    ORDER BY client_mac
+                    """,
+                    (current["cycle_id"], site),
+                ).fetchall()
+            )
+            baseline = None
+            baseline_rows: tuple[Mapping[str, Any], ...] = ()
+            if authorized_count > 0:
+                if pinned and baseline_cycle_id is None:
+                    baseline = None
+                elif baseline_cycle_id is None:
+                    baseline = connection.execute(
+                        """
+                        SELECT * FROM current_state_cycles
+                        WHERE site_id=? AND kind='client'
+                          AND source_scope_hash=?
+                          AND result='success' AND complete=1
+                          AND capture_started_at<?
+                        ORDER BY capture_started_at DESC, cycle_id DESC
+                        LIMIT 1
+                        """,
+                        (site, scope_hash, current["capture_started_at"]),
+                    ).fetchone()
+                else:
+                    baseline = connection.execute(
+                        """
+                        SELECT * FROM current_state_cycles
+                        WHERE cycle_id=? AND site_id=? AND kind='client'
+                          AND source_scope_hash=?
+                          AND result='success' AND complete=1
+                          AND capture_started_at<?
+                        """,
+                        (
+                            baseline_cycle_id, site, scope_hash,
+                            current["capture_started_at"],
+                        ),
+                    ).fetchone()
+                    if baseline is None and pinned:
+                        raise CurrentGuestRateCursorExpired(
+                            "current guest traffic cursor expired"
+                        )
+                if baseline is not None:
+                    baseline_rows = tuple(
+                        dict(row)
+                        for row in connection.execute(
+                            """
+                            SELECT baseline.*
+                            FROM current_client_state AS baseline
+                            JOIN current_client_state AS current
+                              ON current.cycle_id=?
+                             AND current.site_id=?
+                             AND current.client_mac=baseline.client_mac
+                            WHERE baseline.cycle_id=? AND baseline.site_id=?
+                            ORDER BY baseline.client_mac
+                            """,
+                            (current["cycle_id"], site, baseline["cycle_id"], site),
+                        ).fetchall()
+                    )
+
+        return CurrentGuestRateEvidence(
+            site, scope_hash, evaluated, dict(current),
+            dict(newer) if newer is not None else None,
+            dict(baseline) if baseline is not None else None,
+            scoped_count, authorized_count, unknown_count,
+            current_rows, baseline_rows,
+        )
 
     def get_current_client_summary(self, site_id: str, *, evaluated_at_utc: datetime | str | None = None) -> CurrentClientSummary:
         site = require_site_id(site_id)
@@ -355,6 +591,40 @@ def _cycle_selection(
         (site, kind, *scope_params),
     ).fetchone()
     return attempt, complete, partial
+
+
+def _pinned_newer_attempt_matches(
+    attempt: sqlite3.Row,
+    current: sqlite3.Row,
+    site: str,
+    scope_hash: str,
+    evaluated: str,
+) -> bool:
+    try:
+        attempt_started = parse_utc(
+            str(attempt["capture_started_at"]), "newer capture_started_at"
+        )
+        current_started = parse_utc(
+            str(current["capture_started_at"]), "current capture_started_at"
+        )
+        evaluated_at = parse_utc(evaluated, "evaluated_at_utc")
+    except CurrentStateValidationError:
+        return False
+    return (
+        attempt["site_id"] == site
+        and attempt["kind"] == "client"
+        and attempt["source_scope_hash"] == scope_hash
+        and attempt["result"] in {"partial", "failed", "shutdown"}
+        and int(attempt["complete"]) == 0
+        and attempt_started <= evaluated_at
+        and (
+            attempt_started > current_started
+            or (
+                attempt_started == current_started
+                and str(attempt["cycle_id"]) > str(current["cycle_id"])
+            )
+        )
+    )
 
 
 def _meta_from_row(site: str, kind: str, evaluated: str, row: sqlite3.Row, attempt: sqlite3.Row | None, partial: sqlite3.Row | None, age: float | None, status: str, reason: str) -> CurrentSnapshotMeta:
