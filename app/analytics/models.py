@@ -720,6 +720,69 @@ class CurrentApTrafficPage:
 
 
 @dataclass(frozen=True, slots=True)
+class CurrentGuestTrafficItem:
+    client_mac: str
+    name: str | None
+    ssid: str
+    ap_mac: str | None
+    download_mbps: float | None
+    upload_mbps: float | None
+    total_mbps: float | None
+    source_progress_status: str
+    connection_continuity_status: str
+    continuity_basis: str
+    download_reason: str
+    upload_reason: str
+    total_reason: str
+    rate_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentGuestTrafficPage:
+    limit: int
+    returned_count: int
+    next_cursor: str | None
+    sort: str
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentGuestTrafficResult:
+    metric_version: str
+    population_method: str
+    rate_method: str
+    baseline_method: str
+    continuity_method: str
+    connection_boundary_observation: str
+    unit: str
+    site_id: str
+    evaluated_at_utc: str
+    current_cycle_id: str | None
+    baseline_cycle_id: str | None
+    source_scope_hash: str | None
+    current_capture_started_at: str | None
+    baseline_capture_started_at: str | None
+    elapsed_seconds: float | None
+    status: str
+    source_health_status: str
+    source_health_reason: str
+    rate_evidence_status: str
+    population_complete: bool
+    scoped_client_row_count: int | None
+    known_authorized_count: int | None
+    unknown_auth_count: int | None
+    population_count: int | None
+    supported_max_population: int
+    rate_valid_count: int | None
+    rate_partial_count: int | None
+    rate_unavailable_count: int | None
+    items: tuple[CurrentGuestTrafficItem, ...]
+    page: CurrentGuestTrafficPage
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalTrafficRange:
     site_id: str
     from_utc: str
