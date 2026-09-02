@@ -105,6 +105,10 @@ input[type="radio"] { width: auto; min-height: 0; }
 .live-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1rem; margin-bottom: 1rem; }
 .traffic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin-bottom: 1rem; }
 .traffic-quality { grid-column: auto; }
+.traffic-online-guests-summary { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1rem;margin-bottom:1rem; }
+.traffic-online-guests-summary span,.traffic-online-guests-previous,.traffic-online-guests-subtext { display:block;margin-top:.35rem;color:var(--muted);font-size:.85rem; }
+.traffic-online-guests-previous { padding:.65rem .8rem;border-left:4px solid var(--warning);background:#fef8e7; }
+.traffic-online-guests-table { min-width:1080px; }
 .traffic-history { min-width: 0; }
 .traffic-history-heading-row { align-items: flex-start; gap: 1rem; }
 .traffic-range { display: flex; gap: .5rem; }
@@ -194,7 +198,7 @@ input[type="radio"] { width: auto; min-height: 0; }
   .card { grid-column: span 6; }
   .filter-panel { grid-template-columns: 1fr 1fr; }
   .visit-filter-panel { grid-template-columns: 1fr 1fr; }
-  .live-metrics, .traffic-metrics, .activity-grid, .health-components, .traffic-statistics-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-metrics, .traffic-metrics, .traffic-online-guests-summary, .activity-grid, .health-components, .traffic-statistics-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .traffic-history-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -209,7 +213,7 @@ input[type="radio"] { width: auto; min-height: 0; }
   .filter-panel fieldset { grid-column: auto; }
   .detail-list { grid-template-columns: 1fr; }
   .detail-list dd { margin-bottom: .35rem; }
-  .live-metrics, .traffic-metrics, .activity-grid, .activity-custom, .health-components, .traffic-history-meta, .traffic-statistics-groups, .traffic-statistics-metrics { grid-template-columns: 1fr; }
+  .live-metrics, .traffic-metrics, .traffic-online-guests-summary, .activity-grid, .activity-custom, .health-components, .traffic-history-meta, .traffic-statistics-groups, .traffic-statistics-metrics { grid-template-columns: 1fr; }
   .live-bar { grid-template-columns: 1fr auto; }
   .live-bar-track { grid-column: 1 / -1; }
 }

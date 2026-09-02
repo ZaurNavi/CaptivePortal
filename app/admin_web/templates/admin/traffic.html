@@ -57,6 +57,41 @@
       </article>
     </div>
   </section>
+  {% if traffic_online_guests_allowed and (traffic_online_guests_enabled or traffic_online_guests_unavailable) %}
+  <section id="traffic-online-guests-panel" class="card card-wide traffic-online-guests" aria-labelledby="traffic-online-guests-heading">
+    <div class="card-heading">
+      <div>
+        <p class="eyebrow">Current guest traffic</p>
+        <h2 id="traffic-online-guests-heading">Online Guests Traffic</h2>
+      </div>
+    </div>
+    <p class="live-detail">Controller-reported authorized guests and their near-current Traffic rate from persisted Current State evidence. Online status is not an instantaneous physical Wi-Fi presence check.</p>
+    <div id="traffic-online-guests-state" class="state-panel" data-state="{{ 'error' if traffic_online_guests_unavailable else 'warning' }}" role="status" aria-live="polite">
+      <span class="state-dot" aria-hidden="true"></span>
+      <div>
+        <strong id="traffic-online-guests-state-title">{{ 'Online Guests Traffic unavailable' if traffic_online_guests_unavailable else 'Loading Online Guests Traffic…' }}</strong>
+        <p id="traffic-online-guests-state-message">{{ 'The product read service could not be composed. Other Traffic panels remain available.' if traffic_online_guests_unavailable else 'Reading persisted authorized guest evidence.' }}</p>
+      </div>
+    </div>
+    <div class="traffic-online-guests-summary">
+      <article class="card live-metric"><p>Online Guests</p><strong id="traffic-online-guests-population">—</strong><span id="traffic-online-guests-population-note">—</span></article>
+      <article class="card live-metric"><p>Rate Evidence</p><strong id="traffic-online-guests-rate-evidence">—</strong><span id="traffic-online-guests-rate-counts">—</span></article>
+      <article class="card live-metric"><p>Source Health</p><strong id="traffic-online-guests-source-health">—</strong><span id="traffic-online-guests-source-reason">—</span></article>
+      <article class="card live-metric"><p>Observed / Interval</p><strong id="traffic-online-guests-observed">—</strong><span id="traffic-online-guests-interval">—</span></article>
+    </div>
+    <p id="traffic-online-guests-previous" class="traffic-online-guests-previous" hidden>Previous snapshot · refresh required</p>
+    <div class="table-scroll">
+      <table class="live-table traffic-online-guests-table">
+        <caption id="traffic-online-guests-caption">No current Online Guest rows loaded.</caption>
+        <thead><tr><th scope="col">Guest</th><th scope="col">SSID</th><th scope="col">AP</th><th scope="col">Download</th><th scope="col">Upload</th><th scope="col">Total</th><th scope="col">Evidence</th></tr></thead>
+        <tbody id="traffic-online-guests-items"></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="traffic-online-guests-more" class="button button-secondary" type="button" hidden>Load more</button>
+    </div>
+  </section>
+  {% endif %}
   {% if traffic_history_enabled %}
   <section
     id="traffic-history-panel"

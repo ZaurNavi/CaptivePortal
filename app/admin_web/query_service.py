@@ -16,6 +16,9 @@ from app.analytics.source_gateway import (
 )
 from app.analytics.validation import AnalyticsQueryValidationError, parse_utc
 from app.analytics import (
+    CurrentGuestTrafficIntegrityUnavailable,
+    CurrentGuestTrafficSourceUnavailable,
+    CurrentGuestTrafficValidationError,
     CurrentTrafficIntegrityUnavailable,
     CurrentTrafficSourceUnavailable,
     CurrentTrafficValidationError,
@@ -54,6 +57,10 @@ from .current_traffic_serialization import (
     serialize_current_ap_traffic_page,
     serialize_current_traffic_summary,
 )
+from .current_guest_traffic_serialization import (
+    CurrentGuestTrafficSerializationError,
+    serialize_current_guest_traffic,
+)
 from .home_activity_serialization import (
     HomeActivitySerializationError,
     serialize_home_activity,
@@ -90,6 +97,10 @@ class AdminQueryError(RuntimeError):
 
 class AdminQueryValidationError(AdminQueryError):
     code = "invalid_request"
+
+
+class AdminQueryCursorExpired(AdminQueryValidationError):
+    code = "cursor_expired"
 
 
 class AdminQueryForbidden(AdminQueryError):
@@ -208,6 +219,7 @@ class AdminQueryService:
         visit_analytics_service: Any,
         current_state_read_service: Any | None = None,
         current_traffic_read_service: Any | None = None,
+        current_guest_traffic_read_service: Any | None = None,
         historical_traffic_read_service: Any | None = None,
         home_activity_read_service: Any | None = None,
         home_activity_config: Any | None = None,
@@ -221,6 +233,7 @@ class AdminQueryService:
         self._analytics = visit_analytics_service
         self._current_state = current_state_read_service
         self._current_traffic = current_traffic_read_service
+        self._current_guest_traffic = current_guest_traffic_read_service
         self._historical_traffic = historical_traffic_read_service
         self._home_activity = home_activity_read_service
         self._home_activity_config = home_activity_config
@@ -233,6 +246,42 @@ class AdminQueryService:
                 ),
             )
         )
+
+    def current_guest_traffic(
+        self, principal, site_id, *, limit=None, cursor=None
+    ):
+        self._authorize(principal, "admin.read.devices", site_id)
+        selected_limit = self._current_guest_limit(limit)
+        selected_cursor = self._current_guest_cursor(cursor)
+        source = self._current_guest_traffic
+        if source is None:
+            raise AdminQueryUnavailable()
+
+        def query(deadline):
+            try:
+                deadline.require_remaining()
+                value = source.get_current_guest_traffic(
+                    site_id,
+                    limit=selected_limit,
+                    cursor=selected_cursor,
+                )
+                deadline.require_remaining()
+                result, page = serialize_current_guest_traffic(value, site_id)
+                if page["limit"] != selected_limit:
+                    raise AdminQueryIntegrityUnavailable()
+                return AdminQueryResponse(result, page)
+            except CurrentGuestTrafficValidationError as exc:
+                if str(exc) == "cursor_expired":
+                    raise AdminQueryCursorExpired() from exc
+                raise AdminQueryValidationError() from exc
+            except CurrentGuestTrafficIntegrityUnavailable as exc:
+                raise AdminQueryIntegrityUnavailable() from exc
+            except CurrentGuestTrafficSerializationError as exc:
+                raise AdminQueryIntegrityUnavailable() from exc
+            except CurrentGuestTrafficSourceUnavailable as exc:
+                raise AdminQueryUnavailable() from exc
+
+        return self._run(query)
 
     def home_ap_24h(self, principal, site_id, *, limit=None, cursor=None):
         self._authorize(principal, "admin.read.overview", site_id)
@@ -1029,6 +1078,30 @@ class AdminQueryService:
         if not 1 <= parsed <= 250:
             raise AdminQueryValidationError()
         return parsed
+
+    @staticmethod
+    def _current_guest_limit(value) -> int:
+        if value is None:
+            return 50
+        if (
+            not isinstance(value, str) or not value or not value.isascii()
+            or not value.isdigit() or value.startswith("0")
+        ):
+            raise AdminQueryValidationError()
+        parsed = int(value)
+        if not 1 <= parsed <= 200:
+            raise AdminQueryValidationError()
+        return parsed
+
+    def _current_guest_cursor(self, value):
+        if value is None:
+            return None
+        if (
+            not isinstance(value, str) or not value
+            or len(value) > min(2048, self._config.max_cursor_chars)
+        ):
+            raise AdminQueryValidationError()
+        return value
 
     @staticmethod
     def _home_ap_24h_limit(value) -> int:

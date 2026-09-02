@@ -574,7 +574,9 @@
     if (typeof spec.autoRefresh !== "boolean" || typeof spec.load !== "function" || typeof spec.render !== "function") return false;
     return (spec.renderLoading === undefined || typeof spec.renderLoading === "function")
       && (spec.renderFailure === undefined || typeof spec.renderFailure === "function")
-      && (spec.prepareRefresh === undefined || typeof spec.prepareRefresh === "function");
+      && (spec.renderGlobalFailure === undefined || typeof spec.renderGlobalFailure === "function")
+      && (spec.prepareRefresh === undefined || typeof spec.prepareRefresh === "function")
+      && (spec.prepareRootRefresh === undefined || typeof spec.prepareRootRefresh === "function");
   }
 
   function updateFoundationState() {
@@ -601,7 +603,10 @@
       ? "Sign in again to continue."
       : "This account cannot access Traffic for the current Site.";
     clearScheduler();
-    panels.forEach((state) => abortPanel(state, failure.kind));
+    panels.forEach((state) => {
+      if (state.spec.renderGlobalFailure) state.spec.renderGlobalFailure(failure);
+      abortPanel(state, failure.kind);
+    });
     updateFoundationState();
   }
 
@@ -686,6 +691,7 @@
     const manual = options && options.manual === true;
     const initial = options && options.initial === true;
     if (stopped || globalPaused || document.hidden) return Promise.resolve(false);
+    if (manual && state.failureCount === 0) state.nextEligibleAt = 0;
     const instant = now();
     if (state.suspended) {
       if (!manual) return Promise.resolve(false);
@@ -800,6 +806,7 @@
         queuePanel(state.spec.key, {notBefore});
         return Promise.resolve(true);
       }
+      if (state.spec.prepareRootRefresh) state.spec.prepareRootRefresh({manual});
       return runPanel(state, {manual, initial: false});
     }));
   }
@@ -983,6 +990,242 @@
   });
 }());
 /* TRAFFIC_CURRENT_PANEL_END */
+
+/* TRAFFIC_ONLINE_GUESTS_PANEL_START */
+(function () {
+  "use strict";
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  const coordinator = window.CaptivPortalTrafficCoordinator;
+  if (!root || root.dataset.page !== "traffic"
+      || root.dataset.trafficOnlineGuestsEnabled !== "true"
+      || !coordinator || typeof coordinator.registerPanel !== "function") return;
+
+  const ids = ["panel", "state", "state-title", "state-message", "population",
+    "population-note", "rate-evidence", "rate-counts", "source-health",
+    "source-reason", "observed", "interval", "previous", "caption", "items", "more"];
+  const elements = Object.fromEntries(ids.map((name) => [name,
+    document.getElementById(`traffic-online-guests-${name}`)]));
+  if (Object.values(elements).some((value) => !value)) return;
+
+  const ROOT_STATUSES = new Set(["ok", "partial", "insufficient_data", "stale", "unavailable", "unsupported_population"]);
+  const SOURCE_STATUSES = new Set(["healthy", "degraded", "stale", "unavailable"]);
+  const SOURCE_REASONS = new Set(["within_freshness_window", "newer_degraded_attempt", "older_than_freshness_window", "older_than_unavailable_threshold", "clock_anomaly", "no_complete_snapshot"]);
+  const RATE_EVIDENCE = new Set(["complete", "partial", "insufficient_data", "not_applicable"]);
+  const RATE_STATUS = new Set(["valid", "partial", "unavailable"]);
+  const PROGRESS = new Set(["advanced", "frozen", "unproven"]);
+  const CONTINUITY = new Set(["proven", "unproven", "reset"]);
+  const BASES = new Set(["uptime_progress", "counters_only_diagnostic", "none"]);
+  const REASONS = new Set(["valid", "no_baseline", "no_authorized_baseline", "ssid_transition", "invalid_elapsed", "baseline_gap_too_large", "connection_continuity_unproven", "source_frozen", "connection_reset", "counter_missing", "counter_reset"]);
+  const TRAFFIC_ONLINE_GUESTS_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const MAC = /^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/;
+  const METRIC = "network_traffic_online_guest_current_rate.v1";
+  const TRAFFIC_ONLINE_GUESTS_CONTINUITY_METHOD = ["om", "ada_controller_connection_progress_v1"].join("");
+  const METHODS = ["fresh_complete_current_state_authorized_guest_scope.v1", "current_connection_counter_delta_interval_average.v1", "nearest_previous_complete_same_site_scope_cycle.v1", TRAFFIC_ONLINE_GUESTS_CONTINUITY_METHOD, "sampled_current_state_evidence_v1"];
+  const ITEM_REASON_LABELS = Object.freeze({valid:"Valid",no_baseline:"Waiting for baseline",no_authorized_baseline:"Waiting for authorized baseline",ssid_transition:"SSID changed",invalid_elapsed:"Rate interval invalid",baseline_gap_too_large:"Rate interval unavailable",connection_continuity_unproven:"Connection continuity unavailable",source_frozen:"Controller state did not advance",connection_reset:"Connection reset",counter_missing:"Counter unavailable",counter_reset:"Counter reset"});
+  const SOURCE_LABELS = Object.freeze({within_freshness_window:"Source healthy",newer_degraded_attempt:"Newer Current State collection attempt degraded",older_than_freshness_window:"Current State is stale",older_than_unavailable_threshold:"Current State is too old to assert current guests",clock_anomaly:"Current State timing is unavailable",no_complete_snapshot:"No complete Current State snapshot is available"});
+  const REPLACE_ROOT = "REPLACE_ROOT";
+  const APPEND_CURSOR = "APPEND_CURSOR";
+  let nextCursor = null;
+  let pendingCursor = null;
+  let operationType = REPLACE_ROOT;
+  let rootIdentity = null;
+  let loadedItems = [];
+  let lastRoot = null;
+
+  function object(value) { return value && typeof value === "object" && !Array.isArray(value); }
+  function count(value, nullable=false) { return (nullable && value === null) || (Number.isSafeInteger(value) && value >= 0); }
+  function rate(value) { return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0); }
+  function utc(value, nullable=false) { return (nullable && value === null) || (typeof value === "string" && TRAFFIC_ONLINE_GUESTS_UTC.test(value) && Number.isFinite(Date.parse(value))); }
+  function identityValue(value, nullable=false) { return (nullable && value === null) || (typeof value === "string" && value.length > 0); }
+
+  function validateItem(item) {
+    if (!object(item) || !MAC.test(item.client_mac) || (item.name !== null && typeof item.name !== "string")
+        || typeof item.ssid !== "string" || item.ssid.length === 0
+        || (item.ap_mac !== null && !MAC.test(item.ap_mac))
+        || !rate(item.download_mbps) || !rate(item.upload_mbps) || !rate(item.total_mbps)
+        || !PROGRESS.has(item.source_progress_status) || !CONTINUITY.has(item.connection_continuity_status)
+        || !BASES.has(item.continuity_basis) || !RATE_STATUS.has(item.rate_status)
+        || !REASONS.has(item.download_reason) || !REASONS.has(item.upload_reason) || !REASONS.has(item.total_reason)) {
+      throw new Error("Invalid Online Guests item");
+    }
+    const rates = [item.download_mbps, item.upload_mbps, item.total_mbps];
+    const reasons = [item.download_reason, item.upload_reason, item.total_reason];
+    const numeric = rates.filter((value) => value !== null).length;
+    const hasDownload = item.download_mbps !== null;
+    const hasUpload = item.upload_mbps !== null;
+    const hasTotal = item.total_mbps !== null;
+    if (rates.some((value, index) => (value !== null) !== (reasons[index] === "valid"))
+        || (item.rate_status === "valid" && numeric !== 3)
+        || (item.rate_status === "partial" && (hasDownload === hasUpload || hasTotal))
+        || (item.rate_status === "unavailable" && numeric !== 0)
+        || (hasTotal && !(hasDownload && hasUpload))) {
+      throw new Error("Invalid Online Guests rate shape");
+    }
+    if (numeric && (item.source_progress_status !== "advanced"
+        || item.connection_continuity_status !== "proven"
+        || item.continuity_basis !== "uptime_progress")) {
+      throw new Error("Invalid Online Guests rate continuity");
+    }
+    return Object.freeze({...item});
+  }
+
+  function validate(payload, siteId) {
+    if (!object(payload) || payload.api_version !== "admin.read.v1" || payload.site_id !== siteId
+        || !object(payload.result) || !object(payload.page)) throw new Error("Invalid Online Guests response");
+    const value = payload.result;
+    const page = payload.page;
+    if (value.metric_version !== METRIC || value.population_method !== METHODS[0]
+        || value.rate_method !== METHODS[1] || value.baseline_method !== METHODS[2]
+        || value.continuity_method !== METHODS[3] || value.connection_boundary_observation !== METHODS[4]
+        || value.unit !== "Mbps" || value.site_id !== siteId || !utc(value.evaluated_at_utc)
+        || !ROOT_STATUSES.has(value.status) || !SOURCE_STATUSES.has(value.source_health_status)
+        || !SOURCE_REASONS.has(value.source_health_reason) || !RATE_EVIDENCE.has(value.rate_evidence_status)
+        || typeof value.population_complete !== "boolean" || value.supported_max_population !== 10000
+        || !Array.isArray(value.items) || !Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 200
+        || !Number.isSafeInteger(page.returned_count) || page.returned_count !== value.items.length
+        || page.returned_count > page.limit || page.sort !== "total_rate_desc"
+        || (page.next_cursor !== null && (typeof page.next_cursor !== "string" || page.next_cursor.length === 0))) {
+      throw new Error("Invalid Online Guests response");
+    }
+    const nullableIdentity = [value.current_cycle_id, value.baseline_cycle_id];
+    const nullableTimes = [value.current_capture_started_at, value.baseline_capture_started_at];
+    if (!nullableIdentity.every((item) => identityValue(item, true)) || !nullableTimes.every((item) => utc(item, true))
+        || !(value.elapsed_seconds === null || (typeof value.elapsed_seconds === "number" && Number.isFinite(value.elapsed_seconds) && value.elapsed_seconds > 0))) {
+      throw new Error("Invalid Online Guests evidence identity");
+    }
+    const population = [value.scoped_client_row_count, value.known_authorized_count, value.unknown_auth_count, value.population_count];
+    const rateCounts = [value.rate_valid_count, value.rate_partial_count, value.rate_unavailable_count];
+    const terminal = value.status === "stale" || value.status === "unavailable";
+    const sourcePair = (value.source_health_status === "healthy" && value.source_health_reason === "within_freshness_window")
+      || (value.source_health_status === "degraded" && value.source_health_reason === "newer_degraded_attempt")
+      || (value.source_health_status === "stale" && value.source_health_reason === "older_than_freshness_window")
+      || (value.source_health_status === "unavailable" && ["older_than_unavailable_threshold", "clock_anomaly", "no_complete_snapshot"].includes(value.source_health_reason));
+    if (!sourcePair || (value.current_cycle_id === null) !== (value.current_capture_started_at === null)
+        || (value.baseline_cycle_id === null) !== (value.baseline_capture_started_at === null)
+        || (value.baseline_cycle_id === null) !== (value.elapsed_seconds === null)) throw new Error("Invalid Online Guests evidence shape");
+    if (terminal) {
+      if (population.some((item) => item !== null) || rateCounts.some((item) => item !== null)
+          || value.items.length !== 0 || page.next_cursor !== null || value.baseline_cycle_id !== null
+          || value.population_complete !== false || value.rate_evidence_status !== "insufficient_data"
+          || (value.status === "stale" && (value.current_cycle_id === null || value.source_health_status !== "stale"))
+          || (value.status === "unavailable" && value.source_health_status !== "unavailable")) throw new Error("Invalid terminal Online Guests response");
+    } else {
+      if (value.current_cycle_id === null || !population.every((item) => count(item)) || value.population_count !== value.known_authorized_count
+          || value.known_authorized_count + value.unknown_auth_count > value.scoped_client_row_count) throw new Error("Invalid Online Guests population");
+      if (value.status === "unsupported_population") {
+        if (value.scoped_client_row_count <= 10000 || value.population_complete !== false
+            || value.rate_evidence_status !== "insufficient_data" || value.baseline_cycle_id !== null
+            || rateCounts.some((item) => item !== null) || value.items.length || page.next_cursor !== null) throw new Error("Invalid unsupported population");
+      } else if (!rateCounts.every((item) => count(item)) || rateCounts.reduce((a,b)=>a+b,0) !== value.population_count) {
+        throw new Error("Invalid Online Guests rate counts");
+      } else {
+        const expectedEvidence=value.population_count===0?"not_applicable":value.rate_valid_count===value.population_count?"complete":(value.rate_valid_count>0||value.rate_partial_count>0)?"partial":"insufficient_data";
+        if(value.rate_evidence_status!==expectedEvidence || value.population_complete !== (value.unknown_auth_count===0)
+            || (value.population_count===0 && (value.baseline_cycle_id!==null || value.items.length!==0 || page.next_cursor!==null))
+            || (value.status==="ok" && (value.source_health_status!=="healthy" || !value.population_complete || !["complete","not_applicable"].includes(value.rate_evidence_status)))
+            || (value.status==="insufficient_data" && (value.population_count===0 || value.source_health_status!=="healthy" || !value.population_complete || value.rate_evidence_status!=="insufficient_data"))
+            || (value.status==="partial" && !(value.source_health_status==="degraded" || !value.population_complete || value.rate_evidence_status==="partial"))) throw new Error("Invalid Online Guests root semantics");
+      }
+    }
+    const items = value.items.map(validateItem);
+    if (new Set(items.map((item) => item.client_mac)).size !== items.length) throw new Error("Duplicate Online Guests item");
+    const identity = JSON.stringify([value.metric_version,value.population_method,value.rate_method,value.baseline_method,value.continuity_method,value.connection_boundary_observation,value.unit,value.site_id,value.evaluated_at_utc,value.current_cycle_id,value.baseline_cycle_id,value.current_capture_started_at,value.baseline_capture_started_at,value.elapsed_seconds,page.sort,value.status,value.source_health_status,value.rate_evidence_status,value.population_complete,value.scoped_client_row_count,value.known_authorized_count,value.unknown_auth_count,value.population_count,value.rate_valid_count,value.rate_partial_count,value.rate_unavailable_count]);
+    return Object.freeze({root:Object.freeze({...value,items}),page:Object.freeze({...page}),identity});
+  }
+
+  function formatRate(value) {
+    if (value === null) return "—";
+    if (value === 0) return "0.00 Mbps";
+    if (value < 0.001) return "<0.001 Mbps";
+    if (value < 1) return `${value.toFixed(3)} Mbps`;
+    if (value < 100) return `${value.toFixed(2)} Mbps`;
+    return `${value.toFixed(1)} Mbps`;
+  }
+  function formatTime(value) { return utc(value, true) && value !== null ? new Date(value).toLocaleString([], {dateStyle:"medium",timeStyle:"medium"}) : "—"; }
+  function cell(row, text, className) { const td=document.createElement("td"); if(className)td.className=className; td.textContent=text; row.appendChild(td); return td; }
+  function row(item) {
+    const tr=document.createElement("tr");
+    const guest=cell(tr,item.name === null ? item.client_mac : item.name);
+    if(item.name !== null){const mac=document.createElement("span");mac.className="mono traffic-online-guests-subtext";mac.textContent=item.client_mac;guest.appendChild(mac);}
+    cell(tr,item.ssid); cell(tr,item.ap_mac === null ? "—" : item.ap_mac,"mono");
+    cell(tr,formatRate(item.download_mbps)); cell(tr,formatRate(item.upload_mbps)); cell(tr,formatRate(item.total_mbps));
+    const reasons=[item.download_reason,item.upload_reason,item.total_reason].filter((reason,index,array)=>array.indexOf(reason)===index);
+    cell(tr,`${item.rate_status === "valid" ? "Valid" : item.rate_status === "partial" ? "Partial" : "Unavailable"} · ${reasons.map((reason)=>ITEM_REASON_LABELS[reason]).join(" / ")}`);
+    return tr;
+  }
+  function renderRows() {
+    elements.items.replaceChildren(...loadedItems.map(row));
+    elements.caption.textContent=loadedItems.length ? `Showing ${loadedItems.length} Online Guests from the accepted snapshot.` : "No current Online Guest rows loaded.";
+  }
+  function clearSummary() { ["population","population-note","rate-evidence","rate-counts","source-health","source-reason","observed","interval"].forEach((name)=>{elements[name].textContent="—";}); }
+  function clearChain() { nextCursor=null;pendingCursor=null;rootIdentity=null;loadedItems=[];lastRoot=null;elements.more.hidden=true;elements.more.disabled=false;elements.previous.hidden=true;renderRows();clearSummary(); }
+  function demote(message) { nextCursor=null;pendingCursor=null;rootIdentity=null;elements.more.hidden=true;elements.more.disabled=false;elements.previous.hidden=loadedItems.length===0;elements.previous.textContent="Previous snapshot · refresh required";elements.state.dataset.state="warning";elements["state-title"].textContent="Previous Online Guests snapshot";elements["state-message"].textContent=message; }
+
+  function renderSummary(value) {
+    elements.population.textContent=value.population_count === null ? "—" : `${value.population_count} guests`;
+    elements["population-note"].textContent=value.population_count === null ? "Current population is not asserted" : (value.population_complete ? "Population complete" : `${value.unknown_auth_count} additional rows have unknown authorization`);
+    elements["rate-evidence"].textContent=value.rate_evidence_status === "not_applicable" ? "Not applicable" : value.rate_evidence_status.replace("_"," ");
+    elements["rate-counts"].textContent=value.rate_valid_count === null ? "—" : `${value.rate_valid_count} complete · ${value.rate_partial_count} partial · ${value.rate_unavailable_count} unavailable`;
+    elements["source-health"].textContent=value.source_health_status.charAt(0).toUpperCase()+value.source_health_status.slice(1);
+    elements["source-reason"].textContent=SOURCE_LABELS[value.source_health_reason];
+    elements.observed.textContent=formatTime(value.current_capture_started_at);
+    elements.interval.textContent=value.elapsed_seconds === null ? "Interval —" : `Baseline ${formatTime(value.baseline_capture_started_at)} · ${value.elapsed_seconds.toFixed(3)} seconds`;
+  }
+  function renderState(value) {
+    const zero=value.status === "ok" && value.population_count === 0;
+    const status=value.status;
+    elements.state.dataset.state=status === "ok" ? "ready" : (status === "partial" || status === "insufficient_data" || status === "stale" ? "warning" : "error");
+    elements["state-title"].textContent=zero ? "No Online Guests" : status === "ok" ? "Online Guests Traffic ready" : status === "partial" ? "Online Guests Traffic has partial evidence" : status === "insufficient_data" ? "Guest rate evidence is not available yet" : status === "stale" ? "Online Guests snapshot is stale" : status === "unsupported_population" ? "Current population exceeds the supported limit" : "Online Guests Traffic unavailable";
+    elements["state-message"].textContent=zero ? "No controller-reported authorized guests are present in the current accepted guest scope." : status === "unsupported_population" ? "No truncated subset is shown because the scoped client population exceeds 10,000 rows." : status === "insufficient_data" ? "Guests are Online, but current Traffic rate evidence is not available yet." : status === "partial" ? "Known authorized guests are shown with the available persisted evidence." : status === "stale" ? "Current State is too old to assert these guests as current." : status === "unavailable" ? "No current guest population can be asserted from persisted evidence." : "Rates follow persisted Controller evidence sampled by Current State.";
+  }
+
+  function renderLoading() { elements.more.disabled=true; elements.state.dataset.state="warning"; elements["state-title"].textContent=operationType===APPEND_CURSOR?"Loading more Online Guests…":(loadedItems.length?"Refreshing Online Guests Traffic…":"Loading Online Guests Traffic…"); elements["state-message"].textContent="Reading persisted authorized guest evidence."; }
+  function render(payload) {
+    const value=payload.root;
+    if(payload.operation===APPEND_CURSOR){
+      if(rootIdentity===null || payload.identity!==rootIdentity){clearChain();throw new Error("Online Guests cursor chain changed");}
+      loadedItems=loadedItems.concat(value.items);
+    }else{
+      pendingCursor=null; loadedItems=value.items.slice(); rootIdentity=payload.identity; lastRoot=value;
+    }
+    nextCursor=payload.page.next_cursor; pendingCursor=null; lastRoot=value; elements.previous.hidden=true;
+    renderSummary(value); renderState(value);
+    if(value.status==="stale" || value.status==="unavailable" || value.status==="unsupported_population"){loadedItems=[];nextCursor=null;rootIdentity=null;}
+    renderRows(); elements.more.hidden=nextCursor===null;elements.more.disabled=false;
+  }
+  function renderFailure(failure) {
+    const retain=failure && (
+      (failure.kind==="unavailable" && failure.status===0 && failure.code===null)
+      || (failure.kind==="busy" && failure.status===429 && failure.code==="concurrency_limit")
+      || (failure.kind==="unavailable" && failure.status===503 && failure.code==="source_unavailable")
+      || (failure.kind==="timeout" && failure.status===503 && failure.code==="query_deadline")
+    );
+    if(retain && loadedItems.length){demote("The current refresh failed. Previously loaded rows are no longer asserted as current.");return;}
+    clearChain();elements.state.dataset.state="error";elements["state-title"].textContent=failure&&failure.kind==="session"?"Session expired":failure&&failure.kind==="forbidden"?"Access denied":"Online Guests Traffic unavailable";elements["state-message"].textContent="No identifiable Online Guest rows are retained.";
+  }
+
+  elements.more.addEventListener("click",()=>{
+    if(nextCursor===null || pendingCursor!==null)return;
+    operationType=APPEND_CURSOR;pendingCursor=nextCursor;elements.more.disabled=true;
+    coordinator.refreshPanel("online-guests-traffic",{manual:true});
+  });
+  coordinator.registerPanel({
+    key:"online-guests-traffic",autoRefresh:true,
+    prepareRootRefresh:()=>{operationType=REPLACE_ROOT;pendingCursor=null;},
+    renderGlobalFailure:renderFailure,
+    load:async(context)=>{
+      const requestedOperation=operationType;
+      const cursor=requestedOperation===APPEND_CURSOR?pendingCursor:null;
+      operationType=REPLACE_ROOT;
+      const suffix=cursor===null?"":`&cursor=${encodeURIComponent(cursor)}`;
+      const value=validate(await context.requestJson(`${context.apiBase}/traffic/online-guests/current?limit=50${suffix}`),context.siteId);
+      if(requestedOperation===APPEND_CURSOR && (cursor===null || value.identity!==rootIdentity))throw new Error("Online Guests cursor chain changed");
+      return Object.freeze({...value,operation:requestedOperation});
+    },render,renderLoading,renderFailure,
+  });
+}());
+/* TRAFFIC_ONLINE_GUESTS_PANEL_END */
 
 /* TRAFFIC_NETWORK_RANGE_CONTEXT_START */
 (function () {
