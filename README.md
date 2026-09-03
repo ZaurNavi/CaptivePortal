@@ -29,15 +29,25 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Repository tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
 | Production deployed HEAD | `6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
 | Production tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
-| Traffic Current / History / Statistics / Peak | **Production active** |
-| Traffic by AP / AP Traffic Share | **Production active** |
+| Current Network Throughput | **Production active** |
+| Network Traffic History | **Production active** |
+| Period Statistics | **Production active** |
+| Peak Load | **Production active** |
+| Traffic by AP | **Production active** |
 | Independent historical ranges | **Production active / acceptance PASS** |
+| AP Traffic Share | **Production active / acceptance PASS** |
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
 | Next Traffic stage | **Not yet assigned in the canonical roadmap** |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
-| Core guest authorization / CAPPORT | Implemented |
-| Observation / Current State / Visit Lifecycle | Implemented |
+| Core guest authorization | Implemented |
+| RFC 8908 CAPPORT | Implemented |
+| Visitor Registry | Implemented |
+| Visit Lifecycle | Implemented, schema v2 |
+| Observation Foundation | Implemented, schema v1 |
+| Current State | Implemented, schema v1 |
 | Analytics / Admin Web | Implemented |
+| Multi-Site / Tenant / RBAC | Future evolution |
+| Current topology | Single application process; HA/multi-process requires ADR |
 
 > Repository defaults, production enabled-state and dated acceptance evidence are different facts.
 
@@ -45,22 +55,15 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 Traffic is production-active through Online Guests Traffic.
 
-```mermaid
-flowchart LR
-    T1[Current] --> T2[History] --> T3[Statistics] --> T4[Peak] --> T5[Traffic by AP]
-    T5 --> R[Independent ranges] --> T6[AP Traffic Share] --> T7[Online Guests Traffic]
-    T7 --> N{{Next Traffic TASK: not assigned}}
-```
-
-Online Guests Traffic is near-current Current State-backed evidence and does not
-use historical `24h | 7d` selection.
+Online Guests Traffic is a separate near-current Current State-backed panel and
+does not use the historical `24h | 7d` selector.
 
 Current functional layout remains production-current, not a frozen final visual
 composition.
 
 ## What CaptivPortal does today
 
-Current Traffic capabilities:
+At the current runtime checkpoint, Traffic includes:
 
 - Current Network Throughput;
 - Network Traffic History;
@@ -70,13 +73,12 @@ Current Traffic capabilities:
 - AP Traffic Share;
 - Online Guests Traffic.
 
-Historical Traffic products retain independent page-local `24h | 7d` range state.
-
+Historical Traffic panels retain independent page-local `24h | 7d` ranges.
 Online Guests Traffic reads persisted Current State through
-`CurrentGuestTrafficReadService`, is range-insensitive and performs no query-time
-Omada calls.
+`CurrentGuestTrafficReadService`, is range-insensitive and does not perform
+query-time Omada calls.
 
-These are product evidence domains, not WAN/Internet billing counters.
+The Traffic domains are product evidence, not WAN/Internet billing counters.
 
 # Architecture
 
@@ -775,28 +777,31 @@ See [`docs/api/omada-open-api.md`](docs/api/omada-open-api.md).
 
 ```mermaid
 flowchart LR
-    T0[Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Share]:::done --> T7R[Online Guest Read]:::done --> T7[Online Guests]:::done
-    T7 --> N[Next task not assigned]
+    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::next
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
+    classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
 ```
 
 ## Near-term direction
 
 ```text
-TRAFFIC-00 DONE
-TRAFFIC-01 DONE / PRODUCTION ACTIVE
-TRAFFIC-02-READ DONE
-TRAFFIC-02 DONE / PRODUCTION ACTIVE
+TRAFFIC-00         DONE
+TRAFFIC-01         DONE / PRODUCTION ACTIVE
+TRAFFIC-02-READ    DONE
+TRAFFIC-02         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-PERF-01 DONE
-TRAFFIC-03 DONE / PRODUCTION ACTIVE
-TRAFFIC-04 DONE / PRODUCTION ACTIVE
-TRAFFIC-05 DONE / PRODUCTION ACTIVE
-TRAFFIC-RANGE-01 DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
-TRAFFIC-06 DONE / PRODUCTION ACTIVE
-TRAFFIC-07-READ DONE / READ FOUNDATION IMPLEMENTED
-TRAFFIC-07 COMPLETE / PRODUCTION ACTIVE
-next Traffic TASK NOT YET ASSIGNED
+TRAFFIC-03         DONE / PRODUCTION ACTIVE
+TRAFFIC-04         DONE / PRODUCTION ACTIVE
+TRAFFIC-05         DONE / PRODUCTION ACTIVE
+TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06         DONE / PRODUCTION ACTIVE
+TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
+next Traffic TASK  NOT YET ASSIGNED
 ```
+
+No `TRAFFIC-08` or other successor is canonical until Owner / Tech Lead approves
+a separate TASK.
 
 ## Real second Site as a trigger
 

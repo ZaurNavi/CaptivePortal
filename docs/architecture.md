@@ -118,28 +118,36 @@ Reader/reconciliation health influences runtime `active/degraded`.
 
 ## 6. Analytics
 
-Analytics remains read-only over persisted facts.
-
-Observation / Visit / Registry analytics continue through their existing
-read-service / `AnalyticsSourceGateway` boundaries.
-
-Current State has a separate persisted read boundary:
+Analytics reads persisted source facts only.
 
 ```text
-current_state.sqlite3
-→ CurrentStateReadService
+Observation / Visit / Registry read boundaries
+        ↓
+AnalyticsSourceGateway
+        ↓
+Quality / Wireless / Visit /
+CurrentTraffic / HistoricalTraffic / HomeActivity services
 ```
 
-Analytics does not call Omada at query time and does not write/migrate source
-databases.
+Source boundaries require read-only SQLite/query-only contracts.
+
+Prohibited:
+- Analytics → Omada;
+- Analytics → source writes/migrations;
+- Admin/browser → direct raw source persistence.
 
 ## 7. Traffic analytics
 
-### Observation-backed Network Traffic
+### Current
 
-`CurrentTrafficReadService` owns Current Network Throughput.
+`CurrentTrafficReadService` owns current Site Network Throughput semantics.
 
-`HistoricalTrafficReadService` remains the single historical semantic owner for:
+Current Network Throughput is range-insensitive.
+
+### Historical
+
+`HistoricalTrafficReadService` is the single historical Network Traffic semantic
+owner for:
 
 - Network Traffic History;
 - Period Statistics;
@@ -147,41 +155,131 @@ databases.
 - Traffic by AP;
 - AP Traffic Share.
 
-### Current State-backed Online Guests Traffic
+Canonical path:
 
-`CurrentGuestTrafficReadService` is the semantic owner for Online Guests Traffic.
+```text
+persisted Observation AP history
+→ HistoricalTrafficReadService
+→ AdminQueryService
+→ product-scoped historical API projection
+→ Traffic historical frontend orchestration
+```
+
+`TRAFFIC-02-PERF-01` requested-range bounded validation remains an architectural
+performance invariant.
+
+Canonical product projection order:
+
+```text
+history,statistics,peak,aps,apshare
+```
+
+Product-scoped reads execute only requested product-specific calculations while
+reusing common range/integrity/source facts.
+
+Traffic by AP and AP Traffic Share use the same Historical Traffic semantic foundation and do not introduce a second collector/database/semantic owner.
+
+AP Traffic Share uses interval-integrated accepted AP contribution evidence (`network_traffic_ap_share.v1`), not sample counts. Internal unit is fraction and display unit is percent.
+
+### Independent historical panel ranges
+
+`TASK-TRAFFIC-RANGE-01` moves range intent to each historical product panel.
+
+Each panel owns page-local:
+
+```text
+selected_range
+applied_range
+phase
+last successful payload
+error
+intent generation
+```
+
+Failed selection preserves prior successful payload.
+
+The page-local `TrafficHistoricalRequestBroker` owns intent/coalescing/response
+mapping. It is **not** scheduler owner.
+
+`CaptivPortalTrafficCoordinator` remains the sole page scheduler/lifecycle owner.
+
+Permanent invariant:
+
+```text
+max historical HTTP requests in flight from one page = 1
+```
+
+Admission guard:
+
+```text
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+```
+
+No QueryDeadline, browser-timeout or Admin-concurrency increase is part of this
+architecture.
+
+### Online Guests Traffic
+
+`TASK-TRAFFIC-07` adds a separate near-current Current State-backed Traffic
+product without changing the historical Network Traffic semantic owner.
 
 ```text
 Current State
 → CurrentStateReadService
 → CurrentGuestTrafficReadService
 → AdminQueryService
-→ /admin/api/v1/sites/<site_id>/traffic/online-guests/current
-→ Admin Console / Traffic
+→ Admin API
+→ Admin Console / Traffic / Online Guests Traffic
 ```
 
-Canonical metric:
+Semantic owner:
 
 ```text
-network_traffic_online_guest_current_rate.v1
+CurrentGuestTrafficReadService
 ```
 
-The module does not use Observation, Visit, Visitor Registry, AuthSession,
-query-time Omada calls, or browser-side traffic calculations.
+The calculation source is persisted Current State only. Observation, Visit,
+Visitor Registry, AuthSession, query-time Omada calls and browser-side traffic
+calculations are not sources for this product.
 
-No separate collector or database was introduced.
+No separate collector or database was added.
 
 ## 8. Admin Web
 
-Admin Web remains a read-only product surface over bounded read/query services.
+Guest auth and Admin auth remain separate.
 
-Traffic now contains both:
-- Observation-backed Network Traffic products;
-- Current State-backed Online Guests Traffic.
+Current pages:
+Home, Devices, Device Detail, Visits, Observations, Traffic.
 
-Online Guests Traffic requires `admin.read.devices`, uses bounded
-`limit/cursor` pagination and is not part of the historical range broker /
-10-second admission path.
+Traffic production-current functional surface:
+- Current Network Throughput;
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP;
+- AP Traffic Share;
+- Online Guests Traffic.
+
+Historical panels have independent `24h | 7d` selectors.
+Current Network Throughput and Online Guests Traffic have none.
+
+Canonical historical API remains:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/history
+```
+
+Canonical projection is `products=`; legacy `include=` remains temporary
+backward compatibility. AP-only response uses `ap_bucket_axis`.
+
+The current Traffic visual arrangement is not a final design invariant; later
+UI/design work may rearrange/polish cards without changing semantic owners.
+
+Forbidden browser paths:
+- direct SQLite;
+- Omada;
+- Loki/Grafana;
+- internal Analytics bearer API.
 
 ## 9. Shared OmadaProvider invariant
 

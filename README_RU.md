@@ -29,15 +29,24 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | Repository tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
 | Production deployed HEAD | `6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
 | Production tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
-| Traffic Current / History / Statistics / Peak | **Production active** |
-| Traffic by AP / AP Traffic Share | **Production active** |
+| Current Network Throughput | **Production active** |
+| Network Traffic History | **Production active** |
+| Period Statistics | **Production active** |
+| Peak Load | **Production active** |
+| Traffic by AP | **Production active** |
 | Independent historical ranges | **Production active / acceptance PASS** |
+| AP Traffic Share | **Production active / acceptance PASS** |
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
 | Следующий Traffic stage | **Пока не назначен в каноническом roadmap** |
 | Omada Controller family | Omada Software Controller 5.14.x |
-| Core guest authorization / CAPPORT | Реализованы |
-| Observation / Current State / Visit Lifecycle | Реализованы |
+| Core guest authorization | Реализован |
+| RFC 8908 CAPPORT | Реализован |
+| Visitor Registry | Реализован |
+| Visit Lifecycle | Реализован, schema v2 |
+| Observation Foundation | Реализован, schema v1 |
+| Current State | Реализован, schema v1 |
 | Analytics / Admin Web | Реализованы |
+| Multi-Site / Tenant / RBAC | Future evolution |
 
 > Repository defaults, production enabled-state и dated acceptance evidence — разные факты.
 
@@ -45,15 +54,8 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 Traffic production-active до Online Guests Traffic включительно.
 
-```mermaid
-flowchart LR
-    T1[Current] --> T2[History] --> T3[Statistics] --> T4[Peak] --> T5[Traffic by AP]
-    T5 --> R[Independent ranges] --> T6[AP Traffic Share] --> T7[Online Guests Traffic]
-    T7 --> N{{Следующий Traffic TASK пока не назначен}}
-```
-
-Online Guests Traffic — near-current Current State-backed панель и не использует
-historical `24h | 7d` selector.
+Online Guests Traffic — отдельная near-current Current State-backed панель и не
+использует historical `24h | 7d` selector.
 
 Текущая functional layout production-current, но не финальный визуальный дизайн.
 
@@ -69,10 +71,8 @@ Current Traffic surface:
 - AP Traffic Share;
 - Online Guests Traffic.
 
-Historical Traffic products сохраняют независимый page-local `24h | 7d` range
-state.
-
-Online Guests Traffic читает persisted Current State через
+Historical Traffic panels сохраняют независимый page-local `24h | 7d` range
+state. Online Guests Traffic читает persisted Current State через
 `CurrentGuestTrafficReadService`, range-insensitive и не делает query-time Omada
 calls.
 
@@ -774,28 +774,31 @@ Controlled research на Omada 5.14.31 подтвердил:
 
 ```mermaid
 flowchart LR
-    T0[Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Share]:::done --> T7R[Online Guest Read]:::done --> T7[Online Guests]:::done
-    T7 --> N[Следующий task пока не назначен]
+    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::next
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
+    classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
 ```
 
 ## Near-term direction
 
 ```text
-TRAFFIC-00 DONE
-TRAFFIC-01 DONE / PRODUCTION ACTIVE
-TRAFFIC-02-READ DONE
-TRAFFIC-02 DONE / PRODUCTION ACTIVE
+TRAFFIC-00         DONE
+TRAFFIC-01         DONE / PRODUCTION ACTIVE
+TRAFFIC-02-READ    DONE
+TRAFFIC-02         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-PERF-01 DONE
-TRAFFIC-03 DONE / PRODUCTION ACTIVE
-TRAFFIC-04 DONE / PRODUCTION ACTIVE
-TRAFFIC-05 DONE / PRODUCTION ACTIVE
-TRAFFIC-RANGE-01 DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
-TRAFFIC-06 DONE / PRODUCTION ACTIVE
-TRAFFIC-07-READ DONE / READ FOUNDATION IMPLEMENTED
-TRAFFIC-07 COMPLETE / PRODUCTION ACTIVE
-next Traffic TASK NOT YET ASSIGNED
+TRAFFIC-03         DONE / PRODUCTION ACTIVE
+TRAFFIC-04         DONE / PRODUCTION ACTIVE
+TRAFFIC-05         DONE / PRODUCTION ACTIVE
+TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06         DONE / PRODUCTION ACTIVE
+TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
+next Traffic TASK  NOT YET ASSIGNED
 ```
+
+`TRAFFIC-08` или другой successor не считается каноническим, пока Owner / Tech
+Lead отдельно его не утвердят.
 
 ## Реальный второй Site как trigger
 

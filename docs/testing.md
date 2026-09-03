@@ -335,15 +335,15 @@ During TRAFFIC-00 acceptance:
 
 This is troubleshooting history, not a current product defect.
 
-### Latest Traffic acceptance evidence
+### Latest Traffic acceptance evidence — TRAFFIC-07
 
 Current accepted repository / production artifact:
 
 ```text
 HEAD: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
 tree: b669f368b0062fcb100b24758cf05e2c4b500144
-TASK-TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
-TASK-TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
+TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
 PR #98: merged
 PR #99: merged
 production deployment / activation: PASS
@@ -374,21 +374,63 @@ exact-artifact immutability: PASS
 Linux 10k-row read-only PERF/capacity: PASS
 ```
 
-The reviewed Windows/SQLite infinity behavior reproduced on the exact PR #98
+The known Windows/SQLite infinity behavior reproduced on the exact PR #98
 baseline and is not a candidate regression.
 
-Source/semantic acceptance:
+### Previous Traffic acceptance evidence — TRAFFIC-06
+
+Current accepted repository / production artifact:
 
 ```text
-Current State only
-CurrentGuestTrafficReadService = semantic owner
-no query-time Omada
-no Observation/Visit/Registry/AuthSession calculation source
-no browser-side rate calculation
+HEAD: c5f9dc39bbf399847f147526c9c7ae15769a198c
+tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+TASK-TRAFFIC-06: DONE / PRODUCTION ACTIVE
+PR #96: merged
+production activation / browser acceptance: PASS
 ```
 
-Owner-confirmed closure:
-`IMPLEMENTED → TESTED → MERGED → PRODUCTION DEPLOYED → ACTIVATED → COMPLETE`.
+Gate matrix:
+
+```text
+Tech Lead Static Review: PASS
+Targeted Traffic Regression: PASS WITH REVIEWED COMPATIBILITY
+Candidate regressions: 0
+Windows Central Lab V6-FIXED: PASS
+Strict regressions: 0
+Exact-artifact immutability: PASS
+Linux production-size PERF: PASS
+CORE_PERF_GATE=PASS
+ALL24_CAPABILITY=PASS
+G1_G2_FALLBACK_CAPABILITY=PASS
+IMMUTABILITY=PASS
+RESULT=PASS
+```
+
+Production-size snapshot:
+
+```text
+bytes: 273235968
+SHA256: b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
+```
+
+Key measured p95/max:
+
+```text
+SH24 0.614524s / 0.698018s
+SH7  2.751386s / 2.795773s
+CA7  3.057368s / 3.291041s
+AS7  3.099320s / 3.113963s
+E24-C 0.740699s / 0.830057s
+ALL24 0.584355s / 0.595118s
+```
+
+All measured variants completed `10/10` successfully with `query_deadline=0`, `source_integrity=0`, `unexpected_5xx=0`; semantic stability PASS.
+
+Accepted ALL24 grouping: `history,statistics,peak,aps,apshare`.
+
+The reviewed Windows compatibility cases are not candidate regressions.
+
+Production closure: deploy FROM GIT → dormant PASS → separate activation → browser/product PASS.
 
 ## Test Set Maintenance Rule
 
@@ -400,11 +442,11 @@ For the current TRAFFIC-07 state, relevant coverage includes at minimum:
 - current guest traffic capacity/PERF benchmark coverage;
 - Current State read-service regressions;
 - Admin config/routes/query/capability/pagination regressions;
-- existing Traffic regressions proving isolation from historical products.
+- existing Traffic regressions proving historical/current product isolation.
 
 Permanent invariants:
 - `CurrentGuestTrafficReadService` remains semantic owner;
-- Current State remains the calculation source;
+- persisted Current State remains the calculation source;
 - numeric rates require valid counter/continuity evidence;
 - missing/frozen/reset evidence must not fabricate numeric zero;
 - cursor chains remain deterministic and bounded;

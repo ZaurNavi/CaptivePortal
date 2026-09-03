@@ -241,11 +241,30 @@ Historical endpoint:
 GET /admin/api/v1/sites/<site_id>/traffic/history
 ```
 
-Historical projection:
+Canonical product projection:
 
 ```text
 products=history,statistics,peak,aps,apshare
 ```
+
+Legacy `include=` remains temporary backward compatibility. `include + products`
+and malformed/duplicate/out-of-order/unknown/empty projections return `400`.
+
+History, Statistics, Peak and Traffic by AP each own independent page-local
+`24h | 7d` selected/applied state.
+
+`TrafficHistoricalRequestBroker` is the historical page-local intent/coalescing/
+response-mapping layer. `CaptivPortalTrafficCoordinator` remains scheduler and
+lifecycle owner.
+
+Permanent invariant:
+
+```text
+max historical HTTP requests in flight from one page = 1
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+```
+
+Current Network Throughput remains range-insensitive.
 
 Online Guests endpoint:
 
@@ -262,7 +281,7 @@ cursor=opaque
 capability=admin.read.devices
 ```
 
-Canonical path:
+Canonical read path:
 
 ```text
 CurrentStateReadService
@@ -271,11 +290,9 @@ CurrentStateReadService
 → Admin API
 ```
 
-Online Guests Traffic is range-insensitive. Historical products retain their
-independent `24h | 7d` page-local state.
+Online Guests Traffic is range-insensitive and Current State-backed.
 
-No browser/Admin request performs query-time Omada reads or client-rate
-calculation.
+Business/data Admin API remains read-only.
 
 ## 13. Admin security facts
 
@@ -374,15 +391,15 @@ Testing ownership remains:
 
 ```text
 Coder → focused/minimal TASK/module tests
-Owner + Tech Lead / Central Lab → broader/full/official acceptance
+Owner + Tech Lead / Central Lab → cross-module/broader/full/official acceptance
 ```
 
-Current Traffic closure evidence:
+Latest Traffic closure evidence:
 
 ```text
 artifact: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
 tree: b669f368b0062fcb100b24758cf05e2c4b500144
-TRAFFIC-07-READ: DONE
+TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
 PR #98: merged
 PR #99: merged
@@ -395,16 +412,15 @@ Linux authenticated API PERF: PASS
 read-only/provider isolation: PASS
 ```
 
-PR #98 separately established Current Guest Traffic read-foundation
-immutability and 10k-row Linux capacity/PERF PASS.
+Previous TRAFFIC-06 production-size acceptance remains canonical historical
+evidence in `docs/testing.md` and `docs/modules/traffic.md`.
 
 After each accepted TASK Tech Lead reviews changed tests, targeted regression
-set, cross-surface invariants and runner-contract impact.
+set, cross-surface invariants and whether the runner contract changed.
 
 ## 19. Current vs historical vs change-intent
 
 Current repository/production Traffic implementation includes:
-
 - Current Network Throughput;
 - Network Traffic History;
 - Period Statistics;
@@ -429,10 +445,11 @@ TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
 Online Guests Traffic is Current State-backed near-current authorized guest rate
 evidence. Historical Network Traffic remains Observation-backed.
 
-No approved next Traffic TASK is currently assigned in the canonical repository
-roadmap. No `TRAFFIC-08` is current change-intent.
+No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is current
+change-intent.
 
-Historical TASK/PR evidence remains historical.
+Historical TASK/PR evidence remains historical and does not override current
+production truth.
 
 ## 20. Repository-only unknowns
 

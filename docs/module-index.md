@@ -44,26 +44,36 @@ Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 ## Current production evidence
 
-Owner-confirmed production checkpoint 2026-09-01:
+Owner-provided production checkpoint 2026-09-03:
 
 ```text
 HEAD: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
 tree: b669f368b0062fcb100b24758cf05e2c4b500144
 
+TRAFFIC-00: DONE
+TRAFFIC-01 Current: production active
+TRAFFIC-02-READ: DONE
+TRAFFIC-02 History: production active
+TRAFFIC-02-PERF-01: DONE
+TRAFFIC-03 Statistics: production active
+TRAFFIC-04 Peak: production active
+TRAFFIC-05 Traffic by AP: production active
+TRAFFIC-RANGE-01: production active / production acceptance PASS
+TRAFFIC-06 AP Traffic Share: production active / production acceptance PASS
 TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
-TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
+TRAFFIC-07 Online Guests Traffic: COMPLETE / PRODUCTION ACTIVE
 
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 captive-portal.service=active
 ```
 
-Existing TRAFFIC-00..06/RANGE capabilities remain production-active as previously
-accepted.
+Existing earlier Traffic production flags/acceptance remain as documented in
+`modules/traffic.md` and `deployment.md`.
 
 ## Next Traffic item
 
-No approved next Traffic TASK is currently assigned in the canonical repository
-roadmap. No `TRAFFIC-08` is documented as current change-intent.
+No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is
+canonical change-intent.
 
 ## Production evidence rule
 

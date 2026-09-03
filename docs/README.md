@@ -88,21 +88,23 @@ TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
 ```
 
-Owner-confirmed production Traffic flags include:
+Owner-confirmed production Traffic flags now also include:
 
 ```text
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 ```
 
-Online Guests Traffic is Current State-backed near-current evidence and does not
-use historical `24h | 7d` selectors. Historical Traffic panels retain independent
-page-local ranges.
+Repository default remains `WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false`.
 
-No approved next Traffic TASK is currently assigned; no `TRAFFIC-08` is
+Historical Traffic panels retain independent page-local `24h | 7d` ranges.
+Online Guests Traffic is Current State-backed, near-current and range-insensitive.
+
+No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is
 canonical change-intent.
 
 `modules/traffic.md` is the current Traffic product/semantic contract.
-Historical FINAL TASKs remain traceability evidence.
+Historical FINAL TASKs and acceptance evidence remain traceability evidence and
+do not override current implementation state.
 
 ## Permanent promotion boundary
 

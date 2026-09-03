@@ -211,7 +211,7 @@ WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
 WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20
 ```
 
-Owner-confirmed production state:
+Production state 2026-09-01:
 
 ```text
 WEB_ADMIN_TRAFFIC_ENABLED=true
@@ -233,20 +233,32 @@ Peak requires Admin + Traffic + History + Statistics.
 Traffic by AP requires Admin + Traffic + History.
 Independent ranges requires Admin + Traffic + History.
 AP Traffic Share requires Admin + Traffic + History + Independent ranges.
-Online Guests Traffic requires Admin + Traffic.
+Online Guests Traffic requires Admin + Traffic only. Repository default remains `false`; Owner-confirmed production activation is `true`.
 ```
 
-`WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false` is the repository default;
-production activation is `true`.
+Independent ranges does **not** require every optional historical product to be
+enabled. It changes historical product range/request orchestration for whichever
+historical products are enabled.
 
-Online Guests Traffic reads persisted Current State through
-`CurrentGuestTrafficReadService`. It does not create a collector/database and
-does not use query-time Omada.
+These are product-exposure/orchestration flags. They do not start/stop Observation,
+`CurrentTrafficReadService` or `HistoricalTrafficReadService`.
 
-Historical independent ranges do not apply to Online Guests Traffic. History,
-Statistics, Peak, Traffic by AP and AP Traffic Share retain independent
-page-local `24h | 7d` selected/applied state. Current Network Throughput and
-Online Guests Traffic are range-insensitive.
+Current Network Throughput shared policy remains:
+
+```text
+fresh max age = 90s
+stale boundary = 180s
+max AP skew = 60s
+```
+
+Historical product ranges:
+
+```text
+24h
+7d
+```
+
+With independent ranges enabled, History, Statistics, Peak, Traffic by AP and AP Traffic Share each own independent page-local selected/applied range state. Current Network Throughput remains range-insensitive.
 
 Permanent historical admission guard:
 
@@ -260,7 +272,8 @@ Admin query deadline remains:
 WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=10
 ```
 
-Traffic browser request timeout remains `20s`.
+Traffic browser request timeout remains `20s`. No accepted RANGE-01 change
+increased query deadline, browser timeout or Admin concurrency.
 
 Repository default=false must not be rewritten as production disabled.
 
