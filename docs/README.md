@@ -1,9 +1,9 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-09-01
-Current-state implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Current implementation tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Updated: 2026-09-03
+Current-state implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Current implementation tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -71,7 +71,7 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic state at implementation baseline `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`:
+Current Traffic state at implementation baseline `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`:
 
 ```text
 TRAFFIC-00         DONE
@@ -84,26 +84,25 @@ TRAFFIC-04         DONE / PRODUCTION ACTIVE
 TRAFFIC-05         DONE / PRODUCTION ACTIVE
 TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06         DONE / PRODUCTION ACTIVE
-TRAFFIC-07         NEXT / NOT IMPLEMENTED
+TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
 ```
 
-Owner-confirmed production Traffic flags:
+Owner-confirmed production Traffic flags include:
 
 ```text
-WEB_ADMIN_TRAFFIC_ENABLED=true
-WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
-WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
-WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
-WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
-WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
-WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 ```
 
-Historical Traffic panels, including AP Traffic Share, have independent page-local `24h | 7d` ranges.
+Online Guests Traffic is Current State-backed near-current evidence and does not
+use historical `24h | 7d` selectors. Historical Traffic panels retain independent
+page-local ranges.
+
+No approved next Traffic TASK is currently assigned; no `TRAFFIC-08` is
+canonical change-intent.
 
 `modules/traffic.md` is the current Traffic product/semantic contract.
-Historical FINAL TASKs and acceptance evidence remain traceability evidence and
-do not override current implementation state.
+Historical FINAL TASKs remain traceability evidence.
 
 ## Permanent promotion boundary
 

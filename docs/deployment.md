@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-01
-Current repository implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Confirmed production deployed HEAD: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Confirmed production tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Updated: 2026-09-03
+Current repository implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Confirmed production deployed HEAD: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Confirmed production tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 ## Repository vs production
 
@@ -165,16 +165,16 @@ Owner + Tech Lead issue official PASS/FAIL.
 All mandatory pre-publication gates must PASS before the normal publication
 commit/PR path.
 
-## Traffic production checkpoint — 2026-09-01
+## Traffic production checkpoint — 2026-09-03
 
 Owner-confirmed current state:
 
 ```text
-repository / production HEAD:
-c5f9dc39bbf399847f147526c9c7ae15769a198c
+repository implementation / production HEAD:
+6425988b5b4ec5ff38bf9c67c74846c3806f668f
 
 repository / production tree:
-0831ecf598b5760e8ede2e9e94a25b926480c2dd
+b669f368b0062fcb100b24758cf05e2c4b500144
 
 captive-portal.service:
 active
@@ -189,123 +189,66 @@ Period Statistics
 Peak Load
 Traffic by AP
 AP Traffic Share
+Online Guests Traffic
 ```
 
-Production flags:
+Production activation includes:
 
 ```text
-WEB_ADMIN_TRAFFIC_ENABLED=true
-WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
-WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
-WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
-WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
-WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
-WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 ```
 
-Repository defaults remain false, including `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false`.
+Repository default remains `WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false`.
 
-## TRAFFIC-06 deployment / activation history
+## TRAFFIC-07 deployment / activation history
+
+Implementation layers:
 
 ```text
-development baseline: 022c8666ef58f0a6d4bef9dd72696199ebd5719f
-accepted tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
-publication commit: 1d4e373262a236cb1c6dded82fe6b9789c9110a7
-PR: #96
-merge / production commit: c5f9dc39bbf399847f147526c9c7ae15769a198c
-production tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+PR #98 — TRAFFIC-07-READ / CurrentGuestTrafficReadService foundation
+PR #99 — Admin: add Online Guests Traffic
 ```
 
-Deployment was performed **FROM GIT** without SCP/manual source replacement.
+Final artifact:
 
 ```text
-dormant deploy with AP Share disabled → PASS
-separate WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true activation → PASS
-production browser/product acceptance → PASS
+PR #99 head: 0d7782d93c028226f9396c2d089db76e7986a4b2
+accepted / production tree: b669f368b0062fcb100b24758cf05e2c4b500144
+merge / production commit: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
 ```
 
-Post-activation:
+Deployment was performed **FROM GIT**.
+
+Canonical closure:
 
 ```text
-NRestarts=0
-ExecMainStatus=0
-Admin Traffic API=HTTP 200
-Omada webhook=HTTP 204
-Observation complete=True
-Observation error_count=0
-Observation failure_category=None
+IMPLEMENTED
+→ TESTED
+→ MERGED
+→ PRODUCTION DEPLOYED
+→ ACTIVATED
+→ COMPLETE / PRODUCTION ACTIVE
 ```
 
-Existing Omada `InsecureRequestWarning` and Flask development-server warning are pre-existing and are not TRAFFIC-06 regressions.
-
-## TRAFFIC-06 acceptance history
+PR #99 acceptance evidence:
 
 ```text
-Tech Lead Static Review = PASS
-Targeted Traffic Regression = PASS WITH REVIEWED COMPATIBILITY
-candidate regressions = 0
-Windows Central Lab V6-FIXED = PASS
-strict regressions = 0
-exact-artifact immutability = PASS
-Linux production-size PERF = PASS
-CORE_PERF_GATE=PASS
-ALL24_CAPABILITY=PASS
-G1_G2_FALLBACK_CAPABILITY=PASS
-IMMUTABILITY=PASS
-RESULT=PASS
+Static review: PASS
+Focused acceptance: 49 passed
+Targeted regression: 175 passed
+Central Lab V6: PASS
+strict regressions: 0
+Linux authenticated API PERF: PASS
+payload <= 256 KiB: PASS
+read-only: PASS
+provider isolation: PASS
 ```
 
-Accepted ALL24 product group: `history,statistics,peak,aps,apshare`.
-## Production architecture outcome
+Online Guests Traffic reads persisted Current State only. No separate collector,
+Traffic DB, schema migration, Observation fallback or query-time Omada path was
+added.
 
-The production fix for heavy shared 7d historical work did **not** increase the
-Admin query deadline.
-
-Preserved:
-
-```text
-WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=10
-Traffic browser request timeout=20s
-Admin concurrency=unchanged
-```
-
-Accepted remediation:
-- canonical product-scoped `products=` requests;
-- independent panel intent;
-- at most one historical HTTP request in flight;
-- sequential historical admission;
-- permanent 10-second admission guard.
-
-## TRAFFIC-RANGE-01 production-size acceptance
-
-Linux §97 PERF:
-
-```text
-PASS
-```
-
-A7 hard evidence:
-
-```text
-p50 2.444160s
-p95 2.469994s
-max  2.472858s
-query_deadline=0
-source_integrity=0
-unexpected 5xx=0
-```
-
-B24 ↔ C24 semantic identity: PASS.
-
-Immutable snapshot:
-
-```text
-bytes=273235968
-SHA256=b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
-```
-
-The reviewed Windows SQLite infinity compatibility case is known compatibility,
-not a TASK regression.
+Earlier TRAFFIC-00..06/RANGE acceptance remains historical evidence.
 
 ## Feature activation
 

@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-01
+Updated: 2026-09-03
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Production deployed HEAD: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Production tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Documentation/current-state implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Production deployed HEAD: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Production tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 ## Responsibility model
 
@@ -340,111 +340,79 @@ This is troubleshooting history, not a current product defect.
 Current accepted repository / production artifact:
 
 ```text
-HEAD: c5f9dc39bbf399847f147526c9c7ae15769a198c
-tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
-TASK-TRAFFIC-06: DONE / PRODUCTION ACTIVE
-PR #96: merged
-production activation / browser acceptance: PASS
+HEAD: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
+tree: b669f368b0062fcb100b24758cf05e2c4b500144
+TASK-TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
+TASK-TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
+PR #98: merged
+PR #99: merged
+production deployment / activation: PASS
 ```
 
-Gate matrix:
+TASK-TRAFFIC-07 product gate evidence:
 
 ```text
-Tech Lead Static Review: PASS
-Targeted Traffic Regression: PASS WITH REVIEWED COMPATIBILITY
-Candidate regressions: 0
-Windows Central Lab V6-FIXED: PASS
-Strict regressions: 0
-Exact-artifact immutability: PASS
-Linux production-size PERF: PASS
-CORE_PERF_GATE=PASS
-ALL24_CAPABILITY=PASS
-G1_G2_FALLBACK_CAPABILITY=PASS
-IMMUTABILITY=PASS
-RESULT=PASS
+Static review: PASS
+Focused acceptance: 49 passed
+Targeted regression: 175 passed
+Central Lab V6: PASS
+strict regressions: 0
+Linux authenticated API PERF: PASS
+payload <= 256 KiB: PASS
+read-only: PASS
+provider isolation: PASS
 ```
 
-Production-size snapshot:
+TRAFFIC-07-READ foundation evidence from PR #98:
 
 ```text
-bytes: 273235968
-SHA256: b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
+focused regression: 47 passed
+broader Current State + Analytics: 783 passed / 3 skipped
+candidate regressions: 0
+Windows Central Lab V6: PASS
+exact-artifact immutability: PASS
+Linux 10k-row read-only PERF/capacity: PASS
 ```
 
-Key measured p95/max:
+The reviewed Windows/SQLite infinity behavior reproduced on the exact PR #98
+baseline and is not a candidate regression.
+
+Source/semantic acceptance:
 
 ```text
-SH24 0.614524s / 0.698018s
-SH7  2.751386s / 2.795773s
-CA7  3.057368s / 3.291041s
-AS7  3.099320s / 3.113963s
-E24-C 0.740699s / 0.830057s
-ALL24 0.584355s / 0.595118s
+Current State only
+CurrentGuestTrafficReadService = semantic owner
+no query-time Omada
+no Observation/Visit/Registry/AuthSession calculation source
+no browser-side rate calculation
 ```
 
-All measured variants completed `10/10` successfully with `query_deadline=0`, `source_integrity=0`, `unexpected_5xx=0`; semantic stability PASS.
-
-Accepted ALL24 grouping: `history,statistics,peak,aps,apshare`.
-
-The reviewed Windows compatibility cases are not candidate regressions.
-
-Production closure: deploy FROM GIT → dormant PASS → separate activation → browser/product PASS.
+Owner-confirmed closure:
+`IMPLEMENTED → TESTED → MERGED → PRODUCTION DEPLOYED → ACTIVATED → COMPLETE`.
 
 ## Test Set Maintenance Rule
 
-Every accepted TASK / module / Admin panel / API / read-service change requires a
-fresh review of the actual test set.
+For the current TRAFFIC-07 state, relevant coverage includes at minimum:
 
-Coder handoff must explicitly list:
-- new test files;
-- existing test files changed;
-- exact focused/minimal command;
-- result of the allowed focused run.
+- `tests/analytics/test_current_guest_traffic.py`;
+- `tests/admin_web/test_traffic_online_guests.py`;
+- `tests/admin_web/test_traffic_online_guests_frontend.py`;
+- current guest traffic capacity/PERF benchmark coverage;
+- Current State read-service regressions;
+- Admin config/routes/query/capability/pagination regressions;
+- existing Traffic regressions proving isolation from historical products.
 
-After implementation handoff, Tech Lead / Assistant Tech Lead must determine:
-1. which new tests belong to TASK-focused verification;
-2. which existing modules belong to targeted Central Lab regression;
-3. which new cross-surface invariants exist;
-4. which test files belong in the current targeted regression command;
-5. whether the full repository test set changed;
-6. whether the Central Lab runner itself changed, or only the targeted command/test set changed.
+Permanent invariants:
+- `CurrentGuestTrafficReadService` remains semantic owner;
+- Current State remains the calculation source;
+- numeric rates require valid counter/continuity evidence;
+- missing/frozen/reset evidence must not fabricate numeric zero;
+- cursor chains remain deterministic and bounded;
+- Online Guests Traffic remains range-insensitive;
+- query-time Omada isolation remains intact.
 
-Permanent flow:
-
-```text
-NEW MODULE / PANEL / FEATURE
-→ NEW OR CHANGED TESTS
-→ TECH LEAD TEST-SET REVIEW
-→ UPDATED TARGETED REGRESSION COMMAND
-→ CENTRAL LAB ACCEPTANCE
-```
-
-Do not keep using an old targeted command merely because it was correct for the
-previous TASK.
-
-Adding an ordinary pytest file does not by itself require editing the full runner
-when normal full discovery already includes that file.
-
-Change the Central Lab runner only when its own contract changes, for example:
-- reviewed compatibility case/classification changes;
-- a new mandatory acceptance phase;
-- changed isolation/execution model;
-- repository/test-layout assumptions change;
-- new mandatory gate environment/dependency.
-
-Never add a new failure to compatibility merely to obtain a green candidate.
-
-For the current TRAFFIC-06 state, the relevant Traffic test set includes at minimum:
-
-- `tests/analytics/test_historical_traffic_ap_share.py`;
-- `tests/admin_web/test_traffic_ap_share.py`;
-- `tests/admin_web/test_traffic_ap_share_frontend.py`;
-- existing Current Traffic and historical product regressions touched by TRAFFIC-06;
-- independent-range broker/coordinator/admission regressions;
-- product projection/order and AP Share conservation/evidence invariants;
-- production-size PERF capability matrix.
-
-The exact targeted command must be reviewed again for `TRAFFIC-07` or conditional `TRAFFIC-07-READ`.
+No next Traffic TASK is currently assigned. When one is approved, Tech Lead
+reviews the targeted command/test set for that exact TASK.
 
 ## Acceptance before Publication
 

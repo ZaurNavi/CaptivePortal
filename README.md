@@ -25,45 +25,58 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@c5f9dc39bbf399847f147526c9c7ae15769a198c` |
-| Repository tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
-| Production deployed HEAD | `c5f9dc39bbf399847f147526c9c7ae15769a198c` |
-| Production tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
-| Current / History / Statistics / Peak | **Production active** |
-| Traffic by AP | **Production active** |
+| Repository implementation checkpoint | `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
+| Repository tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
+| Production deployed HEAD | `6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
+| Production tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
+| Traffic Current / History / Statistics / Peak | **Production active** |
+| Traffic by AP / AP Traffic Share | **Production active** |
 | Independent historical ranges | **Production active / acceptance PASS** |
-| AP Traffic Share | **Production active / acceptance PASS** |
-| Next Traffic stage | `TRAFFIC-07 — Online Guests Traffic` — NEXT / not implemented |
+| Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
+| Next Traffic stage | **Not yet assigned in the canonical roadmap** |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
 | Core guest authorization / CAPPORT | Implemented |
 | Observation / Current State / Visit Lifecycle | Implemented |
 | Analytics / Admin Web | Implemented |
-| Multi-Site / Tenant / RBAC | Future evolution |
 
 > Repository defaults, production enabled-state and dated acceptance evidence are different facts.
 
 ## Where the project is now
 
-Traffic is production-active through AP Traffic Share, with independent historical `24h | 7d` ranges.
+Traffic is production-active through Online Guests Traffic.
 
 ```mermaid
 flowchart LR
     T1[Current] --> T2[History] --> T3[Statistics] --> T4[Peak] --> T5[Traffic by AP]
-    T5 --> R[Independent ranges] --> T6[AP Traffic Share]
-    T6 --> T7{{NEXT: Online Guests Traffic}}
+    T5 --> R[Independent ranges] --> T6[AP Traffic Share] --> T7[Online Guests Traffic]
+    T7 --> N{{Next Traffic TASK: not assigned}}
 ```
 
-Current functional layout remains production-current, not a frozen final visual composition.
+Online Guests Traffic is near-current Current State-backed evidence and does not
+use historical `24h | 7d` selection.
+
+Current functional layout remains production-current, not a frozen final visual
+composition.
 
 ## What CaptivPortal does today
 
-Current Traffic capabilities include Current Network Throughput, Network Traffic History, Period Statistics, Peak Load, Traffic by AP and AP Traffic Share.
+Current Traffic capabilities:
 
-All historical Traffic panels have independent page-local `24h | 7d` range state. Current Network Throughput is range-insensitive. Historical requests remain product-scoped, sequentially admitted, and limited to one HTTP request in flight per page.
+- Current Network Throughput;
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP;
+- AP Traffic Share;
+- Online Guests Traffic.
 
-AP Traffic Share displays percent share derived from accepted interval-integrated Network Traffic evidence. It is not a sample-count ratio.
+Historical Traffic products retain independent page-local `24h | 7d` range state.
 
-Network Traffic remains AP/network evidence, not WAN/Internet/billing/SSID or Guest Session Traffic.
+Online Guests Traffic reads persisted Current State through
+`CurrentGuestTrafficReadService`, is range-insensitive and performs no query-time
+Omada calls.
+
+These are product evidence domains, not WAN/Internet billing counters.
 
 # Architecture
 
@@ -762,9 +775,9 @@ See [`docs/api/omada-open-api.md`](docs/api/omada-open-api.md).
 
 ```mermaid
 flowchart LR
-    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::next
+    T0[Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Share]:::done --> T7R[Online Guest Read]:::done --> T7[Online Guests]:::done
+    T7 --> N[Next task not assigned]
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
-    classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
 ```
 
 ## Near-term direction
@@ -780,8 +793,9 @@ TRAFFIC-04 DONE / PRODUCTION ACTIVE
 TRAFFIC-05 DONE / PRODUCTION ACTIVE
 TRAFFIC-RANGE-01 DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06 DONE / PRODUCTION ACTIVE
-TRAFFIC-07 NEXT / NOT IMPLEMENTED
-TRAFFIC-07-READ CONDITIONAL / NOT IMPLEMENTED
+TRAFFIC-07-READ DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07 COMPLETE / PRODUCTION ACTIVE
+next Traffic TASK NOT YET ASSIGNED
 ```
 
 ## Real second Site as a trigger

@@ -25,15 +25,15 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@c5f9dc39bbf399847f147526c9c7ae15769a198c` |
-| Repository tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
-| Production deployed HEAD | `c5f9dc39bbf399847f147526c9c7ae15769a198c` |
-| Production tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
-| Current / History / Statistics / Peak | **Production active** |
-| Traffic by AP | **Production active** |
+| Repository implementation checkpoint | `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
+| Repository tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
+| Production deployed HEAD | `6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
+| Production tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
+| Traffic Current / History / Statistics / Peak | **Production active** |
+| Traffic by AP / AP Traffic Share | **Production active** |
 | Independent historical ranges | **Production active / acceptance PASS** |
-| AP Traffic Share | **Production active / acceptance PASS** |
-| Следующий Traffic stage | `TRAFFIC-07 — Online Guests Traffic` — NEXT / не реализован |
+| Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
+| Следующий Traffic stage | **Пока не назначен в каноническом roadmap** |
 | Omada Controller family | Omada Software Controller 5.14.x |
 | Core guest authorization / CAPPORT | Реализованы |
 | Observation / Current State / Visit Lifecycle | Реализованы |
@@ -43,26 +43,40 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 ## Где проект находится сейчас
 
-Traffic production-active до AP Traffic Share включительно; historical панели имеют независимые `24h | 7d` диапазоны.
+Traffic production-active до Online Guests Traffic включительно.
 
 ```mermaid
 flowchart LR
     T1[Current] --> T2[History] --> T3[Statistics] --> T4[Peak] --> T5[Traffic by AP]
-    T5 --> R[Independent ranges] --> T6[AP Traffic Share]
-    T6 --> T7{{СЛЕДУЮЩИЙ: Online Guests Traffic}}
+    T5 --> R[Independent ranges] --> T6[AP Traffic Share] --> T7[Online Guests Traffic]
+    T7 --> N{{Следующий Traffic TASK пока не назначен}}
 ```
 
-Текущая functional layout является production-current, но не финальным визуальным дизайном.
+Online Guests Traffic — near-current Current State-backed панель и не использует
+historical `24h | 7d` selector.
+
+Текущая functional layout production-current, но не финальный визуальный дизайн.
 
 ## Что CaptivPortal умеет сегодня
 
-Current Traffic surface: Current Network Throughput, Network Traffic History, Period Statistics, Peak Load, Traffic by AP и AP Traffic Share.
+Current Traffic surface:
 
-Все historical Traffic panels имеют независимый page-local `24h | 7d` range state. Current Network Throughput range-insensitive. Historical requests остаются product-scoped, sequentially admitted и ограничены одним HTTP request in-flight на страницу.
+- Current Network Throughput;
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP;
+- AP Traffic Share;
+- Online Guests Traffic.
 
-AP Traffic Share показывает процентную долю accepted interval-integrated Network Traffic evidence; это не отношение sample counts.
+Historical Traffic products сохраняют независимый page-local `24h | 7d` range
+state.
 
-Network Traffic — AP/network evidence, не WAN/Internet/billing/SSID и не Guest Session Traffic.
+Online Guests Traffic читает persisted Current State через
+`CurrentGuestTrafficReadService`, range-insensitive и не делает query-time Omada
+calls.
+
+Это product evidence, а не WAN/Internet billing counter.
 
 # Архитектура
 
@@ -760,9 +774,9 @@ Controlled research на Omada 5.14.31 подтвердил:
 
 ```mermaid
 flowchart LR
-    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::next
+    T0[Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Share]:::done --> T7R[Online Guest Read]:::done --> T7[Online Guests]:::done
+    T7 --> N[Следующий task пока не назначен]
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
-    classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
 ```
 
 ## Near-term direction
@@ -778,8 +792,9 @@ TRAFFIC-04 DONE / PRODUCTION ACTIVE
 TRAFFIC-05 DONE / PRODUCTION ACTIVE
 TRAFFIC-RANGE-01 DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06 DONE / PRODUCTION ACTIVE
-TRAFFIC-07 NEXT / NOT IMPLEMENTED
-TRAFFIC-07-READ CONDITIONAL / NOT IMPLEMENTED
+TRAFFIC-07-READ DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07 COMPLETE / PRODUCTION ACTIVE
+next Traffic TASK NOT YET ASSIGNED
 ```
 
 ## Реальный второй Site как trigger

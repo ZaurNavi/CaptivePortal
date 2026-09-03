@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-09-01
+Updated: 2026-09-03
 Branch: `main`
-Runtime commit: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Runtime tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
-Commit source: merge PR #96 / TASK-TRAFFIC-06, 2026-09-01
+Runtime commit: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Commit source: merge PR #99 / TASK-TRAFFIC-07, 2026-09-02
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -89,6 +89,8 @@ Analytics has no worker/write lifecycle to stop.
 | Traffic by AP | Admin Web + Historical Traffic | product-scoped AP projection | none | no |
 | Independent Traffic Range per Panel | Admin Web frontend | page-local product range/intent orchestration | page-local memory only | no |
 | AP Traffic Share | Admin Web + Historical Traffic | accepted interval-integrated AP contribution ratio | none | no |
+| Online Guest Traffic Read Foundation | `app/analytics/current_guest_traffic.py`, Current State read service | persisted Current State | none | no |
+| Online Guests Traffic | Admin Web + Current Guest Traffic | persisted Current State / authorized guest scope | none | no |
 
 ## 5. Observation vs Current State
 
@@ -224,6 +226,7 @@ Traffic currently contains:
 - Peak Load;
 - Traffic by AP;
 - AP Traffic Share;
+- Online Guests Traffic;
 - independent historical panel ranges.
 
 Current endpoint:
@@ -238,32 +241,41 @@ Historical endpoint:
 GET /admin/api/v1/sites/<site_id>/traffic/history
 ```
 
-Canonical product projection:
+Historical projection:
 
 ```text
 products=history,statistics,peak,aps,apshare
 ```
 
-Legacy `include=` remains temporary backward compatibility. `include + products`
-and malformed/duplicate/out-of-order/unknown/empty projections return `400`.
-
-History, Statistics, Peak and Traffic by AP each own independent page-local
-`24h | 7d` selected/applied state.
-
-`TrafficHistoricalRequestBroker` is the historical page-local intent/coalescing/
-response-mapping layer. `CaptivPortalTrafficCoordinator` remains scheduler and
-lifecycle owner.
-
-Permanent invariant:
+Online Guests endpoint:
 
 ```text
-max historical HTTP requests in flight from one page = 1
-HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+GET /admin/api/v1/sites/<site_id>/traffic/online-guests/current
 ```
 
-Current Network Throughput remains range-insensitive.
+Online Guests contract:
 
-Business/data Admin API remains read-only.
+```text
+limit default=50
+limit max=200
+cursor=opaque
+capability=admin.read.devices
+```
+
+Canonical path:
+
+```text
+CurrentStateReadService
+→ CurrentGuestTrafficReadService
+→ AdminQueryService
+→ Admin API
+```
+
+Online Guests Traffic is range-insensitive. Historical products retain their
+independent `24h | 7d` page-local state.
+
+No browser/Admin request performs query-time Omada reads or client-rate
+calculation.
 
 ## 13. Admin security facts
 
@@ -362,57 +374,65 @@ Testing ownership remains:
 
 ```text
 Coder → focused/minimal TASK/module tests
-Owner + Tech Lead / Central Lab → cross-module/broader/full/official acceptance
+Owner + Tech Lead / Central Lab → broader/full/official acceptance
 ```
 
 Current Traffic closure evidence:
 
 ```text
-artifact: c5f9dc39bbf399847f147526c9c7ae15769a198c
-tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
-TASK-TRAFFIC-06: DONE / PRODUCTION ACTIVE
-Tech Lead Static Review: PASS
-targeted Traffic regression: PASS WITH REVIEWED COMPATIBILITY
-Windows Central Lab V6-FIXED: PASS
-Linux production-size PERF: PASS
+artifact: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
+tree: b669f368b0062fcb100b24758cf05e2c4b500144
+TRAFFIC-07-READ: DONE
+TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
+PR #98: merged
+PR #99: merged
+Static review: PASS
+Focused acceptance: 49 passed
+Targeted regression: 175 passed
+Central Lab V6: PASS
 strict regressions: 0
+Linux authenticated API PERF: PASS
+read-only/provider isolation: PASS
 ```
 
-All PERF measured variants were 10/10 successful with zero query deadlines, source-integrity failures and unexpected 5xx responses.
+PR #98 separately established Current Guest Traffic read-foundation
+immutability and 10k-row Linux capacity/PERF PASS.
 
-After each accepted TASK Tech Lead reviews changed tests, targeted regression set, cross-surface invariants and whether the runner contract changed.
+After each accepted TASK Tech Lead reviews changed tests, targeted regression
+set, cross-surface invariants and runner-contract impact.
 
 ## 19. Current vs historical vs change-intent
 
 Current repository/production Traffic implementation includes:
+
 - Current Network Throughput;
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
 - Traffic by AP;
 - Independent Traffic Range per Panel;
-- AP Traffic Share.
+- AP Traffic Share;
+- Online Guest Traffic Read Foundation;
+- Online Guests Traffic.
 
 Owner-confirmed production checkpoint:
 
 ```text
-production HEAD: c5f9dc39bbf399847f147526c9c7ae15769a198c
-production tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
-WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
+production HEAD: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
+production tree: b669f368b0062fcb100b24758cf05e2c4b500144
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 captive-portal.service=active
-TRAFFIC-06: DONE / PRODUCTION ACTIVE
+TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
 ```
 
-Next product change-intent:
+Online Guests Traffic is Current State-backed near-current authorized guest rate
+evidence. Historical Network Traffic remains Observation-backed.
 
-```text
-TRAFFIC-07 — Online Guests Traffic
-NEXT / NOT IMPLEMENTED
-```
+No approved next Traffic TASK is currently assigned in the canonical repository
+roadmap. No `TRAFFIC-08` is current change-intent.
 
-`TRAFFIC-07-READ` is CONDITIONAL / NOT IMPLEMENTED and is created only if Current Rate requires substantial backend foundation.
-
-Historical TASK/PR evidence remains historical and does not override current production truth.
+Historical TASK/PR evidence remains historical.
 
 ## 20. Repository-only unknowns
 
