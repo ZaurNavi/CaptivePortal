@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-09-01
-Baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Updated: 2026-09-03
+Baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
 
 ## Boundary
 
@@ -50,6 +50,7 @@ WEB_ADMIN_TRAFFIC_PEAK_ENABLED=false
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=false
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false
 ```
 
 Owner-confirmed production state:
@@ -62,6 +63,7 @@ WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 ```
 
 Current functional panels:
@@ -71,7 +73,8 @@ Current functional panels:
 3. Period Statistics;
 4. Peak Load;
 5. Traffic by AP;
-6. AP Traffic Share.
+6. AP Traffic Share;
+7. Online Guests Traffic.
 
 Current Network Throughput is range-insensitive.
 
@@ -189,6 +192,43 @@ Current production Traffic by AP uses `network_traffic_by_ap.v1` in Mbps and sha
 Current production AP Traffic Share uses `network_traffic_ap_share.v1`; internal unit is `fraction`, display unit is `percent`, and product token is `apshare`.
 
 AP Share requires Admin + Traffic + History + Independent Ranges. It has its own page-local `24h | 7d` selected/applied range and uses the existing broker/coordinator/admission path.
+
+## Online Guests Traffic
+
+Canonical endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/online-guests/current
+```
+
+Query contract:
+
+```text
+limit default=50
+limit max=200
+cursor=opaque continuation cursor
+capability=admin.read.devices
+```
+
+Canonical path:
+
+```text
+Current State
+→ CurrentStateReadService
+→ CurrentGuestTrafficReadService
+→ AdminQueryService
+→ Admin API
+```
+
+`CurrentGuestTrafficReadService` is the semantic owner. The browser validates and
+renders payloads; it does not calculate current guest rates.
+
+Online Guests Traffic is range-insensitive and does not use the historical
+`TrafficHistoricalRequestBroker` / 10-second admission guard.
+
+Online Guest means controller-reported active authorized wireless guest in the
+latest accepted Current State guest scope, not independent proof of
+instantaneous physical RF presence.
 
 ## UI/design status
 

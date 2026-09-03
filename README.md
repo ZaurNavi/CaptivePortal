@@ -25,45 +25,60 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@c5f9dc39bbf399847f147526c9c7ae15769a198c` |
-| Repository tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
-| Production deployed HEAD | `c5f9dc39bbf399847f147526c9c7ae15769a198c` |
-| Production tree | `0831ecf598b5760e8ede2e9e94a25b926480c2dd` |
-| Current / History / Statistics / Peak | **Production active** |
+| Repository implementation checkpoint | `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
+| Repository tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
+| Production deployed HEAD | `6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
+| Production tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
+| Current Network Throughput | **Production active** |
+| Network Traffic History | **Production active** |
+| Period Statistics | **Production active** |
+| Peak Load | **Production active** |
 | Traffic by AP | **Production active** |
 | Independent historical ranges | **Production active / acceptance PASS** |
 | AP Traffic Share | **Production active / acceptance PASS** |
-| Next Traffic stage | `TRAFFIC-07 — Online Guests Traffic` — NEXT / not implemented |
+| Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
+| Next Traffic stage | **Not yet assigned in the canonical roadmap** |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
-| Core guest authorization / CAPPORT | Implemented |
-| Observation / Current State / Visit Lifecycle | Implemented |
+| Core guest authorization | Implemented |
+| RFC 8908 CAPPORT | Implemented |
+| Visitor Registry | Implemented |
+| Visit Lifecycle | Implemented, schema v2 |
+| Observation Foundation | Implemented, schema v1 |
+| Current State | Implemented, schema v1 |
 | Analytics / Admin Web | Implemented |
 | Multi-Site / Tenant / RBAC | Future evolution |
+| Current topology | Single application process; HA/multi-process requires ADR |
 
 > Repository defaults, production enabled-state and dated acceptance evidence are different facts.
 
 ## Where the project is now
 
-Traffic is production-active through AP Traffic Share, with independent historical `24h | 7d` ranges.
+Traffic is production-active through Online Guests Traffic.
 
-```mermaid
-flowchart LR
-    T1[Current] --> T2[History] --> T3[Statistics] --> T4[Peak] --> T5[Traffic by AP]
-    T5 --> R[Independent ranges] --> T6[AP Traffic Share]
-    T6 --> T7{{NEXT: Online Guests Traffic}}
-```
+Online Guests Traffic is a separate near-current Current State-backed panel and
+does not use the historical `24h | 7d` selector.
 
-Current functional layout remains production-current, not a frozen final visual composition.
+Current functional layout remains production-current, not a frozen final visual
+composition.
 
 ## What CaptivPortal does today
 
-Current Traffic capabilities include Current Network Throughput, Network Traffic History, Period Statistics, Peak Load, Traffic by AP and AP Traffic Share.
+At the current runtime checkpoint, Traffic includes:
 
-All historical Traffic panels have independent page-local `24h | 7d` range state. Current Network Throughput is range-insensitive. Historical requests remain product-scoped, sequentially admitted, and limited to one HTTP request in flight per page.
+- Current Network Throughput;
+- Network Traffic History;
+- Period Statistics;
+- Peak Load;
+- Traffic by AP;
+- AP Traffic Share;
+- Online Guests Traffic.
 
-AP Traffic Share displays percent share derived from accepted interval-integrated Network Traffic evidence. It is not a sample-count ratio.
+Historical Traffic panels retain independent page-local `24h | 7d` ranges.
+Online Guests Traffic reads persisted Current State through
+`CurrentGuestTrafficReadService`, is range-insensitive and does not perform
+query-time Omada calls.
 
-Network Traffic remains AP/network evidence, not WAN/Internet/billing/SSID or Guest Session Traffic.
+The Traffic domains are product evidence, not WAN/Internet billing counters.
 
 # Architecture
 
@@ -770,19 +785,23 @@ flowchart LR
 ## Near-term direction
 
 ```text
-TRAFFIC-00 DONE
-TRAFFIC-01 DONE / PRODUCTION ACTIVE
-TRAFFIC-02-READ DONE
-TRAFFIC-02 DONE / PRODUCTION ACTIVE
+TRAFFIC-00         DONE
+TRAFFIC-01         DONE / PRODUCTION ACTIVE
+TRAFFIC-02-READ    DONE
+TRAFFIC-02         DONE / PRODUCTION ACTIVE
 TRAFFIC-02-PERF-01 DONE
-TRAFFIC-03 DONE / PRODUCTION ACTIVE
-TRAFFIC-04 DONE / PRODUCTION ACTIVE
-TRAFFIC-05 DONE / PRODUCTION ACTIVE
-TRAFFIC-RANGE-01 DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
-TRAFFIC-06 DONE / PRODUCTION ACTIVE
-TRAFFIC-07 NEXT / NOT IMPLEMENTED
-TRAFFIC-07-READ CONDITIONAL / NOT IMPLEMENTED
+TRAFFIC-03         DONE / PRODUCTION ACTIVE
+TRAFFIC-04         DONE / PRODUCTION ACTIVE
+TRAFFIC-05         DONE / PRODUCTION ACTIVE
+TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
+TRAFFIC-06         DONE / PRODUCTION ACTIVE
+TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
+next Traffic TASK  NOT YET ASSIGNED
 ```
+
+No `TRAFFIC-08` or other successor is canonical until Owner / Tech Lead approves
+a separate TASK.
 
 ## Real second Site as a trigger
 

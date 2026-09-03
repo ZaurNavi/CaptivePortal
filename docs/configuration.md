@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-09-01
-Baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Updated: 2026-09-03
+Baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -221,6 +221,7 @@ WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 ```
 
 Feature dependencies:
@@ -232,8 +233,7 @@ Peak requires Admin + Traffic + History + Statistics.
 Traffic by AP requires Admin + Traffic + History.
 Independent ranges requires Admin + Traffic + History.
 AP Traffic Share requires Admin + Traffic + History + Independent ranges.
-Online Guests Traffic requires Admin + Traffic only and remains repository-default
-off until a separate Owner-controlled production activation.
+Online Guests Traffic requires Admin + Traffic only. Repository default remains `false`; Owner-confirmed production activation is `true`.
 ```
 
 Independent ranges does **not** require every optional historical product to be

@@ -1,8 +1,8 @@
 # Analytics
 
 Status: current module contract
-Updated: 2026-09-01
-Baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
+Updated: 2026-09-03
+Baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
 
 ## Purpose
 
@@ -16,6 +16,9 @@ source DBs.
 `ObservationReadService`, `VisitLifecycleReadService`, `VisitorRegistryReadService`
 → `AnalyticsSourceGateway`.
 
+`CurrentStateReadService` is the persisted Current State read boundary used by
+`CurrentGuestTrafficReadService`.
+
 Source health checks validate expected schema and SQLite `PRAGMA query_only`.
 
 ## Services
@@ -27,6 +30,7 @@ Current services include:
 - `VisitAnalyticsService`;
 - `CurrentTrafficReadService`;
 - `HistoricalTrafficReadService`;
+- `CurrentGuestTrafficReadService`;
 - `HomeActivityReadService`.
 
 ## Home Activity
@@ -46,6 +50,37 @@ Rules:
 - `wired` primary, `lan` fallback;
 - one source family per Site result;
 - explicit freshness/AP skew.
+
+## Online Guests Traffic current rate
+
+`CurrentGuestTrafficReadService` is the semantic owner for `TASK-TRAFFIC-07`.
+
+Canonical source:
+
+```text
+persisted Current State
+→ CurrentStateReadService
+→ CurrentGuestTrafficReadService
+```
+
+Canonical contracts:
+
+```text
+metric = network_traffic_online_guest_current_rate.v1
+population = fresh_complete_current_state_authorized_guest_scope.v1
+rate = current_connection_counter_delta_interval_average.v1
+baseline = nearest_previous_complete_same_site_scope_cycle.v1
+continuity = omada_controller_connection_progress_v1
+boundary observation = sampled_current_state_evidence.v1
+unit = Mbps
+```
+
+It does not use Observation, Visit, Visitor Registry, AuthSession, query-time
+Omada calls or browser-side rate calculations.
+
+Online Guest means controller-reported active authorized wireless guest in the
+accepted Current State guest scope. This is not independent proof of
+instantaneous RF presence.
 
 ## Historical Network Traffic
 

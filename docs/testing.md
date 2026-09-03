@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-01
+Updated: 2026-09-03
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Production deployed HEAD: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Production tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Documentation/current-state implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Production deployed HEAD: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Production tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 ## Responsibility model
 
@@ -335,7 +335,49 @@ During TRAFFIC-00 acceptance:
 
 This is troubleshooting history, not a current product defect.
 
-### Latest Traffic acceptance evidence
+### Latest Traffic acceptance evidence — TRAFFIC-07
+
+Current accepted repository / production artifact:
+
+```text
+HEAD: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
+tree: b669f368b0062fcb100b24758cf05e2c4b500144
+TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
+PR #98: merged
+PR #99: merged
+production deployment / activation: PASS
+```
+
+TASK-TRAFFIC-07 product gate evidence:
+
+```text
+Static review: PASS
+Focused acceptance: 49 passed
+Targeted regression: 175 passed
+Central Lab V6: PASS
+strict regressions: 0
+Linux authenticated API PERF: PASS
+payload <= 256 KiB: PASS
+read-only: PASS
+provider isolation: PASS
+```
+
+TRAFFIC-07-READ foundation evidence from PR #98:
+
+```text
+focused regression: 47 passed
+broader Current State + Analytics: 783 passed / 3 skipped
+candidate regressions: 0
+Windows Central Lab V6: PASS
+exact-artifact immutability: PASS
+Linux 10k-row read-only PERF/capacity: PASS
+```
+
+The known Windows/SQLite infinity behavior reproduced on the exact PR #98
+baseline and is not a candidate regression.
+
+### Previous Traffic acceptance evidence — TRAFFIC-06
 
 Current accepted repository / production artifact:
 
@@ -434,17 +476,29 @@ Change the Central Lab runner only when its own contract changes, for example:
 
 Never add a new failure to compatibility merely to obtain a green candidate.
 
-For the current TRAFFIC-06 state, the relevant Traffic test set includes at minimum:
+### Current TRAFFIC-07 targeted set
 
-- `tests/analytics/test_historical_traffic_ap_share.py`;
-- `tests/admin_web/test_traffic_ap_share.py`;
-- `tests/admin_web/test_traffic_ap_share_frontend.py`;
-- existing Current Traffic and historical product regressions touched by TRAFFIC-06;
-- independent-range broker/coordinator/admission regressions;
-- product projection/order and AP Share conservation/evidence invariants;
-- production-size PERF capability matrix.
+For the current TRAFFIC-07 state, relevant coverage includes at minimum:
 
-The exact targeted command must be reviewed again for `TRAFFIC-07` or conditional `TRAFFIC-07-READ`.
+- `tests/analytics/test_current_guest_traffic.py`;
+- `tests/admin_web/test_traffic_online_guests.py`;
+- `tests/admin_web/test_traffic_online_guests_frontend.py`;
+- current guest traffic capacity/PERF benchmark coverage;
+- Current State read-service regressions;
+- Admin config/routes/query/capability/pagination regressions;
+- existing Traffic regressions proving historical/current product isolation.
+
+Permanent TRAFFIC-07 invariants:
+- `CurrentGuestTrafficReadService` remains semantic owner;
+- persisted Current State remains the calculation source;
+- numeric rates require valid counter/continuity evidence;
+- missing/frozen/reset evidence must not fabricate numeric zero;
+- cursor chains remain deterministic and bounded;
+- Online Guests Traffic remains range-insensitive;
+- query-time Omada isolation remains intact.
+
+No next Traffic TASK is currently assigned. When one is approved, Tech Lead
+reviews the targeted command/test set again for that exact TASK.
 
 ## Acceptance before Publication
 

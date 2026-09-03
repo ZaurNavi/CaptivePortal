@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-01
-Current repository implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Confirmed production deployed HEAD: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Confirmed production tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Updated: 2026-09-03
+Current repository implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Confirmed production deployed HEAD: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Confirmed production tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 ## Repository vs production
 
@@ -171,10 +171,10 @@ Owner-confirmed current state:
 
 ```text
 repository / production HEAD:
-c5f9dc39bbf399847f147526c9c7ae15769a198c
+6425988b5b4ec5ff38bf9c67c74846c3806f668f
 
 repository / production tree:
-0831ecf598b5760e8ede2e9e94a25b926480c2dd
+b669f368b0062fcb100b24758cf05e2c4b500144
 
 captive-portal.service:
 active
@@ -189,6 +189,7 @@ Period Statistics
 Peak Load
 Traffic by AP
 AP Traffic Share
+Online Guests Traffic
 ```
 
 Production flags:
@@ -201,6 +202,7 @@ WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 ```
 
 Repository defaults remain false, including `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false`.
@@ -306,6 +308,61 @@ SHA256=b65a2ce7718454571f08c474c1b59045c3da415d1e160a55725d5095e49287eb
 
 The reviewed Windows SQLite infinity compatibility case is known compatibility,
 not a TASK regression.
+
+## TRAFFIC-07 deployment / activation history
+
+Implementation layers:
+
+```text
+PR #98 — TRAFFIC-07-READ / CurrentGuestTrafficReadService read foundation
+PR #99 — Admin: add Online Guests Traffic
+```
+
+Final production artifact:
+
+```text
+PR #99 head: 0d7782d93c028226f9396c2d089db76e7986a4b2
+accepted / production tree: b669f368b0062fcb100b24758cf05e2c4b500144
+merge / production commit: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
+```
+
+Deployment was performed **FROM GIT**.
+
+Canonical closure:
+
+```text
+IMPLEMENTED
+→ TESTED
+→ MERGED
+→ PRODUCTION DEPLOYED
+→ ACTIVATED
+→ COMPLETE / PRODUCTION ACTIVE
+```
+
+Production activation:
+
+```text
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
+captive-portal.service=active
+```
+
+PR #99 acceptance:
+
+```text
+Static review: PASS
+Focused acceptance: 49 passed
+Targeted regression: 175 passed
+Central Lab V6: PASS
+strict regressions: 0
+Linux authenticated API PERF: PASS
+payload <= 256 KiB: PASS
+read-only: PASS
+provider isolation: PASS
+```
+
+Online Guests Traffic reads persisted Current State only. No separate collector,
+Traffic DB, schema migration, Observation fallback or query-time Omada path was
+introduced.
 
 ## Feature activation
 

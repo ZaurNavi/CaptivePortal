@@ -1,9 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-09-01
-Runtime implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Runtime tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Updated: 2026-09-03
+Runtime implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -39,14 +39,16 @@ Runtime tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
 | Traffic by AP | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
 | Independent Traffic Range per Panel | current; default disabled | `app/admin_web/` | `modules/traffic.md` | page-local memory only | no |
 | AP Traffic Share | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
+| Online Guest Traffic Read Foundation | current | `app/analytics/current_guest_traffic.py`, `app/current_state/read_service.py` | `modules/traffic.md`, `modules/analytics.md` | reads Current State | no |
+| Online Guests Traffic | current; default disabled | `app/admin_web/`, `app/analytics/current_guest_traffic.py` | `modules/traffic.md`, `modules/admin-web.md` | reads Current State | no |
 
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-09-01:
+Owner-provided production checkpoint 2026-09-03:
 
 ```text
-HEAD: daf68e91fc759188980cf8741913e6b60a58eb62
-tree: 0831ecf598b5760e8ede2e9e94a25b926480c2dd
+HEAD: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
+tree: b669f368b0062fcb100b24758cf05e2c4b500144
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -58,6 +60,8 @@ TRAFFIC-04 Peak: production active
 TRAFFIC-05 Traffic by AP: production active
 TRAFFIC-RANGE-01: production active / production acceptance PASS
 TRAFFIC-06 AP Traffic Share: production active / production acceptance PASS
+TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
+TRAFFIC-07 Online Guests Traffic: COMPLETE / PRODUCTION ACTIVE
 
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
@@ -66,18 +70,15 @@ WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 
 captive-portal.service=active
 ```
 
 ## Next Traffic item
 
-```text
-TRAFFIC-07 — Online Guests Traffic
-NEXT / NOT IMPLEMENTED
-```
-
-`TRAFFIC-07-READ` is conditional and is created only if Current Rate requires substantial backend foundation.
+No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is
+canonical change-intent.
 
 ## Production evidence rule
 

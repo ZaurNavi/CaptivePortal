@@ -1,9 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-09-01
-Runtime implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Runtime tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
+Updated: 2026-09-03
+Runtime implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 ## 1. Mental model
 
@@ -218,6 +218,32 @@ HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
 No QueryDeadline, browser-timeout or Admin-concurrency increase is part of this
 architecture.
 
+### Online Guests Traffic
+
+`TASK-TRAFFIC-07` adds a separate near-current Current State-backed Traffic
+product without changing the historical Network Traffic semantic owner.
+
+```text
+Current State
+→ CurrentStateReadService
+→ CurrentGuestTrafficReadService
+→ AdminQueryService
+→ Admin API
+→ Admin Console / Traffic / Online Guests Traffic
+```
+
+Semantic owner:
+
+```text
+CurrentGuestTrafficReadService
+```
+
+The calculation source is persisted Current State only. Observation, Visit,
+Visitor Registry, AuthSession, query-time Omada calls and browser-side traffic
+calculations are not sources for this product.
+
+No separate collector or database was added.
+
 ## 8. Admin Web
 
 Guest auth and Admin auth remain separate.
@@ -231,10 +257,11 @@ Traffic production-current functional surface:
 - Period Statistics;
 - Peak Load;
 - Traffic by AP;
-- AP Traffic Share.
+- AP Traffic Share;
+- Online Guests Traffic.
 
 Historical panels have independent `24h | 7d` selectors.
-Current Network Throughput has none.
+Current Network Throughput and Online Guests Traffic have none.
 
 Canonical historical API remains:
 

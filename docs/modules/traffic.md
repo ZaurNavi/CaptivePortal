@@ -1,12 +1,12 @@
 # Admin Console Traffic
 
 Status: current production module contract
-Updated: 2026-09-01
-Repository implementation baseline: `main@c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Repository tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
-Production deployed HEAD: `c5f9dc39bbf399847f147526c9c7ae15769a198c`
-Production tree: `0831ecf598b5760e8ede2e9e94a25b926480c2dd`
-Latest production acceptance: `TASK-TRAFFIC-06 — AP Traffic Share — PRODUCTION PASS / CLOSED`
+Updated: 2026-09-03
+Repository implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Repository tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Production deployed HEAD: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Production tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Latest production acceptance: `TASK-TRAFFIC-07 — Online Guests Traffic — COMPLETE / PRODUCTION ACTIVE`
 
 ## Current roadmap state
 
@@ -41,14 +41,15 @@ DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06 — AP Traffic Share
 DONE / PRODUCTION ACTIVE
 
-TRAFFIC-07 — Online Guests Traffic
-NEXT / NOT IMPLEMENTED
-
 TRAFFIC-07-READ — Current Rate backend foundation
-CONDITIONAL / NOT IMPLEMENTED
+DONE / READ FOUNDATION IMPLEMENTED
+
+TRAFFIC-07 — Online Guests Traffic
+COMPLETE / PRODUCTION ACTIVE
 ```
 
-`TRAFFIC-07` is the next product roadmap item. `TRAFFIC-07-READ` is conditional and is created only if Current Rate requires substantial backend foundation.
+No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is
+canonical change-intent.
 
 ## Production feature state — 2026-09-01
 
@@ -62,6 +63,7 @@ WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
 WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 ```
 
 Repository defaults remain `false` for these feature flags, including `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false`.
@@ -75,7 +77,8 @@ Production Traffic contains:
 3. Period Statistics;
 4. Peak Load;
 5. Traffic by AP;
-6. AP Traffic Share.
+6. AP Traffic Share;
+7. Online Guests Traffic.
 
 Current layout is production-current functional layout, not a permanently approved final visual composition.
 
@@ -175,6 +178,92 @@ sample count != traffic share
 Share is accepted interval-integrated Network Traffic contribution over common comparable evidence. It is not user count, sample count, Internet share, SSID share or billing share. The panel uses its own independent 24h/7d selected/applied range and the `apshare` product projection. It reuses `HistoricalTrafficReadService` and adds no collector, Traffic DB, schema/index, cache/rollup or Omada path.
 
 Current status family includes `ok | partial | insufficient_data | unsupported_population`. Safe current-source unavailability may produce truthful partial historical Share; malformed/contradictory current evidence and impossible pagination fail closed; generic source outage is not relabelled as an integrity failure.
+
+## Online Guests Traffic
+
+`TASK-TRAFFIC-07` is complete and production-active.
+
+Canonical source path:
+
+```text
+Current State
+→ CurrentStateReadService
+→ CurrentGuestTrafficReadService
+→ AdminQueryService
+→ Admin API
+→ Admin Console / Traffic / Online Guests Traffic
+```
+
+Semantic owner:
+
+```text
+CurrentGuestTrafficReadService
+```
+
+Canonical endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/online-guests/current
+```
+
+Pagination/capability:
+
+```text
+limit default = 50
+limit maximum = 200
+cursor = opaque continuation cursor
+capability = admin.read.devices
+```
+
+Canonical metric contracts:
+
+```text
+metric = network_traffic_online_guest_current_rate.v1
+population = fresh_complete_current_state_authorized_guest_scope.v1
+rate = current_connection_counter_delta_interval_average.v1
+baseline = nearest_previous_complete_same_site_scope_cycle.v1
+continuity = omada_controller_connection_progress_v1
+boundary observation = sampled_current_state_evidence.v1
+unit = Mbps
+```
+
+Online Guest means controller-reported active authorized wireless guest in the
+latest accepted Current State guest scope. It is not independent proof of
+instantaneous physical RF presence.
+
+The panel shows Online Guest, SSID, AP, Download, Upload, Total, Evidence,
+Online Guest count, Population completeness, Rate Evidence, Source Health,
+observed time and interval.
+
+The product does not use Observation, Visit, Visitor Registry, AuthSession,
+query-time Omada calls or browser-side traffic calculations. No separate
+collector/database was added.
+
+Online Guests Traffic is range-insensitive and does not use historical
+`TrafficHistoricalRequestBroker` / admission-guard orchestration.
+
+### TRAFFIC-07 closure
+
+```text
+TRAFFIC-07-READ PR: #98
+TRAFFIC-07 PR: #99
+PR #99 head: 0d7782d93c028226f9396c2d089db76e7986a4b2
+accepted / production tree: b669f368b0062fcb100b24758cf05e2c4b500144
+merge / production commit: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
+WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
+captive-portal.service=active
+```
+
+Canonical status:
+
+```text
+IMPLEMENTED
+→ TESTED
+→ MERGED
+→ PRODUCTION DEPLOYED
+→ ACTIVATED
+→ COMPLETE / PRODUCTION ACTIVE
+```
 
 ## Historical request broker / admission
 
@@ -511,17 +600,10 @@ Do not list this one-time observation as an open current defect or technical deb
 
 ## Next step
 
-Next product roadmap item:
-
 ```text
-TRAFFIC-07 — Online Guests Traffic
-NEXT / NOT IMPLEMENTED
+TRAFFIC-07 — COMPLETE / PRODUCTION ACTIVE
+next Traffic TASK — NOT YET ASSIGNED
 ```
 
-Conditional preparatory foundation:
-
-```text
-TRAFFIC-07-READ — CONDITIONAL / NOT IMPLEMENTED
-```
-
-`TRAFFIC-07-READ` is created only if Current Rate requires substantial backend foundation. No unaccepted TRAFFIC-07 detail is promoted to current architecture.
+No approved `TRAFFIC-08` or other successor is current change-intent. A new
+Traffic item becomes canonical only after separate Owner / Tech Lead approval.
