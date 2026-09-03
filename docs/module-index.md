@@ -63,12 +63,17 @@ TRAFFIC-06 AP Traffic Share: production active / production acceptance PASS
 TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07 Online Guests Traffic: COMPLETE / PRODUCTION ACTIVE
 
+WEB_ADMIN_TRAFFIC_ENABLED=true
+WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
+WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
+WEB_ADMIN_TRAFFIC_PEAK_ENABLED=true
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
+WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
+
 captive-portal.service=active
 ```
-
-Existing earlier Traffic production flags/acceptance remain as documented in
-`modules/traffic.md` and `deployment.md`.
 
 ## Next Traffic item
 

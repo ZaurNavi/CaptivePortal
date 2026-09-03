@@ -434,6 +434,50 @@ Production closure: deploy FROM GIT → dormant PASS → separate activation →
 
 ## Test Set Maintenance Rule
 
+Every accepted TASK / module / Admin panel / API / read-service change requires a
+fresh review of the actual test set.
+
+Coder handoff must explicitly list:
+- new test files;
+- existing test files changed;
+- exact focused/minimal command;
+- result of the allowed focused run.
+
+After implementation handoff, Tech Lead / Assistant Tech Lead must determine:
+1. which new tests belong to TASK-focused verification;
+2. which existing modules belong to targeted Central Lab regression;
+3. which new cross-surface invariants exist;
+4. which test files belong in the current targeted regression command;
+5. whether the full repository test set changed;
+6. whether the Central Lab runner itself changed, or only the targeted command/test set changed.
+
+Permanent flow:
+
+```text
+NEW MODULE / PANEL / FEATURE
+→ NEW OR CHANGED TESTS
+→ TECH LEAD TEST-SET REVIEW
+→ UPDATED TARGETED REGRESSION COMMAND
+→ CENTRAL LAB ACCEPTANCE
+```
+
+Do not keep using an old targeted command merely because it was correct for the
+previous TASK.
+
+Adding an ordinary pytest file does not by itself require editing the full runner
+when normal full discovery already includes that file.
+
+Change the Central Lab runner only when its own contract changes, for example:
+- reviewed compatibility case/classification changes;
+- a new mandatory acceptance phase;
+- changed isolation/execution model;
+- repository/test-layout assumptions change;
+- new mandatory gate environment/dependency.
+
+Never add a new failure to compatibility merely to obtain a green candidate.
+
+### Current TRAFFIC-07 targeted set
+
 For the current TRAFFIC-07 state, relevant coverage includes at minimum:
 
 - `tests/analytics/test_current_guest_traffic.py`;
@@ -444,7 +488,7 @@ For the current TRAFFIC-07 state, relevant coverage includes at minimum:
 - Admin config/routes/query/capability/pagination regressions;
 - existing Traffic regressions proving historical/current product isolation.
 
-Permanent invariants:
+Permanent TRAFFIC-07 invariants:
 - `CurrentGuestTrafficReadService` remains semantic owner;
 - persisted Current State remains the calculation source;
 - numeric rates require valid counter/continuity evidence;
@@ -454,7 +498,7 @@ Permanent invariants:
 - query-time Omada isolation remains intact.
 
 No next Traffic TASK is currently assigned. When one is approved, Tech Lead
-reviews the targeted command/test set for that exact TASK.
+reviews the targeted command/test set again for that exact TASK.
 
 ## Acceptance before Publication
 
