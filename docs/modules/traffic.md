@@ -51,6 +51,12 @@ COMPLETE / PRODUCTION ACTIVE
 No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is
 canonical change-intent.
 
+The dormant Historical Traffic projection foundation is controlled separately by
+`TRAFFIC_PROJECTION_ENABLED=false` and
+`WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED=false`. It materializes only derived,
+discardable Observation facts in `traffic_projection.sqlite3`; Observation remains
+authoritative. Both controls require a separately approved production activation.
+
 ## Production feature state — 2026-09-01
 
 Owner-confirmed production Traffic flags:

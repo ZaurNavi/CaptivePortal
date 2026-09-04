@@ -364,6 +364,20 @@ CURRENT_STATE_SHUTDOWN_TIMEOUT_SECONDS = os.getenv(
     "CURRENT_STATE_SHUTDOWN_TIMEOUT_SECONDS", "20"
 )
 
+# Historical Traffic derived projection (separate worker; safely dormant).
+TRAFFIC_PROJECTION_ENABLED = os.getenv("TRAFFIC_PROJECTION_ENABLED", "false")
+TRAFFIC_PROJECTION_DB_PATH = os.getenv(
+    "TRAFFIC_PROJECTION_DB_PATH",
+    "/opt/CaptivePortal/data/traffic_projection.sqlite3",
+)
+TRAFFIC_PROJECTION_WRITER_LOCK_PATH = os.getenv(
+    "TRAFFIC_PROJECTION_WRITER_LOCK_PATH",
+    "/opt/CaptivePortal/data/traffic_projection.writer.lock",
+)
+WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED = os.getenv(
+    "WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED", "false"
+)
+
 # Analytics Read and Data Quality Foundation and internal read API
 ANALYTICS_FOUNDATION_ENABLED = os.getenv(
     "ANALYTICS_FOUNDATION_ENABLED", "false"

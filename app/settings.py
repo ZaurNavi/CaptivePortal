@@ -100,6 +100,9 @@ from app.config import (
     CURRENT_STATE_CLEANUP_MAX_DURATION_SECONDS,
     CURRENT_STATE_SQLITE_BUSY_TIMEOUT_MS,
     CURRENT_STATE_SHUTDOWN_TIMEOUT_SECONDS,
+    TRAFFIC_PROJECTION_ENABLED, TRAFFIC_PROJECTION_DB_PATH,
+    TRAFFIC_PROJECTION_WRITER_LOCK_PATH,
+    WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED,
     ANALYTICS_FOUNDATION_ENABLED, ANALYTICS_WIRELESS_ENABLED,
     ANALYTICS_VISIT_ENABLED, ANALYTICS_DEFAULT_LIMIT,
     ANALYTICS_MAX_LIMIT, ANALYTICS_MAX_QUERY_WINDOW_DAYS,
@@ -475,6 +478,14 @@ def get_settings() -> dict:
         ),
         "current_state_shutdown_timeout_seconds": (
             CURRENT_STATE_SHUTDOWN_TIMEOUT_SECONDS
+        ),
+        "traffic_projection_enabled": TRAFFIC_PROJECTION_ENABLED,
+        "traffic_projection_db_path": TRAFFIC_PROJECTION_DB_PATH,
+        "traffic_projection_writer_lock_path": (
+            TRAFFIC_PROJECTION_WRITER_LOCK_PATH
+        ),
+        "web_admin_traffic_projection_read_enabled": (
+            WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED
         ),
         "analytics_foundation_enabled": ANALYTICS_FOUNDATION_ENABLED,
         "analytics_wireless_enabled": ANALYTICS_WIRELESS_ENABLED,

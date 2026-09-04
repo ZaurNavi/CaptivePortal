@@ -206,8 +206,27 @@ def create_analytics_runtime(
         home_activity_service = None
         _event(logger, "analytics.home_activity_unavailable", "construction_error")
     try:
+        historical_gateway = gateway
+        from app.traffic_projection.config import projection_read_enabled
+
+        if projection_read_enabled(settings):
+            from app.traffic_projection.config import (
+                traffic_projection_config_from_settings,
+            )
+            from app.traffic_projection.read_service import (
+                TrafficProjectionReadService,
+            )
+            from app.traffic_projection.repository import (
+                TrafficProjectionRepository,
+            )
+
+            projection_config = traffic_projection_config_from_settings(settings)
+            historical_gateway = TrafficProjectionReadService(
+                TrafficProjectionRepository(projection_config.db_path),
+                current_observation_db_path=projection_config.source_db_path,
+            )
         historical_traffic_service = HistoricalTrafficReadService(
-            gateway,
+            historical_gateway,
             quality_gap_threshold_seconds=(
                 analytics_config.quality_gap_threshold_seconds
             ),
