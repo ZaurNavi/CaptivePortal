@@ -243,6 +243,24 @@ historical products are enabled.
 These are product-exposure/orchestration flags. They do not start/stop Observation,
 `CurrentTrafficReadService` or `HistoricalTrafficReadService`.
 
+### Historical Traffic projection
+
+The derived projection has two independent, repository-default-off controls:
+
+```text
+TRAFFIC_PROJECTION_ENABLED=false
+TRAFFIC_PROJECTION_DB_PATH=/opt/CaptivePortal/data/traffic_projection.sqlite3
+TRAFFIC_PROJECTION_WRITER_LOCK_PATH=/opt/CaptivePortal/data/traffic_projection.writer.lock
+WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED=false
+```
+
+The worker is a separate process (`python -m app.traffic_projection.cli run`) and
+reads the existing Observation database in SQLite read-only/query-only mode. The
+Admin read flag switches History, Statistics, Peak, Traffic by AP and AP Share as
+one bundle. It never falls back automatically to raw reconstruction. Build,
+`mark-ready`, `activate`, `repair-site`, and cleanup are explicit CLI operations;
+production execution requires separate Owner authorization.
+
 Current Network Throughput shared policy remains:
 
 ```text

@@ -35,12 +35,15 @@ def parse_utc(value: Any, name: str) -> datetime:
             f"{name} must use YYYY-MM-DDTHH:MM:SS.mmmZ"
         )
     try:
-        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+        # The regex has already frozen the public millisecond-Z shape.  The
+        # ISO parser performs the same calendar validation without rebuilding
+        # strptime's locale-sensitive state for every projected sample.
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:
         raise AnalyticsQueryValidationError(
             f"{name} must be a valid UTC timestamp"
         ) from exc
-    return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def format_utc(value: datetime) -> str:
