@@ -1,9 +1,9 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-09-03
-Current-state implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Current implementation tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Updated: 2026-09-06
+Current-state implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Current implementation tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -25,7 +25,8 @@ Historical reports, production acceptance и research сохраняют док�
 4. `module-index.md`
 5. `configuration.md`
 6. соответствующий `modules/*.md`
-7. `testing.md`, `security.md`, `deployment.md` по задаче
+7. `testing-environments.md` перед любым Windows/Linux/production gate
+8. `testing.md`, `security.md`, `deployment.md` по задаче
 
 ## Карта знаний
 
@@ -38,6 +39,10 @@ Historical reports, production acceptance и research сохраняют док�
 | Traffic current semantics/roadmap | `modules/traffic.md` |
 | Omada OpenAPI evidence | `api/omada-open-api.md` |
 | Testing responsibility/gates | `testing.md` |
+| Test environment routing / production-not-test-host invariant | `testing-environments.md` |
+| Practical command/harness lessons | `operations-command-lessons-learned.md` |
+| Current DB baseline prerequisite | `tasks/TASK-DB-BASELINE-SYNC-01.md` |
+| Deferred Projection maintenance request | `deferred/TRAFFIC-PROJECTION-MAINTENANCE-REINDEX.md` |
 | Acceptance/publication workflow | `agents/workflow.md` |
 | Git/production deployment boundary | `deployment.md` |
 | Repository actions | `agents/repository-actions.md` |
@@ -71,7 +76,7 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic state at implementation baseline `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`:
+Current Traffic state at implementation baseline `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`:
 
 ```text
 TRAFFIC-00         DONE
@@ -99,8 +104,15 @@ Repository default remains `WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false`.
 Historical Traffic panels retain independent page-local `24h | 7d` ranges.
 Online Guests Traffic is Current State-backed, near-current and range-insensitive.
 
-No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is
-canonical change-intent.
+Current operational prerequisite:
+
+```text
+TASK-DB-BASELINE-SYNC-01
+APPROVED / READY FOR EXECUTION / NOT YET ACCEPTED
+```
+
+After `FINAL_DB_BASELINE=PASS`, the next planned product stage is **Traffic 0.8**.
+This does not yet create a detailed Traffic 0.8 implementation/API contract.
 
 `modules/traffic.md` is the current Traffic product/semantic contract.
 Historical FINAL TASKs and acceptance evidence remain traceability evidence and

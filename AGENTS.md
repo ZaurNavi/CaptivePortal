@@ -1,7 +1,7 @@
 # CaptivPortal: правила для coding agents
 
 Status: current
-Updated: 2026-08-30
+Updated: 2026-09-06
 Central Lab governance effective: 2026-08-27
 
 ## Project
@@ -36,6 +36,8 @@ TASK задаёт scope и намерение изменения, но не ст
 
 Карта знаний: docs/README.md.
 Процесс: docs/agents/workflow.md.
+Тестовые контуры: docs/testing-environments.md.
+Практические command lessons: docs/operations-command-lessons-learned.md.
 Контракт TASK: docs/agents/task-contract.md.
 Формат результата: docs/agents/handoff.md.
 
@@ -79,6 +81,8 @@ TASK задаёт scope и намерение изменения, но не ст
 - Coder может создавать/изменять tests своего implementation scope, но не запускает unrelated/cross-module/broader/full regression.
 - Cross-module proof выполняет Owner/Tech Lead/Central Lab либо Coder подготавливает test без запуска.
 - `C:\CaptivPortal-Lab` official gate физически запускает Owner; Tech Lead задаёт exact artifact/commands/criteria; Owner + Tech Lead выдают PASS/FAIL.
+- Linux/pre-production/PERF gates по умолчанию выполняются в существующем dedicated WSL/Linux Lab Owner (`DESKTOP-7C8M3BS`, user `zaur_navi`), а не на production.
+- `192.168.0.202` — production VM, не acceptance/performance test host без отдельного явного Owner разрешения на конкретную production validation.
 - После каждого нового TASK/panel/module Tech Lead пересматривает актуальный targeted regression/test-set block.
 - Full Central Lab runner меняется только при изменении gate/compatibility/environment contract, а не из-за обычного нового pytest file.
 - Не исправлять несвязанные падения full suite.
@@ -181,7 +185,10 @@ Infrastructure failure before test logic (wrong interpreter, missing pytest, ina
 
 Official full gate requires a clean immutable candidate. A local detached `LAB ONLY` candidate commit is permitted for Central Lab acceptance; it is not pushed, PR'd, merged or deployed.
 
-Если перед production требуется Linux/full production-compatible gate, он выполняется отдельно по deploy/release contract. Windows gate его не заменяет.
+Если перед production требуется Linux/full production-compatible/PERF gate, стандартная среда — существующий dedicated laptop WSL/Linux Lab Owner. Windows gate его не заменяет, а production `192.168.0.202` не подменяет Linux Lab.
+
+Permanent routing and production boundary: `docs/testing-environments.md`.
+Known command/harness lessons that must be reflected in future instructions: `docs/operations-command-lessons-learned.md`.
 
 ## Повторное использование результатов тестирования
 

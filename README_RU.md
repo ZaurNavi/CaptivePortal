@@ -25,10 +25,10 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
-| Repository tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
-| Production deployed HEAD | `6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
-| Production tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
+| Repository implementation checkpoint | `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4` |
+| Repository tree | `fc3c1ed53df32d0074036a749ee028781ec1f1b5` |
+| Production deployed HEAD | `6fbc3736085be9d0538d893b6e9569ff490ef7f4` |
+| Production tree | `fc3c1ed53df32d0074036a749ee028781ec1f1b5` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -37,7 +37,8 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | Independent historical ranges | **Production active / acceptance PASS** |
 | AP Traffic Share | **Production active / acceptance PASS** |
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
-| Следующий Traffic stage | **Пока не назначен в каноническом roadmap** |
+| DB baseline prerequisite | `TASK-DB-BASELINE-SYNC-01` — **READY FOR EXECUTION** |
+| Следующий Traffic stage | **Traffic 0.8 — planned после FINAL_DB_BASELINE=PASS** |
 | Omada Controller family | Omada Software Controller 5.14.x |
 | Core guest authorization | Реализован |
 | RFC 8908 CAPPORT | Реализован |
@@ -774,7 +775,7 @@ Controlled research на Omada 5.14.31 подтвердил:
 
 ```mermaid
 flowchart LR
-    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::next
+    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::done --> DB[DB Baseline Sync]:::next --> T8[Traffic 0.8]:::next
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
     classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
 ```
@@ -794,11 +795,11 @@ TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06         DONE / PRODUCTION ACTIVE
 TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
-next Traffic TASK  NOT YET ASSIGNED
+DB-BASELINE-SYNC   READY FOR EXECUTION
+Traffic 0.8        PLANNED AFTER FINAL_DB_BASELINE=PASS
 ```
 
-`TRAFFIC-08` или другой successor не считается каноническим, пока Owner / Tech
-Lead отдельно его не утвердят.
+Traffic 0.8 пока является planned stage; детальный implementation contract для него ещё не утверждён.
 
 ## Реальный второй Site как trigger
 

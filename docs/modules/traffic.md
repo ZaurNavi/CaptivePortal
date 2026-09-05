@@ -1,11 +1,11 @@
 # Admin Console Traffic
 
 Status: current production module contract
-Updated: 2026-09-03
-Repository implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Repository tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
-Production deployed HEAD: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Production tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Updated: 2026-09-06
+Repository implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Repository tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
+Production deployed HEAD: `6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Production tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
 Latest production acceptance: `TASK-TRAFFIC-07 — Online Guests Traffic — COMPLETE / PRODUCTION ACTIVE`
 
 ## Current roadmap state
@@ -608,8 +608,10 @@ Do not list this one-time observation as an open current defect or technical deb
 
 ```text
 TRAFFIC-07 — COMPLETE / PRODUCTION ACTIVE
-next Traffic TASK — NOT YET ASSIGNED
+TASK-DB-BASELINE-SYNC-01 — CURRENT PREREQUISITE
+Traffic 0.8 — PLANNED AFTER FINAL_DB_BASELINE=PASS
 ```
 
-No approved `TRAFFIC-08` or other successor is current change-intent. A new
-Traffic item becomes canonical only after separate Owner / Tech Lead approval.
+`TASK-DB-BASELINE-SYNC-01` synchronizes/records the production SQLite baseline; it does not implement Traffic 0.8.
+
+The separate Projection Maintenance/Reindex concept is deferred only: `../deferred/TRAFFIC-PROJECTION-MAINTENANCE-REINDEX.md`. It must not expand the current Projection Foundation and is not an approved implementation TASK.

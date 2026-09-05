@@ -25,10 +25,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
-| Repository tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
-| Production deployed HEAD | `6425988b5b4ec5ff38bf9c67c74846c3806f668f` |
-| Production tree | `b669f368b0062fcb100b24758cf05e2c4b500144` |
+| Repository implementation checkpoint | `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4` |
+| Repository tree | `fc3c1ed53df32d0074036a749ee028781ec1f1b5` |
+| Production deployed HEAD | `6fbc3736085be9d0538d893b6e9569ff490ef7f4` |
+| Production tree | `fc3c1ed53df32d0074036a749ee028781ec1f1b5` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -37,7 +37,8 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Independent historical ranges | **Production active / acceptance PASS** |
 | AP Traffic Share | **Production active / acceptance PASS** |
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
-| Next Traffic stage | **Not yet assigned in the canonical roadmap** |
+| DB baseline prerequisite | `TASK-DB-BASELINE-SYNC-01` — **READY FOR EXECUTION** |
+| Next Traffic stage | **Traffic 0.8 — planned after FINAL_DB_BASELINE=PASS** |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
 | Core guest authorization | Implemented |
 | RFC 8908 CAPPORT | Implemented |
@@ -777,7 +778,7 @@ See [`docs/api/omada-open-api.md`](docs/api/omada-open-api.md).
 
 ```mermaid
 flowchart LR
-    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::next
+    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::done --> DB[DB Baseline Sync]:::next --> T8[Traffic 0.8]:::next
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
     classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
 ```
@@ -797,11 +798,11 @@ TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06         DONE / PRODUCTION ACTIVE
 TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
-next Traffic TASK  NOT YET ASSIGNED
+DB-BASELINE-SYNC   READY FOR EXECUTION
+Traffic 0.8        PLANNED AFTER FINAL_DB_BASELINE=PASS
 ```
 
-No `TRAFFIC-08` or other successor is canonical until Owner / Tech Lead approves
-a separate TASK.
+Traffic 0.8 is a planned stage only; its detailed implementation contract is not yet defined.
 
 ## Real second Site as a trigger
 
