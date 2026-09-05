@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-03
-Current repository implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Confirmed production deployed HEAD: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Confirmed production tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Updated: 2026-09-06
+Current repository implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Confirmed production deployed HEAD: `6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Confirmed production tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
 
 ## Repository vs production
 
@@ -165,16 +165,49 @@ Owner + Tech Lead issue official PASS/FAIL.
 All mandatory pre-publication gates must PASS before the normal publication
 commit/PR path.
 
+## Test / production environment boundary
+
+Production CaptivPortal VM:
+
+```text
+192.168.0.202
+Ubuntu 22.04.x
+```
+
+Permanent invariant:
+
+```text
+PRODUCTION IS NOT AN ACCEPTANCE OR PERFORMANCE TEST HOST.
+```
+
+Linux/pre-production/PERF gates use the existing dedicated laptop WSL/Linux Lab
+by default. Production is reserved for runtime, read-only inspection, approved
+snapshot/copy procedures, post-deploy validation and specifically authorized
+production tests.
+
+Production-like acceptance data should flow:
+
+```text
+production source
+→ safe/read-only snapshot or approved copy
+→ dedicated WSL/Linux Lab
+→ isolated candidate DB/output
+```
+
+See:
+- `testing-environments.md`;
+- `operations-command-lessons-learned.md`.
+
 ## Traffic production checkpoint — 2026-09-01
 
 Owner-confirmed current state:
 
 ```text
 repository / production HEAD:
-6425988b5b4ec5ff38bf9c67c74846c3806f668f
+6fbc3736085be9d0538d893b6e9569ff490ef7f4
 
 repository / production tree:
-b669f368b0062fcb100b24758cf05e2c4b500144
+fc3c1ed53df32d0074036a749ee028781ec1f1b5
 
 captive-portal.service:
 active

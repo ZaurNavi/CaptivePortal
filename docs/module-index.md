@@ -1,9 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-09-03
-Runtime implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Updated: 2026-09-06
+Runtime implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Runtime tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -33,6 +33,7 @@ Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 | Traffic Section Foundation | current; default disabled | `app/admin_web/` | `modules/traffic.md` | none | no |
 | Traffic Current Network Throughput | current; default disabled | `app/admin_web/`, `app/analytics/current_traffic.py` | `modules/traffic.md` | reads Observation | no |
 | Historical Traffic Read Foundation | current | `app/analytics/historical_traffic.py`, source gateway | `modules/traffic.md` | reads Observation | no |
+| Historical Traffic Projection | current; default disabled | `app/traffic_projection/` | `modules/traffic.md` | SQLite derived projection | no |
 | Traffic Network History | current; default disabled | `app/admin_web/`, Historical Traffic | `modules/traffic.md` | none | no |
 | Traffic Period Statistics | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
 | Traffic Peak Load | current; default disabled | `app/admin_web/`, `app/analytics/historical_traffic.py` | `modules/traffic.md` | none | no |
@@ -44,11 +45,11 @@ Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
 
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-09-03:
+Owner-provided production checkpoint 2026-09-06:
 
 ```text
-HEAD: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
-tree: b669f368b0062fcb100b24758cf05e2c4b500144
+HEAD: 6fbc3736085be9d0538d893b6e9569ff490ef7f4
+tree: fc3c1ed53df32d0074036a749ee028781ec1f1b5
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -77,8 +78,15 @@ captive-portal.service=active
 
 ## Next Traffic item
 
-No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is
-canonical change-intent.
+Current prerequisite:
+
+```text
+TASK-DB-BASELINE-SYNC-01
+→ FINAL_DB_BASELINE=PASS
+```
+
+Next planned product stage after that gate: **Traffic 0.8**.
+Detailed Traffic 0.8 change-intent remains undefined until its separate TASK is approved.
 
 ## Production evidence rule
 

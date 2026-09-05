@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-03
+Updated: 2026-09-06
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Production deployed HEAD: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Production tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Documentation/current-state implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Production deployed HEAD: `6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Production tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
 
 ## Responsibility model
 
@@ -432,6 +432,59 @@ The reviewed Windows compatibility cases are not candidate regressions.
 
 Production closure: deploy FROM GIT → dormant PASS → separate activation → browser/product PASS.
 
+## Test environment routing and production boundary
+
+Canonical detailed contract: `testing-environments.md`.
+
+Permanent three-contour model:
+
+```text
+Windows Central Lab
+→ Windows/general acceptance and browser/UI gates
+
+Dedicated laptop WSL/Linux Lab
+→ Linux/pre-production/PERF/SQLite/WAL/storage/concurrency gates
+
+Production 192.168.0.202
+→ production runtime / separately authorized production validation only
+```
+
+Dedicated Linux Lab identity:
+
+```text
+host: DESKTOP-7C8M3BS
+user: zaur_navi
+known workdirs:
+  ~/captivportal-lab
+  ~/captivportal-traffic07-perf
+```
+
+Permanent invariant:
+
+```text
+PRODUCTION IS NOT AN ACCEPTANCE OR PERFORMANCE TEST HOST.
+```
+
+SSH access and Linux availability on production do not authorize using it as a
+Linux acceptance/PERF machine.
+
+When production-like data is required:
+
+```text
+Production
+→ safe/read-only snapshot or approved copy
+→ dedicated WSL/Linux Lab
+→ isolated candidate DB/output
+```
+
+Before using an allowlisted worktree path, check `git worktree list` and path
+occupancy. Prefer a new detached worktree in the required path over
+`git worktree move`.
+
+Command/paste/permission/interpreter/readiness failures are harness or
+infrastructure errors until product behavior is actually exercised. Permanent
+execution lessons are in `operations-command-lessons-learned.md`.
+
 ## Test Set Maintenance Rule
 
 Every accepted TASK / module / Admin panel / API / read-service change requires a
@@ -497,8 +550,10 @@ Permanent TRAFFIC-07 invariants:
 - Online Guests Traffic remains range-insensitive;
 - query-time Omada isolation remains intact.
 
-No next Traffic TASK is currently assigned. When one is approved, Tech Lead
-reviews the targeted command/test set again for that exact TASK.
+`TASK-DB-BASELINE-SYNC-01` is the current prerequisite before the planned
+Traffic 0.8 stage. Traffic 0.8 does not yet imply a canonical implementation
+or targeted-test contract; Tech Lead must define/review that exact set when
+its TASK is approved.
 
 ## Acceptance before Publication
 

@@ -1,7 +1,7 @@
 # Workflow coding agent
 
 Status: current
-Updated: 2026-08-30
+Updated: 2026-09-06
 Central Lab governance effective: 2026-08-27
 
 ## 1. Intake
@@ -67,11 +67,29 @@ Owner + Tech Lead → evidence analysis + PASS/FAIL
 
 Cross-module regression, broader regression, full repository suite, release/differential gates and official acceptance are not delegated to Coder.
 
-### Linux pre-production
+### Linux pre-production / dedicated Linux Lab
 
-When production acceptance requires Linux/production-compatible execution, that is a separate exact-artifact gate defined by the deploy/release contract. Windows Local Gate does not replace it.
+The project already has a permanent dedicated WSL/Linux Lab on the Owner laptop:
 
-Detailed policy, current Windows Lab environment, verified runner and anti-drift rule: `../testing.md`.
+```text
+host: DESKTOP-7C8M3BS
+user: zaur_navi
+known workdirs: ~/captivportal-lab, ~/captivportal-traffic07-perf
+```
+
+Linux pre-production, performance, SQLite/materialization/rebuild, WAL/storage, concurrency and source-immutability gates should use this Lab first. A new specialist must not rediscover or recreate a Linux host for every TASK.
+
+Permanent invariant:
+
+```text
+PRODUCTION IS NOT AN ACCEPTANCE OR PERFORMANCE TEST HOST.
+```
+
+Production `192.168.0.202` is used only for production runtime and explicitly authorized production validation. Production-like data should be copied/snapshotted safely into the dedicated Linux Lab.
+
+Detailed environment routing: `../testing-environments.md`.
+Windows runner/governance: `../testing.md`.
+Command/harness lessons: `../operations-command-lessons-learned.md`.
 
 ## 4A. Test-set maintenance after each accepted TASK
 
@@ -133,9 +151,10 @@ A mandatory gate is pre-publication acceptance.
 GitHub is publication/review/chain-of-custody, not the normal transport between
 acceptance environments.
 
-For mandatory production-compatible acceptance, use an isolated Linux Lab or
-equivalent controlled environment with exact candidate tree and immutable
-read-only production-size data snapshot when needed.
+For mandatory production-compatible acceptance, use the existing dedicated
+laptop WSL/Linux Lab by default with the exact candidate tree and an immutable
+read-only/approved production-derived snapshot when needed. Do not use the
+production VM as a convenient Linux benchmark host.
 
 A changed candidate tree after acceptance requires Tech Lead to determine/repeat
 the necessary gates.

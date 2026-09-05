@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-09-03
+Updated: 2026-09-06
 Branch: `main`
-Runtime commit: `6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
-Commit source: merge PR #99 / TASK-TRAFFIC-07, 2026-09-02
+Runtime commit: `6fbc3736085be9d0538d893b6e9569ff490ef7f4`
+Runtime tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
+Commit source: merge PR #102 / TASK-ADMIN-PROD-BASELINE-01, 2026-09-05
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -83,6 +83,7 @@ Analytics has no worker/write lifecycle to stop.
 | Traffic Section | `app/admin_web/` | Admin product shell + shared Traffic coordinator | none | no |
 | Traffic Current Network Throughput | Admin Web + `app/analytics/current_traffic.py` | persisted AP Observation facts via CurrentTrafficReadService | none | no |
 | Historical Traffic Read | `app/analytics/historical_traffic.py`, source gateway | persisted AP Observation history | none | no |
+| Historical Traffic Projection | `app/traffic_projection/` | authoritative Observation source | SQLite derived/materialized read-model | no |
 | Traffic Network History | Admin Web + Historical Traffic | shared 24h/7d historical read | none | no |
 | Traffic Period Statistics | Admin Web + Historical Traffic | product-scoped Historical Traffic projection | none | no |
 | Traffic Peak Load | Admin Web + Historical Traffic | product-scoped Peak projection | none | no |
@@ -122,10 +123,13 @@ Current State client classification:
 | `public_traffic.sqlite3` | Public Traffic | portal API | completed-session traffic |
 | `visitor_registry.sqlite3` | Visitor Registry | Registry read service / Analytics / Admin | device identity/history |
 | `visits.sqlite3` | Visit Lifecycle | Visit read service / Analytics / Admin | visits, auths, source events |
-| `observations.sqlite3` | Observation Foundation | Observation read service / Analytics / Admin | historical client/AP facts |
+| `observations.sqlite3` | Observation Foundation | Observation read service / Analytics / Admin | authoritative historical client/AP evidence |
 | `current_state.sqlite3` | Current State | CurrentStateReadService / Admin | current snapshots + short history |
+| `traffic_projection.sqlite3` | Traffic Projection worker | TrafficProjectionReadService / Historical Traffic when enabled | derived/disposable Observation materialization |
 
 Writers own schema/migrations. Read-only consumers do not mutate source storage.
+
+Current operational prerequisite before planned Traffic 0.8: `tasks/TASK-DB-BASELINE-SYNC-01.md`. It inventories all active production SQLite stores against exact current `main`; Observation remains authoritative, Traffic Projection remains derived, and accepted Visit Site-rename recovery is not replayed.
 
 ## 7. Visit Lifecycle current contract
 
@@ -445,8 +449,9 @@ TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
 Online Guests Traffic is Current State-backed near-current authorized guest rate
 evidence. Historical Network Traffic remains Observation-backed.
 
-No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is current
-change-intent.
+`TASK-DB-BASELINE-SYNC-01` is the current operational prerequisite. After
+`FINAL_DB_BASELINE=PASS`, the next planned product stage is Traffic 0.8.
+No detailed Traffic 0.8 implementation contract is implied by this inventory.
 
 Historical TASK/PR evidence remains historical and does not override current
 production truth.
