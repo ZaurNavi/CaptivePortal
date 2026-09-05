@@ -315,7 +315,7 @@ def test_home_traffic_defaults_bounds_and_parent_contract():
         config.home_traffic_fresh_max_age_seconds,
         config.home_traffic_stale_max_age_seconds,
         config.home_traffic_max_ap_skew_seconds,
-    ) == (60, 20, 100, 90, 180, 60)
+    ) == (60, 30, 100, 90, 180, 60)
     for key, value in (
         ("web_admin_home_traffic_refresh_seconds", 59),
         ("web_admin_home_traffic_request_timeout_seconds", 61),

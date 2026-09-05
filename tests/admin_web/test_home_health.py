@@ -51,7 +51,7 @@ def health_settings(**overrides):
     values = enabled_settings(
         web_admin_home_health_enabled="true",
         web_admin_home_health_refresh_seconds="60",
-        web_admin_home_health_request_timeout_seconds="20",
+        web_admin_home_health_request_timeout_seconds="30",
         web_admin_home_health_auth_evidence_max_age_seconds="86400",
     )
     values.update(overrides)
@@ -115,12 +115,13 @@ class Analytics:
 
 
 def service(*, tracker=None, current=None, observation=None, visit=None, analytics=None,
-            traffic=False, activity=False, now_factory=None):
+            traffic=False, activity=False, now_factory=None,
+            cycle_finished_at="2026-08-27T11:59:00.000Z"):
     if tracker is None:
         tracker = AuthorizationHealthTracker((SITE_ID,))
         tracker.record(SITE_ID, OUTCOME_VERIFIED_SUCCESS, NOW - timedelta(seconds=10))
-    success = _cycle("client", "2026-08-27T11:59:00.000Z")
-    ap_success = _cycle("ap_dynamic", "2026-08-27T11:59:00.000Z")
+    success = _cycle("client", cycle_finished_at)
+    ap_success = _cycle("ap_dynamic", cycle_finished_at)
     config = SimpleNamespace(
         site_ids=(SITE_ID,), client_enabled=True, ap_enabled=True,
         client_interval_seconds=60, client_max_pages=20,
@@ -383,7 +384,7 @@ def test_one_request_deadline_reaches_each_observation_read():
 def test_health_config_isolated_and_strict():
     admin = admin_web_config_from_settings(health_settings())
     config = home_health_config_from_settings(health_settings(), admin_config=admin)
-    assert (config.refresh_seconds, config.request_timeout_seconds, config.auth_evidence_max_age_seconds) == (60, 20, 86400)
+    assert (config.refresh_seconds, config.request_timeout_seconds, config.auth_evidence_max_age_seconds) == (60, 30, 86400)
     with pytest.raises(HomeHealthConfigError):
         home_health_config_from_settings(
             health_settings(web_admin_home_health_request_timeout_seconds="10"),
@@ -406,12 +407,14 @@ def _health_app(
     registry_source=True,
     setting_updates=None,
 ):
+    now = datetime.now(UTC)
     tracker = AuthorizationHealthTracker((SITE_ID,))
     tracker.record(
         SITE_ID,
         OUTCOME_VERIFIED_SUCCESS,
-        datetime.now(UTC) - timedelta(seconds=10),
+        now - timedelta(seconds=10),
     )
+    cycle_finished_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     registry = (
         SimpleNamespace(
             repository=SimpleNamespace(
@@ -432,7 +435,7 @@ def _health_app(
         logging.getLogger("home-health-test"),
         authorization_health_tracker=tracker,
         current_state_runtime=SimpleNamespace(state="active", read_service=CurrentRead()),
-        observation_runtime=service()._observations,
+        observation_runtime=service(cycle_finished_at=cycle_finished_at)._observations,
         visit_runtime=SimpleNamespace(state="active", available=True),
     )
     app = Flask(__name__)

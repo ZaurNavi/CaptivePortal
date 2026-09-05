@@ -35,11 +35,11 @@ def render_admin_page(
     device_id: str | None = None,
     home_live_enabled: bool = False,
     home_live_refresh_seconds: int = 60,
-    home_live_request_timeout_seconds: int = 20,
+    home_live_request_timeout_seconds: int = 30,
     current_state_page_size: int = 100,
     home_traffic_enabled: bool = False,
     home_traffic_refresh_seconds: int = 60,
-    home_traffic_request_timeout_seconds: int = 20,
+    home_traffic_request_timeout_seconds: int = 30,
     home_traffic_page_size: int = 100,
     traffic_enabled: bool = False,
     traffic_history_enabled: bool = False,
@@ -51,7 +51,7 @@ def render_admin_page(
     traffic_online_guests_state: str = "disabled",
     traffic_online_guests_allowed: bool = False,
     traffic_refresh_seconds: int = 60,
-    traffic_request_timeout_seconds: int = 20,
+    traffic_request_timeout_seconds: int = 30,
     home_activity_state: str = "disabled",
     home_activity_config: object | None = None,
     home_health_state: str = "disabled",
@@ -104,7 +104,7 @@ def render_admin_page(
                 home_activity_config, "refresh_seconds", 60
             ),
             home_activity_request_timeout_seconds=getattr(
-                home_activity_config, "request_timeout_seconds", 20
+                home_activity_config, "request_timeout_seconds", 30
             ),
             home_health_enabled=(
                 home_health_state == "active"
@@ -115,7 +115,7 @@ def render_admin_page(
                 home_health_config, "refresh_seconds", 60
             ),
             home_health_request_timeout_seconds=getattr(
-                home_health_config, "request_timeout_seconds", 20
+                home_health_config, "request_timeout_seconds", 30
             ),
             home_ap_24h_enabled=(
                 home_ap_24h_state == "active"
@@ -126,7 +126,7 @@ def render_admin_page(
                 home_ap_24h_config, "refresh_seconds", 120
             ),
             home_ap_24h_request_timeout_seconds=getattr(
-                home_ap_24h_config, "request_timeout_seconds", 20
+                home_ap_24h_config, "request_timeout_seconds", 30
             ),
         )
     )

@@ -2434,7 +2434,7 @@
   }
 
   const PRODUCT_ORDER = Object.freeze(["history", "statistics", "peak", "aps", "apshare"]);
-  const ADMISSION_GUARD_MILLISECONDS = 10000;
+  const ADMISSION_GUARD_MILLISECONDS = 3000;
   const productUi = {
     history: {state: elements.state, title: elements.title, message: elements.message},
     statistics: statisticsEnabled ? {

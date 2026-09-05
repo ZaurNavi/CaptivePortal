@@ -43,12 +43,12 @@ def test_traffic_config_defaults_and_env_example_are_safe():
     config = admin_web_config_from_settings({"web_admin_enabled": "false"})
     assert config.traffic_enabled is False
     assert config.traffic_refresh_seconds == 60
-    assert config.traffic_request_timeout_seconds == 20
+    assert config.traffic_request_timeout_seconds == 30
 
     example = (Path(__file__).parents[2] / ".env.example").read_text(encoding="utf-8")
     assert "WEB_ADMIN_TRAFFIC_ENABLED=false\n" in example
     assert "WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60\n" in example
-    assert "WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20\n" in example
+    assert "WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=30\n" in example
 
 
 @pytest.mark.parametrize(
@@ -149,7 +149,7 @@ def test_traffic_shell_has_only_safe_page_context_and_foundation_hooks(tmp_path)
     assert 'data-page="traffic"' in body
     assert 'data-traffic-enabled="true"' in body
     assert 'data-traffic-refresh-seconds="60"' in body
-    assert 'data-traffic-request-timeout-seconds="20"' in body
+    assert 'data-traffic-request-timeout-seconds="30"' in body
     assert 'id="traffic-global-state"' in body
     assert 'id="traffic-empty-state"' in body
     assert 'id="traffic-panels"' in body

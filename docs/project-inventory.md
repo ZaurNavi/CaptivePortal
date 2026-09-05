@@ -261,7 +261,7 @@ Permanent invariant:
 
 ```text
 max historical HTTP requests in flight from one page = 1
-HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 3
 ```
 
 Current Network Throughput remains range-insensitive.

@@ -225,6 +225,15 @@ WEB_ADMIN_MAX_QUERY_DURATION_SECONDS = 10
 No query deadline, browser timeout or Admin concurrency increase is part of this
 architecture.
 
+Current production baseline after `TASK-ADMIN-PROD-BASELINE-01` (2026-09-05):
+
+```text
+Admin concurrency=4
+Admin query deadline=25s
+dependent request timeouts=30s
+historical admission guard=3s
+```
+
 ## Internal API
 
 Prefix: `/api/internal/analytics/v1`.

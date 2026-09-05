@@ -153,7 +153,7 @@ def test_home_live_safe_defaults():
     config = admin_web_config_from_settings(enabled_settings())
     assert config.home_live_enabled is False
     assert config.home_live_refresh_seconds == 60
-    assert config.home_live_request_timeout_seconds == 20
+    assert config.home_live_request_timeout_seconds == 30
     assert config.current_state_page_size == 100
     assert "correct horse" not in repr(config)
 
