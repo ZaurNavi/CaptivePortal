@@ -21,9 +21,9 @@ class HomeAp24Config:
 def home_ap_24h_config_from_settings(settings: Mapping[str, Any], *, admin_config) -> HomeAp24Config:
     enabled = _bool(settings.get("web_admin_home_ap_24h_enabled", "false"))
     if not enabled:
-        return HomeAp24Config(False, 120, 20)
+        return HomeAp24Config(False, 120, 30)
     refresh = _integer(settings.get("web_admin_home_ap_24h_refresh_seconds", "120"), 60, 600)
-    timeout = _integer(settings.get("web_admin_home_ap_24h_request_timeout_seconds", "20"), 5, 60)
+    timeout = _integer(settings.get("web_admin_home_ap_24h_request_timeout_seconds", "30"), 5, 60)
     if not admin_config.enabled:
         raise HomeAp24ConfigError("AP-24H requires Admin Web")
     if timeout <= admin_config.max_query_duration_seconds:

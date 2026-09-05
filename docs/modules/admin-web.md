@@ -165,7 +165,7 @@ server persistence exists.
 Current invariant:
 
 ```text
-HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 3
 ```
 
 Eligibility:
@@ -173,7 +173,7 @@ Eligibility:
 ```text
 next_dispatch >= max(
     previous_request_completion,
-    previous_dispatch + 10s,
+    previous_dispatch + 3s,
     coordinator backoff / Retry-After / lifecycle eligibility
 )
 ```
@@ -224,7 +224,7 @@ Current State
 renders payloads; it does not calculate current guest rates.
 
 Online Guests Traffic is range-insensitive and does not use the historical
-`TrafficHistoricalRequestBroker` / 10-second admission guard.
+`TrafficHistoricalRequestBroker` / 3-second admission guard.
 
 Online Guest means controller-reported active authorized wireless guest in the
 latest accepted Current State guest scope, not independent proof of

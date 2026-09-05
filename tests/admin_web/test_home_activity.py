@@ -81,7 +81,7 @@ def test_disabled_activity_ignores_broken_activity_only_configuration():
     )
     assert config.enabled is False
     assert config.sites == {} and config.guest_ssids == ()
-    assert (config.refresh_seconds, config.request_timeout_seconds) == (60, 20)
+    assert (config.refresh_seconds, config.request_timeout_seconds) == (60, 30)
 
 
 @pytest.mark.parametrize(

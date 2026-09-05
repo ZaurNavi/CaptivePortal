@@ -260,8 +260,8 @@ RESULT=PASS
 Accepted ALL24 product group: `history,statistics,peak,aps,apshare`.
 ## Production architecture outcome
 
-The production fix for heavy shared 7d historical work did **not** increase the
-Admin query deadline.
+The accepted RANGE-01 remediation did **not** increase the Admin query
+deadline, browser timeout or Admin concurrency.
 
 Preserved:
 
@@ -276,7 +276,16 @@ Accepted remediation:
 - independent panel intent;
 - at most one historical HTTP request in flight;
 - sequential historical admission;
-- permanent 10-second admission guard.
+- 10-second admission guard.
+
+Current production baseline after `TASK-ADMIN-PROD-BASELINE-01` (2026-09-05):
+
+```text
+Admin concurrency=4
+Admin query deadline=25s
+dependent request timeouts=30s
+historical admission guard=3s
+```
 
 ## TRAFFIC-RANGE-01 production-size acceptance
 

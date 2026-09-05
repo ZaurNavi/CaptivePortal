@@ -208,7 +208,7 @@ WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false
 WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
-WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=20
+WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=30
 ```
 
 Production state 2026-09-01:
@@ -278,20 +278,25 @@ Historical product ranges:
 
 With independent ranges enabled, History, Statistics, Peak, Traffic by AP and AP Traffic Share each own independent page-local selected/applied range state. Current Network Throughput remains range-insensitive.
 
-Permanent historical admission guard:
+At acceptance of `TASK-TRAFFIC-RANGE-01`, the historical limits were:
 
 ```text
-HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
-```
-
-Admin query deadline remains:
-
-```text
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS=10
 WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=10
+Traffic browser request timeout=20s
+Admin concurrency=unchanged
 ```
 
-Traffic browser request timeout remains `20s`. No accepted RANGE-01 change
-increased query deadline, browser timeout or Admin concurrency.
+RANGE-01 itself did not increase these limits.
+
+Current production baseline after `TASK-ADMIN-PROD-BASELINE-01` (2026-09-05):
+
+```text
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS=3
+WEB_ADMIN_MAX_QUERY_DURATION_SECONDS=25
+dependent Admin/Home request timeouts=30s
+WEB_ADMIN_MAX_CONCURRENT_QUERIES=4
+```
 
 Repository default=false must not be rewritten as production disabled.
 

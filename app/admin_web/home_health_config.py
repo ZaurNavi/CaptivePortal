@@ -28,7 +28,7 @@ def home_health_config_from_settings(
         "WEB_ADMIN_HOME_HEALTH_ENABLED",
     )
     if not enabled:
-        return HomeHealthConfig(False, 60, 20, 86400)
+        return HomeHealthConfig(False, 60, 30, 86400)
     refresh = _integer(
         settings.get("web_admin_home_health_refresh_seconds", "60"),
         "WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS",
@@ -36,7 +36,7 @@ def home_health_config_from_settings(
         300,
     )
     request_timeout = _integer(
-        settings.get("web_admin_home_health_request_timeout_seconds", "20"),
+        settings.get("web_admin_home_health_request_timeout_seconds", "30"),
         "WEB_ADMIN_HOME_HEALTH_REQUEST_TIMEOUT_SECONDS",
         5,
         60,

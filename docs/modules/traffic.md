@@ -279,7 +279,7 @@ Permanent invariants:
 
 ```text
 max historical HTTP requests in flight from one page = 1
-HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 3
 ```
 
 Initial same-range products may coalesce; explicit panel intent outranks queued Global Refresh; same-panel pending intents collapse to latest; shared in-flight batches are not aborted because one panel is superseded; response applies only if generation and selected range remain current. Guard is measured from actual dispatch and never shortens Retry-After/backoff/lifecycle eligibility.

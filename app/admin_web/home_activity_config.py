@@ -59,7 +59,7 @@ def home_activity_config_from_settings(
     # deliberately not parsed while disabled, so stale/broken optional
     # configuration cannot degrade the rest of Admin Web.
     if not enabled:
-        return HomeActivityConfig(False, 60, 20, 90, 180, {}, ())
+        return HomeActivityConfig(False, 60, 30, 90, 180, {}, ())
     refresh = _integer(
         settings.get("web_admin_home_activity_refresh_seconds", "60"),
         "WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS",
@@ -67,7 +67,7 @@ def home_activity_config_from_settings(
         300,
     )
     request_timeout = _integer(
-        settings.get("web_admin_home_activity_request_timeout_seconds", "20"),
+        settings.get("web_admin_home_activity_request_timeout_seconds", "30"),
         "WEB_ADMIN_HOME_ACTIVITY_REQUEST_TIMEOUT_SECONDS",
         5,
         60,

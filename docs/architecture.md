@@ -218,6 +218,15 @@ HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
 No QueryDeadline, browser-timeout or Admin-concurrency increase is part of this
 architecture.
 
+Current production baseline after `TASK-ADMIN-PROD-BASELINE-01` (2026-09-05):
+
+```text
+Admin concurrency=4
+Admin query deadline=25s
+dependent request timeouts=30s
+historical admission guard=3s
+```
+
 ### Online Guests Traffic
 
 `TASK-TRAFFIC-07` adds a separate near-current Current State-backed Traffic
