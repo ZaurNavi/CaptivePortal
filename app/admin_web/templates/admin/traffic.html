@@ -92,6 +92,33 @@
     </div>
   </section>
   {% endif %}
+  {% if traffic_completed_sessions_allowed and (traffic_completed_sessions_enabled or traffic_completed_sessions_unavailable) %}
+  <section id="traffic-completed-sessions-panel" class="card card-wide traffic-completed-sessions" aria-labelledby="traffic-completed-sessions-heading">
+    <div class="card-heading traffic-history-heading-row">
+      <div><p class="eyebrow">Closed guest Visits</p><h2 id="traffic-completed-sessions-heading">Completed Guest Session Traffic</h2></div>
+      <div id="traffic-completed-sessions-range" class="traffic-range" role="group" aria-label="Completed Guest Session Traffic range">
+        <button id="traffic-completed-sessions-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button>
+        <button id="traffic-completed-sessions-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button>
+      </div>
+    </div>
+    <p class="live-detail">Observed traffic from persisted client samples inside each closed Visit. Values are sampled evidence, not billing-complete totals.</p>
+    <div id="traffic-completed-sessions-state" class="state-panel" data-state="{{ 'error' if traffic_completed_sessions_unavailable else 'warning' }}" role="status" aria-live="polite">
+      <span class="state-dot" aria-hidden="true"></span><div>
+        <strong id="traffic-completed-sessions-state-title">{{ 'Completed session history unavailable' if traffic_completed_sessions_unavailable else 'Loading completed guest sessions…' }}</strong>
+        <p id="traffic-completed-sessions-state-message">{{ 'The product read service could not be composed. Other Traffic panels remain available.' if traffic_completed_sessions_unavailable else 'Reading persisted Visit and client Observation evidence.' }}</p>
+      </div>
+    </div>
+    <p id="traffic-completed-sessions-range-note" class="live-detail">Applied range —</p>
+    <div class="table-scroll">
+      <table class="live-table traffic-completed-sessions-table">
+        <caption id="traffic-completed-sessions-caption">No completed guest sessions loaded.</caption>
+        <thead><tr><th scope="col">Guest</th><th scope="col">Session Start</th><th scope="col">Session End</th><th scope="col">Duration</th><th scope="col">SSID</th><th scope="col">Download</th><th scope="col">Upload</th><th scope="col">Total</th><th scope="col">Evidence</th></tr></thead>
+        <tbody id="traffic-completed-sessions-items"></tbody>
+      </table>
+    </div>
+    <div class="pagination"><button id="traffic-completed-sessions-more" class="button button-secondary" type="button" hidden>Load more</button></div>
+  </section>
+  {% endif %}
   {% if traffic_history_enabled %}
   <section
     id="traffic-history-panel"

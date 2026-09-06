@@ -109,6 +109,7 @@ input[type="radio"] { width: auto; min-height: 0; }
 .traffic-online-guests-summary span,.traffic-online-guests-previous,.traffic-online-guests-subtext { display:block;margin-top:.35rem;color:var(--muted);font-size:.85rem; }
 .traffic-online-guests-previous { padding:.65rem .8rem;border-left:4px solid var(--warning);background:#fef8e7; }
 .traffic-online-guests-table { min-width:1080px; }
+.traffic-completed-sessions-table { min-width:1320px; }
 .traffic-history { min-width: 0; }
 .traffic-history-heading-row { align-items: flex-start; gap: 1rem; }
 .traffic-range { display: flex; gap: .5rem; }
