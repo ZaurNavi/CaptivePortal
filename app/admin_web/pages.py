@@ -50,6 +50,8 @@ def render_admin_page(
     traffic_ap_share_enabled: bool = False,
     traffic_online_guests_state: str = "disabled",
     traffic_online_guests_allowed: bool = False,
+    traffic_completed_sessions_state: str = "disabled",
+    traffic_completed_sessions_allowed: bool = False,
     traffic_refresh_seconds: int = 60,
     traffic_request_timeout_seconds: int = 30,
     home_activity_state: str = "disabled",
@@ -93,6 +95,15 @@ def render_admin_page(
                 traffic_online_guests_state == "unavailable"
             ),
             traffic_online_guests_allowed=traffic_online_guests_allowed,
+            traffic_completed_sessions_enabled=(
+                traffic_completed_sessions_state == "active"
+            ),
+            traffic_completed_sessions_unavailable=(
+                traffic_completed_sessions_state == "unavailable"
+            ),
+            traffic_completed_sessions_allowed=(
+                traffic_completed_sessions_allowed
+            ),
             traffic_refresh_seconds=traffic_refresh_seconds,
             traffic_request_timeout_seconds=traffic_request_timeout_seconds,
             home_activity_enabled=(

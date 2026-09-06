@@ -344,6 +344,14 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 )
             except Exception:
                 online_guests_allowed = False
+        completed_sessions_allowed = False
+        if page.key == "traffic" and config.traffic_completed_sessions_enabled:
+            try:
+                completed_sessions_allowed = policy.authorize(
+                    g.admin_principal, "admin.read.devices", selected
+                )
+            except Exception:
+                completed_sessions_allowed = False
         return render_admin_page(
             page,
             site_id=selected,
@@ -373,6 +381,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 if config.traffic_online_guests_enabled else "disabled"
             ),
             traffic_online_guests_allowed=online_guests_allowed,
+            traffic_completed_sessions_state=(
+                runtime.traffic_completed_sessions_state
+                if config.traffic_completed_sessions_enabled else "disabled"
+            ),
+            traffic_completed_sessions_allowed=completed_sessions_allowed,
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -805,6 +818,30 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             ),
         )
 
+    @blueprint.get(
+        "/admin/api/v1/sites/<site_id>/traffic/completed-sessions"
+    )
+    @authenticated
+    def api_traffic_completed_sessions(site_id: str) -> Response:
+        allowed = frozenset({"range", "limit", "cursor"})
+        return _current_traffic_query(
+            site_id,
+            route_name="traffic_completed_sessions",
+            capability="admin.read.devices",
+            feature_enabled=config.traffic_completed_sessions_enabled,
+            allowed_parameters=allowed,
+            required_parameters=frozenset({"range"}),
+            operation=lambda service, selected: (
+                service.completed_guest_session_traffic(
+                    g.admin_principal,
+                    selected,
+                    range_id=request.args.get("range"),
+                    limit=request.args.get("limit"),
+                    cursor=request.args.get("cursor"),
+                )
+            ),
+        )
+
     @blueprint.get("/admin/api/v1/sites/<site_id>/home-activity/today")
     @authenticated
     def api_home_activity_today(site_id: str) -> Response:
@@ -1143,6 +1180,19 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                             "rate_partial_count", "rate_unavailable_count",
                         ):
                             product_counts[field] = result.result.get(field)
+                    elif route_name == "traffic_completed_sessions":
+                        product_status = result.result.get("status")
+                        source_health = result.result.get("source_health")
+                        if isinstance(source_health, dict):
+                            product_source_health_status = (
+                                f"visits:{source_health.get('visits')};"
+                                f"observations:{source_health.get('observations')}"
+                            )
+                        completed_page = result.result.get("page")
+                        if isinstance(completed_page, dict):
+                            product_has_next_page = (
+                                completed_page.get("next_cursor") is not None
+                            )
                     snapshot = result.result.get("snapshot")
                     if isinstance(snapshot, dict):
                         freshness_status = snapshot.get("freshness_status")
@@ -1160,6 +1210,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 ))
                 response_bytes = len(response.get_data())
                 if route_name == "traffic_online_guests" and isinstance(result.page, dict):
+                    product_has_next_page = result.page.get("next_cursor") is not None
+                elif route_name == "traffic_completed_sessions" and isinstance(result.page, dict):
                     product_has_next_page = result.page.get("next_cursor") is not None
                 if response.status_code == 503:
                     reason = "response_too_large"
@@ -1238,6 +1290,21 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                         "returned_count": item_count,
                         "has_next_page": product_has_next_page,
                         "response_bytes": response_bytes,
+                        "cursor_used": "cursor" in request.args,
+                    })
+                elif route_name == "traffic_completed_sessions":
+                    fields.update({
+                        "product": "completed_guest_session_traffic",
+                        "status": product_status,
+                        "source_health_status": product_source_health_status,
+                        "returned_count": item_count,
+                        "has_next_page": product_has_next_page,
+                        "response_bytes": response_bytes,
+                        "range": (
+                            request.args.get("range")
+                            if request.args.get("range") in {"24h", "7d"}
+                            else None
+                        ),
                         "cursor_used": "cursor" in request.args,
                     })
                 _event(
@@ -1873,6 +1940,7 @@ def _is_current_traffic_path(path: str) -> bool:
             or path.endswith("/traffic/current")
             or path.endswith("/traffic/history")
             or path.endswith("/traffic/online-guests/current")
+            or path.endswith("/traffic/completed-sessions")
         )
     )
 

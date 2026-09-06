@@ -26,6 +26,70 @@ _SQLITE_PROGRESS_OPCODES = 100
 _SNAPSHOT_BATCH_SIZE = 800
 _VISIT_WINDOW_BATCH_SIZE = 100
 
+
+def _completed_visit_page_sql(*, with_after: bool) -> str:
+    after_sql = (
+        "AND (closed_at<? OR (closed_at=? AND visit_id<?))"
+        if with_after else ""
+    )
+    return f"""
+        SELECT visit_id,site_id,client_mac,started_at,closed_at,
+               duration_seconds,status,start_ssid,final_ssid,
+               start_ap_mac,final_ap_mac
+        FROM visits INDEXED BY idx_visits_site_closed
+        WHERE site_id=? AND status='closed'
+          AND closed_at>=? AND closed_at<? {after_sql}
+        ORDER BY closed_at DESC,visit_id DESC
+        LIMIT ?
+    """
+
+
+def _completed_visit_authorization_sql(window_count: int) -> str:
+    values = ",".join("(?,?,?,?,?)" for _ in range(window_count))
+    return f"""
+        WITH windows(
+          visit_id,site_id,client_mac,start_at,end_at
+        ) AS (VALUES {values})
+        SELECT w.visit_id,a.authorized_at,a.row_id
+        FROM windows w
+        JOIN visits v ON v.visit_id=w.visit_id
+          AND v.site_id=w.site_id
+          AND v.client_mac=w.client_mac
+        JOIN visit_authorizations a
+          INDEXED BY idx_visit_auth_visit_time
+          ON a.visit_id=w.visit_id
+         AND a.authorized_at>w.start_at
+         AND a.authorized_at<w.end_at
+        ORDER BY w.visit_id,a.authorized_at,a.row_id
+    """
+
+
+def _completed_visit_evidence_sql(window_count: int) -> str:
+    values = ",".join("(?,?,?,?,?)" for _ in range(window_count))
+    return f"""
+        WITH windows(
+          visit_id,site_id,client_mac,start_at,end_at
+        ) AS (VALUES {values})
+        SELECT w.visit_id,o.row_id,o.cycle_id,o.observed_at,
+               o.site_id,o.client_mac,o.ssid,o.ap_mac,o.uptime,
+               o.traffic_down,o.traffic_up,
+               o.source_inventory_complete,
+               c.kind AS cycle_kind,c.state AS cycle_state,
+               c.result AS cycle_result,c.complete AS cycle_complete
+        FROM windows w
+        JOIN client_observations o
+          INDEXED BY idx_client_site_mac_time
+          ON o.site_id=w.site_id
+         AND o.client_mac=w.client_mac
+         AND o.observed_at>=w.start_at
+         AND o.observed_at<w.end_at
+        JOIN observation_cycles c ON c.cycle_id=o.cycle_id
+        WHERE c.kind='client' AND c.state='completed'
+          AND c.complete=1 AND c.result='success'
+          AND o.source_inventory_complete=1
+        ORDER BY w.visit_id,o.observed_at,o.row_id
+    """
+
 CLIENT_FIELDS = frozenset({
     "ap_mac", "radio_id", "band", "channel", "rssi", "snr",
     "traffic_down", "traffic_up",
@@ -3279,6 +3343,90 @@ class AnalyticsSourceGateway:
             raise AnalyticsPerformanceBudgetExceeded(
                 "Visit cohort exceeds materialization budget")
         return tuple(dict(row) for row in rows)
+
+    def completed_visit_page(
+        self,
+        *,
+        site_id: str,
+        from_utc: str,
+        to_utc: str,
+        after: tuple[str, str] | None,
+        limit: int,
+        deadline: QueryDeadline,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Read one bounded closed-Visit completion cohort page."""
+        parameters: list[Any] = [site_id, from_utc, to_utc]
+        if after is not None:
+            parameters.extend((after[0], after[0], after[1]))
+        parameters.append(limit)
+        with self._connection("visits", deadline) as connection:
+            rows = self._all(
+                connection,
+                _completed_visit_page_sql(with_after=after is not None),
+                parameters,
+                deadline,
+            )
+        return tuple(dict(row) for row in rows)
+
+    def completed_visit_authorization_boundaries_batch(
+        self,
+        *,
+        site_id: str,
+        windows: Sequence[Mapping[str, Any]],
+        deadline: QueryDeadline,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Read later authorization boundaries for supported Visit windows."""
+        if not windows:
+            return ()
+        output: list[Mapping[str, Any]] = []
+        with self._connection("visits", deadline) as connection:
+            for offset in range(0, len(windows), _VISIT_WINDOW_BATCH_SIZE):
+                deadline.require_remaining()
+                batch = windows[offset:offset + _VISIT_WINDOW_BATCH_SIZE]
+                parameters: list[Any] = []
+                for row in batch:
+                    parameters.extend((
+                        row["visit_id"], site_id, row["client_mac"],
+                        row["started_at"], row["closed_at"],
+                    ))
+                rows = self._all(
+                    connection,
+                    _completed_visit_authorization_sql(len(batch)),
+                    parameters,
+                    deadline,
+                )
+                output.extend(dict(row) for row in rows)
+        return tuple(output)
+
+    def completed_visit_traffic_evidence_batch(
+        self,
+        *,
+        site_id: str,
+        windows: Sequence[Mapping[str, Any]],
+        deadline: QueryDeadline,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Read strict persisted client evidence for supported Visit windows."""
+        if not windows:
+            return ()
+        output: list[Mapping[str, Any]] = []
+        with self._connection("observations", deadline) as connection:
+            for offset in range(0, len(windows), _VISIT_WINDOW_BATCH_SIZE):
+                deadline.require_remaining()
+                batch = windows[offset:offset + _VISIT_WINDOW_BATCH_SIZE]
+                parameters: list[Any] = []
+                for row in batch:
+                    parameters.extend((
+                        row["visit_id"], site_id, row["client_mac"],
+                        row["started_at"], row["closed_at"],
+                    ))
+                rows = self._all(
+                    connection,
+                    _completed_visit_evidence_sql(len(batch)),
+                    parameters,
+                    deadline,
+                )
+                output.extend(dict(row) for row in rows)
+        return tuple(output)
 
     def visit_observation_coverage_batch(
         self, *, site_id: str, windows: Sequence[Mapping[str, Any]],

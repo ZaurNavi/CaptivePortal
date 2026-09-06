@@ -574,9 +574,14 @@
     if (typeof spec.autoRefresh !== "boolean" || typeof spec.load !== "function" || typeof spec.render !== "function") return false;
     return (spec.renderLoading === undefined || typeof spec.renderLoading === "function")
       && (spec.renderFailure === undefined || typeof spec.renderFailure === "function")
+      && (spec.renderWaiting === undefined || typeof spec.renderWaiting === "function")
       && (spec.renderGlobalFailure === undefined || typeof spec.renderGlobalFailure === "function")
       && (spec.prepareRefresh === undefined || typeof spec.prepareRefresh === "function")
-      && (spec.prepareRootRefresh === undefined || typeof spec.prepareRootRefresh === "function");
+      && (spec.prepareRootRefresh === undefined || typeof spec.prepareRootRefresh === "function")
+      && (spec.historicalLane === undefined || spec.historicalLane === true)
+      && (spec.historicalLane === true
+        ? typeof spec.historicalLaneGuard === "boolean"
+        : spec.historicalLaneGuard === undefined);
   }
 
   function updateFoundationState() {
@@ -674,7 +679,8 @@
     clearScheduler();
     if (stopped || globalPaused || document.hidden || panels.size === 0) return;
     const eligible = Array.from(panels.values()).filter((state) => (
-      (state.spec.autoRefresh || state.pending) && !state.inFlight && !state.suspended
+      (state.spec.autoRefresh || state.pending) && !state.inFlight
+        && !state.suspended && !state.waitingLane
     ));
     if (!eligible.length) return;
     const nextAt = Math.min(...eligible.map((state) => state.nextEligibleAt));
@@ -703,11 +709,50 @@
     }
     if (state.inFlight) {
       if (!manual) return state.inFlight;
+      if (state.spec.historicalLane === true) {
+        state.generation += 1;
+        state.pending = true;
+        state.waitingLane = true;
+        abortPanel(state, "superseded");
+        if (state.spec.renderWaiting) state.spec.renderWaiting();
+        return state.inFlight;
+      }
       abortPanel(state, "superseded");
+    }
+    let historicalLaneGranted = false;
+    if (state.spec.historicalLane === true) {
+      const activeLane = Array.from(panels.values()).find((candidate) => (
+        candidate !== state && candidate.spec.historicalLane === true
+          && candidate.historicalLaneOwnerGeneration !== null
+      ));
+      const dispatches = Array.from(panels.values()).map((candidate) => (
+        candidate.spec.historicalLane === true
+          ? candidate.historicalLaneLastDispatch : null
+      )).filter((value) => value !== null);
+      const laneEligibleAt = state.spec.historicalLaneGuard === true && dispatches.length
+        ? Math.max(...dispatches) + 3000 : 0;
+      if (activeLane) {
+        state.waitingLane = true;
+        state.pending = true;
+        if (state.spec.renderWaiting) state.spec.renderWaiting();
+        return Promise.resolve(false);
+      }
+      if (instant < laneEligibleAt) {
+        state.pending = true;
+        state.nextEligibleAt = Math.max(state.nextEligibleAt, laneEligibleAt);
+        if (state.spec.renderWaiting) state.spec.renderWaiting();
+        schedule();
+        return Promise.resolve(false);
+      }
+      historicalLaneGranted = true;
+      state.historicalLaneLastDispatch = instant;
     }
     state.generation += 1;
     state.pending = false;
     const generation = state.generation;
+    if (historicalLaneGranted) {
+      state.historicalLaneOwnerGeneration = generation;
+    }
     const controller = new AbortController();
     state.controller = controller;
     if (state.spec.renderLoading) state.spec.renderLoading();
@@ -751,8 +796,39 @@
       }
       return false;
     }).finally(() => {
+      const releasedHistoricalLane = state.historicalLaneOwnerGeneration === generation;
+      if (releasedHistoricalLane) {
+        state.historicalLaneOwnerGeneration = null;
+      }
       if (state.controller === controller) state.controller = null;
       if (state.inFlight === execution) state.inFlight = null;
+      let immediateHistoricalWaiter = null;
+      if (releasedHistoricalLane) {
+        const instant = now();
+        panels.forEach((candidate) => {
+          if (candidate.spec.historicalLane === true && candidate.waitingLane) {
+            if (candidate.spec.historicalLaneGuard === true) {
+              candidate.waitingLane = false;
+              candidate.nextEligibleAt = Math.max(
+                candidate.nextEligibleAt,
+                state.historicalLaneLastDispatch + 3000,
+              );
+            } else if (immediateHistoricalWaiter === null && candidate.pending
+                && !candidate.inFlight && !candidate.suspended
+                && candidate.nextEligibleAt <= instant
+                && !stopped && !globalPaused && !document.hidden) {
+              candidate.waitingLane = false;
+              immediateHistoricalWaiter = candidate;
+            } else if (!candidate.pending || candidate.nextEligibleAt > instant
+                || stopped || globalPaused || document.hidden) {
+              candidate.waitingLane = false;
+            }
+          }
+        });
+      }
+      if (immediateHistoricalWaiter !== null) {
+        runPanel(immediateHistoricalWaiter, {manual: false, initial: false});
+      }
       schedule();
     });
     state.inFlight = execution;
@@ -772,6 +848,9 @@
       suspended: false,
       initialComplete: false,
       pending: false,
+      waitingLane: false,
+      historicalLaneOwnerGeneration: null,
+      historicalLaneLastDispatch: null,
     };
     panels.set(spec.key, state);
     updateFoundationState();
@@ -2405,6 +2484,8 @@
     coordinator.registerPanel({
       key: PANEL_KEY,
       autoRefresh: false,
+      historicalLane: true,
+      historicalLaneGuard: false,
       load: async (context) => {
         const requestRange = rangeContext.selected();
         const include = peakEnabled ? (apEnabled ? "statistics,peak,aps" : "statistics,peak")
@@ -2644,6 +2725,8 @@
   coordinator.registerPanel({
     key: PANEL_KEY,
     autoRefresh: false,
+    historicalLane: true,
+    historicalLaneGuard: false,
     prepareRefresh: () => {
       enqueueRefresh();
       return nextAdmissionAt();
@@ -2686,6 +2769,373 @@
   });
 }());
 /* TRAFFIC_HISTORY_PANEL_END */
+
+/* TRAFFIC_COMPLETED_SESSIONS_PANEL_START */
+(function () {
+  "use strict";
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  const coordinator = window.CaptivPortalTrafficCoordinator;
+  if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
+      || root.dataset.trafficCompletedSessionsEnabled !== "true" || !coordinator
+      || typeof coordinator.registerPanel !== "function"
+      || typeof coordinator.refreshPanel !== "function") return;
+  const elements = Object.fromEntries([
+    "panel", "state", "state-title", "state-message", "range", "range-24h",
+    "range-7d", "range-note", "caption", "items", "more",
+  ].map((name) => [name, document.getElementById(`traffic-completed-sessions-${name}`)]));
+  if (Object.values(elements).some((value) => !value)) return;
+
+  const PANEL_KEY = "completed-guest-session-traffic";
+  const TRAFFIC_COMPLETED_SESSIONS_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const MAC = /^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/;
+  const VISIT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const RANGE = Object.freeze({"24h": 86400000, "7d": 604800000});
+  const EVIDENCE = new Set(["complete", "partial", "insufficient_data", "unavailable"]);
+  const REASONS = new Set(["invalid_elapsed", "gap_too_large", "authorization_boundary",
+    "ssid_transition", "ssid_unproven", "continuity_frozen", "connection_reset",
+    "continuity_unproven", "counter_missing", "counter_reset", "start_edge_uncovered",
+    "end_edge_uncovered", "no_usable_interval", "observation_source_unavailable",
+    "attribution_window_exceeds_supported_max"]);
+  const LABELS = Object.freeze({complete: "Complete sampled evidence", partial: "Partial evidence",
+    insufficient_data: "Insufficient data", unavailable: "Unavailable"});
+  let selectedRange = "24h";
+  let appliedRange = null;
+  let operation = "root";
+  let pendingCursor = null;
+  let nextCursor = null;
+  let rootIdentity = null;
+  let items = [];
+  let intentGeneration = 1;
+
+  function object(value) { return value && typeof value === "object" && !Array.isArray(value); }
+  function utc(value) {
+    return typeof value === "string"
+      && TRAFFIC_COMPLETED_SESSIONS_UTC.test(value)
+      && Number.isFinite(Date.parse(value));
+  }
+  function count(value) { return Number.isInteger(value) && value >= 0; }
+  function bytes(value) { return value === null || (Number.isSafeInteger(value) && value >= 0); }
+  function optionalText(value) { return value === null || (typeof value === "string" && value.length > 0 && value.trim() === value); }
+  function optionalMac(value) { return value === null || (typeof value === "string" && MAC.test(value)); }
+  function identity(value) {
+    return [value.site_id, value.range.id, value.range.evaluated_at_utc,
+      value.range.from_utc, value.range.to_utc, value.page.sort].join("|");
+  }
+
+  function validateItem(item, range) {
+    if (!object(item) || typeof item.visit_id !== "string" || !VISIT.test(item.visit_id)
+        || typeof item.client_mac !== "string" || !MAC.test(item.client_mac)
+        || !utc(item.started_at) || !utc(item.closed_at)
+        || Date.parse(item.closed_at) < Date.parse(item.started_at)
+        || Date.parse(item.closed_at) < Date.parse(range.from_utc)
+        || Date.parse(item.closed_at) >= Date.parse(range.to_utc)
+        || !count(item.duration_seconds) || !optionalText(item.start_ssid)
+        || !optionalText(item.final_ssid) || !optionalMac(item.start_ap_mac)
+        || !optionalMac(item.final_ap_mac)
+        || ![item.observed_download_bytes, item.observed_upload_bytes,
+          item.observed_total_bytes].every(bytes)
+        || !EVIDENCE.has(item.download_evidence_status)
+        || !EVIDENCE.has(item.upload_evidence_status)
+        || !EVIDENCE.has(item.traffic_evidence_status)
+        || !Array.isArray(item.evidence_reason_codes)
+        || item.evidence_reason_codes.some((reason) => !REASONS.has(reason))
+        || new Set(item.evidence_reason_codes).size !== item.evidence_reason_codes.length
+        || !count(item.sample_count) || !count(item.accepted_download_interval_count)
+        || !count(item.accepted_upload_interval_count)
+        || item.accepted_download_interval_count > Math.max(item.sample_count - 1, 0)
+        || item.accepted_upload_interval_count > Math.max(item.sample_count - 1, 0)
+        || !((item.first_observed_at === null && item.last_observed_at === null && item.sample_count === 0)
+          || (utc(item.first_observed_at) && utc(item.last_observed_at)
+            && item.sample_count > 0
+            && Date.parse(item.first_observed_at) >= Date.parse(item.started_at)
+            && Date.parse(item.first_observed_at) <= Date.parse(item.last_observed_at)
+            && Date.parse(item.last_observed_at) < Date.parse(item.closed_at)))) {
+      throw new Error("Invalid completed session item");
+    }
+    const down = item.observed_download_bytes;
+    const up = item.observed_upload_bytes;
+    const total = item.observed_total_bytes;
+    if ((down === null) !== (item.accepted_download_interval_count === 0)
+        || (up === null) !== (item.accepted_upload_interval_count === 0)
+        || (total !== null && (down === null || up === null || total !== down + up))
+        || (total === null && down !== null && up !== null)) {
+      throw new Error("Invalid completed session values");
+    }
+    const unavailable = item.evidence_reason_codes.filter((reason) => (
+      reason === "observation_source_unavailable"
+        || reason === "attribution_window_exceeds_supported_max"
+    ));
+    let shape = false;
+    if (item.traffic_evidence_status === "unavailable") {
+      shape = down === null && up === null && total === null
+        && item.download_evidence_status === "unavailable"
+        && item.upload_evidence_status === "unavailable" && unavailable.length === 1
+        && item.evidence_reason_codes.length === 1 && item.sample_count === 0;
+    } else if (item.traffic_evidence_status === "complete") {
+      shape = down !== null && up !== null && total !== null
+        && item.download_evidence_status === "complete"
+        && item.upload_evidence_status === "complete"
+        && item.evidence_reason_codes.length === 0;
+    } else if (item.traffic_evidence_status === "insufficient_data") {
+      shape = down === null && up === null && total === null
+        && item.download_evidence_status === "insufficient_data"
+        && item.upload_evidence_status === "insufficient_data"
+        && item.evidence_reason_codes.includes("no_usable_interval") && unavailable.length === 0;
+    } else {
+      shape = (down !== null || up !== null) && unavailable.length === 0
+        && item.download_evidence_status !== "unavailable"
+        && item.upload_evidence_status !== "unavailable"
+        && item.evidence_reason_codes.length > 0
+        && (item.download_evidence_status === "partial"
+          || item.upload_evidence_status === "partial" || down === null || up === null);
+    }
+    for (const [status, value] of [[item.download_evidence_status, down], [item.upload_evidence_status, up]]) {
+      shape = shape && ((["complete", "partial"].includes(status) && value !== null)
+        || (["insufficient_data", "unavailable"].includes(status) && value === null));
+    }
+    if (!shape) throw new Error("Invalid completed session evidence");
+    return Object.freeze(item);
+  }
+
+  function validate(payload, siteId) {
+    if (!object(payload) || payload.api_version !== "admin.read.v1"
+        || payload.site_id !== siteId || payload.page !== null || !object(payload.result)) {
+      throw new Error("Invalid completed session response");
+    }
+    const value = payload.result;
+    const range = value.range;
+    const source = value.source_health;
+    const page = value.page;
+    if (value.metric_version !== "network_traffic_completed_guest_session_observed_bytes.v1"
+        || value.session_method !== "closed_visit_completion_cohort.v1"
+        || value.attribution_method !== "visit_window_observation_counter_interval_sum.v1"
+        || value.continuity_method !== "observation_uptime_progress.v1"
+        || value.unit !== "bytes" || value.site_id !== siteId
+        || !["ok", "partial", "insufficient_data", "unavailable"].includes(value.status)
+        || !object(range) || !RANGE[range.id] || !utc(range.from_utc)
+        || !utc(range.to_utc) || !utc(range.evaluated_at_utc)
+        || range.to_utc !== range.evaluated_at_utc
+        || Date.parse(range.to_utc) - Date.parse(range.from_utc) !== RANGE[range.id]
+        || !object(source) || !["healthy", "unavailable"].includes(source.visits)
+        || !["healthy", "unavailable", "not_required"].includes(source.observations)
+        || !object(page) || !count(page.limit) || page.limit < 1 || page.limit > 100
+        || !count(page.returned_count) || page.sort !== "closed_at_desc_visit_id_desc.v1"
+        || !(page.next_cursor === null || (typeof page.next_cursor === "string"
+          && page.next_cursor.length > 0 && page.next_cursor.length <= 4096))
+        || !Array.isArray(value.items) || value.items.length !== page.returned_count
+        || value.items.length > page.limit) throw new Error("Invalid completed session response");
+    const resultItems = value.items.map((item) => validateItem(item, range));
+    const ids = resultItems.map((item) => item.visit_id);
+    if (new Set(ids).size !== ids.length || (page.next_cursor !== null && !resultItems.length)) {
+      throw new Error("Invalid completed session page");
+    }
+    for (let index = 1; index < resultItems.length; index += 1) {
+      const previous = resultItems[index - 1];
+      const current = resultItems[index];
+      if (previous.closed_at < current.closed_at
+          || (previous.closed_at === current.closed_at && previous.visit_id <= current.visit_id)) {
+        throw new Error("Invalid completed session ordering");
+      }
+    }
+    let rootOk = false;
+    if (source.visits === "unavailable") rootOk = value.status === "unavailable"
+      && source.observations === "not_required" && resultItems.length === 0 && page.next_cursor === null;
+    else if (!resultItems.length) rootOk = value.status === "ok"
+      && source.observations === "not_required" && page.next_cursor === null;
+    else if (source.observations === "unavailable") rootOk = value.status === "partial"
+      && resultItems.every((item) => item.traffic_evidence_status === "unavailable");
+    else {
+      const expected = resultItems.every((item) => item.traffic_evidence_status === "complete")
+        ? "ok" : (resultItems.every((item) => item.traffic_evidence_status === "insufficient_data")
+          ? "insufficient_data" : "partial");
+      rootOk = value.status === expected
+        && (source.observations !== "not_required" || resultItems.every((item) => (
+          item.evidence_reason_codes.length === 1
+            && item.evidence_reason_codes[0] === "attribution_window_exceeds_supported_max"
+        )));
+    }
+    if (!rootOk) throw new Error("Invalid completed session root state");
+    return Object.freeze({...value, items: Object.freeze(resultItems), identity: identity(value)});
+  }
+
+  function formatBytes(value) {
+    if (value === null) return "—";
+    if (value === 0) return "0 B";
+    const units = ["B", "KiB", "MiB", "GiB"];
+    let number = value;
+    let index = 0;
+    while (number >= 1024 && index < units.length - 1) { number /= 1024; index += 1; }
+    return `${index === 0 ? number : number.toFixed(1)} ${units[index]}`;
+  }
+  function displayTime(value) {
+    try { return new Intl.DateTimeFormat([], {dateStyle: "medium", timeStyle: "short"}).format(new Date(value)); }
+    catch (_error) { return "—"; }
+  }
+  function displayDuration(value) {
+    const hours = Math.floor(value / 3600);
+    const minutes = Math.floor((value % 3600) / 60);
+    const seconds = value % 60;
+    return hours ? `${hours}h ${minutes}m` : (minutes ? `${minutes}m ${seconds}s` : `${seconds}s`);
+  }
+  function displaySsid(item) {
+    if (item.start_ssid && item.final_ssid && item.start_ssid !== item.final_ssid) {
+      return `${item.start_ssid} → ${item.final_ssid}`;
+    }
+    return item.final_ssid || item.start_ssid || "—";
+  }
+  function cell(row, value, className) {
+    const result = document.createElement("td");
+    if (className) result.className = className;
+    result.textContent = value;
+    row.appendChild(result);
+  }
+  function renderRows() {
+    elements.items.replaceChildren();
+    for (const item of items) {
+      const row = document.createElement("tr");
+      row.dataset.visitId = item.visit_id;
+      cell(row, item.client_mac, "mono");
+      cell(row, displayTime(item.started_at));
+      cell(row, displayTime(item.closed_at));
+      cell(row, displayDuration(item.duration_seconds));
+      cell(row, displaySsid(item));
+      cell(row, formatBytes(item.observed_download_bytes));
+      cell(row, formatBytes(item.observed_upload_bytes));
+      cell(row, formatBytes(item.observed_total_bytes));
+      cell(row, LABELS[item.traffic_evidence_status]);
+      elements.items.appendChild(row);
+    }
+    elements.caption.textContent = items.length
+      ? `Showing ${items.length} completed guest session${items.length === 1 ? "" : "s"}.`
+      : "No completed guest sessions";
+    elements.more.hidden = nextCursor === null;
+    elements.more.disabled = nextCursor === null;
+  }
+  function clearIdentity() {
+    items = [];
+    nextCursor = null;
+    pendingCursor = null;
+    rootIdentity = null;
+    appliedRange = null;
+    operation = "root";
+    renderRows();
+    elements["range-note"].textContent = "Applied range —";
+  }
+  function renderLoading() {
+    elements.state.dataset.state = "warning";
+    elements["state-title"].textContent = operation === "append"
+      ? "Loading more completed sessions…" : "Loading completed guest sessions…";
+    elements["state-message"].textContent = appliedRange === null
+      ? `${selectedRange} persisted evidence is loading.`
+      : `${appliedRange} remains visible while ${selectedRange} loads.`;
+  }
+  function renderWaiting() {
+    elements.state.dataset.state = "warning";
+    elements["state-title"].textContent = "Completed sessions waiting for request admission";
+    elements["state-message"].textContent = "The shared historical lane will dispatch this request after its 3-second guard.";
+  }
+  function renderFailure(failure) {
+    if (failure && (failure.kind === "session" || failure.kind === "forbidden")) clearIdentity();
+    if (operation === "append") { pendingCursor = null; operation = "root"; }
+    elements.state.dataset.state = "error";
+    elements["state-title"].textContent = failure && failure.kind === "busy"
+      ? "Completed session query is busy" : "Completed session history unavailable";
+    elements["state-message"].textContent = items.length
+      ? "Previously loaded completed sessions remain visible; refresh to create a new chain."
+      : "Completed session history could not be loaded.";
+  }
+  function renderGlobalFailure(failure) { clearIdentity(); renderFailure(failure); }
+  function render(value) {
+    if (value.operation === "append") {
+      if (rootIdentity === null || value.identity !== rootIdentity
+          || pendingCursor === null) throw new Error("Completed session cursor chain changed");
+      const known = new Set(items.map((item) => item.visit_id));
+      if (value.items.some((item) => known.has(item.visit_id))) throw new Error("Duplicate completed session page");
+      items = items.concat(value.items);
+    } else {
+      if (value.range.id !== selectedRange) return;
+      items = Array.from(value.items);
+      rootIdentity = value.identity;
+      appliedRange = value.range.id;
+    }
+    nextCursor = value.page.next_cursor;
+    pendingCursor = null;
+    operation = "root";
+    renderRows();
+    elements["range-note"].textContent = `Applied range ${appliedRange} · evaluated ${displayTime(value.range.evaluated_at_utc)}`;
+    elements.state.dataset.state = value.status === "ok" ? "ready" : "warning";
+    elements["state-title"].textContent = value.status === "ok" ? "Completed sessions ready"
+      : (value.status === "insufficient_data" ? "Completed session traffic has insufficient data"
+        : (value.status === "unavailable" ? "Completed session history unavailable" : "Completed session traffic is partial"));
+    elements["state-message"].textContent = value.source_health.visits === "unavailable"
+      ? "Completed session history unavailable"
+      : (value.source_health.observations === "unavailable"
+        ? "Traffic evidence unavailable. Completed session history is still available."
+        : (items.length ? "Persisted completed Visit traffic evidence is shown." : "No completed guest sessions"));
+  }
+  function updateRangeControls() {
+    elements["range-24h"].setAttribute("aria-pressed", selectedRange === "24h" ? "true" : "false");
+    elements["range-7d"].setAttribute("aria-pressed", selectedRange === "7d" ? "true" : "false");
+    elements["range-24h"].dataset.applied = appliedRange === "24h" ? "true" : "false";
+    elements["range-7d"].dataset.applied = appliedRange === "7d" ? "true" : "false";
+  }
+  function requestRoot(range) {
+    selectedRange = range;
+    intentGeneration += 1;
+    operation = "root";
+    pendingCursor = null;
+    nextCursor = null;
+    updateRangeControls();
+    elements.more.hidden = true;
+    elements.more.disabled = true;
+    coordinator.refreshPanel(PANEL_KEY, {manual: true});
+  }
+  elements["range-24h"].addEventListener("click", () => { if (selectedRange !== "24h") requestRoot("24h"); });
+  elements["range-7d"].addEventListener("click", () => { if (selectedRange !== "7d") requestRoot("7d"); });
+  elements.more.addEventListener("click", () => {
+    if (nextCursor === null || pendingCursor !== null) return;
+    operation = "append";
+    pendingCursor = nextCursor;
+    coordinator.refreshPanel(PANEL_KEY, {manual: true});
+  });
+  updateRangeControls();
+  coordinator.registerPanel({
+    key: PANEL_KEY,
+    autoRefresh: false,
+    historicalLane: true,
+    historicalLaneGuard: true,
+    prepareRootRefresh: () => {
+      intentGeneration += 1;
+      operation = "root";
+      pendingCursor = null;
+      nextCursor = null;
+    },
+    renderWaiting,
+    renderLoading,
+    renderFailure,
+    renderGlobalFailure,
+    load: async (context) => {
+      const requestedOperation = operation;
+      const requestedCursor = requestedOperation === "append" ? pendingCursor : null;
+      const requestedRange = selectedRange;
+      const requestedIntent = intentGeneration;
+      const suffix = requestedCursor === null ? "" : `&cursor=${encodeURIComponent(requestedCursor)}`;
+      const value = validate(await context.requestJson(
+        `${context.apiBase}/traffic/completed-sessions?range=${encodeURIComponent(requestedRange)}&limit=100${suffix}`,
+      ), context.siteId);
+      if (requestedIntent !== intentGeneration || requestedRange !== selectedRange) {
+        throw {trafficNeutral: true};
+      }
+      if (requestedOperation === "append" && value.identity !== rootIdentity) {
+        throw new Error("Completed session cursor chain changed");
+      }
+      return Object.freeze({...value, operation: requestedOperation});
+    },
+    render,
+  });
+}());
+/* TRAFFIC_COMPLETED_SESSIONS_PANEL_END */
 
 (function () {
   "use strict";

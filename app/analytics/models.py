@@ -783,6 +783,76 @@ class CurrentGuestTrafficResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CompletedGuestSessionTrafficRange:
+    id: str
+    from_utc: str
+    to_utc: str
+    evaluated_at_utc: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedGuestSessionTrafficSourceHealth:
+    visits: str
+    observations: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedGuestSessionTrafficPage:
+    limit: int
+    returned_count: int
+    next_cursor: str | None
+    sort: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedGuestSessionTrafficItem:
+    visit_id: str
+    client_mac: str
+    started_at: str
+    closed_at: str
+    duration_seconds: int
+    start_ssid: str | None
+    final_ssid: str | None
+    start_ap_mac: str | None
+    final_ap_mac: str | None
+    observed_download_bytes: int | None
+    observed_upload_bytes: int | None
+    observed_total_bytes: int | None
+    download_evidence_status: str
+    upload_evidence_status: str
+    traffic_evidence_status: str
+    evidence_reason_codes: tuple[str, ...]
+    sample_count: int
+    accepted_download_interval_count: int
+    accepted_upload_interval_count: int
+    first_observed_at: str | None
+    last_observed_at: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "evidence_reason_codes", tuple(self.evidence_reason_codes)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedGuestSessionTrafficResult:
+    metric_version: str
+    session_method: str
+    attribution_method: str
+    continuity_method: str
+    unit: str
+    site_id: str
+    range: CompletedGuestSessionTrafficRange
+    status: str
+    source_health: CompletedGuestSessionTrafficSourceHealth
+    page: CompletedGuestSessionTrafficPage
+    items: tuple[CompletedGuestSessionTrafficItem, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalTrafficRange:
     site_id: str
     from_utc: str
