@@ -3,9 +3,9 @@
 Status: current
 Updated: 2026-09-06
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
-Production deployed HEAD: `6fbc3736085be9d0538d893b6e9569ff490ef7f4`
-Production tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
+Documentation/current-state implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Production deployed HEAD: `df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Production tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
 
 ## Responsibility model
 
@@ -335,7 +335,97 @@ During TRAFFIC-00 acceptance:
 
 This is troubleshooting history, not a current product defect.
 
-### Latest Traffic acceptance evidence — TRAFFIC-07
+### Latest Traffic acceptance evidence — TRAFFIC-08
+
+Canonical artifact:
+
+```text
+TASK: TASK-TRAFFIC-08 — Completed Guest Session Traffic
+parent baseline: 3761981f4b1ec30b330abe1eec1713f15191c711
+accepted implementation commit: 8cfe30c2bcb13bf3ca7e001238991abd5943ea08
+accepted / production tree: 1161739c6b4fe90fa08928556746a5a4ea6af4cd
+PR #104: merged
+merge / production commit: df91355a99d2561abc9c4d6d4bb6f5a968d327b3
+R6 patch SHA256: 6077ea09f6f1421d43f2602cbea6beeae436faf5dc19a032ed520cf348efbbfa
+production deployment: PASS
+feature activation: PASS
+production verification: PASS
+new failures: 0
+regressions: 0
+```
+
+Windows acceptance:
+
+```text
+reconstruction: PASS
+focused: 50 passed
+regression: PASS_WITH_BASELINE_EXCEPTIONS
+canonical PERF: PASS
+full suite: PASS_WITH_BASELINE_EXCEPTIONS
+TASK-TRAFFIC-08 regressions: 0
+```
+
+Owner Linux Lab:
+
+```text
+reconstruction: PASS
+focused: 50 passed
+regression: PASS_WITH_BASELINE_EXCEPTIONS
+PERF: PASS
+full suite: 2892 passed, 1 skipped, 3 baseline failures
+TASK-TRAFFIC-08 new failures: 0
+```
+
+Canonical Linux PERF:
+
+```text
+API50 p95=1.3743s <=2.0s
+API50 max=1.3743s <=3.0s
+API100 p95=2.3960s <=4.0s
+API100 max=2.3960s <=6.0s
+deadline failures=0
+unexpected HTTP statuses=0
+provider calls=0
+payload <=256KiB=PASS
+five source DB fingerprints unchanged=PASS
+```
+
+Required existing indexes confirmed:
+
+```text
+idx_visits_site_closed
+idx_visit_auth_visit_time
+idx_client_site_mac_time
+```
+
+TRAFFIC-08 added no new index.
+
+Confirmed baseline exceptions outside TRAFFIC-08:
+
+1. `tests/analytics/test_current_traffic.py::test_sql_integrity_aggregates_reject_corrupt_rate_and_null_values[wired_download_mbps-inf-bad_rate_count]`
+2. `tests/test_auth_retry_frontend.py::test_lost_retry_response_reconciles_active_run`
+3. Linux SQLite EXPLAIN planner:
+   `tests/analytics/test_historical_traffic_peak.py::test_peak_projection_reuses_one_materialized_requested_range_validation`
+4. Linux SQLite EXPLAIN planner:
+   `tests/analytics/test_historical_traffic_statistics.py::test_combined_projection_materializes_one_expensive_validation_path`
+5. Visitor Registry `[stopping]` timing race — baseline-flaky.
+
+These exceptions must not be attributed to TRAFFIC-08 and were neither fixed nor
+suppressed by the TASK.
+
+Production closure:
+
+```text
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+traffic page=HTTP 200
+completed-sessions API=HTTP 200
+panel/heading=FOUND
+Visits source=healthy
+Observation source=healthy
+API_PARSE=PASS
+```
+
+### Previous Traffic acceptance evidence — TRAFFIC-07
 
 Current accepted repository / production artifact:
 
@@ -550,10 +640,10 @@ Permanent TRAFFIC-07 invariants:
 - Online Guests Traffic remains range-insensitive;
 - query-time Omada isolation remains intact.
 
-`TASK-DB-BASELINE-SYNC-01` is the current prerequisite before the planned
-Traffic 0.8 stage. Traffic 0.8 does not yet imply a canonical implementation
-or targeted-test contract; Tech Lead must define/review that exact set when
-its TASK is approved.
+`TASK-DB-BASELINE-SYNC-01` is CLOSED / PASS and `TASK-TRAFFIC-08` is
+CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED. No next Traffic TASK is
+currently assigned; Tech Lead must define a fresh targeted set when a successor
+TASK is separately approved.
 
 ## Acceptance before Publication
 

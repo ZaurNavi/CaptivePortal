@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-09-03
-Baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Updated: 2026-09-06
+Baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
 
 ## Boundary
 
@@ -51,6 +51,7 @@ WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=false
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false
 ```
 
 Owner-confirmed production state:
@@ -64,17 +65,19 @@ WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
 ```
 
 Current functional panels:
 
 1. Current Network Throughput;
-2. Network Traffic History;
-3. Period Statistics;
-4. Peak Load;
-5. Traffic by AP;
-6. AP Traffic Share;
-7. Online Guests Traffic.
+2. Online Guests Traffic;
+3. Completed Guest Session Traffic;
+4. Network Traffic History;
+5. Period Statistics;
+6. Peak Load;
+7. Traffic by AP;
+8. AP Traffic Share.
 
 Current Network Throughput is range-insensitive.
 
@@ -230,6 +233,51 @@ Online Guest means controller-reported active authorized wireless guest in the
 latest accepted Current State guest scope, not independent proof of
 instantaneous physical RF presence.
 
+## Completed Guest Session Traffic
+
+Canonical endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/completed-sessions
+```
+
+Query contract:
+
+```text
+range=24h|7d
+default range=24h
+limit default=100
+limit max=100
+cursor=opaque keyset cursor
+sort=closed_at DESC, visit_id DESC
+sort contract=closed_at_desc_visit_id_desc.v1
+```
+
+Canonical path:
+
+```text
+persisted Visit Lifecycle + Client Observation evidence
+→ CompletedGuestSessionTrafficReadService
+→ AdminQueryService
+→ Admin API
+```
+
+Only closed Visits are returned; cohort selection is by `closed_at`. The browser
+does not calculate session traffic. `0 B` is rendered for numeric zero and `—`
+for unknown/null evidence.
+
+Public evidence labels:
+
+```text
+Complete sampled evidence
+Partial evidence
+Insufficient data
+Unavailable
+```
+
+The product does not poll Omada/provider at query time and does not read
+`historical_traffic_projection.v1`.
+
 ## UI/design status
 
 Current panel placement remains production-current functional composition, not a
@@ -237,8 +285,9 @@ permanently frozen final Traffic visual design.
 
 ## Semantic restrictions
 
-Network Throughput/History/Statistics/Peak/Traffic by AP/AP Traffic Share are AP/network evidence.
-Do not label them as WAN, Internet-only, billing, guest, SSID or Guest Session Traffic.
+Network Throughput/History/Statistics/Peak/Traffic by AP/AP Traffic Share are
+AP/network evidence and must not be relabelled as guest/WAN/billing traffic.
+Completed Guest Session Traffic is a separate Visit-scoped guest-session domain.
 
 ## Lifecycle
 

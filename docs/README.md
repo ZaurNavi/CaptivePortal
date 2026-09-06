@@ -2,8 +2,8 @@
 
 Status: current
 Updated: 2026-09-06
-Current-state implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
-Current implementation tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
+Current-state implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Current implementation tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -41,7 +41,8 @@ Historical reports, production acceptance и research сохраняют док�
 | Testing responsibility/gates | `testing.md` |
 | Test environment routing / production-not-test-host invariant | `testing-environments.md` |
 | Practical command/harness lessons | `operations-command-lessons-learned.md` |
-| Current DB baseline prerequisite | `tasks/TASK-DB-BASELINE-SYNC-01.md` |
+| Completed DB baseline gate | `tasks/TASK-DB-BASELINE-SYNC-01.md` |
+| TRAFFIC-08 final production closure | `tasks/TASK-TRAFFIC-08-FINAL.md` |
 | Deferred Projection maintenance request | `deferred/TRAFFIC-PROJECTION-MAINTENANCE-REINDEX.md` |
 | Acceptance/publication workflow | `agents/workflow.md` |
 | Git/production deployment boundary | `deployment.md` |
@@ -76,7 +77,7 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic state at implementation baseline `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`:
+Current Traffic state at implementation baseline `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`:
 
 ```text
 TRAFFIC-00         DONE
@@ -91,12 +92,14 @@ TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06         DONE / PRODUCTION ACTIVE
 TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
+TRAFFIC-08         CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
 ```
 
 Owner-confirmed production Traffic flags now also include:
 
 ```text
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
 ```
 
 Repository default remains `WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false`.
@@ -104,15 +107,16 @@ Repository default remains `WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false`.
 Historical Traffic panels retain independent page-local `24h | 7d` ranges.
 Online Guests Traffic is Current State-backed, near-current and range-insensitive.
 
-Current operational prerequisite:
+Closed prerequisite and current closure:
 
 ```text
-TASK-DB-BASELINE-SYNC-01
-APPROVED / READY FOR EXECUTION / NOT YET ACCEPTED
+TASK-DB-BASELINE-SYNC-01 = CLOSED / PASS
+FINAL_DB_BASELINE = PASS
+TASK-TRAFFIC-08 = CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
 ```
 
-After `FINAL_DB_BASELINE=PASS`, the next planned product stage is **Traffic 0.8**.
-This does not yet create a detailed Traffic 0.8 implementation/API contract.
+No next Traffic TASK is currently assigned. A successor becomes canonical only
+after separate Owner / Tech Lead approval.
 
 `modules/traffic.md` is the current Traffic product/semantic contract.
 Historical FINAL TASKs and acceptance evidence remain traceability evidence and

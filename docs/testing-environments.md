@@ -86,30 +86,50 @@ The detailed Windows runner/interpreter/anti-drift contract remains in
 CaptivPortal already has a dedicated Linux test/performance environment on the
 Owner laptop.
 
-Technology:
+Technology / canonical entry:
 
 ```text
-WSL / Linux under Windows
+WSL distro: Ubuntu-22.04
+OS: Ubuntu 22.04.5 LTS
+canonical Windows entry: wsl -d Ubuntu-22.04
+generic `wsl` is not the canonical acceptance entry
 ```
 
-Known host identity:
+Known host identity and runtime:
 
 ```text
-DESKTOP-7C8M3BS
+host: DESKTOP-7C8M3BS
+user: zaur_navi
+repo: ~/captivportal-lab/repo
+Python env: ~/captivportal-lab/perf-venv
+Python: 3.10.12
+pytest: 9.1.1
+Node.js: 24.20.0
+npm: 11.19.0
+node: /usr/bin/node
+npm: /usr/bin/npm
 ```
 
-Linux user:
+Before Linux pytest:
 
 ```text
-zaur_navi
+export PYTHONPATH="$PWD"
+~/captivportal-lab/perf-venv/bin/python -m pytest ...
 ```
 
-Known previously used working directories:
+Node is installed system-wide because frontend pytest scenarios invoke `node`
+through subprocess.
+
+Known task-specific work directories may include:
 
 ```text
 ~/captivportal-lab
 ~/captivportal-traffic07-perf
 ```
+
+Do not run acceptance directly in a source repository that contains unfinished
+work. Create a separate native-Linux detached worktree from the exact accepted
+baseline/candidate.
 
 Task-specific directories, virtual environments, candidate worktrees,
 production-derived snapshots and performance directories may change between
@@ -133,6 +153,10 @@ The dedicated WSL/Linux Lab is the default environment for:
 If a TASK requires Linux acceptance or a performance gate, Tech Lead must first
 use this existing dedicated Lab unless the TASK explicitly requires another
 environment.
+
+Owner/production runbooks must not wrap acceptance in `set -e` or
+`set -euo pipefail`; use explicit bounded checks so harness/diagnostic failures
+can be classified separately from candidate failures.
 
 ## 5. Production is not a test host
 

@@ -2,9 +2,9 @@
 
 Status: current contract; production details remain host-verified
 Updated: 2026-09-06
-Current repository implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
-Confirmed production deployed HEAD: `6fbc3736085be9d0538d893b6e9569ff490ef7f4`
-Confirmed production tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
+Current repository implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Confirmed production deployed HEAD: `df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Confirmed production tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
 
 ## Repository vs production
 
@@ -198,16 +198,16 @@ See:
 - `testing-environments.md`;
 - `operations-command-lessons-learned.md`.
 
-## Traffic production checkpoint — 2026-09-01
+## Traffic production checkpoint — 2026-09-06
 
 Owner-confirmed current state:
 
 ```text
 repository / production HEAD:
-6fbc3736085be9d0538d893b6e9569ff490ef7f4
+df91355a99d2561abc9c4d6d4bb6f5a968d327b3
 
 repository / production tree:
-fc3c1ed53df32d0074036a749ee028781ec1f1b5
+1161739c6b4fe90fa08928556746a5a4ea6af4cd
 
 captive-portal.service:
 active
@@ -217,12 +217,13 @@ Current production Traffic surface:
 
 ```text
 Current Network Throughput
+Online Guests Traffic
+Completed Guest Session Traffic
 Network Traffic History
 Period Statistics
 Peak Load
 Traffic by AP
 AP Traffic Share
-Online Guests Traffic
 ```
 
 Production flags:
@@ -236,6 +237,7 @@ WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
 ```
 
 Repository defaults remain false, including `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false`.
@@ -405,6 +407,91 @@ provider isolation: PASS
 Online Guests Traffic reads persisted Current State only. No separate collector,
 Traffic DB, schema migration, Observation fallback or query-time Omada path was
 introduced.
+
+## TRAFFIC-08 deployment / activation history
+
+Canonical implementation:
+
+```text
+TASK: TASK-TRAFFIC-08 — Completed Guest Session Traffic
+parent baseline: 3761981f4b1ec30b330abe1eec1713f15191c711
+accepted implementation commit: 8cfe30c2bcb13bf3ca7e001238991abd5943ea08
+accepted / production tree: 1161739c6b4fe90fa08928556746a5a4ea6af4cd
+PR: #104
+merge / production commit: df91355a99d2561abc9c4d6d4bb6f5a968d327b3
+cumulative R6 patch SHA256: 6077ea09f6f1421d43f2602cbea6beeae436faf5dc19a032ed520cf348efbbfa
+```
+
+Production host / checkout:
+
+```text
+host: 192.168.0.202
+application: /opt/CaptivePortal
+service: captive-portal.service
+checkout: detached HEAD df91355a99d2561abc9c4d6d4bb6f5a968d327b3
+worktree: CLEAN
+```
+
+Deployment preserved the normal two-step boundary:
+
+```text
+dormant deploy with WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false → PASS
+separate Owner-authorized activation to true → PASS
+startup/readiness → PASS
+production HTTP/Admin/API verification → PASS
+```
+
+Final production flag:
+
+```text
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+```
+
+The flag was verified both in `/etc/default/captive-portal` and in the live
+production process environment.
+
+Production smoke on Site `6a64f17630da7c70d232187a`:
+
+```text
+GET  /admin/login = 200
+POST /admin/login = 302
+GET  /admin/sites/6a64f17630da7c70d232187a/traffic = 200
+GET  /admin/api/v1/sites/6a64f17630da7c70d232187a/traffic/completed-sessions = 200
+COMPLETED_SESSIONS_PANEL=FOUND
+COMPLETED_SESSIONS_HEADING=FOUND
+API_PARSE=PASS
+```
+
+Final observed live API sample:
+
+```text
+ROOT_STATUS=partial
+VISIT_SOURCE=healthy
+OBSERVATION_SOURCE=healthy
+RETURNED_COUNT=100
+NEXT_CURSOR=True
+partial=94
+insufficient_data=6
+NUMERIC_TOTAL_ROWS=94
+API_RESPONSE_BYTES=75316
+```
+
+`ROOT_STATUS=partial` is valid evidence quality, not a product error. Both source
+roots were healthy and the live Observation stream continued to change individual
+Visit evidence between smoke requests.
+
+No projection rebuild/schema/index/source mutation was part of TRAFFIC-08.
+`historical_traffic_projection.v1` is not the source of this product.
+
+Rollback points retained:
+
+```text
+code rollback: 6fbc3736085be9d0538d893b6e9569ff490ef7f4
+pre-dormant env: /etc/default/captive-portal.pre-traffic08-20260906-233314
+pre-activation env: /etc/default/captive-portal.pre-traffic08-activation-20260906-233650
+```
+
+Rollback is not currently required.
 
 ## Feature activation
 
