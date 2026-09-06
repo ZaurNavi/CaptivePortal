@@ -25,10 +25,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4` |
-| Repository tree | `fc3c1ed53df32d0074036a749ee028781ec1f1b5` |
-| Production deployed HEAD | `6fbc3736085be9d0538d893b6e9569ff490ef7f4` |
-| Production tree | `fc3c1ed53df32d0074036a749ee028781ec1f1b5` |
+| Repository implementation checkpoint | `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3` |
+| Repository tree | `1161739c6b4fe90fa08928556746a5a4ea6af4cd` |
+| Production deployed HEAD | `df91355a99d2561abc9c4d6d4bb6f5a968d327b3` |
+| Production tree | `1161739c6b4fe90fa08928556746a5a4ea6af4cd` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -37,8 +37,9 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Independent historical ranges | **Production active / acceptance PASS** |
 | AP Traffic Share | **Production active / acceptance PASS** |
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
-| DB baseline prerequisite | `TASK-DB-BASELINE-SYNC-01` — **READY FOR EXECUTION** |
-| Next Traffic stage | **Traffic 0.8 — planned after FINAL_DB_BASELINE=PASS** |
+| Completed Guest Session Traffic | **CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED** |
+| DB baseline gate | `TASK-DB-BASELINE-SYNC-01` — **CLOSED / PASS** |
+| Next Traffic task | **NOT YET ASSIGNED** |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
 | Core guest authorization | Implemented |
 | RFC 8908 CAPPORT | Implemented |
@@ -54,10 +55,12 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 ## Where the project is now
 
-Traffic is production-active through Online Guests Traffic.
+Traffic is production-active through `TASK-TRAFFIC-08 — Completed Guest Session Traffic`.
 
-Online Guests Traffic is a separate near-current Current State-backed panel and
-does not use the historical `24h | 7d` selector.
+Online Guests Traffic remains the separate near-current Current State-backed
+panel. Completed Guest Session Traffic is a closed-Visit historical product
+backed by persisted Visit Lifecycle + Client Observation evidence and supports
+`24h | 7d` closed-at cohorts.
 
 Current functional layout remains production-current, not a frozen final visual
 composition.
@@ -67,12 +70,13 @@ composition.
 At the current runtime checkpoint, Traffic includes:
 
 - Current Network Throughput;
+- Online Guests Traffic;
+- Completed Guest Session Traffic;
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
 - Traffic by AP;
-- AP Traffic Share;
-- Online Guests Traffic.
+- AP Traffic Share.
 
 Historical Traffic panels retain independent page-local `24h | 7d` ranges.
 Online Guests Traffic reads persisted Current State through
@@ -798,11 +802,12 @@ TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06         DONE / PRODUCTION ACTIVE
 TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
-DB-BASELINE-SYNC   READY FOR EXECUTION
-Traffic 0.8        PLANNED AFTER FINAL_DB_BASELINE=PASS
+DB-BASELINE-SYNC   CLOSED / PASS
+TRAFFIC-08          CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+next Traffic TASK   NOT YET ASSIGNED
 ```
 
-Traffic 0.8 is a planned stage only; its detailed implementation contract is not yet defined.
+TASK-TRAFFIC-08 is closed and production-verified. No successor Traffic TASK is canonical until separately approved by Owner / Tech Lead.
 
 ## Real second Site as a trigger
 

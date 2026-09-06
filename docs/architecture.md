@@ -1,9 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-09-03
-Runtime implementation baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
-Runtime tree: `b669f368b0062fcb100b24758cf05e2c4b500144`
+Updated: 2026-09-06
+Runtime implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Runtime tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
 
 ## 1. Mental model
 
@@ -126,7 +126,8 @@ Observation / Visit / Registry read boundaries
 AnalyticsSourceGateway
         ↓
 Quality / Wireless / Visit /
-CurrentTraffic / HistoricalTraffic / HomeActivity services
+CurrentTraffic / CurrentGuestTraffic / CompletedGuestSessionTraffic /
+HistoricalTraffic / HomeActivity services
 ```
 
 Source boundaries require read-only SQLite/query-only contracts.
@@ -212,7 +213,7 @@ max historical HTTP requests in flight from one page = 1
 Admission guard:
 
 ```text
-HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 10
+HISTORICAL_TRAFFIC_REQUEST_ADMISSION_GUARD_SECONDS = 3
 ```
 
 No QueryDeadline, browser-timeout or Admin-concurrency increase is part of this
@@ -253,6 +254,44 @@ calculations are not sources for this product.
 
 No separate collector or database was added.
 
+### Completed Guest Session Traffic
+
+`TASK-TRAFFIC-08` adds a separate closed-Visit historical product. It does not
+change the Network Traffic historical semantic owner and does not use
+`historical_traffic_projection.v1`.
+
+Canonical read path:
+
+```text
+Visit Lifecycle DB + persisted Client Observation evidence
+→ CompletedGuestSessionTrafficReadService
+→ AdminQueryService
+→ GET /admin/api/v1/sites/<site_id>/traffic/completed-sessions
+→ Admin Console / Traffic / Completed Guest Session Traffic
+```
+
+Canonical session identity is `visit_id`. Only `status=closed` Visits enter the
+population. The selected `24h | 7d` range defines the cohort by `closed_at`;
+traffic attribution uses the Visit's full `[started_at, closed_at)` window and
+is not clipped to the selected UI range.
+
+The read path performs no Omada/provider polling and adds no source DB,
+projection DB, schema or index.
+
+Permanent evidence boundaries include:
+
+```text
+maximum attribution window = 86400s
+maximum accepted Observation interval = 180s
+AP roaming allowed
+uptime continuity required
+numeric 0 = evidence
+null = unknown/unavailable
+```
+
+Visits longer than 24 hours remain visible but return unavailable traffic
+evidence with `attribution_window_exceeds_supported_max`.
+
 ## 8. Admin Web
 
 Guest auth and Admin auth remain separate.
@@ -262,15 +301,18 @@ Home, Devices, Device Detail, Visits, Observations, Traffic.
 
 Traffic production-current functional surface:
 - Current Network Throughput;
+- Online Guests Traffic;
+- Completed Guest Session Traffic;
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
 - Traffic by AP;
-- AP Traffic Share;
-- Online Guests Traffic.
+- AP Traffic Share.
 
-Historical panels have independent `24h | 7d` selectors.
-Current Network Throughput and Online Guests Traffic have none.
+Network History, Statistics, Peak, Traffic by AP and AP Share have independent
+`24h | 7d` selectors. Completed Guest Session Traffic also supports `24h | 7d`
+for its closed-at cohort. Current Network Throughput and Online Guests Traffic
+remain range-insensitive.
 
 Canonical historical API remains:
 

@@ -3,9 +3,9 @@
 Status: current runtime snapshot
 Updated: 2026-09-06
 Branch: `main`
-Runtime commit: `6fbc3736085be9d0538d893b6e9569ff490ef7f4`
-Runtime tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
-Commit source: merge PR #102 / TASK-ADMIN-PROD-BASELINE-01, 2026-09-05
+Runtime commit: `df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Runtime tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
+Commit source: merge PR #104 / TASK-TRAFFIC-08, 2026-09-06
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -92,6 +92,7 @@ Analytics has no worker/write lifecycle to stop.
 | AP Traffic Share | Admin Web + Historical Traffic | accepted interval-integrated AP contribution ratio | none | no |
 | Online Guest Traffic Read Foundation | `app/analytics/current_guest_traffic.py`, Current State read service | persisted Current State | none | no |
 | Online Guests Traffic | Admin Web + Current Guest Traffic | persisted Current State / authorized guest scope | none | no |
+| Completed Guest Session Traffic | `app/analytics/completed_guest_traffic.py`, Admin Web | closed Visits + persisted Client Observation evidence | none | no |
 
 ## 5. Observation vs Current State
 
@@ -129,7 +130,10 @@ Current State client classification:
 
 Writers own schema/migrations. Read-only consumers do not mutate source storage.
 
-Current operational prerequisite before planned Traffic 0.8: `tasks/TASK-DB-BASELINE-SYNC-01.md`. It inventories all active production SQLite stores against exact current `main`; Observation remains authoritative, Traffic Projection remains derived, and accepted Visit Site-rename recovery is not replayed.
+`TASK-DB-BASELINE-SYNC-01` is closed with `FINAL_DB_BASELINE=PASS`.
+All active production SQLite stores passed the required baseline/integrity gate;
+that closure unblocked TRAFFIC-08. Observation remains authoritative and Traffic
+Projection remains derived.
 
 ## 7. Visit Lifecycle current contract
 
@@ -189,7 +193,8 @@ Services:
 - visit analytics;
 - optional `CurrentTrafficReadService`;
 - `HomeActivityReadService`;
-- `HistoricalTrafficReadService`.
+- `HistoricalTrafficReadService`;
+- `CompletedGuestSessionTrafficReadService`.
 
 Protected internal API prefix:
 `/api/internal/analytics/v1`
@@ -225,12 +230,13 @@ Current pages:
 Traffic currently contains:
 - Traffic Foundation / `CaptivPortalTrafficCoordinator`;
 - Current Network Throughput;
+- Online Guests Traffic;
+- Completed Guest Session Traffic;
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
 - Traffic by AP;
 - AP Traffic Share;
-- Online Guests Traffic;
 - independent historical panel ranges.
 
 Current endpoint:
@@ -295,6 +301,25 @@ CurrentStateReadService
 ```
 
 Online Guests Traffic is range-insensitive and Current State-backed.
+
+Completed Sessions endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/completed-sessions
+```
+
+Completed Sessions contract:
+
+```text
+range=24h|7d
+default=24h
+limit=100
+pagination=keyset
+sort=closed_at DESC, visit_id DESC
+source=closed Visits + persisted Client Observation
+provider calls=none
+historical_traffic_projection.v1 source=no
+```
 
 Business/data Admin API remains read-only.
 
@@ -433,25 +458,29 @@ Current repository/production Traffic implementation includes:
 - Independent Traffic Range per Panel;
 - AP Traffic Share;
 - Online Guest Traffic Read Foundation;
-- Online Guests Traffic.
+- Online Guests Traffic;
+- Completed Guest Session Traffic.
 
 Owner-confirmed production checkpoint:
 
 ```text
-production HEAD: 6425988b5b4ec5ff38bf9c67c74846c3806f668f
-production tree: b669f368b0062fcb100b24758cf05e2c4b500144
+production HEAD: df91355a99d2561abc9c4d6d4bb6f5a968d327b3
+production tree: 1161739c6b4fe90fa08928556746a5a4ea6af4cd
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
 captive-portal.service=active
 TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
+TASK-DB-BASELINE-SYNC-01: CLOSED / PASS
+TRAFFIC-08: CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
 ```
 
 Online Guests Traffic is Current State-backed near-current authorized guest rate
 evidence. Historical Network Traffic remains Observation-backed.
 
-`TASK-DB-BASELINE-SYNC-01` is the current operational prerequisite. After
-`FINAL_DB_BASELINE=PASS`, the next planned product stage is Traffic 0.8.
-No detailed Traffic 0.8 implementation contract is implied by this inventory.
+`TASK-DB-BASELINE-SYNC-01` is closed with `FINAL_DB_BASELINE=PASS`.
+`TASK-TRAFFIC-08` is closed, deployed, active and production-verified.
+No next Traffic TASK is currently assigned.
 
 Historical TASK/PR evidence remains historical and does not override current
 production truth.

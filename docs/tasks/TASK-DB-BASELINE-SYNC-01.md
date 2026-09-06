@@ -1,6 +1,6 @@
 # TASK-DB-BASELINE-SYNC-01 — привести production DB layer к актуальному baseline
 
-Status: APPROVED / READY FOR EXECUTION / NOT YET ACCEPTED
+Status: CLOSED / PASS
 Updated: 2026-09-06
 
 ## 1. Baseline
@@ -21,14 +21,57 @@ WORKTREE=CLEAN
 
 `TASK-ADMIN-PROD-BASELINE-01` is complete.
 
-The next planned product stage is **Traffic 0.8**, but it must not begin until
-this DB baseline task finishes with:
+This TASK was the DB prerequisite for TASK-TRAFFIC-08. The required gate
+completed with:
 
 ```text
 FINAL_DB_BASELINE=PASS
+BLOCKERS_FOR_TRAFFIC_0_8=none
 ```
 
-This TASK does not implement Traffic 0.8.
+The TASK itself did not implement Traffic 0.8/TRAFFIC-08.
+
+## Closure — production PASS
+
+Owner/Tech Lead production audit completed successfully.
+
+```text
+OBSERVATION_DB=PASS
+VISITS_DB=PASS
+TRAFFIC_PROJECTION_DB=PASS
+OTHER_ACTIVE_DBS_STATUS=PASS
+
+quick_check=ok
+foreign_key_violations=0
+
+projection healthy=yes
+projection backlog=0
+projection divergence=no
+worker restart/catch-up=PASS
+
+REQUIRED_MIGRATIONS=none
+DATA_REWRITTEN=no
+DESTRUCTIVE_ACTIONS=none
+
+FINAL_DB_BASELINE=PASS
+BLOCKERS_FOR_TRAFFIC_0_8=none
+```
+
+The active additional SQLite stores verified PASS were:
+
+```text
+current_state.sqlite3
+visitor_registry.sqlite3
+public_traffic.sqlite3
+portal_counter.db
+```
+
+A consistent Traffic Projection backup was created and passed
+`PRAGMA quick_check=ok`. No Observation historical rewrite, destructive schema
+action, projection rebuild or repeated Visit Site-rename recovery was performed.
+
+This gate unblocked TASK-TRAFFIC-08, which subsequently completed and reached
+production verification.
 
 ## 2. Goal
 
@@ -294,4 +337,5 @@ Only after:
 FINAL_DB_BASELINE=PASS
 ```
 
-is the DB layer considered ready for the planned **Traffic 0.8** stage.
+the DB layer was declared ready for `TASK-TRAFFIC-08`; that successor has
+since completed and is production-verified.

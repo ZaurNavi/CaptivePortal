@@ -1,8 +1,8 @@
 # Analytics
 
 Status: current module contract
-Updated: 2026-09-03
-Baseline: `main@6425988b5b4ec5ff38bf9c67c74846c3806f668f`
+Updated: 2026-09-06
+Baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
 
 ## Purpose
 
@@ -31,6 +31,7 @@ Current services include:
 - `CurrentTrafficReadService`;
 - `HistoricalTrafficReadService`;
 - `CurrentGuestTrafficReadService`;
+- `CompletedGuestSessionTrafficReadService`;
 - `HomeActivityReadService`.
 
 ## Home Activity
@@ -81,6 +82,59 @@ Omada calls or browser-side rate calculations.
 Online Guest means controller-reported active authorized wireless guest in the
 accepted Current State guest scope. This is not independent proof of
 instantaneous RF presence.
+
+## Completed Guest Session Traffic
+
+`CompletedGuestSessionTrafficReadService` is the semantic owner for
+`TASK-TRAFFIC-08`.
+
+Canonical source:
+
+```text
+closed Visit Lifecycle rows
++
+persisted Client Observation evidence
+→ CompletedGuestSessionTrafficReadService
+```
+
+Core contracts:
+
+```text
+session identity = visit_id
+population = status=closed
+cohort boundary = closed_at
+attribution window = [started_at, closed_at)
+ranges = 24h | 7d
+default range = 24h
+max attribution window = 86400s
+max accepted Observation gap = 180s
+sort = closed_at DESC, visit_id DESC
+pagination = keyset / no OFFSET
+limit default=max=100
+```
+
+The selected UI cohort does not clip a Visit's internal attribution window.
+Visits over 24 hours remain visible but return `null` traffic values with
+`unavailable / attribution_window_exceeds_supported_max`.
+
+Download/upload are evaluated independently. Numeric zero is valid evidence.
+Missing/regressed counters, unproven/frozen/reset continuity, large gaps,
+authorization boundaries and SSID evidence failures remain explicit reason codes.
+
+Uptime continuity:
+
+```text
+current uptime > previous uptime → proven
+equal → continuity_frozen
+lower → connection_reset
+missing → continuity_unproven
+```
+
+SSID must be present and equal at both interval endpoints. AP equality is not
+required; roaming is allowed.
+
+This read path performs no Omada/provider call, source DB write or projection
+read. `historical_traffic_projection.v1` is not a source.
 
 ## Historical Network Traffic
 

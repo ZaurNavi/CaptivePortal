@@ -25,10 +25,10 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4` |
-| Repository tree | `fc3c1ed53df32d0074036a749ee028781ec1f1b5` |
-| Production deployed HEAD | `6fbc3736085be9d0538d893b6e9569ff490ef7f4` |
-| Production tree | `fc3c1ed53df32d0074036a749ee028781ec1f1b5` |
+| Repository implementation checkpoint | `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3` |
+| Repository tree | `1161739c6b4fe90fa08928556746a5a4ea6af4cd` |
+| Production deployed HEAD | `df91355a99d2561abc9c4d6d4bb6f5a968d327b3` |
+| Production tree | `1161739c6b4fe90fa08928556746a5a4ea6af4cd` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -37,8 +37,9 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | Independent historical ranges | **Production active / acceptance PASS** |
 | AP Traffic Share | **Production active / acceptance PASS** |
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
-| DB baseline prerequisite | `TASK-DB-BASELINE-SYNC-01` — **READY FOR EXECUTION** |
-| Следующий Traffic stage | **Traffic 0.8 — planned после FINAL_DB_BASELINE=PASS** |
+| Completed Guest Session Traffic | **CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED** |
+| DB baseline gate | `TASK-DB-BASELINE-SYNC-01` — **CLOSED / PASS** |
+| Следующий Traffic TASK | **ПОКА НЕ НАЗНАЧЕН** |
 | Omada Controller family | Omada Software Controller 5.14.x |
 | Core guest authorization | Реализован |
 | RFC 8908 CAPPORT | Реализован |
@@ -53,10 +54,12 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 ## Где проект находится сейчас
 
-Traffic production-active до Online Guests Traffic включительно.
+Traffic production-active до `TASK-TRAFFIC-08 — Completed Guest Session Traffic` включительно.
 
-Online Guests Traffic — отдельная near-current Current State-backed панель и не
-использует historical `24h | 7d` selector.
+Online Guests Traffic остаётся отдельной near-current Current State-backed панелью.
+Completed Guest Session Traffic — исторический продукт по закрытым Visits,
+использующий persisted Visit Lifecycle + Client Observation evidence и
+`24h | 7d` cohort по `closed_at`.
 
 Текущая functional layout production-current, но не финальный визуальный дизайн.
 
@@ -65,12 +68,13 @@ Online Guests Traffic — отдельная near-current Current State-backed �
 Current Traffic surface:
 
 - Current Network Throughput;
+- Online Guests Traffic;
+- Completed Guest Session Traffic;
 - Network Traffic History;
 - Period Statistics;
 - Peak Load;
 - Traffic by AP;
-- AP Traffic Share;
-- Online Guests Traffic.
+- AP Traffic Share.
 
 Historical Traffic panels сохраняют независимый page-local `24h | 7d` range
 state. Online Guests Traffic читает persisted Current State через
@@ -795,11 +799,12 @@ TRAFFIC-RANGE-01   DONE / PRODUCTION ACTIVE / PRODUCTION ACCEPTANCE PASS
 TRAFFIC-06         DONE / PRODUCTION ACTIVE
 TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
-DB-BASELINE-SYNC   READY FOR EXECUTION
-Traffic 0.8        PLANNED AFTER FINAL_DB_BASELINE=PASS
+DB-BASELINE-SYNC   CLOSED / PASS
+TRAFFIC-08          CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+next Traffic TASK   NOT YET ASSIGNED
 ```
 
-Traffic 0.8 пока является planned stage; детальный implementation contract для него ещё не утверждён.
+TASK-TRAFFIC-08 закрыт и production-verified. Следующий Traffic TASK не считается каноническим до отдельного утверждения Owner / Tech Lead.
 
 ## Реальный второй Site как trigger
 

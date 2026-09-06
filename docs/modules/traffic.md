@@ -2,11 +2,11 @@
 
 Status: current production module contract
 Updated: 2026-09-06
-Repository implementation baseline: `main@6fbc3736085be9d0538d893b6e9569ff490ef7f4`
-Repository tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
-Production deployed HEAD: `6fbc3736085be9d0538d893b6e9569ff490ef7f4`
-Production tree: `fc3c1ed53df32d0074036a749ee028781ec1f1b5`
-Latest production acceptance: `TASK-TRAFFIC-07 — Online Guests Traffic — COMPLETE / PRODUCTION ACTIVE`
+Repository implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Repository tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
+Production deployed HEAD: `df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Production tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
+Latest production acceptance: `TASK-TRAFFIC-08 — Completed Guest Session Traffic — CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED`
 
 ## Current roadmap state
 
@@ -46,18 +46,18 @@ DONE / READ FOUNDATION IMPLEMENTED
 
 TRAFFIC-07 — Online Guests Traffic
 COMPLETE / PRODUCTION ACTIVE
+
+TRAFFIC-08 — Completed Guest Session Traffic
+CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
 ```
 
-No approved next Traffic TASK is currently assigned. No `TRAFFIC-08` is
-canonical change-intent.
+No next Traffic TASK is currently assigned.
 
-The dormant Historical Traffic projection foundation is controlled separately by
-`TRAFFIC_PROJECTION_ENABLED=false` and
-`WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED=false`. It materializes only derived,
-discardable Observation facts in `traffic_projection.sqlite3`; Observation remains
-authoritative. Both controls require a separately approved production activation.
+Historical Traffic Projection remains a separate derived/disposable layer over
+Observation. `historical_traffic_projection.v1` is not a source for
+Completed Guest Session Traffic and TRAFFIC-08 did not modify its contract.
 
-## Production feature state — 2026-09-01
+## Production feature state — 2026-09-06
 
 Owner-confirmed production Traffic flags:
 
@@ -70,21 +70,24 @@ WEB_ADMIN_TRAFFIC_BY_AP_ENABLED=true
 WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
 ```
 
-Repository defaults remain `false` for these feature flags, including `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false`.
+Repository defaults remain `false` for these Traffic exposure flags, including
+`WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false`.
 
 ## Current Traffic product surface
 
 Production Traffic contains:
 
 1. Current Network Throughput;
-2. Network Traffic History;
-3. Period Statistics;
-4. Peak Load;
-5. Traffic by AP;
-6. AP Traffic Share;
-7. Online Guests Traffic.
+2. Online Guests Traffic;
+3. Completed Guest Session Traffic;
+4. Network Traffic History;
+5. Period Statistics;
+6. Peak Load;
+7. Traffic by AP;
+8. AP Traffic Share.
 
 Current layout is production-current functional layout, not a permanently approved final visual composition.
 
@@ -92,7 +95,9 @@ Current layout is production-current functional layout, not a permanently approv
 
 Network Traffic means persisted AP/network throughput evidence. Current/History/Statistics/Peak/Traffic by AP use Mbps evidence. AP Traffic Share expresses accepted contribution as fraction/percent.
 
-It is not WAN, Internet-only, billing, guest-only, SSID or Guest Session Traffic.
+The Network Traffic products are not WAN, Internet-only, billing, guest-only
+or SSID totals. Completed Guest Session Traffic is a separate Visit-scoped guest
+traffic product and must not be conflated with AP/network Traffic.
 
 ## Canonical architecture
 
@@ -270,6 +275,229 @@ IMPLEMENTED
 → ACTIVATED
 → COMPLETE / PRODUCTION ACTIVE
 ```
+
+## Completed Guest Session Traffic
+
+`TASK-TRAFFIC-08` is closed, deployed, active and production-verified.
+
+Product endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/completed-sessions
+```
+
+Production Site:
+
+```text
+6a64f17630da7c70d232187a
+current Site name: Zefer_Parki
+historical name: Home
+```
+
+This is the existing renamed Omada Site and must not be confused with a newer
+separate Site named `Home`.
+
+Canonical source path:
+
+```text
+Visit Lifecycle DB
++
+persisted Client Observation evidence
+→ CompletedGuestSessionTrafficReadService
+→ AdminQueryService
+→ Admin API / Admin Traffic panel
+```
+
+No query-time Omada/provider polling is used. `historical_traffic_projection.v1`
+is not a source and was not modified.
+
+### Session / cohort / pagination
+
+```text
+identity = visit_id
+population = status=closed
+cohort = closed_at
+attribution = full Visit [started_at, closed_at)
+ranges = 24h | 7d
+default = 24h
+limit default = 100
+limit max = 100
+pagination = keyset / no OFFSET
+sort = closed_at DESC, visit_id DESC
+sort contract = closed_at_desc_visit_id_desc.v1
+max attribution window = 86400s
+```
+
+A selected UI range chooses which Visits closed in the range; it does not clip
+the attribution interval inside each Visit.
+
+Visit duration > 24h:
+
+```text
+traffic values = null
+evidence = unavailable
+reason = attribution_window_exceeds_supported_max
+```
+
+### Evidence contract
+
+Download and Upload are evaluated independently.
+
+```text
+monotonic counter delta → accepted
+zero delta → valid numeric evidence
+missing counter → counter_missing
+counter regression → counter_reset
+negative/wrap/clamp → not used
+```
+
+Continuity:
+
+```text
+uptime required
+C uptime > P uptime → proven
+equal → continuity_frozen
+lower → connection_reset
+missing → continuity_unproven
+```
+
+Interval gap > `180s` → `gap_too_large`.
+
+SSID:
+
+```text
+both endpoints must have SSID
+same SSID required
+transition → ssid_transition
+missing/unproven → ssid_unproven
+```
+
+AP equality is not required; roaming is allowed.
+
+Authorization boundary inside a candidate interval →
+`authorization_boundary`.
+
+Public evidence statuses:
+
+```text
+complete
+partial
+insufficient_data
+unavailable
+```
+
+Numeric `0` is evidence. `null` is unknown/unavailable.
+
+Public reason codes:
+
+```text
+invalid_elapsed
+gap_too_large
+authorization_boundary
+ssid_transition
+ssid_unproven
+continuity_frozen
+connection_reset
+continuity_unproven
+counter_missing
+counter_reset
+start_edge_uncovered
+end_edge_uncovered
+no_usable_interval
+observation_source_unavailable
+attribution_window_exceeds_supported_max
+```
+
+Root source health:
+
+```text
+Visits: healthy | unavailable
+Observations: healthy | unavailable | not_required
+root: ok | partial | insufficient_data | unavailable
+```
+
+### UI contract
+
+Panel order:
+
+```text
+Current Network Throughput
+Online Guests
+Completed Sessions
+Network History
+Statistics
+Peak
+Traffic by AP
+AP Share
+```
+
+Heading: `Completed Guest Session Traffic`.
+
+Columns:
+
+```text
+Guest
+Session Start
+Session End
+Duration
+SSID
+Download
+Upload
+Total
+Evidence
+```
+
+Display:
+
+```text
+numeric zero → 0 B
+unknown/null → —
+```
+
+Evidence labels:
+
+```text
+Complete sampled evidence
+Partial evidence
+Insufficient data
+Unavailable
+```
+
+### Closure / production evidence
+
+```text
+parent baseline: 3761981f4b1ec30b330abe1eec1713f15191c711
+accepted implementation: 8cfe30c2bcb13bf3ca7e001238991abd5943ea08
+accepted / production tree: 1161739c6b4fe90fa08928556746a5a4ea6af4cd
+PR: #104
+merge / production: df91355a99d2561abc9c4d6d4bb6f5a968d327b3
+R6 cumulative patch SHA256: 6077ea09f6f1421d43f2602cbea6beeae436faf5dc19a032ed520cf348efbbfa
+WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+TASK-TRAFFIC-08 new failures=0
+TASK-TRAFFIC-08 regressions=0
+```
+
+Production smoke:
+
+```text
+traffic page=200
+completed-sessions API=200
+panel=FOUND
+heading=FOUND
+root status=partial
+Visits source=healthy
+Observation source=healthy
+returned_count=100
+next_cursor=True
+partial=94
+insufficient_data=6
+numeric total rows=94
+response bytes=75316
+API_PARSE=PASS
+```
+
+`partial` is not a product failure; it describes per-Visit evidence quality.
+Live values may change as Observation acquisition continues.
 
 ## Historical request broker / admission
 
@@ -607,9 +835,9 @@ Do not list this one-time observation as an open current defect or technical deb
 ## Next step
 
 ```text
-TRAFFIC-07 — COMPLETE / PRODUCTION ACTIVE
-TASK-DB-BASELINE-SYNC-01 — CURRENT PREREQUISITE
-Traffic 0.8 — PLANNED AFTER FINAL_DB_BASELINE=PASS
+TRAFFIC-08 — CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TASK-DB-BASELINE-SYNC-01 — CLOSED / PASS
+next Traffic TASK — NOT YET ASSIGNED
 ```
 
 `TASK-DB-BASELINE-SYNC-01` synchronizes/records the production SQLite baseline; it does not implement Traffic 0.8.

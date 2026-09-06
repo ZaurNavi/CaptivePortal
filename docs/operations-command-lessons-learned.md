@@ -121,22 +121,22 @@ command/paste error
 → only then classify product behavior
 ```
 
-## 8. `set -euo pipefail` can terminate diagnostics
+## 8. Do not use shell-wide fail-fast in Owner / production runbooks
 
-With:
+Do not wrap CaptivPortal Owner acceptance or production runbooks in:
 
 ```text
+set -e
 set -euo pipefail
 ```
 
-one failing diagnostic command terminates the remaining block.
+A single diagnostic/non-critical probe can otherwise terminate the remaining
+evidence collection and make a harness failure look like a candidate/product
+failure.
 
-If a diagnostic absence/error is expected and non-fatal:
-- isolate it into a separate bounded stage; or
-- deliberately use `|| true` where that behavior is explicitly intended.
-
-Do not accidentally skip later evidence collection because a diagnostic probe
-returned non-zero.
+Use explicit bounded stages and explicit checks for each critical action.
+Expected/non-fatal diagnostic absence should be classified deliberately rather
+than hidden behind a shell-wide fail-fast mode.
 
 ## 9. Permanent pre-action sequence
 
