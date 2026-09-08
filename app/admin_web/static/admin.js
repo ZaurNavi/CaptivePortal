@@ -3137,6 +3137,346 @@
 }());
 /* TRAFFIC_COMPLETED_SESSIONS_PANEL_END */
 
+/* TRAFFIC_EVIDENCE_PANEL_START */
+(function () {
+  "use strict";
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const root = document.getElementById("admin-page");
+  const coordinator = window.CaptivPortalTrafficCoordinator;
+  if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
+      || root.dataset.trafficEvidenceEnabled !== "true" || !coordinator
+      || typeof coordinator.registerPanel !== "function"
+      || typeof coordinator.refreshPanel !== "function") return;
+  const PRODUCT_IDS = Object.freeze(["current", "history", "statistics", "peak", "aps",
+    "apshare", "online_guests", "completed_sessions"]);
+  const FAILURE = new Set(["source_unavailable", "query_deadline", "integrity_unavailable",
+    "runtime_unavailable", "unexpected"]);
+  const RANGE_MS = Object.freeze({"24h": 86400000, "7d": 604800000});
+  const elements = Object.fromEntries(["panel", "state", "state-title", "state-message",
+    "range", "range-24h", "range-7d", "range-note", "products"].map((name) => (
+    [name, document.getElementById(`traffic-evidence-${name}`)]
+  )));
+  if (Object.values(elements).some((value) => !value)) return;
+  const productElements = Object.fromEntries(PRODUCT_IDS.map((id) => [id, Object.freeze({
+    exposure: document.getElementById(`traffic-evidence-${id}-exposure`),
+    delivery: document.getElementById(`traffic-evidence-${id}-delivery`),
+    native: document.getElementById(`traffic-evidence-${id}-native`),
+    detail: document.getElementById(`traffic-evidence-${id}-detail`),
+  })]));
+  if (Object.values(productElements).some((group) => Object.values(group).some((value) => !value))) return;
+  let selectedRange = "24h";
+  let appliedRange = null;
+  let intentGeneration = 1;
+
+  function object(value) { return value && typeof value === "object" && !Array.isArray(value); }
+  function exact(value, keys) {
+    return object(value) && Object.keys(value).length === keys.length
+      && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+  }
+  function utc(value) {
+    return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+      && Number.isFinite(Date.parse(value));
+  }
+  function count(value) { return Number.isInteger(value) && value >= 0; }
+  function number(value) { return typeof value === "number" && Number.isFinite(value) && value >= 0; }
+  function optionalNumber(value) { return value === null || number(value); }
+  function machineToken(value) {
+    return typeof value === "string" && /^[a-z][a-z0-9_.]{0,127}$/.test(value);
+  }
+  function validateScope(id, value, range, deliveryStatus) {
+    const evaluated = range.evaluated_at_utc;
+    if (id === "current") return exact(value, ["kind", "evaluated_at_utc"])
+      && value.kind === "current_snapshot" && value.evaluated_at_utc === evaluated;
+    if (id === "online_guests") return exact(value, ["kind", "evaluated_at_utc"])
+      && value.kind === "current_authorized_population" && value.evaluated_at_utc === evaluated;
+    const base = value && value.range_id === range.id && value.from_utc === range.from_utc
+      && value.to_utc === range.to_utc && value.evaluated_at_utc === evaluated;
+    if (id === "completed_sessions") {
+      if (deliveryStatus !== "available") return value === null;
+      return base
+        && exact(value, ["kind", "range_id", "from_utc", "to_utc", "evaluated_at_utc", "limit", "returned_count", "has_more"])
+        && value.kind === "completion_first_page" && value.limit === 100
+        && count(value.returned_count) && value.returned_count <= value.limit
+        && typeof value.has_more === "boolean";
+    }
+    return base && exact(value, ["kind", "range_id", "from_utc", "to_utc", "evaluated_at_utc"])
+      && value.kind === "historical_range";
+  }
+  function validateEvidence(id, value) {
+    if (!object(value)) return false;
+    if (id === "current") {
+      const keys = ["freshness_status", "freshness_reason", "observed_at", "newest_observed_at",
+        "age_seconds", "source_skew_seconds", "complete", "primary_source", "selected_source",
+        "selection_reason", "coverage_status", "total_ap_count", "valid_rate_ap_count",
+        "missing_rate_ap_count", "stale_ap_count", "unavailable_ap_count", "reset_ap_count",
+        "gap_rejected_ap_count", "no_baseline_ap_count", "source_unavailable_ap_count",
+        "invalid_elapsed_ap_count"];
+      return exact(value, keys) && ["fresh", "stale", "unavailable"].includes(value.freshness_status)
+        && ["within_freshness_window", "within_stale_window", "age_exceeded", "clock_anomaly",
+          "no_complete_snapshot", "source_unavailable"].includes(value.freshness_reason)
+        && ["complete", "partial", "none"].includes(value.coverage_status)
+        && value.primary_source === "wired" && ["wired", "lan", null].includes(value.selected_source)
+        && ["no_complete_snapshot", "empty_population", "primary_full_coverage", "fallback_full_coverage",
+          "fallback_higher_coverage", "primary_preferred_tie_or_higher"].includes(value.selection_reason)
+        && [value.observed_at, value.newest_observed_at].every((item) => item === null || utc(item))
+        && typeof value.complete === "boolean" && optionalNumber(value.age_seconds)
+        && optionalNumber(value.source_skew_seconds)
+        && keys.slice(11).every((key) => count(value[key]));
+    }
+    if (id === "history") {
+      const keys = ["status", "metric_version", "source_kind", "source_watermark_utc", "source_age_seconds",
+        "bucket_count", "complete_bucket_count", "partial_bucket_count", "missing_bucket_count",
+        "canonical_cycle_count", "complete_site_sample_count", "excluded_site_sample_count", "gap_bucket_count",
+        "source_transition_count", "partial_cycle_count", "failed_cycle_count", "shutdown_cycle_count",
+        "abandoned_cycle_count", "running_cycle_count", "no_baseline_count", "counter_reset_count",
+        "gap_too_large_count", "invalid_elapsed_count", "source_unavailable_count",
+        "source_skew_excluded_sample_count", "integrity_failure_count"];
+      return exact(value, keys) && ["ok", "partial", "insufficient_data"].includes(value.status)
+        && value.metric_version === "network_traffic_history.v1" && value.source_kind === "observation_ap_dynamic"
+        && (value.source_watermark_utc === null || utc(value.source_watermark_utc))
+        && optionalNumber(value.source_age_seconds) && keys.slice(5).every((key) => count(value[key]));
+    }
+    if (id === "statistics") {
+      const keys = ["status", "metric_version", "average_method", "peak_method", "candidate_interval_count",
+        "accepted_interval_count", "accepted_interval_seconds", "interval_coverage_ratio",
+        "excluded_gap_interval_count", "excluded_source_transition_interval_count", "invalid_period_interval_count",
+        "accepted_peak_sample_count", "leading_unweighted_seconds", "trailing_unweighted_seconds"];
+      return exact(value, keys) && ["ok", "partial", "insufficient_data"].includes(value.status)
+        && value.metric_version === "network_traffic_period_statistics.v1"
+        && value.average_method === "right_endpoint_sample_hold_time_weighted.v1"
+        && value.peak_method === "max_accepted_complete_site_sample.v1"
+        && ["candidate_interval_count", "accepted_interval_count", "excluded_gap_interval_count",
+          "excluded_source_transition_interval_count", "invalid_period_interval_count", "accepted_peak_sample_count"].every((key) => count(value[key]))
+        && ["accepted_interval_seconds", "interval_coverage_ratio", "leading_unweighted_seconds",
+          "trailing_unweighted_seconds"].every((key) => number(value[key]));
+    }
+    if (id === "peak") {
+      const keys = ["status", "metric_version", "peak_value_method", "peak_tie_break_method",
+        "sample_timestamp_semantics", "download_event_available", "upload_event_available",
+        "total_event_available", "busiest_bucket_status", "busiest_hour_status"];
+      return exact(value, keys) && ["ok", "partial", "insufficient_data"].includes(value.status)
+        && value.metric_version === "network_traffic_peak_load.v1"
+        && value.peak_value_method === "max_accepted_complete_site_sample.v1"
+        && value.peak_tie_break_method === "earliest_peak_sample_at.v1"
+        && value.sample_timestamp_semantics === "cycle_finished_at"
+        && ["download_event_available", "upload_event_available", "total_event_available"].every((key) => typeof value[key] === "boolean")
+        && [value.busiest_bucket_status, value.busiest_hour_status].every((status) => ["ok", "insufficient_data"].includes(status));
+    }
+    if (id === "aps") {
+      const keys = ["status", "metric_version", "population_method", "population_count", "current_population_count",
+        "historical_population_count", "supported_max_ap_count", "returned_ap_count", "population_complete",
+        "complete_ap_count", "partial_ap_count", "insufficient_data_ap_count"];
+      return exact(value, keys) && ["ok", "partial", "insufficient_data", "unsupported_population"].includes(value.status)
+        && value.metric_version === "network_traffic_by_ap.v1"
+        && value.population_method === "current_union_historical_validated.v1"
+        && value.supported_max_ap_count === 12 && typeof value.population_complete === "boolean"
+        && keys.slice(3).filter((key) => key !== "population_complete").every((key) => count(value[key]))
+        && value.complete_ap_count + value.partial_ap_count + value.insufficient_data_ap_count === value.returned_ap_count;
+    }
+    if (id === "apshare") {
+      const keys = ["status", "metric_version", "share_method", "temporal_method", "presence_method", "absence_method",
+        "population_method", "population_count", "historical_population_count", "current_population_status",
+        "current_population_count", "supported_max_ap_count", "returned_ap_count", "population_complete",
+        "candidate_interval_count", "accepted_interval_count", "accepted_interval_seconds", "interval_coverage_ratio",
+        "excluded_gap_interval_count", "excluded_source_transition_interval_count", "invalid_period_interval_count",
+        "download_denominator_status", "upload_denominator_status", "total_denominator_status"];
+      return exact(value, keys) && ["ok", "partial", "insufficient_data", "unsupported_population"].includes(value.status)
+        && value.metric_version === "network_traffic_ap_share.v1"
+        && value.share_method === "accepted_site_interval_integrated_ap_contribution_ratio.v1"
+        && value.temporal_method === "right_endpoint_sample_hold_time_weighted.v1"
+        && value.presence_method === "accepted_selected_source_historical_presence_in_range.v1"
+        && value.absence_method === "proven_population_member_absent_from_trusted_complete_site_sample_zero_contribution.v1"
+        && value.population_method === "current_union_historical_validated.v1" && value.supported_max_ap_count === 12
+        && ["available", "unavailable"].includes(value.current_population_status)
+        && (value.current_population_count === null || count(value.current_population_count))
+        && typeof value.population_complete === "boolean"
+        && ["population_count", "historical_population_count", "returned_ap_count", "candidate_interval_count",
+          "accepted_interval_count", "excluded_gap_interval_count", "excluded_source_transition_interval_count",
+          "invalid_period_interval_count"].every((key) => count(value[key]))
+        && number(value.accepted_interval_seconds) && number(value.interval_coverage_ratio)
+        && [value.download_denominator_status, value.upload_denominator_status, value.total_denominator_status]
+          .every((status) => ["positive", "zero_traffic", "insufficient_data"].includes(status));
+    }
+    if (id === "online_guests") {
+      const keys = ["status", "metric_version", "population_method", "rate_method", "baseline_method", "continuity_method",
+        "connection_boundary_observation", "source_health_status", "source_health_reason", "rate_evidence_status",
+        "population_complete", "scoped_client_row_count", "known_authorized_count", "unknown_auth_count", "population_count",
+        "rate_valid_count", "rate_partial_count", "rate_unavailable_count", "current_capture_started_at",
+        "baseline_capture_started_at", "elapsed_seconds"];
+      return exact(value, keys) && ["ok", "partial", "insufficient_data", "stale", "unavailable", "unsupported_population"].includes(value.status)
+        && value.metric_version === "network_traffic_online_guest_current_rate.v1"
+        && value.population_method === "fresh_complete_current_state_authorized_guest_scope.v1"
+        && value.rate_method === "current_connection_counter_delta_interval_average.v1"
+        && value.baseline_method === "nearest_previous_complete_same_site_scope_cycle.v1"
+        && machineToken(value.continuity_method)
+        && value.connection_boundary_observation === "sampled_current_state_evidence_v1"
+        && ["healthy", "degraded", "stale", "unavailable"].includes(value.source_health_status)
+        && ["within_freshness_window", "newer_degraded_attempt", "older_than_freshness_window",
+          "older_than_unavailable_threshold", "clock_anomaly", "no_complete_snapshot"].includes(value.source_health_reason)
+        && ["complete", "partial", "insufficient_data", "not_applicable"].includes(value.rate_evidence_status)
+        && typeof value.population_complete === "boolean"
+        && keys.slice(11, 18).every((key) => value[key] === null || count(value[key]))
+        && [value.current_capture_started_at, value.baseline_capture_started_at].every((item) => item === null || utc(item))
+        && optionalNumber(value.elapsed_seconds);
+    }
+    if (id === "completed_sessions") {
+      const keys = ["status", "metric_version", "session_method", "attribution_method", "continuity_method",
+        "visits_source_status", "observations_source_status", "complete_count", "partial_count",
+        "insufficient_data_count", "unavailable_count", "reason_counts"];
+      const reasons = new Set(["invalid_elapsed", "gap_too_large", "authorization_boundary", "ssid_transition",
+        "ssid_unproven", "continuity_frozen", "connection_reset", "continuity_unproven", "counter_missing",
+        "counter_reset", "start_edge_uncovered", "end_edge_uncovered", "no_usable_interval",
+        "observation_source_unavailable", "attribution_window_exceeds_supported_max"]);
+      return exact(value, keys) && ["ok", "partial", "insufficient_data", "unavailable"].includes(value.status)
+        && value.metric_version === "network_traffic_completed_guest_session_observed_bytes.v1"
+        && value.session_method === "closed_visit_completion_cohort.v1"
+        && value.attribution_method === "visit_window_observation_counter_interval_sum.v1"
+        && value.continuity_method === "observation_uptime_progress.v1"
+        && ["healthy", "unavailable"].includes(value.visits_source_status)
+        && ["healthy", "unavailable", "not_required"].includes(value.observations_source_status)
+        && ["complete_count", "partial_count", "insufficient_data_count", "unavailable_count"].every((key) => count(value[key]))
+        && object(value.reason_counts) && Object.entries(value.reason_counts).every(([key, item]) => reasons.has(key) && count(item));
+    }
+    return false;
+  }
+  function validate(payload, siteId) {
+    if (!exact(payload, ["api_version", "request_id", "site_id", "result", "page"])
+        || payload.api_version !== "admin.read.v1" || payload.site_id !== siteId
+        || payload.page !== null || !object(payload.result)) throw new Error("Invalid Evidence response");
+    const result = payload.result;
+    const range = result.evidence_range;
+    if (!exact(result, ["contract_version", "evaluated_at_utc", "evidence_range", "products"])
+        || result.contract_version !== "admin.traffic.evidence.v1" || !utc(result.evaluated_at_utc)
+        || !exact(range, ["id", "from_utc", "to_utc"]) || !RANGE_MS[range.id]
+        || !utc(range.from_utc) || !utc(range.to_utc) || range.to_utc !== result.evaluated_at_utc
+        || Date.parse(range.to_utc) - Date.parse(range.from_utc) !== RANGE_MS[range.id]
+        || !object(result.products) || Object.keys(result.products).length !== PRODUCT_IDS.length
+        || PRODUCT_IDS.some((id) => !Object.prototype.hasOwnProperty.call(result.products, id))) {
+      throw new Error("Invalid Evidence contract");
+    }
+    const projected = {};
+    for (const id of PRODUCT_IDS) {
+      const item = result.products[id];
+      if (!exact(item, ["product_id", "exposure_status", "delivery_status", "scope", "evidence", "failure_category"])
+          || item.product_id !== id || !["enabled", "disabled"].includes(item.exposure_status)
+          || !["available", "failed", "not_attempted"].includes(item.delivery_status)
+          || !validateScope(id, item.scope, {...range, evaluated_at_utc: result.evaluated_at_utc}, item.delivery_status)) {
+        throw new Error("Invalid Evidence product");
+      }
+      const available = item.exposure_status === "enabled" && item.delivery_status === "available"
+        && item.failure_category === null && validateEvidence(id, item.evidence)
+        && (id !== "completed_sessions" || ["complete_count", "partial_count",
+          "insufficient_data_count", "unavailable_count"].reduce(
+          (total, key) => total + item.evidence[key], 0,
+        ) === item.scope.returned_count);
+      const failed = item.exposure_status === "enabled" && item.delivery_status === "failed"
+        && item.evidence === null && FAILURE.has(item.failure_category);
+      const disabled = item.exposure_status === "disabled" && item.delivery_status === "not_attempted"
+        && item.evidence === null && item.failure_category === null;
+      if (!(available || failed || disabled)) throw new Error("Invalid Evidence product shape");
+      projected[id] = Object.freeze({...item});
+    }
+    return Object.freeze({...result, products: Object.freeze(projected)});
+  }
+  function nativeStatus(id, item) {
+    if (id === "current" && item.delivery_status === "available") return "Not defined";
+    return item.delivery_status === "available" && item.evidence && typeof item.evidence.status === "string"
+      ? item.evidence.status : "—";
+  }
+  function shown(value) { return value === null ? "—" : String(value); }
+  function yesNo(value) { return value ? "Yes" : "No"; }
+  function nonZero(value, names) {
+    const parts = names.filter((name) => value[name] > 0).map((name) => `${name} ${value[name]}`);
+    return parts.length ? parts.join(" · ") : "none";
+  }
+  function detail(id, item) {
+    if (item.delivery_status === "failed") return item.failure_category.replaceAll("_", " ");
+    if (item.delivery_status === "not_attempted") return "Not queried";
+    const value = item.evidence;
+    if (id === "current") return `Freshness: ${value.freshness_status} · Reason: ${value.freshness_reason} · Coverage: ${value.coverage_status} · Rates: ${value.valid_rate_ap_count}/${value.total_ap_count} · Source: ${shown(value.selected_source)} · Observed: ${shown(value.observed_at)} · Newest: ${shown(value.newest_observed_at)}`;
+    if (id === "history") return `Buckets: ${value.complete_bucket_count} complete · ${value.partial_bucket_count} partial · ${value.missing_bucket_count} missing · Source age: ${shown(value.source_age_seconds)} · Watermark: ${shown(value.source_watermark_utc)} · Quality: ${nonZero(value, ["partial_cycle_count", "failed_cycle_count", "shutdown_cycle_count", "abandoned_cycle_count", "running_cycle_count", "no_baseline_count", "counter_reset_count", "gap_too_large_count", "invalid_elapsed_count", "source_unavailable_count", "source_skew_excluded_sample_count", "integrity_failure_count"])}`;
+    if (id === "statistics") return `Intervals: ${value.accepted_interval_count}/${value.candidate_interval_count} · Coverage ratio: ${value.interval_coverage_ratio} · Exclusions: ${nonZero(value, ["excluded_gap_interval_count", "excluded_source_transition_interval_count", "invalid_period_interval_count"])}`;
+    if (id === "peak") return `Download event: ${yesNo(value.download_event_available)} · Upload event: ${yesNo(value.upload_event_available)} · Total event: ${yesNo(value.total_event_available)} · Busiest bucket: ${value.busiest_bucket_status} · Busiest hour: ${value.busiest_hour_status}`;
+    if (id === "aps") return `APs: ${value.returned_ap_count}/${value.population_count} · ${value.complete_ap_count} complete · ${value.partial_ap_count} partial · ${value.insufficient_data_ap_count} insufficient · Population complete: ${yesNo(value.population_complete)}`;
+    if (id === "apshare") return `Intervals: ${value.accepted_interval_count}/${value.candidate_interval_count} · Coverage ratio: ${value.interval_coverage_ratio} · Denominators: download ${value.download_denominator_status} · upload ${value.upload_denominator_status} · total ${value.total_denominator_status}`;
+    if (id === "online_guests") return `Source: ${value.source_health_status} · Reason: ${value.source_health_reason} · Rate evidence: ${value.rate_evidence_status} · Population: ${shown(value.population_count)} · Rates: ${shown(value.rate_valid_count)} valid · ${shown(value.rate_partial_count)} partial · ${shown(value.rate_unavailable_count)} unavailable`;
+    const reasons = Object.keys(value.reason_counts).sort().map((reason) => `${reason} ${value.reason_counts[reason]}`);
+    return `First page · Returned: ${item.scope.returned_count} · More available: ${yesNo(item.scope.has_more)} · Complete ${value.complete_count} · Partial ${value.partial_count} · Insufficient ${value.insufficient_data_count} · Unavailable ${value.unavailable_count}${reasons.length ? ` · Reasons: ${reasons.join(" · ")}` : ""}`;
+  }
+  function clear() {
+    appliedRange = null;
+    elements["range-note"].textContent = "Applied range —";
+    PRODUCT_IDS.forEach((id) => Object.values(productElements[id]).forEach((element) => { element.textContent = "—"; }));
+  }
+  function updateRange() {
+    elements["range-24h"].setAttribute("aria-pressed", selectedRange === "24h" ? "true" : "false");
+    elements["range-7d"].setAttribute("aria-pressed", selectedRange === "7d" ? "true" : "false");
+  }
+  function renderWaiting() {
+    elements.state.dataset.state = "warning";
+    elements["state-title"].textContent = "Traffic Evidence waiting for request admission";
+    elements["state-message"].textContent = "The shared historical lane will dispatch this request after its 3-second guard.";
+  }
+  function renderLoading() {
+    elements.state.dataset.state = "warning";
+    elements["state-title"].textContent = "Loading Traffic Evidence…";
+    elements["state-message"].textContent = `${selectedRange} consolidated evidence is loading.`;
+  }
+  function renderFailure(failure) {
+    elements.state.dataset.state = "error";
+    elements["state-title"].textContent = "Traffic Evidence unavailable";
+    elements["state-message"].textContent = failure && failure.kind === "busy"
+      ? "The Admin query budget is busy." : "Consolidated evidence could not be loaded.";
+  }
+  function renderGlobalFailure(failure) { clear(); renderFailure(failure); }
+  function render(value) {
+    if (value.evidence_range.id !== selectedRange) return;
+    appliedRange = value.evidence_range.id;
+    elements["range-note"].textContent = `Applied range ${appliedRange} · evaluated ${value.evaluated_at_utc}`;
+    for (const id of PRODUCT_IDS) {
+      const item = value.products[id];
+      productElements[id].exposure.textContent = item.exposure_status;
+      productElements[id].delivery.textContent = item.delivery_status;
+      productElements[id].native.textContent = nativeStatus(id, item);
+      productElements[id].detail.textContent = detail(id, item);
+    }
+    elements.state.dataset.state = "ready";
+    elements["state-title"].textContent = "Traffic Evidence ready";
+    elements["state-message"].textContent = "Delivery and native product evidence are shown independently.";
+  }
+  function requestRange(range) {
+    selectedRange = range;
+    intentGeneration += 1;
+    updateRange();
+    coordinator.refreshPanel("traffic-evidence", {manual: true});
+  }
+  elements["range-24h"].addEventListener("click", () => { if (selectedRange !== "24h") requestRange("24h"); });
+  elements["range-7d"].addEventListener("click", () => { if (selectedRange !== "7d") requestRange("7d"); });
+  updateRange();
+  coordinator.registerPanel({
+    key: "traffic-evidence",
+    autoRefresh: false,
+    historicalLane: true,
+    historicalLaneGuard: true,
+    prepareRootRefresh: () => { intentGeneration += 1; },
+    renderWaiting,
+    renderLoading,
+    renderFailure,
+    renderGlobalFailure,
+    load: async (context) => {
+      const requestedRange = selectedRange;
+      const requestedIntent = intentGeneration;
+      const value = validate(await context.requestJson(
+        `${context.apiBase}/traffic/evidence?range=${encodeURIComponent(requestedRange)}`,
+      ), context.siteId);
+      if (requestedIntent !== intentGeneration || requestedRange !== selectedRange) throw {trafficNeutral: true};
+      return value;
+    },
+    render,
+  });
+}());
+/* TRAFFIC_EVIDENCE_PANEL_END */
+
 (function () {
   "use strict";
   const STATUS = new Set(["operational", "degraded", "unavailable", "unknown"]);

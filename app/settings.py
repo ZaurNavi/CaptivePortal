@@ -171,6 +171,7 @@ from app.config import (
     WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED,
     WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED,
     WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED,
+    WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED,
     WEB_ADMIN_TRAFFIC_REFRESH_SECONDS,
     WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS,
     CAPPORT_ENABLED, CAPPORT_SITE_ID, CAPPORT_PUBLIC_BASE_URL,
@@ -623,6 +624,7 @@ def get_settings() -> dict:
         "web_admin_traffic_completed_sessions_enabled": (
             WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED
         ),
+        "web_admin_traffic_evidence_enabled": WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED,
         "web_admin_traffic_refresh_seconds": WEB_ADMIN_TRAFFIC_REFRESH_SECONDS,
         "web_admin_traffic_request_timeout_seconds": WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS,
         "capport_enabled": CAPPORT_ENABLED,
