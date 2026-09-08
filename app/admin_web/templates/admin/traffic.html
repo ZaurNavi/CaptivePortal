@@ -276,5 +276,41 @@
   </section>
   {% endif %}
   {% endif %}
+  {% if traffic_evidence_allowed and (traffic_evidence_enabled or traffic_evidence_unavailable) %}
+  <section id="traffic-evidence-panel" class="card card-wide traffic-evidence" aria-labelledby="traffic-evidence-heading">
+    <div class="card-heading traffic-history-heading-row">
+      <div><p class="eyebrow">Consolidated evidence</p><h2 id="traffic-evidence-heading">Traffic Evidence / Quality</h2></div>
+      <div id="traffic-evidence-range" class="traffic-range" role="group" aria-label="Traffic Evidence range">
+        <button id="traffic-evidence-range-24h" class="button button-small" type="button" aria-pressed="true">24h</button>
+        <button id="traffic-evidence-range-7d" class="button button-small" type="button" aria-pressed="false">7d</button>
+      </div>
+    </div>
+    <p class="live-detail">A compact view of delivery and native evidence states from the existing Traffic products. No overall score is calculated.</p>
+    <div id="traffic-evidence-state" class="state-panel" data-state="{{ 'error' if traffic_evidence_unavailable else 'warning' }}" role="status" aria-live="polite">
+      <span class="state-dot" aria-hidden="true"></span><div>
+        <strong id="traffic-evidence-state-title">{{ 'Traffic Evidence unavailable' if traffic_evidence_unavailable else 'Loading Traffic Evidence…' }}</strong>
+        <p id="traffic-evidence-state-message">{{ 'The Evidence application component could not be composed. Other Traffic panels remain available.' if traffic_evidence_unavailable else 'Reading compact evidence from existing Traffic product owners.' }}</p>
+      </div>
+    </div>
+    <p id="traffic-evidence-range-note" class="live-detail">Applied range —</p>
+    <div id="traffic-evidence-products" class="traffic-evidence-products">
+      {% for product_id, label in (
+        ('current', 'Current'), ('history', 'History'),
+        ('statistics', 'Statistics'), ('peak', 'Peak'),
+        ('aps', 'Traffic by AP'), ('apshare', 'AP Traffic Share'),
+        ('online_guests', 'Online Guests'),
+        ('completed_sessions', 'Completed Sessions')
+      ) %}
+      <article class="card traffic-evidence-product" data-product-id="{{ product_id }}">
+        <h3>{{ label }}</h3>
+        <p>Exposure <strong id="traffic-evidence-{{ product_id }}-exposure">—</strong></p>
+        <p>Delivery <strong id="traffic-evidence-{{ product_id }}-delivery">—</strong></p>
+        <p>Native status <strong id="traffic-evidence-{{ product_id }}-native">—</strong></p>
+        <p>Evidence <span id="traffic-evidence-{{ product_id }}-detail">—</span></p>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
 </div>
 {% endblock %}

@@ -352,6 +352,19 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 )
             except Exception:
                 completed_sessions_allowed = False
+        traffic_evidence_allowed = False
+        if page.key == "traffic" and config.traffic_evidence_enabled:
+            try:
+                traffic_evidence_allowed = (
+                    policy.authorize(
+                        g.admin_principal, "admin.read.overview", selected
+                    )
+                    and policy.authorize(
+                        g.admin_principal, "admin.read.devices", selected
+                    )
+                )
+            except Exception:
+                traffic_evidence_allowed = False
         return render_admin_page(
             page,
             site_id=selected,
@@ -386,6 +399,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 if config.traffic_completed_sessions_enabled else "disabled"
             ),
             traffic_completed_sessions_allowed=completed_sessions_allowed,
+            traffic_evidence_state=(
+                runtime.traffic_evidence_state
+                if config.traffic_evidence_enabled else "disabled"
+            ),
+            traffic_evidence_allowed=traffic_evidence_allowed,
             traffic_refresh_seconds=config.traffic_refresh_seconds,
             traffic_request_timeout_seconds=config.traffic_request_timeout_seconds,
             home_activity_state=runtime.home_activity_state,
@@ -797,6 +815,63 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     @authenticated
     def api_traffic_history(site_id: str) -> Response:
         return _traffic_history_query(site_id)
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/traffic/evidence")
+    @authenticated
+    def api_traffic_evidence(site_id: str) -> Response:
+        try:
+            if not config.traffic_evidence_enabled:
+                return _error("not_found", 404)
+            try:
+                selected = resolver.resolve(site_id)
+            except AdminSiteContextError:
+                return _error("invalid_request", 400)
+            except AdminAccessDenied:
+                return _error("site_forbidden", 403)
+            for capability in ("admin.read.overview", "admin.read.devices"):
+                try:
+                    authorized = policy.authorize(
+                        g.admin_principal, capability, selected
+                    )
+                except Exception:
+                    return _error("internal_error", 500)
+                if not authorized:
+                    return _error("site_forbidden", 403)
+            if (
+                set(request.args) != {"range"}
+                or len(request.args.getlist("range")) != 1
+                or request.args.get("range") not in {"24h", "7d"}
+            ):
+                return _error("invalid_request", 400)
+            if runtime.traffic_evidence_state != "active":
+                return _error("source_unavailable", 503)
+            service = runtime.query_service
+            if service is None:
+                return _error("source_unavailable", 503)
+            response = service.traffic_evidence(
+                g.admin_principal, selected, range_id=request.args.get("range")
+            )
+            return _success(
+                selected,
+                response.result,
+                enforce_size=True,
+                response_limit_bytes=65_536,
+            )
+        except AdminQueryValidationError:
+            return _error("invalid_request", 400)
+        except AdminQueryForbidden:
+            return _error("site_forbidden", 403)
+        except AdminQueryBusy:
+            response = _error("concurrency_limit", 429)
+            response.headers["Retry-After"] = "1"
+            return response
+        except AdminQueryDeadline:
+            return _error("query_deadline", 503)
+        except (AdminQueryIntegrityUnavailable, AdminQueryUnavailable):
+            return _error("source_unavailable", 503)
+        except Exception:
+            logger.exception("admin.traffic_evidence_query_failed")
+            return _error("internal_error", 500)
 
     @blueprint.get(
         "/admin/api/v1/sites/<site_id>/traffic/online-guests/current"
@@ -1875,6 +1950,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         status_code: int = 200,
         page: dict[str, Any] | None = None,
         enforce_size: bool = False,
+        response_limit_bytes: int | None = None,
     ) -> Response:
         payload = {
             "api_version": API_VERSION,
@@ -1893,7 +1969,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             ).encode("utf-8")
         except (TypeError, ValueError):
             return _error("internal_error", 500)
-        if enforce_size and len(body) > config.max_response_bytes:
+        limit = config.max_response_bytes if response_limit_bytes is None else min(
+            config.max_response_bytes, response_limit_bytes
+        )
+        if enforce_size and len(body) > limit:
             return _error("response_too_large", 503)
         response = make_response(body, status_code)
         response.mimetype = "application/json"
@@ -1941,6 +2020,7 @@ def _is_current_traffic_path(path: str) -> bool:
             or path.endswith("/traffic/history")
             or path.endswith("/traffic/online-guests/current")
             or path.endswith("/traffic/completed-sessions")
+            or path.endswith("/traffic/evidence")
         )
     )
 

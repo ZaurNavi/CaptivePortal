@@ -151,6 +151,7 @@ _CURRENT_PAGE_CALLER_REASONS = frozenset({
     "auth_classification is invalid", "ap_mac is invalid", "ssid is invalid",
     "cycle_id is invalid",
 })
+_PREFETCH_NOT_PROVIDED = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +262,52 @@ class AdminQueryService:
                 ),
             )
         )
+        self._traffic_evidence = None
+
+    def configure_traffic_evidence(self) -> None:
+        """Compose optional Evidence without making core Admin composition fatal."""
+        from .traffic_evidence import TrafficEvidenceAggregator
+
+        self._traffic_evidence = TrafficEvidenceAggregator(
+            config=self._config,
+            read_current=self._traffic_evidence_current,
+            read_historical=self._historical_traffic_projection,
+            online_service=self._current_guest_traffic,
+            completed_service=self._completed_guest_session_traffic,
+            current_available=self._current_traffic is not None,
+            historical_available=self._historical_traffic is not None,
+        )
+
+    @property
+    def traffic_evidence_aggregator(self):
+        return self._traffic_evidence
+
+    def traffic_evidence(self, principal, site_id, *, range_id):
+        self._authorize(principal, "admin.read.overview", site_id)
+        self._authorize(principal, "admin.read.devices", site_id)
+        try:
+            resolved_range = resolve_traffic_network_range(
+                range_id, datetime.now(timezone.utc)
+            )
+        except TrafficNetworkRangeError as exc:
+            raise AdminQueryValidationError() from exc
+        if self._traffic_evidence is None:
+            raise AdminQueryUnavailable()
+
+        def query(deadline):
+            from .traffic_evidence_serialization import (
+                TrafficEvidenceSerializationError,
+            )
+            try:
+                return AdminQueryResponse(
+                    self._traffic_evidence.get_evidence(
+                        site_id, resolved_range=resolved_range, deadline=deadline
+                    )
+                )
+            except TrafficEvidenceSerializationError as exc:
+                raise AdminQueryIntegrityUnavailable() from exc
+
+        return self._run(query)
 
     def current_guest_traffic(
         self, principal, site_id, *, limit=None, cursor=None
@@ -569,6 +616,40 @@ class AdminQueryService:
 
         return self._run(query)
 
+    def _read_current_site_raw(self, site_id, *, evaluated_at_utc, deadline):
+        options = {
+            "fresh_max_age_seconds": self._config.home_traffic_fresh_max_age_seconds,
+            "stale_max_age_seconds": self._config.home_traffic_stale_max_age_seconds,
+            "max_ap_skew_seconds": self._config.home_traffic_max_ap_skew_seconds,
+        }
+        if evaluated_at_utc is not None:
+            options["evaluated_at_utc"] = evaluated_at_utc
+        source = self._current_traffic
+        if source is None:
+            raise AdminQueryUnavailable()
+        return source.get_current_site_traffic(
+            site_id, deadline=deadline, **options
+        )
+
+    def _traffic_evidence_current(self, site_id, *, evaluated_at_utc, deadline):
+        try:
+            value = self._read_current_site_raw(
+                site_id,
+                evaluated_at_utc=evaluated_at_utc,
+                deadline=deadline,
+            )
+            return value, serialize_current_traffic_summary(value, site_id)
+        except AnalyticsQueryDeadlineExceeded as exc:
+            raise AdminQueryDeadline() from exc
+        except CurrentTrafficValidationError as exc:
+            raise AdminQueryIntegrityUnavailable() from exc
+        except CurrentTrafficIntegrityUnavailable as exc:
+            raise AdminQueryIntegrityUnavailable() from exc
+        except (CurrentTrafficSourceUnavailable, sqlite3.Error, OSError) as exc:
+            raise AdminQueryUnavailable() from exc
+        except CurrentTrafficSerializationError as exc:
+            raise AdminQueryIntegrityUnavailable() from exc
+
     def historical_traffic_history(
         self, principal, site_id, *, range_id, include_statistics=False,
         include_peak=False, include_aps=False, include_ap_share=False,
@@ -587,30 +668,60 @@ class AdminQueryService:
             raise AdminQueryUnavailable()
 
         def query(deadline):
-            try:
-                current_snapshot = None
-                current_population_count = 0
-                current_items = ()
-                current_cycle_id = None
-                current_population_status = (
-                    "unavailable" if include_ap_share else "available"
-                )
-                if (include_aps or include_ap_share) and self._current_traffic is not None:
+            return self._historical_traffic_projection(
+                site_id,
+                resolved_range=resolved_range,
+                deadline=deadline,
+                include_statistics=include_statistics,
+                include_peak=include_peak,
+                include_aps=include_aps,
+                include_ap_share=include_ap_share,
+                include_history=include_history,
+                requested_products=requested_products,
+            )
+
+        return self._run(query)
+
+    def _historical_traffic_projection(
+        self, site_id, *, resolved_range, deadline, include_statistics=False,
+        include_peak=False, include_aps=False, include_ap_share=False,
+        include_history=True, requested_products=None,
+        prefetched_current=_PREFETCH_NOT_PROVIDED,
+    ):
+        source = self._historical_traffic
+        if source is None:
+            raise AdminQueryUnavailable()
+        try:
+            current_snapshot = None
+            current_population_count = 0
+            current_items = ()
+            current_cycle_id = None
+            current_population_status = (
+                "unavailable" if include_ap_share else "available"
+            )
+            if include_aps or include_ap_share:
+                current = prefetched_current
+                if current is _PREFETCH_NOT_PROVIDED and self._current_traffic is not None:
                     try:
-                        current = self._current_traffic.get_current_site_traffic(
+                        current = self._read_current_site_raw(
                             site_id,
                             evaluated_at_utc=resolved_range.evaluated_at_utc,
-                            fresh_max_age_seconds=(
-                                self._config.home_traffic_fresh_max_age_seconds
-                            ),
-                            stale_max_age_seconds=(
-                                self._config.home_traffic_stale_max_age_seconds
-                            ),
-                            max_ap_skew_seconds=(
-                                self._config.home_traffic_max_ap_skew_seconds
-                            ),
                             deadline=deadline,
                         )
+                    except (
+                        CurrentTrafficIntegrityUnavailable,
+                        CurrentTrafficValidationError,
+                    ) as exc:
+                        if include_ap_share:
+                            raise AdminQueryIntegrityUnavailable() from exc
+                        current = None
+                    except CurrentTrafficSourceUnavailable:
+                        current = None
+                        current_population_status = (
+                            "unavailable" if include_ap_share else "available"
+                        )
+                if current is not _PREFETCH_NOT_PROVIDED and current is not None:
+                    try:
                         current_snapshot = current.snapshot
                         current_population_count = current.coverage.total_ap_count
                         current_cycle_id = current.snapshot.cycle_id
@@ -619,12 +730,9 @@ class AdminQueryService:
                             if (
                                 current_cycle_id is not None
                                 and current.snapshot.complete is True
-                                and current.snapshot.freshness_status
-                                in {"fresh", "stale"}
+                                and current.snapshot.freshness_status in {"fresh", "stale"}
                             )
-                            else (
-                                "unavailable" if include_ap_share else "available"
-                            )
+                            else ("unavailable" if include_ap_share else "available")
                         )
                         if include_ap_share and current_population_status == "unavailable":
                             current_snapshot = None
@@ -636,15 +744,9 @@ class AdminQueryService:
                                     site_id,
                                     cycle_id=current_cycle_id,
                                     evaluated_at_utc=resolved_range.evaluated_at_utc,
-                                    fresh_max_age_seconds=(
-                                        self._config.home_traffic_fresh_max_age_seconds
-                                    ),
-                                    stale_max_age_seconds=(
-                                        self._config.home_traffic_stale_max_age_seconds
-                                    ),
-                                    max_ap_skew_seconds=(
-                                        self._config.home_traffic_max_ap_skew_seconds
-                                    ),
+                                    fresh_max_age_seconds=self._config.home_traffic_fresh_max_age_seconds,
+                                    stale_max_age_seconds=self._config.home_traffic_stale_max_age_seconds,
+                                    max_ap_skew_seconds=self._config.home_traffic_max_ap_skew_seconds,
                                     limit=12,
                                     deadline=deadline,
                                 )
@@ -688,55 +790,49 @@ class AdminQueryService:
                         current_population_status = (
                             "unavailable" if include_ap_share else "available"
                         )
-                value = source.get_site_history(
-                    site_id,
-                    from_utc=resolved_range.from_utc,
-                    to_utc=resolved_range.to_utc,
-                    evaluated_at_utc=resolved_range.evaluated_at_utc,
-                    deadline=deadline,
-                    include_period_statistics=include_statistics,
-                    include_peak_load=include_peak,
-                    include_ap_traffic=include_aps,
-                    include_ap_share=include_ap_share,
-                    current_population_status=current_population_status,
-                    current_cycle_id=current_cycle_id,
-                )
-                if include_aps:
-                    value = source.compose_current_ap_traffic(
-                        value,
-                        current_snapshot=current_snapshot,
-                        current_population_count=current_population_count,
-                        current_items=tuple(current_items),
-                    )
-                result = serialize_historical_traffic(
+            value = source.get_site_history(
+                site_id,
+                from_utc=resolved_range.from_utc,
+                to_utc=resolved_range.to_utc,
+                evaluated_at_utc=resolved_range.evaluated_at_utc,
+                deadline=deadline,
+                include_period_statistics=include_statistics,
+                include_peak_load=include_peak,
+                include_ap_traffic=include_aps,
+                include_ap_share=include_ap_share,
+                current_population_status=current_population_status,
+                current_cycle_id=current_cycle_id,
+            )
+            if include_aps:
+                value = source.compose_current_ap_traffic(
                     value,
-                    site_id,
-                    resolved_range=resolved_range,
-                    include_history=include_history,
-                    include_period_statistics=include_statistics,
-                    include_peak_load=include_peak,
-                    include_ap_traffic=include_aps,
-                    include_ap_share=include_ap_share,
-                    requested_products=requested_products,
+                    current_snapshot=current_snapshot,
+                    current_population_count=current_population_count,
+                    current_items=tuple(current_items),
                 )
-                return AdminQueryResponse(result)
-            except HistoricalTrafficValidationError as exc:
-                raise AdminQueryValidationError() from exc
-            except (
-                HistoricalTrafficIntegrityUnavailable,
-                HistoricalTrafficSerializationError,
-            ) as exc:
-                if include_ap_share:
-                    raise AdminQueryIntegrityUnavailable() from exc
-                raise AdminQueryUnavailable() from exc
-            except (
-                HistoricalTrafficSourceUnavailable,
-                sqlite3.Error,
-                OSError,
-            ) as exc:
-                raise AdminQueryUnavailable() from exc
-
-        return self._run(query)
+            result = serialize_historical_traffic(
+                value,
+                site_id,
+                resolved_range=resolved_range,
+                include_history=include_history,
+                include_period_statistics=include_statistics,
+                include_peak_load=include_peak,
+                include_ap_traffic=include_aps,
+                include_ap_share=include_ap_share,
+                requested_products=requested_products,
+            )
+            return AdminQueryResponse(result)
+        except HistoricalTrafficValidationError as exc:
+            raise AdminQueryValidationError() from exc
+        except (
+            HistoricalTrafficIntegrityUnavailable,
+            HistoricalTrafficSerializationError,
+        ) as exc:
+            if include_ap_share:
+                raise AdminQueryIntegrityUnavailable() from exc
+            raise AdminQueryUnavailable() from exc
+        except (HistoricalTrafficSourceUnavailable, sqlite3.Error, OSError) as exc:
+            raise AdminQueryUnavailable() from exc
 
     def list_current_ap_traffic(
         self, principal, site_id, *, cycle_id, limit=None, cursor=None,

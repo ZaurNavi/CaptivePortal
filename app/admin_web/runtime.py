@@ -52,6 +52,8 @@ class AdminWebRuntime:
     traffic_online_guests_service: Any | None = None
     traffic_completed_sessions_state: str = "disabled"
     traffic_completed_sessions_service: Any | None = None
+    traffic_evidence_state: str = "disabled"
+    traffic_evidence_aggregator: Any | None = None
     blueprint: Any | None = None
 
     def clear(self) -> None:
@@ -301,6 +303,24 @@ def create_admin_web_runtime(
             completed_sessions_service,
             execution_controls,
         )
+    evidence_state = "active" if config.traffic_evidence_enabled else "disabled"
+    evidence_aggregator = None
+    if config.traffic_evidence_enabled:
+        if query_service is None:
+            evidence_state = "unavailable"
+        else:
+            try:
+                query_service.configure_traffic_evidence()
+                evidence_aggregator = query_service.traffic_evidence_aggregator
+            except Exception:
+                evidence_state = "unavailable"
+                logger.error(
+                    "admin.traffic_evidence_composition_failed",
+                    extra={
+                        "event": "admin.traffic_evidence_composition_failed",
+                        "failure_category": "composition_error",
+                    },
+                )
     runtime = AdminWebRuntime(
         state=(
             "active"
@@ -331,6 +351,8 @@ def create_admin_web_runtime(
         traffic_online_guests_service=online_guests_service,
         traffic_completed_sessions_state=completed_sessions_state,
         traffic_completed_sessions_service=completed_sessions_service,
+        traffic_evidence_state=evidence_state,
+        traffic_evidence_aggregator=evidence_aggregator,
     )
     from .routes import create_admin_web_blueprint
 
