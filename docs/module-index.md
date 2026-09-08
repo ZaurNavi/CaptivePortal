@@ -1,9 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-09-06
-Runtime implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Runtime tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
+Updated: 2026-09-08
+Runtime implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Runtime tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -43,14 +43,15 @@ Runtime tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
 | Online Guest Traffic Read Foundation | current | `app/analytics/current_guest_traffic.py`, `app/current_state/read_service.py` | `modules/traffic.md`, `modules/analytics.md` | reads Current State | no |
 | Online Guests Traffic | current; default disabled | `app/admin_web/`, `app/analytics/current_guest_traffic.py` | `modules/traffic.md`, `modules/admin-web.md` | reads Current State | no |
 | Completed Guest Session Traffic | current; default disabled | `app/admin_web/`, `app/analytics/completed_guest_traffic.py` | `modules/traffic.md`, `modules/analytics.md`, `modules/admin-web.md` | reads Visit + Observation | no |
+| Consolidated Traffic Evidence | current; default disabled | `app/admin_web/traffic_evidence.py`, serializer/routes/UI | `modules/traffic.md`, `modules/admin-web.md` | composition only; no persistence | no |
 
 ## Current production evidence
 
 Owner-provided production checkpoint 2026-09-06:
 
 ```text
-HEAD: df91355a99d2561abc9c4d6d4bb6f5a968d327b3
-tree: 1161739c6b4fe90fa08928556746a5a4ea6af4cd
+HEAD: e32ade378bdbfc9f8458db9c18221958f4552718
+tree: 2766139c83965dcf2f80e0c8084b3fb363dbd781
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -66,6 +67,7 @@ TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07 Online Guests Traffic: COMPLETE / PRODUCTION ACTIVE
 TASK-DB-BASELINE-SYNC-01: CLOSED / PASS
 TRAFFIC-08 Completed Guest Session Traffic: CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TRAFFIC-09 Consolidated Traffic Evidence: COMPLETED / PRODUCTION ACTIVE
 
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
@@ -76,6 +78,7 @@ WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 
 captive-portal.service=active
 ```
@@ -87,6 +90,8 @@ Current closure:
 ```text
 TASK-DB-BASELINE-SYNC-01 = CLOSED / PASS
 TASK-TRAFFIC-08 = CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TASK-TRAFFIC-09 = COMPLETED / PRODUCTION ACTIVE
+TASK_TRAFFIC_09_PRODUCTION = ACTIVE
 ```
 
 No next Traffic TASK is currently assigned. No successor becomes canonical until

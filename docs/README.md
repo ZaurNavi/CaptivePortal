@@ -1,9 +1,9 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-09-06
-Current-state implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Current implementation tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
+Updated: 2026-09-08
+Current-state implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Current implementation tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -43,6 +43,7 @@ Historical reports, production acceptance и research сохраняют док�
 | Practical command/harness lessons | `operations-command-lessons-learned.md` |
 | Completed DB baseline gate | `tasks/TASK-DB-BASELINE-SYNC-01.md` |
 | TRAFFIC-08 final production closure | `tasks/TASK-TRAFFIC-08-FINAL.md` |
+| TRAFFIC-09 final production closure | `tasks/TASK-TRAFFIC-09-FINAL.md` |
 | Deferred Projection maintenance request | `deferred/TRAFFIC-PROJECTION-MAINTENANCE-REINDEX.md` |
 | Acceptance/publication workflow | `agents/workflow.md` |
 | Git/production deployment boundary | `deployment.md` |
@@ -77,7 +78,7 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic state at implementation baseline `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`:
+Current Traffic state at implementation baseline `main@e32ade378bdbfc9f8458db9c18221958f4552718`:
 
 ```text
 TRAFFIC-00         DONE
@@ -93,6 +94,7 @@ TRAFFIC-06         DONE / PRODUCTION ACTIVE
 TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
 TRAFFIC-08         CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TRAFFIC-09         COMPLETED / PRODUCTION ACTIVE
 ```
 
 Owner-confirmed production Traffic flags now also include:
@@ -100,6 +102,7 @@ Owner-confirmed production Traffic flags now also include:
 ```text
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 ```
 
 Repository default remains `WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false`.
@@ -113,6 +116,8 @@ Closed prerequisite and current closure:
 TASK-DB-BASELINE-SYNC-01 = CLOSED / PASS
 FINAL_DB_BASELINE = PASS
 TASK-TRAFFIC-08 = CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TASK-TRAFFIC-09 = COMPLETED / PRODUCTION ACTIVE
+TASK_TRAFFIC_09_PRODUCTION = ACTIVE
 ```
 
 No next Traffic TASK is currently assigned. A successor becomes canonical only

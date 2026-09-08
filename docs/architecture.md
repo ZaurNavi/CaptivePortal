@@ -1,9 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-09-06
-Runtime implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Runtime tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
+Updated: 2026-09-08
+Runtime implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Runtime tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
 
 ## 1. Mental model
 
@@ -292,6 +292,74 @@ null = unknown/unavailable
 Visits longer than 24 hours remain visible but return unavailable traffic
 evidence with `attribution_window_exceeds_supported_max`.
 
+### Consolidated Traffic Evidence
+
+`TASK-TRAFFIC-09` adds a standalone Admin Traffic evidence area after the eight
+existing Traffic products.
+
+It does **not** add a ninth business metric and does not become a new semantic
+owner.
+
+Composition path:
+
+```text
+accepted semantic owners
+→ TrafficEvidenceAggregator
+→ bounded Admin application aggregation
+→ safe Admin serialization
+→ admin.read.v1
+→ Admin Traffic Evidence UI
+```
+
+`TrafficEvidenceAggregator` is composition-only. Canonical semantic owners remain:
+
+```text
+current            → CurrentTrafficReadService
+history            → HistoricalTrafficReadService
+statistics         → HistoricalTrafficReadService
+peak               → HistoricalTrafficReadService
+aps                → HistoricalTrafficReadService
+apshare            → HistoricalTrafficReadService
+online_guests      → CurrentGuestTrafficReadService
+completed_sessions → CompletedGuestSessionTrafficReadService
+```
+
+Maximum read groups per Evidence request:
+
+```text
+1. Current
+2. Historical
+3. Online Guests
+4. Completed Sessions
+```
+
+The five Historical evidence products share one bounded Historical read.
+Completed Sessions Evidence reads only the first page (`limit=100`,
+`cursor=None`) and must expose truthful `returned_count` / `has_more` scope.
+
+Permanent boundaries:
+
+```text
+no N+1
+no query-time Omada/provider polling
+no new collector
+no new polling loop
+no new DB/persistence/schema
+no new acquisition process
+no new worker
+no new scheduler
+no synthetic overall score / GOOD-BAD / normalized quality algorithm
+```
+
+Permanent evidence rule:
+
+```text
+missing / unknown / stale / insufficient / unavailable != 0
+```
+
+Traffic Evidence has an independent `24h | 7d` selector, default `24h`; it does
+not mutate any existing Traffic product's selected/applied range.
+
 ## 8. Admin Web
 
 Guest auth and Admin auth remain separate.
@@ -308,6 +376,9 @@ Traffic production-current functional surface:
 - Peak Load;
 - Traffic by AP;
 - AP Traffic Share.
+
+After these eight product surfaces, Admin Traffic contains the standalone
+`TRAFFIC EVIDENCE` area from TASK-TRAFFIC-09.
 
 Network History, Statistics, Peak, Traffic by AP and AP Share have independent
 `24h | 7d` selectors. Completed Guest Session Traffic also supports `24h | 7d`

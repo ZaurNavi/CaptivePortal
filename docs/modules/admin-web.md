@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-09-06
-Baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Updated: 2026-09-08
+Baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
 
 ## Boundary
 
@@ -52,6 +52,7 @@ WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=false
 ```
 
 Owner-confirmed production state:
@@ -66,6 +67,7 @@ WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 ```
 
 Current functional panels:
@@ -78,6 +80,9 @@ Current functional panels:
 6. Peak Load;
 7. Traffic by AP;
 8. AP Traffic Share.
+
+After these eight products, the page contains the standalone `TRAFFIC EVIDENCE`
+area from TASK-TRAFFIC-09.
 
 Current Network Throughput is range-insensitive.
 
@@ -277,6 +282,64 @@ Unavailable
 
 The product does not poll Omada/provider at query time and does not read
 `historical_traffic_projection.v1`.
+
+## Consolidated Traffic Evidence
+
+Canonical endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/evidence?range=24h|7d
+```
+
+Contracts:
+
+```text
+outer API = admin.read.v1
+inner Evidence = admin.traffic.evidence.v1
+required capabilities = admin.read.overview + admin.read.devices
+```
+
+Feature flag:
+
+```text
+repository default: WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=false
+production:         WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
+```
+
+When feature OFF, the Evidence feature route is unavailable.
+
+Canonical product IDs, in order:
+
+```text
+current
+history
+statistics
+peak
+aps
+apshare
+online_guests
+completed_sessions
+```
+
+Evidence has its own independent `24h | 7d` range, default `24h`; it does not
+change existing panel ranges.
+
+`TrafficEvidenceAggregator` is composition-only and performs at most four
+canonical read groups: Current, Historical, Online Guests, Completed Sessions.
+Historical evidence shares one bounded Historical read. Completed Sessions uses
+only first page `limit=100, cursor=None` and serializes truthful
+`returned_count` / `has_more`.
+
+The aggregator does not define product semantics. It reuses the existing semantic
+owners and adds no N+1, query-time Omada polling, collector, worker, polling
+loop, scheduler, DB, persistence, schema or acquisition process.
+
+Traffic Evidence introduces no synthetic overall score, universal GOOD/BAD or
+normalized quality metric.
+
+```text
+missing / unknown / stale / insufficient / unavailable != 0
+```
 
 ## UI/design status
 

@@ -1,12 +1,12 @@
 # Admin Console Traffic
 
 Status: current production module contract
-Updated: 2026-09-06
-Repository implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Repository tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
-Production deployed HEAD: `df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Production tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
-Latest production acceptance: `TASK-TRAFFIC-08 — Completed Guest Session Traffic — CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED`
+Updated: 2026-09-08
+Repository implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Repository tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Production deployed HEAD: `e32ade378bdbfc9f8458db9c18221958f4552718`
+Production tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Latest production acceptance: `TASK-TRAFFIC-09 — Consolidated Traffic Evidence — COMPLETED / PRODUCTION ACTIVE`
 
 ## Current roadmap state
 
@@ -49,15 +49,18 @@ COMPLETE / PRODUCTION ACTIVE
 
 TRAFFIC-08 — Completed Guest Session Traffic
 CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+
+TRAFFIC-09 — Consolidated Traffic Evidence
+COMPLETED / PRODUCTION ACTIVE
 ```
 
 No next Traffic TASK is currently assigned.
 
 Historical Traffic Projection remains a separate derived/disposable layer over
-Observation. `historical_traffic_projection.v1` is not a source for
-Completed Guest Session Traffic and TRAFFIC-08 did not modify its contract.
+Observation. It is not a source for Completed Guest Session Traffic or Traffic
+Evidence, and TRAFFIC-09 did not change its contract.
 
-## Production feature state — 2026-09-06
+## Production feature state — 2026-09-08
 
 Owner-confirmed production Traffic flags:
 
@@ -71,10 +74,12 @@ WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 ```
 
-Repository defaults remain `false` for these Traffic exposure flags, including
-`WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false`.
+Repository defaults remain `false` for opt-in Traffic exposure flags,
+including `WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false` and
+`WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=false`.
 
 ## Current Traffic product surface
 
@@ -88,6 +93,9 @@ Production Traffic contains:
 6. Peak Load;
 7. Traffic by AP;
 8. AP Traffic Share.
+
+After these eight product surfaces, `TRAFFIC EVIDENCE` is a separate consolidated
+evidence area. It is not a ninth business metric.
 
 Current layout is production-current functional layout, not a permanently approved final visual composition.
 
@@ -499,6 +507,145 @@ API_PARSE=PASS
 `partial` is not a product failure; it describes per-Visit evidence quality.
 Live values may change as Observation acquisition continues.
 
+## Consolidated Traffic Evidence
+
+`TASK-TRAFFIC-09` is completed and production-active.
+
+```text
+TASK_TRAFFIC_09_PRODUCTION=ACTIVE
+TASK_TRAFFIC_09_PRODUCTION_SMOKE=PASS
+```
+
+Canonical endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/evidence?range=24h|7d
+```
+
+Contracts / authorization:
+
+```text
+outer API = admin.read.v1
+inner Evidence = admin.traffic.evidence.v1
+capabilities = admin.read.overview + admin.read.devices
+```
+
+Feature state:
+
+```text
+repository default = WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=false
+production         = WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
+```
+
+Canonical product IDs:
+
+```text
+current
+history
+statistics
+peak
+aps
+apshare
+online_guests
+completed_sessions
+```
+
+Semantic owners:
+
+```text
+current            → CurrentTrafficReadService
+history            → HistoricalTrafficReadService
+statistics         → HistoricalTrafficReadService
+peak               → HistoricalTrafficReadService
+aps                → HistoricalTrafficReadService
+apshare            → HistoricalTrafficReadService
+online_guests      → CurrentGuestTrafficReadService
+completed_sessions → CompletedGuestSessionTrafficReadService
+```
+
+Composition:
+
+```text
+accepted semantic owners
+→ TrafficEvidenceAggregator
+→ bounded application aggregation
+→ safe Admin serialization
+→ admin.read.v1
+→ UI
+```
+
+`TrafficEvidenceAggregator` is composition-only. It performs at most four read
+groups: Current, Historical, Online Guests and Completed Sessions.
+
+Historical products use one bounded Historical read. Completed Sessions reads
+only first page:
+
+```text
+limit=100
+cursor=None
+```
+
+Scope truthfully exposes `returned_count` and `has_more`.
+
+Evidence range:
+
+```text
+24h
+7d
+default=24h
+```
+
+This selector is independent and never changes the functional ranges of existing
+Traffic products.
+
+Permanent non-scope:
+
+```text
+no N+1
+no query-time Omada polling
+no new collector/polling loop
+no new DB/persistence/schema
+no new acquisition process
+no new worker/scheduler
+no new quality algorithm
+no synthetic overall score
+no universal GOOD/BAD
+no normalized quality score
+```
+
+Permanent evidence invariant:
+
+```text
+missing / unknown / stale / insufficient / unavailable != 0
+```
+
+Production closure:
+
+```text
+previous baseline=f57d3550ffd2e1e48f24092666d861a959c57e40
+implementation=6729e5bc45c810423cf739ebd8fc2685f6098a3d
+accepted / production tree=2766139c83965dcf2f80e0c8084b3fb363dbd781
+PR=#106
+merge / production=e32ade378bdbfc9f8458db9c18221958f4552718
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
+Windows acceptance=PASS
+Linux acceptance=PASS WITH BASELINE EXCEPTIONS
+Official production-size PERF=PASS
+Production deploy=PASS
+Production activation=PASS
+Authenticated smoke=PASS
+Owner manual Web UI verification=PASS
+```
+
+Production authenticated smoke for both `24h` and `7d` confirmed exact 8 product
+IDs and:
+
+```text
+exposure=enabled
+delivery=available
+failure=None
+```
+
 ## Historical request broker / admission
 
 `TrafficHistoricalRequestBroker` remains page-local intent/coalescing/response-mapping. `CaptivPortalTrafficCoordinator` remains scheduler/lifecycle owner.
@@ -836,6 +983,7 @@ Do not list this one-time observation as an open current defect or technical deb
 
 ```text
 TRAFFIC-08 — CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TRAFFIC-09 — COMPLETED / PRODUCTION ACTIVE
 TASK-DB-BASELINE-SYNC-01 — CLOSED / PASS
 next Traffic TASK — NOT YET ASSIGNED
 ```

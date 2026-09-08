@@ -25,10 +25,10 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3` |
-| Repository tree | `1161739c6b4fe90fa08928556746a5a4ea6af4cd` |
-| Production deployed HEAD | `df91355a99d2561abc9c4d6d4bb6f5a968d327b3` |
-| Production tree | `1161739c6b4fe90fa08928556746a5a4ea6af4cd` |
+| Repository implementation checkpoint | `main@e32ade378bdbfc9f8458db9c18221958f4552718` |
+| Repository tree | `2766139c83965dcf2f80e0c8084b3fb363dbd781` |
+| Production deployed HEAD | `e32ade378bdbfc9f8458db9c18221958f4552718` |
+| Production tree | `2766139c83965dcf2f80e0c8084b3fb363dbd781` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -38,6 +38,7 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | AP Traffic Share | **Production active / acceptance PASS** |
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
 | Completed Guest Session Traffic | **CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED** |
+| Traffic Evidence | **TASK-TRAFFIC-09 — COMPLETED / PRODUCTION ACTIVE** |
 | DB baseline gate | `TASK-DB-BASELINE-SYNC-01` — **CLOSED / PASS** |
 | Следующий Traffic TASK | **ПОКА НЕ НАЗНАЧЕН** |
 | Omada Controller family | Omada Software Controller 5.14.x |
@@ -54,12 +55,13 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 ## Где проект находится сейчас
 
-Traffic production-active до `TASK-TRAFFIC-08 — Completed Guest Session Traffic` включительно.
+Traffic production-active до `TASK-TRAFFIC-09 — Consolidated Traffic Evidence` включительно.
 
-Online Guests Traffic остаётся отдельной near-current Current State-backed панелью.
-Completed Guest Session Traffic — исторический продукт по закрытым Visits,
-использующий persisted Visit Lifecycle + Client Observation evidence и
-`24h | 7d` cohort по `closed_at`.
+Восемь существующих Traffic products остаются самостоятельными продуктами.
+После них в Admin → Traffic находится отдельная область `TRAFFIC EVIDENCE`,
+которая консолидирует существующие evidence/status/freshness/coverage/
+source-health/reason/provenance факты без новой quality-метрики или нового
+источника данных.
 
 Текущая functional layout production-current, но не финальный визуальный дизайн.
 
@@ -75,6 +77,18 @@ Current Traffic surface:
 - Peak Load;
 - Traffic by AP;
 - AP Traffic Share.
+
+Traffic Evidence имеет собственный независимый `24h | 7d` range (default
+`24h`) и не меняет functional ranges восьми существующих Traffic products.
+
+Постоянный evidence invariant:
+
+```text
+missing / unknown / stale / insufficient / unavailable != 0
+```
+
+Traffic Evidence не является synthetic GOOD/BAD score или normalized quality
+algorithm.
 
 Historical Traffic panels сохраняют независимый page-local `24h | 7d` range
 state. Online Guests Traffic читает persisted Current State через
@@ -801,10 +815,11 @@ TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
 DB-BASELINE-SYNC   CLOSED / PASS
 TRAFFIC-08          CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TRAFFIC-09          COMPLETED / PRODUCTION ACTIVE
 next Traffic TASK   NOT YET ASSIGNED
 ```
 
-TASK-TRAFFIC-08 закрыт и production-verified. Следующий Traffic TASK не считается каноническим до отдельного утверждения Owner / Tech Lead.
+TASK-TRAFFIC-09 завершён и production-active. Следующий Traffic TASK не считается каноническим до отдельного утверждения Owner / Tech Lead.
 
 ## Реальный второй Site как trigger
 
