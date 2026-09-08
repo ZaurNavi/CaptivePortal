@@ -1,8 +1,8 @@
 # Analytics
 
 Status: current module contract
-Updated: 2026-09-06
-Baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Updated: 2026-09-08
+Baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
 
 ## Purpose
 
@@ -135,6 +135,40 @@ required; roaming is allowed.
 
 This read path performs no Omada/provider call, source DB write or projection
 read. `historical_traffic_projection.v1` is not a source.
+
+## Traffic Evidence semantic-owner reuse
+
+Traffic Evidence does not create an Analytics semantic owner.
+
+`TrafficEvidenceAggregator` lives in the Admin composition layer and reuses:
+
+```text
+Current:
+  CurrentTrafficReadService
+
+History / Statistics / Peak / AP Traffic / AP Share:
+  HistoricalTrafficReadService
+
+Online Guests:
+  CurrentGuestTrafficReadService
+
+Completed Sessions:
+  CompletedGuestSessionTrafficReadService
+```
+
+Canonical architecture:
+
+```text
+accepted semantic owners
+→ bounded application aggregation
+→ safe Admin serialization
+→ admin.read.v1
+→ UI
+```
+
+Historical evidence products are grouped into one bounded Historical read.
+Traffic Evidence performs no Omada/provider call and owns no source persistence,
+schema, collection or scheduler.
 
 ## Historical Network Traffic
 

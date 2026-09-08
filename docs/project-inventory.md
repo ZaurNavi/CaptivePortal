@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-09-06
+Updated: 2026-09-08
 Branch: `main`
-Runtime commit: `df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Runtime tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
-Commit source: merge PR #104 / TASK-TRAFFIC-08, 2026-09-06
+Runtime commit: `e32ade378bdbfc9f8458db9c18221958f4552718`
+Runtime tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Commit source: merge PR #106 / TASK-TRAFFIC-09, 2026-09-08
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -93,6 +93,7 @@ Analytics has no worker/write lifecycle to stop.
 | Online Guest Traffic Read Foundation | `app/analytics/current_guest_traffic.py`, Current State read service | persisted Current State | none | no |
 | Online Guests Traffic | Admin Web + Current Guest Traffic | persisted Current State / authorized guest scope | none | no |
 | Completed Guest Session Traffic | `app/analytics/completed_guest_traffic.py`, Admin Web | closed Visits + persisted Client Observation evidence | none | no |
+| Consolidated Traffic Evidence | `app/admin_web/traffic_evidence.py` + serializer/routes/UI | canonical Traffic read owners | none; composition only | no |
 
 ## 5. Observation vs Current State
 
@@ -237,7 +238,8 @@ Traffic currently contains:
 - Peak Load;
 - Traffic by AP;
 - AP Traffic Share;
-- independent historical panel ranges.
+- independent historical panel ranges;
+- standalone Consolidated Traffic Evidence area after the eight product surfaces.
 
 Current endpoint:
 
@@ -320,6 +322,24 @@ source=closed Visits + persisted Client Observation
 provider calls=none
 historical_traffic_projection.v1 source=no
 ```
+
+Traffic Evidence endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/evidence?range=24h|7d
+```
+
+Evidence contract:
+
+```text
+api_version=admin.read.v1
+contract_version=admin.traffic.evidence.v1
+products=current,history,statistics,peak,aps,apshare,online_guests,completed_sessions
+```
+
+`TrafficEvidenceAggregator` is composition-only. It adds no persistence, schema,
+worker, scheduler, collector or acquisition process and performs no query-time
+Omada/provider polling.
 
 Business/data Admin API remains read-only.
 
@@ -459,20 +479,23 @@ Current repository/production Traffic implementation includes:
 - AP Traffic Share;
 - Online Guest Traffic Read Foundation;
 - Online Guests Traffic;
-- Completed Guest Session Traffic.
+- Completed Guest Session Traffic;
+- Consolidated Traffic Evidence.
 
 Owner-confirmed production checkpoint:
 
 ```text
-production HEAD: df91355a99d2561abc9c4d6d4bb6f5a968d327b3
-production tree: 1161739c6b4fe90fa08928556746a5a4ea6af4cd
+production HEAD: e32ade378bdbfc9f8458db9c18221958f4552718
+production tree: 2766139c83965dcf2f80e0c8084b3fb363dbd781
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 captive-portal.service=active
 TRAFFIC-07-READ: DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07: COMPLETE / PRODUCTION ACTIVE
 TASK-DB-BASELINE-SYNC-01: CLOSED / PASS
 TRAFFIC-08: CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TRAFFIC-09: COMPLETED / PRODUCTION ACTIVE
 ```
 
 Online Guests Traffic is Current State-backed near-current authorized guest rate
@@ -480,6 +503,7 @@ evidence. Historical Network Traffic remains Observation-backed.
 
 `TASK-DB-BASELINE-SYNC-01` is closed with `FINAL_DB_BASELINE=PASS`.
 `TASK-TRAFFIC-08` is closed, deployed, active and production-verified.
+`TASK-TRAFFIC-09` is completed and production-active.
 No next Traffic TASK is currently assigned.
 
 Historical TASK/PR evidence remains historical and does not override current

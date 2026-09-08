@@ -25,10 +25,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3` |
-| Repository tree | `1161739c6b4fe90fa08928556746a5a4ea6af4cd` |
-| Production deployed HEAD | `df91355a99d2561abc9c4d6d4bb6f5a968d327b3` |
-| Production tree | `1161739c6b4fe90fa08928556746a5a4ea6af4cd` |
+| Repository implementation checkpoint | `main@e32ade378bdbfc9f8458db9c18221958f4552718` |
+| Repository tree | `2766139c83965dcf2f80e0c8084b3fb363dbd781` |
+| Production deployed HEAD | `e32ade378bdbfc9f8458db9c18221958f4552718` |
+| Production tree | `2766139c83965dcf2f80e0c8084b3fb363dbd781` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -38,6 +38,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | AP Traffic Share | **Production active / acceptance PASS** |
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
 | Completed Guest Session Traffic | **CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED** |
+| Traffic Evidence | **TASK-TRAFFIC-09 — COMPLETED / PRODUCTION ACTIVE** |
 | DB baseline gate | `TASK-DB-BASELINE-SYNC-01` — **CLOSED / PASS** |
 | Next Traffic task | **NOT YET ASSIGNED** |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
@@ -55,12 +56,12 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 ## Where the project is now
 
-Traffic is production-active through `TASK-TRAFFIC-08 — Completed Guest Session Traffic`.
+Traffic is production-active through `TASK-TRAFFIC-09 — Consolidated Traffic Evidence`.
 
-Online Guests Traffic remains the separate near-current Current State-backed
-panel. Completed Guest Session Traffic is a closed-Visit historical product
-backed by persisted Visit Lifecycle + Client Observation evidence and supports
-`24h | 7d` closed-at cohorts.
+The eight existing Traffic products remain independent product surfaces.
+After them, Admin → Traffic now includes a standalone `TRAFFIC EVIDENCE` area
+that consolidates existing evidence/status/freshness/coverage/source-health/
+reason/provenance facts without creating a new quality metric or data source.
 
 Current functional layout remains production-current, not a frozen final visual
 composition.
@@ -77,6 +78,18 @@ At the current runtime checkpoint, Traffic includes:
 - Peak Load;
 - Traffic by AP;
 - AP Traffic Share.
+
+Traffic Evidence has its own independent `24h | 7d` range (default `24h`) and
+does not change the functional ranges of the eight existing Traffic products.
+
+Permanent evidence rule:
+
+```text
+missing / unknown / stale / insufficient / unavailable != 0
+```
+
+Traffic Evidence is composition/presentation of existing product evidence, not a
+synthetic GOOD/BAD score or normalized quality algorithm.
 
 Historical Traffic panels retain independent page-local `24h | 7d` ranges.
 Online Guests Traffic reads persisted Current State through
@@ -804,10 +817,11 @@ TRAFFIC-07-READ    DONE / READ FOUNDATION IMPLEMENTED
 TRAFFIC-07         COMPLETE / PRODUCTION ACTIVE
 DB-BASELINE-SYNC   CLOSED / PASS
 TRAFFIC-08          CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
+TRAFFIC-09          COMPLETED / PRODUCTION ACTIVE
 next Traffic TASK   NOT YET ASSIGNED
 ```
 
-TASK-TRAFFIC-08 is closed and production-verified. No successor Traffic TASK is canonical until separately approved by Owner / Tech Lead.
+TASK-TRAFFIC-09 is completed and production-active. No successor Traffic TASK is canonical until separately approved by Owner / Tech Lead.
 
 ## Real second Site as a trigger
 

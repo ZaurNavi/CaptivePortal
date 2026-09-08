@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-09-06
-Baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
+Updated: 2026-09-08
+Baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -208,11 +208,12 @@ WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=false
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=false
 WEB_ADMIN_TRAFFIC_REFRESH_SECONDS=60
 WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=30
 ```
 
-Production state 2026-09-06:
+Production state 2026-09-08:
 
 ```text
 WEB_ADMIN_TRAFFIC_ENABLED=true
@@ -224,6 +225,7 @@ WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 ```
 
 Feature dependencies:
@@ -238,8 +240,11 @@ AP Traffic Share requires Admin + Traffic + History + Independent ranges.
 Online Guests Traffic requires Admin + Traffic only.
 Completed Guest Session Traffic requires Admin + Traffic only; it reads Visit +
 Observation persistence and does not require Historical Traffic Projection.
-Repository defaults for both guest Traffic product flags remain `false`;
-Owner-confirmed production activation is `true`.
+Traffic Evidence requires Admin + Traffic and its endpoint authorizes both
+`admin.read.overview` and `admin.read.devices`.
+
+Repository defaults remain opt-in/off for Online Guests, Completed Sessions and
+Traffic Evidence. Owner-confirmed production activation is `true` for all three.
 ```
 
 Independent ranges does **not** require every optional historical product to be

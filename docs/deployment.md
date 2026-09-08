@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-06
-Current repository implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Confirmed production deployed HEAD: `df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Confirmed production tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
+Updated: 2026-09-08
+Current repository implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Confirmed production deployed HEAD: `e32ade378bdbfc9f8458db9c18221958f4552718`
+Confirmed production tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
 
 ## Repository vs production
 
@@ -198,16 +198,16 @@ See:
 - `testing-environments.md`;
 - `operations-command-lessons-learned.md`.
 
-## Traffic production checkpoint — 2026-09-06
+## Traffic production checkpoint — 2026-09-08
 
 Owner-confirmed current state:
 
 ```text
 repository / production HEAD:
-df91355a99d2561abc9c4d6d4bb6f5a968d327b3
+e32ade378bdbfc9f8458db9c18221958f4552718
 
 repository / production tree:
-1161739c6b4fe90fa08928556746a5a4ea6af4cd
+2766139c83965dcf2f80e0c8084b3fb363dbd781
 
 captive-portal.service:
 active
@@ -224,6 +224,7 @@ Period Statistics
 Peak Load
 Traffic by AP
 AP Traffic Share
+TRAFFIC EVIDENCE (standalone consolidated evidence area)
 ```
 
 Production flags:
@@ -238,6 +239,7 @@ WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
 WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=true
 WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED=true
 WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 ```
 
 Repository defaults remain false, including `WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED=false`.
@@ -492,6 +494,100 @@ pre-activation env: /etc/default/captive-portal.pre-traffic08-activation-2026090
 ```
 
 Rollback is not currently required.
+
+## TRAFFIC-09 deployment / activation history
+
+```text
+TASK=TASK-TRAFFIC-09 — Consolidated Traffic Evidence
+previous baseline=f57d3550ffd2e1e48f24092666d861a959c57e40
+accepted implementation=6729e5bc45c810423cf739ebd8fc2685f6098a3d
+accepted / production tree=2766139c83965dcf2f80e0c8084b3fb363dbd781
+PR=#106
+merge / production commit=e32ade378bdbfc9f8458db9c18221958f4552718
+```
+
+Production:
+
+```text
+host=192.168.0.202
+application=/opt/CaptivePortal
+service=captive-portal.service
+WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
+TASK_TRAFFIC_09_PRODUCTION=ACTIVE
+```
+
+Post-deploy / activation health:
+
+```text
+service=active
+SubState=running
+NRestarts=0
+listener=127.0.0.1:8088
+root readiness HTTP 400=expected without Omada parameters
+startup Evidence errors=none
+```
+
+Authenticated production smoke:
+
+```text
+Admin login GET=200
+Admin login POST=302
+authenticated session=200
+Traffic page=200
+Evidence UI=PASS
+Evidence 24h=200
+Evidence 7d=200
+logout=302
+
+api_version=admin.read.v1 → PASS
+contract_version=admin.traffic.evidence.v1 → PASS
+range contract → PASS
+exact 8 products → PASS
+canonical product_id validation → PASS
+
+TASK_TRAFFIC_09_PRODUCTION_SMOKE=PASS
+TASK_TRAFFIC_09_PRODUCTION=ACTIVE
+```
+
+For both `24h` and `7d`, all eight products were present with:
+
+```text
+exposure=enabled
+delivery=available
+failure=None
+```
+
+Owner manual browser verification: PASS.
+
+Official production-size PERF used an immutable five-SQLite-DB snapshot of
+approximately 572 MiB.
+
+```text
+24h: 10 runs; p95=max=0.0730241s; max response=4813 bytes
+7d:  10 runs; p95=max=0.0724418s; max response=4806 bytes
+HTTP failures=0
+deadline failures=0
+payload <=65536 bytes=PASS
+```
+
+Thresholds were 5s/10s for 24h p95/max and 7s/12s for 7d p95/max.
+
+Across 20 Evidence requests:
+
+```text
+current_site_calls=20
+current_ap_calls=0
+historical_calls=20
+online_calls=20
+completed_calls=20
+provider_calls=0
+writes=0
+collection_cycles=0
+source DB fingerprints=UNCHANGED
+```
+
+No new DB, collector, polling loop, scheduler, worker, persistence/schema or
+query-time Omada path was introduced.
 
 ## Feature activation
 

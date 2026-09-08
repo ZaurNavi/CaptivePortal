@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-06
+Updated: 2026-09-08
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Production deployed HEAD: `df91355a99d2561abc9c4d6d4bb6f5a968d327b3`
-Production tree: `1161739c6b4fe90fa08928556746a5a4ea6af4cd`
+Documentation/current-state implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Production deployed HEAD: `e32ade378bdbfc9f8458db9c18221958f4552718`
+Production tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
 
 ## Responsibility model
 
@@ -335,7 +335,123 @@ During TRAFFIC-00 acceptance:
 
 This is troubleshooting history, not a current product defect.
 
-### Latest Traffic acceptance evidence — TRAFFIC-08
+### Latest Traffic acceptance evidence — TRAFFIC-09
+
+Canonical artifact:
+
+```text
+TASK=TASK-TRAFFIC-09 — Consolidated Traffic Evidence
+previous baseline=f57d3550ffd2e1e48f24092666d861a959c57e40
+implementation commit=6729e5bc45c810423cf739ebd8fc2685f6098a3d
+accepted / production tree=2766139c83965dcf2f80e0c8084b3fb363dbd781
+PR #106=merged
+merge / production commit=e32ade378bdbfc9f8458db9c18221958f4552718
+TASK-TRAFFIC-09=COMPLETED / PRODUCTION ACTIVE
+TASK_TRAFFIC_09_PRODUCTION=ACTIVE
+```
+
+Acceptance:
+
+```text
+Architecture/specification=accepted
+Implementation=accepted
+Windows Central Full=PASS
+Windows regressions=0
+Linux Full=PASS WITH BASELINE EXCEPTIONS
+Linux full=2921 passed, 1 skipped, 3 known baseline failures
+Linux new failures=0
+Linux regressions=0
+Official production-size PERF=PASS
+Publication=PASS
+PR merged=PASS
+Production deploy=PASS
+Production activation=PASS
+Authenticated production smoke=PASS
+Owner manual Web UI verification=PASS
+```
+
+Official production-size PERF used an immutable approximately 572 MiB snapshot
+of:
+
+```text
+observations
+visits
+traffic_projection
+current_state
+visitor_registry
+```
+
+Results:
+
+```text
+24h runs=10
+24h p95=0.0730241s
+24h max=0.0730241s
+24h max response=4813 bytes
+24h HTTP failures=0
+24h deadline failures=0
+
+7d runs=10
+7d p95=0.0724418s
+7d max=0.0724418s
+7d max response=4806 bytes
+7d HTTP failures=0
+7d deadline failures=0
+
+payload <=65536 bytes=PASS
+```
+
+Thresholds:
+
+```text
+24h p95<=5s; max<=10s
+7d p95<=7s; max<=12s
+```
+
+Read-call contract across 20 Evidence requests:
+
+```text
+current_site_calls=20
+current_ap_calls=0
+historical_calls=20
+online_calls=20
+completed_calls=20
+provider_calls=0
+writes=0
+collection_cycles=0
+source DB fingerprints=UNCHANGED
+```
+
+Production authenticated smoke:
+
+```text
+Admin login GET=200
+Admin login POST=302
+authenticated session=200
+Traffic page=200
+Evidence UI=PASS
+Evidence 24h=200
+Evidence 7d=200
+logout=302
+api_version=admin.read.v1=PASS
+contract_version=admin.traffic.evidence.v1=PASS
+exact 8 products=PASS
+canonical product_id validation=PASS
+TASK_TRAFFIC_09_PRODUCTION_SMOKE=PASS
+```
+
+For both ranges every canonical product returned:
+
+```text
+exposure=enabled
+delivery=available
+failure=None
+```
+
+The three Linux failures are existing documented baseline exceptions, not
+TASK-TRAFFIC-09 regressions.
+
+### Previous Traffic acceptance evidence — TRAFFIC-08
 
 Canonical artifact:
 
@@ -640,10 +756,11 @@ Permanent TRAFFIC-07 invariants:
 - Online Guests Traffic remains range-insensitive;
 - query-time Omada isolation remains intact.
 
-`TASK-DB-BASELINE-SYNC-01` is CLOSED / PASS and `TASK-TRAFFIC-08` is
-CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED. No next Traffic TASK is
-currently assigned; Tech Lead must define a fresh targeted set when a successor
-TASK is separately approved.
+`TASK-DB-BASELINE-SYNC-01` is CLOSED / PASS, `TASK-TRAFFIC-08` is
+CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED, and `TASK-TRAFFIC-09` is
+COMPLETED / PRODUCTION ACTIVE. No next Traffic TASK is currently assigned;
+Tech Lead must define a fresh targeted set when a successor TASK is separately
+approved.
 
 ## Acceptance before Publication
 
