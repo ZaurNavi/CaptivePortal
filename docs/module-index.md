@@ -1,9 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-09-08
-Runtime implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
-Runtime tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Updated: 2026-09-09
+Runtime implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Runtime tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -26,6 +26,7 @@ Runtime tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
 | Analytics | current; default disabled | `app/analytics/` | `modules/analytics.md` | none | **no** |
 | Analytics internal API | current; default disabled | `app/analytics/api.py` | `modules/analytics.md` | none | no |
 | Admin Web | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | process security state | **no** |
+| Device Current Context | current; default disabled | `app/admin_web/`, `app/current_state/read_service.py`, `app/analytics/current_guest_traffic.py` | `modules/admin-web.md`, `modules/current-state.md`, `modules/analytics.md` | reads Current State only; no new persistence | no |
 | Home Live | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
 | Current Traffic | current | `app/analytics/current_traffic.py` | `modules/analytics.md` | reads Observation | no |
 | Home Traffic | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
@@ -47,11 +48,11 @@ Runtime tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
 
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-09-06:
+Owner-provided production checkpoint 2026-09-09:
 
 ```text
-HEAD: e32ade378bdbfc9f8458db9c18221958f4552718
-tree: 2766139c83965dcf2f80e0c8084b3fb363dbd781
+HEAD: 7df71a8e807efd74b123117e78cb8d992c190fa1
+tree: 8f1342f0a0f1e8242642161e02b2f3276e6ddf51
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -68,7 +69,9 @@ TRAFFIC-07 Online Guests Traffic: COMPLETE / PRODUCTION ACTIVE
 TASK-DB-BASELINE-SYNC-01: CLOSED / PASS
 TRAFFIC-08 Completed Guest Session Traffic: CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
 TRAFFIC-09 Consolidated Traffic Evidence: COMPLETED / PRODUCTION ACTIVE
+TASK-DEVICE-CARD-01 Current Device Context: COMPLETE / PRODUCTION ACTIVE
 
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
 WEB_ADMIN_TRAFFIC_ENABLED=true
 WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
 WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true
@@ -82,6 +85,18 @@ WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 
 captive-portal.service=active
 ```
+
+## Device UI follow-on
+
+```text
+TASK-WEB-DEVICE-UI-01 = IN PROGRESS / LAB REVIEW PENDING
+NOT MERGED
+NOT DEPLOYED
+NOT CURRENT PRODUCTION
+```
+
+This follow-on is presentation-layer work and does not change the current
+authoritative DEVICE-CARD-01 functional status.
 
 ## Next Traffic item
 

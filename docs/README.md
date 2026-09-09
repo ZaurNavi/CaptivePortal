@@ -1,9 +1,9 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-09-08
-Current-state implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
-Current implementation tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Updated: 2026-09-09
+Current-state implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Current implementation tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -44,6 +44,7 @@ Historical reports, production acceptance и research сохраняют док�
 | Completed DB baseline gate | `tasks/TASK-DB-BASELINE-SYNC-01.md` |
 | TRAFFIC-08 final production closure | `tasks/TASK-TRAFFIC-08-FINAL.md` |
 | TRAFFIC-09 final production closure | `tasks/TASK-TRAFFIC-09-FINAL.md` |
+| DEVICE-CARD-01 final production closure | `tasks/TASK-DEVICE-CARD-01-FINAL.md` |
 | Deferred Projection maintenance request | `deferred/TRAFFIC-PROJECTION-MAINTENANCE-REINDEX.md` |
 | Acceptance/publication workflow | `agents/workflow.md` |
 | Git/production deployment boundary | `deployment.md` |
@@ -126,6 +127,47 @@ after separate Owner / Tech Lead approval.
 `modules/traffic.md` is the current Traffic product/semantic contract.
 Historical FINAL TASKs and acceptance evidence remain traceability evidence and
 do not override current implementation state.
+
+## Current Device Card state
+
+```text
+TASK-DEVICE-CARD-01 = COMPLETE
+IMPLEMENTATION = PASS
+OWNER + TECH LEAD ACCEPTANCE = PASS
+MERGE = COMPLETE
+PRODUCTION DEPLOY = PASS
+PRODUCTION ACTIVATION = PASS
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED = true
+```
+
+Current implementation / production baseline:
+
+```text
+main = 7df71a8e807efd74b123117e78cb8d992c190fa1
+tree = 8f1342f0a0f1e8242642161e02b2f3276e6ddf51
+```
+
+Device Detail now exposes a separate read-only `Current Device Context` over
+persisted Current State + the accepted exact-client Current Guest Traffic
+projection.
+
+Permanent semantic boundary:
+
+```text
+Historical Device Context != Current Device Context
+stale != offline
+unavailable != offline
+numeric 0 != missing/unavailable
+```
+
+Follow-on UI work:
+
+```text
+TASK-WEB-DEVICE-UI-01 = IN PROGRESS / LAB REVIEW PENDING
+MERGED = NO
+DEPLOYED = NO
+CURRENT PRODUCTION BEHAVIOR = NO
+```
 
 ## Permanent promotion boundary
 

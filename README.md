@@ -25,10 +25,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@e32ade378bdbfc9f8458db9c18221958f4552718` |
-| Repository tree | `2766139c83965dcf2f80e0c8084b3fb363dbd781` |
-| Production deployed HEAD | `e32ade378bdbfc9f8458db9c18221958f4552718` |
-| Production tree | `2766139c83965dcf2f80e0c8084b3fb363dbd781` |
+| Repository implementation checkpoint | `main@7df71a8e807efd74b123117e78cb8d992c190fa1` |
+| Repository tree | `8f1342f0a0f1e8242642161e02b2f3276e6ddf51` |
+| Production deployed HEAD | `7df71a8e807efd74b123117e78cb8d992c190fa1` |
+| Production tree | `8f1342f0a0f1e8242642161e02b2f3276e6ddf51` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -48,6 +48,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Visit Lifecycle | Implemented, schema v2 |
 | Observation Foundation | Implemented, schema v1 |
 | Current State | Implemented, schema v1 |
+| Current Device Context | **TASK-DEVICE-CARD-01 — COMPLETE / PRODUCTION ACTIVE** |
 | Analytics / Admin Web | Implemented |
 | Multi-Site / Tenant / RBAC | Future evolution |
 | Current topology | Single application process; HA/multi-process requires ADR |
@@ -97,6 +98,53 @@ Online Guests Traffic reads persisted Current State through
 query-time Omada calls.
 
 The Traffic domains are product evidence, not WAN/Internet billing counters.
+
+## Device Detail — Current Device Context
+
+`TASK-DEVICE-CARD-01` is complete and production-active.
+
+The existing Device Detail page now keeps two deliberately different evidence
+domains:
+
+```text
+Historical Device Context
+!=
+Current Device Context
+```
+
+Historical device information continues to contain Identity, Latest Site
+Snapshot, Latest Client Observation and Recent Visits.
+
+The separate read-only `Current Device Context` block contains:
+
+```text
+Presence
+Authorization
+Network
+Radio
+Controller
+Current Guest Traffic
+Evidence / Freshness
+```
+
+Canonical current-state rules include:
+
+```text
+fresh + complete scope + present  → online
+fresh + complete scope + absent   → offline
+stale/unavailable/untrusted       → unknown
+
+stale != offline
+unavailable != offline
+0 Mbps != unknown/unavailable
+```
+
+The browser reads persisted application evidence only. Device Detail does not
+add query-time Omada, Loki, Grafana or external Analytics calls.
+
+The follow-on presentation task `TASK-WEB-DEVICE-UI-01` is **IN PROGRESS / LAB
+REVIEW PENDING**. Its compact-list/readable-format/status-indicator work is not
+current production behavior until separately accepted, merged and deployed.
 
 # Architecture
 

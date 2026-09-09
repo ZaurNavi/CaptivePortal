@@ -1,9 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-09-08
-Runtime implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
-Runtime tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Updated: 2026-09-09
+Runtime implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Runtime tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
 
 ## 1. Mental model
 
@@ -359,6 +359,102 @@ missing / unknown / stale / insufficient / unavailable != 0
 
 Traffic Evidence has an independent `24h | 7d` selector, default `24h`; it does
 not mutate any existing Traffic product's selected/applied range.
+
+### Device Current Context
+
+`TASK-DEVICE-CARD-01` adds a separate current evidence read path to the existing
+Device Detail page without changing the historical Device Card contract.
+
+Permanent semantic split:
+
+```text
+Historical Device Context
+- Identity
+- Latest Site Snapshot
+- Latest Client Observation
+- Recent Visits
+
+Current Device Context
+- Presence
+- Authorization
+- Network
+- Radio
+- Controller
+- Current Guest Traffic
+- Evidence / Freshness
+```
+
+Canonical read path:
+
+```text
+Site-safe Device boundary
+→ server-side canonical MAC
+→ CurrentStateReadService.get_current_client(...)
+→ optional exact-client CurrentGuestTrafficReadService projection
+→ AdminQueryService.device_current_context(...)
+→ admin.device.current.v1
+→ Device Detail
+```
+
+Endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/devices/<device_id>/current
+capability = admin.read.device
+contract = admin.device.current.v1
+```
+
+Current evidence is not reconstructed from historical Device/Visit/Observation
+facts.
+
+Presence semantics:
+
+```text
+fresh + complete managed scope + client present
+→ online
+
+fresh + complete managed scope + client absent
+→ offline
+
+stale / unavailable / invalid timestamp / untrusted current evidence
+→ unknown
+```
+
+Permanent:
+
+```text
+stale != offline
+unavailable != offline
+invalid timestamp != offline
+```
+
+Authorization is current-state evidence (`authorized | pending | other |
+unknown`).
+
+Current Guest Traffic is applicable only to a current authorized guest. Traffic
+projection failure is local to Traffic evidence and does not erase Presence,
+Authorization, Network or Radio. Numeric zero is valid evidence.
+
+```text
+0 Mbps != null
+0 Mbps != unavailable
+```
+
+If Current State itself cannot be read, the Current endpoint fails in a controlled
+way; historical Device Detail remains a separate read path.
+
+Invalid timestamp evidence is sanitized to semantic Unknown rather than exposed
+as unsafe timestamp data.
+
+This feature adds:
+
+```text
+no query-time Omada/provider call
+no Loki/Grafana/external Analytics browser call
+no DB/schema/index/migration
+no write path
+no worker/scheduler/polling loop
+```
 
 ## 8. Admin Web
 

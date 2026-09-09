@@ -1,8 +1,8 @@
 # Analytics
 
 Status: current module contract
-Updated: 2026-09-08
-Baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Updated: 2026-09-09
+Baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
 
 ## Purpose
 
@@ -82,6 +82,38 @@ Omada calls or browser-side rate calculations.
 Online Guest means controller-reported active authorized wireless guest in the
 accepted Current State guest scope. This is not independent proof of
 instantaneous RF presence.
+
+## Exact-client Current Guest Traffic reuse
+
+`TASK-DEVICE-CARD-01` reuses the existing `CurrentGuestTrafficReadService`
+semantic owner for one current authorized device.
+
+New exact-client projection:
+
+```text
+CurrentStateReadService.read_current_guest_rate_client_evidence(...)
+→ CurrentGuestTrafficReadService.get_current_guest_traffic_for_client(...)
+```
+
+The projection is pinned to the accepted Current State `current_cycle_id` and
+canonical Site/scope identity. It reads one current row plus the nearest accepted
+baseline row instead of materializing the Site population.
+
+This is not a new Traffic semantic owner.
+
+Permanent:
+
+```text
+same current cycle as Device Current Context
+authorized current guest only
+numeric zero remains valid
+no query-time Omada
+no source write
+no new persistence/schema
+```
+
+Traffic source/integrity/deadline failures can be reported locally by Device
+Current Context without invalidating otherwise trustworthy Current State facts.
 
 ## Completed Guest Session Traffic
 

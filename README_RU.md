@@ -25,10 +25,10 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@e32ade378bdbfc9f8458db9c18221958f4552718` |
-| Repository tree | `2766139c83965dcf2f80e0c8084b3fb363dbd781` |
-| Production deployed HEAD | `e32ade378bdbfc9f8458db9c18221958f4552718` |
-| Production tree | `2766139c83965dcf2f80e0c8084b3fb363dbd781` |
+| Repository implementation checkpoint | `main@7df71a8e807efd74b123117e78cb8d992c190fa1` |
+| Repository tree | `8f1342f0a0f1e8242642161e02b2f3276e6ddf51` |
+| Production deployed HEAD | `7df71a8e807efd74b123117e78cb8d992c190fa1` |
+| Production tree | `8f1342f0a0f1e8242642161e02b2f3276e6ddf51` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -48,6 +48,7 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | Visit Lifecycle | Реализован, schema v2 |
 | Observation Foundation | Реализован, schema v1 |
 | Current State | Реализован, schema v1 |
+| Current Device Context | **TASK-DEVICE-CARD-01 — COMPLETE / PRODUCTION ACTIVE** |
 | Analytics / Admin Web | Реализованы |
 | Multi-Site / Tenant / RBAC | Future evolution |
 
@@ -96,6 +97,53 @@ state. Online Guests Traffic читает persisted Current State через
 calls.
 
 Это product evidence, а не WAN/Internet billing counter.
+
+## Device Detail — Current Device Context
+
+`TASK-DEVICE-CARD-01` завершён и production-active.
+
+Device Detail теперь явно разделяет два evidence domain:
+
+```text
+Historical Device Context
+!=
+Current Device Context
+```
+
+Historical часть сохраняет Identity, Latest Site Snapshot, Latest Client
+Observation и Recent Visits.
+
+Отдельный read-only блок `Current Device Context` показывает:
+
+```text
+Presence
+Authorization
+Network
+Radio
+Controller
+Current Guest Traffic
+Evidence / Freshness
+```
+
+Канонические current-state правила:
+
+```text
+fresh + complete scope + присутствует → online
+fresh + complete scope + отсутствует  → offline
+stale/unavailable/untrusted           → unknown
+
+stale != offline
+unavailable != offline
+0 Mbps != unknown/unavailable
+```
+
+Device Detail читает persisted application evidence и не добавляет query-time
+Omada, Loki, Grafana или external Analytics calls.
+
+Следующая presentation-layer задача `TASK-WEB-DEVICE-UI-01` имеет статус
+**IN PROGRESS / LAB REVIEW PENDING**. Compact list, human-readable formatting,
+status indicators и Online-first UX не считаются current production behavior до
+отдельной приёмки, merge и deploy.
 
 # Архитектура
 
