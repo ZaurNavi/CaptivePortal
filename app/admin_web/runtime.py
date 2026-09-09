@@ -198,7 +198,11 @@ def create_admin_web_runtime(
         "active" if config.traffic_online_guests_enabled else "disabled"
     )
     online_guests_service = None
-    if config.traffic_online_guests_enabled:
+    guest_traffic_needed = (
+        config.traffic_online_guests_enabled
+        or config.device_current_context_enabled
+    )
+    if guest_traffic_needed:
         try:
             from app.analytics.current_guest_traffic import (
                 CurrentGuestTrafficReadService,
@@ -208,7 +212,8 @@ def create_admin_web_runtime(
                 current_state_read_service
             )
         except Exception:
-            online_guests_state = "unavailable"
+            if config.traffic_online_guests_enabled:
+                online_guests_state = "unavailable"
             logger.error(
                 "admin.traffic_online_guests_composition_failed",
                 extra={

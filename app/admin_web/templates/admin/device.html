@@ -1,2 +1,23 @@
 {% extends "admin/base.html" %}
 {% block subtitle %}<p>Site-local identity, recent visits and latest safe observation.</p>{% endblock %}
+{% block page_body %}
+  {{ super() }}
+  {% if device_current_context_enabled %}
+  <section id="device-current-context" class="section-card" aria-labelledby="device-current-context-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="device-current-context-title">Current Device Context</h2>
+        <p>Current managed Site/SSID evidence, independent from historical device context.</p>
+      </div>
+    </div>
+    <div id="device-current-state" class="state-panel" role="status" aria-live="polite">
+      <span class="state-dot" aria-hidden="true"></span>
+      <div>
+        <strong id="device-current-state-title">Loading</strong>
+        <p id="device-current-state-message">Requesting current device evidence…</p>
+      </div>
+    </div>
+    <div id="device-current-content" class="content-grid" aria-live="polite"></div>
+  </section>
+  {% endif %}
+{% endblock %}

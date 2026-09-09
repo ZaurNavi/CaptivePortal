@@ -56,6 +56,147 @@ def test_client_summary_uses_one_complete_cycle_and_invariants(service):
     assert [(item.ap_mac, item.client_count) for item in summary.devices_by_ap] == [("11:22:33:44:55:66", 2), ("22:33:44:55:66:77", 1)]
 
 
+def test_device_current_exact_lookup_returns_only_fresh_present_client(service):
+    publish_clients(service)
+
+    lookup = service.get_current_client(
+        SITE, "aa-bb-cc-dd-ee-01", evaluated_at_utc=EVALUATED
+    )
+
+    assert lookup.snapshot.cycle_id == "client"
+    assert lookup.snapshot.freshness_status == "fresh"
+    assert lookup.client is not None
+    assert lookup.client.client_mac == "AA:BB:CC:DD:EE:01"
+
+
+def test_device_current_fresh_absence_and_stale_presence_do_not_leak_rows(service):
+    publish_clients(service)
+
+    absent = service.get_current_client(
+        SITE, "AA:BB:CC:DD:EE:99", evaluated_at_utc=EVALUATED
+    )
+    stale = service.get_current_client(
+        SITE,
+        "AA:BB:CC:DD:EE:01",
+        evaluated_at_utc="2026-08-23T10:01:00.001Z",
+    )
+
+    assert absent.snapshot.freshness_status == "fresh"
+    assert absent.client is None
+    assert stale.snapshot.freshness_status == "stale"
+    assert stale.client is None
+
+
+def test_device_current_query_plan_uses_exact_cycle_mac_primary_key(service):
+    publish_clients(service)
+    with service.repository.read_connection() as connection:
+        plan = connection.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM current_client_state
+            WHERE cycle_id=? AND client_mac=? AND site_id=?
+            """,
+            ("client", "AA:BB:CC:DD:EE:01", SITE),
+        ).fetchall()
+
+    detail = " ".join(str(row[3]) for row in plan)
+    assert "sqlite_autoindex_current_client_state_1" in detail
+    assert "cycle_id=? AND client_mac=?" in detail
+
+
+def test_device_current_no_snapshot_clock_and_untrusted_scope_are_unknown(service):
+    empty = service.get_current_client(
+        SITE, "AA:BB:CC:DD:EE:01", evaluated_at_utc=EVALUATED
+    )
+    assert empty.snapshot.freshness_reason == "no_complete_snapshot"
+    assert empty.client is None
+
+    publish_clients(service)
+    clock = service.get_current_client(
+        SITE, "AA:BB:CC:DD:EE:01",
+        evaluated_at_utc="2026-08-23T09:59:59.000Z",
+    )
+    assert clock.snapshot.freshness_reason == "clock_anomaly"
+    assert clock.client is None
+
+    connection = sqlite3.connect(service.repository.config.db_path)
+    connection.execute(
+        "UPDATE current_state_cycles SET source_scope_json=? WHERE cycle_id='client'",
+        (json.dumps({"scope_type": "client_ssid_allowlist", "site_id": SITE, "ssids": ["Other"]}),),
+    )
+    connection.commit()
+    connection.close()
+    untrusted = service.get_current_client(
+        SITE, "AA:BB:CC:DD:EE:01", evaluated_at_utc=EVALUATED
+    )
+    assert untrusted.snapshot.freshness_reason == "invalid_source_scope"
+    assert untrusted.client is None
+
+
+def test_device_current_invalid_persisted_timestamp_is_semantic_unknown(service):
+    publish_clients(service)
+    with sqlite3.connect(service.repository.config.db_path) as connection:
+        connection.execute(
+            "UPDATE current_state_cycles SET capture_started_at='invalid' "
+            "WHERE cycle_id='client'"
+        )
+        connection.commit()
+
+    lookup = service.get_current_client(
+        SITE, "AA:BB:CC:DD:EE:01", evaluated_at_utc=EVALUATED
+    )
+
+    assert lookup.snapshot.cycle_id == "client"
+    assert lookup.snapshot.complete is True
+    assert lookup.snapshot.freshness_status == "unavailable"
+    assert lookup.snapshot.freshness_reason == "invalid_timestamp"
+    assert lookup.snapshot.age_seconds is None
+    assert lookup.client is None
+
+
+def test_device_current_reversed_capture_interval_is_semantic_unknown(service):
+    publish_clients(service)
+    with sqlite3.connect(service.repository.config.db_path) as connection:
+        connection.execute(
+            "UPDATE current_state_cycles SET capture_finished_at=? "
+            "WHERE cycle_id='client'",
+            ("2026-08-23T09:59:59.999Z",),
+        )
+        connection.commit()
+
+    lookup = service.get_current_client(
+        SITE, "AA:BB:CC:DD:EE:01", evaluated_at_utc=EVALUATED
+    )
+
+    assert lookup.snapshot.complete is True
+    assert lookup.snapshot.freshness_status == "unavailable"
+    assert lookup.snapshot.freshness_reason == "invalid_timestamp"
+    assert lookup.snapshot.age_seconds is None
+    assert lookup.client is None
+
+
+def test_device_current_invalid_scope_with_reversed_timestamp_stays_semantic(service):
+    publish_clients(service)
+    with sqlite3.connect(service.repository.config.db_path) as connection:
+        connection.execute(
+            "UPDATE current_state_cycles SET capture_finished_at=?, "
+            "source_scope_json=? WHERE cycle_id='client'",
+            ("2026-08-23T09:59:59.999Z", "not-json"),
+        )
+        connection.commit()
+
+    lookup = service.get_current_client(
+        SITE, "AA:BB:CC:DD:EE:01", evaluated_at_utc=EVALUATED
+    )
+
+    assert lookup.snapshot.complete is True
+    assert lookup.snapshot.freshness_status == "unavailable"
+    assert lookup.snapshot.freshness_reason == "invalid_source_scope"
+    assert lookup.snapshot.age_seconds is None
+    assert lookup.snapshot.source_scope is None
+    assert lookup.client is None
+
+
 def test_fresh_partial_never_replaces_complete(service):
     publish_clients(service, cycle_id="complete", started="2026-08-23T09:59:30.000Z")
     partial_rows = [client_row(cycle_id="partial")]

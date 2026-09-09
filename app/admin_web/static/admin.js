@@ -125,7 +125,13 @@
     visitQuery: null,
     homeTimer: null,
     stopped: false,
+    deviceCurrentLoading: false,
   };
+  const deviceCurrentPanel = document.getElementById("device-current-context");
+  const deviceCurrentContent = document.getElementById("device-current-content");
+  const deviceCurrentState = document.getElementById("device-current-state");
+  const deviceCurrentStateTitle = document.getElementById("device-current-state-title");
+  const deviceCurrentStateMessage = document.getElementById("device-current-state-message");
 
   function node(tag, className, text) {
     const value = document.createElement(tag);
@@ -367,6 +373,257 @@
     setState(visits.length ? "ready" : "warning", visits.length ? "Up to date" : "Partial context", visits.length ? "Device context and recent visits loaded." : "Device context is available, but there are no recent Site visits.", true);
   }
 
+  function deviceCurrentSetState(kind, title, message) {
+    if (!deviceCurrentState) return;
+    deviceCurrentState.dataset.state = kind;
+    deviceCurrentStateTitle.textContent = title;
+    deviceCurrentStateMessage.textContent = message;
+  }
+
+  const DEVICE_CURRENT_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const DEVICE_CURRENT_REASONS = new Set([
+    "valid", "no_baseline", "no_authorized_baseline", "ssid_transition",
+    "invalid_elapsed", "baseline_gap_too_large", "connection_continuity_unproven",
+    "source_frozen", "connection_reset", "counter_missing", "counter_reset",
+  ]);
+
+  function deviceCurrentUtc(value) {
+    if (typeof value !== "string" || !DEVICE_CURRENT_UTC.test(value)
+        || value.slice(0, 4) === "0000") return false;
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+  }
+
+  function deviceCurrentNumber(value, nullable=true) {
+    return (nullable && value === null)
+      || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+  }
+
+  function deviceCurrentInteger(value, nullable=true) {
+    return (nullable && value === null) || (Number.isSafeInteger(value) && value >= 0);
+  }
+
+  function deviceCurrentIdentity(value, nullable=false) {
+    return (nullable && value === null)
+      || (typeof value === "string" && value.length > 0 && value.length <= 128);
+  }
+
+  function deviceCurrentItem(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const rates = [value.download_mbps, value.upload_mbps, value.total_mbps];
+    if (!rates.every((item) => deviceCurrentNumber(item))) return false;
+    const reasons = [value.download_reason, value.upload_reason, value.total_reason];
+    if (!reasons.every((item) => DEVICE_CURRENT_REASONS.has(item))) return false;
+    if (rates.some((item, index) => (item !== null) !== (reasons[index] === "valid"))) return false;
+    if (value.rate_status === "valid") {
+      if (rates.some((item) => item === null) || Math.abs(rates[2] - rates[0] - rates[1]) > 1e-9) return false;
+    } else if (value.rate_status === "partial") {
+      if (Number(rates[0] !== null) + Number(rates[1] !== null) !== 1 || rates[2] !== null) return false;
+    } else if (value.rate_status !== "unavailable" || rates.some((item) => item !== null)) return false;
+    if (rates.some((item) => item !== null)
+        && (value.source_progress_status !== "advanced"
+          || value.connection_continuity_status !== "proven"
+          || value.continuity_basis !== "uptime_progress")) return false;
+    return ["advanced", "frozen", "unproven"].includes(value.source_progress_status)
+      && ["proven", "unproven", "reset"].includes(value.connection_continuity_status)
+      && ["uptime_progress", "counters_only_diagnostic", "none"].includes(value.continuity_basis);
+  }
+
+  function deviceCurrentResult(payload) {
+    const value = payload && payload.result;
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || value.contract_version !== "admin.device.current.v1"
+        || value.site_id !== context.siteId || value.device_id !== context.deviceId
+        || !deviceCurrentUtc(value.evaluated_at_utc)) return null;
+    const scope = value.scope;
+    const current = value.current_state;
+    const traffic = value.current_guest_traffic;
+    if (!scope || scope.scope_type !== "client_ssid_allowlist"
+        || scope.site_id !== context.siteId || !Array.isArray(scope.ssids)
+        || scope.ssids.length === 0
+        || scope.ssids.some((item) => typeof item !== "string" || item.length === 0)
+        || new Set(scope.ssids).size !== scope.ssids.length
+        || !current || !traffic || !current.snapshot || !current.authorization) return null;
+    if (!["online", "offline", "unknown"].includes(current.presence_status)
+        || !["fresh", "stale", "unavailable"].includes(current.snapshot.freshness_status)
+        || !["authorized", "pending", "other", "unknown"].includes(current.authorization.classification)
+        || !["applicable", "not_applicable", "unknown"].includes(traffic.applicability)) return null;
+    const snapshot = current.snapshot;
+    const presencePair = (
+      (current.presence_status === "online" && current.presence_reason === "present_in_fresh_complete_scope")
+      || (current.presence_status === "offline" && current.presence_reason === "absent_from_fresh_complete_scope")
+      || (current.presence_status === "unknown" && current.presence_reason === "current_state_unknown")
+    );
+    const freshnessPair = (
+      (snapshot.freshness_status === "fresh" && snapshot.freshness_reason === "within_freshness_window")
+      || (snapshot.freshness_status === "stale" && snapshot.freshness_reason === "older_than_freshness_window")
+      || (snapshot.freshness_status === "unavailable" && [
+        "older_than_unavailable_threshold", "no_complete_snapshot", "clock_anomaly",
+        "invalid_timestamp", "invalid_source_scope",
+      ].includes(snapshot.freshness_reason))
+    );
+    if (!presencePair || !freshnessPair) return null;
+    if (typeof snapshot.complete !== "boolean"
+        || !deviceCurrentNumber(snapshot.age_seconds)
+        || (snapshot.observed_at !== null && !deviceCurrentUtc(snapshot.observed_at))
+        || (snapshot.capture_finished_at !== null && !deviceCurrentUtc(snapshot.capture_finished_at))) return null;
+    if (snapshot.complete) {
+      if (!deviceCurrentIdentity(snapshot.cycle_id)) return null;
+      const hasObserved = snapshot.observed_at !== null;
+      const hasFinished = snapshot.capture_finished_at !== null;
+      const semanticTimestamp = snapshot.freshness_status === "unavailable"
+        && ["invalid_timestamp", "invalid_source_scope"].includes(snapshot.freshness_reason);
+      if (hasObserved !== hasFinished) return null;
+      if (hasObserved && Date.parse(snapshot.capture_finished_at) < Date.parse(snapshot.observed_at)) return null;
+      if (!hasObserved) {
+        if (!semanticTimestamp || snapshot.age_seconds !== null) return null;
+      } else if (snapshot.freshness_reason === "invalid_timestamp") {
+        if (snapshot.age_seconds !== null) return null;
+      } else if (typeof snapshot.age_seconds !== "number") return null;
+    } else if (snapshot.cycle_id !== null || snapshot.observed_at !== null
+        || snapshot.capture_finished_at !== null || snapshot.age_seconds !== null) return null;
+    if ((current.presence_status === "online") !== (current.client !== null)) return null;
+    if (current.presence_status === "online"
+        && (snapshot.freshness_status !== "fresh" || snapshot.complete !== true
+          || !current.client || current.client.active !== true || current.client.wireless !== true
+          || typeof current.client.client_mac !== "string"
+          || !scope.ssids.includes(current.client.ssid)
+          || ![
+            current.client.controller_traffic_down_bytes,
+            current.client.controller_traffic_up_bytes,
+            current.client.controller_traffic_total_bytes,
+          ].every((item) => deviceCurrentInteger(item)))) return null;
+    if (current.presence_status === "offline"
+        && (snapshot.freshness_status !== "fresh" || snapshot.complete !== true)) return null;
+    if (current.presence_status === "unknown" && snapshot.freshness_status === "fresh") return null;
+    if (
+      (current.presence_status === "online" && current.authorization.reason !== "current_row")
+      || (current.presence_status === "offline"
+        && (current.authorization.classification !== "unknown" || current.authorization.reason !== "offline"))
+      || (current.presence_status === "unknown"
+        && (current.authorization.classification !== "unknown" || current.authorization.reason !== "current_state_unknown"))
+    ) return null;
+    const expectedApplicability = current.presence_status === "online"
+      ? current.authorization.classification === "authorized"
+        ? ["applicable", "authorized_current_guest"]
+        : ["not_applicable", "not_authorized_current_guest"]
+      : current.presence_status === "offline"
+        ? ["not_applicable", "offline"] : ["unknown", "current_state_unknown"];
+    if (traffic.applicability !== expectedApplicability[0]
+        || traffic.applicability_reason !== expectedApplicability[1]) return null;
+    if (traffic.failure_reason !== null
+        && !["source_unavailable", "integrity_unavailable", "query_deadline"].includes(traffic.failure_reason)) return null;
+    if (traffic.failure_reason !== null) {
+      if (traffic.applicability !== "applicable"
+          || traffic.item !== null || traffic.rate_evidence_status !== null
+          || traffic.source_health_status !== null || traffic.source_health_reason !== null
+          || traffic.baseline_cycle_id !== null || traffic.elapsed_seconds !== null
+          || traffic.current_cycle_id !== current.snapshot.cycle_id) return null;
+    } else if (traffic.applicability === "applicable") {
+      if (!deviceCurrentItem(traffic.item) || !["complete", "partial", "insufficient_data"].includes(traffic.rate_evidence_status)
+          || traffic.current_cycle_id !== current.snapshot.cycle_id
+          || !deviceCurrentIdentity(traffic.current_cycle_id)) return null;
+      const sourcePair = (
+        (traffic.source_health_status === "healthy" && traffic.source_health_reason === "within_freshness_window")
+        || (traffic.source_health_status === "degraded" && traffic.source_health_reason === "newer_degraded_attempt")
+      );
+      if (!sourcePair) return null;
+      const hasBaseline = traffic.baseline_cycle_id !== null;
+      if (!deviceCurrentIdentity(traffic.baseline_cycle_id, true)
+          || hasBaseline !== (traffic.elapsed_seconds !== null)
+          || (traffic.elapsed_seconds !== null
+            && (!deviceCurrentNumber(traffic.elapsed_seconds, false) || traffic.elapsed_seconds <= 0))) return null;
+      const expectedRateEvidence = traffic.item.rate_status === "valid" ? "complete"
+        : traffic.item.rate_status === "partial" ? "partial" : "insufficient_data";
+      if (traffic.rate_evidence_status !== expectedRateEvidence) return null;
+    } else if (traffic.item !== null || traffic.rate_evidence_status !== "not_applicable"
+        || traffic.source_health_status !== null || traffic.source_health_reason !== null
+        || traffic.baseline_cycle_id !== null || traffic.elapsed_seconds !== null
+        || traffic.current_cycle_id !== current.snapshot.cycle_id) return null;
+    return value;
+  }
+
+  function renderDeviceCurrent(value) {
+    const current = value.current_state;
+    const snapshot = current.snapshot;
+    const client = current.client;
+    const traffic = value.current_guest_traffic;
+    const trafficItem = traffic.item;
+    deviceCurrentContent.replaceChildren();
+    deviceCurrentContent.append(
+      card("Presence", [
+        ["Status", current.presence_status],
+        ["Reason", current.presence_reason],
+      ]),
+      card("Authorization", [
+        ["Classification", current.authorization.classification],
+        ["Reason", current.authorization.reason],
+      ]),
+      card("Network", [
+        ["IP", client && client.ip], ["SSID", client && client.ssid],
+        ["AP", client && client.ap_name], ["AP MAC", client && client.ap_mac],
+      ]),
+      card("Radio", [
+        ["Radio", client && client.radio_id], ["Band", client && client.band],
+        ["Channel", client && client.channel], ["RSSI", client && client.rssi],
+        ["SNR", client && client.snr],
+      ]),
+      card("Controller", [
+        ["Uptime", client && client.controller_uptime],
+        ["Download bytes", client && client.controller_traffic_down_bytes],
+        ["Upload bytes", client && client.controller_traffic_up_bytes],
+        ["Total bytes", client && client.controller_traffic_total_bytes],
+      ]),
+      card("Current Guest Traffic", [
+        ["Applicability", traffic.applicability],
+        ["Download (Mbps)", trafficItem && trafficItem.download_mbps],
+        ["Upload (Mbps)", trafficItem && trafficItem.upload_mbps],
+        ["Total (Mbps)", trafficItem && trafficItem.total_mbps],
+        ["Rate evidence", traffic.rate_evidence_status],
+        ["Failure", traffic.failure_reason],
+      ]),
+      card("Evidence / Freshness", [
+        ["Evaluated", value.evaluated_at_utc], ["Observed", snapshot.observed_at],
+        ["Age (s)", snapshot.age_seconds], ["Freshness", snapshot.freshness_status],
+        ["Freshness reason", snapshot.freshness_reason],
+        ["Source health", traffic.source_health_status],
+        ["Source reason", traffic.source_health_reason],
+        ["Managed Site/SSID scope", value.scope.ssids.join(", ")],
+      ])
+    );
+    const warning = current.presence_status === "unknown" || traffic.failure_reason !== null;
+    deviceCurrentSetState(
+      warning ? "warning" : "ready",
+      warning ? "Current context limited" : "Current context loaded",
+      traffic.failure_reason !== null
+        ? "Current State is retained; current traffic evidence is temporarily unavailable."
+        : "Showing the latest accepted current evidence."
+    );
+  }
+
+  async function loadDeviceCurrent() {
+    if (!deviceCurrentPanel || context.deviceCurrentLoading) return false;
+    if (!context.deviceId || !UUID_PATTERN.test(context.deviceId)) return false;
+    context.deviceCurrentLoading = true;
+    deviceCurrentSetState("loading", "Loading", "Requesting current device evidence…");
+    try {
+      const payload = await requestJson(
+        `${context.apiBase}/devices/${encodeURIComponent(context.deviceId)}/current`
+      );
+      const value = deviceCurrentResult(payload);
+      if (!value) throw {uiFailure: classifyHttp(500, null, null)};
+      renderDeviceCurrent(value);
+      return true;
+    } catch (error) {
+      deviceCurrentContent.replaceChildren();
+      const failure = error && error.uiFailure ? error.uiFailure : classifyHttp(500, null, null);
+      deviceCurrentSetState("warning", "Current Device Context unavailable", failure.message);
+      return false;
+    } finally {
+      context.deviceCurrentLoading = false;
+    }
+  }
+
   function observationRow(item) {
     const value = node("article", "data-row");
     const header = node("div", "data-row-header");
@@ -493,6 +750,7 @@
       }
       if (context.operation) run(context.operation);
       else if (context.page === "observations") run(() => loadObservations(false));
+      if (context.page === "device") loadDeviceCurrent();
     });
     loadMoreButton.addEventListener("click", () => {
       if (context.page === "devices") run(() => loadDevices(true));
@@ -500,7 +758,10 @@
       if (context.page === "observations") run(() => loadObservations(true));
     });
     if (legacyHealthCoordinatorEnabled()) runLegacyHome(false);
-    else if (context.operation) run(context.operation);
+    else if (context.operation) {
+      run(context.operation);
+      if (context.page === "device") loadDeviceCurrent();
+    }
   }
 
   configure();

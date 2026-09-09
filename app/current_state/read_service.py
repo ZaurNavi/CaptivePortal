@@ -60,6 +60,28 @@ class CurrentGuestRateEvidence:
     baseline_rows: tuple[Mapping[str, Any], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentClientLookup:
+    """One exact client resolved against one accepted Current State cycle."""
+
+    snapshot: CurrentSnapshotMeta
+    client: CurrentClientState | None
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentGuestRateClientEvidence:
+    """Bounded exact-client evidence for the canonical Traffic rate owner."""
+
+    site_id: str
+    source_scope_hash: str
+    evaluated_at_utc: str
+    current_cycle: Mapping[str, Any]
+    newer_attempt: Mapping[str, Any] | None
+    baseline_cycle: Mapping[str, Any] | None
+    current_row: Mapping[str, Any] | None
+    baseline_row: Mapping[str, Any] | None
+
+
 class CurrentStateReadService:
     """Read persisted current facts without Omada calls or writes."""
 
@@ -72,6 +94,160 @@ class CurrentStateReadService:
         """Yield the repository's existing URI-mode read-only connection."""
         with self.repository.read_connection() as connection:
             yield connection
+
+    def get_current_client(
+        self,
+        site_id: str,
+        client_mac: str,
+        *,
+        evaluated_at_utc: datetime | str | None = None,
+        cycle_id: str | None = None,
+    ) -> CurrentClientLookup:
+        """Return only a fresh exact client from the accepted scoped cycle."""
+
+        site = require_site_id(site_id)
+        if site not in self.config.site_ids:
+            raise CurrentStateValidationError("site_id is not configured")
+        try:
+            mac = format_mac_colon(client_mac)
+        except (TypeError, ValueError) as exc:
+            raise CurrentStateValidationError("client_mac is invalid") from exc
+        evaluated = _evaluated(evaluated_at_utc)
+        scope_json, scope_hash = canonical_scope(
+            "client", site, self.config.client_ssids
+        )
+        with self.repository.read_connection() as connection:
+            connection.execute("BEGIN")
+            attempt, latest_complete, partial = _cycle_selection(
+                connection, site, "client", source_scope_hash=scope_hash,
+            )
+            selected = latest_complete
+            if cycle_id is not None:
+                selected = connection.execute(
+                    """
+                    SELECT * FROM current_state_cycles
+                    WHERE cycle_id=? AND site_id=? AND kind='client'
+                      AND result='success' AND complete=1
+                      AND source_scope_hash=?
+                    """,
+                    (require_cycle_id(cycle_id), site, scope_hash),
+                ).fetchone()
+            snapshot = self._meta(
+                site, "client", evaluated, attempt, selected, partial
+            )
+            trusted_scope = (
+                snapshot.source_scope == json.loads(scope_json)
+                and snapshot.source_scope_hash == scope_hash
+                and snapshot.source_scope_version == 1
+            )
+            if (
+                selected is None
+                or not snapshot.complete
+                or snapshot.freshness_status != "fresh"
+                or not trusted_scope
+            ):
+                if snapshot.freshness_status == "fresh" and not trusted_scope:
+                    snapshot = _meta_from_row(
+                        site, "client", evaluated, selected, attempt, partial,
+                        snapshot.age_seconds, "unavailable", "invalid_source_scope",
+                    )
+                return CurrentClientLookup(snapshot, None)
+            row = connection.execute(
+                """
+                SELECT * FROM current_client_state
+                WHERE cycle_id=? AND client_mac=? AND site_id=?
+                """,
+                (selected["cycle_id"], mac, site),
+            ).fetchone()
+        return CurrentClientLookup(snapshot, _client(row) if row is not None else None)
+
+    def read_current_guest_rate_client_evidence(
+        self,
+        site_id: str,
+        client_mac: str,
+        *,
+        evaluated_at_utc: datetime | str,
+        current_cycle_id: str,
+    ) -> CurrentGuestRateClientEvidence:
+        """Read a pinned current row and nearest exact baseline row only."""
+
+        site = require_site_id(site_id)
+        if site not in self.config.site_ids:
+            raise CurrentStateValidationError("site_id is not configured")
+        try:
+            mac = format_mac_colon(client_mac)
+        except (TypeError, ValueError) as exc:
+            raise CurrentStateValidationError("client_mac is invalid") from exc
+        evaluated = _evaluated(evaluated_at_utc)
+        cycle_id = require_cycle_id(current_cycle_id)
+        scope_hash = self._current_client_scope_hash(site)
+        with self.repository.read_connection() as connection:
+            connection.execute("BEGIN")
+            current = connection.execute(
+                """
+                SELECT * FROM current_state_cycles
+                WHERE cycle_id=? AND site_id=? AND kind='client'
+                  AND source_scope_hash=?
+                  AND result='success' AND complete=1
+                """,
+                (cycle_id, site, scope_hash),
+            ).fetchone()
+            if current is None:
+                raise CurrentStateValidationError("pinned current cycle is unavailable")
+            newer = connection.execute(
+                """
+                SELECT * FROM current_state_cycles
+                WHERE site_id=? AND kind='client' AND source_scope_hash=?
+                  AND result IN ('partial','failed','shutdown')
+                  AND complete=0
+                  AND capture_started_at<=?
+                  AND (
+                    capture_started_at>?
+                    OR (capture_started_at=? AND cycle_id>?)
+                  )
+                ORDER BY capture_started_at DESC, cycle_id DESC
+                LIMIT 1
+                """,
+                (
+                    site, scope_hash, evaluated,
+                    current["capture_started_at"], current["capture_started_at"],
+                    current["cycle_id"],
+                ),
+            ).fetchone()
+            current_row = connection.execute(
+                """
+                SELECT * FROM current_client_state
+                WHERE cycle_id=? AND client_mac=? AND site_id=?
+                """,
+                (cycle_id, mac, site),
+            ).fetchone()
+            baseline = connection.execute(
+                """
+                SELECT * FROM current_state_cycles
+                WHERE site_id=? AND kind='client' AND source_scope_hash=?
+                  AND result='success' AND complete=1
+                  AND capture_started_at<?
+                ORDER BY capture_started_at DESC, cycle_id DESC
+                LIMIT 1
+                """,
+                (site, scope_hash, current["capture_started_at"]),
+            ).fetchone()
+            baseline_row = None
+            if baseline is not None:
+                baseline_row = connection.execute(
+                    """
+                    SELECT * FROM current_client_state
+                    WHERE cycle_id=? AND client_mac=? AND site_id=?
+                    """,
+                    (baseline["cycle_id"], mac, site),
+                ).fetchone()
+        return CurrentGuestRateClientEvidence(
+            site, scope_hash, evaluated, dict(current),
+            dict(newer) if newer is not None else None,
+            dict(baseline) if baseline is not None else None,
+            dict(current_row) if current_row is not None else None,
+            dict(baseline_row) if baseline_row is not None else None,
+        )
 
     def read_current_guest_rate_evidence(
         self,

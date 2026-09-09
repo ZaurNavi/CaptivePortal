@@ -6,6 +6,7 @@ import base64
 import json
 import math
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -23,6 +24,7 @@ from app.current_state.read_service import (
     CurrentGuestRateEvidence,
     CurrentStateReadService,
 )
+from app.common.mac import format_mac_colon
 
 from .models import (
     CurrentGuestTrafficItem,
@@ -62,6 +64,22 @@ class CurrentGuestTrafficSourceUnavailable(RuntimeError):
 
 class CurrentGuestTrafficIntegrityUnavailable(CurrentGuestTrafficSourceUnavailable):
     """Persisted evidence is contradictory or malformed."""
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentGuestTrafficClientResult:
+    """Canonical Traffic-07 projection for one pinned authorized client."""
+
+    site_id: str
+    evaluated_at_utc: str
+    current_cycle_id: str
+    baseline_cycle_id: str | None
+    source_scope_hash: str
+    source_health_status: str
+    source_health_reason: str
+    rate_evidence_status: str
+    elapsed_seconds: float | None
+    item: CurrentGuestTrafficItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +153,143 @@ class CurrentGuestTrafficReadService:
                 )
             return self._result(evidence, page_limit, decoded)
         except (CurrentGuestTrafficValidationError, CurrentGuestTrafficIntegrityUnavailable):
+            raise
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise CurrentGuestTrafficIntegrityUnavailable(
+                "current guest traffic source integrity is unavailable"
+            ) from exc
+
+    def get_current_guest_traffic_for_client(
+        self,
+        site_id: str,
+        client_mac: str,
+        *,
+        evaluated_at_utc: datetime | str,
+        current_cycle_id: str,
+    ) -> CurrentGuestTrafficClientResult:
+        """Project one exact client without materializing the Site population."""
+
+        site = _site(site_id)
+        try:
+            mac = format_mac_colon(client_mac)
+        except (TypeError, ValueError) as exc:
+            raise CurrentGuestTrafficValidationError("client_mac is invalid") from exc
+        evaluated = _evaluated(evaluated_at_utc)
+        if not isinstance(current_cycle_id, str) or not current_cycle_id:
+            raise CurrentGuestTrafficValidationError("current_cycle_id is invalid")
+        _, expected_scope_hash = canonical_scope(
+            "client", site, self._current_state.config.client_ssids
+        )
+        try:
+            evidence = self._current_state.read_current_guest_rate_client_evidence(
+                site,
+                mac,
+                evaluated_at_utc=evaluated,
+                current_cycle_id=current_cycle_id,
+            )
+        except CurrentStateValidationError as exc:
+            raise CurrentGuestTrafficIntegrityUnavailable(
+                "current guest traffic exact evidence is unavailable"
+            ) from exc
+        except (
+            CurrentStateStorageError,
+            CurrentStateSchemaError,
+            sqlite3.Error,
+            OSError,
+        ) as exc:
+            raise CurrentGuestTrafficSourceUnavailable(
+                "current guest traffic source is unavailable"
+            ) from exc
+
+        try:
+            if evidence.source_scope_hash != expected_scope_hash:
+                raise CurrentGuestTrafficIntegrityUnavailable(
+                    "current guest traffic source scope is invalid"
+                )
+            current = evidence.current_cycle
+            if current["cycle_id"] != current_cycle_id:
+                raise CurrentGuestTrafficIntegrityUnavailable(
+                    "current guest traffic cycle coherence is invalid"
+                )
+            current_context = _cycle(
+                current, site, expected_scope_hash, evaluated
+            )
+            source_health, health_reason = _source_health(
+                current_context,
+                evidence.newer_attempt,
+                site,
+                expected_scope_hash,
+                evaluated,
+                self._current_state.config.client_fresh_max_age_seconds,
+                self._current_state.config.client_stale_max_age_seconds,
+            )
+            if source_health in {"stale", "unavailable"}:
+                raise CurrentGuestTrafficIntegrityUnavailable(
+                    "pinned current guest traffic evidence is not current"
+                )
+            current_row = evidence.current_row
+            if current_row is None:
+                raise CurrentGuestTrafficIntegrityUnavailable(
+                    "pinned current guest traffic client is absent"
+                )
+            _row(current_row, current, evidence, current_cycle=True)
+            if (
+                current_row["client_mac"] != mac
+                or current_row["auth_classification"] != "authorized"
+            ):
+                raise CurrentGuestTrafficIntegrityUnavailable(
+                    "pinned current guest traffic client is invalid"
+                )
+
+            baseline = evidence.baseline_cycle
+            baseline_context = None
+            elapsed = None
+            baseline_row = evidence.baseline_row
+            if baseline is not None:
+                baseline_context = _cycle(
+                    baseline, site, expected_scope_hash, evaluated
+                )
+                if baseline_context["started"] >= current_context["started"]:
+                    raise CurrentGuestTrafficIntegrityUnavailable(
+                        "current guest traffic baseline ordering is invalid"
+                    )
+                elapsed = (
+                    current_context["started"] - baseline_context["started"]
+                ).total_seconds()
+                if baseline_row is not None:
+                    _row(baseline_row, baseline, evidence, current_cycle=False)
+                    if baseline_row["client_mac"] != mac:
+                        raise CurrentGuestTrafficIntegrityUnavailable(
+                            "current guest traffic baseline identity is invalid"
+                        )
+            elif baseline_row is not None:
+                raise CurrentGuestTrafficIntegrityUnavailable(
+                    "current guest traffic baseline evidence is invalid"
+                )
+
+            projected = _project(
+                current_row, baseline_row, elapsed, baseline is not None
+            )
+            rate_evidence = {
+                "valid": "complete",
+                "partial": "partial",
+                "unavailable": "insufficient_data",
+            }[projected.item.rate_status]
+            return CurrentGuestTrafficClientResult(
+                site_id=site,
+                evaluated_at_utc=evaluated,
+                current_cycle_id=current_cycle_id,
+                baseline_cycle_id=(
+                    str(baseline["cycle_id"]) if baseline is not None else None
+                ),
+                source_scope_hash=expected_scope_hash,
+                source_health_status=source_health,
+                source_health_reason=health_reason,
+                rate_evidence_status=rate_evidence,
+                elapsed_seconds=elapsed,
+                item=projected.item,
+            )
+        except CurrentGuestTrafficIntegrityUnavailable:
             raise
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise CurrentGuestTrafficIntegrityUnavailable(

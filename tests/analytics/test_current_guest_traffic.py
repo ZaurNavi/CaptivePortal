@@ -15,6 +15,7 @@ from app.analytics.current_guest_traffic import (
     SUPPORTED_MAX_POPULATION,
     CurrentGuestTrafficIntegrityUnavailable,
     CurrentGuestTrafficReadService,
+    CurrentGuestTrafficSourceUnavailable,
     CurrentGuestTrafficValidationError,
 )
 from app.current_state.models import CurrentStateCycle
@@ -188,6 +189,148 @@ def test_metric_identity_and_positive_rates_are_frozen(guest_service):
     assert result.items[0].continuity_basis == "uptime_progress"
     with pytest.raises(FrozenInstanceError):
         result.status = "partial"  # type: ignore[misc]
+
+
+def test_device_current_exact_client_reuses_rate_projection_without_population(guest_service):
+    service, repository = guest_service
+    _publish_pair(repository)
+
+    result = service.get_current_guest_traffic_for_client(
+        SITE,
+        "AA:BB:CC:DD:00:01",
+        evaluated_at_utc=EVALUATED_AT,
+        current_cycle_id="current",
+    )
+
+    assert result.current_cycle_id == "current"
+    assert result.baseline_cycle_id == "baseline"
+    assert result.rate_evidence_status == "complete"
+    assert result.item.download_mbps == 0.0002
+    assert result.item.upload_mbps == 0.0004
+    assert result.item.total_mbps == 0.0006000000000000001
+
+
+def test_device_current_exact_client_preserves_numeric_zero(guest_service):
+    service, repository = guest_service
+    baseline = _row("baseline", BASELINE_AT, down=1_000, up=2_000)
+    current = _row("current", CURRENT_AT, uptime=160, down=1_000, up=2_000)
+    _publish_pair(repository, baseline_rows=[baseline], current_rows=[current])
+
+    result = service.get_current_guest_traffic_for_client(
+        SITE,
+        "AA:BB:CC:DD:00:01",
+        evaluated_at_utc=EVALUATED_AT,
+        current_cycle_id="current",
+    )
+
+    assert (result.item.download_mbps, result.item.upload_mbps) == (0.0, 0.0)
+    assert result.item.total_mbps == 0.0
+    assert result.item.rate_status == "valid"
+
+
+def test_device_current_exact_client_missing_baseline_is_semantic_not_failure(guest_service):
+    service, repository = guest_service
+    repository.publish_cycle(
+        _cycle("current", CURRENT_AT, 1),
+        client_rows=[_row("current", CURRENT_AT)],
+    )
+
+    result = service.get_current_guest_traffic_for_client(
+        SITE,
+        "AA:BB:CC:DD:00:01",
+        evaluated_at_utc=EVALUATED_AT,
+        current_cycle_id="current",
+    )
+
+    assert result.rate_evidence_status == "insufficient_data"
+    assert result.item.rate_status == "unavailable"
+    assert result.item.total_mbps is None
+    assert result.item.total_reason == "no_baseline"
+
+
+def test_device_current_exact_client_raw_sqlite_source_error_is_normalized(
+    guest_service, monkeypatch,
+):
+    service, _repository = guest_service
+
+    def fail_read(*_args, **_kwargs):
+        raise sqlite3.OperationalError("private storage detail")
+
+    monkeypatch.setattr(
+        service._current_state, "read_current_guest_rate_client_evidence", fail_read
+    )
+
+    with pytest.raises(CurrentGuestTrafficSourceUnavailable):
+        service.get_current_guest_traffic_for_client(
+            SITE,
+            "AA:BB:CC:DD:00:01",
+            evaluated_at_utc=EVALUATED_AT,
+            current_cycle_id="current",
+        )
+
+
+def test_device_current_successful_newer_cycle_is_not_degraded_attempt(
+    guest_service,
+):
+    service, repository = guest_service
+    _publish_pair(repository)
+    newer_at = "2026-09-01T10:00:20.000Z"
+    repository.publish_cycle(
+        _cycle("newer-success", newer_at, 1),
+        client_rows=[
+            _row(
+                "newer-success", newer_at, uptime=180, down=4_000, up=8_000
+            )
+        ],
+    )
+
+    evidence = service._current_state.read_current_guest_rate_client_evidence(
+        SITE,
+        "AA:BB:CC:DD:00:01",
+        evaluated_at_utc=EVALUATED_AT,
+        current_cycle_id="current",
+    )
+    result = service.get_current_guest_traffic_for_client(
+        SITE,
+        "AA:BB:CC:DD:00:01",
+        evaluated_at_utc=EVALUATED_AT,
+        current_cycle_id="current",
+    )
+
+    assert evidence.newer_attempt is None
+    assert result.current_cycle_id == "current"
+    assert result.source_health_status == "healthy"
+    assert result.source_health_reason == "within_freshness_window"
+    assert result.item.download_mbps == 0.0002
+
+
+@pytest.mark.parametrize("attempt_result", ["partial", "failed", "shutdown"])
+def test_device_current_exact_client_uses_only_newer_degraded_attempt(
+    guest_service, attempt_result,
+):
+    service, repository = guest_service
+    _publish_pair(repository)
+    attempt_at = "2026-09-01T10:00:20.000Z"
+    rows = (
+        [_row("newer-attempt", attempt_at, uptime=180, down=4_000, up=8_000)]
+        if attempt_result == "partial"
+        else []
+    )
+    repository.publish_cycle(
+        _cycle("newer-attempt", attempt_at, len(rows), result=attempt_result),
+        client_rows=rows,
+    )
+
+    result = service.get_current_guest_traffic_for_client(
+        SITE,
+        "AA:BB:CC:DD:00:01",
+        evaluated_at_utc=EVALUATED_AT,
+        current_cycle_id="current",
+    )
+
+    assert result.current_cycle_id == "current"
+    assert result.source_health_status == "degraded"
+    assert result.source_health_reason == "newer_degraded_attempt"
 
 
 def test_complete_cycles_may_skip_out_of_scope_controller_inventory_rows(
