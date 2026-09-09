@@ -1,8 +1,8 @@
 # Current Network State
 
 Status: current module contract
-Updated: 2026-08-26
-Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Updated: 2026-09-09
+Baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
 Schema: v1
 
 ## Purpose
@@ -46,6 +46,76 @@ Pagination cursors bind endpoint, Site, cycle, source scope, sort/filters. A sco
 ## History
 
 Current State keeps bounded short history (repository default 48h) and enforces a configured maximum client-row pressure signal.
+
+## Exact Current Device read contract
+
+`TASK-DEVICE-CARD-01` extends the read boundary without changing Current State
+collection or schema.
+
+Canonical exact lookup:
+
+```text
+CurrentStateReadService.get_current_client(
+    site_id,
+    client_mac,
+    evaluated_at_utc=...,
+    cycle_id=optional,
+)
+```
+
+The lookup resolves the canonical configured Site/SSID scope and only exposes a
+client row when the selected snapshot is:
+
+```text
+result=success
+complete=true
+fresh
+trusted source scope
+```
+
+Result:
+
+```text
+CurrentClientLookup(
+    snapshot=CurrentSnapshotMeta,
+    client=CurrentClientState | None,
+)
+```
+
+Presence is composed by the Admin Device Current boundary:
+
+```text
+fresh complete trusted scope + matching client row
+→ online
+
+fresh complete trusted scope + no matching client row
+→ offline
+
+stale/unavailable/untrusted current evidence
+→ unknown
+```
+
+Therefore:
+
+```text
+historical data alone != offline proof
+stale != offline
+unavailable != offline
+invalid timestamp != offline
+```
+
+The same TASK also adds bounded pinned evidence for one exact client rate:
+
+```text
+read_current_guest_rate_client_evidence(...)
+```
+
+which reads one accepted current cycle/client and the nearest previous accepted
+cycle/client under the same Site/scope. It adds no Site population scan, write
+path, schema/index or acquisition behavior.
+
+Invalid timestamp/source-scope evidence is sanitized/fail-safe and cannot be
+coerced to fresh Current State.
 
 ## Dependencies
 

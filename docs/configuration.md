@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-09-08
-Baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Updated: 2026-09-09
+Baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -147,6 +147,35 @@ Security and capacity groups:
 At this baseline `.env.example` includes:
 `127.0.0.1/32,::1/128,10.8.0.0/24`
 for `WEB_ADMIN_ALLOWED_NETWORKS`, including the owner-approved VPN network.
+
+### Device Current Context
+
+Feature flag:
+
+```text
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=false
+```
+
+Repository default remains safe/opt-in `false`.
+
+Activation dependency:
+
+```text
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
+requires WEB_ADMIN_ENABLED=true
+```
+
+Owner-confirmed production state on 2026-09-09:
+
+```text
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
+```
+
+This flag controls the Current Device Context exposure/read route only. It does
+not start Current State, change its collectors, add persistence or modify the
+historical Device Card.
+
+Repository default `false` must not be interpreted as production disabled.
 
 ### Home Live
 

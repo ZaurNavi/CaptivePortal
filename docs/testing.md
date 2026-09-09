@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-08
+Updated: 2026-09-09
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
-Production deployed HEAD: `e32ade378bdbfc9f8458db9c18221958f4552718`
-Production tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Documentation/current-state implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Production deployed HEAD: `7df71a8e807efd74b123117e78cb8d992c190fa1`
+Production tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
 
 ## Responsibility model
 
@@ -334,6 +334,70 @@ During TRAFFIC-00 acceptance:
 - the rerun was moved to a dedicated `C:\CaptivPortal-Lab\tmp\...` basetemp.
 
 This is troubleshooting history, not a current product defect.
+
+### Latest Device acceptance evidence — TASK-DEVICE-CARD-01
+
+```text
+TASK=TASK-DEVICE-CARD-01 — Current Device Context
+PR=#108
+PR base=3eac6f13d5f3966574f6d1b0a10f531d988f91ec
+implementation commit=1a3f2b8a844f2ce1c26cbdd9e4c44d17a201ac14
+accepted / production tree=8f1342f0a0f1e8242642161e02b2f3276e6ddf51
+merge / production commit=7df71a8e807efd74b123117e78cb8d992c190fa1
+```
+
+Acceptance:
+
+```text
+implementation=PASS
+Owner + Tech Lead acceptance=PASS
+cross-surface focused gate=178 passed
+Official Windows Central Full V6=PASS
+strict regressions=0
+bounded exact-read/query-plan gate=PASS
+Controlled Browser acceptance=PASS
+production deploy=PASS
+production activation=PASS
+Owner manual production Web UI verification=PASS
+```
+
+Controlled Browser scenarios explicitly covered:
+
+```text
+online
+pending
+offline
+stale
+invalid timestamp
+Current endpoint 503
+Traffic technical failure
+valid numeric zero
+manual Refresh
+no Current overlap
+no automatic polling
+```
+
+Semantic acceptance:
+
+```text
+historical Device context != current Device context
+offline requires fresh + complete managed scope
+stale/unavailable/invalid timestamp != offline
+traffic failure does not erase Current State
+0 Mbps != unavailable
+Current State execution failure is controlled independently
+```
+
+No schema/index/migration/write path or query-time Omada was introduced.
+
+Follow-on `TASK-WEB-DEVICE-UI-01` is not acceptance evidence for this TASK and is
+not current production:
+
+```text
+IN PROGRESS / LAB REVIEW PENDING
+NOT MERGED
+NOT DEPLOYED
+```
 
 ### Latest Traffic acceptance evidence — TRAFFIC-09
 

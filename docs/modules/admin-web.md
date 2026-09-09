@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-09-08
-Baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Updated: 2026-09-09
+Baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
 
 ## Boundary
 
@@ -32,6 +32,149 @@ secure cookies, CSP/security headers and no-store.
 
 `AdminQueryService` owns Site authorization, bounded concurrency/deadline and safe
 error mapping.
+
+## Device Detail — Historical vs Current
+
+Device Detail keeps two independent evidence domains.
+
+Historical Device context remains:
+
+```text
+Identity
+Latest Site Snapshot
+Latest Client Observation
+Recent Visits
+```
+
+`TASK-DEVICE-CARD-01` adds the separate read-only:
+
+```text
+Current Device Context
+```
+
+with:
+
+```text
+Presence
+Authorization
+Network
+Radio
+Controller
+Current Guest Traffic
+Evidence / Freshness
+```
+
+Feature state:
+
+```text
+repository default:
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=false
+
+Owner-confirmed production:
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
+```
+
+Endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/devices/<device_id>/current
+```
+
+Security / contract:
+
+```text
+capability=admin.read.device
+DTO=admin.device.current.v1
+Device is resolved through existing Site-safe Device boundary
+canonical MAC is resolved server-side
+query parameters=none
+```
+
+Canonical path:
+
+```text
+persisted Site-safe Device identity
+→ canonical MAC
+→ CurrentStateReadService exact current client
+→ optional pinned exact-client CurrentGuestTrafficReadService
+→ AdminQueryService
+→ strict Admin serializer
+→ same-origin Device Detail
+```
+
+No browser/API request calls Omada, Loki, Grafana or the internal Analytics
+Bearer API.
+
+Presence:
+
+```text
+online  = present in fresh + complete managed Current State scope
+offline = absent from fresh + complete managed Current State scope
+unknown = stale/unavailable/untrusted/invalid current evidence
+```
+
+Historical evidence alone never proves `offline`.
+
+```text
+stale != offline
+unavailable != offline
+invalid timestamp != offline
+```
+
+Authorization values are current evidence:
+
+```text
+authorized
+pending
+other
+unknown
+```
+
+Current Guest Traffic is only applicable to a current authorized guest. Pending
+or other current clients do not receive fabricated rate data.
+
+Traffic failure is isolated:
+
+```text
+Traffic technical failure
+→ endpoint remains a valid Current response
+→ Presence/Authorization/Network/Radio remain available
+→ failure_reason is local to current_guest_traffic
+```
+
+A Current State execution/read failure is different and maps to the controlled
+Current endpoint failure path (`503` where source/query availability fails).
+Historical Device Card loading remains independent.
+
+Numeric zero is a valid value:
+
+```text
+0 Mbps != —
+0 Mbps != missing
+0 Mbps != unavailable
+```
+
+Invalid Current State timestamps are sanitized to safe semantics:
+
+```text
+HTTP success for semantic evidence
+Presence=unknown
+Observed=null/—
+Age=null/—
+Freshness=unavailable
+Reason=invalid_timestamp
+```
+
+Frontend lifecycle:
+
+```text
+one Current load when Device Detail opens
+manual Refresh supported
+automatic Current polling absent
+no overlapping Current request
+Historical and Current load independently
+Current failure does not erase Historical
+```
 
 ## Home
 
@@ -343,8 +486,25 @@ missing / unknown / stale / insufficient / unavailable != 0
 
 ## UI/design status
 
-Current panel placement remains production-current functional composition, not a
-permanently frozen final Traffic visual design.
+Current functional Device Detail / Traffic presentation is production-current,
+but presentation is not permanently frozen.
+
+Separate follow-on work:
+
+```text
+TASK-WEB-DEVICE-UI-01
+STATUS=IN PROGRESS / LAB REVIEW PENDING
+MERGED=NO
+DEPLOYED=NO
+CURRENT PRODUCTION=NO
+```
+
+That task covers presentation-only compact Devices cards/list, human-readable
+bytes/time/rates, status indicators and future Online-first UX. It must not be
+described as current production behavior until separately accepted.
+
+Current Traffic panel placement also remains production-current functional
+composition, not a permanently frozen final Traffic visual design.
 
 ## Semantic restrictions
 

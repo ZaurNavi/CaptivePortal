@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-08
-Current repository implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
-Confirmed production deployed HEAD: `e32ade378bdbfc9f8458db9c18221958f4552718`
-Confirmed production tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Updated: 2026-09-09
+Current repository implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Confirmed production deployed HEAD: `7df71a8e807efd74b123117e78cb8d992c190fa1`
+Confirmed production tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
 
 ## Repository vs production
 
@@ -588,6 +588,63 @@ source DB fingerprints=UNCHANGED
 
 No new DB, collector, polling loop, scheduler, worker, persistence/schema or
 query-time Omada path was introduced.
+
+## DEVICE-CARD-01 deployment / activation history
+
+```text
+TASK=TASK-DEVICE-CARD-01 — Current Device Context
+PR=#108
+PR base=3eac6f13d5f3966574f6d1b0a10f531d988f91ec
+implementation commit=1a3f2b8a844f2ce1c26cbdd9e4c44d17a201ac14
+accepted / production tree=8f1342f0a0f1e8242642161e02b2f3276e6ddf51
+merge / production commit=7df71a8e807efd74b123117e78cb8d992c190fa1
+previous production runtime=e32ade378bdbfc9f8458db9c18221958f4552718
+```
+
+Production:
+
+```text
+host=192.168.0.202
+application=/opt/CaptivePortal
+service=captive-portal.service
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
+```
+
+Rollout preserved the normal two-step feature boundary:
+
+```text
+1. fast-forward deploy to 7df71a8e807efd74b123117e78cb8d992c190fa1
+2. start/smoke with WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=false
+3. separate activation to WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
+```
+
+Final result:
+
+```text
+PRODUCTION DEPLOY=PASS
+PRODUCTION ACTIVATION=PASS
+captive-portal.service=active
+rollback required=no
+Owner manual Device Detail verification=PASS
+```
+
+No new DB schema, index, migration or write path was deployed by this feature.
+No Device Detail request-time Omada/Loki/Grafana/external Analytics path was
+introduced.
+
+Current Device Context production semantics include:
+
+```text
+fresh complete present → online
+fresh complete absent  → offline
+stale/unavailable/untrusted → unknown
+traffic technical failure → Current State retained
+Current State execution failure → Current endpoint controlled 503
+numeric 0 Mbps → valid value
+```
+
+The follow-on `TASK-WEB-DEVICE-UI-01` is not part of this production rollout and
+must not be represented as deployed/current until separately accepted.
 
 ## Feature activation
 

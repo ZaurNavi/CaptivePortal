@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-09-08
+Updated: 2026-09-09
 Branch: `main`
-Runtime commit: `e32ade378bdbfc9f8458db9c18221958f4552718`
-Runtime tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
-Commit source: merge PR #106 / TASK-TRAFFIC-09, 2026-09-08
+Runtime commit: `7df71a8e807efd74b123117e78cb8d992c190fa1`
+Runtime tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Commit source: merge PR #108 / TASK-DEVICE-CARD-01, 2026-09-09
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -76,6 +76,7 @@ Analytics has no worker/write lifecycle to stop.
 | Analytics | `app/analytics` | persisted read services | none | **no** |
 | Analytics internal API | `app/analytics/api.py` | Analytics services | none | no |
 | Admin Web | `app/admin_web` | read services/gateways | process session state only | **no** |
+| Device Current Context | Admin Web + Current State + Current Guest Traffic | persisted Current State exact-device evidence | none | no |
 | Home Live | Admin Web | `CurrentStateReadService` | none | no |
 | Current Traffic | `app/analytics/current_traffic.py` | persisted AP Observation facts | none | no |
 | Home Traffic | Admin Web | `CurrentTrafficReadService` | none | no |
@@ -175,6 +176,8 @@ Schema version: **1**.
 - client scope has a canonical source-scope hash; cursors are bound to Site/cycle/scope and reject stale scope.
 - short client history default retention: 48 hours.
 - no Admin request polls Omada through this service.
+- exact `get_current_client()` reads can prove online/offline only from fresh complete trusted Site/SSID scope; stale/unavailable/untrusted evidence remains unknown.
+- exact-client guest-rate evidence can be pinned to the same accepted Current State cycle without scanning the full Site population.
 - startup `PRAGMA quick_check` self-timeout is retryable storage contention only when the repository itself interrupted that quick_check; unrelated `interrupted`, schema mismatch and `quick_check != ok` remain schema/integrity failures.
 - SQLite contention detection is Python-3.10 compatible: primary BUSY/LOCKED codes are `5`/`6`; integer `sqlite_errorcode` is normalized with `code & 0xFF`, with message fallback for `database is locked` / `database is busy`.
 
@@ -193,6 +196,7 @@ Services:
 - wireless analytics;
 - visit analytics;
 - optional `CurrentTrafficReadService`;
+- `CurrentGuestTrafficReadService`;
 - `HomeActivityReadService`;
 - `HistoricalTrafficReadService`;
 - `CompletedGuestSessionTrafficReadService`.
@@ -323,6 +327,28 @@ provider calls=none
 historical_traffic_projection.v1 source=no
 ```
 
+Device Current endpoint:
+
+```text
+GET /admin/api/v1/sites/<site_id>/devices/<device_id>/current
+```
+
+Contract:
+
+```text
+capability=admin.read.device
+DTO=admin.device.current.v1
+repository default flag=false
+Owner-confirmed production flag=true
+```
+
+The existing Site-safe Device lookup resolves the device and canonical MAC first.
+Current State then provides Presence/Authorization/Network/Radio/Controller
+evidence. Exact-client Current Guest Traffic is composed only when applicable.
+
+Historical Device context remains independent and is not used to infer current
+offline state.
+
 Traffic Evidence endpoint:
 
 ```text
@@ -342,6 +368,30 @@ worker, scheduler, collector or acquisition process and performs no query-time
 Omada/provider polling.
 
 Business/data Admin API remains read-only.
+
+## 12A. Device Current Context production state
+
+```text
+TASK-DEVICE-CARD-01=COMPLETE
+PR #108=MERGED
+implementation=1a3f2b8a844f2ce1c26cbdd9e4c44d17a201ac14
+main / production=7df71a8e807efd74b123117e78cb8d992c190fa1
+tree=8f1342f0a0f1e8242642161e02b2f3276e6ddf51
+WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
+PRODUCTION DEPLOY=PASS
+PRODUCTION ACTIVATION=PASS
+Owner manual Device Detail verification=PASS
+```
+
+No DB schema/index/migration/write path was added.
+
+Follow-on:
+
+```text
+TASK-WEB-DEVICE-UI-01=IN PROGRESS / LAB REVIEW PENDING
+NOT MERGED
+NOT DEPLOYED
+```
 
 ## 13. Admin security facts
 
