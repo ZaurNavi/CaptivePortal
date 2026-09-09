@@ -26,6 +26,17 @@ def test_disabled_config_accepts_empty_credentials_and_sites():
     assert config.username == ""
     assert config.password_hash == ""
     assert config.allowed_site_ids == frozenset()
+    assert config.device_current_context_enabled is False
+
+
+def test_device_current_context_flag_is_independent_from_traffic_ui():
+    config = admin_web_config_from_settings(enabled_settings(
+        web_admin_device_current_context_enabled="true",
+        web_admin_traffic_enabled="false",
+        web_admin_traffic_online_guests_enabled="false",
+    ))
+    assert config.device_current_context_enabled is True
+    assert config.traffic_enabled is False
 
 
 @pytest.mark.parametrize(

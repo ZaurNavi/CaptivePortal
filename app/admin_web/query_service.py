@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import uuid
 import sqlite3
+import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
@@ -42,6 +43,7 @@ from app.current_state import (
     CurrentStateStorageError,
     CurrentStateValidationError,
 )
+from app.current_state.normalizer import canonical_scope
 
 from .config import AdminWebConfig
 from .cursors import AdminCursorError, decode_cursor, encode_cursor
@@ -67,6 +69,10 @@ from .current_traffic_serialization import (
 from .current_guest_traffic_serialization import (
     CurrentGuestTrafficSerializationError,
     serialize_current_guest_traffic,
+)
+from .device_current_context_serialization import (
+    DeviceCurrentContextSerializationError,
+    serialize_device_current_context,
 )
 from .completed_guest_traffic_serialization import (
     CompletedGuestSessionTrafficSerializationError,
@@ -968,6 +974,108 @@ class AdminQueryService:
                     "latest_client_observation": observation,
                 }
             )
+
+        return self._run(query)
+
+    def device_current_context(
+        self,
+        principal,
+        site_id,
+        device_id,
+        *,
+        query_parameters_present: bool = False,
+    ):
+        """Compose one exact Device Current result under one Admin budget."""
+
+        self._authorize(principal, "admin.read.device", site_id)
+        if query_parameters_present:
+            raise AdminQueryValidationError()
+        selected_id = self._uuid(device_id, "device_id")
+        if self._current_state is None:
+            raise AdminQueryUnavailable()
+
+        def query(deadline):
+            device = self._devices.get_device(
+                site_id=site_id,
+                device_id=selected_id,
+                deadline=deadline,
+            )
+            if device is None:
+                raise AdminQueryNotFound()
+            evaluated = format_utc(datetime.now(timezone.utc))
+            current = self._current_call(
+                deadline,
+                "entity",
+                "get_current_client",
+                site_id,
+                client_mac=device.canonical_mac,
+                evaluated_at_utc=evaluated,
+            )
+            client = current.client
+            if client is not None and client.auth_classification == "authorized":
+                applicability = "applicable"
+                applicability_reason = "authorized_current_guest"
+            elif client is not None:
+                applicability = "not_applicable"
+                applicability_reason = "not_authorized_current_guest"
+            elif (
+                current.snapshot.freshness_status == "fresh"
+                and current.snapshot.complete
+            ):
+                applicability = "not_applicable"
+                applicability_reason = "offline"
+            else:
+                applicability = "unknown"
+                applicability_reason = "current_state_unknown"
+
+            traffic = None
+            traffic_failure = None
+            if applicability == "applicable":
+                source = self._current_guest_traffic
+                cycle_id = current.snapshot.cycle_id
+                if source is None or cycle_id is None:
+                    traffic_failure = "source_unavailable"
+                else:
+                    try:
+                        deadline.require_remaining()
+                        traffic = source.get_current_guest_traffic_for_client(
+                            site_id,
+                            device.canonical_mac,
+                            evaluated_at_utc=evaluated,
+                            current_cycle_id=cycle_id,
+                        )
+                        deadline.require_remaining()
+                    except AnalyticsQueryDeadlineExceeded:
+                        traffic = None
+                        traffic_failure = "query_deadline"
+                    except CurrentGuestTrafficIntegrityUnavailable:
+                        traffic = None
+                        traffic_failure = "integrity_unavailable"
+                    except CurrentGuestTrafficSourceUnavailable:
+                        traffic = None
+                        traffic_failure = "source_unavailable"
+                    except CurrentGuestTrafficValidationError:
+                        traffic = None
+                        traffic_failure = "integrity_unavailable"
+            try:
+                scope_json, _scope_hash = canonical_scope(
+                    "client", site_id, self._current_state.config.client_ssids
+                )
+                scope = json.loads(scope_json)
+                result = serialize_device_current_context(
+                    site_id=site_id,
+                    device_id=selected_id,
+                    evaluated_at_utc=evaluated,
+                    scope=scope,
+                    current=current,
+                    traffic=traffic,
+                    applicability=applicability,
+                    applicability_reason=applicability_reason,
+                    traffic_failure_reason=traffic_failure,
+                )
+            except DeviceCurrentContextSerializationError as exc:
+                raise AdminQueryIntegrityUnavailable() from exc
+            return AdminQueryResponse(result=result)
 
         return self._run(query)
 

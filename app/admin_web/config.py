@@ -62,6 +62,7 @@ class AdminWebConfig:
     max_query_duration_seconds: int
     max_response_bytes: int
     device_page_size: int
+    device_current_context_enabled: bool
     visit_page_size: int
     observation_page_size: int
     observation_max_window_hours: int
@@ -116,6 +117,10 @@ def admin_web_config_from_settings(
     home_live_enabled = _exact_bool(
         settings.get("web_admin_home_live_enabled", "false"),
         "WEB_ADMIN_HOME_LIVE_ENABLED",
+    )
+    device_current_context_enabled = _exact_bool(
+        settings.get("web_admin_device_current_context_enabled", "false"),
+        "WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED",
     )
     home_traffic_enabled = _exact_bool(
         settings.get("web_admin_home_traffic_enabled", "false"),
@@ -239,6 +244,10 @@ def admin_web_config_from_settings(
         raise AdminWebConfigError(
             "WEB_ADMIN_HOME_LIVE_ENABLED requires WEB_ADMIN_ENABLED=true"
         )
+    if device_current_context_enabled and not enabled:
+        raise AdminWebConfigError(
+            "WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED requires WEB_ADMIN_ENABLED=true"
+        )
     if home_traffic_enabled and (not enabled or not home_live_enabled):
         raise AdminWebConfigError(
             "WEB_ADMIN_HOME_TRAFFIC_ENABLED requires WEB_ADMIN_ENABLED=true and WEB_ADMIN_HOME_LIVE_ENABLED=true"
@@ -342,6 +351,7 @@ def admin_web_config_from_settings(
         default_site_id=default_site,
         require_https=require_https,
         home_live_enabled=home_live_enabled,
+        device_current_context_enabled=device_current_context_enabled,
         home_traffic_enabled=home_traffic_enabled,
         traffic_enabled=traffic_enabled,
         traffic_history_enabled=traffic_history_enabled,

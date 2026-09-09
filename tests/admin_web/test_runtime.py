@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import run as process_runtime
 from app.admin_web import create_admin_web_runtime
+from app.current_state.read_service import CurrentStateReadService
 
 from .conftest import enabled_settings
 
@@ -69,6 +70,37 @@ def test_concrete_read_boundaries_compose_admin_query_service(tmp_path):
     )
     assert runtime.state == "active"
     assert runtime.query_service is not None
+
+
+def test_device_current_composes_shared_guest_rate_service_without_traffic_ui(tmp_path):
+    registry = SimpleNamespace(repository=SimpleNamespace(
+        config=SimpleNamespace(db_path=str(tmp_path / "registry.sqlite3"))
+    ))
+    visits = SimpleNamespace(repository=SimpleNamespace(
+        db_path=tmp_path / "visits.sqlite3"
+    ))
+    observations = SimpleNamespace(_repository=SimpleNamespace(
+        db_path=tmp_path / "observations.sqlite3"
+    ))
+    analytics = SimpleNamespace(state="active", visit_service=object())
+    current = object.__new__(CurrentStateReadService)
+    runtime = create_admin_web_runtime(
+        enabled_settings(
+            web_admin_device_current_context_enabled="true",
+            web_admin_traffic_enabled="false",
+            web_admin_traffic_online_guests_enabled="false",
+        ),
+        analytics, registry, visits, observations,
+        logging.getLogger("admin-device-current-composition"),
+        current_state_read_service=current,
+    )
+    assert runtime.state == "active"
+    assert runtime.traffic_online_guests_state == "disabled"
+    assert runtime.traffic_online_guests_service is not None
+    assert (
+        runtime.query_service._current_guest_traffic
+        is runtime.traffic_online_guests_service
+    )
 
 
 def test_incomplete_read_boundary_keeps_admin_runtime_unavailable():

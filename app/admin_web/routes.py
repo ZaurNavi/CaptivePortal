@@ -102,6 +102,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 _is_current_state_path(request.path)
                 or _is_current_traffic_path(request.path)
                 or _is_home_activity_path(request.path)
+                or _is_device_current_context_path(request.path)
             )
             and any(len(request.args.getlist(key)) != 1 for key in request.args)
         ):
@@ -372,6 +373,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             csrf_token=g.admin_session.csrf_token,
             runtime_state=runtime.state,
             device_id=device_id,
+            device_current_context_enabled=(
+                page.key == "device"
+                and config.device_current_context_enabled
+            ),
             home_live_enabled=config.home_live_enabled,
             home_live_refresh_seconds=config.home_live_refresh_seconds,
             home_live_request_timeout_seconds=config.home_live_request_timeout_seconds,
@@ -635,6 +640,60 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 g.admin_principal, selected, device_id
             ),
         )
+
+    @blueprint.get(
+        "/admin/api/v1/sites/<site_id>/devices/<device_id>/current"
+    )
+    @authenticated
+    def api_device_current(site_id: str, device_id: str) -> Response:
+        try:
+            selected = resolver.resolve(site_id)
+        except AdminSiteContextError:
+            return _error("invalid_request", 400)
+        except AdminAccessDenied:
+            return _error("site_forbidden", 403)
+        if not config.device_current_context_enabled:
+            return _error("not_found", 404)
+        try:
+            authorized = policy.authorize(
+                g.admin_principal, "admin.read.device", selected
+            )
+        except Exception:
+            return _error("internal_error", 500)
+        if not authorized:
+            return _error("site_forbidden", 403)
+        if request.args:
+            return _error("invalid_request", 400)
+        service = runtime.query_service
+        if service is None:
+            return _error("source_unavailable", 503)
+        try:
+            response = service.device_current_context(
+                g.admin_principal,
+                selected,
+                device_id,
+                query_parameters_present=False,
+            )
+        except AdminQueryValidationError:
+            return _error("invalid_request", 400)
+        except AdminQueryForbidden:
+            return _error("site_forbidden", 403)
+        except AdminQueryNotFound:
+            return _error("not_found", 404)
+        except AdminQueryBusy:
+            result = make_response(_error("concurrency_limit", 429))
+            result.headers["Retry-After"] = "1"
+            return result
+        except AdminQueryDeadline:
+            return _error("query_deadline", 503)
+        except AdminQueryUnavailable:
+            return _error("source_unavailable", 503)
+        except AdminQueryError:
+            return _error("internal_error", 500)
+        except Exception:
+            logger.exception("admin.device_current_context_query_failed")
+            return _error("internal_error", 500)
+        return _success(selected, response.result, enforce_size=True)
 
     @blueprint.get("/admin/api/v1/sites/<site_id>/visits")
     @authenticated
@@ -2029,6 +2088,22 @@ def _is_home_activity_path(path: str) -> bool:
     return (
         path.startswith(ADMIN_API_PREFIX + "/sites/")
         and "/home-activity/" in path
+    )
+
+
+def _is_device_current_context_path(path: str) -> bool:
+    if not path.startswith(ADMIN_API_PREFIX + "/sites/"):
+        return False
+    parts = path.split("/")
+    return (
+        len(parts) == 10
+        and parts[6] == "devices"
+        and parts[8] == "current"
+        and parts[9] == ""
+    ) if path.endswith("/") else (
+        len(parts) == 9
+        and parts[6] == "devices"
+        and parts[8] == "current"
     )
 
 
