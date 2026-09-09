@@ -10,9 +10,16 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.current_state.cleanup import CurrentStateCleanup
-from app.current_state.models import CurrentStateValidationError
+from app.current_state.models import (
+    CurrentStateSchemaError,
+    CurrentStateStorageError,
+    CurrentStateValidationError,
+)
 from app.current_state.normalizer import canonical_scope
-from app.current_state.read_service import CurrentStateReadService
+from app.current_state.read_service import (
+    CurrentClientInventoryContextExpired,
+    CurrentStateReadService,
+)
 from app.current_state.repository import CurrentStateRepository
 from app.current_state import repository as repository_module
 from app.current_state.ap_status import classify_ap_status_code
@@ -530,4 +537,200 @@ def test_history_quality_rejects_noncanonical_scope_hash(service, source_scope_h
             "2026-08-23T09:00:00.000Z",
             "2026-08-23T10:00:00.000Z",
             source_scope_hash=source_scope_hash,
+        )
+
+
+def test_inventory_context_initial_fresh_complete_and_empty_are_trusted(service):
+    published = publish_clients(service)
+    context = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=EVALUATED
+    )
+    assert context.site_id == SITE
+    assert context.evaluated_at_utc == "2026-08-23T10:00:30.000Z"
+    assert context.overlay_mode == "trusted"
+    assert context.current_cycle_id == published.cycle_id
+    assert context.source_scope_hash == published.source_scope_hash
+
+    publish_clients(
+        service,
+        cycle_id="empty-client",
+        started="2026-08-23T10:00:10.000Z",
+        rows=[],
+    )
+    empty = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc="2026-08-23T10:00:20.000Z"
+    )
+    assert empty.overlay_mode == "trusted"
+    assert empty.current_cycle_id == "empty-client"
+
+
+@pytest.mark.parametrize(
+    "evaluated,reason",
+    [
+        ("2026-08-23T10:01:00.001Z", "older_than_freshness_window"),
+        ("2026-08-23T10:03:01.000Z", "older_than_unavailable_threshold"),
+        ("2026-08-23T09:59:59.000Z", "clock_anomaly"),
+    ],
+)
+def test_inventory_context_safe_freshness_states_are_unknown(service, evaluated, reason):
+    publish_clients(service)
+    context = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=evaluated
+    )
+    assert context.overlay_mode == "unknown"
+    assert context.current_cycle_id is None
+    assert context.source_scope_hash is None
+    assert context.snapshot.freshness_reason == reason
+
+
+def test_inventory_context_no_complete_and_invalid_timestamp_are_unknown(service):
+    empty = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=EVALUATED
+    )
+    assert empty.overlay_mode == "unknown"
+    assert empty.snapshot.freshness_reason == "no_complete_snapshot"
+
+    publish_clients(service)
+    with sqlite3.connect(service.repository.config.db_path) as connection:
+        connection.execute(
+            "UPDATE current_state_cycles SET capture_started_at='invalid' "
+            "WHERE cycle_id='client'"
+        )
+    invalid = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=EVALUATED
+    )
+    assert invalid.overlay_mode == "unknown"
+    assert invalid.snapshot.freshness_reason == "invalid_timestamp"
+
+
+def test_inventory_context_invalid_source_scope_is_unknown(service):
+    publish_clients(service)
+    with sqlite3.connect(service.repository.config.db_path) as connection:
+        connection.execute(
+            "UPDATE current_state_cycles SET source_scope_json='{}' "
+            "WHERE cycle_id='client'"
+        )
+    context = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=EVALUATED
+    )
+    assert context.overlay_mode == "unknown"
+    assert context.snapshot.freshness_reason == "invalid_source_scope"
+
+
+def test_inventory_context_pinned_same_context_is_trusted(service):
+    published = publish_clients(service)
+    initial = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=EVALUATED
+    )
+    continued = service.get_current_client_inventory_context(
+        SITE,
+        evaluated_at_utc=initial.evaluated_at_utc,
+        current_cycle_id=initial.current_cycle_id,
+        expected_source_scope_hash=initial.source_scope_hash,
+    )
+    assert continued.overlay_mode == "trusted"
+    assert continued.current_cycle_id == published.cycle_id
+    assert continued.evaluated_at_utc == initial.evaluated_at_utc
+
+
+def test_inventory_context_pinned_site_removal_expires(service):
+    publish_clients(service)
+    initial = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=EVALUATED
+    )
+    service.config = replace(service.config, site_ids=(OTHER_SITE,))
+
+    with pytest.raises(CurrentClientInventoryContextExpired):
+        service.get_current_client_inventory_context(
+            SITE,
+            evaluated_at_utc=initial.evaluated_at_utc,
+            current_cycle_id=initial.current_cycle_id,
+            expected_source_scope_hash=initial.source_scope_hash,
+        )
+
+
+def test_inventory_context_pinned_missing_or_scope_changed_expires(service):
+    publish_clients(service)
+    initial = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=EVALUATED
+    )
+    with pytest.raises(CurrentClientInventoryContextExpired):
+        service.get_current_client_inventory_context(
+            SITE,
+            evaluated_at_utc=initial.evaluated_at_utc,
+            current_cycle_id="missing",
+            expected_source_scope_hash=initial.source_scope_hash,
+        )
+    service.config = replace(service.config, client_ssids=("Other",))
+    with pytest.raises(CurrentClientInventoryContextExpired):
+        service.get_current_client_inventory_context(
+            SITE,
+            evaluated_at_utc=initial.evaluated_at_utc,
+            current_cycle_id=initial.current_cycle_id,
+            expected_source_scope_hash=initial.source_scope_hash,
+        )
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "result='failed'",
+        "complete=0",
+        "source_scope_hash='" + "0" * 64 + "'",
+        "site_id='" + OTHER_SITE + "'",
+    ],
+)
+def test_inventory_context_pinned_wrong_cycle_contract_expires(service, assignment):
+    publish_clients(service)
+    initial = service.get_current_client_inventory_context(
+        SITE, evaluated_at_utc=EVALUATED
+    )
+    with sqlite3.connect(service.repository.config.db_path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints=ON")
+        connection.execute(
+            f"UPDATE current_state_cycles SET {assignment} WHERE cycle_id='client'"
+        )
+    with pytest.raises(CurrentClientInventoryContextExpired):
+        service.get_current_client_inventory_context(
+            SITE,
+            evaluated_at_utc=initial.evaluated_at_utc,
+            current_cycle_id=initial.current_cycle_id,
+            expected_source_scope_hash=initial.source_scope_hash,
+        )
+
+
+@pytest.mark.parametrize(
+    "cycle_id,scope_hash",
+    [("client", None), (None, "0" * 64), ("", "0" * 64), ("client", "bad")],
+)
+def test_inventory_context_partial_or_malformed_pins_are_validation_errors(
+    service, cycle_id, scope_hash
+):
+    with pytest.raises(CurrentStateValidationError):
+        service.get_current_client_inventory_context(
+            SITE,
+            evaluated_at_utc=EVALUATED,
+            current_cycle_id=cycle_id,
+            expected_source_scope_hash=scope_hash,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_type",
+    [CurrentStateStorageError, CurrentStateSchemaError],
+)
+def test_inventory_context_storage_and_schema_errors_remain_source_errors(
+    service, monkeypatch, failure_type
+):
+    class BrokenRead:
+        def __enter__(self):
+            raise failure_type("source failure")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(service.repository, "read_connection", BrokenRead)
+    with pytest.raises(failure_type):
+        service.get_current_client_inventory_context(
+            SITE, evaluated_at_utc=EVALUATED
         )

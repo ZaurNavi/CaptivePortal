@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.admin_web.device_gateway import (
+    AdminDeviceContextExpired,
     AdminDeviceIntegrityError,
     AdminDeviceReadGateway,
     AdminDeviceSourceError,
@@ -89,6 +90,7 @@ def _snapshot(
     site_id: str = SITE,
     suffix: str = "1",
     ip: str | None = None,
+    hostname: str | None = None,
 ) -> None:
     with sqlite3.connect(registry) as connection:
         connection.execute(
@@ -99,8 +101,9 @@ def _snapshot(
             """
             INSERT INTO device_snapshots(
                 snapshot_id, device_id, site_id, requested_mac,
-                authorized_at, captured_at, ip, ssid, ap_mac, device_type
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                authorized_at, captured_at, ip, ssid, ap_mac, device_type,
+                hostname
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"snapshot-{device_id}-{suffix}",
@@ -113,6 +116,7 @@ def _snapshot(
                 "OwnerWiFi",
                 "AA:BB:CC:DD:EE:FF",
                 "phone",
+                hostname,
             ),
         )
 
@@ -153,6 +157,41 @@ def _gateway(paths: tuple[Path, Path]) -> AdminDeviceReadGateway:
 
 def _deadline() -> QueryDeadline:
     return QueryDeadline.after(10.0)
+
+
+def _current_database(tmp_path: Path) -> Path:
+    current = tmp_path / "current.sqlite3"
+    with sqlite3.connect(current) as connection:
+        connection.executescript(
+            """
+            PRAGMA user_version=1;
+            CREATE TABLE current_state_cycles (
+                cycle_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                result TEXT NOT NULL,
+                complete INTEGER NOT NULL,
+                source_scope_hash TEXT NOT NULL
+            );
+            CREATE TABLE current_client_state (
+                cycle_id TEXT NOT NULL,
+                site_id TEXT NOT NULL,
+                client_mac TEXT NOT NULL,
+                PRIMARY KEY(cycle_id, client_mac)
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO current_state_cycles VALUES (?, ?, 'client', 'success', 1, ?)",
+            ("cycle-1", SITE, "1" * 64),
+        )
+    return current
+
+
+def _context_gateway(tmp_path: Path):
+    paths = _databases(tmp_path)
+    current = _current_database(tmp_path)
+    return AdminDeviceReadGateway(*paths, current), paths, current
 
 
 def test_exact_site_membership_union_counts_and_latest_context(tmp_path):
@@ -504,3 +543,145 @@ def test_device_page_executes_one_cross_database_data_statement(
     assert progress_calls[-1] == (None, 0)
     assert "last_site_id" not in statements[0]
     assert "last_known_" not in statements[0]
+
+
+def test_device_list_context_unknown_reuses_historical_order_without_current_db(tmp_path):
+    paths = _databases(tmp_path)
+    _snapshot(
+        paths[0], device_id="older", mac="00:00:00:00:00:01",
+        captured_at="2026-01-01T01:00:00.000Z", hostname="older-host",
+    )
+    _visit(
+        paths[1], device_id="newer", mac="00:00:00:00:00:02",
+        started_at="2026-01-01T02:00:00.000Z",
+    )
+    gateway = AdminDeviceReadGateway(*paths)
+    page = gateway.list_devices_context(
+        site_id=SITE, limit=10, deadline=_deadline(), overlay_mode="unknown",
+        current_cycle_id=None, source_scope_hash=None,
+    )
+    assert [item.device_id for item in page.items] == ["newer", "older"]
+    assert [item.current_presence for item in page.items] == ["unknown", "unknown"]
+    assert page.items[1].hostname == "older-host"
+    assert page.items[0].hostname is None
+
+
+def test_device_list_context_trusted_is_globally_online_first_before_limit(tmp_path):
+    gateway, paths, current = _context_gateway(tmp_path)
+    _snapshot(
+        paths[0], device_id="online-old", mac="00:00:00:00:00:01",
+        captured_at="2026-01-01T01:00:00.000Z", hostname="online-host",
+    )
+    _snapshot(
+        paths[0], device_id="offline-new", mac="00:00:00:00:00:02",
+        captured_at="2026-01-01T02:00:00.000Z", hostname="offline-host",
+    )
+    with sqlite3.connect(current) as connection:
+        connection.execute(
+            "INSERT INTO current_client_state VALUES (?, ?, ?)",
+            ("cycle-1", SITE, "00:00:00:00:00:01"),
+        )
+    first = gateway.list_devices_context(
+        site_id=SITE, limit=1, deadline=_deadline(), overlay_mode="trusted",
+        current_cycle_id="cycle-1", source_scope_hash="1" * 64,
+    )
+    assert first.has_more is True
+    assert first.items[0].device_id == "online-old"
+    assert first.items[0].current_presence == "online"
+    assert first.items[0].online_rank == 0
+    second = gateway.list_devices_context(
+        site_id=SITE, limit=1, deadline=_deadline(), overlay_mode="trusted",
+        current_cycle_id="cycle-1", source_scope_hash="1" * 64,
+        cursor=(
+            first.items[0].online_rank,
+            first.items[0].site_last_seen_at,
+            first.items[0].device_id,
+        ),
+    )
+    assert second.items[0].device_id == "offline-new"
+    assert second.items[0].current_presence == "offline"
+    assert second.items[0].online_rank == 1
+
+
+def test_device_list_context_trusted_rank_secondary_order_and_mac_filter(tmp_path):
+    gateway, paths, _current = _context_gateway(tmp_path)
+    for number in range(1, 4):
+        _snapshot(
+            paths[0], device_id=f"device-{number}",
+            mac=f"00:00:00:00:00:{number:02X}",
+            captured_at=f"2026-01-01T0{number}:00:00.000Z",
+        )
+    page = gateway.list_devices_context(
+        site_id=SITE, limit=10, deadline=_deadline(), overlay_mode="trusted",
+        current_cycle_id="cycle-1", source_scope_hash="1" * 64,
+    )
+    assert [item.device_id for item in page.items] == [
+        "device-3", "device-2", "device-1"
+    ]
+    filtered = gateway.list_devices_context(
+        site_id=SITE, limit=10, deadline=_deadline(), overlay_mode="trusted",
+        current_cycle_id="cycle-1", source_scope_hash="1" * 64,
+        canonical_mac="00:00:00:00:00:02",
+    )
+    assert [item.device_id for item in filtered.items] == ["device-2"]
+
+
+def test_device_list_context_current_only_mac_never_creates_device(tmp_path):
+    gateway, _paths, current = _context_gateway(tmp_path)
+    with sqlite3.connect(current) as connection:
+        connection.execute(
+            "INSERT INTO current_client_state VALUES (?, ?, ?)",
+            ("cycle-1", SITE, "00:00:00:00:00:99"),
+        )
+    page = gateway.list_devices_context(
+        site_id=SITE, limit=10, deadline=_deadline(), overlay_mode="trusted",
+        current_cycle_id="cycle-1", source_scope_hash="1" * 64,
+    )
+    assert page.items == ()
+
+
+def test_device_list_context_same_transaction_guard_prevents_false_offline(tmp_path):
+    gateway, paths, current = _context_gateway(tmp_path)
+    _snapshot(
+        paths[0], device_id="device", mac="00:00:00:00:00:01",
+        captured_at="2026-01-01T01:00:00.000Z",
+    )
+    with sqlite3.connect(current) as connection:
+        connection.execute(
+            "DELETE FROM current_state_cycles WHERE cycle_id='cycle-1'"
+        )
+    with pytest.raises(AdminDeviceContextExpired):
+        gateway.list_devices_context(
+            site_id=SITE, limit=10, deadline=_deadline(),
+            overlay_mode="trusted", current_cycle_id="cycle-1",
+            source_scope_hash="1" * 64,
+        )
+
+
+def test_device_list_context_temporary_sqlite_failure_is_source_error(tmp_path):
+    paths = _databases(tmp_path)
+    missing = tmp_path / "missing-current.sqlite3"
+    gateway = AdminDeviceReadGateway(*paths, missing)
+    with pytest.raises(AdminDeviceSourceError):
+        gateway.list_devices_context(
+            site_id=SITE, limit=10, deadline=_deadline(),
+            overlay_mode="trusted", current_cycle_id="cycle-1",
+            source_scope_hash="1" * 64,
+        )
+
+
+def test_device_list_context_addition_preserves_old_list_and_detail_semantics(tmp_path):
+    gateway, paths, _current = _context_gateway(tmp_path)
+    _snapshot(
+        paths[0], device_id="device", mac="00:00:00:00:00:01",
+        captured_at="2026-01-01T01:00:00.000Z", hostname="host",
+    )
+    listed = gateway.list_devices(
+        site_id=SITE, limit=10, deadline=_deadline()
+    )
+    detailed = gateway.get_device(
+        site_id=SITE, device_id="device", deadline=_deadline()
+    )
+    assert [item.device_id for item in listed.items] == ["device"]
+    assert detailed is not None
+    assert detailed.latest_snapshot["hostname"] == "host"

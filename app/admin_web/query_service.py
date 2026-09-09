@@ -43,14 +43,30 @@ from app.current_state import (
     CurrentStateStorageError,
     CurrentStateValidationError,
 )
+from app.current_state.read_service import CurrentClientInventoryContextExpired
 from app.current_state.normalizer import canonical_scope
 
 from .config import AdminWebConfig
-from .cursors import AdminCursorError, decode_cursor, encode_cursor
+from .cursors import (
+    AdminCursorError,
+    decode_cursor,
+    encode_cursor,
+    filter_fingerprint,
+)
 from .device_gateway import (
+    AdminDeviceContextExpired,
     AdminDeviceIntegrityError,
     AdminDeviceReadGateway,
     AdminDeviceSourceError,
+)
+from .device_list_context_cursor import (
+    DeviceListContextCursor,
+    DeviceListContextCursorError,
+)
+from .device_list_context_serialization import (
+    DeviceListContextSerializationError,
+    serialize_device_list_context,
+    serialize_device_list_context_overlay,
 )
 from .models import AdminPrincipal
 from .policy import AdminAccessPolicy
@@ -244,6 +260,8 @@ class AdminQueryService:
         home_activity_config: Any | None = None,
         home_ap_24h_read_service: Any | None = None,
         execution_controls: AdminQueryExecutionControls | None = None,
+        device_list_context_state: str = "disabled",
+        device_list_context_cursor_codec: Any | None = None,
     ):
         self._config = config
         self._policy = policy
@@ -260,6 +278,8 @@ class AdminQueryService:
         self._home_activity = home_activity_read_service
         self._home_activity_config = home_activity_config
         self._home_ap_24h = home_ap_24h_read_service
+        self._device_list_context_state = device_list_context_state
+        self._device_list_context_cursor_codec = device_list_context_cursor_codec
         self._execution_controls = execution_controls or (
             AdminQueryExecutionControls(
                 max_concurrent_queries=config.max_concurrent_queries,
@@ -905,43 +925,474 @@ class AdminQueryService:
         selected_limit = self._limit(limit, self._config.device_page_size)
         selected_mac = self._optional_mac(mac)
         filters = {} if selected_mac is None else {"mac": selected_mac}
-        try:
-            decoded = decode_cursor(
-                cursor,
-                kind="devices",
-                site_id=site_id,
-                filters=filters,
-                identity_kind="uuid",
-                maximum_length=self._config.max_cursor_chars,
-            )
-        except AdminCursorError as exc:
-            raise AdminQueryValidationError() from exc
-
-        def query(deadline):
-            page = self._devices.list_devices(
-                site_id=site_id,
-                limit=selected_limit,
-                cursor=decoded,  # type: ignore[arg-type]
-                canonical_mac=selected_mac,
-                deadline=deadline,
-            )
-            items = [self._device_list_dto(item) for item in page.items]
-            next_cursor = None
-            if page.has_more and page.items:
-                last = page.items[-1]
-                next_cursor = encode_cursor(
+        if not self._config.device_list_context_enabled:
+            try:
+                decoded = decode_cursor(
+                    cursor,
                     kind="devices",
                     site_id=site_id,
-                    timestamp=last.site_last_seen_at,
-                    identity=last.device_id,
                     filters=filters,
+                    identity_kind="uuid",
+                    maximum_length=self._config.max_cursor_chars,
                 )
-            return AdminQueryResponse(
-                result={"items": items},
-                page={"limit": selected_limit, "next_cursor": next_cursor},
+            except AdminCursorError as exc:
+                raise AdminQueryValidationError() from exc
+
+            def query(deadline):
+                page = self._devices.list_devices(
+                    site_id=site_id,
+                    limit=selected_limit,
+                    cursor=decoded,  # type: ignore[arg-type]
+                    canonical_mac=selected_mac,
+                    deadline=deadline,
+                )
+                items = [self._device_list_dto(item) for item in page.items]
+                next_cursor = None
+                if page.has_more and page.items:
+                    last = page.items[-1]
+                    next_cursor = encode_cursor(
+                        kind="devices",
+                        site_id=site_id,
+                        timestamp=last.site_last_seen_at,
+                        identity=last.device_id,
+                        filters=filters,
+                    )
+                return AdminQueryResponse(
+                    result={"items": items},
+                    page={"limit": selected_limit, "next_cursor": next_cursor},
+                )
+
+            return self._run(query)
+
+        codec = self._device_list_context_cursor_codec
+        if self._device_list_context_state != "active" or codec is None:
+            raise AdminQueryUnavailable()
+        try:
+            decoded = codec.decode(cursor, site_id=site_id, filters=filters)
+        except DeviceListContextCursorError as exc:
+            raise AdminQueryValidationError() from exc
+
+        return self._run(
+            lambda deadline: self._device_list_context_response(
+                deadline=deadline,
+                site_id=site_id,
+                selected_limit=selected_limit,
+                selected_mac=selected_mac,
+                filters=filters,
+                decoded=decoded,
+                codec=codec,
+            )
+        )
+
+    def _device_list_context_response(
+        self,
+        *,
+        deadline,
+        site_id,
+        selected_limit,
+        selected_mac,
+        filters,
+        decoded,
+        codec,
+    ):
+        if decoded is not None:
+            return self._device_list_context_continuation(
+                deadline=deadline,
+                site_id=site_id,
+                selected_limit=selected_limit,
+                selected_mac=selected_mac,
+                filters=filters,
+                decoded=decoded,
+                codec=codec,
             )
 
-        return self._run(query)
+        evaluated = format_utc(datetime.now(timezone.utc))
+        safe_scope = self._device_list_context_safe_scope(site_id)
+        source = self._current_state
+        method = getattr(source, "get_current_client_inventory_context", None)
+        context = None
+        execution_unavailable = (
+            source is None or not callable(method) or safe_scope is None
+        )
+        if not execution_unavailable:
+            try:
+                deadline.require_remaining()
+                context = method(site_id, evaluated_at_utc=evaluated)
+                deadline.require_remaining()
+            except CurrentClientInventoryContextExpired as exc:
+                raise AdminQueryIntegrityUnavailable() from exc
+            except AnalyticsQueryDeadlineExceeded:
+                raise
+            except (
+                CurrentStateStorageError,
+                CurrentStateSchemaError,
+                CurrentStateValidationError,
+                sqlite3.Error,
+                OSError,
+            ):
+                execution_unavailable = True
+
+        if execution_unavailable:
+            overlay = self._device_list_context_overlay(
+                site_id=site_id,
+                overlay_mode="unknown",
+                source_execution_status="unavailable",
+                evaluated_at_utc=evaluated,
+                scope=safe_scope,
+                snapshot=None,
+            )
+            page = self._devices.list_devices_context(
+                site_id=site_id,
+                limit=selected_limit,
+                deadline=deadline,
+                overlay_mode="unknown",
+                current_cycle_id=None,
+                source_scope_hash=None,
+                cursor=None,
+                canonical_mac=selected_mac,
+            )
+            return self._device_list_context_page(
+                site_id=site_id,
+                selected_limit=selected_limit,
+                filters=filters,
+                page=page,
+                overlay=overlay,
+                current_cycle_id=None,
+                source_scope_hash=None,
+                codec=codec,
+            )
+
+        expected_scope_hash = None
+        if safe_scope is not None:
+            expected_scope_hash = canonical_scope(
+                "client", site_id, tuple(safe_scope["ssids"])
+            )[1]
+        if (
+            getattr(context, "site_id", None) != site_id
+            or getattr(context, "evaluated_at_utc", None) != evaluated
+            or getattr(context, "overlay_mode", None) not in {"trusted", "unknown"}
+        ):
+            raise AdminQueryIntegrityUnavailable()
+        if context.overlay_mode == "trusted":
+            if (
+                safe_scope is None
+                or not isinstance(getattr(context, "current_cycle_id", None), str)
+                or not context.current_cycle_id
+                or getattr(context, "source_scope_hash", None)
+                != expected_scope_hash
+            ):
+                raise AdminQueryIntegrityUnavailable()
+            overlay = self._device_list_context_trusted_overlay(
+                site_id=site_id,
+                evaluated_at_utc=evaluated,
+                scope=safe_scope,
+                snapshot=context.snapshot,
+                current_cycle_id=context.current_cycle_id,
+                source_scope_hash=context.source_scope_hash,
+            )
+        elif (
+            getattr(context, "current_cycle_id", None) is not None
+            or getattr(context, "source_scope_hash", None) is not None
+        ):
+            raise AdminQueryIntegrityUnavailable()
+        else:
+            overlay = self._device_list_context_overlay(
+                site_id=site_id,
+                overlay_mode=context.overlay_mode,
+                source_execution_status="available",
+                evaluated_at_utc=context.evaluated_at_utc,
+                scope=safe_scope,
+                snapshot=context.snapshot,
+            )
+        if context.overlay_mode == "unknown":
+            page = self._devices.list_devices_context(
+                site_id=site_id,
+                limit=selected_limit,
+                deadline=deadline,
+                overlay_mode="unknown",
+                current_cycle_id=None,
+                source_scope_hash=None,
+                cursor=None,
+                canonical_mac=selected_mac,
+            )
+            return self._device_list_context_page(
+                site_id=site_id,
+                selected_limit=selected_limit,
+                filters=filters,
+                page=page,
+                overlay=overlay,
+                current_cycle_id=None,
+                source_scope_hash=None,
+                codec=codec,
+            )
+        try:
+            page = self._devices.list_devices_context(
+                site_id=site_id,
+                limit=selected_limit,
+                deadline=deadline,
+                overlay_mode="trusted",
+                current_cycle_id=context.current_cycle_id,
+                source_scope_hash=context.source_scope_hash,
+                cursor=None,
+                canonical_mac=selected_mac,
+            )
+        except AdminDeviceIntegrityError:
+            raise
+        except (AdminDeviceContextExpired, AdminDeviceSourceError):
+            deadline.require_remaining()
+            overlay = self._device_list_context_overlay(
+                site_id=site_id,
+                overlay_mode="unknown",
+                source_execution_status="unavailable",
+                evaluated_at_utc=evaluated,
+                scope=safe_scope,
+                snapshot=None,
+            )
+            page = self._devices.list_devices_context(
+                site_id=site_id,
+                limit=selected_limit,
+                deadline=deadline,
+                overlay_mode="unknown",
+                current_cycle_id=None,
+                source_scope_hash=None,
+                cursor=None,
+                canonical_mac=selected_mac,
+            )
+            return self._device_list_context_page(
+                site_id=site_id,
+                selected_limit=selected_limit,
+                filters=filters,
+                page=page,
+                overlay=overlay,
+                current_cycle_id=None,
+                source_scope_hash=None,
+                codec=codec,
+            )
+        return self._device_list_context_page(
+            site_id=site_id,
+            selected_limit=selected_limit,
+            filters=filters,
+            page=page,
+            overlay=overlay,
+            current_cycle_id=context.current_cycle_id,
+            source_scope_hash=context.source_scope_hash,
+            codec=codec,
+        )
+
+    def _device_list_context_continuation(
+        self,
+        *,
+        deadline,
+        site_id,
+        selected_limit,
+        selected_mac,
+        filters,
+        decoded,
+        codec,
+    ):
+        overlay = {
+            "overlay_mode": decoded.overlay_mode,
+            "ordering_applied": decoded.overlay_mode == "trusted",
+            "source_execution_status": decoded.source_execution_status,
+            "evaluated_at_utc": decoded.evaluated_at_utc,
+            "scope": decoded.scope,
+            "snapshot": decoded.snapshot,
+        }
+        cursor_key = (
+            decoded.last_online_rank,
+            decoded.last_site_last_seen_at,
+            decoded.last_device_id,
+        )
+        if decoded.overlay_mode == "unknown":
+            page = self._devices.list_devices_context(
+                site_id=site_id,
+                limit=selected_limit,
+                deadline=deadline,
+                overlay_mode="unknown",
+                current_cycle_id=None,
+                source_scope_hash=None,
+                cursor=cursor_key,
+                canonical_mac=selected_mac,
+            )
+        else:
+            source = self._current_state
+            method = getattr(source, "get_current_client_inventory_context", None)
+            if source is None or not callable(method):
+                raise AdminQueryUnavailable()
+            try:
+                deadline.require_remaining()
+                context = method(
+                    site_id,
+                    evaluated_at_utc=decoded.evaluated_at_utc,
+                    current_cycle_id=decoded.current_cycle_id,
+                    expected_source_scope_hash=decoded.source_scope_hash,
+                )
+                deadline.require_remaining()
+            except CurrentClientInventoryContextExpired as exc:
+                raise AdminQueryCursorExpired() from exc
+            except AnalyticsQueryDeadlineExceeded:
+                raise
+            except (
+                CurrentStateStorageError,
+                CurrentStateSchemaError,
+                sqlite3.Error,
+                OSError,
+            ) as exc:
+                raise AdminQueryUnavailable() from exc
+            except CurrentStateValidationError as exc:
+                raise AdminQueryIntegrityUnavailable() from exc
+            if (
+                getattr(context, "overlay_mode", None) != "trusted"
+                or getattr(context, "site_id", None) != site_id
+                or getattr(context, "evaluated_at_utc", None)
+                != decoded.evaluated_at_utc
+                or getattr(context, "current_cycle_id", None)
+                != decoded.current_cycle_id
+                or getattr(context, "source_scope_hash", None)
+                != decoded.source_scope_hash
+            ):
+                raise AdminQueryIntegrityUnavailable()
+            self._device_list_context_trusted_overlay(
+                site_id=site_id,
+                evaluated_at_utc=decoded.evaluated_at_utc,
+                scope=decoded.scope,
+                snapshot=context.snapshot,
+                current_cycle_id=decoded.current_cycle_id,
+                source_scope_hash=decoded.source_scope_hash,
+            )
+            try:
+                page = self._devices.list_devices_context(
+                    site_id=site_id,
+                    limit=selected_limit,
+                    deadline=deadline,
+                    overlay_mode="trusted",
+                    current_cycle_id=decoded.current_cycle_id,
+                    source_scope_hash=decoded.source_scope_hash,
+                    cursor=cursor_key,
+                    canonical_mac=selected_mac,
+                )
+            except AdminDeviceContextExpired as exc:
+                raise AdminQueryCursorExpired() from exc
+        return self._device_list_context_page(
+            site_id=site_id,
+            selected_limit=selected_limit,
+            filters=filters,
+            page=page,
+            overlay=overlay,
+            current_cycle_id=decoded.current_cycle_id,
+            source_scope_hash=decoded.source_scope_hash,
+            codec=codec,
+        )
+
+    def _device_list_context_trusted_overlay(
+        self,
+        *,
+        site_id,
+        evaluated_at_utc,
+        scope,
+        snapshot,
+        current_cycle_id,
+        source_scope_hash,
+    ):
+        snapshot_scope = getattr(snapshot, "source_scope", None)
+        if (
+            getattr(snapshot, "site_id", None) != site_id
+            or getattr(snapshot, "kind", None) != "client"
+            or getattr(snapshot, "evaluated_at", None) != evaluated_at_utc
+            or getattr(snapshot, "cycle_id", None) != current_cycle_id
+            or getattr(snapshot, "source_scope_hash", None) != source_scope_hash
+            or getattr(snapshot, "source_scope_version", None) != 1
+            or getattr(snapshot, "complete", None) is not True
+            or getattr(snapshot, "freshness_status", None) != "fresh"
+            or getattr(snapshot, "freshness_reason", None)
+            != "within_freshness_window"
+            or not isinstance(snapshot_scope, Mapping)
+            or not isinstance(scope, Mapping)
+            or dict(snapshot_scope) != dict(scope)
+        ):
+            raise AdminQueryIntegrityUnavailable()
+        return self._device_list_context_overlay(
+            site_id=site_id,
+            overlay_mode="trusted",
+            source_execution_status="available",
+            evaluated_at_utc=evaluated_at_utc,
+            scope=scope,
+            snapshot=snapshot,
+        )
+
+    @staticmethod
+    def _device_list_context_overlay(**kwargs):
+        try:
+            return serialize_device_list_context_overlay(**kwargs)
+        except DeviceListContextSerializationError as exc:
+            raise AdminQueryIntegrityUnavailable() from exc
+
+    def _device_list_context_page(
+        self,
+        *,
+        site_id,
+        selected_limit,
+        filters,
+        page,
+        overlay,
+        current_cycle_id,
+        source_scope_hash,
+        codec,
+    ):
+        try:
+            result = serialize_device_list_context(
+                site_id=site_id, items=page.items, overlay=overlay
+            )
+        except DeviceListContextSerializationError as exc:
+            raise AdminQueryIntegrityUnavailable() from exc
+        next_cursor = None
+        if page.has_more:
+            if not page.items:
+                raise AdminQueryIntegrityUnavailable()
+            last = page.items[-1]
+            value = DeviceListContextCursor(
+                version=1,
+                kind="devices_context",
+                site_id=site_id,
+                filter_fingerprint=filter_fingerprint(filters),
+                ordering_contract_version=1,
+                overlay_mode=overlay["overlay_mode"],
+                evaluated_at_utc=overlay["evaluated_at_utc"],
+                source_execution_status=overlay["source_execution_status"],
+                scope=overlay["scope"],
+                snapshot=overlay["snapshot"],
+                current_cycle_id=current_cycle_id,
+                source_scope_hash=source_scope_hash,
+                last_online_rank=last.online_rank,
+                last_site_last_seen_at=last.site_last_seen_at,
+                last_device_id=last.device_id,
+            )
+            try:
+                next_cursor = codec.encode(value)
+            except DeviceListContextCursorError as exc:
+                raise AdminQueryUnavailable() from exc
+        return AdminQueryResponse(
+            result=result,
+            page={"limit": selected_limit, "next_cursor": next_cursor},
+        )
+
+    def _device_list_context_safe_scope(self, site_id):
+        try:
+            config = getattr(self._current_state, "config", None)
+            ssids = getattr(config, "client_ssids", None)
+            if (
+                not isinstance(ssids, (tuple, list))
+                or not ssids
+                or any(not isinstance(value, str) or not value for value in ssids)
+            ):
+                return None
+            scope_json, _scope_hash = canonical_scope(
+                "client", site_id, tuple(ssids)
+            )
+            scope = json.loads(scope_json)
+            return scope if isinstance(scope, dict) else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def device_detail(self, principal, site_id, device_id):
         self._authorize(principal, "admin.read.device", site_id)

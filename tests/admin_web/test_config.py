@@ -6,6 +6,11 @@ import pytest
 from werkzeug.security import generate_password_hash
 
 from app.admin_web.config import AdminWebConfigError, admin_web_config_from_settings
+from app.admin_web.device_list_context_config import (
+    DeviceListContextConfigError,
+    device_list_context_config_from_settings,
+)
+from app.settings import get_settings
 
 from .conftest import SITE_ID, enabled_settings
 
@@ -119,3 +124,58 @@ def test_config_repr_redacts_username_and_hash():
     assert config.username not in rendered
     assert config.password_hash not in rendered
     assert rendered.count("[REDACTED]") == 2
+
+
+def test_device_list_context_admin_flag_defaults_false_and_requires_admin():
+    disabled = admin_web_config_from_settings({"web_admin_enabled": "false"})
+    assert disabled.device_list_context_enabled is False
+    with pytest.raises(AdminWebConfigError):
+        admin_web_config_from_settings({
+            "web_admin_enabled": "false",
+            "web_admin_device_list_context_enabled": "true",
+        })
+
+
+def test_device_list_context_settings_surface_contains_flag_and_secret():
+    settings = get_settings()
+    assert "web_admin_device_list_context_enabled" in settings
+    assert "web_admin_device_list_context_cursor_secret" in settings
+
+
+def test_device_list_context_feature_off_does_not_validate_secret():
+    admin = admin_web_config_from_settings(enabled_settings())
+    value = device_list_context_config_from_settings(
+        {"web_admin_device_list_context_cursor_secret": "not-a-secret"},
+        admin_config=admin,
+    )
+    assert value.enabled is False
+    assert value.cursor_secret == b""
+
+
+def test_device_list_context_accepts_exact_lower_hex_secret_and_redacts_repr():
+    secret = "ab" * 32
+    admin = admin_web_config_from_settings(enabled_settings(
+        web_admin_device_list_context_enabled="true"
+    ))
+    value = device_list_context_config_from_settings(
+        {"web_admin_device_list_context_cursor_secret": secret},
+        admin_config=admin,
+    )
+    assert value.cursor_secret == bytes.fromhex(secret)
+    assert secret not in repr(value)
+    assert value.cursor_secret.hex() not in repr(value)
+
+
+@pytest.mark.parametrize(
+    "secret",
+    ["", "a" * 63, "a" * 65, "A" * 64, "g" * 64],
+)
+def test_device_list_context_rejects_invalid_enabled_secret(secret):
+    admin = admin_web_config_from_settings(enabled_settings(
+        web_admin_device_list_context_enabled="true"
+    ))
+    with pytest.raises(DeviceListContextConfigError):
+        device_list_context_config_from_settings(
+            {"web_admin_device_list_context_cursor_secret": secret},
+            admin_config=admin,
+        )

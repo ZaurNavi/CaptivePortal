@@ -26,6 +26,12 @@ from .home_ap_24h_config import (
     HomeAp24ConfigError,
     home_ap_24h_config_from_settings,
 )
+from .device_list_context_config import (
+    DeviceListContextConfig,
+    DeviceListContextConfigError,
+    device_list_context_config_from_settings,
+)
+from .device_list_context_cursor import DeviceListContextCursorCodec
 
 
 @dataclass(slots=True)
@@ -39,6 +45,9 @@ class AdminWebRuntime:
     site_resolver: AdminSiteContextResolver | None = None
     query_service: Any | None = None
     query_execution_controls: Any | None = None
+    device_list_context_config: DeviceListContextConfig | None = None
+    device_list_context_state: str = "disabled"
+    device_list_context_cursor_codec: Any | None = None
     home_activity_config: HomeActivityConfig | None = None
     home_activity_state: str = "disabled"
     home_health_config: HomeHealthConfig | None = None
@@ -85,8 +94,39 @@ def create_admin_web_runtime(
     except AdminWebConfigError:
         logger.exception("admin.runtime_configuration_failed")
         return AdminWebRuntime(state="unavailable")
+    try:
+        device_list_context_config = device_list_context_config_from_settings(
+            settings,
+            admin_config=config,
+        )
+        if device_list_context_config.enabled:
+            device_list_context_cursor_codec = DeviceListContextCursorCodec(
+                secret_key=device_list_context_config.cursor_secret,
+                maximum_length=config.max_cursor_chars,
+            )
+            device_list_context_state = "active"
+        else:
+            device_list_context_cursor_codec = None
+            device_list_context_state = "disabled"
+    except DeviceListContextConfigError:
+        device_list_context_config = None
+        device_list_context_cursor_codec = None
+        device_list_context_state = "unavailable"
+        logger.error(
+            "admin.device_list_context_configuration_failed",
+            extra={
+                "event": "admin.device_list_context_configuration_failed",
+                "failure_category": "configuration_error",
+            },
+        )
     if not config.enabled:
-        return AdminWebRuntime(state="disabled", config=config)
+        return AdminWebRuntime(
+            state="disabled",
+            config=config,
+            device_list_context_config=device_list_context_config,
+            device_list_context_state=device_list_context_state,
+            device_list_context_cursor_codec=device_list_context_cursor_codec,
+        )
 
     sessions = AdminSessionStore(
         max_sessions=config.max_sessions,
@@ -294,6 +334,29 @@ def create_admin_web_runtime(
         else None
     )
     query_service = None
+    current_state_db_path = None
+    if config.device_list_context_enabled:
+        current_repository = getattr(
+            current_state_read_service,
+            "repository",
+            None,
+        )
+        current_state_db_path = getattr(
+            current_repository,
+            "db_path",
+            None,
+        )
+        if current_state_db_path is None:
+            current_config = getattr(
+                current_state_read_service,
+                "config",
+                None,
+            )
+            current_state_db_path = getattr(
+                current_config,
+                "db_path",
+                None,
+            )
     if getattr(analytics_runtime, "state", None) == "active" and source_ready:
         query_service = _query_service(
             config,
@@ -307,6 +370,9 @@ def create_admin_web_runtime(
             online_guests_service,
             completed_sessions_service,
             execution_controls,
+            device_list_context_state,
+            device_list_context_cursor_codec,
+            current_state_db_path,
         )
     evidence_state = "active" if config.traffic_evidence_enabled else "disabled"
     evidence_aggregator = None
@@ -343,6 +409,9 @@ def create_admin_web_runtime(
         ),
         query_service=query_service,
         query_execution_controls=execution_controls,
+        device_list_context_config=device_list_context_config,
+        device_list_context_state=device_list_context_state,
+        device_list_context_cursor_codec=device_list_context_cursor_codec,
         home_activity_config=activity_config,
         home_activity_state=activity_state,
         home_health_config=health_config,
@@ -377,6 +446,9 @@ def _query_service(
     online_guests_service: Any | None = None,
     completed_sessions_service: Any | None = None,
     execution_controls: Any | None = None,
+    device_list_context_state: str = "disabled",
+    device_list_context_cursor_codec: Any | None = None,
+    current_state_db_path: Any | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
     try:
@@ -395,6 +467,7 @@ def _query_service(
             device_gateway=AdminDeviceReadGateway(
                 registry_repository.config.db_path,
                 visit_repository.db_path,
+                current_state_db_path,
             ),
             read_gateway=AdminSqlReadGateway(
                 visit_repository.db_path,
@@ -418,6 +491,10 @@ def _query_service(
                 completed_sessions_service
             ),
             execution_controls=execution_controls,
+            device_list_context_state=device_list_context_state,
+            device_list_context_cursor_codec=(
+                device_list_context_cursor_codec
+            ),
         )
     except (AttributeError, TypeError):
         return None

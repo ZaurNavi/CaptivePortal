@@ -43,6 +43,10 @@ class CurrentGuestRateCursorExpired(CurrentStateValidationError):
     """A pinned Current Guest Traffic cycle was removed by retention."""
 
 
+class CurrentClientInventoryContextExpired(CurrentStateValidationError):
+    """A server-issued Device-list Current context is no longer available."""
+
+
 @dataclass(frozen=True, slots=True)
 class CurrentGuestRateEvidence:
     """Bounded raw Current State evidence captured in one read transaction."""
@@ -66,6 +70,16 @@ class CurrentClientLookup:
 
     snapshot: CurrentSnapshotMeta
     client: CurrentClientState | None
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentClientInventoryContext:
+    site_id: str
+    evaluated_at_utc: str
+    overlay_mode: str
+    snapshot: CurrentSnapshotMeta
+    current_cycle_id: str | None
+    source_scope_hash: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +174,96 @@ class CurrentStateReadService:
                 (selected["cycle_id"], mac, site),
             ).fetchone()
         return CurrentClientLookup(snapshot, _client(row) if row is not None else None)
+
+    def get_current_client_inventory_context(
+        self,
+        site_id: str,
+        *,
+        evaluated_at_utc: datetime | str | None = None,
+        current_cycle_id: str | None = None,
+        expected_source_scope_hash: str | None = None,
+    ) -> CurrentClientInventoryContext:
+        """Resolve or revalidate one immutable client-inventory overlay context."""
+
+        site = require_site_id(site_id)
+        pinned = current_cycle_id is not None or expected_source_scope_hash is not None
+        if (current_cycle_id is None) != (expected_source_scope_hash is None):
+            raise CurrentStateValidationError("pinned inventory context is incomplete")
+        if site not in self.config.site_ids:
+            if pinned:
+                raise CurrentClientInventoryContextExpired(
+                    "device current context expired"
+                )
+            raise CurrentStateValidationError("site_id is not configured")
+        cycle_id = None
+        expected_hash = None
+        if pinned:
+            cycle_id = require_cycle_id(current_cycle_id)
+            if (
+                not isinstance(expected_source_scope_hash, str)
+                or SCOPE_HASH_PATTERN.fullmatch(expected_source_scope_hash) is None
+            ):
+                raise CurrentStateValidationError("source scope hash is invalid")
+            expected_hash = expected_source_scope_hash
+        evaluated = _evaluated(evaluated_at_utc)
+        scope_json, scope_hash = canonical_scope(
+            "client", site, self.config.client_ssids
+        )
+        if pinned and expected_hash != scope_hash:
+            raise CurrentClientInventoryContextExpired(
+                "device current context expired"
+            )
+        with self.repository.read_connection() as connection:
+            connection.execute("BEGIN")
+            attempt, latest_complete, partial = _cycle_selection(
+                connection, site, "client", source_scope_hash=scope_hash,
+            )
+            selected = latest_complete
+            if pinned:
+                selected = connection.execute(
+                    """
+                    SELECT * FROM current_state_cycles
+                    WHERE cycle_id=? AND site_id=? AND kind='client'
+                      AND result='success' AND complete=1
+                      AND source_scope_hash=?
+                    """,
+                    (cycle_id, site, scope_hash),
+                ).fetchone()
+                if selected is None:
+                    raise CurrentClientInventoryContextExpired(
+                        "device current context expired"
+                    )
+            snapshot = self._meta(
+                site, "client", evaluated, attempt, selected, partial
+            )
+            trusted_scope = (
+                snapshot.source_scope == json.loads(scope_json)
+                and snapshot.source_scope_hash == scope_hash
+                and snapshot.source_scope_version == 1
+            )
+            trusted = (
+                selected is not None
+                and snapshot.complete
+                and snapshot.freshness_status == "fresh"
+                and trusted_scope
+            )
+            if snapshot.freshness_status == "fresh" and not trusted_scope:
+                snapshot = _meta_from_row(
+                    site, "client", evaluated, selected, attempt, partial,
+                    snapshot.age_seconds, "unavailable", "invalid_source_scope",
+                )
+            if pinned and not trusted:
+                raise CurrentClientInventoryContextExpired(
+                    "device current context expired"
+                )
+        return CurrentClientInventoryContext(
+            site_id=site,
+            evaluated_at_utc=evaluated,
+            overlay_mode="trusted" if trusted else "unknown",
+            snapshot=snapshot,
+            current_cycle_id=str(selected["cycle_id"]) if trusted else None,
+            source_scope_hash=scope_hash if trusted else None,
+        )
 
     def read_current_guest_rate_client_evidence(
         self,
