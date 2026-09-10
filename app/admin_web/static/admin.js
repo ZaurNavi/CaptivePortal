@@ -34,6 +34,62 @@
     return String(value);
   }
 
+  function compactDecimal(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    return String(Number(value.toFixed(2)));
+  }
+
+  function formatDeviceBytes(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return display(value);
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let scaled = value;
+    let unit = 0;
+    while (scaled >= 1024 && unit < units.length - 1) {
+      scaled /= 1024;
+      unit += 1;
+    }
+    return `${compactDecimal(scaled)} ${units[unit]}`;
+  }
+
+  function formatDeviceDurationSeconds(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return display(value);
+    if (value === 0) return "0 sec";
+    if (value < 60) return `${compactDecimal(value)} sec`;
+    let remaining = Math.floor(value);
+    const units = [["d", 86400], ["h", 3600], ["min", 60], ["sec", 1]];
+    const parts = [];
+    for (const [label, seconds] of units) {
+      const amount = Math.floor(remaining / seconds);
+      if (amount > 0) {
+        parts.push(`${amount} ${label}`);
+        remaining %= seconds;
+      }
+      if (parts.length === 2) break;
+    }
+    return parts.length ? parts.join(" ") : "0 sec";
+  }
+
+  function formatDeviceRateMbps(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return display(value);
+    if (value === 0) return "0 Mbps";
+    if (value < 1) return `${compactDecimal(value * 1000)} Kbps`;
+    if (value >= 1000) return `${compactDecimal(value / 1000)} Gbps`;
+    return `${compactDecimal(value)} Mbps`;
+  }
+
+  function deviceDetailEntries(value) {
+    return Object.entries(value || {}).map(([key, field]) => {
+      if (key === "traffic_down") return ["Traffic down", formatDeviceBytes(field)];
+      if (key === "traffic_up") return ["Traffic up", formatDeviceBytes(field)];
+      if (key === "traffic_total") return ["Traffic total", formatDeviceBytes(field)];
+      if (key === "uptime") return ["Uptime", formatDeviceDurationSeconds(field)];
+      return [key.replaceAll("_", " "), field];
+    });
+  }
+
   function localDatetimeValue(value) {
     const pad = (part) => String(part).padStart(2, "0");
     return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`
@@ -283,18 +339,49 @@
     return run(() => loadLegacyHomeWithHealth(manual)).finally(scheduleLegacyHome);
   }
 
-  function deviceCard(item) {
-    const value = card("Device", [
-      ["MAC", item.canonical_mac], ["Type", item.device_type],
-      ["First seen", item.site_first_seen_at], ["Last seen", item.site_last_seen_at],
-      ["Snapshots", item.site_snapshot_count], ["Visits", item.site_visit_count],
-      ["Last SSID", item.last_site_ssid], ["Last AP", item.last_site_ap_mac],
-    ], false);
-    if (typeof item.device_id === "string" && UUID_PATTERN.test(item.device_id)) {
-      const link = node("a", "card-link", "Open device card");
-      link.href = `/admin/sites/${context.siteId}/devices/${encodeURIComponent(item.device_id)}`;
-      value.prepend(link);
+  function deviceRow(item) {
+    const validId = typeof item.device_id === "string" && UUID_PATTERN.test(item.device_id);
+    const value = node(validId ? "a" : "article", "device-row");
+    if (validId) {
+      value.href = `/admin/sites/${context.siteId}/devices/${encodeURIComponent(item.device_id)}`;
+      value.setAttribute("aria-label", `Open device ${display(item.canonical_mac)}`);
     }
+
+    const presence = ["online", "offline", "unknown"].includes(item.current_presence) ? item.current_presence : "unknown";
+    const status = node("span", "device-status", presence === "online" ? "Online" : presence === "offline" ? "Offline" : "Unknown");
+    status.dataset.status = presence;
+    status.setAttribute("aria-label", `Current status ${status.textContent}`);
+    status.prepend(node("span", "device-status-dot"));
+
+    const main = node("span", "device-row-main");
+    main.append(
+      node("strong", "device-row-mac mono", item.canonical_mac),
+      node("span", "device-row-hostname", item.hostname)
+    );
+
+    const type = node("span", "device-row-field device-row-type-field");
+    type.append(node("span", "device-row-label", "Type"), node("span", "device-row-value", item.device_type));
+
+    const lastSeen = node("span", "device-row-field device-row-activity");
+    lastSeen.append(
+      node("span", "device-row-label", "Last seen"),
+      node("span", "device-row-value", item.site_last_seen_at)
+    );
+
+    const network = node("span", "device-row-field device-row-network");
+    network.append(
+      node("span", "device-row-label", "Last SSID"),
+      node("span", "device-row-value", item.last_site_ssid)
+    );
+
+    const stats = node("span", "device-row-stats");
+    [[item.site_visit_count, "Visits"], [item.site_snapshot_count, "Snapshots"]].forEach(([field, label]) => {
+      const stat = node("span", "device-row-stat");
+      stat.append(node("strong", null, field), node("span", null, label));
+      stats.append(stat);
+    });
+
+    value.append(status, main, type, lastSeen, network, stats, node("span", "device-row-chevron", "›"));
     return value;
   }
 
@@ -316,7 +403,12 @@
     const payload = await requestJson(`${context.apiBase}/devices?${parameters.toString()}`);
     const items = payload.result && Array.isArray(payload.result.items) ? payload.result.items : null;
     if (!items) throw {uiFailure: classifyHttp(500, null, null)};
-    items.forEach((item) => content.append(deviceCard(item)));
+    let list = content.querySelector(".device-list");
+    if (!list) {
+      list = node("div", "device-list");
+      content.append(list);
+    }
+    items.forEach((item) => list.append(deviceRow(item)));
     context.cursor = payload.page && typeof payload.page.next_cursor === "string" ? payload.page.next_cursor : null;
     pagination.hidden = !context.cursor;
     setState(items.length || append ? "ready" : "empty", items.length || append ? "Up to date" : "No devices", items.length || append ? "Site-scoped device evidence loaded." : "No device matches the current Site and filter.", true);
@@ -364,8 +456,8 @@
       ["First seen", identity.site_first_seen_at], ["Last seen", identity.site_last_seen_at],
       ["Snapshot count", identity.site_snapshot_count], ["Visit count", identity.site_visit_count],
     ]));
-    content.append(card("Latest Site snapshot", Object.entries(result.latest_snapshot || {}).map(([key, value]) => [key.replaceAll("_", " "), value])));
-    content.append(card("Latest client observation", Object.entries(result.latest_client_observation || {}).map(([key, value]) => [key.replaceAll("_", " "), value])));
+    content.append(card("Latest Site snapshot", deviceDetailEntries(result.latest_snapshot)));
+    content.append(card("Latest client observation", deviceDetailEntries(result.latest_client_observation)));
     const visits = Array.isArray(result.recent_visits) ? result.recent_visits : [];
     const list = node("div", "row-list");
     visits.forEach((item) => list.append(visitRow(item)));
@@ -569,22 +661,22 @@
         ["SNR", client && client.snr],
       ]),
       card("Controller", [
-        ["Uptime", client && client.controller_uptime],
-        ["Download bytes", client && client.controller_traffic_down_bytes],
-        ["Upload bytes", client && client.controller_traffic_up_bytes],
-        ["Total bytes", client && client.controller_traffic_total_bytes],
+        ["Uptime", formatDeviceDurationSeconds(client && client.controller_uptime)],
+        ["Download", formatDeviceBytes(client && client.controller_traffic_down_bytes)],
+        ["Upload", formatDeviceBytes(client && client.controller_traffic_up_bytes)],
+        ["Total", formatDeviceBytes(client && client.controller_traffic_total_bytes)],
       ]),
       card("Current Guest Traffic", [
         ["Applicability", traffic.applicability],
-        ["Download (Mbps)", trafficItem && trafficItem.download_mbps],
-        ["Upload (Mbps)", trafficItem && trafficItem.upload_mbps],
-        ["Total (Mbps)", trafficItem && trafficItem.total_mbps],
+        ["Download", formatDeviceRateMbps(trafficItem && trafficItem.download_mbps)],
+        ["Upload", formatDeviceRateMbps(trafficItem && trafficItem.upload_mbps)],
+        ["Total", formatDeviceRateMbps(trafficItem && trafficItem.total_mbps)],
         ["Rate evidence", traffic.rate_evidence_status],
         ["Failure", traffic.failure_reason],
       ]),
       card("Evidence / Freshness", [
         ["Evaluated", value.evaluated_at_utc], ["Observed", snapshot.observed_at],
-        ["Age (s)", snapshot.age_seconds], ["Freshness", snapshot.freshness_status],
+        ["Age", formatDeviceDurationSeconds(snapshot.age_seconds)], ["Freshness", snapshot.freshness_status],
         ["Freshness reason", snapshot.freshness_reason],
         ["Source health", traffic.source_health_status],
         ["Source reason", traffic.source_health_reason],

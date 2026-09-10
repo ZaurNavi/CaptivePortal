@@ -72,6 +72,101 @@ def test_concrete_read_boundaries_compose_admin_query_service(tmp_path):
     assert runtime.query_service is not None
 
 
+def test_device_list_context_runtime_disabled_has_no_codec(tmp_path):
+    registry, visits, observations, analytics = _device_list_context_sources(tmp_path)
+    runtime = create_admin_web_runtime(
+        enabled_settings(), analytics, registry, visits, observations,
+        logging.getLogger("admin-device-list-context-disabled"),
+    )
+    assert runtime.device_list_context_state == "disabled"
+    assert runtime.device_list_context_cursor_codec is None
+
+
+def test_device_list_context_runtime_active_constructs_codec_and_injects_path(tmp_path):
+    registry, visits, observations, analytics = _device_list_context_sources(tmp_path)
+    current_path = tmp_path / "current.sqlite3"
+    current = SimpleNamespace(
+        repository=SimpleNamespace(db_path=current_path),
+        config=SimpleNamespace(client_ssids=("Zefer_Parki",)),
+    )
+    runtime = create_admin_web_runtime(
+        enabled_settings(
+            web_admin_device_list_context_enabled="true",
+            web_admin_device_list_context_cursor_secret="ab" * 32,
+        ),
+        analytics, registry, visits, observations,
+        logging.getLogger("admin-device-list-context-active"),
+        current_state_read_service=current,
+    )
+    assert runtime.state == "active"
+    assert runtime.device_list_context_state == "active"
+    assert runtime.device_list_context_cursor_codec is not None
+    assert runtime.query_service._devices._current_state_path == current_path
+
+
+def test_device_list_context_invalid_secret_isolated_from_base_runtime(tmp_path, caplog):
+    registry, visits, observations, analytics = _device_list_context_sources(tmp_path)
+    with caplog.at_level(logging.ERROR):
+        runtime = create_admin_web_runtime(
+            enabled_settings(
+                web_admin_device_list_context_enabled="true",
+                web_admin_device_list_context_cursor_secret="secret-must-not-leak",
+            ),
+            analytics, registry, visits, observations,
+            logging.getLogger("admin-device-list-context-invalid"),
+        )
+    assert runtime.state == "active"
+    assert runtime.device_list_context_state == "unavailable"
+    assert runtime.device_list_context_cursor_codec is None
+    assert "secret-must-not-leak" not in caplog.text
+
+
+def test_device_list_context_feature_off_does_not_inspect_current_repository(tmp_path):
+    registry, visits, observations, analytics = _device_list_context_sources(tmp_path)
+
+    class Current:
+        @property
+        def repository(self):
+            raise AssertionError("Current repository must not be inspected")
+
+    runtime = create_admin_web_runtime(
+        enabled_settings(), analytics, registry, visits, observations,
+        logging.getLogger("admin-device-list-context-no-inspection"),
+        current_state_read_service=Current(),
+    )
+    assert runtime.state == "active"
+
+
+def test_device_list_context_feature_on_minimal_current_keeps_runtime_active(tmp_path):
+    registry, visits, observations, analytics = _device_list_context_sources(tmp_path)
+    runtime = create_admin_web_runtime(
+        enabled_settings(
+            web_admin_device_list_context_enabled="true",
+            web_admin_device_list_context_cursor_secret="ab" * 32,
+        ),
+        analytics, registry, visits, observations,
+        logging.getLogger("admin-device-list-context-minimal"),
+        current_state_read_service=object(),
+    )
+    assert runtime.state == "active"
+    assert runtime.device_list_context_state == "active"
+    assert runtime.query_service._devices._current_state_path is None
+
+
+def _device_list_context_sources(tmp_path):
+    registry = SimpleNamespace(repository=SimpleNamespace(
+        config=SimpleNamespace(db_path=tmp_path / "registry.sqlite3")
+    ))
+    visits = SimpleNamespace(repository=SimpleNamespace(
+        db_path=tmp_path / "visits.sqlite3"
+    ))
+    observations = SimpleNamespace(_repository=SimpleNamespace(
+        db_path=tmp_path / "observations.sqlite3"
+    ))
+    analytics = SimpleNamespace(state="active", visit_service=object())
+    return registry, visits, observations, analytics
+
+
 def test_device_current_composes_shared_guest_rate_service_without_traffic_ui(tmp_path):
     registry = SimpleNamespace(repository=SimpleNamespace(
         config=SimpleNamespace(db_path=str(tmp_path / "registry.sqlite3"))

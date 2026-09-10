@@ -133,7 +133,9 @@ from app.config import (
     WEB_ADMIN_MAX_NEXT_CHARS, WEB_ADMIN_MAX_CURSOR_CHARS,
     WEB_ADMIN_MAX_FILTER_CHARS, WEB_ADMIN_MAX_CONCURRENT_QUERIES,
     WEB_ADMIN_MAX_QUERY_DURATION_SECONDS, WEB_ADMIN_MAX_RESPONSE_BYTES,
-    WEB_ADMIN_DEVICE_PAGE_SIZE, WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED,
+    WEB_ADMIN_DEVICE_PAGE_SIZE, WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED,
+    WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET,
+    WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED,
     WEB_ADMIN_VISIT_PAGE_SIZE,
     WEB_ADMIN_OBSERVATION_PAGE_SIZE,
     WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS,
@@ -576,6 +578,12 @@ def get_settings() -> dict:
         ),
         "web_admin_max_response_bytes": WEB_ADMIN_MAX_RESPONSE_BYTES,
         "web_admin_device_page_size": WEB_ADMIN_DEVICE_PAGE_SIZE,
+        "web_admin_device_list_context_enabled": (
+            WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED
+        ),
+        "web_admin_device_list_context_cursor_secret": (
+            WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET
+        ),
         "web_admin_device_current_context_enabled": (
             WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED
         ),
