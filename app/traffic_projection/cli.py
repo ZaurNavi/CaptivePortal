@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import logging
+import signal
 
+from app.artifact_identity import (
+    ArtifactIdentityError,
+    capture_loaded_artifact_identity,
+)
 from app.settings import get_settings
 
 from .config import traffic_projection_config_from_settings
 from .models import PROJECTION_VERSION, validate_projection_version
 from .service import TrafficProjectionService, writer_lock
+from .telemetry import configure_traffic_projection_logger
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,12 +41,30 @@ def main(argv: list[str] | None = None) -> int:
     config = traffic_projection_config_from_settings(get_settings())
     if not config.enabled:
         parser.error("TRAFFIC_PROJECTION_ENABLED must be true")
+    logger = configure_traffic_projection_logger()
+    identity = None
+    if args.command in {"run", "repair-site"}:
+        service_name = (
+            "traffic-projection.service"
+            if args.command == "run"
+            else "traffic-projection-repair"
+        )
+        try:
+            identity = capture_loaded_artifact_identity(service_name)
+        except ArtifactIdentityError:
+            parser.exit(
+                status=1,
+                message="traffic-projection: loaded artifact identity unavailable\n",
+            )
     service = TrafficProjectionService(
         config,
-        logger=logging.getLogger(__name__),
+        logger=logger,
         projection_version=args.projection_version,
+        artifact_identity=identity,
     )
     if args.command == "run":
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: service.stop())
+        signal.signal(signal.SIGINT, lambda _signum, _frame: service.stop())
         service.serve_forever()
     else:
         with writer_lock(config.writer_lock_path):

@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.artifact_identity import LoadedArtifactIdentity
+import app.traffic_projection.service as projection_service_module
 from app.analytics.historical_traffic import HistoricalTrafficReadService
 from app.observations.repository import _schema_sql as observation_schema_sql
 from app.traffic_projection.config import traffic_projection_config_from_settings
@@ -17,7 +19,10 @@ from app.traffic_projection.models import (
     ProjectionRunResult,
     TrafficProjectionDiverged,
     TrafficProjectionConfigError,
+    TrafficProjectionSourceUnavailable,
     TrafficProjectionStorageCorrupt,
+    TrafficProjectionStorageUnavailable,
+    TrafficProjectionWriterUnavailable,
 )
 from app.traffic_projection.repository import (
     REQUIRED_TABLES,
@@ -37,6 +42,38 @@ from app.traffic_projection.source import (
 
 NOW = "2026-09-03T12:00:00.000Z"
 SITE = "site-a"
+IDENTITY = LoadedArtifactIdentity(
+    "a" * 40,
+    "b" * 40,
+    "traffic-projection.service",
+    "2026-09-11T12:00:00.000Z",
+)
+
+
+class _SynchronousObserver:
+    instances = []
+
+    def __init__(self, root_service, **_kwargs):
+        self.root_service = root_service
+        self.started = False
+        self.requested = False
+        self.stopped = False
+        self.__class__.instances.append(self)
+
+    def start(self, *, initial_services):
+        self.started = True
+        self.initial_services = tuple(initial_services)
+
+    def request_stop(self):
+        self.requested = True
+
+    def stop(self, _timeout):
+        self.requested = True
+        self.stopped = True
+        return True
+
+    def observe_service_site(self, *_args, **_kwargs):
+        return None
 
 
 def _observation_db(path):
@@ -519,7 +556,9 @@ def test_reconciliation_without_readable_source_head_never_completes_sweep(
     assert state["source_boundary_proof_head_cycle_id"] == "old-head"
 
 
-def test_serve_forever_always_scans_head_but_reconciles_only_when_due(tmp_path):
+def test_serve_forever_always_scans_head_but_reconciles_only_when_due(
+    tmp_path, monkeypatch
+):
     class OneIterationStop:
         stopped = False
 
@@ -536,7 +575,13 @@ def test_serve_forever_always_scans_head_but_reconciles_only_when_due(tmp_path):
             writer_lock_path=str(tmp_path / "projection.lock"),
             source_db_path=str(tmp_path / "observations.sqlite3"),
             site_ids=(SITE,),
-        )
+        ),
+        artifact_identity=IDENTITY,
+    )
+    monkeypatch.setattr(
+        projection_service_module,
+        "TrafficProjectionHealthObserver",
+        _SynchronousObserver,
     )
     calls: list[str] = []
     service._stop = OneIterationStop()  # type: ignore[assignment]
@@ -628,6 +673,8 @@ def test_site_repair_invalidates_old_proof_and_completes_full_reconcile(tmp_path
         return original(site_id, **kwargs)
 
     service.reconcile_site = inspecting_reconcile  # type: ignore[method-assign]
+    events = []
+    service.telemetry.emit = lambda event, **fields: events.append((event, fields))
     result = service.repair_site(SITE)
     assert result.sweep_completed is True
     assert proof_at_reconcile[0] == (None,) * 8
@@ -635,6 +682,9 @@ def test_site_repair_invalidates_old_proof_and_completes_full_reconcile(tmp_path
     assert state["status"] == "healthy"
     assert state["last_full_reconcile_completed_at"] == NOW
     assert state["last_deep_audit_at"] == NOW
+    recovered = [item for item in events if item[0] == "traffic_projection_recovered"]
+    assert len(recovered) == 1
+    assert recovered[0][1]["projection_revision"] == state["projection_revision"]
 
 
 def test_mark_ready_rejects_stale_health_text_without_current_proof(tmp_path):
@@ -680,9 +730,26 @@ def test_service_mark_ready_rechecks_current_retained_identity(tmp_path):
             (PROJECTION_VERSION, SITE),
         )
         writer.commit()
+    events = []
+    service.telemetry.emit = lambda event, **fields: events.append((event, fields))
     with pytest.raises(TrafficProjectionDiverged):
         service.mark_ready()
     assert repository.site_state(SITE)["status"] == "diverged"
+    identity_events = [
+        fields
+        for event, fields in events
+        if event == "traffic_projection_source_identity_failed"
+    ]
+    assert identity_events == [
+        {
+            "projection_version": PROJECTION_VERSION,
+            "site_id": SITE,
+            "error_category": "ready_source_identity",
+            "source_count": 1,
+            "projection_count": 0,
+            "count_delta": 1,
+        }
+    ]
 
 
 def test_disabled_runtime_does_not_create_projection_database(tmp_path):
@@ -811,7 +878,9 @@ def test_diverged_site_rejects_range_rebuild_without_changing_evidence(tmp_path)
     assert after["projection_revision"] == before["projection_revision"]
 
 
-def test_interrupted_site_repair_stays_rebuilding_and_resumes(tmp_path):
+def test_interrupted_site_repair_stays_rebuilding_and_resumes(
+    tmp_path, monkeypatch
+):
     observation_path = tmp_path / "observations.sqlite3"
     connection = _observation_db(observation_path)
     for cycle_id in ("cycle-a", "cycle-b", "cycle-c"):
@@ -827,6 +896,8 @@ def test_interrupted_site_repair_stays_rebuilding_and_resumes(tmp_path):
     service = TrafficProjectionService(
         config, repository=repository, clock=lambda: NOW
     )
+    first_events = []
+    service.telemetry.emit = lambda event, **fields: first_events.append((event, fields))
     service.run_once()
     repository.begin_site_repair(SITE)
     with repository.write_connection() as writer:
@@ -841,15 +912,29 @@ def test_interrupted_site_repair_stays_rebuilding_and_resumes(tmp_path):
     interrupted = repository.site_state(SITE)
     assert interrupted["status"] == "rebuilding"
     assert interrupted["reconcile_sweep_started_at"] is not None
+    assert all(event != "traffic_projection_recovered" for event, _ in first_events)
 
     resumed = TrafficProjectionService(
         config, repository=repository, clock=lambda: NOW
+    )
+    resumed_events = []
+    resumed.telemetry.emit = lambda event, **fields: resumed_events.append((event, fields))
+    monkeypatch.setattr(
+        repository,
+        "begin_site_repair",
+        lambda _site_id: pytest.fail(
+            "durable explicit repair lineage was incorrectly restarted"
+        ),
     )
     result = resumed.repair_site(SITE)
     while not result.sweep_completed:
         result = resumed.repair_site(SITE)
     assert result.sweep_completed is True
     assert repository.site_state(SITE)["status"] == "healthy"
+    assert sum(
+        event == "traffic_projection_recovered"
+        for event, _fields in resumed_events
+    ) == 1
 
 
 def test_bounded_site_repair_keeps_other_active_site_maintained(tmp_path):
@@ -1251,6 +1336,12 @@ def test_scheduler_runs_multiple_target_quanta_between_active_deadlines(
             site_ids=(SITE,),
         ),
         monotonic=clock,
+        artifact_identity=IDENTITY,
+    )
+    monkeypatch.setattr(
+        projection_service_module,
+        "TrafficProjectionHealthObserver",
+        _SynchronousObserver,
     )
     owner._stop = stop  # type: ignore[assignment]
     active = FakeVersion("version-a")
@@ -1686,6 +1777,764 @@ def test_cleanup_converges_in_bounded_restart_safe_chunks(tmp_path):
         assert read.execute(
             "SELECT COUNT(*) FROM traffic_projection_cycles"
         ).fetchone()[0] == 0
+
+
+class _CleanupRepository:
+    projection_version = PROJECTION_VERSION
+
+    def __init__(self, states, *, version_status="active"):
+        self.states = dict(states)
+        self._version_status = version_status
+        self.deletes = []
+        self.checkpoints = 0
+
+    def version_status(self):
+        if isinstance(self._version_status, BaseException):
+            raise self._version_status
+        return self._version_status
+
+    def site_state(self, site_id):
+        state = self.states[site_id]
+        if isinstance(state, BaseException):
+            raise state
+        return state
+
+    def delete_before(self, site_id, cutoff):
+        self.deletes.append((site_id, cutoff))
+        return 0
+
+    def checkpoint_passive(self):
+        self.checkpoints += 1
+
+
+def _cleanup_service(repository, *, sites=(SITE,)):
+    service = TrafficProjectionService(
+        TrafficProjectionConfig(
+            enabled=True,
+            db_path="projection.sqlite3",
+            writer_lock_path="projection.lock",
+            source_db_path="observations.sqlite3",
+            site_ids=sites,
+        ),
+        repository=repository,
+        clock=lambda: "2026-09-20T12:00:00.000Z",
+    )
+    events = []
+    service.telemetry.emit = lambda event, **fields: events.append((event, fields))
+    return service, events
+
+
+def _ordinary_cleanup_state(*, status="healthy"):
+    return {
+        "status": status,
+        "last_error_category": None,
+        "reconcile_sweep_started_at": None,
+        "reconcile_sweep_from_utc": None,
+        "reconcile_sweep_source_head_utc": None,
+        "reconcile_sweep_source_head_cycle_id": None,
+        "reconcile_cursor_started_at": None,
+        "reconcile_cursor_cycle_id": None,
+    }
+
+
+def _sweep_cleanup_state(*, status="catching_up"):
+    return {
+        **_ordinary_cleanup_state(status=status),
+        "reconcile_sweep_started_at": "2026-09-11T00:00:00.000Z",
+        "reconcile_sweep_from_utc": "2026-08-27T08:26:05.244Z",
+        "reconcile_sweep_source_head_utc": "2026-09-11T00:00:00.000Z",
+        "reconcile_sweep_source_head_cycle_id": "cycle-head",
+    }
+
+
+def test_cleanup_uses_durable_frozen_sweep_floor_not_moving_cutoff():
+    repository = _CleanupRepository({SITE: _sweep_cleanup_state()})
+    service, events = _cleanup_service(repository)
+
+    assert service.cleanup() == 0
+    assert repository.deletes == [(SITE, "2026-08-27T08:26:05.244Z")]
+    assert events == []
+
+
+def test_restart_cleanup_preserves_production_timing_topology_during_sweep(
+    tmp_path,
+):
+    observation_path = tmp_path / "observations.sqlite3"
+    connection = _observation_db(observation_path)
+    _insert_cycle(
+        connection,
+        "cycle-a",
+        started="2026-08-27T08:26:28.388Z",
+        finished="2026-08-27T08:26:29.388Z",
+    )
+    _insert_cycle(
+        connection,
+        "cycle-b",
+        started="2026-08-27T08:27:02.854Z",
+        finished="2026-08-27T08:27:03.854Z",
+    )
+    source = TrafficProjectionSource(str(observation_path))
+    repository = _repository(tmp_path)
+    with repository.write_connection() as writer:
+        writer.execute(
+            "UPDATE traffic_projection_versions SET status='active' "
+            "WHERE projection_version=?",
+            (PROJECTION_VERSION,),
+        )
+        writer.commit()
+    for cycle_id in ("cycle-a", "cycle-b"):
+        repository.upsert_cycle(source.cycle(SITE, cycle_id), NOW)
+    repository.update_site(
+        SITE,
+        status="catching_up",
+        reconcile_sweep_started_at="2026-09-11T00:00:00.000Z",
+        reconcile_sweep_from_utc="2026-08-27T08:26:05.244Z",
+        reconcile_sweep_source_head_utc="2026-08-27T08:27:02.854Z",
+        reconcile_sweep_source_head_cycle_id="cycle-b",
+    )
+    config = TrafficProjectionConfig(
+        enabled=True,
+        db_path=str(tmp_path / "projection.sqlite3"),
+        writer_lock_path=str(tmp_path / "projection.lock"),
+        source_db_path=str(observation_path),
+        site_ids=(SITE,),
+    )
+
+    # A new process has no in-memory cleanup grace; its first due cleanup must
+    # recover the durable lower fence from the unfinished sweep.
+    resumed = TrafficProjectionService(
+        config,
+        repository=repository,
+        source=source,
+        clock=lambda: "2026-09-20T12:00:00.000Z",
+    )
+    assert resumed._last_cleanup == 0.0
+    assert resumed.cleanup() == 0
+    assert repository.cycle_count(
+        SITE,
+        from_utc="2026-08-27T08:26:05.244Z",
+        through=("2026-08-27T08:27:02.854Z", "cycle-b"),
+    ) == 2
+    assert source.cycle_count(
+        SITE,
+        from_utc="2026-08-27T08:26:05.244Z",
+        through=("2026-08-27T08:27:02.854Z", "cycle-b"),
+    ) == 2
+    result = resumed.reconcile_site(SITE)
+    while not result.sweep_completed:
+        result = resumed.reconcile_site(SITE)
+    with source.connection() as source_read:
+        source_ids = {
+            row[0]
+            for row in source_read.execute(
+                "SELECT cycle_id FROM observation_cycles "
+                "WHERE site_id=? AND kind='ap_dynamic' "
+                "AND started_at>=? AND started_at<=?",
+                (
+                    SITE,
+                    "2026-08-27T08:26:05.244Z",
+                    "2026-08-27T08:27:02.854Z",
+                ),
+            )
+        }
+    with repository.read_connection() as projected_read:
+        projection_ids = {
+            row[0]
+            for row in projected_read.execute(
+                "SELECT cycle_id FROM traffic_projection_cycles "
+                "WHERE projection_version=? AND site_id=? "
+                "AND source_started_at>=? AND source_started_at<=?",
+                (
+                    PROJECTION_VERSION,
+                    SITE,
+                    "2026-08-27T08:26:05.244Z",
+                    "2026-08-27T08:27:02.854Z",
+                ),
+            )
+        }
+    assert source_ids - projection_ids == set()
+    assert projection_ids - source_ids == set()
+    assert repository.site_state(SITE)["status"] != "diverged"
+
+
+def test_restart_service_b_due_cleanup_uses_service_a_unfinished_sweep(
+    tmp_path, monkeypatch
+):
+    observation_path = tmp_path / "observations.sqlite3"
+    connection = _observation_db(observation_path)
+    _insert_cycle(connection, "cycle-a")
+    _insert_cycle(
+        connection,
+        "cycle-b",
+        started="2026-09-03T11:59:01.000Z",
+        finished="2026-09-03T11:59:02.000Z",
+    )
+    source = TrafficProjectionSource(str(observation_path))
+    repository = _repository(tmp_path)
+    with repository.write_connection() as writer:
+        writer.execute(
+            "UPDATE traffic_projection_versions SET status='active' "
+            "WHERE projection_version=?",
+            (PROJECTION_VERSION,),
+        )
+        writer.commit()
+    config = TrafficProjectionConfig(
+        enabled=True,
+        db_path=str(tmp_path / "projection.sqlite3"),
+        writer_lock_path=str(tmp_path / "projection.lock"),
+        source_db_path=str(observation_path),
+        site_ids=(SITE,),
+    )
+    service_a = TrafficProjectionService(
+        config, repository=repository, source=source, clock=lambda: NOW
+    )
+    service_a.incremental_site(SITE)
+    first = service_a.reconcile_site(SITE, limit=1)
+    assert first.sweep_completed is False
+    assert repository.site_state(SITE)["reconcile_sweep_started_at"] is not None
+
+    service_b = TrafficProjectionService(
+        config,
+        repository=repository,
+        source=source,
+        clock=lambda: "2026-09-20T12:00:00.000Z",
+        monotonic=lambda: 90_000.0,
+    )
+    monkeypatch.setattr(service_b, "_owned_worker_services", lambda: (service_b,))
+    assert service_b._last_cleanup == 0.0
+    service_b._cleanup_if_due()
+    assert repository.cycle_count(
+        SITE,
+        from_utc="2026-08-20T11:59:01.000Z",
+        through=("2026-09-03T11:59:01.000Z", "cycle-b"),
+    ) == 2
+    assert repository.site_state(SITE)["status"] != "diverged"
+
+
+def test_actual_worker_due_cleanup_is_fenced_between_reconcile_quanta(
+    tmp_path, monkeypatch
+):
+    observation_path = tmp_path / "observations.sqlite3"
+    connection = _observation_db(observation_path)
+    _insert_cycle(connection, "cycle-a")
+    _insert_cycle(
+        connection,
+        "cycle-b",
+        started="2026-09-03T11:59:01.000Z",
+        finished="2026-09-03T11:59:02.000Z",
+    )
+    source = TrafficProjectionSource(str(observation_path))
+    repository = _repository(tmp_path)
+    with repository.write_connection() as writer:
+        writer.execute(
+            "UPDATE traffic_projection_versions SET status='active' "
+            "WHERE projection_version=?",
+            (PROJECTION_VERSION,),
+        )
+        writer.commit()
+    config = TrafficProjectionConfig(
+        enabled=True,
+        db_path=str(tmp_path / "projection.sqlite3"),
+        writer_lock_path=str(tmp_path / "projection.lock"),
+        source_db_path=str(observation_path),
+        site_ids=(SITE,),
+    )
+
+    class TwoIterations:
+        waits = 0
+
+        def is_set(self):
+            return self.waits >= 2
+
+        def wait(self, _seconds):
+            self.waits += 1
+
+        def set(self):
+            self.waits = 2
+
+    service = TrafficProjectionService(
+        config,
+        repository=repository,
+        source=source,
+        clock=lambda: "2026-09-20T12:00:00.000Z",
+        monotonic=lambda: 90_000.0,
+        artifact_identity=IDENTITY,
+    )
+    service._stop = TwoIterations()
+    monkeypatch.setattr(
+        projection_service_module,
+        "TrafficProjectionHealthObserver",
+        _SynchronousObserver,
+    )
+    monkeypatch.setattr(service, "_worker_services_by_role", lambda: ((service,), ()))
+    monkeypatch.setattr(service, "_owned_worker_services", lambda: (service,))
+    monkeypatch.setattr(service, "_checkpoint_if_due", lambda: None)
+    original_reconcile = service.reconcile_site
+    reconciliations = []
+
+    def reconcile(site_id, **kwargs):
+        kwargs["limit"] = 1 if not reconciliations else 5000
+        result = original_reconcile(site_id, **kwargs)
+        reconciliations.append(result.sweep_completed)
+        return result
+
+    monkeypatch.setattr(service, "reconcile_site", reconcile)
+    original_cleanup_if_due = service._cleanup_if_due
+    protected_counts = []
+
+    def cleanup_if_due():
+        original_cleanup_if_due()
+        protected_counts.append(
+            repository.cycle_count(
+                SITE,
+                from_utc="2026-08-20T11:59:01.000Z",
+                through=("2026-09-03T11:59:01.000Z", "cycle-b"),
+            )
+        )
+
+    monkeypatch.setattr(service, "_cleanup_if_due", cleanup_if_due)
+    service.serve_forever()
+    assert reconciliations == [False, True]
+    assert protected_counts[0] == 2
+    assert repository.site_state(SITE)["status"] != "diverged"
+
+
+def test_cleanup_blocks_diverged_and_exact_active_repair_but_not_building_sweep():
+    diverged = _ordinary_cleanup_state(status="diverged")
+    active_repair = _sweep_cleanup_state(status="rebuilding")
+    repair_delete = {
+        **_ordinary_cleanup_state(status="rebuilding"),
+        "last_error_category": "repair_delete",
+    }
+    building_sweep = _sweep_cleanup_state(status="rebuilding")
+
+    for state in (diverged, active_repair, repair_delete):
+        repository = _CleanupRepository({SITE: state}, version_status="active")
+        service, _events = _cleanup_service(repository)
+        service.cleanup()
+        assert repository.deletes == []
+
+    repository = _CleanupRepository(
+        {SITE: building_sweep}, version_status="building"
+    )
+    service, _events = _cleanup_service(repository)
+    service.cleanup()
+    assert repository.deletes == [(SITE, "2026-08-27T08:26:05.244Z")]
+
+
+@pytest.mark.parametrize(
+    "mutations",
+    [
+        {"reconcile_sweep_from_utc": None},
+        {
+            "reconcile_sweep_started_at": None,
+            "reconcile_sweep_from_utc": "2026-08-27T08:26:05.244Z",
+        },
+        {"reconcile_sweep_source_head_cycle_id": None},
+        {
+            "reconcile_cursor_started_at": "2026-09-01T00:00:00.000Z",
+            "reconcile_cursor_cycle_id": None,
+        },
+        {"reconcile_sweep_started_at": "invalid"},
+        {"reconcile_sweep_from_utc": "2026-09-12T00:00:00.000Z"},
+    ],
+)
+def test_cleanup_rejects_incoherent_frozen_state_without_fallback(mutations):
+    state = {**_sweep_cleanup_state(), **mutations}
+    repository = _CleanupRepository({SITE: state})
+    service, events = _cleanup_service(repository)
+
+    service.cleanup()
+    assert repository.deletes == []
+    assert events == [
+        (
+            "traffic_projection_worker_storage_unavailable",
+            {
+                "projection_version": PROJECTION_VERSION,
+                "site_id": SITE,
+                "error_category": "cleanup_fence_invalid",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "bad_state",
+    [
+        None,
+        TrafficProjectionStorageUnavailable("unavailable"),
+        TrafficProjectionStorageCorrupt("corrupt"),
+    ],
+)
+def test_cleanup_state_unavailable_is_per_site_and_safe_site_continues(bad_state):
+    repository = _CleanupRepository(
+        {SITE: bad_state, "site-b": _ordinary_cleanup_state()}
+    )
+    service, events = _cleanup_service(repository, sites=(SITE, "site-b"))
+
+    service.cleanup()
+    assert repository.deletes == [
+        ("site-b", "2026-09-06T12:00:00.000Z")
+    ]
+    assert events[0][1]["error_category"] == "cleanup_state_unavailable"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TrafficProjectionStorageUnavailable("unavailable"),
+        TrafficProjectionStorageCorrupt("corrupt"),
+    ],
+)
+def test_cleanup_version_state_storage_failure_prevents_all_deletes(failure):
+    repository = _CleanupRepository(
+        {SITE: _ordinary_cleanup_state()}, version_status=failure
+    )
+    service, events = _cleanup_service(repository)
+    assert service.cleanup() == 0
+    assert repository.deletes == []
+    assert events[0][1]["error_category"] == "cleanup_state_unavailable"
+
+
+def test_cleanup_unexpected_state_reader_error_propagates():
+    repository = _CleanupRepository({SITE: RuntimeError("unexpected")})
+    service, events = _cleanup_service(repository)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        service.cleanup()
+    assert repository.deletes == []
+    assert events == []
+
+
+def test_cleanup_accepts_persisted_unavailable_and_does_not_classify_dynamic_health(
+    monkeypatch,
+):
+    repository = _CleanupRepository(
+        {SITE: _ordinary_cleanup_state(status="unavailable")}
+    )
+    service, events = _cleanup_service(repository)
+    monkeypatch.setattr(
+        projection_service_module,
+        "classify_projection_health",
+        lambda *_args, **_kwargs: pytest.fail("cleanup consulted health classifier"),
+    )
+    service.cleanup()
+    assert repository.deletes == [
+        (SITE, "2026-09-06T12:00:00.000Z")
+    ]
+    assert events == []
+
+
+def test_service_stop_requests_observer_without_join(tmp_path):
+    service = TrafficProjectionService(
+        TrafficProjectionConfig(
+            enabled=True,
+            db_path=str(tmp_path / "projection.sqlite3"),
+            writer_lock_path=str(tmp_path / "projection.lock"),
+            source_db_path=str(tmp_path / "observations.sqlite3"),
+            site_ids=(SITE,),
+        )
+    )
+
+    class Observer:
+        requested = 0
+
+        def request_stop(self):
+            self.requested += 1
+
+        def stop(self, _timeout):
+            pytest.fail("stop/join must not run in service.stop()")
+
+    observer = Observer()
+    service._health_observer = observer
+    service.stop()
+    assert service._stop.is_set()
+    assert observer.requested == 1
+
+
+def test_writer_lock_failure_never_emits_worker_started(tmp_path, monkeypatch):
+    service = TrafficProjectionService(
+        TrafficProjectionConfig(
+            enabled=True,
+            db_path=str(tmp_path / "projection.sqlite3"),
+            writer_lock_path=str(tmp_path / "projection.lock"),
+            source_db_path=str(tmp_path / "observations.sqlite3"),
+            site_ids=(SITE,),
+        ),
+        artifact_identity=IDENTITY,
+    )
+    events = []
+    service.telemetry.emit = lambda event, **_fields: events.append(event)
+
+    @contextmanager
+    def unavailable_lock(_path):
+        raise TrafficProjectionWriterUnavailable("writer already active")
+        yield
+
+    monkeypatch.setattr(
+        projection_service_module, "writer_lock", unavailable_lock
+    )
+    with pytest.raises(TrafficProjectionWriterUnavailable):
+        service.serve_forever()
+    assert "traffic_projection_worker_started" not in events
+
+
+@pytest.mark.parametrize("observer_stop_result", [True, False])
+def test_worker_stop_event_requires_bounded_observer_stop_and_follows_lock_release(
+    tmp_path, monkeypatch, observer_stop_result
+):
+    events = []
+
+    @contextmanager
+    def lock(_path):
+        events.append("lock-enter")
+        try:
+            yield
+        finally:
+            events.append("lock-released")
+
+    class Observer(_SynchronousObserver):
+        def start(self, *, initial_services):
+            events.append("observer-start")
+            super().start(initial_services=initial_services)
+
+        def stop(self, _timeout):
+            events.append("observer-stop")
+            return observer_stop_result
+
+    service = TrafficProjectionService(
+        TrafficProjectionConfig(
+            enabled=True,
+            db_path=str(tmp_path / "projection.sqlite3"),
+            writer_lock_path=str(tmp_path / "projection.lock"),
+            source_db_path=str(tmp_path / "observations.sqlite3"),
+            site_ids=(SITE,),
+        ),
+        artifact_identity=IDENTITY,
+    )
+    service._stop.set()
+    monkeypatch.setattr(projection_service_module, "writer_lock", lock)
+    monkeypatch.setattr(
+        projection_service_module, "TrafficProjectionHealthObserver", Observer
+    )
+    monkeypatch.setattr(
+        service,
+        "_worker_services_by_role",
+        lambda: events.append("initialize") or ((service,), ()),
+    )
+    service.telemetry.emit = lambda event, **_fields: events.append(event)
+
+    service.serve_forever()
+
+    assert events[:4] == [
+        "lock-enter",
+        "initialize",
+        "traffic_projection_worker_started",
+        "observer-start",
+    ]
+    assert events[-2:] == (
+        ["lock-released", "traffic_projection_worker_stopped"]
+        if observer_stop_result
+        else ["observer-stop", "lock-released"]
+    )
+    if not observer_stop_result:
+        assert "traffic_projection_worker_stopped" not in events
+
+
+def test_unexpected_worker_failure_stops_observer_but_never_emits_worker_stopped(
+    tmp_path, monkeypatch
+):
+    events = []
+
+    @contextmanager
+    def lock(_path):
+        events.append("lock-enter")
+        try:
+            yield
+        finally:
+            events.append("lock-released")
+
+    class Observer(_SynchronousObserver):
+        def stop(self, _timeout):
+            events.append("observer-stop")
+            return True
+
+    service = TrafficProjectionService(
+        TrafficProjectionConfig(
+            enabled=True,
+            db_path=str(tmp_path / "projection.sqlite3"),
+            writer_lock_path=str(tmp_path / "projection.lock"),
+            source_db_path=str(tmp_path / "observations.sqlite3"),
+            site_ids=(SITE,),
+        ),
+        artifact_identity=IDENTITY,
+    )
+    calls = 0
+
+    def roles():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ((service,), ())
+        raise RuntimeError("worker failed")
+
+    monkeypatch.setattr(projection_service_module, "writer_lock", lock)
+    monkeypatch.setattr(
+        projection_service_module, "TrafficProjectionHealthObserver", Observer
+    )
+    monkeypatch.setattr(service, "_worker_services_by_role", roles)
+    service.telemetry.emit = lambda event, **_fields: events.append(event)
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        service.serve_forever()
+    assert events[-2:] == ["observer-stop", "lock-released"]
+    assert "traffic_projection_worker_stopped" not in events
+
+
+@pytest.mark.parametrize(
+    "failure,record_failure,expected_events,observer_source_flag",
+    [
+        (
+            TrafficProjectionDiverged("diverged"),
+            False,
+            [("traffic_projection_scan_failed", "diverged")],
+            False,
+        ),
+        (
+            TrafficProjectionSourceUnavailable("source"),
+            True,
+            [
+                ("traffic_projection_worker_source_unavailable", "source_unavailable"),
+                ("traffic_projection_scan_failed", "source_or_storage"),
+            ],
+            True,
+        ),
+        (
+            TrafficProjectionStorageUnavailable("storage"),
+            False,
+            [
+                ("traffic_projection_worker_storage_unavailable", "storage_unavailable"),
+                ("traffic_projection_scan_failed", "source_or_storage"),
+            ],
+            False,
+        ),
+        (
+            TrafficProjectionStorageCorrupt("corrupt"),
+            False,
+            [
+                ("traffic_projection_worker_storage_unavailable", "storage_unavailable"),
+                ("traffic_projection_scan_failed", "source_or_storage"),
+            ],
+            False,
+        ),
+        (
+            RuntimeError("unknown"),
+            True,
+            [("traffic_projection_scan_failed", "source_or_storage")],
+            False,
+        ),
+    ],
+)
+def test_maintain_version_uses_exact_failure_boundaries_and_observer_isolation(
+    tmp_path,
+    monkeypatch,
+    failure,
+    record_failure,
+    expected_events,
+    observer_source_flag,
+):
+    repository = _repository(tmp_path)
+    service = TrafficProjectionService(
+        TrafficProjectionConfig(
+            enabled=True,
+            db_path=str(tmp_path / "projection.sqlite3"),
+            writer_lock_path=str(tmp_path / "projection.lock"),
+            source_db_path=str(tmp_path / "observations.sqlite3"),
+            site_ids=(SITE,),
+        ),
+        repository=repository,
+    )
+    monkeypatch.setattr(service, "initialize", lambda: None)
+    monkeypatch.setattr(
+        service,
+        "incremental_site",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+    recorded = []
+    monkeypatch.setattr(service, "_record_worker_failure", recorded.append)
+    events = []
+    service.telemetry.emit = lambda event, **fields: events.append(
+        (event, fields.get("error_category"))
+    )
+
+    class Observer:
+        calls = []
+
+        def observe_service_site(self, *_args, **kwargs):
+            self.calls.append(kwargs["source_unavailable_event_already_emitted"])
+            raise RuntimeError("observer-only failure")
+
+    observer = Observer()
+    service._health_observer = observer
+    assert service._maintain_version(service, is_target=False) == ()
+    assert recorded == ([SITE] if record_failure else [])
+    assert events == expected_events
+    assert observer.calls == [observer_source_flag]
+
+
+@pytest.mark.parametrize(
+    "head_or_failure,expected_available",
+    [
+        (None, False),
+        (RuntimeError("source unavailable"), False),
+        ((NOW, "cycle-head"), True),
+    ],
+)
+def test_health_observation_reuses_classifier_with_exact_source_availability(
+    tmp_path, monkeypatch, head_or_failure, expected_available
+):
+    repository = _repository(tmp_path)
+    service = TrafficProjectionService(
+        TrafficProjectionConfig(
+            enabled=True,
+            db_path=str(tmp_path / "projection.sqlite3"),
+            writer_lock_path=str(tmp_path / "projection.lock"),
+            source_db_path=str(tmp_path / "observations.sqlite3"),
+            site_ids=(SITE,),
+        ),
+        repository=repository,
+        clock=lambda: NOW,
+    )
+
+    def head(_site_id):
+        if isinstance(head_or_failure, BaseException):
+            raise head_or_failure
+        return head_or_failure
+
+    service.source.head = head
+    durable_state = repository.site_state(SITE)
+    classifier_calls = []
+
+    class Classified:
+        def safe_dict(self):
+            return {"status": "healthy"}
+
+    def classify(state, **kwargs):
+        classifier_calls.append((state, kwargs))
+        return Classified()
+
+    monkeypatch.setattr(
+        projection_service_module, "classify_projection_health", classify
+    )
+    observation = service.health_observation(SITE)
+    assert observation["source_available"] is expected_available
+    assert observation["health"] == {"status": "healthy"}
+    assert observation["site_state"] == durable_state
+    assert classifier_calls[0][1]["source_available"] is expected_available
+    if expected_available:
+        assert classifier_calls[0][0]["source_head_cycle_id"] == "cycle-head"
+        assert observation["site_state"]["source_head_cycle_id"] == (
+            durable_state["source_head_cycle_id"]
+        )
 
 
 def test_cli_projection_version_is_explicit_and_never_auto_activates(

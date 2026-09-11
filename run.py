@@ -16,6 +16,10 @@ from werkzeug.serving import WSGIRequestHandler
 from flask import Flask
 
 from app import create_controller, logger, get_settings
+from app.artifact_identity import (
+    ArtifactIdentityError,
+    capture_loaded_artifact_identity,
+)
 from app.visitor_registry import (
     UnavailableVisitorRegistry,
     create_visitor_registry,
@@ -359,6 +363,12 @@ def main() -> None:
     global _visit_lifecycle, _analytics_runtime, _admin_web_runtime
     global _home_ap_24h_telemetry_worker
 
+    try:
+        identity = capture_loaded_artifact_identity("captive-portal.service")
+    except ArtifactIdentityError:
+        logger.critical("captivportal_artifact_identity_startup_failed")
+        raise SystemExit(1)
+    logger.info(identity.json_line())
     logger.info("Starting Captive Portal")
 
     atexit.register(shutdown_handler)

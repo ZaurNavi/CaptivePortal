@@ -13,7 +13,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Collection, Iterator, Mapping
 
+from app.artifact_identity import LoadedArtifactIdentity
+
 from .health import classify_projection_health
+from .health_observer import TrafficProjectionHealthObserver
 from .models import (
     PROJECTION_VERSION,
     SEMANTIC_CONTRACT_SHA256,
@@ -24,7 +27,9 @@ from .models import (
     ProjectionRunResult,
     TrafficProjectionConfig,
     TrafficProjectionDiverged,
+    TrafficProjectionSourceUnavailable,
     TrafficProjectionStorageCorrupt,
+    TrafficProjectionStorageUnavailable,
     TrafficProjectionWriterUnavailable,
 )
 from .repository import TrafficProjectionRepository
@@ -56,6 +61,7 @@ class TrafficProjectionService:
         supported_semantic_contracts: Collection[str] = (
             SUPPORTED_SEMANTIC_CONTRACTS
         ),
+        artifact_identity: LoadedArtifactIdentity | None = None,
     ):
         self.config = config
         self.projection_version = projection_version
@@ -72,13 +78,22 @@ class TrafficProjectionService:
             raise ValueError("repository projection_version does not match service")
         self.source = source or TrafficProjectionSource(config.source_db_path)
         self.logger = logger or logging.getLogger(__name__)
-        self.telemetry = TrafficProjectionTelemetry(self.logger)
+        self._artifact_identity = artifact_identity
+        self.telemetry = TrafficProjectionTelemetry(
+            self.logger,
+            runtime_fields=(
+                artifact_identity.safe_fields()
+                if artifact_identity is not None
+                else None
+            ),
+        )
         self._clock = clock
         self._monotonic = monotonic
         self._stop = threading.Event()
         self._last_checkpoint = 0.0
         self._last_cleanup = 0.0
         self._target_site_index = 0
+        self._health_observer = None
 
     def initialize(self) -> None:
         self.repository.initialize()
@@ -111,15 +126,26 @@ class TrafficProjectionService:
                 )
             heads[site_id] = head
             from_utc = _minus_days(head[0], self.config.retention_days)
-            if self.source.cycle_count(
+            source_count = self.source.cycle_count(
                 site_id, from_utc=from_utc, through=head
-            ) != self.repository.cycle_count(
+            )
+            projection_count = self.repository.cycle_count(
                 site_id, from_utc=from_utc, through=head
-            ):
+            )
+            if source_count != projection_count:
                 self.repository.update_site(
                     site_id,
                     status="diverged",
                     last_error_category="ready_source_identity",
+                )
+                self.telemetry.emit(
+                    "traffic_projection_source_identity_failed",
+                    projection_version=self.projection_version,
+                    site_id=site_id,
+                    error_category="ready_source_identity",
+                    source_count=source_count,
+                    projection_count=projection_count,
+                    count_delta=source_count - projection_count,
                 )
                 raise TrafficProjectionDiverged(
                     "Projection build identity diverged"
@@ -373,6 +399,17 @@ class TrafficProjectionService:
                     site_id, status="diverged",
                     last_error_category="source_identity",
                 )
+                self.telemetry.emit(
+                    "traffic_projection_source_identity_failed",
+                    projection_version=self.projection_version,
+                    site_id=site_id,
+                    error_category="source_identity",
+                    source_count=source_count,
+                    projection_count=projection_count,
+                    count_delta=source_count - projection_count,
+                    reconcile_sweep_from_utc=str(from_utc),
+                    reconcile_sweep_source_head_utc=str(sweep_head[0]),
+                )
                 raise TrafficProjectionDiverged(
                     "Projection retained-horizon identity diverged"
                 )
@@ -461,12 +498,22 @@ class TrafficProjectionService:
             limit=MAX_BULK_CYCLES_PER_TRANSACTION,
             allow_diverged=True,
         )
-        if (
-            result.sweep_completed
-            and (self.repository.site_state(site_id) or {}).get("status") != "healthy"
-        ):
-            raise TrafficProjectionWriterUnavailable(
-                "Projection Site repair did not establish healthy proof"
+        if result.sweep_completed:
+            final_state = self.repository.site_state(site_id)
+            if final_state is None or final_state.get("status") != "healthy":
+                raise TrafficProjectionWriterUnavailable(
+                    "Projection Site repair did not establish healthy proof"
+                )
+            self.telemetry.emit(
+                "traffic_projection_recovered",
+                projection_version=self.projection_version,
+                site_id=site_id,
+                status="healthy",
+                projection_revision=final_state.get("projection_revision"),
+                last_full_reconcile_completed_at=final_state.get(
+                    "last_full_reconcile_completed_at"
+                ),
+                error_category=None,
             )
         return result
 
@@ -508,12 +555,28 @@ class TrafficProjectionService:
     def cleanup(
         self, *, max_chunks: int = MAX_CLEANUP_CHUNKS_PER_INVOCATION
     ) -> int:
-        if self.repository.version_status() not in {"active", "building", "ready"}:
+        try:
+            version_status = self.repository.version_status()
+        except (TrafficProjectionStorageUnavailable, TrafficProjectionStorageCorrupt):
+            self.telemetry.emit(
+                "traffic_projection_worker_storage_unavailable",
+                projection_version=self.projection_version,
+                error_category="cleanup_state_unavailable",
+            )
             return 0
-        cutoff = _minus_days(self._clock(), self.config.retention_days)
+        if version_status not in {"active", "building", "ready"}:
+            return 0
+        normal_cutoff = _minus_days(self._clock(), self.config.retention_days)
         remaining_chunks = max(1, min(int(max_chunks), MAX_CLEANUP_CHUNKS_PER_INVOCATION))
         deleted = 0
         for site_id in self.config.site_ids:
+            cutoff = self._cleanup_cutoff_for_site(
+                site_id,
+                normal_cutoff=normal_cutoff,
+                version_status=version_status,
+            )
+            if cutoff is None:
+                continue
             while remaining_chunks > 0:
                 chunk = self.repository.delete_before(site_id, cutoff)
                 deleted += chunk
@@ -524,6 +587,94 @@ class TrafficProjectionService:
                 break
         self.repository.checkpoint_passive()
         return deleted
+
+    def _cleanup_cutoff_for_site(
+        self,
+        site_id: str,
+        *,
+        normal_cutoff: str,
+        version_status: str,
+    ) -> str | None:
+        try:
+            state = self.repository.site_state(site_id)
+        except (TrafficProjectionStorageUnavailable, TrafficProjectionStorageCorrupt):
+            self._cleanup_state_failure(site_id, "cleanup_state_unavailable")
+            return None
+        if state is None or state.get("status") not in {
+            "healthy",
+            "catching_up",
+            "stale",
+            "unavailable",
+            "rebuilding",
+            "diverged",
+        }:
+            self._cleanup_state_failure(site_id, "cleanup_state_unavailable")
+            return None
+
+        sweep_started = state.get("reconcile_sweep_started_at")
+        sweep_from = state.get("reconcile_sweep_from_utc")
+        sweep_head = state.get("reconcile_sweep_source_head_utc")
+        sweep_head_cycle = state.get("reconcile_sweep_source_head_cycle_id")
+        cursor_started = state.get("reconcile_cursor_started_at")
+        cursor_cycle = state.get("reconcile_cursor_cycle_id")
+        sweep_active = sweep_started is not None
+
+        valid = True
+        if sweep_active:
+            started_at = _parse_utc(sweep_started)
+            from_at = _parse_utc(sweep_from)
+            head_at = _parse_utc(sweep_head)
+            valid = bool(
+                started_at is not None
+                and from_at is not None
+                and head_at is not None
+                and isinstance(sweep_head_cycle, str)
+                and sweep_head_cycle
+                and from_at <= head_at
+            )
+        elif any(
+            value is not None
+            for value in (sweep_from, sweep_head, sweep_head_cycle)
+        ):
+            valid = False
+        if (cursor_started is None) != (cursor_cycle is None):
+            valid = False
+        elif cursor_started is not None:
+            valid = bool(
+                valid
+                and sweep_active
+                and _parse_utc(cursor_started) is not None
+                and isinstance(cursor_cycle, str)
+                and cursor_cycle
+            )
+        repair_active = _repair_active(
+            version_status=version_status,
+            state=state,
+        )
+        if not valid or (
+            state.get("last_error_category") == "repair_delete"
+            and not repair_active
+        ):
+            self._cleanup_state_failure(site_id, "cleanup_fence_invalid")
+            return None
+        if state.get("status") == "diverged" or repair_active:
+            return None
+        if sweep_active:
+            normal_at = _parse_utc(normal_cutoff)
+            from_at = _parse_utc(sweep_from)
+            if normal_at is None or from_at is None:
+                self._cleanup_state_failure(site_id, "cleanup_fence_invalid")
+                return None
+            return _format_utc(min(normal_at, from_at))
+        return normal_cutoff
+
+    def _cleanup_state_failure(self, site_id: str, category: str) -> None:
+        self.telemetry.emit(
+            "traffic_projection_worker_storage_unavailable",
+            projection_version=self.projection_version,
+            site_id=site_id,
+            error_category=category,
+        )
 
     def _version_service(self, projection_version: str) -> "TrafficProjectionService":
         record = self.repository.version_record(projection_version)
@@ -548,7 +699,22 @@ class TrafficProjectionService:
             projection_version=projection_version,
             semantic_contract_sha256=semantic,
             supported_semantic_contracts=self.supported_semantic_contracts,
+            artifact_identity=self._artifact_identity,
         )
+
+    def _health_worker_services(self) -> tuple["TrafficProjectionService", ...]:
+        """Enumerate owned health contexts without initializing or mutating."""
+        services: list[TrafficProjectionService] = []
+        for record in self.repository.worker_version_records():
+            version = str(record["projection_version"])
+            semantic = str(record["semantic_contract_sha256"])
+            if semantic not in self.supported_semantic_contracts:
+                continue
+            services.append(
+                self if version == self.projection_version
+                else self._version_service(version)
+            )
+        return tuple(services)
 
     def _owned_worker_services(self) -> tuple["TrafficProjectionService", ...]:
         """Return active-first contexts owned by this one locked writer process."""
@@ -608,15 +774,12 @@ class TrafficProjectionService:
         for site_id in site_ids:
             if self._stop.is_set():
                 break
+            source_unavailable_event_already_emitted = False
             try:
                 state = service.repository.site_state(site_id) or {}
-                repairing = bool(
-                    service.repository.version_status() == "active"
-                    and state.get("status") == "rebuilding"
-                    and (
-                        state.get("last_error_category") == "repair_delete"
-                        or state.get("reconcile_sweep_started_at")
-                    )
+                repairing = _repair_active(
+                    version_status=service.repository.version_status(),
+                    state=state,
                 )
                 if repairing:
                     version_results.append(service.repair_site(site_id))
@@ -652,6 +815,34 @@ class TrafficProjectionService:
                     site_id=site_id,
                     error_category="diverged",
                 )
+            except TrafficProjectionSourceUnavailable:
+                service._record_worker_failure(site_id)
+                service.telemetry.emit(
+                    "traffic_projection_worker_source_unavailable",
+                    projection_version=service.projection_version,
+                    site_id=site_id,
+                    error_category="source_unavailable",
+                )
+                source_unavailable_event_already_emitted = True
+                service.telemetry.emit(
+                    "traffic_projection_scan_failed",
+                    projection_version=service.projection_version,
+                    site_id=site_id,
+                    error_category="source_or_storage",
+                )
+            except (TrafficProjectionStorageUnavailable, TrafficProjectionStorageCorrupt):
+                service.telemetry.emit(
+                    "traffic_projection_worker_storage_unavailable",
+                    projection_version=service.projection_version,
+                    site_id=site_id,
+                    error_category="storage_unavailable",
+                )
+                service.telemetry.emit(
+                    "traffic_projection_scan_failed",
+                    projection_version=service.projection_version,
+                    site_id=site_id,
+                    error_category="source_or_storage",
+                )
             except Exception:
                 service._record_worker_failure(site_id)
                 service.telemetry.emit(
@@ -660,6 +851,18 @@ class TrafficProjectionService:
                     site_id=site_id,
                     error_category="source_or_storage",
                 )
+            finally:
+                if self._health_observer is not None:
+                    try:
+                        self._health_observer.observe_service_site(
+                            service,
+                            site_id,
+                            source_unavailable_event_already_emitted=(
+                                source_unavailable_event_already_emitted
+                            ),
+                        )
+                    except Exception:
+                        pass
         return tuple(version_results)
 
     def _worker_services_by_role(
@@ -733,31 +936,72 @@ class TrafficProjectionService:
         return results
 
     def serve_forever(self) -> None:
+        if self._artifact_identity is None:
+            raise TrafficProjectionWriterUnavailable(
+                "Loaded artifact identity is unavailable"
+            )
+        startup_completed = False
+        normal_completion = False
+        observer_stopped = True
         with writer_lock(self.config.writer_lock_path):
-            while not self._stop.is_set():
-                started = self._monotonic()
-                active, targets = self._worker_services_by_role()
-                for service in active:
-                    self._maintain_version(service, is_target=False)
-                self._cleanup_if_due()
-                active_deadline = (
-                    started + self.config.source_head_scan_interval_seconds
+            active, targets = self._worker_services_by_role()
+            observer = TrafficProjectionHealthObserver(
+                self,
+                telemetry=self.telemetry,
+                monotonic=self._monotonic,
+            )
+            self._health_observer = observer
+            self.telemetry.emit(
+                "traffic_projection_worker_started",
+                projection_version=self.projection_version,
+            )
+            startup_completed = True
+            observer.start(initial_services=active + targets)
+            try:
+                while not self._stop.is_set():
+                    started = self._monotonic()
+                    active, targets = self._worker_services_by_role()
+                    for service in active:
+                        self._maintain_version(service, is_target=False)
+                    self._cleanup_if_due()
+                    active_deadline = (
+                        started + self.config.source_head_scan_interval_seconds
+                    )
+                    self._target_window(
+                        targets,
+                        active_deadline_monotonic=active_deadline,
+                    )
+                    self._checkpoint_if_due()
+                    remaining = max(
+                        active_deadline - self._monotonic(), 0.0,
+                    )
+                    self._stop.wait(remaining)
+                normal_completion = True
+            finally:
+                observer_stopped = observer.stop(
+                    self.config.shutdown_timeout_seconds
                 )
-                self._target_window(
-                    targets,
-                    active_deadline_monotonic=active_deadline,
-                )
-                self._checkpoint_if_due()
-                remaining = max(
-                    active_deadline - self._monotonic(), 0.0,
-                )
-                self._stop.wait(remaining)
+        if (
+            startup_completed
+            and normal_completion
+            and self._stop.is_set()
+            and observer_stopped
+        ):
+            self.telemetry.emit(
+                "traffic_projection_worker_stopped",
+                projection_version=self.projection_version,
+            )
 
     def stop(self) -> None:
         self._stop.set()
+        if self._health_observer is not None:
+            self._health_observer.request_stop()
 
-    def health(self, site_id: str) -> Mapping[str, Any]:
-        state = self.repository.site_state(site_id)
+    def health_observation(self, site_id: str) -> Mapping[str, Any]:
+        durable_state = self.repository.site_state(site_id)
+        classifier_state = (
+            None if durable_state is None else dict(durable_state)
+        )
         version = self.repository.version_record()
         version_status = None if version is None else str(version.get("status"))
         version_available = bool(
@@ -766,22 +1010,36 @@ class TrafficProjectionService:
             and version.get("semantic_contract_sha256")
             in self.supported_semantic_contracts
         )
-        source_available = True
         try:
             current_head = self.source.head(site_id)
         except Exception:
             current_head = None
             source_available = False
-        if state is not None and current_head is not None:
-            state = dict(state)
-            state["source_head_utc"], state["source_head_cycle_id"] = current_head
-        return classify_projection_health(
-            state,
+        else:
+            source_available = current_head is not None
+        if classifier_state is not None and current_head is not None:
+            (
+                classifier_state["source_head_utc"],
+                classifier_state["source_head_cycle_id"],
+            ) = current_head
+        health = classify_projection_health(
+            classifier_state,
             now_utc=self._clock(),
             version_available=version_available,
-            source_available=source_available and current_head is not None,
+            source_available=source_available,
             build_state=version_status,
         ).safe_dict()
+        return {
+            "health": health,
+            "site_state": (
+                None if durable_state is None else dict(durable_state)
+            ),
+            "source_available": source_available,
+            "version_status": version_status,
+        }
+
+    def health(self, site_id: str) -> Mapping[str, Any]:
+        return self.health_observation(site_id)["health"]
 
     def _deep_audit(self, site_id: str, *, tuple_head: tuple[str, str]) -> int:
         with self.repository.read_connection() as connection:
@@ -872,3 +1130,36 @@ def writer_lock(path: str) -> Iterator[None]:
 def _minus_days(value: str, days: int) -> str:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return (parsed - timedelta(days=days)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _repair_active(
+    *,
+    version_status: str | None,
+    state: Mapping[str, Any],
+) -> bool:
+    return bool(
+        version_status == "active"
+        and state.get("status") == "rebuilding"
+        and (
+            state.get("last_error_category") == "repair_delete"
+            or state.get("reconcile_sweep_started_at") is not None
+        )
+    )
+
+
+def _parse_utc(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _format_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
