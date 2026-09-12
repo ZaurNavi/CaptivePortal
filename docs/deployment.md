@@ -3,8 +3,8 @@
 Status: current contract; production details remain host-verified
 Updated: 2026-09-11
 Current repository implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Confirmed production deployed HEAD: `7df71a8e807efd74b123117e78cb8d992c190fa1`
-Confirmed production tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Confirmed production deployed HEAD: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Confirmed production tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 ## Repository vs production
 

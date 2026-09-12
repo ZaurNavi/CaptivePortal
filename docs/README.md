@@ -3,7 +3,7 @@
 Status: current
 Updated: 2026-09-11
 Current-state implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Current implementation tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Current implementation tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 

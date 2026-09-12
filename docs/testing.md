@@ -4,8 +4,8 @@ Status: current
 Updated: 2026-09-11
 Central Lab governance effective: 2026-08-27
 Documentation/current-state implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Production deployed HEAD: `7df71a8e807efd74b123117e78cb8d992c190fa1`
-Production tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Production deployed HEAD: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Production tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 ## Responsibility model
 

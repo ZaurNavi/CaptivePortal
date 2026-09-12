@@ -3,9 +3,9 @@
 Status: current production module contract
 Updated: 2026-09-11
 Repository implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Repository tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
-Production deployed HEAD: `e32ade378bdbfc9f8458db9c18221958f4552718`
-Production tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
+Repository tree: `3950df6d400049ed16a823032c6740396cd61137`
+Production deployed HEAD: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Production tree: `3950df6d400049ed16a823032c6740396cd61137`
 Latest production acceptance: `TASK-TRAFFIC-09 — Consolidated Traffic Evidence — COMPLETED / PRODUCTION ACTIVE`
 
 ## Current roadmap state
