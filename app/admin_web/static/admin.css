@@ -117,7 +117,7 @@ button, input, select { font: inherit; }
 .device-row-hostname { display: block; margin-top: .2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: .8rem; }
 .device-row-label { display: block; color: var(--muted); font-size: .68rem; font-weight: 750; letter-spacing: .045em; text-transform: uppercase; }
 .device-row-value { display: block; margin-top: .18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .85rem; }
-.device-row-type-value { display: inline-flex; align-items: center; gap: .42rem; max-width: 100%; }
+.device-row-type-value, .device-type-value { display: inline-flex; align-items: center; gap: .42rem; max-width: 100%; }
 .device-type-icon { display: block; flex: 0 0 auto; width: 18px; height: 11px; object-fit: contain; }
 .device-row-stats { display: flex; gap: 1rem; }
 .device-row-stat strong { display: block; font-size: .9rem; }
