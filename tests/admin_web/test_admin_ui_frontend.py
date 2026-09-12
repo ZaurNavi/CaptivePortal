@@ -46,6 +46,24 @@ assert(api.classifyHttp(503, {error: {code: "source_unavailable"}}, null).kind =
 assert(api.classifyHttp(500, null, null).kind === "unexpected", "malformed state");
 assert(api.display(null) === "—", "null is not numeric zero");
 assert(api.display(0) === "0", "real zero is preserved");
+assert(api.isAndroidDeviceType("android"), "lowercase Android type accepted");
+assert(api.isAndroidDeviceType("Android"), "title-case Android type accepted");
+assert(api.isAndroidDeviceType(" ANDROID "), "trimmed uppercase Android type accepted");
+assert(!api.isAndroidDeviceType("phone") && !api.isAndroidDeviceType(null), "non-Android types rejected");
+const identityEntries = api.deviceIdentityEntries({
+  canonical_mac: "AA:BB:CC:DD:EE:FF",
+  device_type: "android",
+  site_first_seen_at: "first",
+  site_last_seen_at: "last",
+  site_snapshot_count: 1,
+  site_visit_count: 2,
+});
+const identityType = identityEntries.find((entry) => entry[0] === "Type");
+assert(identityType[1] === "android" && identityType[2] === "device-type", "Device detail Type uses icon presentation");
+const snapshotType = api.deviceDetailEntries({device_type: "Android"})[0];
+assert(snapshotType[0] === "device type" && snapshotType[1] === "Android" && snapshotType[2] === "device-type", "detail evidence device_type uses icon presentation");
+const observationType = api.detailEntry("device_type", "ANDROID");
+assert(observationType[1] === "ANDROID" && observationType[2] === "device-type", "observation device_type uses icon presentation");
 const instant = new Date("2026-08-23T12:34:00.000Z");
 assert(api.localDatetimeValue(instant) === "2026-08-23T16:34", "Baku local field value");
 assert(api.utcFromLocal("2026-08-23T16:34") === "2026-08-23T12:34:00.000Z", "local round trip to UTC");
