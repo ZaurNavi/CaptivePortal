@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-09-11
-Baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Updated: 2026-09-12
+Baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -373,6 +373,17 @@ ExecStart=/usr/bin/python3 -m app.traffic_projection.cli run
 
 Production CLI/repair must use the canonical worker environment rather than an
 arbitrary interactive shell environment. Secret values are never recorded in KB.
+
+### TASK-TEST-BASELINE-CLEANUP-01
+
+This production delivery changed no configuration contract:
+
+```text
+configuration changes=NO
+feature flag changes=NO
+systemd unit changes=NO
+DB/schema changes=NO
+```
 
 ### Pending Session Cleaner
 

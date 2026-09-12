@@ -1,7 +1,7 @@
 # Practical Command Execution Lessons Learned
 
 Status: CURRENT / PERMANENT OPERATIONAL GUIDANCE
-Updated: 2026-09-11
+Updated: 2026-09-12
 
 Purpose: prevent known command/harness mistakes from being repeated in future
 deploy, production-validation and acceptance instructions.
@@ -60,11 +60,40 @@ systemctl restart captive-portal.service
 
 `active/running` proves process state, not immediate HTTP readiness.
 
-Port `127.0.0.1:8088` may become ready several seconds later.
+Permanent invariant:
 
-Use a bounded readiness loop with multiple `curl` attempts and a finite timeout.
-Do not classify a single request after a fixed three-second sleep as a product
-failure.
+```text
+systemd active != HTTP readiness
+```
+
+Port `127.0.0.1:8088` may become ready after systemd already reports the service
+active.
+
+During the 2026-09-12 production acceptance, the first probe saw:
+
+```text
+systemd=active
+listener=absent
+HTTP=000
+```
+
+The same PID then continued normal startup composition and reached:
+
+```text
+analytics.api_runtime_active
+127.0.0.1:8088 LISTEN
+HTTP=400
+```
+
+No second restart was required.
+
+Use a bounded readiness loop with listener/startup-progress evidence and multiple
+HTTP attempts. Do not classify one early `HTTP 000` as a product failure, and do
+not restart again solely because the listener is not yet present while the same
+process is still progressing normally.
+
+HTTP `400` on `/` without required Omada request parameters is expected
+CaptivPortal readiness behavior.
 
 ## 4. Git status and identity checks
 

@@ -1,8 +1,8 @@
 # Analytics
 
 Status: current module contract
-Updated: 2026-09-09
-Baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Updated: 2026-09-12
+Baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
 
 ## Purpose
 
@@ -20,6 +20,24 @@ source DBs.
 `CurrentGuestTrafficReadService`.
 
 Source health checks validate expected schema and SQLite `PRAGMA query_only`.
+
+## SQLite finite/nonnegative portability
+
+`TASK-TEST-BASELINE-CLEANUP-01` removed the platform-sensitive max-double SQL
+check from `AnalyticsSourceGateway`.
+
+Current and historical rate validation use the same fail-closed portable shape:
+
+```text
+typeof(value) IN ('integer','real')
+AND value >= 0
+AND COALESCE((value - value) = 0, 0)
+```
+
+Finite values pass. Infinity/non-finite evidence fails closed.
+
+This is a read-validation portability rule only; Analytics remains read-only and
+does not add source writes, migrations or query-time Omada access.
 
 ## Services
 

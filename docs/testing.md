@@ -3,9 +3,9 @@
 Status: current
 Updated: 2026-09-12
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
-Production deployed HEAD: `043a13bc1e3aa3353e27af1859dc0bb698df4955`
-Production tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
+Documentation/current-state implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Production deployed HEAD: `c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Production tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
 
 ## Responsibility model
 
@@ -198,34 +198,78 @@ Use a dedicated descriptive directory per independent run and clean it before re
 
 ### Current verified full runner
 
-As of 2026-08-29, the verified current Windows Central Lab runner is:
+As of 2026-09-12, the current Windows Central Lab full-regression runner is:
 
 ```text
-C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd
+C:\CaptivPortal-Lab\lab-test-v7-strict.cmd
+SHA256=45d3b37150a2c3b3d3e95460b2a1c6cab8d97aa333c3d3e0cd3507ef1c994f77
 ```
 
 Canonical invocation:
 
 ```bat
-call C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd C:\CaptivPortal-UI-Preview
+call C:\CaptivPortal-Lab\lab-test-v7-strict.cmd C:\CaptivPortal-UI-Preview
 ```
 
-V6 owns its own isolated temp directory. Manual `--basetemp` policy must not be
-blindly injected into the runner if the runner already owns temp isolation.
-
-V4 is a historical previous runner. It must not be presented as the current/default
-gate.
-
-V6 is current because the reviewed Windows compatibility model now includes the
-known Home Health baseline case:
+V7 contract:
 
 ```text
-tests/admin_web/test_home_health.py::test_unavailable_analytics_is_one_component_not_health_503
+[1/4] ordinary full strict pytest
+[2/4] compileall
+[3/4] branch diff check
+[4/4] exact-artifact immutability
 ```
 
-On the exact baseline this case has the same expected/observed delta and is treated
-as reviewed compatibility behavior rather than a new TASK regression. Compatibility
-handling must never be broadened merely to make a failing candidate green.
+The six former Windows compatibility exclusions are now ordinary strict tests:
+
+```text
+SQLite infinity edge
+Node retry async timing
+Visitor Registry long audit
+Visitor Registry previous-ready
+Visitor Registry previous-stopping
+Home Health unavailable analytics baseline
+```
+
+Current handling for those six:
+
+```text
+compatibility allowlist=EMPTY
+special --deselect path=NO
+separate compatibility stage=NO
+compatibility WARN counter/path=NO
+strict failure degrades to WARN=NO
+```
+
+A failure in any of these cases is a normal strict regression failure.
+
+Accepted TASK-TEST-BASELINE-CLEANUP-01 V7 evidence:
+
+```text
+3129 passed
+30 skipped
+0 failed
+0 deselected
+strict regressions=0
+compileall=PASS
+branch diff=PASS
+exact-artifact immutability=PASS
+```
+
+The exact `3129 / 30` counts are evidence of that accepted run, not a permanent
+hardcoded acceptance invariant. The durable invariant is that the former six
+cases execute in the ordinary strict suite and cannot escape as compatibility
+WARN.
+
+Historical runner:
+
+```text
+C:\CaptivPortal-Lab\lab-test-v6-fixed.cmd
+status=HISTORICAL / AUDIT ONLY
+```
+
+V6 is deliberately retained and not rewritten because it records the older
+compatibility contract. It is no longer the current/default gate.
 
 ### Gate-version anti-drift rule
 
@@ -242,8 +286,8 @@ Before every official full regression, Owner / Tech Lead must verify:
 2. exact approved baseline;
 3. actual runner files present in `C:\CaptivPortal-Lab`;
 4. which runner was last reviewed/approved successfully;
-5. runner strict/compatibility contract against the known compatibility baseline;
-6. whether a new reviewed compatibility case exists;
+5. runner strict/platform-exception contract against the current approved baseline;
+6. reviewed platform exception list (EMPTY for the former six compatibility cases);
 7. current repository test set;
 8. TASK-specific / cross-surface acceptance invariants.
 
@@ -254,7 +298,7 @@ TEST RUNNER
 +
 REPOSITORY BASELINE
 +
-KNOWN COMPATIBILITY BASELINE
+REVIEWED PLATFORM EXCEPTIONS (if any)
 +
 CURRENT TEST SET
 +
@@ -334,6 +378,56 @@ During TRAFFIC-00 acceptance:
 - the rerun was moved to a dedicated `C:\CaptivPortal-Lab\tmp\...` basetemp.
 
 This is troubleshooting history, not a current product defect.
+
+### Latest Windows baseline cleanup acceptance — TASK-TEST-BASELINE-CLEANUP-01
+
+Artifact identity:
+
+```text
+accepted baseline=75df5af1500ebcaf7d4950abccbaabc0a03610e1
+publication commit=ef3e8ca20e2303c29437c6c087919a6715afac96
+PR #116=MERGED
+merge / production=c1dc3344bc778a32cdc6b0edce278ee40b287c29
+accepted / merged / production tree=0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
+```
+
+Current Windows gate:
+
+```text
+V7 strict=PASS
+runner SHA256=45d3b37150a2c3b3d3e95460b2a1c6cab8d97aa333c3d3e0cd3507ef1c994f77
+former six compatibility exclusions=ordinary strict tests
+compatibility allowlist for former six=EMPTY
+WARN escape for former six=REMOVED
+```
+
+Accepted run evidence:
+
+```text
+3129 passed
+30 skipped
+0 failed
+0 deselected
+strict regressions=0
+compileall=PASS
+branch diff=PASS
+exact-artifact immutability=PASS
+```
+
+Production acceptance:
+
+```text
+traffic-projection.service=active
+Projection status=healthy
+backlog=0
+captive-portal.service=active
+analytics.api_runtime_active
+127.0.0.1:8088 LISTEN
+HTTP readiness=400
+```
+
+Historical `Windows Central Full V6=PASS` entries below remain valid evidence for
+the older TASKs that actually used V6; they do not define the current runner.
 
 ### Latest Admin Web presentation acceptance — WEB-ASSET-LIBRARY-01 + FIX
 

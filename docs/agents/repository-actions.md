@@ -35,7 +35,7 @@ the exact candidate tree have PASS**.
 Mandatory gates may include:
 
 - focused/targeted tests;
-- Central Lab full/V6 gate;
+- Central Lab current official full-regression gate (currently V7 strict);
 - Linux/production-compatible gate;
 - production-size PERF/capacity;
 - migration/schema compatibility;
