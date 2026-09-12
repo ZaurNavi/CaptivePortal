@@ -2,8 +2,8 @@
 
 Status: current
 Updated: 2026-09-12
-Current-state implementation baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
-Current implementation tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
+Current-state implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Current implementation tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -47,6 +47,7 @@ Historical reports, production acceptance и research сохраняют док�
 | DEVICE-CARD-01 final production closure | `tasks/TASK-DEVICE-CARD-01-FINAL.md` |
 | WEB-ASSET-LIBRARY-01 final production closure | `tasks/TASK-WEB-ASSET-LIBRARY-01-FINAL.md` |
 | WEB-ASSET-LIBRARY-01 Android FIX closure | `tasks/TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION-FINAL.md` |
+| Windows compatibility baseline cleanup | `tasks/TASK-TEST-BASELINE-CLEANUP-01-FINAL.md` |
 | Web Designer canonical role | `agents/web-designer-role.md` |
 | Projection lifecycle P0 closure | `tasks/TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01-IMPLEMENTATION-READY-FINAL-R5.md` |
 | Deferred Projection maintenance request | `deferred/TRAFFIC-PROJECTION-MAINTENANCE-REINDEX.md` |
@@ -83,7 +84,7 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic state at implementation baseline `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`:
+Current Traffic state at implementation baseline `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`:
 
 ```text
 TRAFFIC-00         DONE
@@ -144,11 +145,11 @@ PRODUCTION ACTIVATION = PASS
 WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED = true
 ```
 
-Current implementation / production baseline:
+Current implementation / production checkpoint:
 
 ```text
-main = 7df71a8e807efd74b123117e78cb8d992c190fa1
-tree = 8f1342f0a0f1e8242642161e02b2f3276e6ddf51
+main = c1dc3344bc778a32cdc6b0edce278ee40b287c29
+tree = 0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
 ```
 
 Device Detail now exposes a separate read-only `Current Device Context` over
@@ -178,8 +179,8 @@ TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
 TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
 PR #113=MERGED
 PR #114=MERGED / PRODUCTION VERIFIED
-production HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
-production tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+current production HEAD=c1dc3344bc778a32cdc6b0edce278ee40b287c29
+current production tree=0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
 ```
 
 Android asset:
@@ -197,6 +198,20 @@ typeof value === "string" && value.trim().toLowerCase() === "android"
 
 The source `device_type` text remains unchanged. The icon is only a presentation
 cue. No inference from hostname/MAC/vendor/SSID/AP/IP/history is allowed.
+
+## Current Windows full-regression contract
+
+```text
+current runner=C:\CaptivPortal-Lab\lab-test-v7-strict.cmd
+runner SHA256=45d3b37150a2c3b3d3e95460b2a1c6cab8d97aa333c3d3e0cd3507ef1c994f77
+V6 fixed=historical / audit only
+former six compatibility exclusions=ordinary strict regressions
+compatibility allowlist for former six=EMPTY
+WARN escape for former six=REMOVED
+```
+
+Canonical closure:
+`tasks/TASK-TEST-BASELINE-CLEANUP-01-FINAL.md`.
 
 ## Traffic Projection lifecycle P0 closure
 

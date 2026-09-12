@@ -2,8 +2,8 @@
 
 Status: current
 Updated: 2026-09-12
-Runtime implementation baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
-Runtime tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
+Runtime implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Runtime tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -54,8 +54,8 @@ Runtime tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
 Owner-provided production checkpoint 2026-09-12:
 
 ```text
-HEAD: 043a13bc1e3aa3353e27af1859dc0bb698df4955
-tree: c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+HEAD: c1dc3344bc778a32cdc6b0edce278ee40b287c29
+tree: 0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -77,6 +77,9 @@ TASK-DEVICE-LIST-CONTEXT-01: CLOSED / PRODUCTION ACTIVE
 TASK-WEB-DEVICE-UI-01: CLOSED / PRODUCTION ACTIVE
 TASK-WEB-ASSET-LIBRARY-01: CLOSED / PRODUCTION PASS
 TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION: CLOSED / PRODUCTION PASS
+TASK-TEST-BASELINE-CLEANUP-01: FINAL ACCEPTED / MERGED / DEPLOYED / PRODUCTION PASS
+Windows Central Lab current runner: V7 strict
+Windows Central Lab V6 fixed: historical / audit only
 
 WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
 WEB_ADMIN_TRAFFIC_ENABLED=true

@@ -1,12 +1,26 @@
 # Admin Console Traffic
 
 Status: current production module contract
-Updated: 2026-09-11
-Repository implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Repository tree: `3950df6d400049ed16a823032c6740396cd61137`
-Production deployed HEAD: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Production tree: `3950df6d400049ed16a823032c6740396cd61137`
+Updated: 2026-09-12
+Repository implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Repository tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
+Production deployed HEAD: `c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Production tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
 Latest production acceptance: `TASK-TRAFFIC-09 — Consolidated Traffic Evidence — COMPLETED / PRODUCTION ACTIVE`
+
+## Windows portability closure in shared Analytics source validation
+
+`TASK-TEST-BASELINE-CLEANUP-01` updated the shared
+`AnalyticsSourceGateway` finite/nonnegative validation used by current and
+historical Analytics reads.
+
+```text
+platform-sensitive max-double check=REMOVED
+portable fail-closed finite/nonnegative predicate=ACTIVE
+Historical Traffic product semantics=UNCHANGED
+```
+
+The TASK does not create a new Traffic product, source, projection or metric.
 
 ## Current roadmap state
 

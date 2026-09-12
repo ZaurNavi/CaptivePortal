@@ -2,9 +2,9 @@
 
 Status: current contract; production details remain host-verified
 Updated: 2026-09-12
-Current repository implementation baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
-Confirmed production deployed HEAD: `043a13bc1e3aa3353e27af1859dc0bb698df4955`
-Confirmed production tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
+Current repository implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Confirmed production deployed HEAD: `c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Confirmed production tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
 
 ## Repository vs production
 
@@ -67,7 +67,7 @@ Activation → separate step.
 A candidate is **NOT ACCEPTED** while any mandatory TASK/FINAL/release gate is
 FAIL or PENDING.
 
-Mandatory gates may include functional, targeted, full/V6, Linux compatibility,
+Mandatory gates may include functional, targeted, the current official Central Lab full-regression gate, Linux compatibility,
 production-size PERF/capacity, migration/schema, security/browser or other
 explicit acceptance.
 
@@ -785,6 +785,76 @@ Owner production visual acceptance=PASS
 ```
 
 No backend/API/data/security contract changed.
+
+## TASK-TEST-BASELINE-CLEANUP-01 production deployment — 2026-09-12
+
+```text
+PR #116=MERGED
+publication=ef3e8ca20e2303c29437c6c087919a6715afac96
+accepted baseline=75df5af1500ebcaf7d4950abccbaabc0a03610e1
+merge / production HEAD=c1dc3344bc778a32cdc6b0edce278ee40b287c29
+accepted / merged / production tree=0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
+previous production=043a13bc1e3aa3353e27af1859dc0bb698df4955
+production worktree=CLEAN
+```
+
+The accepted tree identity was preserved across candidate, publication, merge
+and production.
+
+This TASK was not fully test-only: `app/analytics/source_gateway.py` changed and
+is used by CaptivPortal Analytics and the Traffic Projection source path.
+
+Activation therefore restarted:
+
+```text
+traffic-projection.service
+captive-portal.service
+```
+
+Not required:
+
+```text
+DB migration=NO
+schema change=NO
+configuration change=NO
+feature flag change=NO
+systemd unit change=NO
+daemon-reload=NO
+```
+
+Production acceptance:
+
+```text
+traffic-projection.service=active
+traffic projection artifact_sha=c1dc3344bc778a32cdc6b0edce278ee40b287c29
+traffic projection artifact_tree=0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
+projection status=healthy
+backlog_cycle_count=0
+
+captive-portal.service=active
+captive portal artifact_sha=c1dc3344bc778a32cdc6b0edce278ee40b287c29
+captive portal artifact_tree=0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
+analytics.api_runtime_active=observed
+127.0.0.1:8088=LISTEN
+HTTP readiness=400
+```
+
+HTTP `400` on `/` without Omada request parameters is expected readiness
+behavior.
+
+Startup lesson:
+
+```text
+systemd active != HTTP readiness
+```
+
+The first probe may see `HTTP 000` while the same PID is still progressing
+through normal startup composition. Do not perform a second restart solely
+because the listener has not appeared yet; first check startup progress and wait
+for bounded listener/readiness evidence.
+
+Existing `urllib3 InsecureRequestWarning` messages for Omada HTTPS
+`192.168.0.222` pre-date this deployment and are not a regression of this TASK.
 
 ## Feature activation
 

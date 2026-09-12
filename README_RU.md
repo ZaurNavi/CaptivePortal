@@ -25,10 +25,10 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@043a13bc1e3aa3353e27af1859dc0bb698df4955` |
-| Repository tree | `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4` |
-| Production deployed HEAD | `043a13bc1e3aa3353e27af1859dc0bb698df4955` |
-| Production tree | `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4` |
+| Repository implementation checkpoint | `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29` |
+| Repository tree | `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c` |
+| Production deployed HEAD | `c1dc3344bc778a32cdc6b0edce278ee40b287c29` |
+| Production tree | `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -41,6 +41,8 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | Traffic Evidence | **TASK-TRAFFIC-09 — COMPLETED / PRODUCTION ACTIVE** |
 | Traffic Projection lifecycle P0 | **CLOSED / PRODUCTION ACCEPTANCE PASS** |
 | DB baseline gate | `TASK-DB-BASELINE-SYNC-01` — **CLOSED / PASS** |
+| Windows Central Lab | **V7 STRICT — CURRENT**; V6 historical/audit only |
+| Windows compatibility cleanup | `TASK-TEST-BASELINE-CLEANUP-01` — **FINAL ACCEPTED / MERGED / DEPLOYED / PRODUCTION PASS** |
 | Следующий Traffic TASK | **ПОКА НЕ НАЗНАЧЕН** |
 | Omada Controller family | Omada Software Controller 5.14.x |
 | Core guest authorization | Реализован |
@@ -150,8 +152,8 @@ TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
 TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
 PR #113=MERGED
 PR #114=MERGED / PRODUCTION VERIFIED
-production HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
-production tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+current production HEAD=c1dc3344bc778a32cdc6b0edce278ee40b287c29
+current production tree=0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
 ```
 
 Android asset:
@@ -169,6 +171,24 @@ typeof value === "string" && value.trim().toLowerCase() === "android"
 
 The source `device_type` text remains unchanged. The icon is only a presentation
 cue. No inference from hostname/MAC/vendor/SSID/AP/IP/history is allowed.
+
+## Windows strict baseline cleanup
+
+`TASK-TEST-BASELINE-CLEANUP-01` принят и находится в production.
+
+```text
+PR #116=MERGED
+current production HEAD=c1dc3344bc778a32cdc6b0edce278ee40b287c29
+current production tree=0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
+Windows Central Lab current runner=V7 strict
+V6=historical / audit only
+former six Windows compatibility exclusions=ordinary strict tests
+compatibility WARN escape for former six=removed
+```
+
+Accepted V7 run дал `3129 passed / 30 skipped / 0 failed / 0 deselected`.
+Это evidence конкретного принятого прогона, а не вечный hardcoded test-count
+invariant.
 
 ## Traffic Projection lifecycle P0 — закрыт
 

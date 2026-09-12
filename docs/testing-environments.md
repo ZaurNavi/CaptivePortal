@@ -1,7 +1,7 @@
 # CaptivPortal Test Environments and Production Boundary
 
 Status: CURRENT / PERMANENT INFRASTRUCTURE CONTRACT
-Updated: 2026-09-06
+Updated: 2026-09-12
 
 This document is mandatory onboarding context for Tech Lead, Coder, Architect and
 any agent that plans or executes acceptance, Linux, performance or
@@ -80,6 +80,30 @@ Coder does not replace Owner/Tech Lead official acceptance.
 
 The detailed Windows runner/interpreter/anti-drift contract remains in
 `testing.md`.
+
+### Current Windows full-regression runner
+
+```text
+C:\CaptivPortal-Lab\lab-test-v7-strict.cmd
+SHA256=45d3b37150a2c3b3d3e95460b2a1c6cab8d97aa333c3d3e0cd3507ef1c994f77
+status=CURRENT
+```
+
+V7 is the current full Windows strict gate.
+
+```text
+former six compatibility exclusions=ordinary strict regression tests
+compatibility allowlist for former six=EMPTY
+separate six-case compatibility stage=NO
+WARN escape for former six=NO
+```
+
+`lab-test-v6-fixed.cmd` is retained as historical/audit evidence and must not be
+used as the current canonical full-regression runner.
+
+The exact `3129 passed / 30 skipped` result belongs to the accepted
+TASK-TEST-BASELINE-CLEANUP-01 run; exact test counts are not permanent gate
+invariants.
 
 ## 3. Dedicated WSL/Linux Lab
 

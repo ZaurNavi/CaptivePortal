@@ -1,9 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-09-11
-Runtime implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Runtime tree: `3950df6d400049ed16a823032c6740396cd61137`
+Updated: 2026-09-12
+Runtime implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Runtime tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
 
 ## 1. Mental model
 
@@ -136,6 +136,23 @@ Prohibited:
 - Analytics → Omada;
 - Analytics → source writes/migrations;
 - Admin/browser → direct raw source persistence.
+
+### Analytics numeric portability invariant
+
+Analytics source validation for current and historical rate evidence must be
+portable across supported SQLite/Windows/Linux environments and fail closed for
+non-finite values.
+
+Canonical finite/nonnegative shape:
+
+```text
+typeof(value) IN ('integer','real')
+AND value >= 0
+AND COALESCE((value - value) = 0, 0)
+```
+
+Do not reintroduce a platform-sensitive max-double literal as the finite-value
+authority.
 
 ## 7. Traffic analytics
 
