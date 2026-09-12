@@ -1,7 +1,7 @@
 # Practical Command Execution Lessons Learned
 
 Status: CURRENT / PERMANENT OPERATIONAL GUIDANCE
-Updated: 2026-09-06
+Updated: 2026-09-11
 
 Purpose: prevent known command/harness mistakes from being repeated in future
 deploy, production-validation and acceptance instructions.
@@ -137,6 +137,40 @@ failure.
 Use explicit bounded stages and explicit checks for each critical action.
 Expected/non-fatal diagnostic absence should be classified deliberately rather
 than hidden behind a shell-wide fail-fast mode.
+
+## 8A. Use the canonical systemd environment for Projection repair CLI
+
+Production Projection worker configuration is supplied by systemd
+`EnvironmentFile=/etc/default/captive-portal`.
+
+During the 2026-09-11 Projection P0 recovery, running `repair-site` from an
+ordinary interactive shell correctly failed closed with:
+
+```text
+TRAFFIC_PROJECTION_ENABLED must be true
+```
+
+No DB mutation began.
+
+The controlled repair was then run with the same effective runtime context as
+`traffic-projection.service`:
+
+```text
+User=admin
+Group=admin
+WorkingDirectory=/opt/CaptivePortal
+EnvironmentFile=/etc/default/captive-portal
+```
+
+Permanent operational rule:
+
+```text
+Do not assume an interactive shell has the production service environment.
+For production CLI/repair that depends on service configuration, reproduce the
+canonical systemd EnvironmentFile/User/Group/WorkingDirectory context.
+```
+
+Never print secret EnvironmentFile values while proving the context.
 
 ## 9. Permanent pre-action sequence
 

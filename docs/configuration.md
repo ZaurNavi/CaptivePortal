@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-09-09
-Baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Updated: 2026-09-11
+Baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -339,6 +339,40 @@ WEB_ADMIN_MAX_CONCURRENT_QUERIES=4
 ```
 
 Repository default=false must not be rewritten as production disabled.
+
+### Historical Traffic projection — production lifecycle state
+
+Repository defaults remain safe/off unless separately configured:
+
+```text
+TRAFFIC_PROJECTION_ENABLED=false
+WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED=false
+```
+
+Repository default values do not describe current production runtime.
+
+Owner-confirmed production recovery on 2026-09-11 ended with:
+
+```text
+traffic-projection.service=active + enabled
+projection_version=historical_traffic_projection.v1
+version_status=active
+Site health=healthy
+```
+
+Canonical worker runtime environment is supplied by:
+
+```text
+/etc/systemd/system/traffic-projection.service
+EnvironmentFile=/etc/default/captive-portal
+User=admin
+Group=admin
+WorkingDirectory=/opt/CaptivePortal
+ExecStart=/usr/bin/python3 -m app.traffic_projection.cli run
+```
+
+Production CLI/repair must use the canonical worker environment rather than an
+arbitrary interactive shell environment. Secret values are never recorded in KB.
 
 ### Pending Session Cleaner
 

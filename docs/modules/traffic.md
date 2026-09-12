@@ -1,8 +1,8 @@
 # Admin Console Traffic
 
 Status: current production module contract
-Updated: 2026-09-08
-Repository implementation baseline: `main@e32ade378bdbfc9f8458db9c18221958f4552718`
+Updated: 2026-09-11
+Repository implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
 Repository tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
 Production deployed HEAD: `e32ade378bdbfc9f8458db9c18221958f4552718`
 Production tree: `2766139c83965dcf2f80e0c8084b3fb363dbd781`
@@ -645,6 +645,90 @@ exposure=enabled
 delivery=available
 failure=None
 ```
+
+## Traffic Projection lifecycle P0 closure
+
+Historical Traffic Projection remains a derived/rebuildable read model over
+authoritative Observation.
+
+P0 root cause:
+
+```text
+RETENTION CLEANUP / FROZEN RECONCILE WINDOW RACE
+```
+
+The incident caused a fail-closed Site `diverged/source_identity` state because
+moving retention cleanup could remove Projection rows still required by an
+active frozen reconcile proof window.
+
+Accepted permanent fix:
+
+```text
+FINAL-R5 + FIX-1
+PR #111
+production=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+tree=3950df6d400049ed16a823032c6740396cd61137
+```
+
+Key lifecycle guarantees:
+
+```text
+durable per-Site/per-version cleanup fence
+diverged cleanup blocked
+active repair cleanup blocked
+persisted repair continuation
+rebuilding + repair_delete = active durable repair phase
+normal worker resumes repair_site() lifecycle
+health observer / structured telemetry
+immutable startup artifact identity
+bounded shutdown
+```
+
+Production recovery proved:
+
+```text
+durable repair=PASS
+delete phase=PASS
+rebuild=PASS
+full reconcile=PASS
+deep audit=PASS
+health=healthy
+source/projection head coherent
+backlog=0
+DB integrity=PASS
+Historical read/UI=PASS
+worker=active + enabled
+P0 incident=closed
+```
+
+Permanent repair boundaries remain:
+
+```text
+Observation mutation=FORBIDDEN
+manual missing-row insertion=FORBIDDEN
+manual healthy reset=FORBIDDEN
+serve divergent Projection=FORBIDDEN
+```
+
+### Post-recovery observation
+
+Normal production telemetry later showed a short:
+
+```text
+healthy → stale → healthy
+```
+
+during an active reconcile sweep, with `error_category=NULL`, no worker failure,
+successful reconcile completion and final `healthy`.
+
+Current classification:
+
+```text
+OBSERVATION — transient healthy/stale/healthy during active reconcile sweep
+```
+
+This is not currently a new incident or TASK regression. Monitor for repetition
+or user-visible read-gate/UI impact before opening separate analysis.
 
 ## Historical request broker / admission
 
