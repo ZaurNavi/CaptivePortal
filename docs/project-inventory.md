@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-09-11
+Updated: 2026-09-12
 Branch: `main`
-Runtime commit: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Runtime tree: `3950df6d400049ed16a823032c6740396cd61137`
-Commit source: merge PR #111 / Projection lifecycle P0 fix, 2026-09-11
+Runtime commit: `043a13bc1e3aa3353e27af1859dc0bb698df4955`
+Runtime tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
+Commit source: merge PR #114 / Android presentation production FIX, 2026-09-12
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -388,9 +388,9 @@ No DB schema/index/migration/write path was added.
 Follow-on:
 
 ```text
-TASK-WEB-DEVICE-UI-01=IN PROGRESS / LAB REVIEW PENDING
-NOT MERGED
-NOT DEPLOYED
+TASK-WEB-DEVICE-UI-01=CLOSED / PRODUCTION ACTIVE
+PR #110 MERGED
+PRODUCTION VERIFIED
 ```
 
 ## Projection lifecycle P0 production state
@@ -428,6 +428,23 @@ Forensic recovery evidence is outside the repository at:
 ```text
 /home/admin/captivportal-recovery/projection-incident-20260911-112820
 ```
+
+## Admin Web asset library production state
+
+```text
+TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+PR #113=MERGED
+PR #114=MERGED / PRODUCTION VERIFIED
+production HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
+production tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+android.svg SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+captive-portal.service=ACTIVE
+Owner production visual acceptance=PASS
+```
+
+The Android cue preserves the exact source `device_type` text and does not create
+a new classification source.
 
 ## 13. Admin security facts
 

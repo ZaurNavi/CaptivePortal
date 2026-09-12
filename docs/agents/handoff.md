@@ -1,7 +1,7 @@
 # Handoff contract
 
 Status: current
-Updated: 2026-08-30
+Updated: 2026-09-12
 Central Lab governance effective: 2026-08-27
 Acceptance-before-Publication governance effective: 2026-08-30
 
@@ -114,6 +114,25 @@ chain-of-custody:
 ```
 
 Do not describe TEST-ONLY experimental publication as accepted.
+
+### Web Designer publication handoff
+
+When Web Designer publishes an accepted presentation-only candidate after
+explicit `PUBLISH APPROVED CANDIDATE`, handoff must additionally include:
+
+```text
+TASK:
+baseline SHA:
+branch:
+commit SHA:
+changed files:
+diff stat:
+exact accepted artifact match: PASS
+NO EXTRAS: PASS
+Draft PR: # / URL
+MERGE=NO
+DEPLOY=NO
+```
 
 ### Deployment / activation
 

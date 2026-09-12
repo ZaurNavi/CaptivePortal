@@ -1,7 +1,7 @@
 # Repository actions
 
 Status: current
-Updated: 2026-08-30
+Updated: 2026-09-12
 Acceptance-before-Publication governance effective: 2026-08-30
 
 TASK перечисляет allowed, forbidden и owner-only operations. Отсутствующее
@@ -88,6 +88,56 @@ accepted merge tree
 unless a deliberately chosen merge strategy changes the tree. Any production or
 test-file change after acceptance creates a new candidate tree and requires
 re-evaluation/repetition of the necessary gates.
+
+## Web Designer accepted-candidate publication
+
+The Web Designer / Admin Console UI Designer role remains presentation-only.
+
+Default flow:
+
+```text
+local presentation candidate / PATCH
+→ Tech Lead + Owner scope review
+→ required test gate
+→ visual acceptance
+→ ACCEPTED CANDIDATE
+```
+
+Repository write permission is not permanent. It is granted only after the exact
+candidate is accepted and Owner / Tech Lead explicitly issue:
+
+```text
+PUBLISH APPROVED CANDIDATE
+```
+
+That authorization permits only:
+
+```text
+feature branch from specified baseline
+accepted-candidate-only commit
+push that feature branch
+Draft PR to main
+```
+
+Before publication, exact match between accepted artifact and publication diff
+must be proven.
+
+Still forbidden without separate authorization:
+
+```text
+modify main
+merge
+deploy/release
+force-push/history rewrite
+post-acceptance extras
+scope expansion
+backend/API/data/security/business/system logic changes
+```
+
+A Coder is not required merely to publish a purely presentation-only accepted
+candidate. Publication handoff must include TASK, baseline SHA, branch, commit
+SHA, changed files, diff stat, exact artifact match, `NO EXTRAS`, Draft PR,
+`MERGE=NO`, `DEPLOY=NO`.
 
 ## Protected
 

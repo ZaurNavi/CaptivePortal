@@ -25,10 +25,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42` |
-| Repository tree | `3950df6d400049ed16a823032c6740396cd61137` |
-| Production deployed HEAD | `7472d67274ea5aaea2a20df6b613b78d5bb70f42` |
-| Production tree | `3950df6d400049ed16a823032c6740396cd61137` |
+| Repository implementation checkpoint | `main@043a13bc1e3aa3353e27af1859dc0bb698df4955` |
+| Repository tree | `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4` |
+| Production deployed HEAD | `043a13bc1e3aa3353e27af1859dc0bb698df4955` |
+| Production tree | `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -143,9 +143,34 @@ unavailable != offline
 The browser reads persisted application evidence only. Device Detail does not
 add query-time Omada, Loki, Grafana or external Analytics calls.
 
-The follow-on presentation task `TASK-WEB-DEVICE-UI-01` is **IN PROGRESS / LAB
-REVIEW PENDING**. Its compact-list/readable-format/status-indicator work is not
-current production behavior until separately accepted, merged and deployed.
+The Devices presentation follow-on is now **CLOSED / PRODUCTION ACTIVE** through PR #110. The local Admin Web asset library and Android presentation FIX are **CLOSED / PRODUCTION PASS**.
+
+## Admin Web local asset library — current production
+
+```text
+TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+PR #113=MERGED
+PR #114=MERGED / PRODUCTION VERIFIED
+production HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
+production tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+```
+
+Android asset:
+
+```text
+app/admin_web/static/icons/platforms/android.svg
+SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+```
+
+Canonical presentation predicate:
+
+```text
+typeof value === "string" && value.trim().toLowerCase() === "android"
+```
+
+The source `device_type` text remains unchanged. The icon is only a presentation
+cue. No inference from hostname/MAC/vendor/SSID/AP/IP/history is allowed.
 
 ## Traffic Projection lifecycle P0 — closed
 

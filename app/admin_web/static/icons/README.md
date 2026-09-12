@@ -22,4 +22,4 @@ Assets are repository-local. Do not add runtime CDN or third-party image depende
 - Required attribution: "The Android robot is reproduced or modified from work created and shared by Google and used according to terms described in the Creative Commons 3.0 Attribution License."
 - Modified: YES. The local copy adds an explicit `viewBox="0 0 152 89"` for bounded responsive rendering; artwork paths, fills and intrinsic width/height are otherwise unchanged.
 
-Production promotion of this branded asset requires the separate attribution/licensing review defined by `TASK-WEB-ASSET-LIBRARY-01`.
+The accepted Android asset is production-active under `TASK-WEB-ASSET-LIBRARY-01`; preserve this provenance/attribution record for future modification or replacement.
