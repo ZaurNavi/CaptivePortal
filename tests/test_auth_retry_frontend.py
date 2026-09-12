@@ -210,6 +210,11 @@ function assert(condition, message) {
         throw new Error(message);
     }
 }
+async function drainAsyncWork(turns = 4) {
+    for (let index = 0; index < turns; index += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+}
 """
     source = (
         harness
@@ -383,7 +388,7 @@ fetchImpl = () => new Promise((resolve) => {
     }));
 });
 
-const clickPromise = retryButtonElement.listeners.click();
+retryButtonElement.listeners.click();
 await Promise.resolve();
 assert(
     retryButtonElement.disabled === true,
@@ -404,7 +409,7 @@ assert(
 );
 
 resolvePost();
-await clickPromise;
+await drainAsyncWork();
 assert(currentState.status === "WAITING", "new run must be active");
 assert(
     retryButtonElement.classList.contains("hidden"),
@@ -495,7 +500,8 @@ fetchImpl = async (_url, options) => {
     });
 };
 
-await elements["retry-button"].listeners.click();
+elements["retry-button"].listeners.click();
+await drainAsyncWork();
 assert(fetchCalls.length === 2, "retry must reconcile with one GET");
 assert(fetchCalls[0].options.method === "POST", "first call is POST");
 assert(fetchCalls[1].options.method === "GET", "second call is GET");

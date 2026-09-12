@@ -501,6 +501,7 @@ def test_cycle_integrity_contradictions_fail_closed(analytics_stack, column, val
         ("partial", 1), ("overview_ok", 0), ("wired_uplink_ok", 0),
         ("lan_traffic_ok", 0), ("radios_ok", 0),
         ("wired_download_rate_reason", None),
+        ("wired_download_mbps", float("inf")),
     ],
 )
 def test_ap_integrity_contradictions_fail_closed(analytics_stack, column, value):

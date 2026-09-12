@@ -110,22 +110,25 @@ class FakeReader:
         return result
 
 
-def worker_config() -> RegistryConfig:
+def worker_config(*, scan_interval_seconds=0.01) -> RegistryConfig:
     return RegistryConfig(
         enabled=True,
         db_path="/private/visitor_registry.sqlite3",
         source_log_path="/private/visitor_snapshots.log",
         source_backup_count=20,
         timezone_name="Asia/Baku",
-        scan_interval_seconds=0.01,
+        scan_interval_seconds=scan_interval_seconds,
         shutdown_timeout_seconds=0.05,
         max_line_bytes=4_194_304,
     )
 
 
-def make_worker(results, *, backfill=False):
+def make_worker(results, *, backfill=False, scan_interval_seconds=0.01):
     telemetry = CaptureTelemetry()
-    repository = FakeRepository(worker_config(), backfill=backfill)
+    repository = FakeRepository(
+        worker_config(scan_interval_seconds=scan_interval_seconds),
+        backfill=backfill,
+    )
     reader = FakeReader(results)
     worker = VisitorRegistryWorker(
         repository=repository,
@@ -384,6 +387,7 @@ def test_long_full_audit_runs_in_worker_and_does_not_block_start():
     worker, repository, reader, _ = make_worker(
         [ScanResult(True)],
         backfill=True,
+        scan_interval_seconds=5.0,
     )
     audit_started = threading.Event()
     release_audit = threading.Event()
@@ -419,6 +423,7 @@ def test_start_exposes_initializing_until_full_audit_finishes(
     worker, repository, reader, _ = make_worker(
         [ScanResult(True)],
         backfill=True,
+        scan_interval_seconds=5.0,
     )
     repository.states.append((
         previous_state,
