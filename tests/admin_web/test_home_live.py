@@ -207,11 +207,34 @@ def test_client_serializers_minimize_and_preserve_zero():
     result, page = serialize_client_page(CurrentClientPage(snapshot(), (client_item(controller_uptime=0),), None), SITE_ID, limit=100, explicit_cycle_id=CYCLE, explicit_cursor=None)
     assert result["items"][0]["controller_uptime"] == 0
     assert set(result["items"][0]) == {
-        "client_mac", "name", "hostname", "ip", "ssid", "ap_name", "ap_mac",
+        "client_mac", "name", "hostname", "device_type", "device_type_key",
+        "ip", "ssid", "ap_name", "ap_mac",
         "band", "rssi", "snr", "controller_uptime", "controller_traffic_down",
         "controller_traffic_up", "controller_traffic_total", "auth_classification",
     }
     assert page["cycle_id"] == CYCLE
+
+
+def test_client_serializer_adds_raw_device_type_and_derived_key():
+    for raw, expected in (
+        (" Android ", "android"),
+        ("phone", "phone"),
+        (None, None),
+    ):
+        result, _page = serialize_client_page(
+            CurrentClientPage(
+                snapshot(),
+                (client_item(device_type=raw),),
+                None,
+            ),
+            SITE_ID,
+            limit=100,
+            explicit_cycle_id=CYCLE,
+            explicit_cursor=None,
+        )
+        item = result["items"][0]
+        assert item["device_type"] == raw
+        assert item["device_type_key"] == expected
 
 
 def test_client_serializer_rejects_cross_site_scope_and_item():

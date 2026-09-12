@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from app.analytics.current_guest_traffic import CurrentGuestTrafficClientResult
+from app.common.device_type import normalize_device_type_key
 from app.current_state.read_service import CurrentClientLookup
 
 
@@ -219,11 +220,13 @@ def _client(value) -> dict[str, Any]:
         raise DeviceCurrentContextSerializationError("client MAC is invalid")
     if type(value.active) is not bool or type(value.wireless) is not bool:
         raise DeviceCurrentContextSerializationError("client state flags are invalid")
+    raw_device_type = _text(value.device_type)
     return {
         "client_mac": value.client_mac,
         "name": _text(value.name),
         "hostname": _text(value.hostname),
-        "device_type": _text(value.device_type),
+        "device_type": raw_device_type,
+        "device_type_key": normalize_device_type_key(raw_device_type),
         "ip": _text(value.ip),
         "ssid": _text(value.ssid, required=True),
         "ap_name": _text(value.ap_name),

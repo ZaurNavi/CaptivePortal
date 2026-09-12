@@ -7,6 +7,7 @@ from contextlib import closing, contextmanager
 from datetime import date, datetime
 from typing import Any
 
+from app.common.device_type import normalize_device_type_key
 from app.common.mac import format_mac_colon
 
 from .registry_repository import VisitorRegistryRepository
@@ -89,15 +90,17 @@ class VisitorRegistryReadService:
         self,
         device_id: str,
     ) -> dict[str, Any] | None:
-        return self.repository.get_device_by_id(
-            canonical_uuid(device_id)
+        return _device_summary_with_type_key(
+            self.repository.get_device_by_id(canonical_uuid(device_id))
         )
 
     def get_device_by_mac(
         self,
         mac: str,
     ) -> dict[str, Any] | None:
-        return self.repository.get_device_by_mac(format_mac_colon(mac))
+        return _device_summary_with_type_key(
+            self.repository.get_device_by_mac(format_mac_colon(mac))
+        )
 
     def list_devices(
         self,
@@ -139,11 +142,14 @@ class VisitorRegistryReadService:
                 raise ValueError(
                     "seen_to must be a timezone-aware timestamp"
                 ) from exc
-        return self.repository.list_devices(
-            filters=normalized,
-            limit=limit,
-            offset=offset,
-        )
+        return [
+            _device_summary_with_type_key(item)
+            for item in self.repository.list_devices(
+                filters=normalized,
+                limit=limit,
+                offset=offset,
+            )
+        ]
 
     def list_device_snapshots(
         self,
@@ -156,11 +162,14 @@ class VisitorRegistryReadService:
             raise ValueError("limit must be between 1 and 200")
         if offset < 0:
             raise ValueError("offset must not be negative")
-        return self.repository.list_device_snapshots(
-            canonical_uuid(device_id),
-            limit=limit,
-            offset=offset,
-        )
+        return [
+            _snapshot_with_type_key(item)
+            for item in self.repository.list_device_snapshots(
+                canonical_uuid(device_id),
+                limit=limit,
+                offset=offset,
+            )
+        ]
 
     def get_snapshot_by_auth_session(
         self,
@@ -193,3 +202,23 @@ class VisitorRegistryReadService:
                 (session_id, site_id.strip(), mac),
             ).fetchone()
         return dict(row) if row is not None else None
+
+
+def _device_summary_with_type_key(
+    value: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    result = dict(value)
+    result["last_known_device_type_key"] = normalize_device_type_key(
+        result.get("last_known_device_type")
+    )
+    return result
+
+
+def _snapshot_with_type_key(value: dict[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    result["device_type_key"] = normalize_device_type_key(
+        result.get("device_type")
+    )
+    return result

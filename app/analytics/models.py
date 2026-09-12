@@ -164,6 +164,7 @@ class SafeSnapshotSummary:
     authorized_at: str
     captured_at: str
     device_type: str | None
+    device_type_key: str | None
     ssid: str | None
     ap_mac: str | None
     radio_id: int | None

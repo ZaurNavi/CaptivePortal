@@ -39,6 +39,7 @@ from app.visitor_registry.registry_reader import (
     source_identity,
     strict_json_object,
 )
+from app.visitor_registry.registry_read_service import VisitorRegistryReadService
 from app.visitor_registry.registry_repository import (
     BUSY_TIMEOUT_MS,
     VisitorRegistryRepository,
@@ -1325,6 +1326,47 @@ def test_reader_stores_fixture_and_creates_card(tmp_path):
         item["event"] == "visitor_registry_snapshot_stored"
         for item in telemetry.events
     )
+
+
+def test_registry_read_service_derives_device_type_keys_without_mutating_raw_source(
+    tmp_path,
+):
+    config, service, repository, reader, _telemetry = make_stack(tmp_path)
+    event = fixture_event()
+    event["client"]["device_type"] = " Android "
+    append_event(config.source_log_path, event)
+    assert reader.scan().complete
+
+    persisted_device = repository.get_device_by_mac("02:11:22:33:44:55")
+    persisted_snapshots = repository.list_device_snapshots(
+        persisted_device["device_id"], limit=10, offset=0
+    )
+    before_device = deepcopy(persisted_device)
+    before_snapshots = deepcopy(persisted_snapshots)
+    reads = VisitorRegistryReadService(
+        repository,
+        service,
+        configured_enabled=True,
+    )
+
+    by_id = reads.get_device_by_id(persisted_device["device_id"])
+    by_mac = reads.get_device_by_mac("02-11-22-33-44-55")
+    listed = reads.list_devices({}, limit=10, offset=0)
+    snapshots = reads.list_device_snapshots(
+        persisted_device["device_id"], limit=10, offset=0
+    )
+
+    for value in (by_id, by_mac, listed[0]):
+        assert value["last_known_device_type"] == " Android "
+        assert value["last_known_device_type_key"] == "android"
+    assert snapshots[0]["device_type"] == " Android "
+    assert snapshots[0]["device_type_key"] == "android"
+    assert repository.get_device_by_mac("02:11:22:33:44:55") == before_device
+    assert repository.list_device_snapshots(
+        persisted_device["device_id"], limit=10, offset=0
+    ) == before_snapshots
+    assert "last_known_device_type_key" not in before_device
+    assert "device_type_key" not in before_snapshots[0]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX source types only")

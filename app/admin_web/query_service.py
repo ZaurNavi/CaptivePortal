@@ -38,6 +38,7 @@ from app.analytics import (
 )
 from app.analytics.validation import format_utc
 from app.common.mac import format_mac_colon
+from app.common.device_type import normalize_device_type_key
 from app.current_state import (
     CurrentStateSchemaError,
     CurrentStateStorageError,
@@ -1888,6 +1889,9 @@ class AdminQueryService:
     def _device_list_dto(item) -> dict[str, Any]:
         value = asdict(item)
         value.pop("latest_snapshot", None)
+        value["device_type_key"] = normalize_device_type_key(
+            value.get("device_type")
+        )
         return value
 
     def _observation_response(

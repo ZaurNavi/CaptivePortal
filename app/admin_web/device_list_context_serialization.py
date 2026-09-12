@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Mapping
 
+from app.common.device_type import normalize_device_type_key
 from app.current_state.models import CurrentSnapshotMeta
 from app.current_state.normalizer import canonical_scope
 
@@ -23,12 +24,13 @@ _SNAPSHOT_KEYS = {
     "observed_at", "capture_finished_at", "age_seconds", "freshness_status",
     "freshness_reason", "complete",
 }
-_ITEM_KEYS = {
+_SOURCE_ITEM_KEYS = {
     "device_id", "canonical_mac", "hostname", "device_type",
     "site_first_seen_at", "site_last_seen_at", "site_snapshot_count",
     "site_visit_count", "last_site_ip", "last_site_ssid",
     "last_site_ap_mac", "current_presence",
 }
+_PUBLIC_ITEM_KEYS = _SOURCE_ITEM_KEYS | {"device_type_key"}
 _FRESHNESS_REASONS = {
     "within_freshness_window", "older_than_freshness_window",
     "older_than_unavailable_threshold", "no_complete_snapshot",
@@ -229,12 +231,15 @@ def _snapshot_dict(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _item(value: Any) -> dict[str, Any]:
     if hasattr(value, "__dataclass_fields__"):
-        source = {name: getattr(value, name) for name in _ITEM_KEYS}
+        source = {
+            name: getattr(value, name)
+            for name in _SOURCE_ITEM_KEYS
+        }
     elif isinstance(value, Mapping):
         source = dict(value)
     else:
         raise DeviceListContextSerializationError("item is invalid")
-    if set(source) != _ITEM_KEYS:
+    if set(source) != _SOURCE_ITEM_KEYS:
         raise DeviceListContextSerializationError("item fields are invalid")
     try:
         if str(uuid.UUID(source["device_id"])) != source["device_id"]:
@@ -256,7 +261,13 @@ def _item(value: Any) -> dict[str, Any]:
         raise DeviceListContextSerializationError("last Site AP MAC is invalid")
     if source["current_presence"] not in {"online", "offline", "unknown"}:
         raise DeviceListContextSerializationError("current presence is invalid")
-    return source
+    result = dict(source)
+    result["device_type_key"] = normalize_device_type_key(
+        source["device_type"]
+    )
+    if set(result) != _PUBLIC_ITEM_KEYS:
+        raise DeviceListContextSerializationError("public item fields are invalid")
+    return result
 
 
 def _scope(value: Any, site_id: str, *, optional: bool) -> dict[str, Any] | None:

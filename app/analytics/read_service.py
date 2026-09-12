@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
+from app.common.device_type import normalize_device_type_key
+
 from .config import AnalyticsConfig
 from .formulas import coverage, observation_coverage
 from .models import (
@@ -880,6 +882,7 @@ class AnalyticsReadService:
             authorized_at=str(row["authorized_at"]),
             captured_at=str(row["captured_at"]),
             device_type=row["device_type"],
+            device_type_key=normalize_device_type_key(row["device_type"]),
             ssid=row["ssid"],
             ap_mac=row["ap_mac"],
             radio_id=row["radio_id"],

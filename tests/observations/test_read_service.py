@@ -103,6 +103,57 @@ def test_client_history_and_latest_are_immutable(repository):
         item.data["hostname"] = "changed"
 
 
+def test_client_device_type_key_is_read_time_enrichment_and_immutable(
+    repository,
+):
+    create_cycle(repository, "device-type", "client")
+    repository.insert_client_batch([
+        client_row(
+            "device-type",
+            "2026-01-01T00:00:01.000Z",
+            client_mac="AA:BB:CC:DD:EE:01",
+            device_type="Android",
+        ),
+        client_row(
+            "device-type",
+            "2026-01-01T00:00:02.000Z",
+            client_mac="AA:BB:CC:DD:EE:02",
+            system_name="Android",
+            device_type="phone",
+            connect_device_type="ap",
+        )
+    ])
+    service = ObservationReadService(repository)
+    direct = service.get_latest_client_observation(
+        "site-a", "AA:BB:CC:DD:EE:01"
+    )
+    assert direct.data["device_type"] == "Android"
+    assert direct.data["device_type_key"] == "android"
+
+    contradiction = service.get_latest_client_observation(
+        "site-a", "AA:BB:CC:DD:EE:02"
+    )
+    assert contradiction.data["device_type"] == "phone"
+    assert contradiction.data["device_type_key"] == "phone"
+    assert contradiction.data["system_name"] == "Android"
+    assert contradiction.data["connect_device_type"] == "ap"
+    with pytest.raises(TypeError):
+        contradiction.data["device_type_key"] = "android"
+
+    with repository.read_connection() as connection:
+        persisted = connection.execute(
+            """
+            SELECT client_mac, device_type FROM client_observations
+            WHERE cycle_id='device-type'
+            ORDER BY client_mac
+            """
+        ).fetchall()
+    assert [tuple(row) for row in persisted] == [
+        ("AA:BB:CC:DD:EE:01", "Android"),
+        ("AA:BB:CC:DD:EE:02", "phone"),
+    ]
+
+
 def test_running_and_abandoned_cycles_are_excluded_but_filterable(repository):
     create_cycle(repository, "running", "client", complete=False)
     repository.insert_client_batch([
