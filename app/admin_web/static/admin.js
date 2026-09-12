@@ -360,7 +360,18 @@
     );
 
     const type = node("span", "device-row-field device-row-type-field");
-    type.append(node("span", "device-row-label", "Type"), node("span", "device-row-value", item.device_type));
+    const typeValue = node("span", "device-row-value device-row-type-value");
+    if (item.device_type === "Android") {
+      const icon = node("img", "device-type-icon");
+      icon.src = "/admin/static/icons/platforms/android.svg";
+      icon.alt = "";
+      icon.width = 18;
+      icon.height = 11;
+      icon.setAttribute("aria-hidden", "true");
+      typeValue.append(icon);
+    }
+    typeValue.append(node("span", null, item.device_type));
+    type.append(node("span", "device-row-label", "Type"), typeValue);
 
     const lastSeen = node("span", "device-row-field device-row-activity");
     lastSeen.append(
