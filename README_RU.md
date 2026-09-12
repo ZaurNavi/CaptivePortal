@@ -25,10 +25,10 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@7df71a8e807efd74b123117e78cb8d992c190fa1` |
-| Repository tree | `8f1342f0a0f1e8242642161e02b2f3276e6ddf51` |
-| Production deployed HEAD | `7df71a8e807efd74b123117e78cb8d992c190fa1` |
-| Production tree | `8f1342f0a0f1e8242642161e02b2f3276e6ddf51` |
+| Repository implementation checkpoint | `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42` |
+| Repository tree | `3950df6d400049ed16a823032c6740396cd61137` |
+| Production deployed HEAD | `7472d67274ea5aaea2a20df6b613b78d5bb70f42` |
+| Production tree | `3950df6d400049ed16a823032c6740396cd61137` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -39,6 +39,7 @@ CaptivPortal начинался как внешний Captive Portal для ав
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
 | Completed Guest Session Traffic | **CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED** |
 | Traffic Evidence | **TASK-TRAFFIC-09 — COMPLETED / PRODUCTION ACTIVE** |
+| Traffic Projection lifecycle P0 | **CLOSED / PRODUCTION ACCEPTANCE PASS** |
 | DB baseline gate | `TASK-DB-BASELINE-SYNC-01` — **CLOSED / PASS** |
 | Следующий Traffic TASK | **ПОКА НЕ НАЗНАЧЕН** |
 | Omada Controller family | Omada Software Controller 5.14.x |
@@ -144,6 +145,33 @@ Omada, Loki, Grafana или external Analytics calls.
 **IN PROGRESS / LAB REVIEW PENDING**. Compact list, human-readable formatting,
 status indicators и Online-first UX не считаются current production behavior до
 отдельной приёмки, merge и deploy.
+
+## Traffic Projection lifecycle P0 — закрыт
+
+`TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01` полностью принят в production.
+
+```text
+root cause=RETENTION CLEANUP / FROZEN RECONCILE WINDOW RACE
+accepted implementation=FINAL-R5 + FIX-1
+PR #111=merged
+production artifact=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+production tree=3950df6d400049ed16a823032c6740396cd61137
+Projection health=healthy
+Historical Traffic=restored
+traffic-projection.service=active + enabled
+P0 incident=closed
+```
+
+Архитектурный принцип не изменился:
+
+```text
+Observation = authoritative source
+Traffic Projection = derived/rebuildable read model
+divergence = fail-closed
+```
+
+Старые `repair/rebuild HOLD` и `STOPPED + DISABLED / CONTAINED` сохраняются
+только как историческое состояние containment, а не current production status.
 
 # Архитектура
 

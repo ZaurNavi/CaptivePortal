@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-09-09
+Updated: 2026-09-11
 Branch: `main`
-Runtime commit: `7df71a8e807efd74b123117e78cb8d992c190fa1`
-Runtime tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
-Commit source: merge PR #108 / TASK-DEVICE-CARD-01, 2026-09-09
+Runtime commit: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Runtime tree: `3950df6d400049ed16a823032c6740396cd61137`
+Commit source: merge PR #111 / Projection lifecycle P0 fix, 2026-09-11
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -391,6 +391,42 @@ Follow-on:
 TASK-WEB-DEVICE-UI-01=IN PROGRESS / LAB REVIEW PENDING
 NOT MERGED
 NOT DEPLOYED
+```
+
+## Projection lifecycle P0 production state
+
+```text
+TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01
+= CLOSED / PRODUCTION ACCEPTANCE PASS
+
+PR #111=MERGED
+production HEAD=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+production tree=3950df6d400049ed16a823032c6740396cd61137
+
+projection_version=historical_traffic_projection.v1
+version_status=active
+Site health=healthy
+backlog_cycle_count=0
+
+traffic-projection.service=active + enabled
+captive-portal.service=active
+Historical Traffic read surface=restored
+```
+
+Source authority remains:
+
+```text
+observations.sqlite3 = authoritative
+traffic_projection.sqlite3 = derived / rebuildable
+```
+
+The prior `repair/rebuild HOLD` and Projection `STOPPED + DISABLED / CONTAINED`
+state is retained only in incident chronology.
+
+Forensic recovery evidence is outside the repository at:
+
+```text
+/home/admin/captivportal-recovery/projection-incident-20260911-112820
 ```
 
 ## 13. Admin security facts

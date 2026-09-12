@@ -1,9 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-09-09
-Runtime implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
-Runtime tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Updated: 2026-09-11
+Runtime implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Runtime tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -97,6 +97,31 @@ NOT CURRENT PRODUCTION
 
 This follow-on is presentation-layer work and does not change the current
 authoritative DEVICE-CARD-01 functional status.
+
+## Traffic Projection lifecycle P0 closure
+
+```text
+TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01
+CLOSED / PRODUCTION ACCEPTANCE PASS
+
+FINAL-R5 + FIX-1
+PR #111 merged
+
+production=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+tree=3950df6d400049ed16a823032c6740396cd61137
+```
+
+Projection remains derived/rebuildable from authoritative Observation. The
+accepted lifecycle fix protects frozen reconcile proof windows, resumes durable
+repair after restart, and adds operational health/artifact lifecycle evidence.
+
+Current production:
+
+```text
+Projection health=healthy
+Historical Traffic=restored
+traffic-projection.service=active + enabled
+```
 
 ## Next Traffic item
 

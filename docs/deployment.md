@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-09
-Current repository implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
-Confirmed production deployed HEAD: `7df71a8e807efd74b123117e78cb8d992c190fa1`
-Confirmed production tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Updated: 2026-09-11
+Current repository implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Confirmed production deployed HEAD: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Confirmed production tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 ## Repository vs production
 
@@ -645,6 +645,108 @@ numeric 0 Mbps → valid value
 
 The follow-on `TASK-WEB-DEVICE-UI-01` is not part of this production rollout and
 must not be represented as deployed/current until separately accepted.
+
+## Projection lifecycle P0 production recovery — 2026-09-11
+
+Artifact:
+
+```text
+TASK=TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01
+accepted implementation=FINAL-R5 + FIX-1
+PR=#111
+accepted head=a0dc02d5ae0ff16c250cf46a7e7a610c24e6f433
+accepted tree=3950df6d400049ed16a823032c6740396cd61137
+merge / production=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+```
+
+Before mutation:
+
+```text
+Site=6a64f17630da7c70d232187a
+status=diverged
+last_error_category=source_identity
+projection_revision=88955
+traffic-projection.service=inactive + disabled
+writer lock=free
+Observation=continuing
+captive-portal.service=active
+```
+
+Forensic backup created before repair:
+
+```text
+/home/admin/captivportal-recovery/projection-incident-20260911-112820
+```
+
+It preserved SQLite-consistent Projection backup, raw DB/WAL/SHM, writer-lock
+snapshot, manifest, Site-state snapshot and SHA256 evidence.
+
+Fixed deploy proof:
+
+```text
+clean repository=PASS
+HEAD=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+tree=3950df6d400049ed16a823032c6740396cd61137
+compileall=PASS
+import smoke=PASS
+loaded artifact identity=PASS
+captive-portal.service=active
+Projection worker intentionally remained inactive + disabled
+```
+
+An interactive-shell `repair-site` attempt failed closed with:
+
+```text
+TRAFFIC_PROJECTION_ENABLED must be true
+```
+
+No mutation began. Recovery then used a transient systemd unit reproducing the
+canonical EnvironmentFile/User/Group/WorkingDirectory.
+
+First durable repair quantum:
+
+```text
+REPAIR_RC=0
+projection_revision 88955 → 88956
+status=rebuilding
+last_error_category=repair_delete
+PRAGMA quick_check=ok
+writer lock=FREE
+```
+
+The permanent worker was started while still disabled and loaded exact artifact
+`7472d67274ea5aaea2a20df6b613b78d5bb70f42` / `3950df6d400049ed16a823032c6740396cd61137`. It automatically continued persisted repair.
+
+Delete progress included:
+
+```text
+34342 → 32642 → 30942 → 27742 → ...
+```
+
+then automatically transitioned to rebuild/reconcile/deep-audit.
+
+Final acceptance:
+
+```text
+projection_revision=123634
+status=healthy
+last_error_category=NULL
+projection_head_utc=2026-09-11T13:18:00.739Z
+source_head_utc=2026-09-11T13:18:00.739Z
+backlog_cycle_count=0
+PRAGMA user_version=1
+PRAGMA quick_check=ok
+Historical Web panels=PASS
+```
+
+After final proof:
+
+```text
+systemctl enable traffic-projection.service
+traffic-projection.service=active + enabled
+rollback=not required
+P0 incident=closed
+```
 
 ## Feature activation
 

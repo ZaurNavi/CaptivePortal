@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-09
+Updated: 2026-09-11
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
-Production deployed HEAD: `7df71a8e807efd74b123117e78cb8d992c190fa1`
-Production tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Documentation/current-state implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Production deployed HEAD: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Production tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 ## Responsibility model
 
@@ -334,6 +334,89 @@ During TRAFFIC-00 acceptance:
 - the rerun was moved to a dedicated `C:\CaptivPortal-Lab\tmp\...` basetemp.
 
 This is troubleshooting history, not a current product defect.
+
+### Latest Projection lifecycle P0 acceptance — TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01
+
+Artifact identity:
+
+```text
+baseline=ff39fe888c53361a7c65a034eaddb0ce92cc4a12
+accepted PR head=a0dc02d5ae0ff16c250cf46a7e7a610c24e6f433
+accepted tree=3950df6d400049ed16a823032c6740396cd61137
+PR #111=MERGED
+merge / production=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+```
+
+Pre-publication acceptance:
+
+```text
+Source Review=PASS
+Windows Central Full V6=PASS
+strict regressions=0
+Linux targeted=132 PASS
+Linux full=3154 PASS, 1 SKIP
+3 known baseline/environment failures reproduced on clean base
+candidate-specific regressions=0
+```
+
+Production recovery acceptance:
+
+```text
+forensic preflight/backup=PASS
+exact deployed artifact identity=PASS
+first durable repair quantum=PASS
+persisted repair continuation=PASS
+bounded delete phase=PASS
+rebuild=PASS
+full reconcile=PASS
+deep audit=PASS
+source/projection head coherence=PASS
+backlog=0
+DB quick_check=ok
+Projection health=healthy
+Historical Web panels=PASS
+worker active=PASS
+worker enabled/autostart=PASS
+```
+
+Final Site sample:
+
+```text
+projection_revision=123634
+status=healthy
+last_error_category=NULL
+projection_head_utc=2026-09-11T13:18:00.739Z
+source_head_utc=2026-09-11T13:18:00.739Z
+last_full_reconcile_completed_at=2026-09-11T13:17:46.393Z
+last_deep_audit_at=2026-09-11T13:17:46.393Z
+backlog_cycle_count=0
+```
+
+Owner manual Web verification proved the restored path:
+
+```text
+Observation
+→ Traffic Projection
+→ Historical read service
+→ Web UI panels
+```
+
+Final verdict:
+
+```text
+P0 INCIDENT=CLOSED
+PRODUCTION ACCEPTANCE=PASS
+```
+
+Non-blocking telemetry observation:
+
+```text
+healthy → stale → healthy
+during active reconcile sweep
+```
+
+With no error category, no worker failure and final healthy state, this remains
+an observation only, not a regression/incident.
 
 ### Latest Device acceptance evidence — TASK-DEVICE-CARD-01
 

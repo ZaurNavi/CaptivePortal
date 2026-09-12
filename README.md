@@ -25,10 +25,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@7df71a8e807efd74b123117e78cb8d992c190fa1` |
-| Repository tree | `8f1342f0a0f1e8242642161e02b2f3276e6ddf51` |
-| Production deployed HEAD | `7df71a8e807efd74b123117e78cb8d992c190fa1` |
-| Production tree | `8f1342f0a0f1e8242642161e02b2f3276e6ddf51` |
+| Repository implementation checkpoint | `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42` |
+| Repository tree | `3950df6d400049ed16a823032c6740396cd61137` |
+| Production deployed HEAD | `7472d67274ea5aaea2a20df6b613b78d5bb70f42` |
+| Production tree | `3950df6d400049ed16a823032c6740396cd61137` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -39,6 +39,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Online Guests Traffic | **COMPLETE / PRODUCTION ACTIVE** |
 | Completed Guest Session Traffic | **CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED** |
 | Traffic Evidence | **TASK-TRAFFIC-09 — COMPLETED / PRODUCTION ACTIVE** |
+| Traffic Projection lifecycle P0 | **CLOSED / PRODUCTION ACCEPTANCE PASS** |
 | DB baseline gate | `TASK-DB-BASELINE-SYNC-01` — **CLOSED / PASS** |
 | Next Traffic task | **NOT YET ASSIGNED** |
 | Omada Controller family used by the project | Omada Software Controller 5.14.x |
@@ -145,6 +146,33 @@ add query-time Omada, Loki, Grafana or external Analytics calls.
 The follow-on presentation task `TASK-WEB-DEVICE-UI-01` is **IN PROGRESS / LAB
 REVIEW PENDING**. Its compact-list/readable-format/status-indicator work is not
 current production behavior until separately accepted, merged and deployed.
+
+## Traffic Projection lifecycle P0 — closed
+
+`TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01` is now production-accepted.
+
+```text
+root cause=RETENTION CLEANUP / FROZEN RECONCILE WINDOW RACE
+accepted implementation=FINAL-R5 + FIX-1
+PR #111=merged
+production artifact=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+production tree=3950df6d400049ed16a823032c6740396cd61137
+Projection health=healthy
+Historical Traffic=restored
+traffic-projection.service=active + enabled
+P0 incident=closed
+```
+
+Permanent authority is unchanged:
+
+```text
+Observation = authoritative source
+Traffic Projection = derived/rebuildable read model
+divergence = fail-closed
+```
+
+The earlier `repair/rebuild HOLD` and `STOPPED + DISABLED / CONTAINED` state is
+historical containment evidence only, not current production status.
 
 # Architecture
 

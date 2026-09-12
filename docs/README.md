@@ -1,9 +1,9 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-09-09
-Current-state implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
-Current implementation tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Updated: 2026-09-11
+Current-state implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Current implementation tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -45,6 +45,7 @@ Historical reports, production acceptance и research сохраняют док�
 | TRAFFIC-08 final production closure | `tasks/TASK-TRAFFIC-08-FINAL.md` |
 | TRAFFIC-09 final production closure | `tasks/TASK-TRAFFIC-09-FINAL.md` |
 | DEVICE-CARD-01 final production closure | `tasks/TASK-DEVICE-CARD-01-FINAL.md` |
+| Projection lifecycle P0 closure | `tasks/TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01-IMPLEMENTATION-READY-FINAL-R5.md` |
 | Deferred Projection maintenance request | `deferred/TRAFFIC-PROJECTION-MAINTENANCE-REINDEX.md` |
 | Acceptance/publication workflow | `agents/workflow.md` |
 | Git/production deployment boundary | `deployment.md` |
@@ -79,7 +80,7 @@ Historical reports, production acceptance и research сохраняют док�
 
 ## Current vs planned
 
-Current Traffic state at implementation baseline `main@e32ade378bdbfc9f8458db9c18221958f4552718`:
+Current Traffic state at implementation baseline `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`:
 
 ```text
 TRAFFIC-00         DONE
@@ -168,6 +169,29 @@ MERGED = NO
 DEPLOYED = NO
 CURRENT PRODUCTION BEHAVIOR = NO
 ```
+
+## Traffic Projection lifecycle P0 closure
+
+Canonical task / incident record:
+
+`tasks/TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01-IMPLEMENTATION-READY-FINAL-R5.md`
+
+Current truth:
+
+```text
+FINAL-R5 + FIX-1=accepted
+PR #111=merged
+production=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+tree=3950df6d400049ed16a823032c6740396cd61137
+recovery=PASS
+Projection health=healthy
+Historical Traffic=restored
+worker=active + enabled
+P0 incident=closed
+```
+
+The task record preserves the earlier HOLD/containment state as chronology and
+does not treat it as current status.
 
 ## Permanent promotion boundary
 

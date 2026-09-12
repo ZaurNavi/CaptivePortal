@@ -1,9 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-09-09
-Runtime implementation baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
-Runtime tree: `8f1342f0a0f1e8242642161e02b2f3276e6ddf51`
+Updated: 2026-09-11
+Runtime implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
+Runtime tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 ## 1. Mental model
 
@@ -454,6 +454,63 @@ no Loki/Grafana/external Analytics browser call
 no DB/schema/index/migration
 no write path
 no worker/scheduler/polling loop
+```
+
+### Traffic Projection lifecycle consistency — accepted production architecture
+
+The P0 lifecycle incident is closed.
+
+Canonical root-cause class remains:
+
+```text
+RETENTION CLEANUP / FROZEN RECONCILE WINDOW RACE
+```
+
+Permanent architecture:
+
+```text
+Observation
+→ authoritative Historical Traffic evidence
+
+Traffic Projection
+→ derived / rebuildable read model
+```
+
+A frozen reconcile proof window must be protected from moving retention cleanup.
+Divergence remains fail-closed; inconsistent Projection is not served merely to
+restore availability.
+
+Accepted `FINAL-R5 + FIX-1` adds/hardens:
+
+```text
+durable cleanup fence
+durable repair continuation
+health observer / telemetry
+immutable loaded artifact identity
+bounded shutdown
+```
+
+Persisted `rebuilding + repair_delete` is active durable repair lineage. After a
+restart/interruption, the normal Projection worker continues the accepted
+`repair_site()` lifecycle rather than losing the repair and returning to normal
+incremental maintenance.
+
+Production repair must use the canonical repair lifecycle. Manual Projection
+row insertion, manual healthy reset and authoritative Observation mutation
+remain forbidden.
+
+Production acceptance proved:
+
+```text
+fixed artifact=7472d67274ea5aaea2a20df6b613b78d5bb70f42
+tree=3950df6d400049ed16a823032c6740396cd61137
+durable repair continuation=PASS
+full reconcile=PASS
+deep audit=PASS
+health=healthy
+backlog=0
+Historical Traffic Web path=PASS
+worker=active + enabled
 ```
 
 ## 8. Admin Web
