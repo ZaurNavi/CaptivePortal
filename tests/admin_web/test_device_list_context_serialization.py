@@ -91,6 +91,7 @@ def test_device_list_context_serialization_exact_root_overlay_and_item_keys():
     }
     assert set(result["items"][0]) == {
         "device_id", "canonical_mac", "hostname", "device_type",
+        "device_type_key",
         "site_first_seen_at", "site_last_seen_at", "site_snapshot_count",
         "site_visit_count", "last_site_ip", "last_site_ssid",
         "last_site_ap_mac", "current_presence",
@@ -100,6 +101,47 @@ def test_device_list_context_serialization_exact_root_overlay_and_item_keys():
     assert "latest_snapshot" not in result["items"][0]
     assert "cycle_id" not in result["current_state_overlay"]["snapshot"]
     assert "source_scope_hash" not in result["current_state_overlay"]
+
+
+def test_device_list_context_serialization_derives_device_type_key_from_source_only():
+    for raw, expected in (
+        (" Android ", "android"),
+        ("Android", "android"),
+        ("phone", "phone"),
+        (None, None),
+    ):
+        row = _row(device_type=raw)
+        result = serialize_device_list_context(
+            site_id=SITE, items=(row,), overlay=_overlay()
+        )
+        item = result["items"][0]
+        assert item["device_type"] == raw
+        assert item["device_type_key"] == expected
+        assert "device_type_key" not in row.__dataclass_fields__
+
+
+def test_device_list_context_serialization_rejects_injected_device_type_key():
+    row = _row(device_type="phone")
+    source = {
+        name: getattr(row, name)
+        for name in (
+            "device_id", "canonical_mac", "hostname", "device_type",
+            "site_first_seen_at", "site_last_seen_at", "site_snapshot_count",
+            "site_visit_count", "last_site_ip", "last_site_ssid",
+            "last_site_ap_mac", "current_presence",
+        )
+    }
+    accepted = serialize_device_list_context(
+        site_id=SITE, items=(source,), overlay=_overlay()
+    )
+    assert accepted["items"][0]["device_type_key"] == "phone"
+
+    with pytest.raises(DeviceListContextSerializationError):
+        serialize_device_list_context(
+            site_id=SITE,
+            items=({**source, "device_type_key": "android"},),
+            overlay=_overlay(),
+        )
 
 
 def test_device_list_context_serialization_accepts_three_overlay_modes():

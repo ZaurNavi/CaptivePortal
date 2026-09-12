@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+from app.common.device_type import normalize_device_type_key
 from app.current_state import (
     CurrentApPage,
     CurrentApSummary,
@@ -83,6 +84,8 @@ def serialize_client_page(
                 "client_mac": item.client_mac,
                 "name": item.name,
                 "hostname": item.hostname,
+                "device_type": item.device_type,
+                "device_type_key": normalize_device_type_key(item.device_type),
                 "ip": item.ip,
                 "ssid": item.ssid,
                 "ap_name": item.ap_name,

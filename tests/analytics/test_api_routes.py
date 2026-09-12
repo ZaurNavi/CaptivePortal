@@ -197,6 +197,15 @@ def test_common_values_are_passed_unchanged_and_evaluation_is_server_generated()
     assert args[3].endswith("Z")
 
 
+def test_device_type_foundation_does_not_change_analytics_api_version():
+    app, _runtime = _app()
+    response = app.test_client().get(
+        API_PREFIX + "/quality/source" + _query(), headers=AUTH
+    )
+    assert response.status_code == 200
+    assert response.get_json()["api_version"] == "analytics.internal.v1"
+
+
 @pytest.mark.parametrize(
     "header",
     [None, "Basic value", "bearer " + TOKEN, "Bearer", "Bearer  " + TOKEN,

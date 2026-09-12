@@ -133,6 +133,30 @@ def test_device_current_serializer_preserves_online_zero_and_byte_units():
     assert "source_scope_hash" not in str(result)
 
 
+def test_device_current_serializer_adds_key_from_current_raw_only():
+    result = _serialize(
+        CurrentClientLookup(
+            _snapshot(),
+            replace(_client(), device_type=" Android "),
+        ),
+        _traffic(),
+    )
+    client = result["current_state"]["client"]
+    assert client["device_type"] == " Android "
+    assert client["device_type_key"] == "android"
+    assert result["contract_version"] == "admin.device.current.v1"
+
+    missing = _serialize(
+        CurrentClientLookup(
+            _snapshot(),
+            replace(_client(), device_type=None),
+        ),
+        _traffic(),
+    )
+    assert missing["current_state"]["client"]["device_type"] is None
+    assert missing["current_state"]["client"]["device_type_key"] is None
+
+
 @pytest.mark.parametrize("auth", ["pending", "other", "unknown"])
 def test_device_current_non_authorized_is_not_applicable(auth):
     result = _serialize(

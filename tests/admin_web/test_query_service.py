@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import threading
 
 import pytest
@@ -311,8 +312,19 @@ def test_device_list_dto_does_not_expose_detail_snapshot():
     service, devices, _reads, _analytics = _service()
     response = service.list_devices(AdminPrincipal("x"), SITE_ID)
     assert response.result["items"][0]["canonical_mac"] == "02:00:00:00:00:01"
+    assert response.result["items"][0]["device_type"] == "phone"
+    assert response.result["items"][0]["device_type_key"] == "phone"
     assert "latest_snapshot" not in response.result["items"][0]
     assert isinstance(devices.calls[0]["deadline"], QueryDeadline)
+
+
+def test_device_list_dto_derives_key_without_rewriting_raw_type():
+    result = AdminQueryService._device_list_dto(
+        replace(_device(), device_type=" Android ")
+    )
+    assert result["device_type"] == " Android "
+    assert result["device_type_key"] == "android"
+    assert "latest_snapshot" not in result
 
 
 def test_device_mac_filter_is_canonical_and_bound_to_cursor():
@@ -464,6 +476,7 @@ def test_device_list_context_feature_off_keeps_old_path_and_decoder():
             "device_id": DEVICE_ID,
             "canonical_mac": "02:00:00:00:00:01",
             "device_type": "phone",
+            "device_type_key": "phone",
             "site_first_seen_at": "2026-01-01T00:00:00.000Z",
             "site_last_seen_at": "2026-01-02T00:00:00.000Z",
             "site_snapshot_count": 2,

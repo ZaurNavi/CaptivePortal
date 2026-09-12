@@ -286,6 +286,34 @@ def test_safe_snapshot_contract_omits_raw_json(analytics_stack):
     assert not hasattr(snapshot, "auth_context_json")
 
 
+def test_safe_snapshot_device_type_key_is_derived_from_raw_source_only(
+    analytics_stack,
+):
+    with closing(analytics_stack.registry._connect()) as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE device_snapshots SET device_type=' Android ' WHERE snapshot_id=?",
+            (SNAPSHOT_A,),
+        )
+        connection.commit()
+    result = analytics_stack.service.get_visit_context(
+        SITE_A, analytics_stack.visit_id
+    )
+    assert result.value.snapshot.device_type == " Android "
+    assert result.value.snapshot.device_type_key == "android"
+
+    with closing(analytics_stack.registry._connect()) as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE device_snapshots SET device_type=NULL WHERE snapshot_id=?",
+            (SNAPSHOT_A,),
+        )
+        connection.commit()
+    missing = analytics_stack.service.get_visit_context(
+        SITE_A, analytics_stack.visit_id
+    )
+    assert missing.value.snapshot.device_type is None
+    assert missing.value.snapshot.device_type_key is None
+
+
 def test_source_quality_fixes_evaluation_and_watermarks(analytics_stack):
     result = analytics_stack.service.get_source_quality(
         SITE_A, FROM, TO, EVALUATION

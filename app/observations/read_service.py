@@ -8,6 +8,8 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Any, Callable, Iterable, Mapping, Sequence, TypeVar
 
+from app.common.device_type import normalize_device_type_key
+
 from .models import (
     ApConfigSnapshot,
     ApObservation,
@@ -475,6 +477,10 @@ def _data(row: sqlite3.Row, excluded: Iterable[str]) -> Mapping[str, Any]:
 
 
 def _client_dto(row: sqlite3.Row) -> ClientObservation:
+    data = dict(_data(row, _CLIENT_CORE))
+    data["device_type_key"] = normalize_device_type_key(
+        data.get("device_type")
+    )
     return ClientObservation(
         row_id=int(row["row_id"]),
         cycle_id=str(row["cycle_id"]),
@@ -485,7 +491,7 @@ def _client_dto(row: sqlite3.Row) -> ClientObservation:
         ssid=row["ssid"],
         ap_mac=row["ap_mac"],
         radio_id=row["radio_id"],
-        data=_data(row, _CLIENT_CORE),
+        data=data,
     )
 
 
