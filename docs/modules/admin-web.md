@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-09-09
-Baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Updated: 2026-09-12
+Baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
 
 ## Boundary
 
@@ -175,6 +175,43 @@ no overlapping Current request
 Historical and Current load independently
 Current failure does not erase Historical
 ```
+
+## Devices presentation and local assets — current state
+
+```text
+TASK-DEVICE-LIST-CONTEXT-01=CLOSED / PRODUCTION ACTIVE
+TASK-WEB-DEVICE-UI-01=CLOSED / PRODUCTION ACTIVE
+PR #110=MERGED / PRODUCTION VERIFIED
+```
+
+Global Online-first remains backend-owned before pagination.
+
+## Admin Web local asset library — current production
+
+```text
+TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+PR #113=MERGED
+PR #114=MERGED / PRODUCTION VERIFIED
+production HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
+production tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+```
+
+Android asset:
+
+```text
+app/admin_web/static/icons/platforms/android.svg
+SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+```
+
+Canonical presentation predicate:
+
+```text
+typeof value === "string" && value.trim().toLowerCase() === "android"
+```
+
+The source `device_type` text remains unchanged. The icon is only a presentation
+cue. No inference from hostname/MAC/vendor/SSID/AP/IP/history is allowed.
 
 ## Home
 
@@ -493,10 +530,9 @@ Separate follow-on work:
 
 ```text
 TASK-WEB-DEVICE-UI-01
-STATUS=IN PROGRESS / LAB REVIEW PENDING
-MERGED=NO
-DEPLOYED=NO
-CURRENT PRODUCTION=NO
+STATUS=CLOSED / PRODUCTION ACTIVE
+MERGED=YES / PR #110
+DEPLOYED=YES / PRODUCTION ACTIVE
 ```
 
 That task covers presentation-only compact Devices cards/list, human-readable

@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-11
-Current repository implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Confirmed production deployed HEAD: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Confirmed production tree: `3950df6d400049ed16a823032c6740396cd61137`
+Updated: 2026-09-12
+Current repository implementation baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
+Confirmed production deployed HEAD: `043a13bc1e3aa3353e27af1859dc0bb698df4955`
+Confirmed production tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
 
 ## Repository vs production
 
@@ -643,8 +643,7 @@ Current State execution failure → Current endpoint controlled 503
 numeric 0 Mbps → valid value
 ```
 
-The follow-on `TASK-WEB-DEVICE-UI-01` is not part of this production rollout and
-must not be represented as deployed/current until separately accepted.
+At DEVICE-CARD-01 rollout time the UI follow-on was not part of that artifact. It later closed separately through PR #110 and is now production-active.
 
 ## Projection lifecycle P0 production recovery — 2026-09-11
 
@@ -747,6 +746,45 @@ traffic-projection.service=active + enabled
 rollback=not required
 P0 incident=closed
 ```
+
+## WEB-ASSET-LIBRARY-01 production history — 2026-09-12
+
+Initial implementation:
+
+```text
+PR #113
+accepted=0b3a692684d5d87ca7b96cf75c722dda7e2e8cf3
+merge=5d1a590d1d575eeea8148ca868b9de5183c0fff5
+6 files / +39/-1
+```
+
+Real production data exposed a presentation-only case mismatch:
+`device_type=android` did not satisfy the original exact `"Android"` predicate.
+
+Production FIX:
+
+```text
+patch SHA256=c11bba2544124bc448f1d1a63a295dda479f0ab81cd430e2dbd6cc829509189b
+baseline=5d1a590d1d575eeea8148ca868b9de5183c0fff5
+accepted=d207e048f0fcdec685d3bae1f8497fdbdcd611d4
+PR #114
+merge / production=043a13bc1e3aa3353e27af1859dc0bb698df4955
+tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+4 files / +68/-23
+```
+
+Delivery proof:
+
+```text
+captive-portal.service=ACTIVE
+admin.js=HTTP 200
+android.svg=HTTP 200
+android.svg SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+service restart for FIX=NOT REQUIRED
+Owner production visual acceptance=PASS
+```
+
+No backend/API/data/security contract changed.
 
 ## Feature activation
 

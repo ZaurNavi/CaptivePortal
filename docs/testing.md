@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-11
+Updated: 2026-09-12
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Production deployed HEAD: `7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Production tree: `3950df6d400049ed16a823032c6740396cd61137`
+Documentation/current-state implementation baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
+Production deployed HEAD: `043a13bc1e3aa3353e27af1859dc0bb698df4955`
+Production tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
 
 ## Responsibility model
 
@@ -335,6 +335,34 @@ During TRAFFIC-00 acceptance:
 
 This is troubleshooting history, not a current product defect.
 
+### Latest Admin Web presentation acceptance — WEB-ASSET-LIBRARY-01 + FIX
+
+```text
+TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+PR #113 accepted=0b3a692684d5d87ca7b96cf75c722dda7e2e8cf3
+PR #113 merge=5d1a590d1d575eeea8148ca868b9de5183c0fff5
+FIX patch SHA256=c11bba2544124bc448f1d1a63a295dda479f0ab81cd430e2dbd6cc829509189b
+PR #114 accepted=d207e048f0fcdec685d3bae1f8497fdbdcd611d4
+PR #114 merge / production=043a13bc1e3aa3353e27af1859dc0bb698df4955
+```
+
+```text
+patch application=PASS
+git diff --check=PASS
+bounded Admin Web tests=12/12 PASS
+case-insensitive Android matching=PASS
+Devices list LAB visual=PASS
+Device Detail Identity LAB visual=PASS
+Device Detail evidence LAB visual=PASS
+Owner visual acceptance=PASS
+production delivery verification=PASS
+Owner production visual acceptance=PASS
+```
+
+The production defect was presentation matching only. Backend/API/data semantics
+were not changed.
+
 ### Latest Projection lifecycle P0 acceptance — TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01
 
 Artifact identity:
@@ -473,8 +501,7 @@ Current State execution failure is controlled independently
 
 No schema/index/migration/write path or query-time Omada was introduced.
 
-Follow-on `TASK-WEB-DEVICE-UI-01` is not acceptance evidence for this TASK and is
-not current production:
+At DEVICE-CARD-01 acceptance time, `TASK-WEB-DEVICE-UI-01` was a separate pending follow-on. It later closed through PR #110:
 
 ```text
 IN PROGRESS / LAB REVIEW PENDING

@@ -25,10 +25,10 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 | Пункт | Текущее положение |
 |---|---|
-| Repository implementation checkpoint | `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42` |
-| Repository tree | `3950df6d400049ed16a823032c6740396cd61137` |
-| Production deployed HEAD | `7472d67274ea5aaea2a20df6b613b78d5bb70f42` |
-| Production tree | `3950df6d400049ed16a823032c6740396cd61137` |
+| Repository implementation checkpoint | `main@043a13bc1e3aa3353e27af1859dc0bb698df4955` |
+| Repository tree | `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4` |
+| Production deployed HEAD | `043a13bc1e3aa3353e27af1859dc0bb698df4955` |
+| Production tree | `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -141,10 +141,34 @@ unavailable != offline
 Device Detail читает persisted application evidence и не добавляет query-time
 Omada, Loki, Grafana или external Analytics calls.
 
-Следующая presentation-layer задача `TASK-WEB-DEVICE-UI-01` имеет статус
-**IN PROGRESS / LAB REVIEW PENDING**. Compact list, human-readable formatting,
-status indicators и Online-first UX не считаются current production behavior до
-отдельной приёмки, merge и deploy.
+Presentation-layer задача `TASK-WEB-DEVICE-UI-01` теперь **CLOSED / PRODUCTION ACTIVE** через PR #110. Локальная библиотека Admin Web assets и Android presentation FIX также **CLOSED / PRODUCTION PASS**.
+
+## Admin Web local asset library — current production
+
+```text
+TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+PR #113=MERGED
+PR #114=MERGED / PRODUCTION VERIFIED
+production HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
+production tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+```
+
+Android asset:
+
+```text
+app/admin_web/static/icons/platforms/android.svg
+SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+```
+
+Canonical presentation predicate:
+
+```text
+typeof value === "string" && value.trim().toLowerCase() === "android"
+```
+
+The source `device_type` text remains unchanged. The icon is only a presentation
+cue. No inference from hostname/MAC/vendor/SSID/AP/IP/history is allowed.
 
 ## Traffic Projection lifecycle P0 — закрыт
 

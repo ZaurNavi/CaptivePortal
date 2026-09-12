@@ -1,9 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-09-11
-Runtime implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Runtime tree: `3950df6d400049ed16a823032c6740396cd61137`
+Updated: 2026-09-12
+Runtime implementation baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
+Runtime tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -27,6 +27,9 @@ Runtime tree: `3950df6d400049ed16a823032c6740396cd61137`
 | Analytics internal API | current; default disabled | `app/analytics/api.py` | `modules/analytics.md` | none | no |
 | Admin Web | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | process security state | **no** |
 | Device Current Context | current; default disabled | `app/admin_web/`, `app/current_state/read_service.py`, `app/analytics/current_guest_traffic.py` | `modules/admin-web.md`, `modules/current-state.md`, `modules/analytics.md` | reads Current State only; no new persistence | no |
+| Device List Context | current; production active | Admin Web + Registry + Current State | `modules/admin-web.md` | no new persistence | no |
+| Devices Web Designer presentation | current production presentation | `app/admin_web/static/admin.css`, `app/admin_web/static/admin.js` | `modules/admin-web.md`, `agents/web-designer-role.md` | none | no |
+| Admin Web local asset library | current production presentation | `app/admin_web/static/icons/` | `modules/admin-web.md` | static assets only | no |
 | Home Live | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
 | Current Traffic | current | `app/analytics/current_traffic.py` | `modules/analytics.md` | reads Observation | no |
 | Home Traffic | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
@@ -48,11 +51,11 @@ Runtime tree: `3950df6d400049ed16a823032c6740396cd61137`
 
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-09-09:
+Owner-provided production checkpoint 2026-09-12:
 
 ```text
-HEAD: 7df71a8e807efd74b123117e78cb8d992c190fa1
-tree: 8f1342f0a0f1e8242642161e02b2f3276e6ddf51
+HEAD: 043a13bc1e3aa3353e27af1859dc0bb698df4955
+tree: c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -70,6 +73,10 @@ TASK-DB-BASELINE-SYNC-01: CLOSED / PASS
 TRAFFIC-08 Completed Guest Session Traffic: CLOSED / DEPLOYED / ACTIVE / PRODUCTION VERIFIED
 TRAFFIC-09 Consolidated Traffic Evidence: COMPLETED / PRODUCTION ACTIVE
 TASK-DEVICE-CARD-01 Current Device Context: COMPLETE / PRODUCTION ACTIVE
+TASK-DEVICE-LIST-CONTEXT-01: CLOSED / PRODUCTION ACTIVE
+TASK-WEB-DEVICE-UI-01: CLOSED / PRODUCTION ACTIVE
+TASK-WEB-ASSET-LIBRARY-01: CLOSED / PRODUCTION PASS
+TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION: CLOSED / PRODUCTION PASS
 
 WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=true
 WEB_ADMIN_TRAFFIC_ENABLED=true
@@ -89,10 +96,9 @@ captive-portal.service=active
 ## Device UI follow-on
 
 ```text
-TASK-WEB-DEVICE-UI-01 = IN PROGRESS / LAB REVIEW PENDING
-NOT MERGED
-NOT DEPLOYED
-NOT CURRENT PRODUCTION
+TASK-WEB-DEVICE-UI-01 = CLOSED / PRODUCTION ACTIVE
+PR #110 MERGED
+PRODUCTION VERIFIED
 ```
 
 This follow-on is presentation-layer work and does not change the current

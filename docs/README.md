@@ -1,9 +1,9 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-09-11
-Current-state implementation baseline: `main@7472d67274ea5aaea2a20df6b613b78d5bb70f42`
-Current implementation tree: `3950df6d400049ed16a823032c6740396cd61137`
+Updated: 2026-09-12
+Current-state implementation baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
+Current implementation tree: `c2a9a01b2f8507c192fe2ef034ed4b9c850deed4`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -45,6 +45,9 @@ Historical reports, production acceptance и research сохраняют док�
 | TRAFFIC-08 final production closure | `tasks/TASK-TRAFFIC-08-FINAL.md` |
 | TRAFFIC-09 final production closure | `tasks/TASK-TRAFFIC-09-FINAL.md` |
 | DEVICE-CARD-01 final production closure | `tasks/TASK-DEVICE-CARD-01-FINAL.md` |
+| WEB-ASSET-LIBRARY-01 final production closure | `tasks/TASK-WEB-ASSET-LIBRARY-01-FINAL.md` |
+| WEB-ASSET-LIBRARY-01 Android FIX closure | `tasks/TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION-FINAL.md` |
+| Web Designer canonical role | `agents/web-designer-role.md` |
 | Projection lifecycle P0 closure | `tasks/TASK-TRAFFIC-PROJECTION-LIFECYCLE-CONSISTENCY-01-IMPLEMENTATION-READY-FINAL-R5.md` |
 | Deferred Projection maintenance request | `deferred/TRAFFIC-PROJECTION-MAINTENANCE-REINDEX.md` |
 | Acceptance/publication workflow | `agents/workflow.md` |
@@ -164,11 +167,36 @@ numeric 0 != missing/unavailable
 Follow-on UI work:
 
 ```text
-TASK-WEB-DEVICE-UI-01 = IN PROGRESS / LAB REVIEW PENDING
-MERGED = NO
-DEPLOYED = NO
-CURRENT PRODUCTION BEHAVIOR = NO
+TASK-WEB-DEVICE-UI-01 = CLOSED / PRODUCTION ACTIVE
+PR #110 = MERGED / PRODUCTION VERIFIED
 ```
+
+## Admin Web local asset library — current production
+
+```text
+TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+PR #113=MERGED
+PR #114=MERGED / PRODUCTION VERIFIED
+production HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
+production tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+```
+
+Android asset:
+
+```text
+app/admin_web/static/icons/platforms/android.svg
+SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+```
+
+Canonical presentation predicate:
+
+```text
+typeof value === "string" && value.trim().toLowerCase() === "android"
+```
+
+The source `device_type` text remains unchanged. The icon is only a presentation
+cue. No inference from hostname/MAC/vendor/SSID/AP/IP/history is allowed.
 
 ## Traffic Projection lifecycle P0 closure
 
