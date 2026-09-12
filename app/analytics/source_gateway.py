@@ -149,11 +149,17 @@ _CANONICAL_MAC_SQL = (
 )
 
 
+def _finite_nonnegative_sql(value: str) -> str:
+    return (
+        f"(typeof({value}) IN ('integer','real') AND {value}>=0 "
+        f"AND COALESCE(({value}-{value})=0,0))"
+    )
+
+
 def _rate_shape_ok_sql(value: str, reason: str, timestamp: str) -> str:
     return (
         f"({reason}='ok' AND {timestamp} IS NOT NULL "
-        f"AND typeof({value}) IN ('integer','real') AND {value}>=0 "
-        f"AND abs({value})<=1.7976931348623157e308)"
+        f"AND {_finite_nonnegative_sql(value)})"
     )
 
 
@@ -223,9 +229,7 @@ _CURRENT_TRAFFIC_STATS_SQL = f"""
 
 _HISTORICAL_WIRED_DOWN_OK = (
     "(a.wired_download_rate_reason='ok' AND a.wired_observed_at IS NOT NULL "
-    "AND typeof(a.wired_download_mbps) IN ('integer','real') "
-    "AND a.wired_download_mbps>=0 "
-    "AND abs(a.wired_download_mbps)<=1.7976931348623157e308 "
+    f"AND {_finite_nonnegative_sql('a.wired_download_mbps')} "
     "AND a.wired_observed_at>=c.started_at "
     "AND a.wired_observed_at<=c.finished_at)"
 )
@@ -234,8 +238,7 @@ _HISTORICAL_WIRED_UP_OK = _HISTORICAL_WIRED_DOWN_OK.replace(
 )
 _HISTORICAL_LAN_DOWN_OK = (
     "(a.lan_rx_rate_reason='ok' AND a.lan_observed_at IS NOT NULL "
-    "AND typeof(a.lan_rx_mbps) IN ('integer','real') "
-    "AND a.lan_rx_mbps>=0 AND abs(a.lan_rx_mbps)<=1.7976931348623157e308 "
+    f"AND {_finite_nonnegative_sql('a.lan_rx_mbps')} "
     "AND a.lan_observed_at>=c.started_at "
     "AND a.lan_observed_at<=c.finished_at)"
 )
@@ -245,8 +248,7 @@ _HISTORICAL_LAN_UP_OK = _HISTORICAL_LAN_DOWN_OK.replace("lan_rx", "lan_tx")
 def _historical_rate_shape(value: str, reason: str, timestamp: str) -> str:
     ok = (
         f"({reason}='ok' AND {timestamp} IS NOT NULL "
-        f"AND typeof({value}) IN ('integer','real') AND {value}>=0 "
-        f"AND abs({value})<=1.7976931348623157e308)"
+        f"AND {_finite_nonnegative_sql(value)})"
     )
     return (
         f"COALESCE(({ok} OR ({reason} IN ({_NON_OK_RATE_REASONS_SQL}) "
