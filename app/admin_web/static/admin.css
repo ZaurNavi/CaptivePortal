@@ -220,8 +220,22 @@ input[type="radio"] { width: auto; min-height: 0; }
 .live-table caption { padding: .4rem 0; text-align: left; color: var(--muted); }
 .live-table th, .live-table td { padding: .7rem .55rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 .live-table th { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
-.controller-facts summary { cursor: pointer; font-weight: 700; }
-.controller-facts dl { margin-top: .5rem; }
+.live-auth-status[data-auth="authorized"] { color: #0aa84f; font-weight: 800; }
+.live-auth-status[data-auth="pending"] { color: #e12d39; font-weight: 800; }
+.live-band-status[data-band="5GHz"] { color: #175cd3; font-weight: 800; }
+.live-band-status[data-band="2.4GHz"] { color: #eab308; font-weight: 800; }
+.live-rssi-value { display: inline-flex; align-items: center; gap: .42rem; white-space: nowrap; }
+.live-rssi-meter { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.live-rssi-segment { display: block; width: 3px; border-radius: 1px; background: #d5dde3; }
+.live-rssi-segment:nth-child(1) { height: 4px; }
+.live-rssi-segment:nth-child(2) { height: 6px; }
+.live-rssi-segment:nth-child(3) { height: 8px; }
+.live-rssi-segment:nth-child(4) { height: 10px; }
+.live-rssi-segment:nth-child(5) { height: 12px; }
+.live-rssi-meter[data-tone="good"] .live-rssi-segment[data-active="true"] { background: #10b956; }
+.live-rssi-meter[data-tone="warning"] .live-rssi-segment[data-active="true"] { background: #f2c20d; }
+.live-rssi-meter[data-tone="danger"] .live-rssi-segment[data-active="true"] { background: #ed3038; }
+.live-controller-value { white-space: nowrap; font-weight: 650; }
 
 .login-page { min-height: 100vh; display: grid; place-items: center; padding: 1rem; background: linear-gradient(145deg, #10212d, #174654); }
 .login-card { width: min(420px, 100%); padding: 2rem; border-radius: 18px; background: var(--surface); box-shadow: 0 24px 60px rgba(0, 0, 0, .28); }

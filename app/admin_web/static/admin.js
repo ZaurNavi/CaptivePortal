@@ -4868,6 +4868,114 @@
     return homeLive === "true" && homeTraffic !== "true" && homeActivity !== "true" && homeHealth !== "true";
   }
 
+  function rssiPresentation(value) {
+    if (!Number.isInteger(value)) {
+      return {text: "—", level: 0, tone: "neutral", ariaLabel: "RSSI unavailable"};
+    }
+    const level = value >= -60 ? 5
+      : value >= -67 ? 4
+        : value >= -73 ? 3
+          : value >= -79 ? 2 : 1;
+    const tone = level >= 4 ? "good" : level >= 2 ? "warning" : "danger";
+    return {
+      text: `${value} dBm`,
+      level,
+      tone,
+      ariaLabel: `RSSI ${value} dBm, ${level} of 5`,
+    };
+  }
+
+  function controllerDisplay(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (typeof value === "boolean") return value ? "Yes" : "No";
+    if (typeof value === "number" && !Number.isFinite(value)) return "—";
+    return String(value);
+  }
+
+  function controllerDecimal(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    return String(Number(value.toFixed(2)));
+  }
+
+  function controllerBytes(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return controllerDisplay(value);
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let scaled = value;
+    let unit = 0;
+    while (scaled >= 1024 && unit < units.length - 1) {
+      scaled /= 1024;
+      unit += 1;
+    }
+    return `${controllerDecimal(scaled)} ${units[unit]}`;
+  }
+
+  function controllerDuration(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return controllerDisplay(value);
+    if (value === 0) return "0 sec";
+    if (value < 60) return `${controllerDecimal(value)} sec`;
+    let remaining = Math.floor(value);
+    const units = [["d", 86400], ["h", 3600], ["min", 60], ["sec", 1]];
+    const parts = [];
+    for (const [label, seconds] of units) {
+      const amount = Math.floor(remaining / seconds);
+      if (amount > 0) {
+        parts.push(`${amount} ${label}`);
+        remaining %= seconds;
+      }
+      if (parts.length === 2) break;
+    }
+    return parts.length ? parts.join(" ") : "0 sec";
+  }
+
+  function prepareClientTableHeader(table) {
+    const row = table && table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : null;
+    if (!row) return;
+    if (row.cells.length === 9
+        && row.cells[7].textContent === "Uptime"
+        && row.cells[8].textContent === "Traffic") return;
+    if (row.cells.length !== 8) return;
+    const legacy = row.cells[7];
+    if (!legacy || legacy.textContent.trim() !== "Controller facts") return;
+    legacy.textContent = "Uptime";
+    const traffic = document.createElement("th");
+    traffic.scope = "col";
+    traffic.textContent = "Traffic";
+    row.append(traffic);
+  }
+
+  function clientPresentationCells(createNode, item) {
+    const auth = createNode(
+      "td",
+      "live-auth-status",
+      {authorized: "Authorized", pending: "Waiting", other: "Other", unknown: "Unknown"}[item.auth_classification],
+    );
+    auth.dataset.auth = item.auth_classification;
+
+    const band = createNode("td", "live-band-status", item.band);
+    if (typeof item.band === "string") band.dataset.band = item.band;
+
+    const rssi = createNode("td");
+    const shown = rssiPresentation(item.rssi);
+    const value = createNode("span", "live-rssi-value");
+    value.setAttribute("aria-label", shown.ariaLabel);
+    const meter = createNode("span", "live-rssi-meter");
+    meter.dataset.tone = shown.tone;
+    meter.setAttribute("aria-hidden", "true");
+    for (let index = 1; index <= 5; index += 1) {
+      const segment = createNode("span", "live-rssi-segment");
+      segment.dataset.active = index <= shown.level ? "true" : "false";
+      meter.append(segment);
+    }
+    value.append(createNode("span", null, shown.text), meter);
+    rssi.append(value);
+
+    const uptime = createNode("td", "live-controller-value", controllerDuration(item.controller_uptime));
+    const traffic = createNode("td", "live-controller-value", controllerBytes(item.controller_traffic_total));
+    return {auth, band, rssi, uptime, traffic};
+  }
+
   if (typeof window !== "undefined") {
     window.CaptivPortalHomeLiveTest = Object.freeze({
       classify, currentAge, localFreshness, retryDelay,
@@ -4875,6 +4983,7 @@
       failureTransition, neutralAbort, releaseController, resetClientState,
       retainedSelection, unavailableValues,
       standaloneCoordinatorEnabled,
+      clientPresentationCells, prepareClientTableHeader, rssiPresentation,
       validateApSummary, validateClientSummary, validatePage,
     });
   }
@@ -5102,16 +5211,12 @@
     const row = node("tr");
     const identity = node("td");
     identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
-    const facts = node("details", "controller-facts");
-    facts.append(node("summary", null, "Controller facts"));
-    const list = node("dl", "detail-list");
-    [["Controller uptime", item.controller_uptime], ["Controller trafficDown", item.controller_traffic_down], ["Controller trafficUp", item.controller_traffic_up], ["Controller trafficTotal", item.controller_traffic_total]].forEach(([label, value]) => { list.append(node("dt", null, label), node("dd", null, value)); });
-    facts.append(list);
-    [identity, node("td", null, {authorized: "Authorized", pending: "Waiting", other: "Other", unknown: "Unknown"}[item.auth_classification]), node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), node("td", null, item.band), node("td", null, item.rssi), node("td", null, item.snr)].forEach((cell) => row.append(cell));
-    const factCell = node("td"); factCell.append(facts); row.append(factCell);
+    const presentation = clientPresentationCells(node, item);
+    [identity, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, node("td", null, item.snr), presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
     return row;
   }
   function renderClients(append) {
+    prepareClientTableHeader(clientRows.closest("table"));
     if (!append) clientRows.replaceChildren();
     sources.client.rows.forEach((item, index) => { if (!append || index >= clientRows.children.length) clientRows.append(clientRow(item)); });
     clientMore.hidden = !sources.client.cursor;
@@ -5754,16 +5859,14 @@
     select.value = macs.has(selected) ? selected : "";
   }
   function renderClients() {
+    live.prepareClientTableHeader(clientRows.closest("table"));
     clientRows.replaceChildren();
     sources.client.rows.forEach((item) => {
       const row = node("tr"); const identity = node("td");
       identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
-      const facts = node("details", "controller-facts"); facts.append(node("summary", null, "Controller facts"));
-      const list = node("dl", "detail-list");
-      [["Controller uptime", item.controller_uptime], ["Controller trafficDown", item.controller_traffic_down], ["Controller trafficUp", item.controller_traffic_up], ["Controller trafficTotal", item.controller_traffic_total]].forEach(([label, value]) => list.append(node("dt", null, label), node("dd", null, value)));
-      facts.append(list);
-      [identity, node("td", null, {authorized: "Authorized", pending: "Waiting", other: "Other", unknown: "Unknown"}[item.auth_classification]), node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), node("td", null, item.band), node("td", null, item.rssi), node("td", null, item.snr)].forEach((cell) => row.append(cell));
-      const factCell = node("td"); factCell.append(facts); row.append(factCell); clientRows.append(row);
+      const presentation = live.clientPresentationCells(node, item);
+      [identity, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, node("td", null, item.snr), presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
+      clientRows.append(row);
     });
     clientMore.hidden = !sources.client.cursor;
     document.getElementById("live-client-state").textContent = sources.client.rows.length ? `Showing ${sources.client.rows.length} current device(s).` : "No devices in this current snapshot.";
