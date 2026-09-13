@@ -1,9 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-09-12
-Runtime implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Runtime tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
+Updated: 2026-09-13
+Runtime implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
 
 ## 1. Mental model
 
@@ -529,6 +529,67 @@ backlog=0
 Historical Traffic Web path=PASS
 worker=active + enabled
 ```
+
+## Canonical Device Type lexical key
+
+Device Type keeps two deliberately different representations:
+
+```text
+device_type     = raw/source/display evidence
+device_type_key = canonical machine/presentation key
+```
+
+Canonical normalization owner:
+
+```text
+app/common/device_type.py
+normalize_device_type_key()
+DEVICE_TYPE_KEY_MAX_UTF8_BYTES=128
+```
+
+The key is read-time lexical normalization of one source value: trim, strict
+UTF-8 validation, bounded length, then `casefold()` and the same validation
+again.
+
+Permanent exclusions:
+
+```text
+Unicode normalization=NO
+semantic mapping=NO
+inference from other facts=NO
+separator collapsing=NO
+truncation=NO
+```
+
+The canonical key is additive. It does not replace stored/raw `device_type` and
+does not create a device-classification layer.
+
+Admin/Web consumers must use the server-provided key for machine decisions.
+Browser-owned trim/lower/casefold/Unicode normalization/inference is forbidden.
+
+## Home operational read models
+
+Home contains multiple independent product-safe read models; they are not a
+second acquisition plane.
+
+```text
+Home System Health
+→ Admin composition of existing bounded runtime/read evidence
+→ no request-time Omada probe / Health DB / repair worker
+
+Home AP-24H
+→ Current State + Observation persisted evidence
+→ rolling 24h / 96 x 15-minute buckets
+→ no new persistence or query-time Omada
+
+Home AP-24H telemetry
+→ existing AP-24H read contract
+→ existing Authorization Telemetry sink
+→ separately feature-gated / fail-open
+```
+
+Repository defaults keep these optional Home surfaces disabled. Production
+feature-state is operational evidence, not inferred from repository defaults.
 
 ## 8. Admin Web
 

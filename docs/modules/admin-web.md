@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-09-12
-Baseline: `main@043a13bc1e3aa3353e27af1859dc0bb698df4955`
+Updated: 2026-09-13
+Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
 
 ## Boundary
 
@@ -176,12 +176,15 @@ Historical and Current load independently
 Current failure does not erase Historical
 ```
 
-## Devices presentation and local assets — current state
+## Devices / Device Type / Home presentation — current state
 
 ```text
 TASK-DEVICE-LIST-CONTEXT-01=CLOSED / PRODUCTION ACTIVE
 TASK-WEB-DEVICE-UI-01=CLOSED / PRODUCTION ACTIVE
-PR #110=MERGED / PRODUCTION VERIFIED
+TASK-WEB-HOME-ONLINE-DEVICE-PRESENTATION-01=CLOSED / PRODUCTION CURRENT
+TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / PRODUCTION ACTIVE
+TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / PRODUCTION ACCEPTANCE PASS
+PR #110 / #118 / #119 / #120=MERGED
 ```
 
 Global Online-first remains backend-owned before pagination.
@@ -193,30 +196,160 @@ TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
 TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
 PR #113=MERGED
 PR #114=MERGED / PRODUCTION VERIFIED
-production HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
-production tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
+current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+current production tree=8312658be3ba272998f46212d9bad76950e3867e
 ```
 
-Android asset:
+The repository-local Android asset remains:
 
 ```text
 app/admin_web/static/icons/platforms/android.svg
 SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
 ```
 
-Canonical presentation predicate:
+The Asset Library tasks remain valid provenance/history for introducing and
+fixing that asset. Their former raw browser predicate is historical acceptance
+evidence only.
 
-```text
-typeof value === "string" && value.trim().toLowerCase() === "android"
+Current machine decision after PR #119/#120:
+
+```javascript
+device_type_key === "android"
 ```
 
-The source `device_type` text remains unchanged. The icon is only a presentation
-cue. No inference from hostname/MAC/vendor/SSID/AP/IP/history is allowed.
+Raw `device_type` remains source/display evidence. Current Admin Web does not
+trim/lower/casefold/Unicode-normalize or infer Device Type in the browser.
+
+## Canonical Device Type contract — current production
+
+```text
+TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACTIVE
+TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACCEPTANCE PASS
+PR #119=MERGED
+PR #120=MERGED
+current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+current production tree=8312658be3ba272998f46212d9bad76950e3867e
+```
+
+Canonical ownership:
+
+```text
+raw/source/display value = device_type
+machine/presentation key = device_type_key
+normalization owner       = app/common/device_type.py
+```
+
+`device_type_key` is a bounded lexical key derived with `strip()` + `casefold()`
+and strict UTF-8 validation. It does not perform Unicode normalization, semantic
+mapping, inference, separator collapsing or truncation.
+
+The browser consumes the server-provided key. It must not derive a Device Type
+key from raw `device_type`.
+
+Android presentation is therefore strictly:
+
+```javascript
+device_type_key === "android"
+```
+
+The earlier browser-owned `trim().toLowerCase()` Android predicate remains
+historical evidence of TASK-WEB-ASSET-LIBRARY-01/FIX and is **superseded as a
+current contract** by PR #119/#120.
+
+The Android SVG remains repository-local:
+
+```text
+app/admin_web/static/icons/platforms/android.svg
+SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+```
+
+
+## Device Card Device Type — current presentation
+
+Device Card keeps raw and canonical roles separate:
+
+```text
+device_type     -> source/display text
+device_type_key -> machine/presentation decision
+```
+
+The frontend does not trim, lowercase, casefold, Unicode-normalize or infer
+Device Type.
+
+A detail object that contains its own `device_type_key` owns that presentation
+decision. `Latest Site snapshot` may use `identity.device_type_key` when the
+snapshot raw type and identity raw type belong to the same Device record.
+
+`device_type_key` itself is not rendered as a separate user-facing field.
+
+
+## Home Online Devices — current presentation
+
+The current production Home table presents:
+
+```text
+Device / MAC
+Type
+Auth
+IP
+AP
+Band
+RSSI
+SNR
+Uptime
+Traffic
+```
+
+The `Type` column is immediately after `Device / MAC`.
+
+Type presentation:
+
+```text
+device_type_key == "android" -> Android SVG cue
+device_type_key == null AND device_type == null -> NULL
+otherwise -> raw device_type
+```
+
+No Device Type inference is performed from hostname, system name, MAC, vendor,
+SSID, AP, IP or history.
+
+SNR is presentation-only:
+
+```text
+>=25      good    #10b956
+15..24    warning #f2c20d
+<15       danger  #ed3038
+null      neutral / —
+```
+
+RSSI and SNR are independent. No combined score or backend quality
+classification exists.
+
+Home-specific geometry and tones are scoped to:
+
+```css
+.live-section[aria-labelledby="devices-now-title"]
+```
+
+and do not redefine unrelated `.live-table` surfaces.
 
 ## Home
 
 Home Live reads Current State. Home Traffic reads Current Traffic. Home Activity
-reads Visit Lifecycle analytics. Home AP-24H reuses existing persisted/read contracts.
+reads Visit Lifecycle analytics.
+
+### System Health
+
+Home System Health is implemented through the Admin read/composition boundary and
+uses existing runtime/read evidence only. Repository default is disabled; this
+document does not infer the current production flag value.
+
+### Home AP-24H
+
+Home AP-24H is implemented as a rolling 24-hour read model over Current State +
+Observation evidence (96 x 15-minute buckets). AP-24H telemetry is separately
+feature-gated and uses existing Authorization Telemetry. Repository defaults for
+both AP-24H and its telemetry are disabled; production flags remain host-verified.
 
 ## Traffic Section
 
@@ -535,9 +668,7 @@ MERGED=YES / PR #110
 DEPLOYED=YES / PRODUCTION ACTIVE
 ```
 
-That task covers presentation-only compact Devices cards/list, human-readable
-bytes/time/rates, status indicators and future Online-first UX. It must not be
-described as current production behavior until separately accepted.
+That task is historical/current production foundation for the Devices presentation. Later Home and Device Type presentation work is tracked separately by PR #118/#120 and is also production-current.
 
 Current Traffic panel placement also remains production-current functional
 composition, not a permanently frozen final Traffic visual design.

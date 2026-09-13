@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-12
-Current repository implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Confirmed production deployed HEAD: `c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Confirmed production tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
+Updated: 2026-09-13
+Current repository implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Confirmed production deployed HEAD: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Confirmed production tree: `8312658be3ba272998f46212d9bad76950e3867e`
 
 ## Repository vs production
 
@@ -855,6 +855,52 @@ for bounded listener/readiness evidence.
 
 Existing `urllib3 InsecureRequestWarning` messages for Omada HTTPS
 `192.168.0.222` pre-date this deployment and are not a regression of this TASK.
+
+## Device presentation / normalization production chain — 2026-09-13
+
+The previous full KB publication was PR #117. Three implementation baselines then
+advanced before this reconciliation:
+
+```text
+PR #118 -> Home Online Devices presentation
+merge=2d87fd6d56f969492318e21c809086576b2b1ab1
+
+PR #119 -> Canonical Device Type foundation
+merge=144c8a922b4431293fdc1d4bb57bed29a8402f6b
+tree=2349838d7e524efd3fb2e0433a7111553f195e71
+
+PR #120 -> Device Type + SNR presentation
+merge / current production=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+tree=8312658be3ba272998f46212d9bad76950e3867e
+```
+
+PR #119 is the server/read-contract foundation. PR #120 is presentation-only
+relative to that foundation.
+
+Current production after PR #120:
+
+```text
+HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+TREE=8312658be3ba272998f46212d9bad76950e3867e
+worktree=CLEAN
+captive-portal.service=active
+traffic-projection.service=active
+root readiness=HTTP 400 expected without Omada request parameters
+Owner production visual acceptance=PASS
+```
+
+PR #120 did not require an application restart: its runtime delivery was static
+JS/CSS/provenance content and controlled checkout already exposed the accepted
+files.
+
+```text
+DB migration=NO
+schema change=NO
+configuration change=NO
+feature flag change=NO
+systemd unit change=NO
+daemon-reload=NO
+```
 
 ## Feature activation
 

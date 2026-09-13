@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-09-12
-Baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Updated: 2026-09-13
+Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -209,6 +209,36 @@ Confirmed production Site context on 2026-08-26:
 - Visits coverage `2026-08-26T17:46:55.982Z`;
 - Traffic coverage `null`.
 
+### Home System Health
+
+Prefix: `WEB_ADMIN_HOME_HEALTH_*`.
+
+Repository defaults:
+
+```text
+WEB_ADMIN_HOME_HEALTH_ENABLED=false
+WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS=60
+WEB_ADMIN_HOME_HEALTH_REQUEST_TIMEOUT_SECONDS=30
+WEB_ADMIN_HOME_HEALTH_AUTH_EVIDENCE_MAX_AGE_SECONDS=86400
+```
+
+The feature is Admin-only/read-only and fails open relative to guest
+authorization. Repository default `false` is not evidence of production
+disablement.
+
+### Home AP-24H
+
+Repository defaults:
+
+```text
+WEB_ADMIN_HOME_AP_24H_ENABLED=false
+WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS=120
+WEB_ADMIN_HOME_AP_24H_REQUEST_TIMEOUT_SECONDS=30
+```
+
+The read model is bounded/read-only over persisted Current State + Observation
+facts. It adds no query-time Omada path, DB or collector.
+
 ### Home AP-24H telemetry
 
 Prefix: `WEB_ADMIN_HOME_AP_24H_TELEMETRY_*`.
@@ -384,6 +414,12 @@ feature flag changes=NO
 systemd unit changes=NO
 DB/schema changes=NO
 ```
+
+### Device Type normalization / presentation tasks
+
+`TASK-DEVICE-TYPE-NORMALIZATION-01` and
+`TASK-WEB-DEVICE-TYPE-PRESENTATION-01` introduce no new configuration key,
+feature flag, DB migration or systemd setting.
 
 ### Pending Session Cleaner
 

@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-12
+Updated: 2026-09-13
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Production deployed HEAD: `c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Production tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
+Documentation/current-state implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Production deployed HEAD: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Production tree: `8312658be3ba272998f46212d9bad76950e3867e`
 
 ## Responsibility model
 
@@ -428,6 +428,68 @@ HTTP readiness=400
 
 Historical `Windows Central Full V6=PASS` entries below remain valid evidence for
 the older TASKs that actually used V6; they do not define the current runner.
+
+### Home operational implementation evidence — repository inventory correction
+
+The current repository also contains earlier merged Home subsystems that were
+underrepresented in the current KB inventory:
+
+```text
+PR #74  Home System Health                    MERGED
+PR #78  Home AP-24H                           MERGED
+PR #79  AP-24H duration-partition fix         MERGED
+PR #80  AP-24H frontend activation fix        MERGED
+PR #81  AP-24H operational telemetry          MERGED
+```
+
+Their historical PR test/acceptance evidence remains valid. This reconciliation
+only restores current documentation routing; it does not invent current
+production feature-flag values.
+
+### Latest Device Type / Home presentation acceptance — PR #118 / #119 / #120
+
+PR #118:
+
+```text
+Home Online Devices presentation=PASS
+narrow frontend gate=4/4 PASS
+Owner visual acceptance=PASS
+Central Lab V7 strict=PASS
+strict regressions=0
+```
+
+PR #119:
+
+```text
+TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED
+Coder focused tests=38 PASS
+compileall=PASS
+git diff --check=PASS
+Central Lab V7 strict=PASS
+accepted tree=2349838d7e524efd3fb2e0433a7111553f195e71
+```
+
+PR #120:
+
+```text
+Owner Visual Acceptance=PASS
+Central Lab V7 strict=PASS
+strict regressions=0
+LAB commit=b6bf602873fcf4a41e21ced6c0fe1be18ce0f483
+accepted / merge tree=8312658be3ba272998f46212d9bad76950e3867e
+production visual acceptance=PASS
+```
+
+The older `case-insensitive Android matching=PASS` evidence below belongs to the
+historical WEB-ASSET-LIBRARY/FIX acceptance. It does **not** define the current
+browser contract after PR #119/#120.
+
+Current browser contract:
+
+```text
+Android machine decision=device_type_key === "android"
+raw browser trim/lower/casefold normalization=NO
+```
 
 ### Latest Admin Web presentation acceptance — WEB-ASSET-LIBRARY-01 + FIX
 
