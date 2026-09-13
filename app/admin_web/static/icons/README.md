@@ -14,7 +14,7 @@ Assets are repository-local. Do not add runtime CDN or third-party image depende
 
 - Asset: `platforms/android.svg`
 - Purpose: decorative cue before unchanged Android `device_type` text anywhere Admin Web renders that field, including Devices list, Device detail identity/evidence, and observations.
-- Presentation matching is case-insensitive (`android`, `Android`, `ANDROID`, etc.); the source text itself is displayed unchanged.
+- Presentation matching uses only the canonical `device_type_key == "android"`; raw `device_type` text remains unchanged, and Admin Web does not normalize or infer the key.
 - Source authority: Google LLC / Android Developers.
 - Source asset URL: https://developer.android.com/static/images/brand/android-head_flat.svg
 - Brand guidelines: https://developer.android.com/distribute/marketing-tools/brand-guidelines
