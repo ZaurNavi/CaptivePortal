@@ -25,10 +25,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29` |
-| Repository tree | `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c` |
-| Production deployed HEAD | `c1dc3344bc778a32cdc6b0edce278ee40b287c29` |
-| Production tree | `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c` |
+| Repository implementation checkpoint | `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5` |
+| Repository tree | `8312658be3ba272998f46212d9bad76950e3867e` |
+| Production deployed HEAD | `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5` |
+| Production tree | `8312658be3ba272998f46212d9bad76950e3867e` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -52,6 +52,9 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Observation Foundation | Implemented, schema v1 |
 | Current State | Implemented, schema v1 |
 | Current Device Context | **TASK-DEVICE-CARD-01 — COMPLETE / PRODUCTION ACTIVE** |
+| Home Online Devices presentation | **TASK-WEB-HOME-ONLINE-DEVICE-PRESENTATION-01 — CLOSED / PRODUCTION CURRENT** |
+| Canonical Device Type foundation | **TASK-DEVICE-TYPE-NORMALIZATION-01 — CLOSED / PRODUCTION ACTIVE** |
+| Device Type + SNR presentation | **TASK-WEB-DEVICE-TYPE-PRESENTATION-01 — CLOSED / PRODUCTION ACCEPTANCE PASS** |
 | Analytics / Admin Web | Implemented |
 | Multi-Site / Tenant / RBAC | Future evolution |
 | Current topology | Single application process; HA/multi-process requires ADR |
@@ -154,25 +157,185 @@ TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
 TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
 PR #113=MERGED
 PR #114=MERGED / PRODUCTION VERIFIED
-current production HEAD=c1dc3344bc778a32cdc6b0edce278ee40b287c29
-current production tree=0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
+current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+current production tree=8312658be3ba272998f46212d9bad76950e3867e
 ```
 
-Android asset:
+The repository-local Android asset remains:
 
 ```text
 app/admin_web/static/icons/platforms/android.svg
 SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
 ```
 
-Canonical presentation predicate:
+The Asset Library tasks remain valid provenance/history for introducing and
+fixing that asset. Their former raw browser predicate is historical acceptance
+evidence only.
 
-```text
-typeof value === "string" && value.trim().toLowerCase() === "android"
+Current machine decision after PR #119/#120:
+
+```javascript
+device_type_key === "android"
 ```
 
-The source `device_type` text remains unchanged. The icon is only a presentation
-cue. No inference from hostname/MAC/vendor/SSID/AP/IP/history is allowed.
+Raw `device_type` remains source/display evidence. Current Admin Web does not
+trim/lower/casefold/Unicode-normalize or infer Device Type in the browser.
+
+## Canonical Device Type contract — current production
+
+```text
+TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACTIVE
+TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACCEPTANCE PASS
+PR #119=MERGED
+PR #120=MERGED
+current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+current production tree=8312658be3ba272998f46212d9bad76950e3867e
+```
+
+Canonical ownership:
+
+```text
+raw/source/display value = device_type
+machine/presentation key = device_type_key
+normalization owner       = app/common/device_type.py
+```
+
+`device_type_key` is a bounded lexical key derived with `strip()` + `casefold()`
+and strict UTF-8 validation. It does not perform Unicode normalization, semantic
+mapping, inference, separator collapsing or truncation.
+
+The browser consumes the server-provided key. It must not derive a Device Type
+key from raw `device_type`.
+
+Android presentation is therefore strictly:
+
+```javascript
+device_type_key === "android"
+```
+
+The earlier browser-owned `trim().toLowerCase()` Android predicate remains
+historical evidence of TASK-WEB-ASSET-LIBRARY-01/FIX and is **superseded as a
+current contract** by PR #119/#120.
+
+The Android SVG remains repository-local:
+
+```text
+app/admin_web/static/icons/platforms/android.svg
+SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+```
+
+
+## Home Online Devices — current presentation
+
+The current production Home table presents:
+
+```text
+Device / MAC
+Type
+Auth
+IP
+AP
+Band
+RSSI
+SNR
+Uptime
+Traffic
+```
+
+The `Type` column is immediately after `Device / MAC`.
+
+Type presentation:
+
+```text
+device_type_key == "android" -> Android SVG cue
+device_type_key == null AND device_type == null -> NULL
+otherwise -> raw device_type
+```
+
+No Device Type inference is performed from hostname, system name, MAC, vendor,
+SSID, AP, IP or history.
+
+SNR is presentation-only:
+
+```text
+>=25      good    #10b956
+15..24    warning #f2c20d
+<15       danger  #ed3038
+null      neutral / —
+```
+
+RSSI and SNR are independent. No combined score or backend quality
+classification exists.
+
+Home-specific geometry and tones are scoped to:
+
+```css
+.live-section[aria-labelledby="devices-now-title"]
+```
+
+and do not redefine unrelated `.live-table` surfaces.
+
+
+## Device Card Device Type — current presentation
+
+Device Card keeps raw and canonical roles separate:
+
+```text
+device_type     -> source/display text
+device_type_key -> machine/presentation decision
+```
+
+The frontend does not trim, lowercase, casefold, Unicode-normalize or infer
+Device Type.
+
+A detail object that contains its own `device_type_key` owns that presentation
+decision. `Latest Site snapshot` may use `identity.device_type_key` when the
+snapshot raw type and identity raw type belong to the same Device record.
+
+`device_type_key` itself is not rendered as a separate user-facing field.
+
+## Home operational read models — current repository contracts
+
+Two implemented Home subsystems were underrepresented in the previous current KB
+inventory and are explicitly restored here.
+
+### Home System Health
+
+```text
+TASK-HOME-HEALTH-01 implementation=MERGED
+PR #74 merge=f458df3b360bba89e9965a1edfdcc0d3af2f201c
+repository default WEB_ADMIN_HOME_HEALTH_ENABLED=false
+```
+
+Home System Health is a read-only Admin composition over existing bounded
+runtime/read evidence. It has no request-time Omada probe, Health DB, repair
+worker or log scan. Its top-level product states are `operational`, `degraded`,
+`unavailable`, `unknown`; `initializing`/`stale` are reason semantics.
+
+This KB sync does **not** infer the current production value of
+`WEB_ADMIN_HOME_HEALTH_ENABLED`; production enabled-state remains host-verified
+unless separately evidenced.
+
+### Home AP-24H
+
+```text
+TASK-HOME-AP-24H-01 implementation=MERGED
+PR #78 merge=042f8e4c5f3c6205cec1823322688e1bf3805a57
+PR #79 duration-partition fix=MERGED
+PR #80 frontend dataset activation fix=MERGED
+TASK-HOME-AP-24H-TELEMETRY-01 / PR #81=MERGED
+repository default WEB_ADMIN_HOME_AP_24H_ENABLED=false
+repository default WEB_ADMIN_HOME_AP_24H_TELEMETRY_ENABLED=false
+```
+
+Home AP-24H is a Site-scoped rolling 24-hour read model over persisted Current
+State + Observation evidence: 96 x 15-minute buckets, no query-time Omada and no
+new persistence owner. Operational telemetry reuses the existing Authorization
+Telemetry sink and is separately feature-gated/fail-open.
+
+Historical PR evidence shows production-acceptance work occurred during AP-24H
+fixes, but this KB sync does not invent a current host flag value. Current
+production enablement must be asserted only from host/Owner evidence.
 
 ## Windows strict baseline cleanup
 
@@ -877,6 +1040,9 @@ The table below is deliberately about **repository implementation**, not a claim
 | Current Traffic | ✅ Current when sources healthy | AP traffic interpretation |
 | Home Traffic | ✅ Current, default disabled | Home presentation of Current Traffic |
 | Home Activity | ✅ Current, default disabled | Visits and completed-session Traffic with independent coverage |
+| Home System Health | ✅ Current, default disabled | Product-safe system health read model; production flag host-verified |
+| Home AP-24H | ✅ Current, default disabled | Rolling 24h AP state/quality read model |
+| Home AP-24H telemetry | ✅ Current, default disabled | Structured operational telemetry over the AP-24H read contract |
 | Traffic Section Foundation | ✅ Current, default disabled | Dedicated Site-scoped Traffic product shell/coordinator |
 | Current Network Throughput | ✅ Current, default disabled | Persisted AP/network Mbps via CurrentTrafficReadService |
 | GitHub Actions release CI | ⚠️ Not present | Release gate remains process debt |

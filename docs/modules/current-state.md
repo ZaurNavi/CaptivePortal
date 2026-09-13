@@ -1,8 +1,8 @@
 # Current Network State
 
 Status: current module contract
-Updated: 2026-09-09
-Baseline: `main@7df71a8e807efd74b123117e78cb8d992c190fa1`
+Updated: 2026-09-13
+Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
 Schema: v1
 
 ## Purpose
@@ -116,6 +116,24 @@ path, schema/index or acquisition behavior.
 
 Invalid timestamp/source-scope evidence is sanitized/fail-safe and cannot be
 coerced to fresh Current State.
+
+## Device Type read contract
+
+Current State persistence retains raw `device_type` evidence.
+
+Admin/Home Current State client serialization now exposes both:
+
+```text
+device_type
+device_type_key
+```
+
+`device_type_key` is derived at read/serialization time by
+`app/common/device_type.py`; collection, schema and raw stored meaning are not
+changed.
+
+Home presentation must consume the key directly and must not re-normalize the raw
+value in JavaScript.
 
 ## Dependencies
 

@@ -49,3 +49,27 @@ HEAD=043a13bc1e3aa3353e27af1859dc0bb698df4955
 tree=c2a9a01b2f8507c192fe2ef034ed4b9c850deed4
 captive-portal.service=ACTIVE
 ```
+
+## Later Device Type architecture supersession — 2026-09-13
+
+The raw browser-owned case-insensitive Android predicate documented above remains
+valid **historical acceptance evidence for this earlier task**.
+
+It is no longer the current machine-decision contract.
+
+Later accepted work:
+
+```text
+TASK-DEVICE-TYPE-NORMALIZATION-01 / PR #119
+TASK-WEB-DEVICE-TYPE-PRESENTATION-01 / PR #120
+```
+
+established:
+
+```text
+device_type     = raw/source/display evidence
+device_type_key = server-provided canonical machine key
+Android decision = device_type_key === "android"
+```
+
+Current Admin Web must not reconstruct the key from raw `device_type`.

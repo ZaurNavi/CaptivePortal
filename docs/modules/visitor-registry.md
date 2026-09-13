@@ -1,8 +1,8 @@
 # Visitor Device Registry
 
 Status: current implementation; repository default disabled
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-09-13
+Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
 
 ## Purpose
 
@@ -31,6 +31,22 @@ Flow:
 - final shutdown scan.
 
 Historical device/snapshot counts are acceptance evidence only and must not be used as current counters.
+
+## Device Type read enrichment
+
+Visitor Registry persistence remains raw/source-oriented.
+
+Read boundaries now add:
+
+```text
+snapshot.device_type_key
+device summary.last_known_device_type_key
+```
+
+These values are derived from the corresponding raw `device_type` /
+`last_known_device_type` through the central lexical normalizer.
+
+No migration/backfill changes the stored source value.
 
 ## Relationship to Visit Lifecycle
 

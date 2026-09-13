@@ -1,9 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-09-12
-Runtime implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Runtime tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
+Updated: 2026-09-13
+Runtime implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -30,10 +30,16 @@ Runtime tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
 | Device List Context | current; production active | Admin Web + Registry + Current State | `modules/admin-web.md` | no new persistence | no |
 | Devices Web Designer presentation | current production presentation | `app/admin_web/static/admin.css`, `app/admin_web/static/admin.js` | `modules/admin-web.md`, `agents/web-designer-role.md` | none | no |
 | Admin Web local asset library | current production presentation | `app/admin_web/static/icons/` | `modules/admin-web.md` | static assets only | no |
+| Canonical Device Type lexical key | current production foundation | `app/common/device_type.py` + read serializers/services | `architecture.md`, `modules/current-state.md`, `modules/observations.md`, `modules/visitor-registry.md`, `modules/analytics.md` | read-time additive key; raw persistence unchanged | no |
+| Home Online Devices presentation | current production presentation | `app/admin_web/static/admin.css`, `app/admin_web/static/admin.js` | `modules/admin-web.md` | none | no |
+| Device Type + SNR presentation | current production presentation | `app/admin_web/static/admin.css`, `app/admin_web/static/admin.js` | `modules/admin-web.md` | none | no |
 | Home Live | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
 | Current Traffic | current | `app/analytics/current_traffic.py` | `modules/analytics.md` | reads Observation | no |
 | Home Traffic | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
 | Home Activity | current; default disabled | `app/analytics/home_activity.py`, `app/admin_web/` | `modules/home-activity.md` | reads Visit Lifecycle | no |
+| Home System Health | current; default disabled | `app/admin_web/home_health*.py` + bounded source read evidence | `modules/admin-web.md` | none | no request-time Omada |
+| Home AP-24H | current; default disabled | `app/admin_web/home_ap_24h*.py` | `modules/admin-web.md` | reads Current State + Observation; no new persistence | no |
+| Home AP-24H telemetry | current; default disabled | `app/admin_web/home_ap_24h_telemetry.py` | `modules/admin-web.md` | existing Authorization Telemetry sink | no |
 | Traffic Section Foundation | current; default disabled | `app/admin_web/` | `modules/traffic.md` | none | no |
 | Traffic Current Network Throughput | current; default disabled | `app/admin_web/`, `app/analytics/current_traffic.py` | `modules/traffic.md` | reads Observation | no |
 | Historical Traffic Read Foundation | current | `app/analytics/historical_traffic.py`, source gateway | `modules/traffic.md` | reads Observation | no |
@@ -51,11 +57,11 @@ Runtime tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
 
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-09-12:
+Owner-provided production checkpoint 2026-09-13:
 
 ```text
-HEAD: c1dc3344bc778a32cdc6b0edce278ee40b287c29
-tree: 0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c
+HEAD: 3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+tree: 8312658be3ba272998f46212d9bad76950e3867e
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -78,6 +84,9 @@ TASK-WEB-DEVICE-UI-01: CLOSED / PRODUCTION ACTIVE
 TASK-WEB-ASSET-LIBRARY-01: CLOSED / PRODUCTION PASS
 TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION: CLOSED / PRODUCTION PASS
 TASK-TEST-BASELINE-CLEANUP-01: FINAL ACCEPTED / MERGED / DEPLOYED / PRODUCTION PASS
+TASK-HOME-HEALTH-01: MERGED / repository default disabled / production flag host-verified
+TASK-HOME-AP-24H-01 + fixes: MERGED / repository default disabled / production flag host-verified
+TASK-HOME-AP-24H-TELEMETRY-01: MERGED / repository default disabled
 Windows Central Lab current runner: V7 strict
 Windows Central Lab V6 fixed: historical / audit only
 

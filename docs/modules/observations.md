@@ -1,8 +1,8 @@
 # Observation Foundation
 
 Status: current module contract
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-09-13
+Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
 Schema: v1
 
 ## Purpose
@@ -31,6 +31,23 @@ Persist:
 cycle id/kind/Site, complete/partial/failure state, source totals, stored/skipped/error counts and data-quality warnings.
 
 Consumers must not silently use a partial/failed cycle as complete data.
+
+## Device Type read enrichment
+
+Observation storage continues to preserve raw `device_type` and the independent
+`connect_device_type` fact.
+
+Client Observation read DTO data adds:
+
+```text
+device_type_key
+```
+
+derived from raw `device_type` by the central lexical normalizer.
+
+The key is read-time enrichment only. It does not rewrite persisted historical
+evidence and it must never be inferred from `system_name`,
+`connect_device_type`, MAC/vendor or other fields.
 
 ## Maintenance
 

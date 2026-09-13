@@ -13,7 +13,7 @@ Assets are repository-local. Do not add runtime CDN or third-party image depende
 ## Android robot
 
 - Asset: `platforms/android.svg`
-- Purpose: decorative cue before unchanged Android `device_type` text anywhere Admin Web renders that field, including Devices list, Device detail identity/evidence, and observations.
+- Purpose: repository-local Android presentation cue. Home Online Devices uses the icon without constant adjacent `Android` text; Device/observation surfaces may pair the cue with unchanged raw `device_type` display text.
 - Presentation matching uses only the canonical `device_type_key == "android"`; raw `device_type` text remains unchanged, and Admin Web does not normalize or infer the key.
 - Source authority: Google LLC / Android Developers.
 - Source asset URL: https://developer.android.com/static/images/brand/android-head_flat.svg

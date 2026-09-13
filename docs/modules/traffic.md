@@ -1,11 +1,11 @@
 # Admin Console Traffic
 
 Status: current production module contract
-Updated: 2026-09-12
-Repository implementation baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Repository tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
-Production deployed HEAD: `c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Production tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
+Updated: 2026-09-13
+Repository implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Repository tree: `8312658be3ba272998f46212d9bad76950e3867e`
+Production deployed HEAD: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Production tree: `8312658be3ba272998f46212d9bad76950e3867e`
 Latest production acceptance: `TASK-TRAFFIC-09 — Consolidated Traffic Evidence — COMPLETED / PRODUCTION ACTIVE`
 
 ## Windows portability closure in shared Analytics source validation

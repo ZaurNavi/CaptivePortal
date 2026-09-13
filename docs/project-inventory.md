@@ -1,11 +1,11 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-09-12
+Updated: 2026-09-13
 Branch: `main`
-Runtime commit: `c1dc3344bc778a32cdc6b0edce278ee40b287c29`
-Runtime tree: `0563f58cf2a5c961e1dedb52cfa2b4b298dd2c1c`
-Commit source: merge PR #116 / Windows compatibility debt removal, 2026-09-12
+Runtime commit: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
+Commit source: merge PR #120 / Device Type and SNR presentation, 2026-09-13
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -445,6 +445,55 @@ Owner production visual acceptance=PASS
 
 The Android cue preserves the exact source `device_type` text and does not create
 a new classification source.
+
+## Device Type / Home presentation current state
+
+```text
+TASK-WEB-HOME-ONLINE-DEVICE-PRESENTATION-01=CLOSED / PRODUCTION CURRENT
+TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / PRODUCTION ACTIVE
+TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / PRODUCTION ACCEPTANCE PASS
+PR #118 / #119 / #120=MERGED
+```
+
+Canonical split:
+
+```text
+device_type=raw/source/display
+device_type_key=central canonical machine key
+owner=app/common/device_type.py
+```
+
+Read-time key exposure now spans Current State/Admin Home, historical Device
+surfaces, Device Current Context, Observation/Analytics evidence and Visitor
+Registry summaries/snapshots.
+
+Current Home Online Devices includes Type plus the accepted Auth/Band/RSSI
+presentation from PR #118 and SNR/Type presentation from PR #120.
+
+No browser-owned Device Type normalization/inference is current architecture.
+
+## Home operational implementation inventory
+
+```text
+Home System Health:
+  PR #74=MERGED
+  code=app/admin_web/home_health.py + config/serialization/runtime/routes/UI/tests
+  repository default=disabled
+  production enabled-state=not inferred by this inventory
+
+Home AP-24H:
+  PR #78=MERGED
+  PR #79 duration-partition fix=MERGED
+  PR #80 frontend activation dataset fix=MERGED
+  code=app/admin_web/home_ap_24h* + Admin query/route/UI/tests
+  repository default=disabled
+  production enabled-state=host/Owner evidence
+
+Home AP-24H telemetry:
+  PR #81=MERGED
+  repository default=disabled
+  sink=existing Authorization Telemetry
+```
 
 ## Windows test baseline / production closure
 

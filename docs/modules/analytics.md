@@ -1,8 +1,8 @@
 # Analytics
 
 Status: current module contract
-Updated: 2026-09-12
-Baseline: `main@c1dc3344bc778a32cdc6b0edce278ee40b287c29`
+Updated: 2026-09-13
+Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
 
 ## Purpose
 
@@ -38,6 +38,23 @@ Finite values pass. Infinity/non-finite evidence fails closed.
 
 This is a read-validation portability rule only; Analytics remains read-only and
 does not add source writes, migrations or query-time Omada access.
+
+## Device Type read contract
+
+Analytics remains read-only and preserves raw source semantics.
+
+`SafeSnapshotSummary` exposes both:
+
+```text
+device_type
+device_type_key
+```
+
+The canonical key is derived from the raw source value only through
+`app/common/device_type.py`.
+
+Analytics does not classify Device Type from hostname, system name, MAC, vendor,
+SSID, AP, IP or unrelated evidence.
 
 ## Services
 
