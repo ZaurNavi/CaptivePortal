@@ -46,24 +46,31 @@ assert(api.classifyHttp(503, {error: {code: "source_unavailable"}}, null).kind =
 assert(api.classifyHttp(500, null, null).kind === "unexpected", "malformed state");
 assert(api.display(null) === "—", "null is not numeric zero");
 assert(api.display(0) === "0", "real zero is preserved");
-assert(api.isAndroidDeviceType("android"), "lowercase Android type accepted");
-assert(api.isAndroidDeviceType("Android"), "title-case Android type accepted");
-assert(api.isAndroidDeviceType(" ANDROID "), "trimmed uppercase Android type accepted");
-assert(!api.isAndroidDeviceType("phone") && !api.isAndroidDeviceType(null), "non-Android types rejected");
+assert(api.isAndroidDeviceType("android"), "canonical Android key accepted");
+assert(!api.isAndroidDeviceType("Android"), "non-canonical title-case key rejected");
+assert(!api.isAndroidDeviceType(" ANDROID "), "non-canonical padded key rejected");
+assert(!api.isAndroidDeviceType("phone") && !api.isAndroidDeviceType(null), "non-Android keys rejected");
 const identityEntries = api.deviceIdentityEntries({
   canonical_mac: "AA:BB:CC:DD:EE:FF",
-  device_type: "android",
+  device_type: " Android ",
+  device_type_key: "android",
   site_first_seen_at: "first",
   site_last_seen_at: "last",
   site_snapshot_count: 1,
   site_visit_count: 2,
 });
 const identityType = identityEntries.find((entry) => entry[0] === "Type");
-assert(identityType[1] === "android" && identityType[2] === "device-type", "Device detail Type uses icon presentation");
-const snapshotType = api.deviceDetailEntries({device_type: "Android"})[0];
-assert(snapshotType[0] === "device type" && snapshotType[1] === "Android" && snapshotType[2] === "device-type", "detail evidence device_type uses icon presentation");
+assert(identityType[1] === " Android " && identityType[2] === "device-type" && identityType[3] === "android", "identity preserves raw Type and carries canonical key");
+const snapshotType = api.deviceDetailEntries({device_type: " Android "}, "android")[0];
+assert(snapshotType[0] === "device type" && snapshotType[1] === " Android " && snapshotType[2] === "device-type" && snapshotType[3] === "android", "latest snapshot preserves raw Type with explicit canonical key");
+const ownKeyType = api.deviceDetailEntries({device_type: "phone", device_type_key: "phone"}, "android")[0];
+assert(ownKeyType[1] === "phone" && ownKeyType[3] === "phone", "object canonical key takes precedence over external key");
+const missingType = api.deviceDetailEntries({device_type: null, device_type_key: null})[0];
+assert(missingType[1] === null && missingType[3] === null, "missing raw Type and key remain missing");
+const contradictoryType = api.deviceDetailEntries({device_type: "phone", device_type_key: "phone", platform: "Android", family: "android"}, "android")[0];
+assert(contradictoryType[1] === "phone" && contradictoryType[3] === "phone", "unrelated Android-looking fields cannot change Type presentation key");
 const observationType = api.detailEntry("device_type", "ANDROID");
-assert(observationType[1] === "ANDROID" && observationType[2] === "device-type", "observation device_type uses icon presentation");
+assert(observationType[1] === "ANDROID" && observationType[2] === "device-type" && observationType.length === 3, "raw observation Type does not infer a canonical key");
 const instant = new Date("2026-08-23T12:34:00.000Z");
 assert(api.localDatetimeValue(instant) === "2026-08-23T16:34", "Baku local field value");
 assert(api.utcFromLocal("2026-08-23T16:34") === "2026-08-23T12:34:00.000Z", "local round trip to UTC");
@@ -177,6 +184,56 @@ assert(api.enrichmentState([], null, ap.result, "A", "fresh") === "Absent after 
 assert(api.enrichmentState([{ap_mac: "A", product_status_classification: "Online"}], null, ap.result, "A", "unavailable") === "AP source unavailable", "local AP expiry hides stale enrichment");
 assert(api.classify(401, null).kind === "session" && api.classify(404, null).kind === "disabled", "global stop states");
 assert(api.classify(429, null).retryable && api.classify(503, "query_deadline").kind === "timeout", "retryable source states");
+function presentationNode(tag, className, text) {
+  return {
+    tag, className, textContent: text, children: [], dataset: {}, attributes: {},
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this.attributes[name] = value; },
+  };
+}
+function headerNode(tag) {
+  const value = {
+    tag, scope: null, className: "", textContent: "", attributes: {},
+    setAttribute(name, field) { this.attributes[name] = field; },
+  };
+  value.classList = {contains(name) { return value.className.split(/\s+/).includes(name); }};
+  return value;
+}
+const headerRow = {
+  cells: Array.from({length: 9}, () => headerNode("th")),
+  append(value) { this.cells.push(value); },
+  insertBefore(value, before) { this.cells.splice(this.cells.indexOf(before), 0, value); },
+};
+headerRow.cells[7].textContent = "Uptime";
+headerRow.cells[8].textContent = "Traffic";
+global.document = {createElement: headerNode};
+api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
+assert(headerRow.cells.length === 10 && headerRow.cells[1].textContent === "Type", "Home Type header is visible after Device / MAC");
+assert(headerRow.cells[1].className === "live-device-type-header", "Home Type header uses the narrow presentation column");
+api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
+assert(headerRow.cells.length === 10, "Home Type header preparation is idempotent");
+const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null};
+const androidPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: " Android ", device_type_key: "android"});
+assert(androidPresentation.deviceType.children.length === 1 && androidPresentation.deviceType.children[0].tag === "img", "Home Android canonical key renders SVG");
+assert(androidPresentation.deviceType.attributes["aria-label"] === " Android ", "Home Android presentation preserves raw label");
+const missingPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null});
+assert(missingPresentation.deviceType.children[0].textContent === "NULL", "Home missing Type renders NULL");
+const phonePresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "phone", device_type_key: "phone"});
+assert(phonePresentation.deviceType.children[0].textContent === "phone" && phonePresentation.deviceType.children[0].tag === "span", "Home non-Android Type renders raw value without icon");
+const invalidAndroidKeyPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "Android"});
+assert(invalidAndroidKeyPresentation.deviceType.children[0].textContent === "Android" && invalidAndroidKeyPresentation.deviceType.children[0].tag === "span", "Home non-canonical Android key does not render Android icon");
+const snrGood = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 25});
+const snrGoodAbove = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 31});
+const snrWarningLow = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 15});
+const snrWarningHigh = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 24});
+const snrDanger = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 14});
+const snrMissing = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: null});
+assert(snrGood.snr.dataset.tone === "good" && snrGoodAbove.snr.dataset.tone === "good", "Home SNR 25 and above is good");
+assert(snrWarningLow.snr.dataset.tone === "warning" && snrWarningHigh.snr.dataset.tone === "warning", "Home SNR 15 through 24 is warning");
+assert(snrDanger.snr.dataset.tone === "danger", "Home SNR below 15 is danger");
+assert(!Object.prototype.hasOwnProperty.call(snrMissing.snr.dataset, "tone"), "Home unavailable SNR has no semantic tone");
+const independentRadio = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, rssi: -50, snr: 14});
+assert(independentRadio.snr.dataset.tone === "danger" && independentRadio.rssi.children[0].children[1].dataset.tone === "good", "Home SNR tone is independent from RSSI presentation");
 const page = {api_version: "admin.read.v1", site_id: site, result: {snapshot: snapshot("client"), items: [{client_mac: "00:11:22:33:44:55", name: null, hostname: null, device_type: " Android ", device_type_key: "android", ip: null, ssid: "WiFi", ap_name: null, ap_mac: null, band: null, rssi: null, snr: null, controller_uptime: null, controller_traffic_down: null, controller_traffic_up: null, controller_traffic_total: null, auth_classification: "authorized"}]}, page: {limit: 100, cycle_id: cycle, source_scope_hash: hash, next_cursor: null}};
 assert(api.validatePage(page, site, "client", snapshot("client")) !== null, "pinned page accepted");
 page.page.cycle_id = "different";

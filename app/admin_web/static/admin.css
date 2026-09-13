@@ -220,6 +220,17 @@ input[type="radio"] { width: auto; min-height: 0; }
 .live-table caption { padding: .4rem 0; text-align: left; color: var(--muted); }
 .live-table th, .live-table td { padding: .7rem .55rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 .live-table th { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+.live-section[aria-labelledby="devices-now-title"] .live-table thead th:not(:first-child) { padding-left: .275rem; padding-right: .825rem; text-align: center; }
+.live-section[aria-labelledby="devices-now-title"] .live-table tbody td:not(:first-child) { vertical-align: middle; }
+.live-section[aria-labelledby="devices-now-title"] .live-table .live-device-type-header,
+.live-section[aria-labelledby="devices-now-title"] .live-table .live-device-type-cell { width: 64px; min-width: 64px; padding-left: .4rem; padding-right: .4rem; text-align: center; vertical-align: middle; white-space: nowrap; }
+.live-section[aria-labelledby="devices-now-title"] .live-table thead th.live-device-type-header { padding-left: .2rem; padding-right: .6rem; }
+.live-section[aria-labelledby="devices-now-title"] .live-device-type-cell .device-type-icon { margin: 0 auto; }
+.live-section[aria-labelledby="devices-now-title"] .live-device-type-null { color: var(--muted); font-size: .66rem; font-weight: 750; letter-spacing: .035em; }
+.live-section[aria-labelledby="devices-now-title"] .live-device-type-raw { display: block; max-width: 64px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: .74rem; }
+.live-section[aria-labelledby="devices-now-title"] .live-snr-value[data-tone="good"] { color: #10b956; font-weight: 800; }
+.live-section[aria-labelledby="devices-now-title"] .live-snr-value[data-tone="warning"] { color: #f2c20d; font-weight: 800; }
+.live-section[aria-labelledby="devices-now-title"] .live-snr-value[data-tone="danger"] { color: #ed3038; font-weight: 800; }
 .live-auth-status[data-auth="authorized"] { color: #0aa84f; font-weight: 800; }
 .live-auth-status[data-auth="pending"] { color: #e12d39; font-weight: 800; }
 .live-band-status[data-band="5GHz"] { color: #175cd3; font-weight: 800; }

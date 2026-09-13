@@ -34,8 +34,8 @@
     return String(value);
   }
 
-  function isAndroidDeviceType(value) {
-    return typeof value === "string" && value.trim().toLowerCase() === "android";
+  function isAndroidDeviceType(deviceTypeKey) {
+    return deviceTypeKey === "android";
   }
 
   function compactDecimal(value) {
@@ -89,19 +89,26 @@
     return key === "device_type" ? [label, field, "device-type"] : [label, field];
   }
 
-  function deviceDetailEntries(value) {
-    return Object.entries(value || {}).map(([key, field]) => {
-      if (key === "traffic_down") return ["Traffic down", formatDeviceBytes(field)];
-      if (key === "traffic_up") return ["Traffic up", formatDeviceBytes(field)];
-      if (key === "traffic_total") return ["Traffic total", formatDeviceBytes(field)];
-      if (key === "uptime") return ["Uptime", formatDeviceDurationSeconds(field)];
-      return detailEntry(key, field);
-    });
+  function deviceDetailEntries(value, explicitDeviceTypeKey) {
+    const source = value || {};
+    const deviceTypeKey = Object.prototype.hasOwnProperty.call(source, "device_type_key")
+      ? source.device_type_key : explicitDeviceTypeKey;
+    return Object.entries(source)
+      .filter(([key]) => key !== "device_type_key")
+      .map(([key, field]) => {
+        if (key === "traffic_down") return ["Traffic down", formatDeviceBytes(field)];
+        if (key === "traffic_up") return ["Traffic up", formatDeviceBytes(field)];
+        if (key === "traffic_total") return ["Traffic total", formatDeviceBytes(field)];
+        if (key === "uptime") return ["Uptime", formatDeviceDurationSeconds(field)];
+        if (key === "device_type") return ["device type", field, "device-type", deviceTypeKey];
+        return detailEntry(key, field);
+      });
   }
 
   function deviceIdentityEntries(identity) {
     return [
-      ["MAC", identity.canonical_mac], ["Type", identity.device_type, "device-type"],
+      ["MAC", identity.canonical_mac],
+      ["Type", identity.device_type, "device-type", identity.device_type_key],
       ["First seen", identity.site_first_seen_at], ["Last seen", identity.site_last_seen_at],
       ["Snapshot count", identity.site_snapshot_count], ["Visit count", identity.site_visit_count],
     ];
@@ -217,10 +224,10 @@
     return value;
   }
 
-  function deviceTypeValue(value, className) {
+  function deviceTypeValue(value, deviceTypeKey, className) {
     const classes = className ? `device-type-value ${className}` : "device-type-value";
     const typeValue = node("span", classes);
-    if (isAndroidDeviceType(value)) {
+    if (isAndroidDeviceType(deviceTypeKey)) {
       const icon = node("img", "device-type-icon");
       icon.src = "/admin/static/icons/platforms/android.svg";
       icon.alt = "";
@@ -244,9 +251,9 @@
 
   function definitionList(entries) {
     const list = node("dl", "detail-list");
-    entries.forEach(([label, value, presentation]) => {
+    entries.forEach(([label, value, presentation, presentationKey]) => {
       const detail = node("dd");
-      if (presentation === "device-type") detail.append(deviceTypeValue(value));
+      if (presentation === "device-type") detail.append(deviceTypeValue(value, presentationKey));
       else detail.textContent = display(value);
       list.append(node("dt", null, label), detail);
     });
@@ -400,7 +407,7 @@
     );
 
     const type = node("span", "device-row-field device-row-type-field");
-    const typeValue = deviceTypeValue(item.device_type, "device-row-value device-row-type-value");
+    const typeValue = deviceTypeValue(item.device_type, item.device_type_key, "device-row-value device-row-type-value");
     type.append(node("span", "device-row-label", "Type"), typeValue);
 
     const lastSeen = node("span", "device-row-field device-row-activity");
@@ -493,7 +500,7 @@
     if (!result || typeof result !== "object" || !result.identity) throw {uiFailure: classifyHttp(500, null, null)};
     const identity = result.identity;
     content.append(card("Identity", deviceIdentityEntries(identity)));
-    content.append(card("Latest Site snapshot", deviceDetailEntries(result.latest_snapshot)));
+    content.append(card("Latest Site snapshot", deviceDetailEntries(result.latest_snapshot, identity.device_type_key)));
     content.append(card("Latest client observation", deviceDetailEntries(result.latest_client_observation)));
     const visits = Array.isArray(result.recent_visits) ? result.recent_visits : [];
     const list = node("div", "row-list");
@@ -4932,9 +4939,16 @@
   function prepareClientTableHeader(table) {
     const row = table && table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : null;
     if (!row) return;
+    if (row.cells.length === 10
+        && row.cells[1].classList.contains("live-device-type-header")
+        && row.cells[8].textContent === "Uptime"
+        && row.cells[9].textContent === "Traffic") return;
     if (row.cells.length === 9
         && row.cells[7].textContent === "Uptime"
-        && row.cells[8].textContent === "Traffic") return;
+        && row.cells[8].textContent === "Traffic") {
+      prepareClientTypeHeader(row);
+      return;
+    }
     if (row.cells.length !== 8) return;
     const legacy = row.cells[7];
     if (!legacy || legacy.textContent.trim() !== "Controller facts") return;
@@ -4943,9 +4957,44 @@
     traffic.scope = "col";
     traffic.textContent = "Traffic";
     row.append(traffic);
+    prepareClientTypeHeader(row);
+  }
+
+  function prepareClientTypeHeader(row) {
+    if (!row || row.cells.length !== 9
+        || row.cells[7].textContent !== "Uptime"
+        || row.cells[8].textContent !== "Traffic") return;
+    const type = document.createElement("th");
+    type.scope = "col";
+    type.className = "live-device-type-header";
+    type.setAttribute("aria-label", "Device type");
+    type.textContent = "Type";
+    row.insertBefore(type, row.cells[1]);
   }
 
   function clientPresentationCells(createNode, item) {
+    const deviceType = createNode("td", "live-device-type-cell");
+    if (item.device_type_key === "android") {
+      const icon = createNode("img", "device-type-icon");
+      icon.src = "/admin/static/icons/platforms/android.svg";
+      icon.alt = "";
+      icon.width = 18;
+      icon.height = 11;
+      icon.setAttribute("aria-hidden", "true");
+      const label = typeof item.device_type === "string" && item.device_type !== "" ? item.device_type : "Android";
+      deviceType.setAttribute("aria-label", label);
+      deviceType.title = label;
+      deviceType.append(icon);
+    } else if (item.device_type_key === null && item.device_type === null) {
+      const missing = createNode("span", "live-device-type-null", "NULL");
+      missing.title = "Device type unavailable";
+      deviceType.append(missing);
+    } else {
+      const raw = createNode("span", "live-device-type-raw", item.device_type);
+      if (typeof item.device_type === "string" && item.device_type !== "") raw.title = item.device_type;
+      deviceType.append(raw);
+    }
+
     const auth = createNode(
       "td",
       "live-auth-status",
@@ -4971,9 +5020,15 @@
     value.append(createNode("span", null, shown.text), meter);
     rssi.append(value);
 
+    const snr = createNode("td", "live-snr-value", item.snr);
+    if (Number.isInteger(item.snr)) {
+      snr.dataset.tone = item.snr >= 25 ? "good"
+        : item.snr >= 15 ? "warning" : "danger";
+    }
+
     const uptime = createNode("td", "live-controller-value", controllerDuration(item.controller_uptime));
     const traffic = createNode("td", "live-controller-value", controllerBytes(item.controller_traffic_total));
-    return {auth, band, rssi, uptime, traffic};
+    return {deviceType, auth, band, rssi, snr, uptime, traffic};
   }
 
   if (typeof window !== "undefined") {
@@ -5212,7 +5267,7 @@
     const identity = node("td");
     identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
     const presentation = clientPresentationCells(node, item);
-    [identity, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, node("td", null, item.snr), presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
+    [identity, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
     return row;
   }
   function renderClients(append) {
@@ -5865,7 +5920,7 @@
       const row = node("tr"); const identity = node("td");
       identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
       const presentation = live.clientPresentationCells(node, item);
-      [identity, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, node("td", null, item.snr), presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
+      [identity, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
       clientRows.append(row);
     });
     clientMore.hidden = !sources.client.cursor;
