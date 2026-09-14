@@ -13,6 +13,15 @@ production env values or current runtime health.
 
 Never print production secret values.
 
+## Fingerprint evidence auxiliary service
+
+Task-01 publication does not deploy or activate the service. Before any future
+checkout/artifact mutation, `fingerprint-evidence.service` must be stopped if it
+exists or is running. After a controlled update, restart only when separately
+authorized and verify the loaded SHA/tree. Never mutate the checkout while this
+artifact-owned auxiliary process remains alive. TLS, firewall, producer secrets,
+systemd provisioning, database creation and activation remain Owner-controlled.
+
 ## Core precondition
 
 Required Omada environment:

@@ -4,6 +4,14 @@ Status: current
 Updated: 2026-08-28
 Baseline: `main@d41888ade1814a2c0e965ff0cd51212e7dc4bd5f`
 
+## Device Fingerprint Evidence
+
+The isolated service logger is `captivportal.device_fingerprint`. Its telemetry
+contains bounded operational identifiers, statuses, counts, runtime state and
+artifact identity only. It never logs Bearer credentials, raw request bodies,
+evidence payloads, MAC addresses, or IP addresses. The dedicated Werkzeug
+request handler strips the entire query string for the fingerprint namespace.
+
 ## Separation
 
 Operational telemetry answers: component state/failure/quality.

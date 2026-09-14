@@ -9,9 +9,20 @@ Commit source: merge PR #120 / Device Type and SNR presentation, 2026-09-13
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
+## Device Fingerprint Evidence
+
+- process: `fingerprint-evidence.service` via
+  `python3 -m app.device_fingerprint.cli run`;
+- persistence: isolated schema-v1 SQLite with normalized P1 evidence and
+  point-in-time source-health events;
+- state: current, repository default disabled;
+- no producer schemas, credentials, TLS material, production database, packet
+  sensor, classifier, or identity linker are shipped by Task-01.
+
 ## 1. Composition roots
 
-- `run.py` — единственный direct process entrypoint и верхний lifecycle/composition root.
+- `run.py` — process entrypoint и верхний lifecycle/composition root основного `captive-portal.service`.
+- `python3 -m app.device_fingerprint.cli run` — независимо разрешённый `TASK-DEVICE-FINGERPRINT-01` auxiliary composition root; в main runtime не регистрируется.
 - `app/web/web.py:create_app()` — Flask composition factory.
 - configuration pipeline: process environment → `app/config.py` → `app/settings.py:get_settings()`.
 - `run.py` создаёт один shared `OmadaProvider` и передаёт его Portal/Auth, Snapshot, Observation, Current State и Pending Cleaner.

@@ -1,5 +1,11 @@
 # CaptivPortal Core Platform
 
+The repository also contains a default-disabled passive Device Fingerprint
+Evidence foundation. It runs only through the separately authorized
+`python3 -m app.device_fingerprint.cli run` composition root and is never
+registered in the main portal runtime. See
+[`docs/modules/device-fingerprint.md`](docs/modules/device-fingerprint.md).
+
 [Русская версия](README_RU.md)
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -496,7 +502,10 @@ Grafana remains engineering observability.
 
 ## Process composition
 
-`run.py` is the only direct process entrypoint and the top-level lifecycle/composition root.
+`run.py` is the process entrypoint and top-level lifecycle/composition root for
+the main `captive-portal.service`. The only Task-01 auxiliary exception is the
+independent `python3 -m app.device_fingerprint.cli run` composition root; it is
+not registered into the main runtime.
 
 A simplified startup picture:
 
