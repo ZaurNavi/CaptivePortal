@@ -7,6 +7,9 @@ Current implementation tree: `8312658be3ba272998f46212d9bad76950e3867e`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
+- [Device Fingerprint Evidence](modules/device-fingerprint.md) — current,
+  default disabled passive evidence foundation and isolated auxiliary service.
+
 ## Модели истины
 
 **Current-state truth:** current code → current tests → current docs.

@@ -8,6 +8,38 @@ Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
 The application does not automatically load `.env.example`. Production values come from process environment/approved secret handling.
 
+## Device Fingerprint Evidence (default disabled)
+
+`DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false` is the repository default. The
+module uses only `DEVICE_FINGERPRINT_*`: DB/lock paths, bind address/port,
+direct-TLS certificate/key paths, API management CIDRs, external producer JSON,
+retention and bounded request/storage limits. Defaults are in `.env.example`
+and `docs/modules/device-fingerprint.md`.
+
+When enabled, absolute distinct DB/lock and TLS paths, valid direct-peer CIDRs,
+and one to 32 strict producer records are mandatory. Bearer secrets and TLS
+private keys are provisioned outside Git. Source-health retention is fixed at
+30 days and has no environment override.
+
+| Variable | Repository default |
+|---|---|
+| `DEVICE_FINGERPRINT_DB_PATH` | `/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3` |
+| `DEVICE_FINGERPRINT_WRITER_LOCK_PATH` | `/opt/CaptivePortal/data/device_fingerprint_evidence.writer.lock` |
+| `DEVICE_FINGERPRINT_BIND_ADDRESS` | `192.168.0.202` |
+| `DEVICE_FINGERPRINT_PORT` | `9443` |
+| `DEVICE_FINGERPRINT_TLS_CERT_PATH` | `/etc/captive-portal/device-fingerprint/server.crt` |
+| `DEVICE_FINGERPRINT_TLS_KEY_PATH` | `/etc/captive-portal/device-fingerprint/server.key` |
+| `DEVICE_FINGERPRINT_API_ALLOWED_NETWORKS` | `192.168.0.0/24` |
+| `DEVICE_FINGERPRINT_PRODUCERS_JSON` | empty/disabled-only |
+| `DEVICE_FINGERPRINT_RETENTION_DAYS` | `30` (range `1..90`) |
+| `DEVICE_FINGERPRINT_MAX_FUTURE_SKEW_SECONDS` | `120` (range `0..600`) |
+| `DEVICE_FINGERPRINT_MAX_DELAYED_EVENT_AGE_SECONDS` | `86400` (range `60..604800`) |
+| `DEVICE_FINGERPRINT_MAX_DB_BYTES` | `1073741824` (range `67108864..8589934592`) |
+| `DEVICE_FINGERPRINT_MAX_HTTP_REQUEST_BYTES` | `1048576` (range `65536..4194304`) |
+| `DEVICE_FINGERPRINT_MAX_EVENTS_PER_BATCH` | `100` (range `1..500`) |
+| `DEVICE_FINGERPRINT_MAX_PAYLOAD_BYTES` | `8192` (range `256..65536`) |
+| `DEVICE_FINGERPRINT_MAX_CONCURRENT_INGEST_REQUESTS` | `2` (range `1..8`) |
+
 ## Core / Omada
 
 | Setting | Repository default / requirement | Notes |

@@ -5,9 +5,17 @@ Updated: 2026-09-13
 Runtime implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
 Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
 
+## Controlled auxiliary composition root
+
+`run.py` remains the lifecycle/composition root for the main
+`captive-portal.service`. TASK-DEVICE-FINGERPRINT-01 authorizes one isolated
+exception: `python3 -m app.device_fingerprint.cli run` for
+`fingerprint-evidence.service`. Its Flask app, SQLite writer, TLS listener and
+maintenance lifecycle are not registered into the main runtime.
+
 ## 1. Mental model
 
-CaptivPortal — один Python process, в котором guest authorization остаётся критическим ядром, а operational/data/product слои подключаются вокруг него с ограниченной связанностью.
+Основной `captive-portal.service` — один Python process, в котором guest authorization остаётся критическим ядром, а operational/data/product слои подключаются вокруг него с ограниченной связанностью. Отдельные auxiliary service processes разрешены только явным TASK-контрактом.
 
 ```text
 Authorization / Identity
@@ -38,7 +46,7 @@ Admin Web
 - webhook receiver/normalizer;
 - portal/public traffic services and routes.
 
-`run.py` remains the only direct executable entrypoint.
+`run.py` remains the composition root and direct executable entrypoint for the main `captive-portal.service`. TASK-authorized auxiliary services use their separately frozen process entrypoints; TASK-DEVICE-FINGERPRINT-01 authorizes only `python3 -m app.device_fingerprint.cli run`.
 
 ## 3. Authorization architecture
 

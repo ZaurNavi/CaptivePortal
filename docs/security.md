@@ -4,6 +4,16 @@ Status: current
 Updated: 2026-08-25
 Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
 
+## Fingerprint evidence endpoint
+
+The default-disabled fingerprint service owns a dedicated direct-TLS Flask app.
+It requires an exact per-producer Bearer credential and authorizes the direct
+`request.remote_addr` against strict management CIDRs. `X-Forwarded-For`,
+`Forwarded`, and `X-Real-IP` are never peer authorities. Query-string credential
+keys are rejected before authentication. Normalized P1 payloads are allowlisted
+by a frozen schema registry; P2 raw packet, destination-name, header, cookie,
+credential and full-user-agent material is rejected.
+
 ## Secrets
 
 - Production secrets come only from process environment/approved secret handling.

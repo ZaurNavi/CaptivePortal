@@ -130,7 +130,20 @@ LAB ONLY commit используется только для immutable Lab testi
 
 ## Архитектурные инварианты
 
-- run.py — process entrypoint и верхнеуровневый lifecycle/composition root.
+run.py is the process entrypoint and
+top-level lifecycle/composition root
+for captive-portal.service / main CaptivPortal runtime.
+
+Auxiliary service process entrypoints are forbidden
+unless explicitly authorized by an approved TASK /
+architecture contract.
+
+An authorized auxiliary service entrypoint is an
+independent composition root and MUST NOT be registered
+into run.py or the main CaptivPortal Flask runtime.
+
+For TASK-DEVICE-FINGERPRINT-01 the authorized exception is exactly:
+`python3 -m app.device_fingerprint.cli run`.
 - app/web/web.py:create_app() — Flask composition factory.
 - Один OmadaProvider передаётся в web/auth и зависимые компоненты процесса.
 - AuthSessionManager и auth executor находятся в памяти процесса; production предполагает один WSGI process.

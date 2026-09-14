@@ -13,6 +13,7 @@ Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
 | Portal entry | current | `app/web/` | `modules/portal-entry.md` | process memory | via shared provider |
 | CAPPORT | current | `app/capport/` | `modules/capport.md` | bounded caches | yes |
 | Auth telemetry | current | `app/auth_telemetry/` | `modules/auth-telemetry.md` | JSONL | no |
+| Device Fingerprint Evidence | current; default disabled | `app/device_fingerprint/` | `modules/device-fingerprint.md` | isolated SQLite v1 | no |
 | Public authorization counter | current | `app/portal_counter/` | `modules/public-authorization-counter.md` | SQLite | no |
 | Public traffic counter | current | `app/public_traffic/` | `modules/public-traffic-counter.md` | SQLite | no |
 | Authorized snapshot | current; default disabled | `app/visitor_registry/snapshot_*` | `modules/authorized-client-snapshot.md` | JSONL | yes |

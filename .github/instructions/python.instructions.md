@@ -7,7 +7,14 @@ applyTo: "app/**/*.py,run.py"
 - Сохраняй существующие слои и public signatures.
 - Используй app/config.py → app/settings.py:get_settings().
 - Не создавай объект с network, file или thread side effects при import.
-- run.py остаётся единственным process entrypoint.
+run.py remains the process entrypoint
+for captive-portal.service / main CaptivPortal runtime.
+
+Auxiliary service process entrypoints are forbidden
+unless explicitly authorized by an approved TASK/architecture contract.
+
+An authorized auxiliary CLI is a separate composition root
+and MUST NOT be registered into the main run.py runtime.
 - Используй типы и dataclasses в стиле соседнего кода; не добавляй dependency ради удобства.
 - Все network calls имеют bounded timeout; retries ограничены.
 - Не перехватывай Exception без telemetry и безопасного результата.
