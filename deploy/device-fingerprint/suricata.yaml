@@ -1,0 +1,62 @@
+%YAML 1.1
+---
+runmode: workers
+
+vars:
+  address-groups:
+    HOME_NET: "[192.168.8.0/22]"
+    EXTERNAL_NET: "!$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+
+default-log-dir: /run/captive-portal/fingerprint-sensor
+default-rule-path: /etc/suricata/rules
+rule-files: []
+
+af-packet:
+  - interface: enp8s0
+    threads: 1
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    use-mmap: yes
+    tpacket-v3: yes
+    bpf-filter: "net 192.168.8.0/22"
+
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      ja3-fingerprints: no
+      ja4-fingerprints: yes
+    quic:
+      enabled: yes
+
+stats:
+  enabled: yes
+  interval: 10
+
+outputs:
+  - console:
+      enabled: no
+  - eve-log:
+      enabled: yes
+      filetype: unix_dgram
+      filename: /run/captive-portal/fingerprint-sensor/suricata-eve.sock
+      ethernet: yes
+      types:
+        - tls:
+            extended: no
+            custom: [ja4, client_alpns, client_handshake]
+        - quic:
+            extended: no
+        - stats:
+            totals: yes
+            threads: no
+            deltas: no
+
+logging:
+  default-log-level: notice
+  outputs:
+    - console:
+        enabled: yes

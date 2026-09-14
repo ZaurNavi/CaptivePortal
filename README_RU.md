@@ -1405,6 +1405,15 @@ Tenant не равен Site.
 
 ---
 
+## Пассивный Device Fingerprint sensor
+
+`TASK-DEVICE-FINGERPRINT-02` добавляет отдельный opt-in sensor для
+нормализованных DHCP, TCP SYN, TLS JA4 и QUIC JA4 evidence. Sensor не участвует
+в Authorization, не выполняет active probing, не сохраняет PCAP или полный EVE
+и по умолчанию выключен. Deployment и activation выполняются Owner отдельно.
+
+---
+
 ## License
 
 См. [LICENSE](LICENSE).

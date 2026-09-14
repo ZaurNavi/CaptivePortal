@@ -75,3 +75,10 @@ Audit-before-action is a safety invariant: `action.planned` must be durably writ
 ## Agent log handoff
 
 Send only bounded relevant time windows/events/correlation identifiers. Do not dump multi-day logs, rotated journals or secrets into TASK/PR/handoff.
+
+## Fingerprint sensor
+
+Sensor telemetry is structured and allowlisted. It may report source kind,
+health transition, capture/dedup counters, Suricata aggregate counters, spool
+capacity and delivery outcomes. It must not contain packet bytes, destination
+identity, SNI, full EVE, authorization headers or the producer credential.

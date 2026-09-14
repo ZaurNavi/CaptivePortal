@@ -419,3 +419,9 @@ Activation → separate step.
 Подробный факт хранится в одном нормативном документе и связывается ссылкой.
 Не копируйте целые TASK/research reports в current architecture. Не передавайте
 агенту весь repository KB, если TASK требует 1–3 связанных contracts.
+
+## Device Fingerprint sensor
+
+Текущее устройство passive network evidence описано в
+`docs/modules/device-fingerprint.md`; deployment boundary — в
+`docs/deployment.md`, sensor-only configuration — в `docs/configuration.md`.

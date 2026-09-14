@@ -4,11 +4,14 @@ from app.device_fingerprint.models import DeviceFingerprintUnsupportedSchema, De
 from app.device_fingerprint.schema_registry import EvidenceSchemaRegistry, build_production_schema_registry
 
 
-def test_production_registry_is_frozen_and_empty():
+def test_production_registry_is_frozen_and_contains_task02_schemas():
     registry = build_production_schema_registry()
     assert registry.frozen
+    for source_kind in ("dhcp", "tcp_syn", "tls_client", "quic_client"):
+        with pytest.raises(DeviceFingerprintValidationError):
+            registry.validate(source_kind, 1, {})
     with pytest.raises(DeviceFingerprintUnsupportedSchema):
-        registry.validate("dhcp", 1, {})
+        registry.validate("portal_ua", 1, {})
 
 
 def test_test_schema_normalizes_before_freeze():

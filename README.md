@@ -1414,6 +1414,16 @@ That is the direction of the platform as it evolves from a captive portal into a
 
 ---
 
+## Passive device fingerprint sensor
+
+`TASK-DEVICE-FINGERPRINT-02` adds an opt-in, separately supervised passive
+sensor for normalized DHCP, TCP SYN, TLS JA4 and QUIC JA4 evidence. It has no
+authorization-path dependency, performs no active network probing, stores no
+packet capture or full EVE stream, and remains disabled by repository default.
+Deployment and activation are separate Owner-controlled operations.
+
+---
+
 ## License
 
 See [LICENSE](LICENSE).

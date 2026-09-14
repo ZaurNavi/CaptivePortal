@@ -706,3 +706,10 @@ Repository alone does not prove:
 - production enabled-state must be host-verified;
 - Omada private UI APIs are not approved product contracts;
 - custom client rate-limit public full-clear remains unresolved on tested Omada 5.14.31.
+
+## 22. Device Fingerprint network sensor
+
+Repository artifacts include the isolated Task-02 sensor package and disabled
+service templates. Four production evidence schemas are registered: `dhcp`,
+`tcp_syn`, `tls_client`, and `quic_client`, all at version 1. Merge or deployment
+does not imply service activation.
