@@ -929,3 +929,12 @@ Never delete audit/history to make rollback appear clean.
 
 systemd, reverse proxy, Alloy, Loki and Grafana require their own
 deploy/infrastructure authorization.
+
+## Device Fingerprint Task-02 artifacts
+
+Repository templates live under `deploy/device-fingerprint/`. Deployment keeps
+both custom services disabled, masks the vendor `suricata.service`, pins
+Suricata 8.0.6, installs the public CA and protected producer credential, and
+starts the sensor before separately starting its bound Suricata service.
+Before checkout mutation, active fingerprint services must be stopped.
+Activation and enable-at-boot require separate Owner authorization.

@@ -721,3 +721,11 @@ Admin Web applies HTTPS/source allowlist/session/CSRF/rate-limit/security-header
 ## 15. Infrastructure boundary
 
 Repository code/docs do not own production systemd, reverse proxy, Alloy, Loki or Grafana configuration unless a separate infrastructure/deploy TASK explicitly changes them.
+
+## 16. Passive fingerprint sensor
+
+`fingerprint-sensor.service` and `fingerprint-suricata.service` are isolated
+auxiliary processes. Core CaptivPortal never imports or waits for them. The
+sensor consumes only the no-L3 `enp8s0` mirrored feed, keeps raw frames in
+memory, durably spools only normalized P1 envelopes, and sends those envelopes
+to the existing direct-TLS Task-01 service.

@@ -470,3 +470,11 @@ Never write:
 `historical production acceptance ⇒ currently healthy`.
 
 Production EnvironmentFile/systemd values are host facts and must be verified separately without printing secrets.
+
+### Device Fingerprint sensor
+
+All `DEVICE_FINGERPRINT_SENSOR_*` variables are parsed exclusively by
+`app/device_fingerprint_sensor/config.py`. The main application settings path
+does not parse them. Repository default is
+`DEVICE_FINGERPRINT_SENSOR_ENABLED=false`. The Bearer credential is supplied
+through systemd `LoadCredential`; it is never stored in `.env.example`.

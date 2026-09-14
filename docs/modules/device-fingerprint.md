@@ -26,8 +26,8 @@ creation.
 
 The database contains only normalized P1 device-evidence rows and immutable
 point-in-time source-health rows. Evidence schemas are registered locally before
-the registry is frozen; Task-01 production composition intentionally registers
-none. Unknown schemas fail closed. Retention is based on `observed_at` (configured
+the registry is frozen; Task-02 registers four bounded network schemas. Unknown
+schemas fail closed. Retention is based on `observed_at` (configured
 1–90 days for evidence and fixed 30 days for source health).
 
 Every endpoint is protected by exact Bearer authentication and direct-peer CIDR
@@ -39,8 +39,13 @@ to Git.
 The frozen initial deployment mapping (without its external secret) is
 `sensor-zefer-01` → capture source `zefer-span-01` → Site
 `6a64f17630da7c70d232187a`, guest CIDR `192.168.8.0/22`, with authorized source
-kinds `dhcp`, `tcp_syn`, `tls_client`, and `quic_client`. These authorized kinds
-do not register evidence schemas; the Task-01 production registry remains empty.
+kinds `dhcp`, `tcp_syn`, `tls_client`, and `quic_client`. The Task-02 sensor
+captures raw DHCP/TCP through an attached kernel BPF and consumes minimized
+TLS/QUIC EVE over a Unix datagram socket. Only normalized bounded envelopes are
+written to its DELETE-journal transport spool; raw frames and EVE are never
+durable.
 
 The authoritative accepted design and verification contract is
 `TASK-DEVICE-FINGERPRINT-01-FINAL.md`.
+Task-02 extends only the reserved schema-registry boundary and is governed by
+`TASK-DEVICE-FINGERPRINT-02-FINAL.md` plus FINAL ADDENDUM-1.

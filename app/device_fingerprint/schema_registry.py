@@ -7,6 +7,12 @@ from typing import Any
 
 from .models import DeviceFingerprintUnsupportedSchema, DeviceFingerprintValidationError
 from .validation import canonical_json, validate_feature_schema_version, validate_source_kind
+from .network_schemas import (
+    validate_dhcp_v1,
+    validate_quic_v1,
+    validate_tcp_syn_v1,
+    validate_tls_v1,
+)
 
 Validator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
@@ -47,4 +53,9 @@ class EvidenceSchemaRegistry:
 
 
 def build_production_schema_registry() -> EvidenceSchemaRegistry:
-    return EvidenceSchemaRegistry().freeze()
+    registry = EvidenceSchemaRegistry()
+    registry.register("dhcp", 1, validate_dhcp_v1)
+    registry.register("tcp_syn", 1, validate_tcp_syn_v1)
+    registry.register("tls_client", 1, validate_tls_v1)
+    registry.register("quic_client", 1, validate_quic_v1)
+    return registry.freeze()

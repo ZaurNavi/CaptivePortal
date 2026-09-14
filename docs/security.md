@@ -81,3 +81,11 @@ Admin browser must not consume this bearer API directly.
 Research proving a mutation works does not authorize product exposure.
 
 New write/control behavior requires explicit policy/audit/change-intent. Private Omada UI `/api/v2` behavior is research evidence, not an approved integration contract.
+
+## Passive fingerprint sensor
+
+The sensor has `CAP_NET_RAW` only and cannot configure interfaces, routes or
+forwarding. Kernel BPF runs before Python parsing. No PCAP, full EVE, SNI,
+DNS/HTTP history, ClientHello, QUIC Initial, opaque DHCP identifier, hostname or
+credential may enter its spool or telemetry. Task-01 direct TLS, Bearer and
+direct-peer CIDR controls remain authoritative for ingestion.

@@ -1,0 +1,1 @@
+(udp and (port 67 or port 68)) or (src net 192.168.8.0/22 and tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn)

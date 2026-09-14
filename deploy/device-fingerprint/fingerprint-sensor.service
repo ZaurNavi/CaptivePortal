@@ -1,0 +1,30 @@
+[Unit]
+Description=CaptivPortal passive device fingerprint sensor
+After=captive-portal.service
+
+[Service]
+Type=simple
+User=fingerprint-sensor
+Group=fingerprint-sensor
+SupplementaryGroups=fingerprint-eve
+WorkingDirectory=/opt/CaptivePortal
+EnvironmentFile=-/etc/captive-portal/device-fingerprint/sensor.env
+LoadCredential=device-fingerprint-bearer:/etc/captive-portal/device-fingerprint/sensor.bearer
+ExecStart=/usr/bin/python3 -m app.device_fingerprint_sensor.cli run
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=20
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+CPUQuota=50%
+MemoryMax=256M
+TasksMax=64
+Nice=10
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/captive-portal/fingerprint-sensor /var/lib/captive-portal/fingerprint-sensor
+
+[Install]
+WantedBy=multi-user.target

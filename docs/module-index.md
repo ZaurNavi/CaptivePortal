@@ -161,3 +161,10 @@ separately approved by Owner / Tech Lead.
 A historical production PASS proves a feature worked at a named artifact/time.
 It does not convert repository defaults into production configuration and does
 not prove current health after later changes.
+
+## Device Fingerprint
+
+- Central evidence service: `app/device_fingerprint/`
+- Passive sensor: `app/device_fingerprint_sensor/`
+- Deployment templates: `deploy/device-fingerprint/`
+- Current contract: `docs/modules/device-fingerprint.md`

@@ -144,6 +144,9 @@ into run.py or the main CaptivPortal Flask runtime.
 
 For TASK-DEVICE-FINGERPRINT-01 the authorized exception is exactly:
 `python3 -m app.device_fingerprint.cli run`.
+For TASK-DEVICE-FINGERPRINT-02 the additional isolated sensor exception is
+exactly `python3 -m app.device_fingerprint_sensor.cli run`; it must not be
+imported or composed by `run.py`.
 - app/web/web.py:create_app() — Flask composition factory.
 - Один OmadaProvider передаётся в web/auth и зависимые компоненты процесса.
 - AuthSessionManager и auth executor находятся в памяти процесса; production предполагает один WSGI process.

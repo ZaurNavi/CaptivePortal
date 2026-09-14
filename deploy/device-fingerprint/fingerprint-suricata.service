@@ -1,0 +1,32 @@
+[Unit]
+Description=CaptivPortal dedicated passive fingerprint Suricata
+After=fingerprint-sensor.service
+BindsTo=fingerprint-sensor.service
+PartOf=fingerprint-sensor.service
+
+[Service]
+Type=simple
+User=suricata
+Group=suricata
+SupplementaryGroups=fingerprint-eve
+ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0
+ExecStartPre=/usr/bin/test -r /etc/captive-portal/device-fingerprint/suricata.yaml
+ExecStartPre=/usr/bin/timeout 1830 /bin/sh -c 'until test -S /run/captive-portal/fingerprint-sensor/suricata-eve.sock; do sleep 1; done'
+ExecStartPre=/bin/sh -c '/usr/bin/suricata --build-info | /bin/grep -q "^This is Suricata version 8.0.6 RELEASE"'
+ExecStartPre=/usr/bin/suricata -T -c /etc/captive-portal/device-fingerprint/suricata.yaml
+ExecStart=/usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers
+Restart=on-failure
+RestartSec=30
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+CPUQuota=150%
+MemoryHigh=768M
+MemoryMax=1024M
+Nice=10
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
