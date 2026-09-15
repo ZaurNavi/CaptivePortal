@@ -10,9 +10,9 @@ def config():
     return sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
 
 
-def event(kind, body):
+def event(kind, body, *, timestamp="2026-09-14T10:00:00.123456+00:00"):
     return {
-        "event_type": kind, "timestamp": "2026-09-14T10:00:00.123456+00:00",
+        "event_type": kind, "timestamp": timestamp,
         "src_ip": "192.168.8.20", "dest_ip": "1.1.1.1",
         "ether": {"src_mac": "00:11:22:33:44:55", "dest_mac": "aa:bb:cc:dd:ee:ff"},
         kind: body,
@@ -54,6 +54,64 @@ def test_quic_version_and_extensions_are_normalized_without_private_fields():
     assert payload["quic_version"] == "0xfaceb002"
     assert payload["ech_extension_present"] is True
     assert "secret" not in repr(values[0].document)
+
+
+def test_tls_suricata_compact_utc_offset_is_normalized_to_canonical_utc():
+    normalizer = NetworkNormalizer(config(), monotonic=lambda: 0)
+    values = normalizer.eve(event("tls", {
+        "ja4": "t13d0203h2_0123456789ab_abcdef012345",
+        "client_alpns": ["h2"],
+        "client_handshake": {"exts": [0, 65037], "version": "TLS 1.3"},
+    }, timestamp="2026-09-15T12:14:52.123456+0000"))
+
+    assert len(values) == 1
+    assert values[0].observed_at == "2026-09-15T12:14:52.123Z"
+    assert values[0].document["observed_at"] == "2026-09-15T12:14:52.123Z"
+
+
+def test_quic_suricata_compact_utc_offset_is_normalized_to_canonical_utc():
+    normalizer = NetworkNormalizer(config(), monotonic=lambda: 0)
+    values = normalizer.eve(event("quic", {
+        "ja4": "q00d0203h3_0123456789ab_abcdef012345",
+        "version": "00000001",
+        "extensions": [{"type": 65037}],
+    }, timestamp="2026-09-15T12:14:52.123456+0000"))
+
+    assert len(values) == 1
+    assert values[0].observed_at == "2026-09-15T12:14:52.123Z"
+    assert values[0].document["observed_at"] == "2026-09-15T12:14:52.123Z"
+
+
+def test_suricata_compact_negative_offset_is_converted_to_utc():
+    normalizer = NetworkNormalizer(config(), monotonic=lambda: 0)
+    values = normalizer.eve(event("tls", {
+        "ja4": "t13d0203h2_0123456789ab_abcdef012345",
+        "client_alpns": ["h2"],
+        "client_handshake": {"exts": [], "version": "TLS 1.3"},
+    }, timestamp="2026-09-15T12:14:52.123456-0400"))
+
+    assert len(values) == 1
+    assert values[0].observed_at == "2026-09-15T16:14:52.123Z"
+
+
+def test_colonized_offset_remains_accepted_and_malformed_compact_offset_fails_closed():
+    normalizer = NetworkNormalizer(config(), monotonic=lambda: 0)
+    body = {
+        "ja4": "t13d0203h2_0123456789ab_abcdef012345",
+        "client_alpns": ["h2"],
+        "client_handshake": {"exts": [], "version": "TLS 1.3"},
+    }
+
+    accepted = normalizer.eve(event(
+        "tls", body, timestamp="2026-09-15T12:14:52.123456+00:00",
+    ))
+    rejected = normalizer.eve(event(
+        "tls", body, timestamp="2026-09-15T12:14:52.123456+0A00",
+    ))
+
+    assert len(accepted) == 1
+    assert accepted[0].observed_at == "2026-09-15T12:14:52.123Z"
+    assert rejected == []
 
 
 class FakeSocket:

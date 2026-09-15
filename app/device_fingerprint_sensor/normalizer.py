@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -21,6 +22,7 @@ from .tcp_syn import parse_tcp_syn_frame
 
 UTC = timezone.utc
 _GREASE = frozenset(range(0x0A0A, 0xFAFA + 1, 0x1010))
+_COMPACT_EVE_OFFSET = re.compile(r"([+-])([0-9]{2})([0-9]{2})$")
 
 
 class NetworkNormalizer:
@@ -239,6 +241,15 @@ def _extension_flags(values: Any) -> tuple[bool | None, bool | None]:
 def _eve_timestamp(value: Any) -> str:
     if not isinstance(value, str):
         raise ValueError
+    compact_offset = _COMPACT_EVE_OFFSET.search(value)
+    if compact_offset is not None:
+        value = (
+            value[:compact_offset.start()]
+            + compact_offset.group(1)
+            + compact_offset.group(2)
+            + ":"
+            + compact_offset.group(3)
+        )
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError
