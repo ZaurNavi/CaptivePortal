@@ -147,6 +147,57 @@ def test_repeated_prepare_reuses_session_and_starts_one_worker():
     ]
 
 
+def test_evidence_submission_follows_worker_and_reuse_and_is_contained():
+    manager = AuthSessionManager()
+    executor = CapturingExecutor()
+    candidate = object()
+
+    class Sink:
+        def __init__(self):
+            self.calls = []
+
+        def try_submit(self, session, submitted):
+            assert executor.submissions
+            self.calls.append((session, submitted))
+            if len(self.calls) == 2:
+                raise RuntimeError("isolated sink failure")
+
+    sink = Sink()
+    handler = PortalEntryHandler(
+        session_manager=manager,
+        auth_worker=Mock(),
+        executor=executor,
+        auth_telemetry=Mock(),
+        portal_evidence_sink=sink,
+        portal_evidence_telemetry=Mock(),
+    )
+    context = PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:44")
+
+    first = handler.prepare_portal(context, candidate)
+    reused = handler.prepare_portal(context, candidate)
+
+    assert first.status_code == reused.status_code == 200
+    assert first.session_id == reused.session_id
+    assert len(sink.calls) == 2
+
+
+def test_worker_start_failure_never_submits_evidence():
+    sink = Mock()
+    handler = PortalEntryHandler(
+        session_manager=AuthSessionManager(),
+        auth_worker=Mock(),
+        executor=FailingExecutor(),
+        auth_telemetry=Mock(),
+        portal_evidence_sink=sink,
+    )
+    result = handler.prepare_portal(
+        PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:45"),
+        object(),
+    )
+    assert result.status_code == 500
+    sink.try_submit.assert_not_called()
+
+
 def test_portal_context_ssid_is_preserved_in_new_auth_session():
     manager = AuthSessionManager()
     handler = PortalEntryHandler(

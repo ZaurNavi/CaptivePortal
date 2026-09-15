@@ -36,7 +36,8 @@ PortalClientContext, PortalEntryResult, PortalEntryHandler, AuthSession.
 
 ## 7. Зависимости
 
-Flask, AuthSessionManager, AuthWorker, telemetry, optional counter.
+Flask, AuthSessionManager, AuthWorker, telemetry, optional counter, and the
+default-disabled non-blocking normalized Task-03 portal-evidence sink.
 
 ## 8. Fail-open
 
@@ -48,7 +49,9 @@ Host/port/debug и module settings через get_settings().
 
 ## 10. Data events
 
-Нет собственного persistent journal.
+Нет собственного persistent journal. When Task-03 is enabled, eligible entry
+requests may submit only an already-normalized candidate to a bounded in-memory
+queue after successful AuthWorker scheduling; raw headers never enter it.
 
 ## 11. Operational telemetry
 

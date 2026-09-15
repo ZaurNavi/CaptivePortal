@@ -40,6 +40,16 @@ private keys are provisioned outside Git. Source-health retention is fixed at
 | `DEVICE_FINGERPRINT_MAX_PAYLOAD_BYTES` | `8192` (range `256..65536`) |
 | `DEVICE_FINGERPRINT_MAX_CONCURRENT_INGEST_REQUESTS` | `2` (range `1..8`) |
 
+### Portal fingerprint producer (default disabled)
+
+`DEVICE_FINGERPRINT_PORTAL_ENABLED=false` leaves the main portal without a
+Task-03 worker or I/O. When enabled, the isolated configuration is frozen to
+producer `portal-zefer-01`, capture source `zefer-portal-http-01`, the production
+Site/guest CIDR/SSID scope, a 256-event queue, 50-event batches, 300-second
+queue age, six-hour coalescing, `(0.5s, 2.0s)` HTTPS timeouts, and 30/300-second
+cooldowns. The full exact variable list is in `.env.example`; the Bearer value
+is never stored there. See `docs/modules/device-fingerprint-portal.md`.
+
 ## Core / Omada
 
 | Setting | Repository default / requirement | Notes |
