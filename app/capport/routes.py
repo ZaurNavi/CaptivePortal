@@ -3,6 +3,7 @@
 import json
 import math
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from flask import (
@@ -32,6 +33,8 @@ def create_capport_blueprint(
     portal_entry_handler,
     config: CapportConfig,
     telemetry,
+    portal_evidence_extractor=None,
+    portal_evidence_telemetry=None,
 ) -> Blueprint:
     blueprint = Blueprint("capport", __name__)
 
@@ -120,6 +123,26 @@ def create_capport_blueprint(
                 mimetype="text/html",
             ))
 
+        portal_evidence_candidate = None
+        if portal_evidence_extractor is not None:
+            observed_at = datetime.now(timezone.utc)
+            try:
+                portal_evidence_candidate = portal_evidence_extractor(
+                    request.headers,
+                    source_subtype="capport_login",
+                    observed_at=observed_at,
+                )
+            except Exception:
+                try:
+                    if portal_evidence_telemetry is not None:
+                        portal_evidence_telemetry.emit(
+                            "portal_evidence_extractor_failed",
+                            source_subtype="capport_login",
+                            error_category="extractor_exception",
+                        )
+                except Exception:
+                    pass
+
         telemetry.safe_emit_system(
             events.CAPPORT_PORTAL_OPENED,
             site_id=state.client.site_id,
@@ -136,12 +159,26 @@ def create_capport_blueprint(
             ssid=state.client.ssid,
         )
         if wants_json:
-            result = portal_entry_handler.prepare_portal(context)
+            result = (
+                portal_entry_handler.prepare_portal(
+                    context,
+                    portal_evidence_candidate=portal_evidence_candidate,
+                )
+                if portal_evidence_candidate is not None
+                else portal_entry_handler.prepare_portal(context)
+            )
             return _no_store(
                 jsonify(_entry_json(result)),
                 result.status_code,
             )
-        return _no_store(portal_entry_handler.open_portal(context))
+        return _no_store(
+            portal_entry_handler.open_portal(
+                context,
+                portal_evidence_candidate=portal_evidence_candidate,
+            )
+            if portal_evidence_candidate is not None
+            else portal_entry_handler.open_portal(context)
+        )
 
     blueprint.add_url_rule(
         config.api_path,

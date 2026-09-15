@@ -88,7 +88,7 @@ def state(
     )
 
 
-def app_for(service, handler=None):
+def app_for(service, handler=None, *, extractor=None, portal_telemetry=None):
     template_dir = (
         Path(__file__).parents[1] / "app" / "web" / "templates"
     )
@@ -100,10 +100,45 @@ def app_for(service, handler=None):
             portal_entry_handler=handler,
             config=config(),
             telemetry=NoopTelemetry(),
+            portal_evidence_extractor=extractor,
+            portal_evidence_telemetry=portal_telemetry,
         )
     )
     app.config["TESTING"] = True
     return app, handler
+
+
+def test_capport_fingerprint_extraction_requires_resolved_client_and_is_contained():
+    candidate = object()
+    extractor = Mock(return_value=candidate)
+    service = Mock()
+    service.resolve_for_login.side_effect = [
+        state(found=False, allowed=False), state(found=False), state(found=True),
+    ]
+    handler = Mock()
+    handler.open_portal.return_value = ("opened", 200)
+    app, _ = app_for(service, handler, extractor=extractor, portal_telemetry=Mock())
+    client = app.test_client()
+
+    assert client.get("/capport/login", environ_base={"REMOTE_ADDR": "192.168.1.10"}).status_code == 403
+    assert extractor.call_count == 0
+    assert client.get("/capport/login", environ_base={"REMOTE_ADDR": "192.168.1.10"}).status_code == 200
+    assert extractor.call_count == 0
+    assert client.get("/capport/login", headers={"User-Agent": "Firefox/120"}, environ_base={"REMOTE_ADDR": "192.168.1.10"}).status_code == 200
+    extractor.assert_called_once()
+    handler.open_portal.assert_called_once_with(
+        PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"),
+        portal_evidence_candidate=candidate,
+    )
+
+
+def test_capport_extractor_exception_preserves_existing_login():
+    service = Mock(); service.resolve_for_login.return_value = state(found=True)
+    handler = Mock(); handler.open_portal.return_value = ("opened", 200)
+    app, _ = app_for(service, handler, extractor=Mock(side_effect=RuntimeError("secret")), portal_telemetry=Mock())
+    response = app.test_client().get("/capport/login", environ_base={"REMOTE_ADDR": "192.168.1.10"})
+    assert response.status_code == 200
+    handler.open_portal.assert_called_once_with(PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"))
 
 
 def javascript_constant(page, name):

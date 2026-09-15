@@ -26,7 +26,8 @@ creation.
 
 The database contains only normalized P1 device-evidence rows and immutable
 point-in-time source-health rows. Evidence schemas are registered locally before
-the registry is frozen; Task-02 registers four bounded network schemas. Unknown
+the registry is frozen; Task-02 registers four bounded network schemas and
+Task-03 adds normalized `portal_headers/1`. Unknown
 schemas fail closed. Retention is based on `observed_at` (configured
 1–90 days for evidence and fixed 30 days for source health).
 
@@ -49,3 +50,6 @@ The authoritative accepted design and verification contract is
 `TASK-DEVICE-FINGERPRINT-01-FINAL.md`.
 Task-02 extends only the reserved schema-registry boundary and is governed by
 `TASK-DEVICE-FINGERPRINT-02-FINAL.md` plus FINAL ADDENDUM-1.
+Task-03 reuses the same API/DB boundary through the isolated asynchronous portal
+producer described in `docs/modules/device-fingerprint-portal.md`; it adds no
+second database or classifier.

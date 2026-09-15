@@ -13,6 +13,7 @@ from .network_schemas import (
     validate_tcp_syn_v1,
     validate_tls_v1,
 )
+from .portal_schemas import validate_portal_headers_v1
 
 Validator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
@@ -58,4 +59,5 @@ def build_production_schema_registry() -> EvidenceSchemaRegistry:
     registry.register("tcp_syn", 1, validate_tcp_syn_v1)
     registry.register("tls_client", 1, validate_tls_v1)
     registry.register("quic_client", 1, validate_quic_v1)
+    registry.register("portal_headers", 1, validate_portal_headers_v1)
     return registry.freeze()

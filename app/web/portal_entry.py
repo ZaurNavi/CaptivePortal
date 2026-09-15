@@ -10,6 +10,7 @@ from flask import render_template
 from app.auth.worker import log_auth_event
 from app.auth_telemetry import events as telemetry_events
 from app.logger import logger
+from app.device_fingerprint_portal.telemetry import safe_emit as safe_portal_evidence_emit
 from app.web.localization import PORTAL_TRANSLATIONS
 
 
@@ -46,6 +47,8 @@ class PortalEntryHandler:
         auth_telemetry: Any,
         portal_counter_service: Any = None,
         counter_recording_enabled: bool = False,
+        portal_evidence_sink: Any = None,
+        portal_evidence_telemetry: Any = None,
     ):
         self._session_manager = session_manager
         self._auth_worker = auth_worker
@@ -53,9 +56,11 @@ class PortalEntryHandler:
         self._auth_telemetry = auth_telemetry
         self._portal_counter_service = portal_counter_service
         self._counter_recording_enabled = counter_recording_enabled
+        self._portal_evidence_sink = portal_evidence_sink
+        self._portal_evidence_telemetry = portal_evidence_telemetry
 
-    def open_portal(self, context: PortalClientContext):
-        result = self.prepare_portal(context)
+    def open_portal(self, context: PortalClientContext, portal_evidence_candidate=None):
+        result = self.prepare_portal(context, portal_evidence_candidate)
         rendered = render_template(
             "portal.html",
             session_id=result.session_id,
@@ -77,6 +82,7 @@ class PortalEntryHandler:
     def prepare_portal(
         self,
         context: PortalClientContext,
+        portal_evidence_candidate=None,
     ) -> PortalEntryResult:
         """Create/reuse one session and return its authoritative state."""
         try:
@@ -147,6 +153,16 @@ class PortalEntryHandler:
                             if reason == "CONFIGURATION_ERROR"
                             else "worker_start_failed"
                         ),
+                    )
+
+            if self._portal_evidence_sink is not None and portal_evidence_candidate is not None:
+                try:
+                    self._portal_evidence_sink.try_submit(session, portal_evidence_candidate)
+                except Exception:
+                    safe_portal_evidence_emit(
+                        self._portal_evidence_telemetry,
+                        "portal_evidence_submit_failed",
+                        error_category="sink_exception",
                     )
 
             snapshot = self._session_manager.snapshot(session)

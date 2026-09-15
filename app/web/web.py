@@ -8,6 +8,7 @@ server-side AuthSession/AuthWorker flow.
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -60,11 +61,18 @@ from app.web.portal_entry import (
     PortalEntryHandler,
 )
 from app.web.localization import PORTAL_TRANSLATIONS
+from app.device_fingerprint_portal import (
+    PortalEvidenceRuntime,
+    extract_portal_evidence_candidate,
+    portal_config_from_env,
+)
+from app.device_fingerprint_portal.telemetry import PortalEvidenceTelemetry, safe_emit
 
 
 MAX_WORKERS = 4
 _AUTO_COUNTER = object()
 _AUTO_TRAFFIC = object()
+_AUTO_PORTAL_EVIDENCE = object()
 
 
 def _normalize_external_portal_ssid(value):
@@ -110,6 +118,7 @@ def create_app(
     visitor_snapshot_collector=None,
     visit_start_submitter=None,
     authorization_health_tracker=None,
+    portal_evidence_sink=_AUTO_PORTAL_EVIDENCE,
 ) -> Flask:
     """Create and configure the Flask application."""
     template_dir = os.path.abspath(
@@ -128,6 +137,30 @@ def create_app(
 
     settings = get_settings()
     auth_telemetry = configure_auth_telemetry(settings)
+    portal_evidence_telemetry = PortalEvidenceTelemetry()
+    portal_evidence_runtime = None
+    if portal_evidence_sink is _AUTO_PORTAL_EVIDENCE:
+        portal_evidence_sink = None
+        try:
+            portal_evidence_config = portal_config_from_env()
+            if portal_evidence_config.enabled:
+                candidate_runtime = PortalEvidenceRuntime(
+                    portal_evidence_config,
+                    telemetry=portal_evidence_telemetry,
+                )
+                candidate_runtime.start()
+                portal_evidence_runtime = candidate_runtime
+                portal_evidence_sink = candidate_runtime
+        except Exception:
+            safe_emit(
+                portal_evidence_telemetry,
+                "portal_evidence_startup_failed",
+                error_category="configuration_or_worker_start",
+                runtime_state="disabled",
+            )
+            portal_evidence_sink = None
+    app.extensions["portal_evidence_sink"] = portal_evidence_sink
+    app.extensions["portal_evidence_runtime"] = portal_evidence_runtime
     app.extensions["auth_telemetry"] = auth_telemetry
 
     webhook_config = OmadaWebhookConfig.from_settings(settings)
@@ -322,6 +355,8 @@ def create_app(
         auth_telemetry=auth_telemetry,
         portal_counter_service=portal_counter_service,
         counter_recording_enabled=counter_recording_enabled,
+        portal_evidence_sink=portal_evidence_sink,
+        portal_evidence_telemetry=portal_evidence_telemetry,
     )
     app.extensions["portal_entry_handler"] = portal_entry_handler
 
@@ -339,6 +374,12 @@ def create_app(
                 portal_entry_handler=portal_entry_handler,
                 config=capport_config,
                 telemetry=auth_telemetry,
+                portal_evidence_extractor=(
+                    extract_portal_evidence_candidate
+                    if portal_evidence_sink is not None
+                    else None
+                ),
+                portal_evidence_telemetry=portal_evidence_telemetry,
             )
         )
 
@@ -386,6 +427,23 @@ def create_app(
                 ),
             ), 400
 
+        portal_evidence_candidate = None
+        if portal_evidence_sink is not None:
+            observed_at = datetime.now(timezone.utc)
+            try:
+                portal_evidence_candidate = extract_portal_evidence_candidate(
+                    request.headers,
+                    source_subtype="omada_external_portal",
+                    observed_at=observed_at,
+                )
+            except Exception:
+                safe_emit(
+                    portal_evidence_telemetry,
+                    "portal_evidence_extractor_failed",
+                    source_subtype="omada_external_portal",
+                    error_category="extractor_exception",
+                )
+
         context = PortalClientContext(
             site_id=site_id,
             client_mac=client_mac,
@@ -395,6 +453,11 @@ def create_app(
             redirect_url=redirect_url,
             radio_id=radio_id,
         )
+        if portal_evidence_candidate is not None:
+            return portal_entry_handler.open_portal(
+                context,
+                portal_evidence_candidate=portal_evidence_candidate,
+            )
         return portal_entry_handler.open_portal(context)
 
     @app.route(
