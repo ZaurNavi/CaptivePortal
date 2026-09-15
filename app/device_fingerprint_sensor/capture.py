@@ -123,7 +123,11 @@ class RawCapture:
         self.socket: socket.socket | None = None
 
     def open(self) -> None:
-        raw = self._socket_factory(socket.AF_PACKET, socket.SOCK_RAW, 0)
+        raw = self._socket_factory(
+            socket.AF_PACKET,
+            socket.SOCK_RAW,
+            socket.htons(0x0003),
+        )
         try:
             raw.settimeout(RECEIVE_POLL_SECONDS)
             raw.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)

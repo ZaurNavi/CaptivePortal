@@ -1,5 +1,6 @@
 import json
 import socket
+import struct
 import subprocess
 import time
 from pathlib import Path
@@ -128,7 +129,7 @@ def test_repository_bpf_artifact_is_exact_frozen_expression():
     assert (root / "deploy/device-fingerprint/raw-capture.bpf").read_text(encoding="ascii").strip() == RAW_CAPTURE_FILTER
 
 
-def test_raw_filter_attaches_before_interface_bind(monkeypatch):
+def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(monkeypatch):
     from app.device_fingerprint_sensor import capture as module
     calls = []
     class Socket:
@@ -140,7 +141,11 @@ def test_raw_filter_attaches_before_interface_bind(monkeypatch):
     monkeypatch.setattr(module.socket, "AF_PACKET", 17, raising=False)
     raw = module.RawCapture("enp8s0", socket_factory=lambda *args: (calls.append(("socket", args)) or Socket()))
     raw.open()
-    assert calls[0][0] == "socket" and calls[0][1][2] == 0
+    assert calls[0] == (
+        "socket",
+        (module.socket.AF_PACKET, module.socket.SOCK_RAW, module.socket.htons(0x0003)),
+    )
+    assert ("bind", ("enp8s0", module.socket.htons(0x0003))) in calls
     assert calls.index("filter") < next(index for index, item in enumerate(calls) if isinstance(item, tuple) and item[0] == "bind")
 
 
@@ -153,6 +158,23 @@ def test_raw_receive_timeout_is_a_neutral_poll():
     capture = RawCapture("enp8s0")
     capture.socket = TimedOutSocket()
     assert capture.receive() is None
+
+
+def test_raw_receive_preserves_kernel_timestamp_semantics():
+    from app.device_fingerprint_sensor.capture import RawCapture, SO_TIMESTAMPNS
+
+    class TimestampedSocket:
+        def recvmsg(self, *_args):
+            return b"frame", [(socket.SOL_SOCKET, SO_TIMESTAMPNS, struct.pack("qq", 0, 123_456_789))], 0, None
+
+    capture = RawCapture("enp8s0")
+    capture.socket = TimestampedSocket()
+
+    assert capture.receive() == (
+        b"frame",
+        123_456_789,
+        "1970-01-01T00:00:00.123Z",
+    )
 
 
 def test_permanent_delivery_fault_cannot_refresh_back_to_ready():
