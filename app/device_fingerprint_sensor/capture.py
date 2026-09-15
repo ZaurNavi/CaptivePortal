@@ -132,7 +132,7 @@ class RawCapture:
             raw.settimeout(RECEIVE_POLL_SECONDS)
             raw.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
             attach_frozen_filter(raw)
-            raw.bind((self.interface, socket.htons(0x0003)))
+            raw.bind((self.interface, 0))
         except Exception:
             raw.close()
             raise

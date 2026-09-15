@@ -145,7 +145,7 @@ def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(m
         "socket",
         (module.socket.AF_PACKET, module.socket.SOCK_RAW, module.socket.htons(0x0003)),
     )
-    assert ("bind", ("enp8s0", module.socket.htons(0x0003))) in calls
+    assert ("bind", ("enp8s0", 0)) in calls
     assert calls.index("filter") < next(index for index, item in enumerate(calls) if isinstance(item, tuple) and item[0] == "bind")
 
 
