@@ -34,61 +34,77 @@ def parse_tcp_syn_frame(frame: bytes, guest_cidrs: tuple[Any, ...]) -> tuple[str
     if data_offset < 20 or tcp + data_offset > offset + total or flags & 0x12 != 0x02:
         return None
     options = frame[tcp + 20:tcp + data_offset]
-    parsed = _options(options)
-    if parsed is None:
-        return None
-    order, mss, scale, sack, timestamps = parsed
     return source_mac, str(source), {
         "ip_version": 4,
         "observed_ttl": frame[offset + 8],
+        "ip_option_length_bytes": ihl - 20,
+        "ip_id_zero": struct.unpack_from("!H", frame, offset + 4)[0] == 0,
+        "ip_df": bool(fragment & 0x4000),
+        "ip_reserved_flag": bool(fragment & 0x8000),
+        "ip_ecn_bits": frame[offset + 1] & 0x03,
+        "tcp_header_length_bytes": data_offset,
         "tcp_window": struct.unpack_from("!H", frame, tcp + 14)[0],
-        "mss": mss,
-        "window_scale": scale,
-        "sack_permitted": sack,
-        "timestamps_present": timestamps,
-        "tcp_option_order": order,
+        "tcp_sequence_zero": struct.unpack_from("!I", frame, tcp + 4)[0] == 0,
+        "tcp_ack_number_nonzero": struct.unpack_from("!I", frame, tcp + 8)[0] != 0,
+        "tcp_urg_pointer_nonzero": struct.unpack_from("!H", frame, tcp + 18)[0] != 0,
+        "tcp_fin": bool(flags & 0x01),
+        "tcp_rst": bool(flags & 0x04),
+        "tcp_push": bool(flags & 0x08),
+        "tcp_urg": bool(flags & 0x20),
+        "tcp_ece": bool(flags & 0x40),
+        "tcp_cwr": bool(flags & 0x80),
+        "tcp_payload_present": total > ihl + data_offset,
+        "tcp_option_records": _options(options),
     }
 
 
-def _options(raw: bytes) -> tuple[list[int], int | None, int | None, bool, bool] | None:
-    order: list[int] = []
-    mss = scale = None
-    sack = timestamps = False
+def _options(raw: bytes) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
     offset = 0
     while offset < len(raw):
         kind = raw[offset]
         offset += 1
-        order.append(kind)
-        if len(order) > 32:
-            return None
         if kind == 0:
-            if any(byte != 0 for byte in raw[offset:]):
-                return None
+            records.append({
+                "record_type": "eol", "kind": 0, "declared_length": None,
+                "available_value_length": 0, "structure_state": "well_formed",
+                "eol_padding_length": len(raw) - offset,
+                "eol_padding_nonzero": any(raw[offset:]),
+            })
             break
         if kind == 1:
+            records.append({
+                "record_type": "nop", "kind": 1, "declared_length": None,
+                "available_value_length": 0, "structure_state": "well_formed",
+            })
             continue
-        if offset >= len(raw):
-            return None
-        length = raw[offset]
-        offset += 1
-        if length < 2 or offset + length - 2 > len(raw):
-            return None
-        value = raw[offset:offset + length - 2]
-        offset += length - 2
+        record_type = {
+            2: "mss", 3: "window_scale", 4: "sack_permitted", 8: "timestamp",
+        }.get(kind, "unknown")
+        length = raw[offset] if offset < len(raw) else None
+        if length is not None:
+            offset += 1
+        available = min(length - 2, len(raw) - offset) if length is not None and length >= 2 else 0
+        value = raw[offset:offset + available]
+        offset += available
+        expected_length = {2: 4, 3: 3, 4: 2, 8: 10}.get(kind)
+        complete = length is not None and length >= 2 and available == length - 2
+        record: dict[str, Any] = {
+            "record_type": record_type, "kind": kind,
+            "declared_length": length, "available_value_length": available,
+            "structure_state": (
+                "well_formed" if complete and (expected_length is None or length == expected_length)
+                else "malformed_but_observable"
+            ),
+        }
         if kind == 2:
-            if length != 4:
-                return None
-            mss = int.from_bytes(value, "big")
+            record["mss"] = int.from_bytes(value[:2], "big") if available >= 2 else None
         elif kind == 3:
-            if length != 3 or value[0] > 14:
-                return None
-            scale = value[0]
-        elif kind == 4:
-            if length != 2:
-                return None
-            sack = True
+            record["window_scale_raw"] = value[0] if available >= 1 else None
         elif kind == 8:
-            if length != 10:
-                return None
-            timestamps = True
-    return order, mss, scale, sack, timestamps
+            record["timestamp_value_zero"] = value[:4] == b"\0" * 4 if available >= 4 else None
+            record["timestamp_echo_nonzero"] = value[4:8] != b"\0" * 4 if available >= 8 else None
+        records.append(record)
+        if not complete:
+            break
+    return records

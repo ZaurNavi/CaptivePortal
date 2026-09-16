@@ -1,8 +1,9 @@
 import pytest
 
-from app.device_fingerprint.models import DeviceFingerprintValidationError
+from app.device_fingerprint.models import DeviceFingerprintUnsupportedSchema, DeviceFingerprintValidationError
 from app.device_fingerprint.network_schemas import (
-    validate_dhcp_v1, validate_quic_v1, validate_tcp_syn_v1, validate_tls_v1,
+    validate_dhcp_v1, validate_quic_v1, validate_tcp_syn_v1,
+    validate_tcp_syn_v2, validate_tls_v1,
 )
 from app.device_fingerprint.schema_registry import build_production_schema_registry
 
@@ -29,11 +30,32 @@ def quic(**changes):
     return value
 
 
+def tcp_v2(**changes):
+    value = {
+        "ip_version": 4, "observed_ttl": 64,
+        "ip_option_length_bytes": 0, "ip_id_zero": True,
+        "ip_df": True, "ip_reserved_flag": False, "ip_ecn_bits": 0,
+        "tcp_header_length_bytes": 24, "tcp_window": 65535,
+        "tcp_sequence_zero": True, "tcp_ack_number_nonzero": False,
+        "tcp_urg_pointer_nonzero": False, "tcp_fin": False,
+        "tcp_rst": False, "tcp_push": False, "tcp_urg": False,
+        "tcp_ece": False, "tcp_cwr": False, "tcp_payload_present": False,
+        "tcp_option_records": [{
+            "record_type": "eol", "kind": 0, "declared_length": None,
+            "available_value_length": 0, "structure_state": "well_formed",
+            "eol_padding_length": 3, "eol_padding_nonzero": False,
+        }],
+    }
+    value.update(changes)
+    return value
+
+
 def test_production_registry_contains_exact_task02_schemas():
     registry = build_production_schema_registry()
     assert registry.frozen
     assert registry.validate("tls_client", 1, tls())["ja4_a"].startswith("t")
     assert registry.validate("quic_client", 1, quic())["ja4_a"].startswith("q")
+    assert registry.validate("tcp_syn", 2, tcp_v2()) == tcp_v2()
 
 
 @pytest.mark.parametrize("alpns", [None, ["h2", "http/1.1"], ["h2", "h2"]])
@@ -96,3 +118,56 @@ def test_tcp_exact_payload_contract():
     assert validate_tcp_syn_v1(payload) == payload
     with pytest.raises(DeviceFingerprintValidationError):
         validate_tcp_syn_v1({**payload, "window_scale": 15})
+
+
+def test_tcp_v1_and_v2_coexist_without_latest_schema_selection():
+    v1 = {
+        "ip_version": 4, "observed_ttl": 64, "tcp_window": 65535,
+        "mss": 1460, "window_scale": 8, "sack_permitted": True,
+        "timestamps_present": True, "tcp_option_order": [2, 4, 8, 1, 3],
+    }
+    registry = build_production_schema_registry()
+    assert registry.validate("tcp_syn", 1, v1) == v1
+    assert registry.validate("tcp_syn", 2, tcp_v2()) == tcp_v2()
+    with pytest.raises(DeviceFingerprintUnsupportedSchema):
+        registry.validate("tcp_syn", 3, tcp_v2())
+    with pytest.raises(DeviceFingerprintValidationError):
+        registry.validate("tcp_syn", 1, tcp_v2())
+    with pytest.raises(DeviceFingerprintValidationError):
+        registry.validate("tcp_syn", 2, v1)
+
+
+@pytest.mark.parametrize("change", [
+    {"ip_version": True}, {"observed_ttl": 256},
+    {"ip_option_length_bytes": 3}, {"ip_ecn_bits": 4},
+    {"tcp_header_length_bytes": 22}, {"tcp_header_length_bytes": 64},
+    {"tcp_window": -1}, {"tcp_fin": 1},
+    {"ip_id": 42}, {"raw_packet": "secret"},
+])
+def test_tcp_v2_top_level_contract_is_closed_and_bounded(change):
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(tcp_v2(**change))
+
+
+@pytest.mark.parametrize("change", [
+    {"record_type": "unknown"}, {"kind": 256},
+    {"declared_length": 2}, {"available_value_length": 1},
+    {"structure_state": "malformed_but_observable"},
+    {"eol_padding_length": 2}, {"eol_padding_nonzero": 1},
+    {"raw_options": "secret"}, {"timestamp_value": 1},
+])
+def test_tcp_v2_record_contract_rejects_impossible_or_private_fields(change):
+    record = {**tcp_v2()["tcp_option_records"][0], **change}
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[record]))
+
+
+def test_tcp_v2_missing_keys_and_impossible_option_sequence_fail():
+    missing = tcp_v2()
+    del missing["tcp_option_records"]
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(missing)
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[]))
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(tcp_v2(tcp_option_records=tcp_v2()["tcp_option_records"] * 2))
