@@ -65,11 +65,13 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
         kind = raw[offset]
         offset += 1
         if kind == 0:
+            padding = raw[offset:]
             records.append({
                 "record_type": "eol", "kind": 0, "declared_length": None,
                 "available_value_length": 0, "structure_state": "well_formed",
-                "eol_padding_length": len(raw) - offset,
-                "eol_padding_nonzero": any(raw[offset:]),
+                "eol_padding_length": len(padding),
+                "eol_padding_nonzero": any(padding),
+                "eol_padding_nonzero_before_final_byte": any(padding[:-1]),
             })
             break
         if kind == 1:

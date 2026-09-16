@@ -44,6 +44,7 @@ def tcp_v2(**changes):
             "record_type": "eol", "kind": 0, "declared_length": None,
             "available_value_length": 0, "structure_state": "well_formed",
             "eol_padding_length": 3, "eol_padding_nonzero": False,
+            "eol_padding_nonzero_before_final_byte": False,
         }],
     }
     value.update(changes)
@@ -155,6 +156,7 @@ def test_tcp_v2_top_level_contract_is_closed_and_bounded(change):
     {"structure_state": "malformed_but_observable"},
     {"eol_padding_length": 2}, {"eol_padding_nonzero": 1},
     {"raw_options": "secret"}, {"timestamp_value": 1},
+    {"eol_padding_bitmap": "010"}, {"p0f_opt_plus": True},
 ])
 def test_tcp_v2_record_contract_rejects_impossible_or_private_fields(change):
     record = {**tcp_v2()["tcp_option_records"][0], **change}
@@ -162,29 +164,43 @@ def test_tcp_v2_record_contract_rejects_impossible_or_private_fields(change):
         validate_tcp_syn_v2(tcp_v2(tcp_option_records=[record]))
 
 
-@pytest.mark.parametrize("padding_length, padding_nonzero, accepted", [
-    (0, False, True),
-    (0, True, False),
-    (3, False, True),
-    (3, True, True),
+@pytest.mark.parametrize("padding_length, padding_nonzero, before_final, accepted", [
+    (0, False, False, True),
+    (0, True, False, False),
+    (0, False, True, False),
+    (1, False, False, True),
+    (1, True, False, True),
+    (1, True, True, False),
+    (3, False, False, True),
+    (3, False, True, False),
+    (3, True, False, True),
+    (3, True, True, True),
 ])
-def test_tcp_v2_eol_padding_nonzero_requires_remaining_bytes(padding_length, padding_nonzero, accepted):
+def test_tcp_v2_eol_padding_consistency(padding_length, padding_nonzero, before_final, accepted):
     eol = {
         **tcp_v2()["tcp_option_records"][0],
         "eol_padding_length": padding_length,
         "eol_padding_nonzero": padding_nonzero,
+        "eol_padding_nonzero_before_final_byte": before_final,
     }
     nop = {
         "record_type": "nop", "kind": 1, "declared_length": None,
         "available_value_length": 0, "structure_state": "well_formed",
     }
-    records = [dict(nop) for _ in range(3)] + [eol] if padding_length == 0 else [eol]
+    records = [dict(nop) for _ in range(3 - padding_length)] + [eol]
     payload = tcp_v2(tcp_option_records=records)
     if accepted:
         assert validate_tcp_syn_v2(payload) == payload
     else:
         with pytest.raises(DeviceFingerprintValidationError):
             validate_tcp_syn_v2(payload)
+
+
+def test_tcp_v2_eol_requires_new_structural_field():
+    eol = dict(tcp_v2()["tcp_option_records"][0])
+    del eol["eol_padding_nonzero_before_final_byte"]
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[eol]))
 
 
 def test_tcp_v2_missing_keys_and_impossible_option_sequence_fail():
