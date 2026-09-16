@@ -43,7 +43,7 @@ def test_health_payload_consumes_authoritative_schema_and_retention_constants(tm
     from app.device_fingerprint.schema import SCHEMA_VERSION
     value = runtime(tmp_path)
     payload = value.health_payload()
-    assert payload["schema_version"] == SCHEMA_VERSION == 1
+    assert payload["schema_version"] == SCHEMA_VERSION == 2
     assert payload["source_health_retention_days"] == SOURCE_HEALTH_RETENTION_DAYS == 30
 
 

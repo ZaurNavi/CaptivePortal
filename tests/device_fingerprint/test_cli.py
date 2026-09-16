@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import app.device_fingerprint.cli as cli
 from app.artifact_identity import ArtifactIdentityError
+from app.device_fingerprint.models import DeviceFingerprintMigrationRequired
+from tests.device_fingerprint import config as fingerprint_config
 
 
 def test_disabled_run_exits_before_logger_identity_lock_db_or_app(monkeypatch):
@@ -61,3 +63,52 @@ def test_artifact_identity_failure_exits_before_lock_db_and_app(monkeypatch, tmp
     monkeypatch.setattr(cli, "writer_lock", lambda _path: (_ for _ in ()).throw(AssertionError("lock must not be acquired")))
     assert cli.main(["run"]) == 1
     assert errors
+
+
+def test_offline_migration_and_recovery_are_explicit_commands(monkeypatch, tmp_path, capsys):
+    cfg = SimpleNamespace(enabled=False, db_path=str(tmp_path / "db"), writer_lock_path=str(tmp_path / "lock"))
+    monkeypatch.setattr(cli, "get_settings", lambda: {})
+    monkeypatch.setattr(cli, "device_fingerprint_config_from_settings", lambda _settings: cfg)
+    calls = []
+    from app.device_fingerprint.storage_v2 import MigrationResult, RecoveryResult
+    def migration(*args, **kwargs):
+        calls.append(("migration", args, kwargs))
+        return MigrationResult(cfg.db_path, 4096, "1:2", "a" * 36, 0, "b" * 64, 4096)
+    def recovery(*args, **kwargs):
+        calls.append(("recovery", args, kwargs))
+        return RecoveryResult("c" * 36, 0)
+    monkeypatch.setattr(cli, "migrate_v1_to_v2", migration)
+    monkeypatch.setattr(cli, "recover_database_generation", recovery)
+    monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_args: (_ for _ in ()).throw(AssertionError("offline command must not start service")))
+    assert cli.main(["migrate-v1-to-v2", "--backup-path", str(tmp_path / "backup")]) == 0
+    assert cli.main(["recover-generation", "--trigger", "DATABASE_BACKUP_RESTORE"]) == 0
+    output = capsys.readouterr().out.splitlines()
+    assert len(output) == 2
+    assert '"backup_sha256": "' + "b" * 64 + '"' in output[0]
+    assert '"source_identity": "1:2"' in output[0]
+    assert '"database_generation_id": "' + "c" * 36 + '"' in output[1]
+    assert calls == [
+        ("migration", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "backup_path": str(tmp_path / "backup")}),
+        ("recovery", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "trigger": "DATABASE_BACKUP_RESTORE"}),
+    ]
+
+
+def test_normal_run_does_not_attempt_offline_migration(monkeypatch, tmp_path):
+    cfg = fingerprint_config(tmp_path)
+    monkeypatch.setattr(cli, "get_settings", lambda: {})
+    monkeypatch.setattr(cli, "device_fingerprint_config_from_settings", lambda _settings: cfg)
+    monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_args: SimpleNamespace(safe_fields=lambda: {}))
+    monkeypatch.setattr(cli, "configure_device_fingerprint_logger", lambda: SimpleNamespace(error=lambda *a, **k: None))
+    monkeypatch.setattr(cli, "DeviceFingerprintTelemetry", lambda *a, **k: SimpleNamespace(emit=lambda *a, **k: None))
+    class Lock:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+    monkeypatch.setattr(cli, "writer_lock", lambda _path: Lock())
+    class Repository:
+        def __init__(self, *_args, **_kwargs): pass
+        def initialize(self): raise DeviceFingerprintMigrationRequired("Fingerprint repository migration is required")
+        def close(self): pass
+    monkeypatch.setattr(cli, "DeviceFingerprintRepository", Repository)
+    monkeypatch.setattr(cli, "migrate_v1_to_v2", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("migration must not run")))
+    monkeypatch.setattr(cli, "create_device_fingerprint_app", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("app must not run")))
+    assert cli.main(["run"]) == 1

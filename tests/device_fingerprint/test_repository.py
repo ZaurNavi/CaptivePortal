@@ -38,7 +38,7 @@ def service(tmp_path):
     return cfg, repo, DeviceFingerprintService(cfg, repo, registry, now=lambda: NOW)
 
 
-def test_schema_v1_exact_tables_indexes_pragmas_and_read_only(tmp_path):
+def test_schema_v2_exact_tables_indexes_pragmas_and_read_only(tmp_path):
     import app.device_fingerprint.config as constants
     assert (constants.BUSY_TIMEOUT_MS, constants.WAL_AUTOCHECKPOINT_PAGES,
             constants.JOURNAL_SIZE_LIMIT_BYTES, constants.RETENTION_DELETE_CHUNK_ROWS,
@@ -46,8 +46,8 @@ def test_schema_v1_exact_tables_indexes_pragmas_and_read_only(tmp_path):
             constants.SOURCE_HEALTH_RETENTION_DAYS) == (500, 1000, 67_108_864, 500, 20, 30)
     cfg, repo = initialized(tmp_path)
     connection = repo.connection
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
-    assert {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == {"device_fingerprint_evidence", "device_fingerprint_source_health_events"}
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == {"device_fingerprint_evidence", "device_fingerprint_source_health_events", "device_fingerprint_storage_state"}
     assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 500
     assert connection.execute("PRAGMA synchronous").fetchone()[0] == 1
