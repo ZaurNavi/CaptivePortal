@@ -26,12 +26,12 @@ _TCP_V2_KEYS = frozenset({
     "ip_df", "ip_reserved_flag", "ip_ecn_bits", "tcp_header_length_bytes",
     "tcp_window", "tcp_sequence_zero", "tcp_ack_number_nonzero",
     "tcp_urg_pointer_nonzero", "tcp_fin", "tcp_rst", "tcp_push", "tcp_urg",
-    "tcp_ece", "tcp_cwr", "tcp_payload_present", "tcp_option_records",
+    "tcp_ns", "tcp_ece", "tcp_cwr", "tcp_payload_present", "tcp_option_records",
 })
 _TCP_V2_BOOLEAN_KEYS = frozenset({
     "ip_id_zero", "ip_df", "ip_reserved_flag", "tcp_sequence_zero",
     "tcp_ack_number_nonzero", "tcp_urg_pointer_nonzero", "tcp_fin",
-    "tcp_rst", "tcp_push", "tcp_urg", "tcp_ece", "tcp_cwr",
+    "tcp_rst", "tcp_push", "tcp_urg", "tcp_ns", "tcp_ece", "tcp_cwr",
     "tcp_payload_present",
 })
 _TCP_V2_OPTION_COMMON = frozenset({

@@ -22,11 +22,11 @@ V2_KEYS = {
     "ip_df", "ip_reserved_flag", "ip_ecn_bits", "tcp_header_length_bytes",
     "tcp_window", "tcp_sequence_zero", "tcp_ack_number_nonzero",
     "tcp_urg_pointer_nonzero", "tcp_fin", "tcp_rst", "tcp_push", "tcp_urg",
-    "tcp_ece", "tcp_cwr", "tcp_payload_present", "tcp_option_records",
+    "tcp_ns", "tcp_ece", "tcp_cwr", "tcp_payload_present", "tcp_option_records",
 }
 
 
-def syn(*, source="192.168.8.20", flags=0x02, options=DEFAULT_OPTIONS,
+def syn(*, source="192.168.8.20", flags=0x02, ns=False, options=DEFAULT_OPTIONS,
         ip_options=b"", ip_id=0, fragment=0, ecn=0, sequence=0,
         ack_number=0, urgent_pointer=0, payload=b"", window=65535):
     assert len(ip_options) % 4 == 0
@@ -35,7 +35,7 @@ def syn(*, source="192.168.8.20", flags=0x02, options=DEFAULT_OPTIONS,
     tcp = bytearray(20 + len(options))
     struct.pack_into("!HH", tcp, 0, 12345, 443)
     struct.pack_into("!II", tcp, 4, sequence, ack_number)
-    tcp[12] = ((20 + len(options)) // 4) << 4
+    tcp[12] = (((20 + len(options)) // 4) << 4) | int(ns)
     tcp[13] = flags
     struct.pack_into("!H", tcp, 14, window)
     struct.pack_into("!H", tcp, 18, urgent_pointer)
@@ -117,12 +117,37 @@ def test_ip_tcp_boolean_derivatives_and_ipv4_options(
     assert value["tcp_sequence_zero"] is (sequence == 0)
     assert value["tcp_ack_number_nonzero"] is (ack != 0)
     assert value["tcp_urg_pointer_nonzero"] is (urgent != 0)
+    assert value["tcp_ns"] is False
     assert value["tcp_payload_present"] is bool(payload)
     for name, bit in (
         ("tcp_fin", 0x01), ("tcp_rst", 0x04), ("tcp_push", 0x08),
         ("tcp_urg", 0x20), ("tcp_ece", 0x40), ("tcp_cwr", 0x80),
     ):
         assert value[name] is bool(flags & bit)
+
+
+def test_tcp_ns_changes_only_one_canonical_payload_fact():
+    assert syn(options=b"", ns=False)[14 + 20 + 12] == 0x50
+    assert syn(options=b"", ns=True)[14 + 20 + 12] == 0x51
+    absent = parsed(b"", ns=False)
+    present = parsed(b"", ns=True)
+    assert absent["tcp_header_length_bytes"] == present["tcp_header_length_bytes"] == 20
+    assert absent["tcp_ns"] is False
+    assert present["tcp_ns"] is True
+    assert {**absent, "tcp_ns": True} == present
+    assert canonical_json(absent) != canonical_json(present)
+    assert canonical_sha256(canonical_json(absent)) != canonical_sha256(canonical_json(present))
+
+
+@pytest.mark.parametrize("ns,flags,expected", [
+    (True, 0x02, (True, False, False)),
+    (False, 0x42, (False, True, False)),
+    (False, 0x82, (False, False, True)),
+])
+def test_tcp_ns_ece_cwr_are_independent(ns, flags, expected):
+    value = parsed(b"", ns=ns, flags=flags)
+    assert (value["tcp_ns"], value["tcp_ece"], value["tcp_cwr"]) == expected
+    assert value["ip_ecn_bits"] == 0
 
 
 @pytest.mark.parametrize("options,expected_type,extra", [
