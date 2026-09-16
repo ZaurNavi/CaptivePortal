@@ -158,7 +158,8 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
                     or not last
                     or type(record["eol_padding_nonzero"]) is not bool
                     or type(record["eol_padding_length"]) is not int
-                    or record["eol_padding_length"] != option_length - offset):
+                    or record["eol_padding_length"] != option_length - offset
+                    or (record["eol_padding_length"] == 0 and record["eol_padding_nonzero"])):
                 _fail()
             offset = option_length
             stopped = True

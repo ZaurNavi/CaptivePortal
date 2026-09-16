@@ -162,6 +162,31 @@ def test_tcp_v2_record_contract_rejects_impossible_or_private_fields(change):
         validate_tcp_syn_v2(tcp_v2(tcp_option_records=[record]))
 
 
+@pytest.mark.parametrize("padding_length, padding_nonzero, accepted", [
+    (0, False, True),
+    (0, True, False),
+    (3, False, True),
+    (3, True, True),
+])
+def test_tcp_v2_eol_padding_nonzero_requires_remaining_bytes(padding_length, padding_nonzero, accepted):
+    eol = {
+        **tcp_v2()["tcp_option_records"][0],
+        "eol_padding_length": padding_length,
+        "eol_padding_nonzero": padding_nonzero,
+    }
+    nop = {
+        "record_type": "nop", "kind": 1, "declared_length": None,
+        "available_value_length": 0, "structure_state": "well_formed",
+    }
+    records = [dict(nop) for _ in range(3)] + [eol] if padding_length == 0 else [eol]
+    payload = tcp_v2(tcp_option_records=records)
+    if accepted:
+        assert validate_tcp_syn_v2(payload) == payload
+    else:
+        with pytest.raises(DeviceFingerprintValidationError):
+            validate_tcp_syn_v2(payload)
+
+
 def test_tcp_v2_missing_keys_and_impossible_option_sequence_fail():
     missing = tcp_v2()
     del missing["tcp_option_records"]
