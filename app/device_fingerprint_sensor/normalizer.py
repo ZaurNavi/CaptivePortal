@@ -8,9 +8,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from app.device_fingerprint.models import DeviceFingerprintValidationError
 from app.device_fingerprint.network_schemas import (
     validate_dhcp_v1,
     validate_quic_v1,
+    validate_tcp_syn_v2,
     validate_tls_v1,
 )
 from app.device_fingerprint.validation import format_utc
@@ -43,8 +45,20 @@ class NetworkNormalizer:
         if syn is None:
             return []
         mac, ip, payload = syn
+        try:
+            payload = dict(validate_tcp_syn_v2(payload))
+        except DeviceFingerprintValidationError:
+            return []
         self._count("tcp_syn_event_count")
-        return [self._evidence("tcp_syn", "ipv4", "packet-tcp-syn", "1.0.0", observed_at, mac, ip, "valid", payload)]
+        quality = (
+            "partial" if any(record["structure_state"] == "malformed_but_observable"
+                             for record in payload["tcp_option_records"])
+            else "valid"
+        )
+        return [self._evidence(
+            "tcp_syn", "ipv4", "packet-tcp-syn", "2.0.0", observed_at,
+            mac, ip, quality, payload, feature_schema_version=2,
+        )]
 
     def eve(self, value: Any) -> list[NormalizedEvent]:
         if not isinstance(value, dict):
@@ -201,12 +215,12 @@ class NetworkNormalizer:
 
     def _evidence(self, kind: str, subtype: str, extractor: str, version: str,
                   observed_at: str, mac: str, ip: str | None, quality: str,
-                  payload: dict[str, Any]) -> NormalizedEvent:
+                  payload: dict[str, Any], *, feature_schema_version: int = 1) -> NormalizedEvent:
         identity = str(uuid.uuid4())
         return NormalizedEvent("evidence", identity, kind, observed_at, {
             "source_event_id": identity, "source_kind": kind, "source_subtype": subtype,
             "extractor_name": extractor, "extractor_version": version,
-            "feature_schema_version": 1, "rule_version": None,
+            "feature_schema_version": feature_schema_version, "rule_version": None,
             "site_id": self.config.site_id, "capture_source_id": self.config.capture_source_id,
             "observed_at": observed_at, "observed_mac": mac, "observed_ip": ip,
             "quality_state": quality, "payload": payload,
