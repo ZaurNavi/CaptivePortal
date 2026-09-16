@@ -39,7 +39,10 @@ _TCP_V2_OPTION_COMMON = frozenset({
     "structure_state",
 })
 _TCP_V2_OPTION_FIELDS = {
-    "eol": frozenset({"eol_padding_length", "eol_padding_nonzero"}),
+    "eol": frozenset({
+        "eol_padding_length", "eol_padding_nonzero",
+        "eol_padding_nonzero_before_final_byte",
+    }),
     "nop": frozenset(),
     "mss": frozenset({"mss"}),
     "window_scale": frozenset({"window_scale_raw"}),
@@ -157,9 +160,14 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
                     or record["structure_state"] != "well_formed"
                     or not last
                     or type(record["eol_padding_nonzero"]) is not bool
-                    or type(record["eol_padding_length"]) is not int
+                    or type(record["eol_padding_nonzero_before_final_byte"]) is not bool
+                    or not _integer(record["eol_padding_length"], 0, 40)
                     or record["eol_padding_length"] != option_length - offset
-                    or (record["eol_padding_length"] == 0 and record["eol_padding_nonzero"])):
+                    or (record["eol_padding_length"] == 0 and record["eol_padding_nonzero"])
+                    or (record["eol_padding_length"] <= 1
+                        and record["eol_padding_nonzero_before_final_byte"])
+                    or (record["eol_padding_nonzero_before_final_byte"]
+                        and not record["eol_padding_nonzero"])):
                 _fail()
             offset = option_length
             stopped = True

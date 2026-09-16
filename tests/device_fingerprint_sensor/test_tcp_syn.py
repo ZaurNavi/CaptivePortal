@@ -126,8 +126,14 @@ def test_ip_tcp_boolean_derivatives_and_ipv4_options(
 
 
 @pytest.mark.parametrize("options,expected_type,extra", [
-    (b"\x00\0\0\0", "eol", {"eol_padding_length": 3, "eol_padding_nonzero": False}),
-    (b"\x00\0\x01\0", "eol", {"eol_padding_length": 3, "eol_padding_nonzero": True}),
+    (b"\x00\0\0\0", "eol", {
+        "eol_padding_length": 3, "eol_padding_nonzero": False,
+        "eol_padding_nonzero_before_final_byte": False,
+    }),
+    (b"\x00\0\x01\0", "eol", {
+        "eol_padding_length": 3, "eol_padding_nonzero": True,
+        "eol_padding_nonzero_before_final_byte": True,
+    }),
     (b"\x01\x01\x01\x01", "nop", {}),
     (b"\x02\x04\x05\xb4", "mss", {"mss": 1460}),
     (b"\x03\x03\xff\x01", "window_scale", {"window_scale_raw": 255}),
@@ -149,6 +155,39 @@ def test_well_formed_option_variants(options, expected_type, extra):
         assert len(records) == 4
     if expected_type == "window_scale":
         assert records[0]["window_scale_raw"] > 14
+
+
+@pytest.mark.parametrize("eol_layout,length,nonzero,before_final", [
+    (b"\x00", 0, False, False),
+    (b"\x00\x00", 1, False, False),
+    (b"\x00\x01", 1, True, False),
+    (b"\x00\x01\x00\x00", 3, True, True),
+    (b"\x00\x00\x00\x01", 3, True, False),
+    (b"\x00\x00\x01\x00", 3, True, True),
+    (b"\x00\x00\x00\x00", 3, False, False),
+])
+def test_eol_padding_structural_fact(eol_layout, length, nonzero, before_final):
+    options = b"\x01" * (4 - len(eol_layout)) + eol_layout
+    records = parsed(options)["tcp_option_records"]
+    eol = records[-1]
+    assert eol == {
+        "record_type": "eol", "kind": 0, "declared_length": None,
+        "available_value_length": 0, "structure_state": "well_formed",
+        "eol_padding_length": length,
+        "eol_padding_nonzero": nonzero,
+        "eol_padding_nonzero_before_final_byte": before_final,
+    }
+
+
+def test_oracle_eol_layouts_have_distinct_canonical_tcp_v2_payloads():
+    early_nonzero = parsed(b"\x00\x01\x00\x00")
+    final_nonzero = parsed(b"\x00\x00\x00\x01")
+    assert early_nonzero["tcp_option_records"][0]["eol_padding_nonzero"] is True
+    assert final_nonzero["tcp_option_records"][0]["eol_padding_nonzero"] is True
+    assert early_nonzero["tcp_option_records"][0]["eol_padding_nonzero_before_final_byte"] is True
+    assert final_nonzero["tcp_option_records"][0]["eol_padding_nonzero_before_final_byte"] is False
+    assert canonical_json(early_nonzero) != canonical_json(final_nonzero)
+    assert canonical_sha256(canonical_json(early_nonzero)) != canonical_sha256(canonical_json(final_nonzero))
 
 
 @pytest.mark.parametrize("options,expected_type,available,extra", [
