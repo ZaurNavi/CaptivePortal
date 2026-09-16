@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
+
 import app.device_fingerprint.cli as cli
+import app.settings as settings_module
 from app.artifact_identity import ArtifactIdentityError
 from app.device_fingerprint.models import DeviceFingerprintMigrationRequired
 from tests.device_fingerprint import config as fingerprint_config
@@ -66,17 +69,16 @@ def test_artifact_identity_failure_exits_before_lock_db_and_app(monkeypatch, tmp
 
 
 def test_offline_migration_and_recovery_are_explicit_commands(monkeypatch, tmp_path, capsys):
-    cfg = SimpleNamespace(
-        enabled=False, db_path=str(tmp_path / "db"),
-        writer_lock_path=str(tmp_path / "lock"), max_db_bytes=67_108_864,
-    )
-    monkeypatch.setattr(cli, "get_settings", lambda: {})
-    monkeypatch.setattr(cli, "device_fingerprint_config_from_settings", lambda _settings: cfg)
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_EVIDENCE_ENABLED", "false")
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_DB_PATH", str(tmp_path / "db"))
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_WRITER_LOCK_PATH", str(tmp_path / "lock"))
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_MAX_DB_BYTES", "134217728")
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_PRODUCERS_JSON", "invalid-disabled-producer-config")
     calls = []
     from app.device_fingerprint.storage_v2 import MigrationResult, RecoveryResult
     def migration(*args, **kwargs):
         calls.append(("migration", args, kwargs))
-        return MigrationResult(cfg.db_path, 4096, "1:2", "a" * 36, 0, "b" * 64, 4096)
+        return MigrationResult(str(tmp_path / "db"), 4096, "1:2", "a" * 36, 0, "b" * 64, 4096)
     def recovery(*args, **kwargs):
         calls.append(("recovery", args, kwargs))
         return RecoveryResult("c" * 36, 0)
@@ -91,9 +93,27 @@ def test_offline_migration_and_recovery_are_explicit_commands(monkeypatch, tmp_p
     assert '"source_identity": "1:2"' in output[0]
     assert '"database_generation_id": "' + "c" * 36 + '"' in output[1]
     assert calls == [
-        ("migration", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "backup_path": str(tmp_path / "backup"), "max_db_bytes": cfg.max_db_bytes}),
-        ("recovery", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "trigger": "DATABASE_BACKUP_RESTORE", "max_db_bytes": cfg.max_db_bytes}),
+        ("migration", (str(tmp_path / "db"),), {"writer_lock_path": str(tmp_path / "lock"), "backup_path": str(tmp_path / "backup"), "max_db_bytes": 134_217_728}),
+        ("recovery", (str(tmp_path / "db"),), {"writer_lock_path": str(tmp_path / "lock"), "trigger": "DATABASE_BACKUP_RESTORE", "max_db_bytes": 134_217_728}),
     ]
+
+
+@pytest.mark.parametrize("invalid_cap", ["67108863", "8589934593", "not-an-integer"])
+def test_offline_commands_reject_invalid_configured_storage_cap(monkeypatch, tmp_path, invalid_cap):
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_EVIDENCE_ENABLED", "false")
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_MAX_DB_BYTES", invalid_cap)
+    monkeypatch.setattr(cli, "migrate_v1_to_v2", lambda *_args, **_kwargs: pytest.fail("migration must not start"))
+    monkeypatch.setattr(cli, "recover_database_generation", lambda *_args, **_kwargs: pytest.fail("recovery must not start"))
+    assert cli.main(["migrate-v1-to-v2", "--backup-path", str(tmp_path / "backup")]) == 1
+    assert cli.main(["recover-generation", "--trigger", "DATABASE_BACKUP_RESTORE"]) == 1
+
+
+def test_disabled_run_ignores_unrelated_invalid_runtime_configuration(monkeypatch):
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_EVIDENCE_ENABLED", "false")
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_MAX_DB_BYTES", "not-an-integer")
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_PRODUCERS_JSON", "invalid-disabled-producer-config")
+    monkeypatch.setattr(settings_module, "DEVICE_FINGERPRINT_PORT", "invalid-disabled-port")
+    assert cli.main(["run"]) == 0
 
 
 def test_normal_run_does_not_attempt_offline_migration(monkeypatch, tmp_path):

@@ -49,6 +49,13 @@ _PRODUCER_KEYS = frozenset({
 })
 
 
+def device_fingerprint_max_db_bytes_from_settings(settings: Mapping[str, Any]) -> int:
+    return _integer(
+        settings.get("device_fingerprint_max_db_bytes", DEFAULT_MAX_DB_BYTES),
+        "DEVICE_FINGERPRINT_MAX_DB_BYTES", 67_108_864, 8_589_934_592,
+    )
+
+
 def device_fingerprint_config_from_settings(settings: Mapping[str, Any]) -> DeviceFingerprintConfig:
     enabled = _bool(settings.get("device_fingerprint_evidence_enabled", "false"), "DEVICE_FINGERPRINT_EVIDENCE_ENABLED")
     if not enabled:
@@ -94,7 +101,7 @@ def device_fingerprint_config_from_settings(settings: Mapping[str, Any]) -> Devi
         retention_days=_integer(settings.get("device_fingerprint_retention_days", DEFAULT_RETENTION_DAYS), "DEVICE_FINGERPRINT_RETENTION_DAYS", 1, 90),
         max_future_skew_seconds=_integer(settings.get("device_fingerprint_max_future_skew_seconds", DEFAULT_MAX_FUTURE_SKEW_SECONDS), "DEVICE_FINGERPRINT_MAX_FUTURE_SKEW_SECONDS", 0, 600),
         max_delayed_event_age_seconds=_integer(settings.get("device_fingerprint_max_delayed_event_age_seconds", DEFAULT_MAX_DELAYED_EVENT_AGE_SECONDS), "DEVICE_FINGERPRINT_MAX_DELAYED_EVENT_AGE_SECONDS", 60, 604800),
-        max_db_bytes=_integer(settings.get("device_fingerprint_max_db_bytes", DEFAULT_MAX_DB_BYTES), "DEVICE_FINGERPRINT_MAX_DB_BYTES", 67_108_864, 8_589_934_592),
+        max_db_bytes=device_fingerprint_max_db_bytes_from_settings(settings),
         max_http_request_bytes=_integer(settings.get("device_fingerprint_max_http_request_bytes", DEFAULT_MAX_HTTP_REQUEST_BYTES), "DEVICE_FINGERPRINT_MAX_HTTP_REQUEST_BYTES", 65_536, 4_194_304),
         max_events_per_batch=_integer(settings.get("device_fingerprint_max_events_per_batch", DEFAULT_MAX_EVENTS_PER_BATCH), "DEVICE_FINGERPRINT_MAX_EVENTS_PER_BATCH", 1, 500),
         max_payload_bytes=_integer(settings.get("device_fingerprint_max_payload_bytes", DEFAULT_MAX_PAYLOAD_BYTES), "DEVICE_FINGERPRINT_MAX_PAYLOAD_BYTES", 256, 65_536),

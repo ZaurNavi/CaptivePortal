@@ -11,7 +11,7 @@ from app.artifact_identity import ArtifactIdentityError, capture_loaded_artifact
 from app.settings import get_settings
 
 from .api import DeviceFingerprintSafeRequestHandler, create_device_fingerprint_app
-from .config import device_fingerprint_config_from_settings
+from .config import device_fingerprint_config_from_settings, device_fingerprint_max_db_bytes_from_settings
 from .models import DeviceFingerprintError
 from .repository import DeviceFingerprintRepository, writer_lock
 from .schema import SCHEMA_VERSION
@@ -32,23 +32,26 @@ def main(argv: list[str] | None = None) -> int:
     recovery = commands.add_parser("recover-generation")
     recovery.add_argument("--trigger", required=True, choices=sorted(RECOVERY_TRIGGERS))
     args = parser.parse_args(argv)
-    config = device_fingerprint_config_from_settings(get_settings())
+    settings = get_settings()
     if args.command != "run":
         try:
+            config = device_fingerprint_config_from_settings(settings)
+            max_db_bytes = device_fingerprint_max_db_bytes_from_settings(settings)
             if args.command == "migrate-v1-to-v2":
                 result = migrate_v1_to_v2(
                     config.db_path, writer_lock_path=config.writer_lock_path,
-                    backup_path=args.backup_path, max_db_bytes=config.max_db_bytes,
+                    backup_path=args.backup_path, max_db_bytes=max_db_bytes,
                 )
             else:
                 result = recover_database_generation(
                     config.db_path, writer_lock_path=config.writer_lock_path,
-                    trigger=args.trigger, max_db_bytes=config.max_db_bytes,
+                    trigger=args.trigger, max_db_bytes=max_db_bytes,
                 )
             print(json.dumps(asdict(result), sort_keys=True))
             return 0
         except Exception:
             return 1
+    config = device_fingerprint_config_from_settings(settings)
     if not config.enabled:
         return 0
     logger = configure_device_fingerprint_logger()
