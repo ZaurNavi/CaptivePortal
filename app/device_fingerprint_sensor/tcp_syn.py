@@ -51,6 +51,7 @@ def parse_tcp_syn_frame(frame: bytes, guest_cidrs: tuple[Any, ...]) -> tuple[str
         "tcp_rst": bool(flags & 0x04),
         "tcp_push": bool(flags & 0x08),
         "tcp_urg": bool(flags & 0x20),
+        "tcp_ns": bool(frame[tcp + 12] & 0x01),
         "tcp_ece": bool(flags & 0x40),
         "tcp_cwr": bool(flags & 0x80),
         "tcp_payload_present": total > ihl + data_offset,

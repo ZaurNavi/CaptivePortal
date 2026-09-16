@@ -39,7 +39,8 @@ def tcp_v2(**changes):
         "tcp_sequence_zero": True, "tcp_ack_number_nonzero": False,
         "tcp_urg_pointer_nonzero": False, "tcp_fin": False,
         "tcp_rst": False, "tcp_push": False, "tcp_urg": False,
-        "tcp_ece": False, "tcp_cwr": False, "tcp_payload_present": False,
+        "tcp_ns": False, "tcp_ece": False, "tcp_cwr": False,
+        "tcp_payload_present": False,
         "tcp_option_records": [{
             "record_type": "eol", "kind": 0, "declared_length": None,
             "available_value_length": 0, "structure_state": "well_formed",
@@ -142,7 +143,7 @@ def test_tcp_v1_and_v2_coexist_without_latest_schema_selection():
     {"ip_version": True}, {"observed_ttl": 256},
     {"ip_option_length_bytes": 3}, {"ip_ecn_bits": 4},
     {"tcp_header_length_bytes": 22}, {"tcp_header_length_bytes": 64},
-    {"tcp_window": -1}, {"tcp_fin": 1},
+    {"tcp_window": -1}, {"tcp_fin": 1}, {"tcp_ns": 1},
     {"ip_id": 42}, {"raw_packet": "secret"},
 ])
 def test_tcp_v2_top_level_contract_is_closed_and_bounded(change):
@@ -204,6 +205,10 @@ def test_tcp_v2_eol_requires_new_structural_field():
 
 
 def test_tcp_v2_missing_keys_and_impossible_option_sequence_fail():
+    missing_ns = tcp_v2()
+    del missing_ns["tcp_ns"]
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(missing_ns)
     missing = tcp_v2()
     del missing["tcp_option_records"]
     with pytest.raises(DeviceFingerprintValidationError):
