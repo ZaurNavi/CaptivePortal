@@ -97,9 +97,7 @@ class DeviceFingerprintRepository:
                     connection.execute("ROLLBACK")
                     raise
             self._validate_connection(connection)
-            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
-            max_pages = max(1, self.max_db_bytes // page_size)
-            connection.execute(f"PRAGMA max_page_count={max_pages}")
+            enforce_storage_cap(connection, self.max_db_bytes)
             if _IS_POSIX:
                 _enforce_posix_mode(
                     path, 0o640,
@@ -107,7 +105,8 @@ class DeviceFingerprintRepository:
                     label="repository",
                 )
             self._connection = connection
-        except (DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageUnavailable):
+        except (DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageLimit,
+                DeviceFingerprintStorageUnavailable):
             if "connection" in locals():
                 connection.close()
             raise
@@ -455,6 +454,18 @@ def _canonical_generation(value: Any) -> bool:
     except (ValueError, AttributeError):
         return False
     return parsed.version == 4 and str(parsed) == value
+
+
+def enforce_storage_cap(connection: sqlite3.Connection, max_db_bytes: int) -> None:
+    """Reject oversized storage and verify SQLite accepted the configured cap."""
+    page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+    max_pages = max_db_bytes // page_size
+    page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+    if max_pages < 1 or page_count > max_pages:
+        raise DeviceFingerprintStorageLimit("Fingerprint repository storage limit reached")
+    effective = int(connection.execute(f"PRAGMA max_page_count={max_pages}").fetchone()[0])
+    if effective > max_pages or page_count > effective:
+        raise DeviceFingerprintStorageLimit("Fingerprint repository storage limit reached")
 
 
 def _prepare_local_file_target(path: Path, *, error_type: type[Exception], label: str) -> Path:

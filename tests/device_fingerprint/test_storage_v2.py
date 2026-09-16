@@ -4,6 +4,7 @@ import hashlib
 import sqlite3
 import uuid
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -40,6 +41,14 @@ def _generation(value):
     parsed = uuid.UUID(value)
     assert parsed.version == 4
     assert str(parsed) == value
+
+
+def _assert_storage_cap(connection, max_db_bytes):
+    page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+    page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+    effective_max_pages = connection.execute("PRAGMA max_page_count").fetchone()[0]
+    assert page_size * page_count <= max_db_bytes
+    assert effective_max_pages <= max_db_bytes // page_size
 
 
 def _v1_sql():
@@ -93,11 +102,12 @@ def _representative_v1(tmp_path):
 
 
 def test_fresh_v2_empty_generation_and_atomic_existing_snapshot(tmp_path):
-    _cfg, repo, svc = service(tmp_path)
+    cfg, repo, svc = service(tmp_path)
     initial = _watermark(repo)
     _generation(initial["database_generation_id"])
     assert initial["max_committed_ingest_sequence"] == 0
     assert repo.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    _assert_storage_cap(repo.connection, cfg.max_db_bytes)
     reader = open_read_only(repo.db_path)
     try:
         reader.execute("BEGIN")
@@ -177,7 +187,7 @@ def test_explicit_v1_migration_preserves_rows_backup_and_bootstrap_order(tmp_pat
     backup = tmp_path / "verified-v1-backup.sqlite3"
     result = migrate_v1_to_v2(
         str(legacy), writer_lock_path=str(tmp_path / "offline.lock"),
-        backup_path=str(backup),
+        backup_path=str(backup), max_db_bytes=67_108_864,
     )
     assert result.assigned_rows == 3
     assert result.bootstrap_rule_id == BOOTSTRAP_RULE_ID
@@ -193,6 +203,7 @@ def test_explicit_v1_migration_preserves_rows_backup_and_bootstrap_order(tmp_pat
     preserved_backup.close()
     repo = DeviceFingerprintRepository(str(legacy), max_db_bytes=67_108_864)
     repo.initialize()
+    _assert_storage_cap(repo.connection, 67_108_864)
     assert _watermark(repo) == {
         "database_generation_id": result.database_generation_id,
         "max_committed_ingest_sequence": 3,
@@ -225,11 +236,13 @@ def test_empty_v1_migration_has_new_generation_and_zero_watermark(tmp_path):
     result = migrate_v1_to_v2(
         str(legacy), writer_lock_path=str(tmp_path / "offline.lock"),
         backup_path=str(tmp_path / "empty-v1-backup.sqlite3"),
+        max_db_bytes=67_108_864,
     )
     assert result.assigned_rows == 0
     _generation(result.database_generation_id)
     repo = DeviceFingerprintRepository(str(legacy), max_db_bytes=67_108_864)
     repo.initialize()
+    _assert_storage_cap(repo.connection, 67_108_864)
     assert _watermark(repo) == {
         "database_generation_id": result.database_generation_id,
         "max_committed_ingest_sequence": 0,
@@ -250,7 +263,7 @@ def test_controlled_restore_recovery_rebaselines_both_families(tmp_path):
     repo.close()
     result = recover_database_generation(
         cfg.db_path, writer_lock_path=cfg.writer_lock_path,
-        trigger="DATABASE_BACKUP_RESTORE",
+        trigger="DATABASE_BACKUP_RESTORE", max_db_bytes=cfg.max_db_bytes,
     )
     assert result.assigned_rows == 3
     assert result.database_generation_id != old_generation
@@ -287,7 +300,7 @@ def test_failed_migration_rolls_back_to_untouched_v1(tmp_path, monkeypatch):
     with pytest.raises(DeviceFingerprintStorageCorrupt):
         migrate_v1_to_v2(
             str(legacy), writer_lock_path=str(tmp_path / "offline.lock"),
-            backup_path=str(backup),
+            backup_path=str(backup), max_db_bytes=67_108_864,
         )
     connection = sqlite3.connect(legacy)
     DeviceFingerprintRepository.validate_v1_for_migration(connection)
@@ -298,13 +311,186 @@ def test_failed_migration_rolls_back_to_untouched_v1(tmp_path, monkeypatch):
     assert backup.is_file()
 
 
+def test_wal_backed_v1_migration_preserves_committed_evidence_and_health(tmp_path):
+    legacy, _before = _representative_v1(tmp_path)
+    holder = sqlite3.connect(legacy)
+    try:
+        assert holder.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        holder.execute(
+            "UPDATE device_fingerprint_source_health_events "
+            "SET ingested_at='2026-09-14T11:59:58.000Z'"
+        )
+        holder.commit()
+        wal_path = Path(str(legacy) + "-wal")
+        assert wal_path.is_file() and wal_path.stat().st_size > 0
+        before = {
+            table: [tuple(row) for row in holder.execute(f"SELECT * FROM {table} ORDER BY 1")]
+            for table in V1_EXPECTED_COLUMNS
+        }
+        backup = tmp_path / "wal-v1-backup.sqlite3"
+        result = migrate_v1_to_v2(
+            str(legacy), writer_lock_path=str(tmp_path / "offline.lock"),
+            backup_path=str(backup), max_db_bytes=67_108_864,
+        )
+    finally:
+        holder.close()
+    _generation(result.database_generation_id)
+    assert result.assigned_rows == 3
+    saved = sqlite3.connect(backup)
+    try:
+        DeviceFingerprintRepository.validate_v1_for_migration(saved)
+        assert saved.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        for table in V1_EXPECTED_COLUMNS:
+            assert [tuple(row) for row in saved.execute(f"SELECT * FROM {table} ORDER BY 1")] == before[table]
+    finally:
+        saved.close()
+    repo = DeviceFingerprintRepository(str(legacy), max_db_bytes=67_108_864)
+    repo.initialize()
+    try:
+        assert repo.connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert repo.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert repo.connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert repo.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert _watermark(repo) == {
+            "database_generation_id": result.database_generation_id,
+            "max_committed_ingest_sequence": 3,
+        }
+        for table in V1_EXPECTED_COLUMNS:
+            columns = ",".join(column[0] for column in V1_EXPECTED_COLUMNS[table])
+            assert [tuple(row) for row in repo.connection.execute(
+                f"SELECT {columns} FROM {table} ORDER BY 1"
+            )] == before[table]
+        assert repo.connection.execute(
+            "SELECT ingest_sequence FROM device_fingerprint_source_health_events"
+        ).fetchone()[0] == 1
+        assert repo.connection.execute(
+            "SELECT ingest_sequence FROM device_fingerprint_evidence WHERE source_event_id=?",
+            ("33333333-3333-4333-8333-333333333333",),
+        ).fetchone()[0] == 2
+        _assert_storage_cap(repo.connection, 67_108_864)
+    finally:
+        repo.close()
+
+
+def test_migration_over_cap_rolls_back_and_retains_verified_v1_backup(tmp_path):
+    legacy, _before = _representative_v1(tmp_path)
+    connection = sqlite3.connect(legacy)
+    connection.row_factory = sqlite3.Row
+    columns = tuple(column[0] for column in V1_EXPECTED_COLUMNS["device_fingerprint_evidence"])
+    template = dict(connection.execute("SELECT * FROM device_fingerprint_evidence LIMIT 1").fetchone())
+    for index in range(80):
+        row = dict(template)
+        row["evidence_id"] = str(uuid.uuid4())
+        row["source_event_id"] = str(uuid.uuid4())
+        row["payload_json"] = '{"blob":"' + "x" * 3000 + str(index) + '"}'
+        row["payload_sha256"] = hashlib.sha256(row["payload_json"].encode()).hexdigest()
+        connection.execute(
+            "INSERT INTO device_fingerprint_evidence (" + ",".join(columns) + ") "
+            "VALUES (" + ",".join("?" for _ in columns) + ")",
+            tuple(row[column] for column in columns),
+        )
+    connection.commit()
+    connection.execute("VACUUM")
+    page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+    original_pages = connection.execute("PRAGMA page_count").fetchone()[0]
+    before_count = connection.execute("SELECT COUNT(*) FROM device_fingerprint_evidence").fetchone()[0]
+    connection.close()
+    cap = page_size * original_pages
+    backup = tmp_path / "over-cap-v1-backup.sqlite3"
+    with pytest.raises(DeviceFingerprintStorageLimit):
+        migrate_v1_to_v2(
+            str(legacy), writer_lock_path=str(tmp_path / "offline.lock"),
+            backup_path=str(backup), max_db_bytes=cap,
+        )
+    original = sqlite3.connect(legacy)
+    saved = sqlite3.connect(backup)
+    try:
+        DeviceFingerprintRepository.validate_v1_for_migration(original)
+        DeviceFingerprintRepository.validate_v1_for_migration(saved)
+        assert original.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert saved.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert original.execute("SELECT COUNT(*) FROM device_fingerprint_evidence").fetchone()[0] == before_count
+        assert saved.execute("SELECT COUNT(*) FROM device_fingerprint_evidence").fetchone()[0] == before_count
+    finally:
+        original.close()
+        saved.close()
+
+
+def test_existing_oversized_v2_fails_startup_and_recovery_without_cap_expansion(tmp_path):
+    cfg, repo, svc = service(tmp_path)
+    _batch_evidence(svc, evidence_event())
+    generation = _watermark(repo)["database_generation_id"]
+    page_size = repo.connection.execute("PRAGMA page_size").fetchone()[0]
+    page_count = repo.connection.execute("PRAGMA page_count").fetchone()[0]
+    assert page_count > 1
+    repo.close()
+    too_small = page_size * (page_count - 1)
+    with pytest.raises(DeviceFingerprintStorageLimit):
+        DeviceFingerprintRepository(cfg.db_path, max_db_bytes=too_small).initialize()
+    with pytest.raises(DeviceFingerprintStorageLimit):
+        recover_database_generation(
+            cfg.db_path, writer_lock_path=cfg.writer_lock_path,
+            trigger="DATABASE_BACKUP_RESTORE", max_db_bytes=too_small,
+        )
+    repo.initialize()
+    try:
+        assert _watermark(repo)["database_generation_id"] == generation
+        _assert_storage_cap(repo.connection, cfg.max_db_bytes)
+    finally:
+        repo.close()
+
+
+def test_recovery_growth_past_cap_rolls_back_without_generation_change(tmp_path, monkeypatch):
+    import app.device_fingerprint.storage_v2 as storage
+
+    cfg, repo, svc = service(tmp_path)
+    _batch_evidence(svc, evidence_event())
+    old_generation = _watermark(repo)["database_generation_id"]
+    old_payload = repo.connection.execute(
+        "SELECT payload_json FROM device_fingerprint_evidence"
+    ).fetchone()[0]
+    page_size = repo.connection.execute("PRAGMA page_size").fetchone()[0]
+    cap = page_size * repo.connection.execute("PRAGMA page_count").fetchone()[0]
+    repo.close()
+    original_assign = storage._assign_sequences
+
+    def simulate_growth(connection, evidence_table, health_table):
+        assigned = original_assign(connection, evidence_table, health_table)
+        payload = '{"blob":"' + "x" * (cap * 3) + '"}'
+        connection.execute(
+            "UPDATE device_fingerprint_evidence SET payload_json=?,payload_sha256=?",
+            (payload, hashlib.sha256(payload.encode()).hexdigest()),
+        )
+        return assigned
+
+    monkeypatch.setattr(storage, "_assign_sequences", simulate_growth)
+    with pytest.raises(DeviceFingerprintStorageLimit):
+        recover_database_generation(
+            cfg.db_path, writer_lock_path=cfg.writer_lock_path,
+            trigger="DATABASE_BACKUP_RESTORE", max_db_bytes=cap,
+        )
+    repo = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cap)
+    repo.initialize()
+    try:
+        assert _watermark(repo)["database_generation_id"] == old_generation
+        assert repo.connection.execute(
+            "SELECT payload_json FROM device_fingerprint_evidence"
+        ).fetchone()[0] == old_payload
+        _assert_storage_cap(repo.connection, cap)
+    finally:
+        repo.close()
+
+
 def test_offline_migration_requires_writer_lock(tmp_path):
     legacy, _before = _representative_v1(tmp_path)
     lock_path = str(tmp_path / "offline.lock")
     backup = tmp_path / "backup.sqlite3"
     with writer_lock(lock_path):
         with pytest.raises(DeviceFingerprintWriterUnavailable):
-            migrate_v1_to_v2(str(legacy), writer_lock_path=lock_path, backup_path=str(backup))
+            migrate_v1_to_v2(
+                str(legacy), writer_lock_path=lock_path,
+                backup_path=str(backup), max_db_bytes=67_108_864,
+            )
     assert not backup.exists()
     connection = sqlite3.connect(legacy)
     assert connection.execute("PRAGMA user_version").fetchone()[0] == 1

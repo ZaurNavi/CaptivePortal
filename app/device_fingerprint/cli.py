@@ -38,12 +38,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "migrate-v1-to-v2":
                 result = migrate_v1_to_v2(
                     config.db_path, writer_lock_path=config.writer_lock_path,
-                    backup_path=args.backup_path,
+                    backup_path=args.backup_path, max_db_bytes=config.max_db_bytes,
                 )
             else:
                 result = recover_database_generation(
                     config.db_path, writer_lock_path=config.writer_lock_path,
-                    trigger=args.trigger,
+                    trigger=args.trigger, max_db_bytes=config.max_db_bytes,
                 )
             print(json.dumps(asdict(result), sort_keys=True))
             return 0

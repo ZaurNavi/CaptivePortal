@@ -66,7 +66,10 @@ def test_artifact_identity_failure_exits_before_lock_db_and_app(monkeypatch, tmp
 
 
 def test_offline_migration_and_recovery_are_explicit_commands(monkeypatch, tmp_path, capsys):
-    cfg = SimpleNamespace(enabled=False, db_path=str(tmp_path / "db"), writer_lock_path=str(tmp_path / "lock"))
+    cfg = SimpleNamespace(
+        enabled=False, db_path=str(tmp_path / "db"),
+        writer_lock_path=str(tmp_path / "lock"), max_db_bytes=67_108_864,
+    )
     monkeypatch.setattr(cli, "get_settings", lambda: {})
     monkeypatch.setattr(cli, "device_fingerprint_config_from_settings", lambda _settings: cfg)
     calls = []
@@ -88,8 +91,8 @@ def test_offline_migration_and_recovery_are_explicit_commands(monkeypatch, tmp_p
     assert '"source_identity": "1:2"' in output[0]
     assert '"database_generation_id": "' + "c" * 36 + '"' in output[1]
     assert calls == [
-        ("migration", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "backup_path": str(tmp_path / "backup")}),
-        ("recovery", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "trigger": "DATABASE_BACKUP_RESTORE"}),
+        ("migration", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "backup_path": str(tmp_path / "backup"), "max_db_bytes": cfg.max_db_bytes}),
+        ("recovery", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "trigger": "DATABASE_BACKUP_RESTORE", "max_db_bytes": cfg.max_db_bytes}),
     ]
 
 

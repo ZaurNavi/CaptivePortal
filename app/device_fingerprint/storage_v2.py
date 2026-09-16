@@ -18,7 +18,7 @@ from .config import BUSY_TIMEOUT_MS
 from .models import DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageUnavailable
 from .repository import (
     DeviceFingerprintRepository, _create_v2_schema, _prepare_local_file_target,
-    _enforce_posix_mode, writer_lock,
+    _enforce_posix_mode, enforce_storage_cap, writer_lock,
 )
 from .schema import (
     BOOTSTRAP_RULE_ID, EXPECTED_INDEXES, MAX_INGEST_SEQUENCE,
@@ -55,7 +55,7 @@ class RecoveryResult:
 
 
 def migrate_v1_to_v2(db_path: str, *, writer_lock_path: str,
-                     backup_path: str) -> MigrationResult:
+                     backup_path: str, max_db_bytes: int) -> MigrationResult:
     """Migrate a stopped v1 writer, retaining an independently verified v1 backup."""
     source_path = _existing_db(db_path)
     target = _prepare_local_file_target(
@@ -102,6 +102,7 @@ def migrate_v1_to_v2(db_path: str, *, writer_lock_path: str,
             backup_bytes = target.stat().st_size
             backup_sha256 = _sha256(target)
 
+            enforce_storage_cap(connection, max_db_bytes)
             connection.execute("BEGIN EXCLUSIVE")
             try:
                 if connection.execute("PRAGMA data_version").fetchone()[0] != data_version:
@@ -121,11 +122,15 @@ def migrate_v1_to_v2(db_path: str, *, writer_lock_path: str,
                 connection.execute(f"DROP TABLE {_LEGACY_HEALTH}")
                 DeviceFingerprintRepository._validate_connection(connection)
                 _integrity_check(connection)
+                enforce_storage_cap(connection, max_db_bytes)
                 if _sha256(target) != backup_sha256 or target.stat().st_size != backup_bytes:
                     raise DeviceFingerprintStorageCorrupt("Fingerprint migration backup changed")
                 connection.execute("COMMIT")
+            except sqlite3.DatabaseError as exc:
+                _rollback(connection)
+                raise DeviceFingerprintRepository._sqlite_error(exc) from exc
             except BaseException:
-                connection.execute("ROLLBACK")
+                _rollback(connection)
                 raise
             return MigrationResult(
                 str(source_path), source_size, source_identity,
@@ -136,7 +141,7 @@ def migrate_v1_to_v2(db_path: str, *, writer_lock_path: str,
 
 
 def recover_database_generation(db_path: str, *, writer_lock_path: str,
-                                trigger: str) -> RecoveryResult:
+                                trigger: str, max_db_bytes: int) -> RecoveryResult:
     """Rebaseline a known restored v2 database before admitting its writer."""
     if trigger not in RECOVERY_TRIGGERS:
         raise ValueError("Unsupported fingerprint generation recovery trigger")
@@ -144,6 +149,7 @@ def recover_database_generation(db_path: str, *, writer_lock_path: str,
     with writer_lock(writer_lock_path):
         connection = _open_existing(source_path)
         try:
+            enforce_storage_cap(connection, max_db_bytes)
             connection.execute("BEGIN EXCLUSIVE")
             try:
                 DeviceFingerprintRepository._validate_connection(connection)
@@ -168,9 +174,13 @@ def recover_database_generation(db_path: str, *, writer_lock_path: str,
                 )
                 DeviceFingerprintRepository._validate_connection(connection)
                 _integrity_check(connection)
+                enforce_storage_cap(connection, max_db_bytes)
                 connection.execute("COMMIT")
+            except sqlite3.DatabaseError as exc:
+                _rollback(connection)
+                raise DeviceFingerprintRepository._sqlite_error(exc) from exc
             except BaseException:
-                connection.execute("ROLLBACK")
+                _rollback(connection)
                 raise
             return RecoveryResult(generation, assigned)
         finally:
@@ -271,6 +281,13 @@ def _verify_copy(connection: sqlite3.Connection, old_table: str, new_table: str)
 def _integrity_check(connection: sqlite3.Connection) -> None:
     if [row[0] for row in connection.execute("PRAGMA integrity_check")] != ["ok"]:
         raise DeviceFingerprintStorageCorrupt("Fingerprint repository is corrupt")
+
+
+def _rollback(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute("ROLLBACK")
+    except sqlite3.DatabaseError:
+        pass
 
 
 def _sha256(path: Path) -> str:

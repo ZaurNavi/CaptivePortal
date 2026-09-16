@@ -54,6 +54,8 @@ def test_schema_v2_exact_tables_indexes_pragmas_and_read_only(tmp_path):
     assert connection.execute("PRAGMA journal_size_limit").fetchone()[0] == 67_108_864
     assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     assert connection.execute("PRAGMA max_page_count").fetchone()[0] == cfg.max_db_bytes // connection.execute("PRAGMA page_size").fetchone()[0]
+    assert (connection.execute("PRAGMA page_size").fetchone()[0]
+            * connection.execute("PRAGMA page_count").fetchone()[0]) <= cfg.max_db_bytes
     expected_indexes = {
         "uq_df_evidence_producer_event": ("producer_id", "source_event_id"),
         "idx_df_evidence_site_mac_time": ("site_id", "observed_mac", "observed_at", "evidence_id"),
