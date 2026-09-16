@@ -16,11 +16,35 @@ python3 -m app.device_fingerprint.cli run
 ```
 
 It owns a dedicated direct-TLS Flask app at
-`/api/internal/device-fingerprint/v1`, a schema-v1 SQLite writer and one bounded
+`/api/internal/device-fingerprint/v1`, a schema-v2 SQLite writer and one bounded
 retention thread. It is not registered into `run.py` or the main CaptivPortal
 Flask app. The repository default `DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false`
 exits normally before logger, identity, lock, database, thread, app, or listener
 creation.
+
+## Task-01 storage v2 readiness
+
+Schema v2 adds one durable database generation (canonical UUIDv4) and one
+shared positive signed-64-bit `ingest_sequence` allocator for evidence and
+source-health rows. The empty generation has watermark 0. Committed sequence
+values are never reused by retention; identical duplicates consume none and
+conflicts roll back the entire batch. The internal watermark read uses the
+caller's existing SQLite connection and snapshot; this task does not assemble
+Task-04 classification snapshots.
+
+Normal service startup rejects a v1 DB with a migration-required error and
+does not migrate it. With the writer stopped, the explicit offline
+`migrate-v1-to-v2 --backup-path <verified-backup-path>` command retains a
+verified v1 backup, preserves normalized rows and IDs, and assigns sequences
+deterministically by `(ingested_at, evidence-before-health, primary ID)`.
+This bootstrap is **not** a reconstruction of historical commit order.
+Known backup/VM/filesystem rollback or rebuild from older material requires
+the stopped-writer `recover-generation --trigger <trigger>` procedure before
+v2 ingestion resumes. It mints a new generation and rebaselines retained rows.
+An arbitrary externally restored self-consistent old DB is not automatically
+detectable. A pre-v2 application rollback requires restoring the verified
+pre-migration v1 DB; old code is not presumed v2-compatible. Neither migration
+nor recovery is automatically run by the service or by this source change.
 
 ## Data and security
 

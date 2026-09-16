@@ -30,6 +30,10 @@ class DeviceFingerprintStorageUnavailable(DeviceFingerprintError):
     pass
 
 
+class DeviceFingerprintMigrationRequired(DeviceFingerprintStorageUnavailable):
+    pass
+
+
 class DeviceFingerprintStorageCorrupt(DeviceFingerprintError):
     pass
 

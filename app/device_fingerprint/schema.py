@@ -1,6 +1,9 @@
-"""Exact SQLite schema v1 for fingerprint evidence."""
+"""Exact SQLite schema v2 for fingerprint evidence."""
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+MAX_INGEST_SEQUENCE = 9223372036854775807
+BOOTSTRAP_RULE_ID = "task01_v2_bootstrap_ingested_at_family_id_v1"
+STORAGE_STATE_TABLE = "device_fingerprint_storage_state"
 
 SCHEMA_SQL = """
 CREATE TABLE device_fingerprint_evidence (
@@ -22,9 +25,11 @@ CREATE TABLE device_fingerprint_evidence (
  quality_state TEXT NOT NULL CHECK(quality_state IN ('valid','partial','degraded')),
  payload_json TEXT NOT NULL CHECK(length(payload_json)>=2),
  payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'),
- ingested_at TEXT NOT NULL CHECK(length(ingested_at)=24 AND substr(ingested_at,-1,1)='Z')
+ ingested_at TEXT NOT NULL CHECK(length(ingested_at)=24 AND substr(ingested_at,-1,1)='Z'),
+ ingest_sequence INTEGER NOT NULL CHECK(ingest_sequence BETWEEN 1 AND 9223372036854775807)
 );
 CREATE UNIQUE INDEX uq_df_evidence_producer_event ON device_fingerprint_evidence(producer_id,source_event_id);
+CREATE UNIQUE INDEX uq_df_evidence_ingest_sequence ON device_fingerprint_evidence(ingest_sequence);
 CREATE INDEX idx_df_evidence_site_mac_time ON device_fingerprint_evidence(site_id,observed_mac,observed_at,evidence_id);
 CREATE INDEX idx_df_evidence_site_kind_time ON device_fingerprint_evidence(site_id,source_kind,observed_at,evidence_id);
 CREATE INDEX idx_df_evidence_retention ON device_fingerprint_evidence(observed_at,evidence_id);
@@ -39,12 +44,19 @@ CREATE TABLE device_fingerprint_source_health_events (
  reason_code TEXT NULL CHECK(reason_code IS NULL OR length(reason_code) BETWEEN 1 AND 64),
  observed_at TEXT NOT NULL CHECK(length(observed_at)=24 AND substr(observed_at,-1,1)='Z'),
  content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64 AND content_sha256 NOT GLOB '*[^0-9a-f]*'),
- ingested_at TEXT NOT NULL CHECK(length(ingested_at)=24 AND substr(ingested_at,-1,1)='Z')
+ ingested_at TEXT NOT NULL CHECK(length(ingested_at)=24 AND substr(ingested_at,-1,1)='Z'),
+ ingest_sequence INTEGER NOT NULL CHECK(ingest_sequence BETWEEN 1 AND 9223372036854775807)
 );
 CREATE UNIQUE INDEX uq_df_source_health_producer_event ON device_fingerprint_source_health_events(producer_id,source_health_event_id);
+CREATE UNIQUE INDEX uq_df_source_health_ingest_sequence ON device_fingerprint_source_health_events(ingest_sequence);
 CREATE INDEX idx_df_source_health_scope_time ON device_fingerprint_source_health_events(site_id,capture_source_id,source_kind,observed_at,source_health_id);
 CREATE INDEX idx_df_source_health_retention ON device_fingerprint_source_health_events(observed_at,source_health_id);
-PRAGMA user_version=1;
+CREATE TABLE device_fingerprint_storage_state (
+ singleton_id INTEGER PRIMARY KEY NOT NULL CHECK(singleton_id=1),
+ database_generation_id TEXT NOT NULL CHECK(length(database_generation_id)=36),
+ last_ingest_sequence INTEGER NOT NULL CHECK(last_ingest_sequence BETWEEN 0 AND 9223372036854775807)
+);
+PRAGMA user_version=2;
 """
 
 EXPECTED_COLUMNS = {
@@ -58,7 +70,7 @@ EXPECTED_COLUMNS = {
         ("observed_mac", "TEXT", 1, 0), ("observed_ip", "TEXT", 0, 0),
         ("privacy_class", "TEXT", 1, 0), ("quality_state", "TEXT", 1, 0),
         ("payload_json", "TEXT", 1, 0), ("payload_sha256", "TEXT", 1, 0),
-        ("ingested_at", "TEXT", 1, 0),
+        ("ingested_at", "TEXT", 1, 0), ("ingest_sequence", "INTEGER", 1, 0),
     ),
     "device_fingerprint_source_health_events": (
         ("source_health_id", "TEXT", 1, 1), ("producer_id", "TEXT", 1, 0),
@@ -66,22 +78,30 @@ EXPECTED_COLUMNS = {
         ("capture_source_id", "TEXT", 1, 0), ("source_kind", "TEXT", 1, 0),
         ("status", "TEXT", 1, 0), ("reason_code", "TEXT", 0, 0),
         ("observed_at", "TEXT", 1, 0), ("content_sha256", "TEXT", 1, 0),
-        ("ingested_at", "TEXT", 1, 0),
+        ("ingested_at", "TEXT", 1, 0), ("ingest_sequence", "INTEGER", 1, 0),
+    ),
+    STORAGE_STATE_TABLE: (
+        ("singleton_id", "INTEGER", 1, 1),
+        ("database_generation_id", "TEXT", 1, 0),
+        ("last_ingest_sequence", "INTEGER", 1, 0),
     ),
 }
 
 EXPECTED_INDEXES = {
     "device_fingerprint_evidence": {
         "uq_df_evidence_producer_event": (1, ("producer_id", "source_event_id")),
+        "uq_df_evidence_ingest_sequence": (1, ("ingest_sequence",)),
         "idx_df_evidence_site_mac_time": (0, ("site_id", "observed_mac", "observed_at", "evidence_id")),
         "idx_df_evidence_site_kind_time": (0, ("site_id", "source_kind", "observed_at", "evidence_id")),
         "idx_df_evidence_retention": (0, ("observed_at", "evidence_id")),
     },
     "device_fingerprint_source_health_events": {
         "uq_df_source_health_producer_event": (1, ("producer_id", "source_health_event_id")),
+        "uq_df_source_health_ingest_sequence": (1, ("ingest_sequence",)),
         "idx_df_source_health_scope_time": (0, ("site_id", "capture_source_id", "source_kind", "observed_at", "source_health_id")),
         "idx_df_source_health_retention": (0, ("observed_at", "source_health_id")),
     },
+    STORAGE_STATE_TABLE: {},
 }
 
 REQUIRED_CHECK_FRAGMENTS = {
@@ -105,6 +125,7 @@ REQUIRED_CHECK_FRAGMENTS = {
         "check(length(payload_json)>=2)",
         "check(length(payload_sha256)=64andpayload_sha256notglob'*[^0-9a-f]*')",
         "check(length(ingested_at)=24andsubstr(ingested_at,-1,1)='z')",
+        "check(ingest_sequencebetween1and9223372036854775807)",
     ),
     "device_fingerprint_source_health_events": (
         "check(length(source_health_id)=36)",
@@ -118,5 +139,24 @@ REQUIRED_CHECK_FRAGMENTS = {
         "check(length(observed_at)=24andsubstr(observed_at,-1,1)='z')",
         "check(length(content_sha256)=64andcontent_sha256notglob'*[^0-9a-f]*')",
         "check(length(ingested_at)=24andsubstr(ingested_at,-1,1)='z')",
+        "check(ingest_sequencebetween1and9223372036854775807)",
     ),
+    STORAGE_STATE_TABLE: (
+        "check(singleton_id=1)",
+        "check(length(database_generation_id)=36)",
+        "check(last_ingest_sequencebetween0and9223372036854775807)",
+    ),
+}
+
+V1_EXPECTED_COLUMNS = {
+    table: tuple(column for column in columns if column[0] != "ingest_sequence")
+    for table, columns in EXPECTED_COLUMNS.items() if table != STORAGE_STATE_TABLE
+}
+V1_EXPECTED_INDEXES = {
+    table: {name: signature for name, signature in indexes.items() if not name.endswith("_ingest_sequence")}
+    for table, indexes in EXPECTED_INDEXES.items() if table != STORAGE_STATE_TABLE
+}
+V1_REQUIRED_CHECK_FRAGMENTS = {
+    table: tuple(fragment for fragment in fragments if not fragment.startswith("check(ingest_sequence"))
+    for table, fragments in REQUIRED_CHECK_FRAGMENTS.items() if table != STORAGE_STATE_TABLE
 }

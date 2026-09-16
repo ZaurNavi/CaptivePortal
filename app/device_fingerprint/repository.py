@@ -23,6 +23,7 @@ from .config import (
 from .models import (
     BatchResult,
     DeviceFingerprintConflict,
+    DeviceFingerprintMigrationRequired,
     DeviceFingerprintStorageCorrupt,
     DeviceFingerprintStorageLimit,
     DeviceFingerprintStorageUnavailable,
@@ -30,11 +31,14 @@ from .models import (
     ValidatedEvidence,
     ValidatedSourceHealth,
 )
-from .schema import EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS, SCHEMA_SQL, SCHEMA_VERSION
+from .schema import (
+    EXPECTED_COLUMNS, EXPECTED_INDEXES, MAX_INGEST_SEQUENCE,
+    REQUIRED_CHECK_FRAGMENTS, SCHEMA_SQL, SCHEMA_VERSION, STORAGE_STATE_TABLE,
+    V1_EXPECTED_COLUMNS, V1_EXPECTED_INDEXES, V1_REQUIRED_CHECK_FRAGMENTS,
+)
 from .validation import format_utc
 
 UTC = timezone.utc
-_OWNED_TABLES = frozenset(EXPECTED_COLUMNS)
 APPROVED_DATA_ROOT = Path("/opt/CaptivePortal/data")
 _IS_POSIX = os.name == "posix"
 _SQLITE_BUSY = 5
@@ -78,12 +82,22 @@ class DeviceFingerprintRepository:
             tables = self._application_tables(connection)
             if version > SCHEMA_VERSION or (version == 0 and tables):
                 raise DeviceFingerprintStorageCorrupt("Fingerprint schema is incompatible")
+            if version == 1:
+                raise DeviceFingerprintMigrationRequired("Fingerprint repository migration is required")
             if version == 0:
-                connection.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL + "\nCOMMIT;")
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    _create_v2_schema(connection)
+                    connection.execute(
+                        f"INSERT INTO {STORAGE_STATE_TABLE} VALUES (1,?,0)",
+                        (str(uuid.uuid4()),),
+                    )
+                    connection.execute("COMMIT")
+                except BaseException:
+                    connection.execute("ROLLBACK")
+                    raise
             self._validate_connection(connection)
-            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
-            max_pages = max(1, self.max_db_bytes // page_size)
-            connection.execute(f"PRAGMA max_page_count={max_pages}")
+            enforce_storage_cap(connection, self.max_db_bytes)
             if _IS_POSIX:
                 _enforce_posix_mode(
                     path, 0o640,
@@ -91,7 +105,8 @@ class DeviceFingerprintRepository:
                     label="repository",
                 )
             self._connection = connection
-        except (DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageUnavailable):
+        except (DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageLimit,
+                DeviceFingerprintStorageUnavailable):
             if "connection" in locals():
                 connection.close()
             raise
@@ -132,6 +147,19 @@ class DeviceFingerprintRepository:
                 "freelist_count": int(connection.execute("PRAGMA freelist_count").fetchone()[0]),
             }
 
+    @staticmethod
+    def read_ingest_watermark(connection: sqlite3.Connection) -> Mapping[str, int | str]:
+        """Read both watermark fields from the caller's existing SQLite snapshot."""
+        row = connection.execute(
+            f"SELECT database_generation_id,last_ingest_sequence FROM {STORAGE_STATE_TABLE} WHERE singleton_id=1"
+        ).fetchone()
+        if row is None:
+            raise DeviceFingerprintStorageCorrupt("Fingerprint generation state is invalid")
+        return {
+            "database_generation_id": row[0],
+            "max_committed_ingest_sequence": row[1],
+        }
+
     def ingest_evidence(self, events: Sequence[ValidatedEvidence], *, ingested_at: str) -> BatchResult:
         columns = tuple(ValidatedEvidence.__slots__)
         immutable = columns
@@ -157,34 +185,55 @@ class DeviceFingerprintRepository:
             connection = self.connection
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                watermark = self.read_ingest_watermark(connection)
+                last_sequence = int(watermark["max_committed_ingest_sequence"])
+                pending: dict[tuple[str, str], tuple[Any, ...]] = {}
+                new_values: list[tuple[Any, tuple[Any, ...]]] = []
                 for value in values:
+                    key = (value.producer_id, getattr(value, producer_event_column))
+                    expected = tuple(getattr(value, column) for column in immutable)
+                    if key in pending:
+                        if pending[key] != expected:
+                            raise DeviceFingerprintConflict("Immutable fingerprint event conflict")
+                        duplicate += 1
+                        continue
                     existing = connection.execute(
                         f"SELECT {','.join(immutable)} FROM {table} WHERE producer_id=? AND {producer_event_column}=?",
-                        (value.producer_id, getattr(value, producer_event_column)),
+                        key,
                     ).fetchone()
-                    expected = tuple(getattr(value, column) for column in immutable)
                     if existing is not None:
                         if tuple(existing[column] for column in immutable) != expected:
                             raise DeviceFingerprintConflict("Immutable fingerprint event conflict")
                         duplicate += 1
                         continue
-                    names = (id_column,) + tuple(columns) + ("ingested_at",)
-                    parameters = (str(uuid.uuid4()),) + expected + (ingested_at,)
+                    pending[key] = expected
+                    new_values.append((value, expected))
+                if len(new_values) > MAX_INGEST_SEQUENCE - last_sequence:
+                    raise DeviceFingerprintStorageLimit("Fingerprint ingest sequence exhausted")
+                for _value, expected in new_values:
+                    last_sequence += 1
+                    names = (id_column,) + tuple(columns) + ("ingested_at", "ingest_sequence")
+                    parameters = (str(uuid.uuid4()),) + expected + (ingested_at, last_sequence)
                     connection.execute(
                         f"INSERT INTO {table} ({','.join(names)}) VALUES ({','.join('?' for _ in names)})",
                         parameters,
                     )
                     inserted += 1
+                if inserted:
+                    connection.execute(
+                        f"UPDATE {STORAGE_STATE_TABLE} SET last_ingest_sequence=? WHERE singleton_id=1",
+                        (last_sequence,),
+                    )
                 connection.execute("COMMIT")
-            except DeviceFingerprintConflict:
-                connection.execute("ROLLBACK")
-                raise
             except sqlite3.DatabaseError as exc:
                 try:
                     connection.execute("ROLLBACK")
                 except sqlite3.DatabaseError:
                     pass
                 raise self._sqlite_error(exc) from exc
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         return BatchResult(len(values), inserted, duplicate)
 
     def cleanup(self, *, now: datetime, evidence_retention_days: int) -> Mapping[str, int]:
@@ -242,15 +291,46 @@ class DeviceFingerprintRepository:
         quick = connection.execute("PRAGMA quick_check").fetchall()
         if [row[0] for row in quick] != ["ok"]:
             raise DeviceFingerprintStorageCorrupt("Fingerprint repository is corrupt")
-        if cls._application_tables(connection) != _OWNED_TABLES:
+        cls._validate_schema_signature(
+            connection, EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS,
+        )
+        state = connection.execute(
+            f"SELECT singleton_id,database_generation_id,last_ingest_sequence FROM {STORAGE_STATE_TABLE}"
+        ).fetchall()
+        if len(state) != 1 or state[0][0] != 1 or not _canonical_generation(state[0][1]):
+            raise DeviceFingerprintStorageCorrupt("Fingerprint generation state is invalid")
+        allocator = state[0][2]
+        if type(allocator) is not int or not 0 <= allocator <= MAX_INGEST_SEQUENCE:
+            raise DeviceFingerprintStorageCorrupt("Fingerprint allocator state is invalid")
+        for table in ("device_fingerprint_evidence", "device_fingerprint_source_health_events"):
+            invalid = connection.execute(
+                f"SELECT 1 FROM {table} WHERE typeof(ingest_sequence)!='integer' "
+                "OR ingest_sequence<1 OR ingest_sequence>? LIMIT 1",
+                (allocator,),
+            ).fetchone()
+            if invalid is not None:
+                raise DeviceFingerprintStorageCorrupt("Fingerprint ingest sequence state is invalid")
+        duplicate = connection.execute(
+            "SELECT 1 FROM device_fingerprint_evidence AS evidence "
+            "JOIN device_fingerprint_source_health_events AS health "
+            "ON health.ingest_sequence=evidence.ingest_sequence LIMIT 1"
+        ).fetchone()
+        if duplicate is not None:
+            raise DeviceFingerprintStorageCorrupt("Fingerprint ingest sequence state is invalid")
+
+    @classmethod
+    def _validate_schema_signature(cls, connection: sqlite3.Connection,
+                                   columns: Mapping[str, Any], indexes: Mapping[str, Any],
+                                   fragments: Mapping[str, Any]) -> None:
+        if cls._application_tables(connection) != frozenset(columns):
             raise DeviceFingerprintStorageCorrupt("Fingerprint table signature is incompatible")
-        for table, expected in EXPECTED_COLUMNS.items():
+        for table, expected in columns.items():
             actual = tuple((row[1], row[2].upper(), row[3], row[5]) for row in connection.execute(f"PRAGMA table_info({table})"))
             if actual != expected:
                 raise DeviceFingerprintStorageCorrupt("Fingerprint column signature is incompatible")
             table_sql = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
             normalized = "".join(table_sql.lower().split())
-            if any(fragment not in normalized for fragment in REQUIRED_CHECK_FRAGMENTS[table]):
+            if any(fragment not in normalized for fragment in fragments[table]):
                 raise DeviceFingerprintStorageCorrupt("Fingerprint constraints are missing")
             actual_indexes = {}
             for row in connection.execute(f"PRAGMA index_list({table})"):
@@ -261,8 +341,18 @@ class DeviceFingerprintRepository:
                     raise DeviceFingerprintStorageCorrupt("Fingerprint index signature is incompatible")
                 columns = tuple(item[2] for item in connection.execute(f"PRAGMA index_info({name})"))
                 actual_indexes[name] = (unique, columns)
-            if actual_indexes != EXPECTED_INDEXES[table]:
+            if actual_indexes != indexes[table]:
                 raise DeviceFingerprintStorageCorrupt("Fingerprint index signature is incompatible")
+
+    @classmethod
+    def validate_v1_for_migration(cls, connection: sqlite3.Connection) -> None:
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 1:
+            raise DeviceFingerprintStorageCorrupt("Fingerprint migration source is incompatible")
+        if [row[0] for row in connection.execute("PRAGMA quick_check")] != ["ok"]:
+            raise DeviceFingerprintStorageCorrupt("Fingerprint migration source is corrupt")
+        cls._validate_schema_signature(
+            connection, V1_EXPECTED_COLUMNS, V1_EXPECTED_INDEXES, V1_REQUIRED_CHECK_FRAGMENTS,
+        )
 
     @staticmethod
     def _sqlite_error(exc: sqlite3.DatabaseError) -> Exception:
@@ -348,6 +438,34 @@ def open_read_only(db_path: str) -> sqlite3.Connection:
         return connection
     except (OSError, sqlite3.DatabaseError) as exc:
         raise DeviceFingerprintStorageUnavailable("Fingerprint repository is unavailable") from exc
+
+
+def _create_v2_schema(connection: sqlite3.Connection) -> None:
+    for statement in SCHEMA_SQL.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+
+
+def _canonical_generation(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return False
+    return parsed.version == 4 and str(parsed) == value
+
+
+def enforce_storage_cap(connection: sqlite3.Connection, max_db_bytes: int) -> None:
+    """Reject oversized storage and verify SQLite accepted the configured cap."""
+    page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+    max_pages = max_db_bytes // page_size
+    page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+    if max_pages < 1 or page_count > max_pages:
+        raise DeviceFingerprintStorageLimit("Fingerprint repository storage limit reached")
+    effective = int(connection.execute(f"PRAGMA max_page_count={max_pages}").fetchone()[0])
+    if effective > max_pages or page_count > effective:
+        raise DeviceFingerprintStorageLimit("Fingerprint repository storage limit reached")
 
 
 def _prepare_local_file_target(path: Path, *, error_type: type[Exception], label: str) -> Path:
