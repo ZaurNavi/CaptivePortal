@@ -16,6 +16,12 @@ PORTAL_HEADER_KEYS = frozenset({
     "sec_ch_ua_platform_present", "sec_ch_ua_mobile_present",
 })
 
+PORTAL_HEADER_V2_KEYS = frozenset({
+    "model_family", "os_major", "form_factor_mobile", "form_factor_tablet",
+    "form_factor_desktop", "model_source", "os_major_source",
+    "form_factors_source",
+})
+
 _PLATFORMS = frozenset({"android", "ios", "windows", "macos", "chromeos", "linux"})
 _RUNTIMES = frozenset({"android_webview", "chromium", "firefox", "safari_webkit"})
 _CONTEXTS = frozenset({"android_webview", "captive_helper"})
@@ -85,6 +91,55 @@ def validate_portal_headers_v1(value: Mapping[str, Any]) -> Mapping[str, Any]:
         "platform_source", "mobile_source", "runtime_source", "context_source",
         "model_source", "os_major_source",
     )) and not value["ua_present"]:
+        _fail()
+    return dict(value)
+
+
+def validate_portal_headers_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate only the admitted normalized Client-Hints semantic payload.
+
+    This standalone contract does not register or emit ``portal_headers/2``.
+    Raw headers are parsed by the separate acquisition boundary, not here.
+    """
+    if not isinstance(value, Mapping) or set(value) != PORTAL_HEADER_V2_KEYS:
+        _fail()
+
+    model = value["model_family"]
+    _nullable_enum(value["model_source"], frozenset({"sec_ch_ua_model"}))
+    if (model is None) != (value["model_source"] is None):
+        _fail()
+    if model is not None and (
+        not isinstance(model, str)
+        or _MODEL.fullmatch(model) is None
+        or re.sub(r"[ \t]+", " ", model).strip() != model
+        or _MAC_LIKE.search(model) is not None
+        or _UUID_LIKE.search(model) is not None
+        or re.search(r"\bBuild[/ _-]", model, re.IGNORECASE) is not None
+        or any(ord(character) < 0x20 or ord(character) > 0x7E for character in model)
+    ):
+        _fail()
+
+    major = value["os_major"]
+    _nullable_enum(value["os_major_source"], frozenset({"sec_ch_ua_platform_version"}))
+    if (major is None) != (value["os_major_source"] is None):
+        _fail()
+    if major is not None and (type(major) is not int or not 0 <= major <= 999):
+        _fail()
+
+    _nullable_enum(value["form_factors_source"], frozenset({"sec_ch_ua_form_factors"}))
+    factors = (
+        value["form_factor_mobile"], value["form_factor_tablet"],
+        value["form_factor_desktop"],
+    )
+    if value["form_factors_source"] is None:
+        if any(factor is not None for factor in factors):
+            _fail()
+    elif any(type(factor) is not bool for factor in factors) or not any(factors):
+        _fail()
+
+    if all(value[source] is None for source in (
+        "model_source", "os_major_source", "form_factors_source",
+    )):
         _fail()
     return dict(value)
 
