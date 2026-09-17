@@ -46,6 +46,7 @@ def parse_tcp_syn_frame(frame: bytes, guest_cidrs: tuple[Any, ...]) -> tuple[str
         "tcp_window": struct.unpack_from("!H", frame, tcp + 14)[0],
         "tcp_sequence_zero": struct.unpack_from("!I", frame, tcp + 4)[0] == 0,
         "tcp_ack_number_nonzero": struct.unpack_from("!I", frame, tcp + 8)[0] != 0,
+        "tcp_ack_first_octet_lsb_set": bool(frame[tcp + 8] & 0x01),
         "tcp_urg_pointer_nonzero": struct.unpack_from("!H", frame, tcp + 18)[0] != 0,
         "tcp_fin": bool(flags & 0x01),
         "tcp_rst": bool(flags & 0x04),
@@ -63,6 +64,7 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     offset = 0
     while offset < len(raw):
+        record_start = offset
         kind = raw[offset]
         offset += 1
         if kind == 0:
@@ -89,10 +91,14 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
             offset += 1
         semantic_value_start = offset
         physical_remaining = len(raw) - semantic_value_start if length is not None else 0
-        available = min(length - 2, len(raw) - offset) if length is not None and length >= 2 else 0
-        offset += available
+        available = min(length - 2, physical_remaining) if length is not None and length >= 2 else 0
         expected_length = {2: 4, 3: 3, 4: 2, 8: 10}.get(kind)
-        complete = length is not None and length >= 2 and available == length - 2
+        if expected_length is not None:
+            complete = length is not None and len(raw) - record_start >= expected_length
+            next_offset = record_start + expected_length if complete else offset
+        else:
+            complete = length is not None and length >= 2 and available == length - 2
+            next_offset = offset + available
         record: dict[str, Any] = {
             "record_type": record_type, "kind": kind,
             "declared_length": length, "available_value_length": available,
@@ -120,4 +126,5 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
         records.append(record)
         if not complete:
             break
+        offset = next_offset
     return records
