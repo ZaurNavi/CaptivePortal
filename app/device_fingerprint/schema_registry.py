@@ -14,7 +14,7 @@ from .network_schemas import (
     validate_tcp_syn_v2,
     validate_tls_v1,
 )
-from .portal_schemas import validate_portal_headers_v1
+from .portal_schemas import validate_portal_headers_v1, validate_portal_headers_v2
 
 Validator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
@@ -37,6 +37,13 @@ class EvidenceSchemaRegistry:
     @property
     def frozen(self) -> bool:
         return self._frozen
+
+    def supports(self, source_kind: str, feature_schema_version: int) -> bool:
+        """Report only an exact executable schema; never select a nearby version."""
+        if not self._frozen:
+            raise DeviceFingerprintValidationError("Schema registry is not frozen")
+        key = (validate_source_kind(source_kind), validate_feature_schema_version(feature_schema_version))
+        return key in self._validators
 
     def validate(self, source_kind: str, feature_schema_version: int, payload: Any) -> Mapping[str, Any]:
         if not self._frozen:
@@ -62,4 +69,5 @@ def build_production_schema_registry() -> EvidenceSchemaRegistry:
     registry.register("tls_client", 1, validate_tls_v1)
     registry.register("quic_client", 1, validate_quic_v1)
     registry.register("portal_headers", 1, validate_portal_headers_v1)
+    registry.register("portal_headers", 2, validate_portal_headers_v2)
     return registry.freeze()

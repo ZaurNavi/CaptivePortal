@@ -66,12 +66,13 @@ def payload_v2():
     }
 
 
-def test_exact_normalized_v2_contract_is_valid_but_not_production_registered():
+def test_exact_normalized_v2_contract_is_production_registered():
     value = payload_v2()
     assert set(value) == PORTAL_HEADER_V2_KEYS
     assert validate_portal_headers_v2(value) == value
+    assert build_production_schema_registry().validate("portal_headers", 2, value) == value
     with pytest.raises(DeviceFingerprintUnsupportedSchema):
-        build_production_schema_registry().validate("portal_headers", 2, value)
+        build_production_schema_registry().validate("portal_headers", 3, value)
 
 
 @pytest.mark.parametrize("mutation", [
