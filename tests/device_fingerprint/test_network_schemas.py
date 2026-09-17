@@ -217,3 +217,96 @@ def test_tcp_v2_missing_keys_and_impossible_option_sequence_fail():
         validate_tcp_syn_v2(tcp_v2(tcp_option_records=[]))
     with pytest.raises(DeviceFingerprintValidationError):
         validate_tcp_syn_v2(tcp_v2(tcp_option_records=tcp_v2()["tcp_option_records"] * 2))
+
+
+def test_tcp_v2_malformed_mss_validator_uses_physical_remaining_bytes():
+    mss = {
+        "record_type": "mss", "kind": 2, "declared_length": 1,
+        "available_value_length": 0, "structure_state": "malformed_but_observable",
+        "mss": 1200,
+    }
+    assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=[mss]))["tcp_option_records"] == [mss]
+    for invalid in (None, True, 65536):
+        with pytest.raises(DeviceFingerprintValidationError):
+            validate_tcp_syn_v2(tcp_v2(tcp_option_records=[{**mss, "mss": invalid}]))
+    nop = {
+        "record_type": "nop", "kind": 1, "declared_length": None,
+        "available_value_length": 0, "structure_state": "well_formed",
+    }
+    for prefix in ([nop], [nop, nop]):
+        missing = {**mss, "mss": None}
+        assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=[*prefix, missing]))
+        with pytest.raises(DeviceFingerprintValidationError):
+            validate_tcp_syn_v2(tcp_v2(tcp_option_records=[*prefix, mss]))
+
+
+def test_tcp_v2_malformed_window_scale_validator_uses_physical_remaining_byte():
+    ws = {
+        "record_type": "window_scale", "kind": 3, "declared_length": 1,
+        "available_value_length": 0, "structure_state": "malformed_but_observable",
+        "window_scale_raw": 255,
+    }
+    assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=[ws]))["tcp_option_records"] == [ws]
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[{**ws, "window_scale_raw": None}]))
+    nop = {
+        "record_type": "nop", "kind": 1, "declared_length": None,
+        "available_value_length": 0, "structure_state": "well_formed",
+    }
+    missing = {**ws, "window_scale_raw": None}
+    assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=[nop, nop, missing]))
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[nop, nop, ws]))
+
+
+@pytest.mark.parametrize("nop_count,header_length,zero,echo", [
+    (3, 28, None, None),
+    (2, 28, True, None),
+    (2, 32, True, False),
+])
+def test_tcp_v2_malformed_timestamp_validator_uses_physical_remaining_bytes(
+    nop_count, header_length, zero, echo,
+):
+    nop = {
+        "record_type": "nop", "kind": 1, "declared_length": None,
+        "available_value_length": 0, "structure_state": "well_formed",
+    }
+    timestamp = {
+        "record_type": "timestamp", "kind": 8, "declared_length": 1,
+        "available_value_length": 0, "structure_state": "malformed_but_observable",
+        "timestamp_value_zero": zero, "timestamp_echo_nonzero": echo,
+    }
+    def payload(record):
+        return tcp_v2(
+            tcp_header_length_bytes=header_length,
+            tcp_option_records=[*[nop] * nop_count, record],
+        )
+    assert validate_tcp_syn_v2(payload(timestamp))
+    for name, value in (("timestamp_value_zero", zero), ("timestamp_echo_nonzero", echo)):
+        wrong = False if value is None else None
+        with pytest.raises(DeviceFingerprintValidationError):
+            validate_tcp_syn_v2(payload({**timestamp, name: wrong}))
+
+
+@pytest.mark.parametrize("kind,record_type,fields,invalid_field", [
+    (2, "mss", {"mss": None}, {"mss": 1200}),
+    (3, "window_scale", {"window_scale_raw": None}, {"window_scale_raw": 255}),
+    (8, "timestamp", {"timestamp_value_zero": None, "timestamp_echo_nonzero": None},
+     {"timestamp_value_zero": True}),
+])
+def test_tcp_v2_known_option_without_length_has_no_semantic_value(
+    kind, record_type, fields, invalid_field,
+):
+    nop = {
+        "record_type": "nop", "kind": 1, "declared_length": None,
+        "available_value_length": 0, "structure_state": "well_formed",
+    }
+    record = {
+        "record_type": record_type, "kind": kind, "declared_length": None,
+        "available_value_length": 0, "structure_state": "malformed_but_observable",
+        **fields,
+    }
+    records = [nop, nop, nop, record]
+    assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=records))
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[*records[:-1], {**record, **invalid_field}]))

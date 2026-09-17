@@ -216,10 +216,10 @@ def test_oracle_eol_layouts_have_distinct_canonical_tcp_v2_payloads():
 
 
 @pytest.mark.parametrize("options,expected_type,available,extra", [
-    (b"\x02\x03\x01\x01", "mss", 1, {"mss": None}),
+    (b"\x02\x03\x01\x01", "mss", 1, {"mss": 257}),
     (b"\x01\x01\x02\x04", "mss", 0, {"mss": None}),
     (b"\x01\x01\x01\x02", "mss", 0, {"declared_length": None}),
-    (b"\x03\x02\x01\x01", "window_scale", 0, {"window_scale_raw": None}),
+    (b"\x03\x02\x01\x01", "window_scale", 0, {"window_scale_raw": 1}),
     (b"\x04\x03\0\x01", "sack_permitted", 1, {}),
     (b"\x08\x09" + b"\0" * 6, "timestamp", 6, {
         "timestamp_value_zero": True, "timestamp_echo_nonzero": None,
@@ -241,6 +241,76 @@ def test_malformed_option_is_retained_as_partial(options, expected_type, availab
     assert len(events) == 1
     assert events[0].document["quality_state"] == "partial"
     assert events[0].document["feature_schema_version"] == 2
+
+
+@pytest.mark.parametrize("options,declared,available,state,mss,layout", [
+    (b"\x01\x01\x02\x01", 1, 0, "malformed_but_observable", None, ["nop", "nop", "mss"]),
+    (b"\x01\x02\x01\x04", 1, 0, "malformed_but_observable", None, ["nop", "mss"]),
+    (b"\x02\x00\x04\xb0", 0, 0, "malformed_but_observable", 1200, ["mss"]),
+    (b"\x02\x01\x04\xb0", 1, 0, "malformed_but_observable", 1200, ["mss"]),
+    (b"\x02\x01\x05\xb4", 1, 0, "malformed_but_observable", 1460, ["mss"]),
+    (b"\x02\x02\x04\xb0", 2, 0, "malformed_but_observable", 1200, ["mss", "sack_permitted"]),
+    (b"\x02\x03\x04\xb0", 3, 1, "malformed_but_observable", 1200, ["mss", "unknown"]),
+    (b"\x02\x04\x04\xb0", 4, 2, "well_formed", 1200, ["mss"]),
+    (b"\x02\x05\x04\xb0", 5, 2, "malformed_but_observable", 1200, ["mss"]),
+])
+def test_mss_physical_value_is_independent_of_declared_extent(
+    options, declared, available, state, mss, layout,
+):
+    records = parsed(options)["tcp_option_records"]
+    record = next(record for record in records if record["record_type"] == "mss")
+    assert (record["declared_length"], record["available_value_length"]) == (declared, available)
+    assert (record["structure_state"], record["mss"]) == (state, mss)
+    assert [record["record_type"] for record in records] == layout
+
+
+def test_malformed_mss_oracle_pair_has_distinct_canonical_payloads():
+    first = parsed(b"\x02\x01\x04\xb0")
+    second = parsed(b"\x02\x01\x05\xb4")
+    assert first["tcp_option_records"][0]["mss"] == 1200
+    assert second["tcp_option_records"][0]["mss"] == 1460
+    assert {**first["tcp_option_records"][0], "mss": 1460} == second["tcp_option_records"][0]
+    assert canonical_json(first) != canonical_json(second)
+    assert canonical_sha256(canonical_json(first)) != canonical_sha256(canonical_json(second))
+
+
+@pytest.mark.parametrize("options,expected", [
+    (b"\x01\x01\x03\x01", None),
+    (b"\x01\x03\x01\xff", 255),
+    (b"\x03\x01\xff\x01", 255),
+])
+def test_malformed_window_scale_uses_physical_byte_without_changing_traversal(options, expected):
+    records = parsed(options)["tcp_option_records"]
+    record = next(record for record in records if record["record_type"] == "window_scale")
+    assert record["declared_length"] == 1
+    assert record["available_value_length"] == 0
+    assert record["structure_state"] == "malformed_but_observable"
+    assert record["window_scale_raw"] == expected
+
+
+@pytest.mark.parametrize("prefix,value_bytes,expected_zero,expected_echo", [
+    (b"\x01" * 3, b"\0" * 3, None, None),
+    (b"\x01" * 2, b"\0" * 4, True, None),
+    (b"\x01" * 3, b"\0" * 7, True, None),
+    (b"\x01" * 2, b"\0" * 8, True, False),
+    (b"", b"\0\0\0\x01\0\0\0\x02\x01\x01", False, True),
+])
+def test_malformed_timestamp_uses_only_bounded_physical_boolean_facts(
+    prefix, value_bytes, expected_zero, expected_echo,
+):
+    options = prefix + b"\x08\x01" + value_bytes
+    assert len(options) % 4 == 0
+    records = parsed(options)["tcp_option_records"]
+    record = next(record for record in records if record["record_type"] == "timestamp")
+    assert record["declared_length"] == 1
+    assert record["available_value_length"] == 0
+    assert record["structure_state"] == "malformed_but_observable"
+    assert record["timestamp_value_zero"] is expected_zero
+    assert record["timestamp_echo_nonzero"] is expected_echo
+    assert set(record) == {
+        "record_type", "kind", "declared_length", "available_value_length",
+        "structure_state", "timestamp_value_zero", "timestamp_echo_nonzero",
+    }
 
 
 def test_ordered_mixed_options_and_known_mismatch_continue_at_safe_boundary():
