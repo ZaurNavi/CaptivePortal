@@ -105,17 +105,51 @@ def test_research_namespace_is_not_imported_by_production_runtime():
 
 def test_repository_contains_no_collected_matrix_artifact():
     repository = Path(__file__).resolve().parents[2]
+    assert _forbidden_repository_artifacts(repository) == []
+
+
+_APPROVED_NON_MATRIX_JSONL = frozenset({
+    "research/device_fingerprint_k2a/evidence/conformance_manifest.jsonl",
+})
+
+
+def _forbidden_repository_artifacts(repository: Path) -> list[str]:
     forbidden = []
     for root_name in ("research", "docs"):
         forbidden.extend(
-            str(path.relative_to(repository))
+            path.relative_to(repository).as_posix()
             for path in (repository / root_name).rglob("*.jsonl")
+            if path.relative_to(repository).as_posix() not in _APPROVED_NON_MATRIX_JSONL
         )
         forbidden.extend(
-            str(path.relative_to(repository))
+            path.relative_to(repository).as_posix()
             for path in (repository / root_name).rglob("checksums.sha256")
         )
-    assert forbidden == []
+    return sorted(forbidden)
+
+
+def test_only_exact_k2a_manifest_is_exempt_from_matrix_artifact_policy(tmp_path):
+    approved = tmp_path / "research/device_fingerprint_k2a/evidence/conformance_manifest.jsonl"
+    approved.parent.mkdir(parents=True)
+    approved.write_text("{}\n", encoding="utf-8")
+    assert _forbidden_repository_artifacts(tmp_path) == []
+
+    other_k2a = approved.with_name("other.jsonl")
+    other_k2a.write_text("{}\n", encoding="utf-8")
+    research_other = tmp_path / "research/other/collected.jsonl"
+    research_other.parent.mkdir()
+    research_other.write_text("{}\n", encoding="utf-8")
+    docs_other = tmp_path / "docs/collected.jsonl"
+    docs_other.parent.mkdir()
+    docs_other.write_text("{}\n", encoding="utf-8")
+    checksum = approved.with_name("checksums.sha256")
+    checksum.write_text("hash\n", encoding="utf-8")
+    assert _forbidden_repository_artifacts(tmp_path) == [
+        "docs/collected.jsonl",
+        "research/device_fingerprint_k2a/evidence/checksums.sha256",
+        "research/device_fingerprint_k2a/evidence/other.jsonl",
+        "research/other/collected.jsonl",
+    ]
 
 
 def test_validator_output_contains_no_classifier_or_training_contract(tmp_path):

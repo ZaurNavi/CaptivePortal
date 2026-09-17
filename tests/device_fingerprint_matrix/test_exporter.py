@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
+import uuid
 from pathlib import Path
 
 import pytest
@@ -61,6 +63,41 @@ def _export(tmp_path, *, evidence_rows=None, health_rows=None, samples=None, bin
         known_coverage_limitations=["quic_sparse"],
     )
     return database, output, result
+
+
+def test_synthetic_v2_database_has_shared_deterministic_watermark_and_generation(tmp_path):
+    database = tmp_path / "mixed.sqlite3"
+    create_source_database(
+        database,
+        [sealed_evidence(identity=501), sealed_evidence(identity=502)],
+        [source_health(identity=601), source_health(identity=602)],
+    )
+    with sqlite3.connect(database) as connection:
+        evidence_sequences = [row[0] for row in connection.execute(
+            "SELECT ingest_sequence FROM device_fingerprint_evidence ORDER BY ingest_sequence"
+        )]
+        health_sequences = [row[0] for row in connection.execute(
+            "SELECT ingest_sequence FROM device_fingerprint_source_health_events ORDER BY ingest_sequence"
+        )]
+        generation, watermark = connection.execute(
+            "SELECT database_generation_id, last_ingest_sequence "
+            "FROM device_fingerprint_storage_state WHERE singleton_id=1"
+        ).fetchone()
+    assert evidence_sequences == [1, 2]
+    assert health_sequences == [3, 4]
+    assert len(set(evidence_sequences + health_sequences)) == 4
+    assert uuid.UUID(generation).version == 4
+    assert watermark == 4
+
+    empty = tmp_path / "empty.sqlite3"
+    create_source_database(empty, [], [])
+    with sqlite3.connect(empty) as connection:
+        empty_generation, empty_watermark = connection.execute(
+            "SELECT database_generation_id, last_ingest_sequence "
+            "FROM device_fingerprint_storage_state WHERE singleton_id=1"
+        ).fetchone()
+    assert empty_generation == generation
+    assert empty_watermark == 0
 
 
 def test_staging_requires_exact_relationships_and_private_binding(tmp_path):
