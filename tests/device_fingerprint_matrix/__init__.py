@@ -265,21 +265,31 @@ def write_matrix(directory: Path, *, devices=None, states=None, samples=None, ev
 def create_source_database(path: Path, evidence_rows, health_rows=()):
     connection = sqlite3.connect(path)
     connection.executescript(SCHEMA_SQL)
+    ingest_sequence = 0
     for row in evidence_rows:
+        ingest_sequence += 1
         normalized = row["payload"]
         payload_json = canonical_json(normalized)
         connection.execute(
-            "INSERT INTO device_fingerprint_evidence VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO device_fingerprint_evidence (
+                evidence_id, producer_id, source_event_id, source_kind,
+                source_subtype, extractor_name, extractor_version,
+                feature_schema_version, rule_version, site_id, capture_source_id,
+                observed_at, observed_mac, observed_ip, privacy_class,
+                quality_state, payload_json, payload_sha256, ingested_at,
+                ingest_sequence
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 row["evidence_id"], row["producer_id"], row["source_event_id"], row["source_kind"],
                 row["source_subtype"], row["extractor_name"], row["extractor_version"],
                 row["feature_schema_version"], row["rule_version"], row["site_id"],
                 row["capture_source_id"], row["observed_at"], row.get("observed_mac", "AA:BB:CC:DD:EE:01"),
                 row.get("observed_ip", "192.168.8.10"), row["privacy_class"], row["quality_state"],
-                payload_json, canonical_sha256(payload_json), row["ingested_at"],
+                payload_json, canonical_sha256(payload_json), row["ingested_at"], ingest_sequence,
             ),
         )
     for row in health_rows:
+        ingest_sequence += 1
         content = canonical_json({
             "capture_source_id": row["capture_source_id"],
             "observed_at": row["observed_at"],
@@ -290,12 +300,23 @@ def create_source_database(path: Path, evidence_rows, health_rows=()):
             "status": row["status"],
         })
         connection.execute(
-            "INSERT INTO device_fingerprint_source_health_events VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO device_fingerprint_source_health_events (
+                source_health_id, producer_id, source_health_event_id,
+                site_id, capture_source_id, source_kind, status, reason_code,
+                observed_at, content_sha256, ingested_at, ingest_sequence
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 row["source_health_id"], row["producer_id"], row["source_health_event_id"],
                 row["site_id"], row["capture_source_id"], row["source_kind"], row["status"],
                 row["reason_code"], row["observed_at"], canonical_sha256(content), row["ingested_at"],
+                ingest_sequence,
             ),
         )
+    connection.execute(
+        """INSERT INTO device_fingerprint_storage_state (
+            singleton_id, database_generation_id, last_ingest_sequence
+        ) VALUES (?, ?, ?)""",
+        (1, uid(701), ingest_sequence),
+    )
     connection.commit()
     connection.close()
