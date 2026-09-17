@@ -175,6 +175,7 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
             if declared is not None or available != 0 or record["structure_state"] != "well_formed":
                 _fail()
         else:
+            physical_remaining_after_length = 0
             if declared is None:
                 if offset != option_length or available != 0 or not last:
                     _fail()
@@ -184,6 +185,7 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
                 if not _integer(declared, 0, 255) or offset >= option_length:
                     _fail()
                 offset += 1  # physically observed length byte
+                physical_remaining_after_length = option_length - offset
                 if declared < 2:
                     if available != 0 or not last:
                         _fail()
@@ -208,21 +210,21 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
             if record["structure_state"] != expected_state:
                 _fail()
             if kind == 2:
-                if available >= 2:
+                if physical_remaining_after_length >= 2:
                     if not _integer(record["mss"], 0, 65535):
                         _fail()
                 elif record["mss"] is not None:
                     _fail()
             elif kind == 3:
-                if available >= 1:
+                if physical_remaining_after_length >= 1:
                     if not _integer(record["window_scale_raw"], 0, 255):
                         _fail()
                 elif record["window_scale_raw"] is not None:
                     _fail()
             elif kind == 8:
                 for name, present in (
-                    ("timestamp_value_zero", available >= 4),
-                    ("timestamp_echo_nonzero", available >= 8),
+                    ("timestamp_value_zero", physical_remaining_after_length >= 4),
+                    ("timestamp_echo_nonzero", physical_remaining_after_length >= 8),
                 ):
                     if (present and type(record[name]) is not bool) or (not present and record[name] is not None):
                         _fail()

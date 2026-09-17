@@ -87,8 +87,9 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
         length = raw[offset] if offset < len(raw) else None
         if length is not None:
             offset += 1
+        semantic_value_start = offset
+        physical_remaining = len(raw) - semantic_value_start if length is not None else 0
         available = min(length - 2, len(raw) - offset) if length is not None and length >= 2 else 0
-        value = raw[offset:offset + available]
         offset += available
         expected_length = {2: 4, 3: 3, 4: 2, 8: 10}.get(kind)
         complete = length is not None and length >= 2 and available == length - 2
@@ -101,12 +102,21 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
             ),
         }
         if kind == 2:
-            record["mss"] = int.from_bytes(value[:2], "big") if available >= 2 else None
+            record["mss"] = (
+                int.from_bytes(raw[semantic_value_start:semantic_value_start + 2], "big")
+                if physical_remaining >= 2 else None
+            )
         elif kind == 3:
-            record["window_scale_raw"] = value[0] if available >= 1 else None
+            record["window_scale_raw"] = raw[semantic_value_start] if physical_remaining >= 1 else None
         elif kind == 8:
-            record["timestamp_value_zero"] = value[:4] == b"\0" * 4 if available >= 4 else None
-            record["timestamp_echo_nonzero"] = value[4:8] != b"\0" * 4 if available >= 8 else None
+            record["timestamp_value_zero"] = (
+                raw[semantic_value_start:semantic_value_start + 4] == b"\0" * 4
+                if physical_remaining >= 4 else None
+            )
+            record["timestamp_echo_nonzero"] = (
+                raw[semantic_value_start + 4:semantic_value_start + 8] != b"\0" * 4
+                if physical_remaining >= 8 else None
+            )
         records.append(record)
         if not complete:
             break
