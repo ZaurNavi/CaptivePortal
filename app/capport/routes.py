@@ -35,6 +35,7 @@ def create_capport_blueprint(
     telemetry,
     portal_evidence_extractor=None,
     portal_evidence_telemetry=None,
+    client_hints_probe=None,
 ) -> Blueprint:
     blueprint = Blueprint("capport", __name__)
 
@@ -171,7 +172,7 @@ def create_capport_blueprint(
                 jsonify(_entry_json(result)),
                 result.status_code,
             )
-        return _no_store(
+        response = _no_store(
             portal_entry_handler.open_portal(
                 context,
                 portal_evidence_candidate=portal_evidence_candidate,
@@ -179,6 +180,21 @@ def create_capport_blueprint(
             if portal_evidence_candidate is not None
             else portal_entry_handler.open_portal(context)
         )
+        if client_hints_probe is not None and response.status_code == 200 and request.is_secure:
+            try:
+                client_hints_probe.apply(
+                    response=response,
+                    headers=request.headers,
+                    site_id=state.client.site_id,
+                    client_mac=state.client.client_mac,
+                    source_subtype="capport_login",
+                    secure=True,
+                    v1_candidate=portal_evidence_candidate,
+                )
+            except Exception:
+                # The research probe is never an Authorization dependency.
+                pass
+        return response
 
     blueprint.add_url_rule(
         config.api_path,

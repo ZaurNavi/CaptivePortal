@@ -10,7 +10,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, make_response, render_template, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app import create_controller, get_settings, logger
@@ -67,12 +67,17 @@ from app.device_fingerprint_portal import (
     portal_config_from_env,
 )
 from app.device_fingerprint_portal.telemetry import PortalEvidenceTelemetry, safe_emit
+from app.device_fingerprint_portal.client_hints_probe import (
+    PortalClientHintsProbe,
+    probe_config_from_env,
+)
 
 
 MAX_WORKERS = 4
 _AUTO_COUNTER = object()
 _AUTO_TRAFFIC = object()
 _AUTO_PORTAL_EVIDENCE = object()
+_AUTO_CLIENT_HINTS_PROBE = object()
 
 
 def _normalize_external_portal_ssid(value):
@@ -119,6 +124,7 @@ def create_app(
     visit_start_submitter=None,
     authorization_health_tracker=None,
     portal_evidence_sink=_AUTO_PORTAL_EVIDENCE,
+    client_hints_probe=_AUTO_CLIENT_HINTS_PROBE,
 ) -> Flask:
     """Create and configure the Flask application."""
     template_dir = os.path.abspath(
@@ -161,6 +167,15 @@ def create_app(
             portal_evidence_sink = None
     app.extensions["portal_evidence_sink"] = portal_evidence_sink
     app.extensions["portal_evidence_runtime"] = portal_evidence_runtime
+    if client_hints_probe is _AUTO_CLIENT_HINTS_PROBE:
+        client_hints_probe = None
+        try:
+            probe_config = probe_config_from_env()
+            if probe_config.enabled:
+                client_hints_probe = PortalClientHintsProbe(probe_config)
+        except Exception:
+            safe_emit(portal_evidence_telemetry, "client_hints_probe_startup_failed")
+    app.extensions["client_hints_probe"] = client_hints_probe
     app.extensions["auth_telemetry"] = auth_telemetry
 
     webhook_config = OmadaWebhookConfig.from_settings(settings)
@@ -380,6 +395,7 @@ def create_app(
                     else None
                 ),
                 portal_evidence_telemetry=portal_evidence_telemetry,
+                client_hints_probe=client_hints_probe,
             )
         )
 
@@ -454,11 +470,29 @@ def create_app(
             radio_id=radio_id,
         )
         if portal_evidence_candidate is not None:
-            return portal_entry_handler.open_portal(
+            result = portal_entry_handler.open_portal(
                 context,
                 portal_evidence_candidate=portal_evidence_candidate,
             )
-        return portal_entry_handler.open_portal(context)
+        else:
+            result = portal_entry_handler.open_portal(context)
+        if client_hints_probe is None:
+            return result
+        response = make_response(result)
+        if response.status_code == 200 and request.is_secure and client_mac:
+            try:
+                client_hints_probe.apply(
+                    response=response,
+                    headers=request.headers,
+                    site_id=site_id,
+                    client_mac=client_mac,
+                    source_subtype="omada_external_portal",
+                    secure=True,
+                    v1_candidate=portal_evidence_candidate,
+                )
+            except Exception:
+                safe_emit(portal_evidence_telemetry, "client_hints_probe_failed")
+        return response
 
     @app.route(
         "/auth/session/<session_id>",

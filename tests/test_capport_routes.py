@@ -20,6 +20,7 @@ from app.capport.service import CapportService
 from app.controllers.omada import OmadaProvider
 from app.models import Result
 from app.web.portal_entry import PortalClientContext, PortalEntryResult
+from app.device_fingerprint_portal.client_hints_probe import PortalClientHintsProbe, ProbeConfig
 
 
 class NoopTelemetry:
@@ -88,7 +89,7 @@ def state(
     )
 
 
-def app_for(service, handler=None, *, extractor=None, portal_telemetry=None):
+def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, client_hints_probe=None):
     template_dir = (
         Path(__file__).parents[1] / "app" / "web" / "templates"
     )
@@ -102,10 +103,46 @@ def app_for(service, handler=None, *, extractor=None, portal_telemetry=None):
             telemetry=NoopTelemetry(),
             portal_evidence_extractor=extractor,
             portal_evidence_telemetry=portal_telemetry,
+            client_hints_probe=client_hints_probe,
         )
     )
     app.config["TESTING"] = True
     return app, handler
+
+
+def test_capport_probe_only_on_secure_resolved_html_login_not_json_or_discovery():
+    recorder = Mock()
+    probe = PortalClientHintsProbe(
+        ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+        recorder=recorder, monotonic=lambda: 0.0,
+    )
+    service = Mock()
+    service.resolve_for_login.side_effect = [state(found=False), state(found=True), state(found=True), state(found=True)]
+    service.resolve.return_value = state(found=True)
+    handler = Mock()
+    handler.open_portal.return_value = ("opened", 200)
+    handler.prepare_portal.return_value = PortalEntryResult(
+        status_code=200, session_id="session-1", redirect_url=None,
+        initial_state={}, error_code=None,
+    )
+    app, _ = app_for(service, handler, client_hints_probe=probe)
+    client = app.test_client()
+    kwargs = {"base_url": "https://portal.example", "environ_base": {"REMOTE_ADDR": "192.168.1.10"}}
+    discovery = client.get("/capport/login", **kwargs)
+    assert "Accept-CH" not in discovery.headers
+    api = client.get("/capport/api", **kwargs)
+    assert "Accept-CH" not in api.headers
+    assert "Clear-Site-Data" not in api.headers
+    json_response = client.get("/capport/login", headers={"Accept": "application/json"}, **kwargs)
+    assert "Accept-CH" not in json_response.headers
+    first = client.get("/capport/login", **kwargs)
+    assert first.headers["Accept-CH"] == "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors"
+    second = client.get("/capport/login", headers={"Sec-CH-UA-Model": '"Pixel 8"'}, **kwargs)
+    assert second.headers["Clear-Site-Data"] == '"clientHints"'
+    assert recorder.record.call_count == 1
+    assert handler.open_portal.call_count == 2
+    assert handler.prepare_portal.call_count == 1
+    assert service.resolve_for_login.call_count == 4
 
 
 def test_capport_fingerprint_extraction_requires_resolved_client_and_is_contained():

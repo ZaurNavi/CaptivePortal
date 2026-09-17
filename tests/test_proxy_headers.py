@@ -7,6 +7,7 @@ import app.web.web as web_module
 from app.device_fingerprint_portal.config import portal_config_from_env
 from app.device_fingerprint_portal.models import DeliveryResult
 from app.device_fingerprint_portal.runtime import PortalEvidenceRuntime
+from app.device_fingerprint_portal.client_hints_probe import PortalClientHintsProbe, ProbeConfig
 
 
 class NoopExecutor:
@@ -14,7 +15,7 @@ class NoopExecutor:
         return None
 
 
-def create_test_app(portal_evidence_sink=None, *, automatic=False):
+def create_test_app(portal_evidence_sink=None, *, automatic=False, client_hints_probe=None):
     settings = {
         "portal_counter_enabled": False,
         "portal_counter_db_path": "unused.db",
@@ -40,7 +41,7 @@ def create_test_app(portal_evidence_sink=None, *, automatic=False):
             NoopExecutor(),
         ),
     ):
-        arguments = {"portal_counter_service": None}
+        arguments = {"portal_counter_service": None, "client_hints_probe": client_hints_probe}
         if not automatic:
             arguments["portal_evidence_sink"] = portal_evidence_sink
         app = web_module.create_app(**arguments)
@@ -57,6 +58,50 @@ def create_test_app(portal_evidence_sink=None, *, automatic=False):
 
     app.config["TESTING"] = True
     return app
+
+
+def test_external_portal_probe_only_after_guarded_secure_success():
+    class Recorder:
+        def __init__(self):
+            self.events = []
+
+        def record(self, event):
+            self.events.append(event)
+
+    recorder = Recorder()
+    clock = Mock(return_value=0.0)
+    probe = PortalClientHintsProbe(
+        ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+        recorder=recorder, monotonic=clock,
+    )
+    app = create_test_app(client_hints_probe=probe)
+    handler = app.extensions["portal_entry_handler"]
+    handler.open_portal = Mock(return_value="opened")
+    client = app.test_client()
+    uri = "/?site=site-1&clientMac=AA:BB:CC:DD:EE:01"
+    assert "Accept-CH" not in client.get(uri).headers
+    assert "Accept-CH" not in client.get("/?clientMac=AA:BB:CC:DD:EE:01", base_url="https://portal.example").headers
+    first = client.get(uri, base_url="https://portal.example")
+    assert first.status_code == 200 and first.data == b"opened"
+    assert first.headers["Accept-CH"] == "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors"
+    second = client.get(uri, base_url="https://portal.example", headers={"Sec-CH-UA-Model": '"Pixel 8"'})
+    assert second.status_code == 200 and second.data == b"opened"
+    assert second.headers["Clear-Site-Data"] == '"clientHints"'
+    assert len(recorder.events) == 1
+    assert recorder.events[0]["source_subtype"] == "omada_external_portal"
+
+
+def test_external_portal_probe_disabled_keeps_response_unchanged():
+    app = create_test_app(client_hints_probe=None)
+    app.extensions["portal_entry_handler"].open_portal = Mock(return_value=("opened", 200))
+    response = app.test_client().get(
+        "/?site=site-1&clientMac=AA:BB:CC:DD:EE:01",
+        base_url="https://portal.example",
+        headers={"Sec-CH-UA-Model": '"Pixel 8"'},
+    )
+    assert response.status_code == 200 and response.data == b"opened"
+    assert "Accept-CH" not in response.headers
+    assert "Clear-Site-Data" not in response.headers
 
 
 def test_external_portal_guard_precedes_extractor_and_valid_request_plumbs_candidate():
