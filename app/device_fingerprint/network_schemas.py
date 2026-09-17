@@ -25,12 +25,14 @@ _TCP_V2_KEYS = frozenset({
     "ip_version", "observed_ttl", "ip_option_length_bytes", "ip_id_zero",
     "ip_df", "ip_reserved_flag", "ip_ecn_bits", "tcp_header_length_bytes",
     "tcp_window", "tcp_sequence_zero", "tcp_ack_number_nonzero",
+    "tcp_ack_first_octet_lsb_set",
     "tcp_urg_pointer_nonzero", "tcp_fin", "tcp_rst", "tcp_push", "tcp_urg",
     "tcp_ns", "tcp_ece", "tcp_cwr", "tcp_payload_present", "tcp_option_records",
 })
 _TCP_V2_BOOLEAN_KEYS = frozenset({
     "ip_id_zero", "ip_df", "ip_reserved_flag", "tcp_sequence_zero",
-    "tcp_ack_number_nonzero", "tcp_urg_pointer_nonzero", "tcp_fin",
+    "tcp_ack_number_nonzero", "tcp_ack_first_octet_lsb_set",
+    "tcp_urg_pointer_nonzero", "tcp_fin",
     "tcp_rst", "tcp_push", "tcp_urg", "tcp_ns", "tcp_ece", "tcp_cwr",
     "tcp_payload_present",
 })
@@ -130,6 +132,8 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
         _fail()
     if any(type(value[name]) is not bool for name in _TCP_V2_BOOLEAN_KEYS):
         _fail()
+    if value["tcp_ack_first_octet_lsb_set"] and not value["tcp_ack_number_nonzero"]:
+        _fail()
     records = value["tcp_option_records"]
     if not isinstance(records, list) or len(records) > 40:
         _fail()
@@ -149,6 +153,7 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
         _keys(record, _TCP_V2_OPTION_COMMON | _TCP_V2_OPTION_FIELDS[record_type])
         if offset >= option_length:
             _fail()
+        record_start = offset
         offset += 1  # physically observed option kind
         declared = record["declared_length"]
         available = record["available_value_length"]
@@ -186,23 +191,33 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
                     _fail()
                 offset += 1  # physically observed length byte
                 physical_remaining_after_length = option_length - offset
-                if declared < 2:
-                    if available != 0 or not last:
+                declared_available = (
+                    min(declared - 2, physical_remaining_after_length) if declared >= 2 else 0
+                )
+                if available != declared_available:
+                    _fail()
+                fixed_length = _TCP_V2_KNOWN_LENGTHS.get(kind)
+                if fixed_length is not None:
+                    physical_complete = option_length - record_start >= fixed_length
+                    expected_state = (
+                        "well_formed" if physical_complete and declared == fixed_length
+                        else "malformed_but_observable"
+                    )
+                    if physical_complete:
+                        offset = record_start + fixed_length
+                    else:
+                        if not last:
+                            _fail()
+                        stopped = True
+                elif declared < 2:
+                    if not last:
                         _fail()
                     expected_state = "malformed_but_observable"
                     stopped = True
                 else:
-                    physically_available = min(declared - 2, option_length - offset)
-                    if available != physically_available:
-                        _fail()
                     offset += available
                     complete = available == declared - 2
-                    expected_state = (
-                        "well_formed" if complete and (
-                            kind not in _TCP_V2_KNOWN_LENGTHS
-                            or declared == _TCP_V2_KNOWN_LENGTHS[kind]
-                        ) else "malformed_but_observable"
-                    )
+                    expected_state = "well_formed" if complete else "malformed_but_observable"
                     if not complete:
                         if not last:
                             _fail()

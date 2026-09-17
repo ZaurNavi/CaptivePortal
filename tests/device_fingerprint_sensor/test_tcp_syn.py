@@ -21,6 +21,7 @@ V2_KEYS = {
     "ip_version", "observed_ttl", "ip_option_length_bytes", "ip_id_zero",
     "ip_df", "ip_reserved_flag", "ip_ecn_bits", "tcp_header_length_bytes",
     "tcp_window", "tcp_sequence_zero", "tcp_ack_number_nonzero",
+    "tcp_ack_first_octet_lsb_set",
     "tcp_urg_pointer_nonzero", "tcp_fin", "tcp_rst", "tcp_push", "tcp_urg",
     "tcp_ns", "tcp_ece", "tcp_cwr", "tcp_payload_present", "tcp_option_records",
 }
@@ -77,6 +78,7 @@ def test_ipv4_guest_syn_v2_exact_protocol_facts_and_minimization():
     assert value["tcp_header_length_bytes"] == 36
     assert value["tcp_window"] == 65535
     assert value["tcp_payload_present"] is False
+    assert value["tcp_ack_first_octet_lsb_set"] is False
     assert [record["record_type"] for record in value["tcp_option_records"]] == [
         "mss", "sack_permitted", "timestamp",
     ]
@@ -116,6 +118,7 @@ def test_ip_tcp_boolean_derivatives_and_ipv4_options(
     assert value["ip_ecn_bits"] == ecn
     assert value["tcp_sequence_zero"] is (sequence == 0)
     assert value["tcp_ack_number_nonzero"] is (ack != 0)
+    assert value["tcp_ack_first_octet_lsb_set"] is bool((ack >> 24) & 1)
     assert value["tcp_urg_pointer_nonzero"] is (urgent != 0)
     assert value["tcp_ns"] is False
     assert value["tcp_payload_present"] is bool(payload)
@@ -249,8 +252,8 @@ def test_malformed_option_is_retained_as_partial(options, expected_type, availab
     (b"\x02\x00\x04\xb0", 0, 0, "malformed_but_observable", 1200, ["mss"]),
     (b"\x02\x01\x04\xb0", 1, 0, "malformed_but_observable", 1200, ["mss"]),
     (b"\x02\x01\x05\xb4", 1, 0, "malformed_but_observable", 1460, ["mss"]),
-    (b"\x02\x02\x04\xb0", 2, 0, "malformed_but_observable", 1200, ["mss", "sack_permitted"]),
-    (b"\x02\x03\x04\xb0", 3, 1, "malformed_but_observable", 1200, ["mss", "unknown"]),
+    (b"\x02\x02\x04\xb0", 2, 0, "malformed_but_observable", 1200, ["mss"]),
+    (b"\x02\x03\x04\xb0", 3, 1, "malformed_but_observable", 1200, ["mss"]),
     (b"\x02\x04\x04\xb0", 4, 2, "well_formed", 1200, ["mss"]),
     (b"\x02\x05\x04\xb0", 5, 2, "malformed_but_observable", 1200, ["mss"]),
 ])
@@ -314,14 +317,110 @@ def test_malformed_timestamp_uses_only_bounded_physical_boolean_facts(
 
 
 def test_ordered_mixed_options_and_known_mismatch_continue_at_safe_boundary():
-    value = parsed(b"\x01\x02\x05\x05\xb4\x00\x03\x03\x0f\x04\x02\x00")
+    value = parsed(b"\x01\x02\x05\x05\xb4\x03\x03\x0f\x04\x02\x00\x00")
     assert [record["record_type"] for record in value["tcp_option_records"]] == [
         "nop", "mss", "window_scale", "sack_permitted", "eol",
     ]
     assert value["tcp_option_records"][1]["structure_state"] == "malformed_but_observable"
     assert value["tcp_option_records"][1]["mss"] == 1460
     assert value["tcp_option_records"][2]["window_scale_raw"] == 15
-    assert value["tcp_option_records"][-1]["eol_padding_length"] == 0
+    assert value["tcp_option_records"][-1]["eol_padding_length"] == 1
+
+
+@pytest.mark.parametrize("kind,prefix,tail_length,semantic", [
+    ("mss", b"\x02\x01\x04\xb0", 4, {"mss": 1200}),
+    ("window_scale", b"\x03\x01\xff", 5, {"window_scale_raw": 255}),
+    ("sack_permitted", b"\x04\x01", 6, {}),
+    ("timestamp", b"\x08\x01" + b"\0" * 8, 6, {
+        "timestamp_value_zero": True, "timestamp_echo_nonzero": False,
+    }),
+])
+def test_malformed_known_short_length_continues_to_nop_or_eol_as_pinned_oracle(
+    kind, prefix, tail_length, semantic,
+):
+    # p0f 3.09b consumes fixed physical widths (4/3/2/10), not declared 1.
+    nops = parsed(prefix + b"\x01" * tail_length)
+    eol = parsed(prefix + b"\0" * tail_length)
+    assert [row["record_type"] for row in nops["tcp_option_records"]] == [
+        kind, *(["nop"] * tail_length),
+    ]
+    assert [row["record_type"] for row in eol["tcp_option_records"]] == [kind, "eol"]
+    for value in (nops, eol):
+        record = value["tcp_option_records"][0]
+        assert record["declared_length"] == 1
+        assert record["available_value_length"] == 0
+        assert record["structure_state"] == "malformed_but_observable"
+        assert all(record[name] == expected for name, expected in semantic.items())
+    assert eol["tcp_option_records"][-1]["eol_padding_length"] == tail_length - 1
+    assert canonical_sha256(canonical_json(nops)) != canonical_sha256(canonical_json(eol))
+
+
+@pytest.mark.parametrize("kind,options,declared,available,next_kind", [
+    ("mss", b"\x02\x05\x04\xb0\x03\x03\x0f\x01", 5, 3, "window_scale"),
+    ("window_scale", b"\x03\x04\x0f\x02\x04\x05\xb4\x01", 4, 2, "mss"),
+    ("sack_permitted", b"\x04\x03\x02\x04\x05\xb4\x01\x01", 3, 1, "mss"),
+    ("timestamp", b"\x08\x0b" + b"\0" * 8 + b"\x02\x04\x05\xb4\x01\x01",
+     11, 9, "mss"),
+])
+def test_malformed_known_long_declared_extent_does_not_skip_next_physical_option(
+    kind, options, declared, available, next_kind,
+):
+    records = parsed(options)["tcp_option_records"]
+    assert [record["record_type"] for record in records[:2]] == [kind, next_kind]
+    assert records[0]["declared_length"] == declared
+    assert records[0]["available_value_length"] == available
+    assert records[0]["structure_state"] == "malformed_but_observable"
+    assert records[1]["structure_state"] == "well_formed"
+
+
+@pytest.mark.parametrize("kind,options", [
+    ("mss", b"\x02\x04\x04\xb0"),
+    ("window_scale", b"\x03\x03\x0f\x01"),
+    ("sack_permitted", b"\x04\x02\x01\x01"),
+    ("timestamp", b"\x08\x0a" + b"\0" * 8 + b"\x01\x01"),
+])
+def test_known_correct_declared_length_remains_well_formed(kind, options):
+    assert parsed(options)["tcp_option_records"][0]["record_type"] == kind
+    assert parsed(options)["tcp_option_records"][0]["structure_state"] == "well_formed"
+
+
+@pytest.mark.parametrize("kind,options,semantic", [
+    ("mss", b"\x01\x01\x02\x04", {"mss": None}),
+    ("window_scale", b"\x01\x01\x03\x03", {"window_scale_raw": None}),
+    ("sack_permitted", b"\x01\x01\x01\x04", {"declared_length": None}),
+    ("timestamp", b"\x01\x01\x08\x0a" + b"\0" * 4, {
+        "timestamp_value_zero": True, "timestamp_echo_nonzero": None,
+    }),
+])
+def test_known_insufficient_fixed_physical_bytes_stop_safely(kind, options, semantic):
+    records = parsed(options)["tcp_option_records"]
+    assert records[-1]["record_type"] == kind
+    assert records[-1]["structure_state"] == "malformed_but_observable"
+    assert all(records[-1][name] == expected for name, expected in semantic.items())
+
+
+@pytest.mark.parametrize("ack,nonzero,first_octet_bit", [
+    (0x00000000, False, False),
+    (0x01000000, True, True),
+    (0x02000000, True, False),
+    (0x03000000, True, True),
+    (0x00000001, True, False),
+])
+def test_ack_first_network_octet_low_bit_is_the_only_new_durable_ack_fact(
+    ack, nonzero, first_octet_bit,
+):
+    value = parsed(b"", ack_number=ack)
+    assert value["tcp_ack_number_nonzero"] is nonzero
+    assert value["tcp_ack_first_octet_lsb_set"] is first_octet_bit
+    assert set(value) == V2_KEYS
+    assert '"ack_number":' not in canonical_json(value)
+
+
+def test_pinned_oracle_ack_bit_collision_pair_now_has_distinct_canonical_payloads():
+    even = parsed(b"", ack_number=0x02000000)
+    odd = parsed(b"", ack_number=0x03000000)
+    assert {**even, "tcp_ack_first_octet_lsb_set": True} == odd
+    assert canonical_sha256(canonical_json(even)) != canonical_sha256(canonical_json(odd))
 
 
 def test_non_guest_ack_fragment_and_header_truncation_emit_nothing():
@@ -374,6 +473,7 @@ def test_v2_validator_rejects_raw_or_numeric_sensitive_fields():
     for key, value in (
         ("ip_id", 42), ("tcp_sequence", 3), ("raw_packet", "x"),
         ("tcp_option_order", [2]), ("tsval", 123), ("os_guess", "x"),
+        ("ack_number", 0x03000000), ("ack_bytes", "03000000"),
     ):
         with pytest.raises(DeviceFingerprintValidationError):
             validate_tcp_syn_v2({**payload, key: value})
