@@ -1,4 +1,5 @@
 import threading
+import re
 from unittest.mock import Mock, patch
 
 from flask import jsonify, request
@@ -7,6 +8,8 @@ import app.web.web as web_module
 from app.device_fingerprint_portal.config import portal_config_from_env
 from app.device_fingerprint_portal.models import DeliveryResult
 from app.device_fingerprint_portal.runtime import PortalEvidenceRuntime
+from app.device_fingerprint_portal.client_hints_probe import PortalClientHintsProbe, ProbeConfig
+from app.auth.manager import AuthSessionManager
 
 
 class NoopExecutor:
@@ -14,7 +17,17 @@ class NoopExecutor:
         return None
 
 
-def create_test_app(portal_evidence_sink=None, *, automatic=False):
+class CapturingExecutor:
+    def __init__(self):
+        self.submissions = []
+
+    def submit(self, function, session_id):
+        self.submissions.append((function, session_id))
+        return object()
+
+
+def create_test_app(portal_evidence_sink=None, *, automatic=False, client_hints_probe=None,
+                    manager=None, executor=None):
     settings = {
         "portal_counter_enabled": False,
         "portal_counter_db_path": "unused.db",
@@ -37,10 +50,11 @@ def create_test_app(portal_evidence_sink=None, *, automatic=False):
         patch.object(
             web_module,
             "auth_executor",
-            NoopExecutor(),
+            executor if executor is not None else NoopExecutor(),
         ),
+        patch.object(web_module, "auth_manager", manager if manager is not None else web_module.auth_manager),
     ):
-        arguments = {"portal_counter_service": None}
+        arguments = {"portal_counter_service": None, "client_hints_probe": client_hints_probe}
         if not automatic:
             arguments["portal_evidence_sink"] = portal_evidence_sink
         app = web_module.create_app(**arguments)
@@ -57,6 +71,108 @@ def create_test_app(portal_evidence_sink=None, *, automatic=False):
 
     app.config["TESTING"] = True
     return app
+
+
+def test_external_portal_probe_only_after_guarded_secure_success():
+    class Recorder:
+        def __init__(self):
+            self.events = []
+
+        def record(self, event):
+            self.events.append(event)
+
+    recorder = Recorder()
+    clock = Mock(return_value=0.0)
+    probe = PortalClientHintsProbe(
+        ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+        recorder=recorder, monotonic=clock,
+    )
+    app = create_test_app(client_hints_probe=probe)
+    handler = app.extensions["portal_entry_handler"]
+    handler.open_portal = Mock(return_value="opened")
+    client = app.test_client()
+    uri = "/?site=site-1&clientMac=AA:BB:CC:DD:EE:01"
+    assert "Accept-CH" not in client.get(uri).headers
+    assert "Accept-CH" not in client.get("/?clientMac=AA:BB:CC:DD:EE:01", base_url="https://portal.example").headers
+    first = client.get(uri, base_url="https://portal.example")
+    assert first.status_code == 200 and first.data == b"opened"
+    assert first.headers["Accept-CH"] == "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors"
+    second = client.get(uri, base_url="https://portal.example", headers={"Sec-CH-UA-Model": '"Pixel 8"'})
+    assert second.status_code == 200 and second.data == b"opened"
+    assert second.headers["Clear-Site-Data"] == '"clientHints"'
+    assert len(recorder.events) == 1
+    assert recorder.events[0]["source_subtype"] == "omada_external_portal"
+
+
+def test_external_portal_probe_disabled_keeps_response_unchanged():
+    app = create_test_app(client_hints_probe=None)
+    app.extensions["portal_entry_handler"].open_portal = Mock(return_value=("opened", 200))
+    response = app.test_client().get(
+        "/?site=site-1&clientMac=AA:BB:CC:DD:EE:01",
+        base_url="https://portal.example",
+        headers={"Sec-CH-UA-Model": '"Pixel 8"'},
+    )
+    assert response.status_code == 200 and response.data == b"opened"
+    assert "Accept-CH" not in response.headers
+    assert "Clear-Site-Data" not in response.headers
+
+
+def test_external_portal_real_session_submission_and_v1_queue_are_probe_invariant():
+    class Sink:
+        def __init__(self):
+            self.candidates = []
+
+        def try_submit(self, _session, candidate):
+            self.candidates.append(candidate)
+
+    def run(enabled):
+        manager = AuthSessionManager()
+        executor = CapturingExecutor()
+        sink = Sink()
+        recorder = Mock()
+        probe = (PortalClientHintsProbe(
+            ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+            recorder=recorder, monotonic=lambda: 0.0,
+        ) if enabled else None)
+        app = create_test_app(sink, client_hints_probe=probe, manager=manager, executor=executor)
+        client = app.test_client()
+        uri = "/?site=site-1&clientMac=AA:BB:CC:DD:EE:77&clientIp=192.168.1.10"
+        base = "https://portal.example"
+        ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/PRIVATE_UA_CANARY_901; wv) Chrome/120 Mobile"
+        first = client.get(uri, base_url=base, headers={"User-Agent": ua})
+        second = client.get(uri, base_url=base, headers={
+            "User-Agent": ua,
+            "Sec-CH-UA-Model": '"Build/PRIVATE_MODEL_CANARY_902"',
+            "Sec-CH-UA-Platform-Version": '"PRIVATE_VERSION_CANARY_903"',
+            "Sec-CH-UA-Form-Factors": '"PRIVATE_FACTOR_CANARY_904"',
+        })
+        session = manager.get_by_client("site-1", "AA:BB:CC:DD:EE:77")
+        assert session is not None
+        assert len(executor.submissions) == 1
+        assert len(sink.candidates) == 2
+        assert all("PRIVATE_" not in repr(value) for value in sink.candidates)
+        assert all("PRIVATE_" not in repr(call) for call in recorder.record.call_args_list)
+        return first, second, session, executor, sink, recorder
+
+    off = run(False)
+    on = run(True)
+    assert [response.status_code for response in off[:2]] == [200, 200]
+    assert [response.status_code for response in on[:2]] == [200, 200]
+    assert on[0].headers["Accept-CH"] == "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors"
+    assert on[1].headers["Clear-Site-Data"] == '"clientHints"'
+    for before, after in zip(off[:2], on[:2]):
+        off_headers = dict(before.headers)
+        on_headers = dict(after.headers)
+        on_headers.pop("Accept-CH", None)
+        on_headers.pop("Clear-Site-Data", None)
+        assert on_headers == off_headers
+        def scrub(body):
+            body = re.sub(rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", b"UUID", body)
+            return re.sub(rb"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", b"TIMESTAMP", body)
+        assert scrub(before.data) == scrub(after.data)
+    assert off[2].status == on[2].status
+    assert off[2].current_run_number == on[2].current_run_number == 1
+    assert len(off[3].submissions) == len(on[3].submissions) == 1
 
 
 def test_external_portal_guard_precedes_extractor_and_valid_request_plumbs_candidate():

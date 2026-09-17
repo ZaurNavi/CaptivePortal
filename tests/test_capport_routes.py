@@ -20,6 +20,9 @@ from app.capport.service import CapportService
 from app.controllers.omada import OmadaProvider
 from app.models import Result
 from app.web.portal_entry import PortalClientContext, PortalEntryResult
+from app.web.portal_entry import PortalEntryHandler
+from app.auth.manager import AuthSessionManager
+from app.device_fingerprint_portal.client_hints_probe import PortalClientHintsProbe, ProbeConfig
 
 
 class NoopTelemetry:
@@ -88,7 +91,7 @@ def state(
     )
 
 
-def app_for(service, handler=None, *, extractor=None, portal_telemetry=None):
+def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, client_hints_probe=None):
     template_dir = (
         Path(__file__).parents[1] / "app" / "web" / "templates"
     )
@@ -102,10 +105,101 @@ def app_for(service, handler=None, *, extractor=None, portal_telemetry=None):
             telemetry=NoopTelemetry(),
             portal_evidence_extractor=extractor,
             portal_evidence_telemetry=portal_telemetry,
+            client_hints_probe=client_hints_probe,
         )
     )
     app.config["TESTING"] = True
     return app, handler
+
+
+def test_capport_probe_only_on_secure_resolved_html_login_not_json_or_discovery():
+    recorder = Mock()
+    probe = PortalClientHintsProbe(
+        ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+        recorder=recorder, monotonic=lambda: 0.0,
+    )
+    service = Mock()
+    service.resolve_for_login.side_effect = [state(found=False), state(found=True), state(found=True), state(found=True)]
+    service.resolve.return_value = state(found=True)
+    handler = Mock()
+    handler.open_portal.return_value = ("opened", 200)
+    handler.prepare_portal.return_value = PortalEntryResult(
+        status_code=200, session_id="session-1", redirect_url=None,
+        initial_state={}, error_code=None,
+    )
+    app, _ = app_for(service, handler, client_hints_probe=probe)
+    client = app.test_client()
+    kwargs = {"base_url": "https://portal.example", "environ_base": {"REMOTE_ADDR": "192.168.1.10"}}
+    discovery = client.get("/capport/login", **kwargs)
+    assert "Accept-CH" not in discovery.headers
+    api = client.get("/capport/api", **kwargs)
+    assert "Accept-CH" not in api.headers
+    assert "Clear-Site-Data" not in api.headers
+    json_response = client.get("/capport/login", headers={"Accept": "application/json"}, **kwargs)
+    assert "Accept-CH" not in json_response.headers
+    first = client.get("/capport/login", **kwargs)
+    assert first.headers["Accept-CH"] == "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors"
+    second = client.get("/capport/login", headers={"Sec-CH-UA-Model": '"Pixel 8"'}, **kwargs)
+    assert second.headers["Clear-Site-Data"] == '"clientHints"'
+    assert recorder.record.call_count == 1
+    assert handler.open_portal.call_count == 2
+    assert handler.prepare_portal.call_count == 1
+    assert service.resolve_for_login.call_count == 4
+
+
+def test_capport_real_session_submission_and_reuse_are_probe_invariant():
+    class Executor:
+        def __init__(self):
+            self.submissions = []
+
+        def submit(self, function, session_id):
+            self.submissions.append((function, session_id))
+            return object()
+
+    def run(enabled):
+        manager = AuthSessionManager()
+        executor = Executor()
+        handler = PortalEntryHandler(
+            session_manager=manager, auth_worker=Mock(), executor=executor,
+            auth_telemetry=Mock(),
+        )
+        recorder = Mock()
+        probe = (PortalClientHintsProbe(
+            ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+            recorder=recorder, monotonic=lambda: 0.0,
+        ) if enabled else None)
+        service = Mock()
+        service.resolve_for_login.return_value = state(found=True)
+        app, _ = app_for(service, handler, client_hints_probe=probe)
+        kwargs = {"base_url": "https://portal.example", "environ_base": {"REMOTE_ADDR": "192.168.1.10"}}
+        client = app.test_client()
+        first = client.get("/capport/login", **kwargs)
+        second = client.get("/capport/login", headers={"Sec-CH-UA-Model": '"Pixel 8"'}, **kwargs)
+        session = manager.get_by_client("site-1", "AA:BB:CC:DD:EE:FF")
+        assert session is not None
+        assert len(executor.submissions) == 1
+        assert service.resolve_for_login.call_count == 2
+        return first, second, session, executor
+
+    off = run(False)
+    on = run(True)
+    assert [item.status_code for item in off[:2]] == [200, 200]
+    assert [item.status_code for item in on[:2]] == [200, 200]
+    assert on[0].headers["Accept-CH"] == "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors"
+    assert on[1].headers["Clear-Site-Data"] == '"clientHints"'
+    for before, after in zip(off[:2], on[:2]):
+        off_headers = dict(before.headers)
+        on_headers = dict(after.headers)
+        on_headers.pop("Accept-CH", None)
+        on_headers.pop("Clear-Site-Data", None)
+        assert on_headers == off_headers
+        def scrub(body):
+            body = re.sub(rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", b"UUID", body)
+            return re.sub(rb"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", b"TIMESTAMP", body)
+        assert scrub(before.data) == scrub(after.data)
+    assert off[2].status == on[2].status
+    assert off[2].current_run_number == on[2].current_run_number == 1
+    assert len(off[3].submissions) == len(on[3].submissions) == 1
 
 
 def test_capport_fingerprint_extraction_requires_resolved_client_and_is_contained():
