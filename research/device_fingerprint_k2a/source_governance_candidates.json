@@ -1,0 +1,47 @@
+[
+  {
+    "governance_contract_version": 1,
+    "source_name": "p0f 3.09b upstream source archive",
+    "source_provenance": "Pinned p0f_3.09b.orig.tar.gz used for local K2A source inspection; SHA256 543b68638e739be5c3e818c3958c3b124ac0ccb8be62ba274b4241dbdec00e7f",
+    "license_identifier": "LGPL-2.1-only",
+    "license_source_reference": "p0f-3.09b/docs/COPYING and upstream source headers",
+    "license_text_sha256": "961c2671591840a60ec9b927dc6036ec5fc5fd861869647c2c4bc1050da48261",
+    "local_storage_status": "STORED_LOCAL",
+    "modification_import_status": "UNMODIFIED_SOURCE",
+    "redistribution_status": "NOT_APPLICABLE",
+    "attribution_requirement": "REQUIRED",
+    "commercial_use_status": "ALLOWED",
+    "review_basis_semantics": "Candidate scope is controlled local/offline K2A source inspection and conformance only; source is not vendored, distributed, deployed, or imported into CaptivPortal production. Future vendoring or distribution requires separate review.",
+    "unresolved_restrictions": []
+  },
+  {
+    "governance_contract_version": 1,
+    "source_name": "p0f 3.09b p0f.fp reference corpus",
+    "source_provenance": "Pinned upstream p0f.fp used only as controlled local K2A oracle reference; SHA256 45f27bcc65de0f64bc69356dc0662e3366e05e67a0e98fd2251808e253b6be40",
+    "license_identifier": "LGPL-2.1-only",
+    "license_source_reference": "p0f.fp copyright/license header and p0f-3.09b/docs/COPYING",
+    "license_text_sha256": "961c2671591840a60ec9b927dc6036ec5fc5fd861869647c2c4bc1050da48261",
+    "local_storage_status": "STORED_LOCAL",
+    "modification_import_status": "UNMODIFIED_SOURCE",
+    "redistribution_status": "NOT_APPLICABLE",
+    "attribution_requirement": "REQUIRED",
+    "commercial_use_status": "ALLOWED",
+    "review_basis_semantics": "Candidate scope is read-only controlled local K2A oracle/conformance reference. Full upstream p0f.fp is not imported, vendored, redistributed, or selected as CaptivPortal production K2B knowledge. K2B requires separate governance.",
+    "unresolved_restrictions": []
+  },
+  {
+    "governance_contract_version": 1,
+    "source_name": "p0f 3.09b local oracle binary",
+    "source_provenance": "Pinned local x86_64 build produced from the pinned unmodified p0f 3.09b source for controlled offline K2A conformance; SHA256 81ac7a7851980afd1f825b15e7ab4655a221f23b8f99d3c337c49752242811d3",
+    "license_identifier": "LGPL-2.1-only",
+    "license_source_reference": "p0f-3.09b/docs/COPYING and upstream source headers",
+    "license_text_sha256": "961c2671591840a60ec9b927dc6036ec5fc5fd861869647c2c4bc1050da48261",
+    "local_storage_status": "STORED_LOCAL",
+    "modification_import_status": "UNMODIFIED_SOURCE",
+    "redistribution_status": "NOT_APPLICABLE",
+    "attribution_requirement": "REQUIRED",
+    "commercial_use_status": "ALLOWED",
+    "review_basis_semantics": "Candidate scope is explicit controlled local/offline execution as the pinned K2A oracle only. Binary is not vendored, redistributed, deployed, or used as a CaptivPortal production runtime dependency.",
+    "unresolved_restrictions": []
+  }
+]
