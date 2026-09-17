@@ -32,14 +32,6 @@ _VERSION = re.compile(r'"(0|[1-9][0-9]{0,2})(?:\.[0-9]{1,3}){1,3}"')
 _FACTOR = re.compile(r'[ \t]*"([A-Za-z]{1,16})"[ \t]*')
 _MAC_LIKE = re.compile(r'(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}')
 _UUID_LIKE = re.compile(r'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}')
-_MODEL_FAMILIES = (
-    (re.compile(r'Pixel(?: [0-9]+(?: Pro|a| XL| Fold)?)?', re.I), "pixel"),
-    (re.compile(r'(?:Samsung )?Galaxy(?: [A-Za-z0-9 +\-]+)?', re.I), "samsung_galaxy"),
-    (re.compile(r'SM-[A-Za-z0-9]+', re.I), "samsung_galaxy"),
-    (re.compile(r'(?:Redmi|Xiaomi)(?: [A-Za-z0-9 +\-]+)?', re.I), "xiaomi"),
-    (re.compile(r'OnePlus(?: [A-Za-z0-9 +\-]+)?', re.I), "oneplus"),
-    (re.compile(r'(?:Moto|Motorola)(?: [A-Za-z0-9 +\-]+)?', re.I), "motorola"),
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,12 +92,9 @@ def _model(value: str | None) -> tuple[str, str | None]:
     if (not candidate or len(candidate) > 64 or _MAC_LIKE.search(candidate)
             or _UUID_LIKE.search(candidate) or re.search(r"\bBuild[/ _-]", candidate, re.I)):
         return "UNUSABLE", None
-    # Only bounded coarse families leave request memory; never an arbitrary
-    # device name or an uncontrolled raw model fragment.
-    for pattern, family in _MODEL_FAMILIES:
-        if pattern.fullmatch(candidate):
-            return "NORMALIZED", family
-    return "UNUSABLE", None
+    # Preserve the complete bounded semantic candidate. No taxonomy or
+    # manufacturer knowledge is applied in the acquisition probe.
+    return "NORMALIZED", candidate
 
 
 def _platform_version(value: str | None) -> tuple[str, int | None]:
@@ -193,9 +182,6 @@ class PortalClientHintsProbe:
         self._now = now
         self._lock = threading.Lock()
         self._pending: dict[tuple[str, str, str], float] = {}
-        # Terminal tombstones prevent an absent-hints result from immediately
-        # starting a new negotiation on the next natural portal visit.
-        self._terminal: dict[tuple[str, str, str], float] = {}
 
     @property
     def pending_count(self) -> int:
@@ -205,7 +191,7 @@ class PortalClientHintsProbe:
     @property
     def lifecycle_entry_count(self) -> int:
         with self._lock:
-            return len(self._pending) + len(self._terminal)
+            return len(self._pending)
 
     def _record(self, event_type: str, source_subtype: str,
                 observation: PortalClientHintsProbeObservation | None,
@@ -250,26 +236,20 @@ class PortalClientHintsProbe:
             expired = [item for item, deadline in self._pending.items() if instant >= deadline]
             for item in expired:
                 del self._pending[item]
-            for item, deadline in tuple(self._terminal.items()):
-                if instant >= deadline:
-                    del self._terminal[item]
-            if key in expired:
-                action = "EXPIRED"
-            elif key in self._pending:
+            expired_current = key in expired
+            if key in self._pending:
                 del self._pending[key]
-                self._terminal[key] = instant + self._config.ttl_seconds
                 action = "CONSUMED"
             elif any(name in headers for name in _HEADERS):
-                if key in self._terminal or len(self._pending) + len(self._terminal) < self._config.max_entries:
-                    self._terminal[key] = instant + self._config.ttl_seconds
                 action = "UNSOLICITED"
-            elif key in self._terminal:
-                action = "TERMINAL"
-            elif len(self._pending) + len(self._terminal) < self._config.max_entries:
+            elif len(self._pending) < self._config.max_entries:
                 self._pending[key] = instant + self._config.ttl_seconds
                 action = "REQUESTED"
             else:
                 action = "CAPACITY_REJECTED"
+        if expired_current:
+            safe_emit(self._telemetry, "probe_expired")
+            self._record("probe_expired", source_subtype, None)
         if action == "REQUESTED":
             response.headers["Accept-CH"] = ACCEPT_CH
             safe_emit(self._telemetry, "probe_requested")
@@ -277,9 +257,6 @@ class PortalClientHintsProbe:
         if action == "CAPACITY_REJECTED":
             safe_emit(self._telemetry, "probe_capacity_rejected")
             return
-        if action == "EXPIRED":
-            safe_emit(self._telemetry, "probe_expired")
-            self._record("probe_expired", source_subtype, None)
         if action == "CONSUMED":
             if any(name in headers for name in _HEADERS):
                 observed = normalize_candidate_headers(headers, source_subtype=source_subtype)
@@ -297,6 +274,6 @@ class PortalClientHintsProbe:
                     False, "ABSENT", None, "MISSING",
                 )
                 self._record("probe_missing", source_subtype, missing, v1_candidate)
-        if action in {"EXPIRED", "CONSUMED", "UNSOLICITED"}:
+        if action in {"CONSUMED", "UNSOLICITED"}:
             response.headers["Clear-Site-Data"] = CLEAR_CLIENT_HINTS
             safe_emit(self._telemetry, "probe_teardown_emitted")

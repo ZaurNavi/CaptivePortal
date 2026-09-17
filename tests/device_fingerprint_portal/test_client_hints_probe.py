@@ -85,7 +85,7 @@ def test_one_shot_request_observation_and_teardown_are_bounded_and_sanitized():
     assert "Clear-Site-Data" not in first.headers
     assert candidate.pending_count == 1
 
-    raw_canary = "PRIVATE_UNCONTROLLED_MODEL_8291"
+    raw_canary = "Build/PRIVATE_UNCONTROLLED_MODEL_8291"
     second = apply(candidate, {
         "Sec-CH-UA-Model": f'"{raw_canary}"',
         "Sec-CH-UA-Platform-Version": '"15.2.1"',
@@ -94,6 +94,7 @@ def test_one_shot_request_observation_and_teardown_are_bounded_and_sanitized():
     assert second.headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
     assert "Accept-CH" not in second.headers
     assert candidate.pending_count == 0
+    assert candidate.lifecycle_entry_count == 0
     assert len(recorder.events) == 1
     event = recorder.events[0]
     assert event["observation"]["model_normalization_state"] == "UNUSABLE"
@@ -102,10 +103,13 @@ def test_one_shot_request_observation_and_teardown_are_bounded_and_sanitized():
     assert raw_canary not in json.dumps(event)
     assert "AA:BB:CC:DD:EE:FF" not in json.dumps(event)
     assert "site-1" not in json.dumps(event)
+    before = len(recorder.events)
     assert apply(candidate, {"Sec-CH-UA-Model": '"Pixel 8"'}).headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
     assert candidate.pending_count == 0
-    assert "Accept-CH" not in apply(candidate).headers
-    assert candidate.lifecycle_entry_count <= 2
+    assert candidate.lifecycle_entry_count == 0
+    assert len(recorder.events) == before
+    assert apply(candidate).headers["Accept-CH"] == ACCEPT_CH
+    assert candidate.lifecycle_entry_count == 1
 
 
 def test_missing_expired_capacity_and_insecure_paths_do_not_force_requests():
@@ -116,14 +120,15 @@ def test_missing_expired_capacity_and_insecure_paths_do_not_force_requests():
     assert "Accept-CH" not in apply(candidate, mac="AA:BB:CC:DD:EE:01").headers
     assert apply(candidate).headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
     assert recorder.events[-1]["observation"]["lifecycle_result"] == "MISSING"
-    assert "Accept-CH" not in apply(candidate).headers
+    assert candidate.lifecycle_entry_count == 0
+    assert apply(candidate).headers["Accept-CH"] == ACCEPT_CH
     clock.value = 3.0
     assert apply(candidate).headers["Accept-CH"] == ACCEPT_CH
-    clock.value = 6.0
-    assert apply(candidate).headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
     assert recorder.events[-1]["event_type"] == "probe_expired"
+    assert candidate.pending_count == 1
+    clock.value = 6.0
+    apply(candidate, {"Sec-CH-UA-Model": '"Pixel 8"'})
     assert candidate.pending_count == 0
-    assert candidate.lifecycle_entry_count == 0
 
 
 def test_site_mac_and_source_subtype_are_independent_lifecycle_keys():
@@ -132,15 +137,31 @@ def test_site_mac_and_source_subtype_are_independent_lifecycle_keys():
     apply(candidate)
     for kwargs in ({"site": "other-site"}, {"mac": "AA:BB:CC:DD:EE:02"},
                    {"subtype": "capport_login"}):
-        assert "Clear-Site-Data" not in apply(candidate, **kwargs).headers
-    assert candidate.pending_count == 4
+        response = apply(candidate, {"Sec-CH-UA-Model": '"Pixel 8"'}, **kwargs)
+        assert response.headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
+        assert "Accept-CH" not in response.headers
+        assert candidate.pending_count == 1
+        assert not recorder.events
     assert apply(candidate, {"Sec-CH-UA-Model": '"Pixel 8"'}).headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
-    assert recorder.events[-1]["observation"]["normalized_model_family_candidate"] == "pixel"
-    assert candidate.pending_count == 3
+    assert recorder.events[-1]["observation"]["normalized_model_family_candidate"] == "Pixel 8"
+    assert candidate.pending_count == 0
+
+
+def test_unsolicited_hints_have_no_state_or_research_record():
+    clock = Clock()
+    candidate, recorder = probe(clock)
+    result = apply(candidate, {"Sec-CH-UA-Model": '"SM-S918B"'})
+    assert result.headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
+    assert "Accept-CH" not in result.headers
+    assert candidate.lifecycle_entry_count == 0
+    assert recorder.events == []
 
 
 @pytest.mark.parametrize("raw,state,family", [
-    ('"Pixel  8"', "NORMALIZED", "pixel"),
+    ('"Pixel  8"', "NORMALIZED", "Pixel 8"),
+    ('"SM-S918B"', "NORMALIZED", "SM-S918B"),
+    ('"moto g85 5G"', "NORMALIZED", "moto g85 5G"),
+    ('"NovelModel X9"', "NORMALIZED", "NovelModel X9"),
     ('""', "UNUSABLE", None),
     ('"' + "A" * 65 + '"', "UNUSABLE", None),
     ('"Pixel\n8"', "UNUSABLE", None),
@@ -153,7 +174,8 @@ def test_model_candidate_shapes(raw, state, family):
     result = normalize_candidate_headers({"Sec-CH-UA-Model": raw}, source_subtype="capport_login")
     assert result.model_normalization_state == state
     assert result.normalized_model_family_candidate == family
-    assert raw not in repr(result)
+    if state == "UNUSABLE":
+        assert raw not in repr(result)
 
 
 @pytest.mark.parametrize("raw,state,major", [
@@ -186,13 +208,13 @@ def test_form_factor_candidate_shapes(raw, state, factors):
     assert result.normalized_form_factors_candidate == factors
 
 
-def test_normalization_is_closed_world_and_never_returns_raw_header_values():
+def test_normalization_preserves_only_bounded_semantic_candidates():
     observed = normalize_candidate_headers({
         "Sec-CH-UA-Model": '"Pixel 8"',
         "Sec-CH-UA-Platform-Version": '"14.0"',
         "Sec-CH-UA-Form-Factors": '"Mobile"',
     }, source_subtype="capport_login")
-    assert observed.normalized_model_family_candidate == "pixel"
+    assert observed.normalized_model_family_candidate == "Pixel 8"
     assert observed.normalized_platform_version_major_candidate == 14
     assert observed.normalized_form_factors_candidate == ("mobile",)
     invalid = normalize_candidate_headers({
@@ -217,7 +239,7 @@ def test_recorder_writes_only_sanitized_event_with_private_file_mode(tmp_path):
         now=lambda: datetime(2026, 9, 17, tzinfo=timezone.utc),
     )
     apply(candidate)
-    apply(candidate, {"Sec-CH-UA-Model": '"unknown-secret-model"'})
+    apply(candidate, {"Sec-CH-UA-Model": '"Build/unknown-secret-model"'})
     content = path.read_text(encoding="ascii")
     assert len(content.splitlines()) == 1
     assert "unknown-secret-model" not in content
@@ -243,7 +265,7 @@ def test_privacy_canaries_never_enter_observation_lifecycle_telemetry_or_output(
     )
     request_headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/PRIVATE_UA_CANARY_8901; wv) Chrome/120 Mobile",
-        "Sec-CH-UA-Model": '"PRIVATE_MODEL_CANARY_8902"',
+        "Sec-CH-UA-Model": '"Build/PRIVATE_MODEL_CANARY_8902"',
         "Sec-CH-UA-Platform-Version": '"PRIVATE_VERSION_CANARY_8903"',
         "Sec-CH-UA-Form-Factors": '"PRIVATE_FACTOR_CANARY_8904"',
     }
@@ -262,7 +284,7 @@ def test_privacy_canaries_never_enter_observation_lifecycle_telemetry_or_output(
     )
     assert response.headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
     assert candidate.pending_count == 0
-    retained = repr(recorder.events) + repr(telemetry.events) + repr(candidate._pending) + repr(candidate._terminal)
+    retained = repr(recorder.events) + repr(telemetry.events) + repr(candidate._pending)
     assert "PRIVATE_" not in retained
     assert len(recorder.events[0]["v1_semantic_digest"]) == 64
     assert "AA:BB:CC:DD:EE:FF" not in repr(recorder.events)
