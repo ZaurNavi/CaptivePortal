@@ -90,8 +90,8 @@ def canonical_set(values: list[Any], primary_key: Callable[[Any], Any]) -> list[
     except TypeError as exc:
         raise DeviceFingerprintValidationError("Invalid artifact SET key") from exc
     for previous, current in zip(ordered, ordered[1:]):
-        if previous[0] == current[0]:
-            _fail("Duplicate artifact SET primary key")
+        if previous[0] == current[0] and previous[1] == current[1]:
+            _fail("Duplicate artifact SET element")
     return [row[2] for row in ordered]
 
 

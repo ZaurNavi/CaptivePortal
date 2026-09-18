@@ -48,8 +48,12 @@ def test_sequence_order_is_preserved_and_declared_set_is_permutation_invariant()
         {"id": "a"}, {"id": "b"},
     ]
     assert canonical_set([3, 1, 2], lambda item: item) == [1, 2, 3]
+    same_primary = [{"id": "a", "value": 2}, {"id": "a", "value": 1}]
+    expected = [{"id": "a", "value": 1}, {"id": "a", "value": 2}]
+    assert canonical_set(same_primary, lambda row: row["id"]) == expected
+    assert canonical_set(list(reversed(same_primary)), lambda row: row["id"]) == expected
     with pytest.raises(DeviceFingerprintValidationError):
-        canonical_set([{"id": "a", "v": 1}, {"id": "a", "v": 2}], lambda row: row["id"])
+        canonical_set([{"id": "a", "value": 1}, {"id": "a", "value": 1}], lambda row: row["id"])
     with pytest.raises(DeviceFingerprintValidationError):
         canonical_set(["a", "a"], lambda item: item)
 
