@@ -76,6 +76,16 @@ def test_read_only_pages_exhaust_and_report_query_plans_without_mutation(tmp_pat
     repo.close()
 
 
+def test_reader_transaction_lifetime_includes_open_and_all_pagination(tmp_path):
+    _cfg, repo, _svc, case = _fixture(tmp_path)
+    timing = inspect_read_only(case)["timing"]
+    lifetime = timing["reader_transaction_lifetime"]["duration_ns"]
+    assert lifetime >= timing["open_snapshot_transaction"]["duration_ns"]
+    assert lifetime >= timing["evidence_pagination_total"]["duration_ns"]
+    assert lifetime >= timing["health_pagination_total"]["duration_ns"]
+    repo.close()
+
+
 def test_snapshot_watermark_remains_pinned_during_delayed_insert(tmp_path, monkeypatch):
     _cfg, repo, svc, case = _fixture(tmp_path)
     from app.device_fingerprint.read_service import DeviceFingerprintSnapshotReadSession

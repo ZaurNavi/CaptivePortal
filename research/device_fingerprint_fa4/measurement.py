@@ -154,7 +154,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
     tracemalloc.start()
     service = DeviceFingerprintReadService(case.db_path, retention_days=case.retention_days)
     registry = build_production_schema_registry()
-    open_start = _ns()
+    transaction_start = open_start = _ns()
     watermark_capture_ns = 0
     original_watermark_read = DeviceFingerprintRepository.read_ingest_watermark
     def timed_watermark(connection: Any) -> Any:
@@ -169,7 +169,6 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
             session = service.open_snapshot_read()
         open_timing = _duration(open_start)
         with session as snapshot:
-            read_started = _ns()
             watermark = snapshot.watermark
             connection = snapshot._connection  # instrumentation of this exact read transaction
             if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
@@ -240,7 +239,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
                     case.site_id, producer, capture, kind, through_utc=case.to_utc,
                 )
             health_timing = _duration(health_start)
-        reader_timing = _duration(read_started)
+        reader_timing = _duration(transaction_start)
     finally:
         _current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
