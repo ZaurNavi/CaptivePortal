@@ -310,3 +310,113 @@ def test_worker_thread_contract_is_one_named_daemon():
     value, _producer, _clock = runtime(); value.start()
     assert value.thread.name == "device-fingerprint-portal" and value.thread.daemon
     value.stop(); value.thread.join(timeout=1)
+
+
+def _heartbeat_runtime(monkeypatch, producer=None):
+    clock = Clock()
+    producer = producer or Producer()
+    config = portal_config_from_env({"DEVICE_FINGERPRINT_PORTAL_ENABLED": "true"})
+    value = PortalEvidenceRuntime(config, producer=producer, monotonic=clock.monotonic, now=clock.now)
+
+    class ManualThread:
+        def __init__(self, *, target, name, daemon):
+            self.target, self.name, self.daemon = target, name, daemon
+        def start(self): pass
+
+    monkeypatch.setattr("app.device_fingerprint_portal.runtime.threading.Thread", ManualThread)
+    value.start()
+    return value, producer, clock
+
+
+def test_idle_worker_has_four_visitor_independent_heartbeat_opportunities(monkeypatch):
+    value, producer, clock = _heartbeat_runtime(monkeypatch)
+    assert value.next_heartbeat_at == 60
+    clock.advance(59.999)
+    assert not value._heartbeat_if_due()
+    for number in range(1, 5):
+        clock.advance(0.001 if number == 1 else 60)
+        assert value._heartbeat_if_due()
+        assert value.next_heartbeat_at == (number + 1) * 60
+    assert value.queue.empty()
+    assert producer.evidence == []
+    assert len(producer.health) == 4
+    assert [batch[0]["observed_at"] for batch in producer.health] == [
+        (Clock.now_value + timedelta(seconds=number * 60)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        for number in range(1, 5)
+    ]
+    for batch in producer.health:
+        assert len(batch) == 1
+        assert batch[0]["source_kind"] == "portal_headers"
+        assert batch[0]["status"] == "available"
+        assert batch[0]["reason_code"] is None
+        assert set(batch[0]) == {
+            "source_health_event_id", "site_id", "capture_source_id", "source_kind",
+            "status", "reason_code", "observed_at",
+        }
+
+
+def test_visitor_success_does_not_move_heartbeat_deadline(monkeypatch):
+    value, producer, clock = _heartbeat_runtime(monkeypatch)
+    clock.advance(30)
+    assert value.try_submit(session(), candidate(clock))
+    assert value.process_once() == 1
+    assert value.next_heartbeat_at == 60
+    assert len(producer.health) == 1  # Existing visitor-driven transition.
+    clock.advance(30)
+    assert value._heartbeat_if_due()
+    assert len(producer.health) == 2  # Independent same-state heartbeat.
+    assert value.next_heartbeat_at == 120
+
+
+def test_heartbeat_failure_recovery_does_not_claim_lost_interval_complete(monkeypatch):
+    class HealthProducer(Producer):
+        def __init__(self):
+            super().__init__()
+            self.health_outcomes = [
+                DeliveryResult("transient", 30, 503),
+                DeliveryResult("success", 0, 200),
+                DeliveryResult("success", 0, 200),
+            ]
+            self.received = []
+        def deliver_source_health(self, events):
+            batch = list(events)
+            self.health.append(batch)
+            result = self.health_outcomes.pop(0)
+            if result.status == "success":
+                self.received.append(batch)
+            return result
+
+    value, producer, clock = _heartbeat_runtime(monkeypatch, HealthProducer())
+    clock.advance(60)
+    assert value._heartbeat_if_due()
+    assert producer.received == []
+    assert value.health_state == "unavailable"
+    assert value.unavailable_started_at == clock.now()
+    assert value.next_heartbeat_at == 120
+    clock.advance(60)
+    assert value._heartbeat_if_due()
+    assert [[event["status"] for event in batch] for batch in producer.received] == [
+        ["unavailable", "available"],
+    ]
+    assert producer.received[0][0]["reason_code"] == "ingest_delivery_unavailable"
+    assert producer.received[0][0]["observed_at"] == producer.health[0][0]["observed_at"]
+    assert value.unavailable_started_at is None
+    assert value.next_heartbeat_at == 180
+    clock.advance(60)
+    assert value._heartbeat_if_due()
+    assert [[event["status"] for event in batch] for batch in producer.received] == [
+        ["unavailable", "available"], ["available"],
+    ]
+
+
+def test_worker_loop_dispatches_due_heartbeat_without_visitors(monkeypatch):
+    value, producer, clock = _heartbeat_runtime(monkeypatch)
+    clock.advance(60)
+    def one_idle_poll(*, block):
+        assert block is True
+        value.stop()
+        return 0
+    value.process_once = one_idle_poll
+    value.thread.target()
+    assert len(producer.health) == 1
+    assert producer.evidence == []
