@@ -222,6 +222,9 @@ def run_candidate_proof(proof_input: dict[str, Any]) -> dict[str, Any]:
             or policy_payload["measured_max_relative_clock_offset_ms"]
             != clock["overall_measured_max_relative_offset_ms"]):
         _fail("Candidate clock policy does not match measured proof")
+    if (policy_payload["cutover_guard_seconds"] * 1000
+            < clock["overall_measured_max_relative_offset_ms"]):
+        _fail("Cutover guard is shorter than measured clock uncertainty")
     cutovers = _verify_cutover_fixtures(timeline, policy, value["cutover_fixtures"])
     return {
         "result": "PROOF_COMPLETE" if cutovers["pass"] else "PROOF_FAILED",

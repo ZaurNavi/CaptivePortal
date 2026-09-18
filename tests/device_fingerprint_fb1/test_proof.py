@@ -172,6 +172,9 @@ def test_zero_guard_cutover_proof_boundary_is_exact(tmp_path):
     value = _input(cfg.db_path)
     value["candidate_timeline_payload"] = timeline.semantic_payload
     value["candidate_clock_policy_payload"] = policy.semantic_payload
+    value["candidate_clock_policy_payload"]["measured_max_relative_clock_offset_ms"] = 0
+    for sample in value["clock_proof_input"]["clock_samples"]:
+        sample["producer_time_utc"] = T
     value["cutover_fixtures"] = [{
         "site_id": SITE, "origin_group": "dhcp", "source_kind": "dhcp",
         "cutover_utc": T, "guard_seconds": 0,
@@ -181,6 +184,36 @@ def test_zero_guard_cutover_proof_boundary_is_exact(tmp_path):
         ],
     }]
     assert run_candidate_proof(value)["cutover_fixture_summary"]["pass"] is True
+    repo.close()
+
+
+@pytest.mark.parametrize(
+    ("offset_ms", "producer_time_utc", "guard_seconds", "accepted"),
+    [
+        (125, "2026-09-15T11:59:59.875Z", 0, False),
+        (1001, "2026-09-15T11:59:58.999Z", 1, False),
+        (1000, "2026-09-15T11:59:59.000Z", 1, True),
+        (0, T, 0, True),
+    ],
+)
+def test_cutover_guard_covers_measured_clock_uncertainty(
+        tmp_path, offset_ms, producer_time_utc, guard_seconds, accepted):
+    cfg, repo, _svc, _case = _fixture(tmp_path, count=1)
+    value = _input(cfg.db_path)
+    value["clock_proof_input"]["clock_samples"][0]["producer_time_utc"] = producer_time_utc
+    value["clock_proof_input"]["clock_samples"][1]["producer_time_utc"] = T
+    value["candidate_clock_policy_payload"]["measured_max_relative_clock_offset_ms"] = offset_ms
+    value["candidate_clock_policy_payload"]["cutover_guard_seconds"] = guard_seconds
+    value["cutover_fixtures"][0]["guard_seconds"] = guard_seconds
+    value["cutover_fixtures"][0]["checks"] = [{
+        "observed_at": T,
+        "expected_outcome": "CUTOVER_AMBIGUOUS" if guard_seconds else "AUTHORIZED",
+    }]
+    if accepted:
+        assert run_candidate_proof(value)["result"] == "PROOF_COMPLETE"
+    else:
+        with pytest.raises(DeviceFingerprintValidationError, match="Cutover guard"):
+            run_candidate_proof(value)
     repo.close()
 
 
