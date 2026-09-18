@@ -20,6 +20,7 @@ from .producer import PortalEvidenceProducer
 from .telemetry import PortalEvidenceTelemetry, safe_emit
 
 UTC = timezone.utc
+_HEARTBEAT_INTERVAL_SECONDS = 60
 
 
 class PortalEvidenceRuntime:
@@ -43,10 +44,13 @@ class PortalEvidenceRuntime:
         self.cooldown_until = 0.0
         self.health_state = "unknown"
         self.unavailable_started_at: datetime | None = None
+        self.next_heartbeat_at: float | None = None
 
     def start(self) -> None:
         if self.thread is not None:
             raise RuntimeError("Portal evidence runtime already started")
+        if self.config.enabled:
+            self.next_heartbeat_at = self.monotonic() + _HEARTBEAT_INTERVAL_SECONDS
         self.thread = threading.Thread(
             target=self._worker_loop,
             name="device-fingerprint-portal",
@@ -123,7 +127,13 @@ class PortalEvidenceRuntime:
 
     def process_once(self, *, block: bool = False) -> int:
         try:
-            first = self.queue.get(timeout=0.1) if block else self.queue.get_nowait()
+            if block:
+                timeout = 0.1
+                if self.next_heartbeat_at is not None:
+                    timeout = min(timeout, max(0.0, self.next_heartbeat_at - self.monotonic()))
+                first = self.queue.get(timeout=timeout)
+            else:
+                first = self.queue.get_nowait()
         except queue.Empty:
             return 0
         items = [first]
@@ -180,6 +190,7 @@ class PortalEvidenceRuntime:
         while not self.stop_event.is_set():
             try:
                 self.process_once(block=True)
+                self._heartbeat_if_due()
             except Exception:
                 safe_emit(
                     self.telemetry,
@@ -187,6 +198,35 @@ class PortalEvidenceRuntime:
                     error_category="contained_worker_exception",
                     runtime_state="degraded",
                 )
+
+    def _heartbeat_if_due(self) -> bool:
+        deadline = self.next_heartbeat_at
+        if deadline is None or self.monotonic() < deadline:
+            return False
+        self.next_heartbeat_at = deadline + _HEARTBEAT_INTERVAL_SECONDS
+        while self.next_heartbeat_at <= self.monotonic():
+            self.next_heartbeat_at += _HEARTBEAT_INTERVAL_SECONDS
+
+        observed_at = self.now()
+        events: list[dict[str, Any]] = []
+        unavailable = self.unavailable_started_at
+        if (self.health_state == "unavailable" and unavailable is not None
+                and (observed_at - unavailable).total_seconds() <= 86400):
+            events.append(self._health_event("unavailable", "ingest_delivery_unavailable", unavailable))
+        events.append(self._health_event("available", None, observed_at))
+        try:
+            result = self.producer.deliver_source_health(events)
+        except Exception:
+            result = DeliveryResult("transient", self.config.transient_cooldown_seconds)
+        if result.status == "success":
+            self.health_state = "available"
+            self.unavailable_started_at = None
+            safe_emit(self.telemetry, "portal_evidence_source_health", source_health_transition="available")
+        elif result.status == "transient":
+            if self.health_state != "unavailable":
+                self.unavailable_started_at = self.now()
+            self.health_state = "unavailable"
+        return True
 
     def _evidence_success(self, recovered_at: datetime) -> None:
         events: list[dict[str, Any]] = []
