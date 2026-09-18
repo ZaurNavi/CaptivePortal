@@ -43,7 +43,8 @@ def test_schema_v2_exact_tables_indexes_pragmas_and_read_only(tmp_path):
     assert (constants.BUSY_TIMEOUT_MS, constants.WAL_AUTOCHECKPOINT_PAGES,
             constants.JOURNAL_SIZE_LIMIT_BYTES, constants.RETENTION_DELETE_CHUNK_ROWS,
             constants.MAX_RETENTION_CHUNKS_PER_PASS,
-            constants.SOURCE_HEALTH_RETENTION_DAYS) == (500, 1000, 67_108_864, 500, 20, 30)
+            constants.SOURCE_HEALTH_RETENTION_DAYS,
+            constants.SOURCE_HEALTH_RETENTION_MARGIN_SECONDS) == (500, 1000, 67_108_864, 500, 20, 30, 600)
     cfg, repo = initialized(tmp_path)
     connection = repo.connection
     assert connection.execute("PRAGMA user_version").fetchone()[0] == 2

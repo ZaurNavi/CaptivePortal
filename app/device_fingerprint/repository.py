@@ -17,7 +17,7 @@ from .config import (
     JOURNAL_SIZE_LIMIT_BYTES,
     MAX_RETENTION_CHUNKS_PER_PASS,
     RETENTION_DELETE_CHUNK_ROWS,
-    SOURCE_HEALTH_RETENTION_DAYS,
+    SOURCE_HEALTH_RETENTION_MARGIN_SECONDS,
     WAL_AUTOCHECKPOINT_PAGES,
 )
 from .models import (
@@ -237,9 +237,12 @@ class DeviceFingerprintRepository:
         return BatchResult(len(values), inserted, duplicate)
 
     def cleanup(self, *, now: datetime, evidence_retention_days: int) -> Mapping[str, int]:
+        evidence_cutoff = now.astimezone(UTC) - timedelta(days=evidence_retention_days)
         cutoffs = {
-            "device_fingerprint_evidence": format_utc(now.astimezone(UTC) - timedelta(days=evidence_retention_days)),
-            "device_fingerprint_source_health_events": format_utc(now.astimezone(UTC) - timedelta(days=SOURCE_HEALTH_RETENTION_DAYS)),
+            "device_fingerprint_evidence": format_utc(evidence_cutoff),
+            "device_fingerprint_source_health_events": format_utc(
+                evidence_cutoff - timedelta(seconds=SOURCE_HEALTH_RETENTION_MARGIN_SECONDS)
+            ),
         }
         ids = {
             "device_fingerprint_evidence": "evidence_id",
