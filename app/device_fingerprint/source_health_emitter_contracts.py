@@ -8,6 +8,7 @@ from .artifact_content import ArtifactContent, canonical_set, make_artifact_cont
 from .models import DeviceFingerprintValidationError
 
 _IDENTITY_SUFFIX = "8e6173bf7ea566bdfb3823fc58bc728ca14e3893"
+_PERIODIC_PORTAL_IMPLEMENTATION_SHA = "337db041dcb194cb44f019686e0c4d29d221def7"
 _STATUSES = frozenset({"available", "unavailable", "unsupported"})
 _DOMAINS = frozenset({"ACQUISITION", "DELIVERY", "CAPABILITY", "RECOVERY", "OTHER"})
 _TOP_LEVEL = frozenset({
@@ -190,6 +191,17 @@ def build_portal_source_health_emitter_contract() -> ArtifactContent:
     return make_source_health_emitter_contract(_payload(
         "CaptivPortal/device_fingerprint_portal/source-health@" + _IDENTITY_SUFFIX,
         ["portal_headers"], "EVENT_DRIVEN", None, False,
+        ["available", "unavailable"],
+        [_reason("ingest_delivery_unavailable", "Task-01 evidence delivery was temporarily unavailable", "DELIVERY")],
+        capacity_block=False,
+    ))
+
+
+def build_periodic_portal_source_health_emitter_contract() -> ArtifactContent:
+    """Return the replacement Portal contract bound to the exact H1 runtime candidate."""
+    return make_source_health_emitter_contract(_payload(
+        "CaptivPortal/device_fingerprint_portal/source-health@" + _PERIODIC_PORTAL_IMPLEMENTATION_SHA,
+        ["portal_headers"], "PERIODIC", 60_000, True,
         ["available", "unavailable"],
         [_reason("ingest_delivery_unavailable", "Task-01 evidence delivery was temporarily unavailable", "DELIVERY")],
         capacity_block=False,
