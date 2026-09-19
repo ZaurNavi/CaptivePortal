@@ -21,13 +21,22 @@ def test_stress_rejects_any_external_db_target(tmp_path):
     assert path.read_bytes() == b"sensitive database"
 
 
-def test_disposable_stress_is_deterministic_in_semantics_and_measures_wal(tmp_path):
-    first = run_disposable_stress(_case(), temporary_parent=str(tmp_path))
-    second = run_disposable_stress(_case(), temporary_parent=str(tmp_path))
+def test_disposable_stress_is_deterministic_in_semantics_and_measures_wal(
+    tmp_path, accepted_dependencies,
+):
+    first = run_disposable_stress(
+        _case(), temporary_parent=str(tmp_path),
+        semantic_dependencies=accepted_dependencies,
+    )
+    second = run_disposable_stress(
+        _case(), temporary_parent=str(tmp_path),
+        semantic_dependencies=accepted_dependencies,
+    )
     assert first["result"] == second["result"] == "MEASUREMENT_COMPLETE"
     assert first["measurement_case"]["mode"] == "DISPOSABLE_STRESS"
     for field in ("cardinality", "pagination", "payload_accounting", "semantic_byte_accounting"):
         assert first[field] == second[field]
+    assert first["semantic_byte_accounting"]["final_binding_and_dependency_overhead_status"] == "COMPLETE"
     assert first["cardinality"]["total_evidence_rows"] == 5
     assert first["cardinality"]["total_relevant_health_rows"] == 5
     assert first["pagination"] == {"evidence_pages": 3, "health_pages": 3}

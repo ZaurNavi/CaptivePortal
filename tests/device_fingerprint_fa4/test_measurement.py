@@ -76,6 +76,36 @@ def test_read_only_pages_exhaust_and_report_query_plans_without_mutation(tmp_pat
     repo.close()
 
 
+def test_complete_semantic_accounting_uses_exact_six_category_formula_and_is_private(
+    tmp_path, accepted_dependencies,
+):
+    _cfg, repo, _svc, case = _fixture(tmp_path, count=2)
+    report = inspect_read_only(case, semantic_dependencies=accepted_dependencies)
+    accounting = report["semantic_byte_accounting"]
+    categories = (
+        "authorized_evidence_descriptor_bytes",
+        "verified_payload_bytes",
+        "materialized_payload_bytes",
+        "authorized_health_descriptor_bytes",
+        "binding_descriptor_bytes",
+        "semantic_dependency_reference_bytes",
+    )
+    assert accounting["total_semantic_input_bytes"] == sum(
+        accounting[field] for field in categories
+    )
+    assert accounting["descriptor_scope"] == "r14_snapshot_semantic_descriptors_complete"
+    assert accounting["final_binding_and_dependency_overhead_status"] == "COMPLETE"
+    assert accounting["binding_epoch_count"] == 1
+    serialized = report_json(report)
+    for forbidden in (
+        FIXED_MAC, FIXED_MAC.lower(), "192.168.8.10", "payload_json",
+        "android-dhcp-13", "LAB-ONLY-NOT-RETAINED", "Bearer", "User-Agent",
+        "Sec-CH-UA-Model",
+    ):
+        assert forbidden not in serialized
+    repo.close()
+
+
 def test_reader_transaction_lifetime_includes_open_and_all_pagination(tmp_path):
     _cfg, repo, _svc, case = _fixture(tmp_path)
     timing = inspect_read_only(case)["timing"]

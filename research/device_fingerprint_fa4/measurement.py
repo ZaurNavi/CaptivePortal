@@ -22,6 +22,16 @@ from app.device_fingerprint.repository import DeviceFingerprintRepository
 from app.device_fingerprint.schema_registry import build_production_schema_registry
 from app.device_fingerprint.validation import parse_utc, validate_mac, validate_site_id
 
+from .semantic_accounting import (
+    SemanticAccountingDependencies,
+    authorized_descriptor,
+    binding_descriptor_bytes,
+    complete_semantic_byte_accounting,
+    semantic_dependency_descriptor,
+    semantic_dependency_reference_bytes,
+    validate_semantic_accounting_dependencies,
+)
+
 _SHA = re.compile(r"[0-9a-f]{40}")
 _EVIDENCE_FIELDS = (
     "evidence_id", "ingest_sequence", "producer_id", "source_kind",
@@ -147,9 +157,15 @@ def _rss() -> tuple[int | None, bool]:
         return None, False
 
 
-def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+def inspect_read_only(
+    case: InspectionCase,
+    *,
+    semantic_dependencies: SemanticAccountingDependencies | None = None,
+) -> dict[str, Any]:
     """Measure one fully exhausted pinned snapshot without writing to its DB."""
     _validate(case)
+    if semantic_dependencies is not None:
+        validate_semantic_accounting_dependencies(semantic_dependencies)
     cpu_start, total_start = time.process_time_ns(), _ns()
     tracemalloc.start()
     service = DeviceFingerprintReadService(case.db_path, retention_days=case.retention_days)
@@ -184,6 +200,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
             verified_count = materialized_count = unsupported_count = 0
             verified_bytes = materialized_bytes = largest_payload = 0
             evidence_descriptor_bytes = health_descriptor_bytes = 0
+            resolved_binding_epochs: list[dict[str, Any]] = []
             grouped: Counter[tuple[str, int, str]] = Counter()
             verify_ns = 0
             page_start = _ns()
@@ -197,9 +214,13 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
                 for row in page["items"]:
                     evidence_count += 1
                     grouped[(row["source_kind"], row["feature_schema_version"], row["quality_state"])] += 1
-                    evidence_descriptor_bytes += len(canonical_artifact_json({
-                        field: row[field] for field in _EVIDENCE_FIELDS
-                    }))
+                    descriptor = {field: row[field] for field in _EVIDENCE_FIELDS}
+                    if semantic_dependencies is not None:
+                        descriptor, epoch = authorized_descriptor(
+                            row, _EVIDENCE_FIELDS, semantic_dependencies,
+                        )
+                        resolved_binding_epochs.append(epoch)
+                    evidence_descriptor_bytes += len(canonical_artifact_json(descriptor))
                     verify_start = _ns()
                     verified = verify_persisted_payload(
                         row["source_kind"], row["feature_schema_version"],
@@ -229,9 +250,13 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
                     health_pages += 1
                     for row in page["items"]:
                         health_count += 1
-                        health_descriptor_bytes += len(canonical_artifact_json({
-                            field: row[field] for field in _HEALTH_FIELDS
-                        }))
+                        descriptor = {field: row[field] for field in _HEALTH_FIELDS}
+                        if semantic_dependencies is not None:
+                            descriptor, epoch = authorized_descriptor(
+                                row, _HEALTH_FIELDS, semantic_dependencies,
+                            )
+                            resolved_binding_epochs.append(epoch)
+                        health_descriptor_bytes += len(canonical_artifact_json(descriptor))
                     cursor = page["next_cursor"]
                     if cursor is None:
                         break
@@ -244,6 +269,47 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
         _current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
     rss, rss_available = _rss()
+    if semantic_dependencies is None:
+        semantic_accounting = {
+            "task01_evidence_descriptor_bytes": evidence_descriptor_bytes,
+            "verified_payload_bytes": verified_bytes,
+            "materialized_payload_bytes": materialized_bytes,
+            "task01_health_descriptor_bytes": health_descriptor_bytes,
+            "known_measurable_input_bytes": evidence_descriptor_bytes + verified_bytes
+            + materialized_bytes + health_descriptor_bytes,
+            "descriptor_scope": "task01_durable_fields_only_binding_epoch_pending",
+            "final_binding_and_dependency_overhead_status": "PENDING_FOUNDATION_DEPENDENCIES",
+        }
+    else:
+        binding_bytes, binding_count = binding_descriptor_bytes(resolved_binding_epochs)
+        dependency_bytes = semantic_dependency_reference_bytes(semantic_dependencies)
+        semantic_accounting = complete_semantic_byte_accounting({
+            "authorized_evidence_descriptor_bytes": evidence_descriptor_bytes,
+            "verified_payload_bytes": verified_bytes,
+            "materialized_payload_bytes": materialized_bytes,
+            "authorized_health_descriptor_bytes": health_descriptor_bytes,
+            "binding_descriptor_bytes": binding_bytes,
+            "semantic_dependency_reference_bytes": dependency_bytes,
+        })
+        semantic_accounting.update({
+            "binding_epoch_count": binding_count,
+            "semantic_dependency_artifact_ids": {
+                "evidence_source_binding_timeline": (
+                    semantic_dependencies.binding_timeline.artifact_id
+                ),
+                "binding_clock_policy": semantic_dependencies.binding_clock_policy.artifact_id,
+                "evidence_schema_registry_contract": (
+                    semantic_dependencies.schema_registry_contract.artifact_id
+                ),
+                "ttl_capture_placement_proof": (
+                    semantic_dependencies.ttl_capture_placement_proof.artifact_id
+                ),
+                "origin_runtime_admission": semantic_dependency_descriptor(
+                    semantic_dependencies
+                )["origin_runtime_admission"]["artifact_id"],
+            },
+            "origin_runtime_admission_status": "PRE_F_ADMIT_SIZING_ONLY",
+        })
     report = {
         "report_schema_version": 1,
         "candidate_identity": {
@@ -275,16 +341,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
             "materialized_payload_bytes": materialized_bytes,
             "unsupported_intact_row_count": unsupported_count,
         },
-        "semantic_byte_accounting": {
-            "task01_evidence_descriptor_bytes": evidence_descriptor_bytes,
-            "verified_payload_bytes": verified_bytes,
-            "materialized_payload_bytes": materialized_bytes,
-            "task01_health_descriptor_bytes": health_descriptor_bytes,
-            "known_measurable_input_bytes": evidence_descriptor_bytes + verified_bytes
-            + materialized_bytes + health_descriptor_bytes,
-            "descriptor_scope": "task01_durable_fields_only_binding_epoch_pending",
-            "final_binding_and_dependency_overhead_status": "PENDING_FOUNDATION_DEPENDENCIES",
-        },
+        "semantic_byte_accounting": semantic_accounting,
         "timing": {"open_snapshot_transaction": open_timing,
                    "watermark_capture": {"duration_ns": watermark_capture_ns,
                                          "duration_ms": watermark_capture_ns // 1_000_000},
