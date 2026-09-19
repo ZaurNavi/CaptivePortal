@@ -86,6 +86,14 @@ def _health_row() -> dict:
     }
 
 
+def _epoch_for(dependencies, source_kind: str) -> dict:
+    return next(
+        epoch
+        for epoch in dependencies.binding_timeline.semantic_payload["binding_epochs"]
+        if epoch["source_kind"] == source_kind
+    )
+
+
 def test_exact_accepted_dependency_identities_are_rematerialized(accepted_dependencies):
     assert accepted_dependencies.binding_timeline.artifact_id == ACCEPTED_BINDING_TIMELINE_ID
     assert accepted_dependencies.binding_clock_policy.artifact_id == ACCEPTED_BINDING_CLOCK_POLICY_ID
@@ -220,6 +228,125 @@ def test_previous_epoch_health_anchor_is_not_inherited_across_cutover():
     row = _health_row()
     row["observed_at"] = "2026-09-18T10:43:59.999Z"
     assert health_anchor_descriptor(row, _HEALTH_FIELDS, second, timeline, clock) is None
+
+
+@pytest.mark.parametrize(("source_kind", "observed_at"), [
+    ("dhcp", "2026-09-18T10:43:13.705Z"),
+    ("portal_headers", "2026-09-18T08:39:36.219Z"),
+])
+def test_pre_first_epoch_health_predecessor_is_omitted_without_error(
+    accepted_dependencies, source_kind, observed_at,
+):
+    epoch = _epoch_for(accepted_dependencies, source_kind)
+    row = _health_row()
+    row.update({
+        "producer_id": epoch["producer_id"],
+        "capture_source_id": epoch["capture_source_id"],
+        "source_kind": source_kind,
+        "observed_at": observed_at,
+    })
+    assert health_anchor_descriptor(
+        row,
+        _HEALTH_FIELDS,
+        epoch,
+        accepted_dependencies.binding_timeline,
+        accepted_dependencies.binding_clock_policy,
+    ) is None
+
+
+def test_malformed_pre_epoch_health_anchor_still_fails_closed(accepted_dependencies):
+    epoch = _epoch_for(accepted_dependencies, "dhcp")
+    row = _health_row()
+    row["observed_at"] = "2026-09-18T10:43:13.705Z"
+    del row["status"]
+    with pytest.raises(DeviceFingerprintValidationError, match="Incomplete"):
+        health_anchor_descriptor(
+            row,
+            _HEALTH_FIELDS,
+            epoch,
+            accepted_dependencies.binding_timeline,
+            accepted_dependencies.binding_clock_policy,
+        )
+
+
+def test_health_at_exact_epoch_start_is_authorized(accepted_dependencies):
+    epoch = _epoch_for(accepted_dependencies, "dhcp")
+    row = _health_row()
+    row["observed_at"] = epoch["effective_from_utc"]
+    descriptor = health_anchor_descriptor(
+        row,
+        _HEALTH_FIELDS,
+        epoch,
+        accepted_dependencies.binding_timeline,
+        accepted_dependencies.binding_clock_policy,
+    )
+    assert descriptor is not None
+    assert descriptor["binding_epoch_id"] == epoch["binding_epoch_id"]
+
+
+def test_in_epoch_no_binding_health_anchor_fails_closed(accepted_dependencies):
+    target = {
+        **_epoch_for(accepted_dependencies, "dhcp"),
+        "binding_epoch_id": "bounded-unregistered-dhcp-epoch",
+        "effective_from_utc": "2026-09-18T10:43:20.000Z",
+        "effective_to_utc": "2026-09-18T10:43:29.014Z",
+    }
+    row = _health_row()
+    row["observed_at"] = "2026-09-18T10:43:25.000Z"
+    with pytest.raises(DeviceFingerprintValidationError, match="no unambiguous"):
+        health_anchor_descriptor(
+            row,
+            _HEALTH_FIELDS,
+            target,
+            accepted_dependencies.binding_timeline,
+            accepted_dependencies.binding_clock_policy,
+        )
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("producer_id", "wrong-producer"),
+    ("capture_source_id", "wrong-capture"),
+])
+def test_health_anchor_authority_mismatch_remains_fail_closed(
+    accepted_dependencies, field, value,
+):
+    epoch = _epoch_for(accepted_dependencies, "dhcp")
+    row = _health_row()
+    row[field] = value
+    with pytest.raises(DeviceFingerprintValidationError, match="authoritative binding"):
+        health_anchor_descriptor(
+            row,
+            _HEALTH_FIELDS,
+            epoch,
+            accepted_dependencies.binding_timeline,
+            accepted_dependencies.binding_clock_policy,
+        )
+
+
+def test_cutover_ambiguous_health_anchor_is_quarantined():
+    first = binding_epoch(
+        "dhcp", "dhcp", "sensor-zefer-01", "zefer-span-01", NETWORK_EMITTER,
+        effective_from=EFFECTIVE_FROM,
+        effective_to="2026-09-18T10:44:00.000Z",
+    )
+    second = {
+        **first,
+        "binding_epoch_id": "zefer-dhcp-v2-20260918T104400000Z",
+        "effective_from_utc": "2026-09-18T10:44:00.000Z",
+        "effective_to_utc": None,
+    }
+    timeline = make_evidence_source_binding_timeline(
+        {"binding_timeline_contract_version": 1, "binding_epochs": [first, second]},
+        build_source_health_emitter_contracts(),
+    )
+    clock_payload = accepted_clock_payload()
+    clock_payload["cutover_guard_seconds"] = 1
+    clock = make_binding_clock_policy(clock_payload)
+    row = _health_row()
+    row["observed_at"] = second["effective_from_utc"]
+    assert health_anchor_descriptor(
+        row, _HEALTH_FIELDS, second, timeline, clock,
+    ) is None
 
 
 @pytest.mark.parametrize("field,artifact_type", [

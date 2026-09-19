@@ -26,7 +26,12 @@ from app.device_fingerprint.models import DeviceFingerprintValidationError
 from app.device_fingerprint.source_health_emitter_contracts import (
     build_source_health_emitter_contracts,
 )
-from app.device_fingerprint.validation import parse_utc, validate_site_id
+from app.device_fingerprint.validation import (
+    parse_utc,
+    validate_machine_id,
+    validate_site_id,
+    validate_source_kind,
+)
 
 ACCEPTED_BINDING_TIMELINE_ID = (
     "EvidenceSourceBindingTimeline:v1:sha256:"
@@ -254,13 +259,46 @@ def health_anchor_descriptor(
     clock_policy: ArtifactContent,
 ) -> dict[str, Any] | None:
     """Keep an anchor only when it is authoritative for this exact epoch."""
-    epoch = resolve_row_binding(row, timeline, clock_policy)
-    if epoch["binding_epoch_id"] != target_epoch["binding_epoch_id"]:
-        return None
+    if not isinstance(row, dict) or not isinstance(target_epoch, dict):
+        _fail("Invalid health anchor")
     try:
         descriptor = {field: row[field] for field in fields}
+        target_epoch_id = target_epoch["binding_epoch_id"]
     except KeyError as exc:
         raise DeviceFingerprintValidationError("Incomplete health anchor descriptor") from exc
+    observed_at = parse_utc(row.get("observed_at"))
+    target_start = parse_utc(target_epoch.get("effective_from_utc"))
+    target_end_value = target_epoch.get("effective_to_utc")
+    if target_end_value is not None:
+        parse_utc(target_end_value)
+    validate_site_id(row.get("site_id"))
+    producer_id = validate_machine_id(row.get("producer_id"))
+    capture_source_id = validate_machine_id(row.get("capture_source_id"))
+    source_kind = validate_source_kind(row.get("source_kind"))
+    origin_group = _SOURCE_ORIGINS.get(source_kind)
+    if origin_group is None:
+        _fail("No exact origin mapping for source kind")
+    if observed_at < target_start:
+        return None
+
+    result = resolve_authoritative_binding(
+        timeline,
+        clock_policy,
+        row.get("site_id"),
+        origin_group,
+        source_kind,
+        row.get("observed_at"),
+    )
+    if result["status"] == "CUTOVER_AMBIGUOUS":
+        return None
+    if result["status"] != "AUTHORIZED" or result["binding_epoch"] is None:
+        _fail("Health anchor has no unambiguous authoritative binding")
+    epoch = result["binding_epoch"]
+    if (producer_id != epoch["producer_id"]
+            or capture_source_id != epoch["capture_source_id"]):
+        _fail("Health anchor does not match authoritative binding")
+    if epoch["binding_epoch_id"] != target_epoch_id:
+        return None
     descriptor["binding_epoch_id"] = epoch["binding_epoch_id"]
     return descriptor
 
