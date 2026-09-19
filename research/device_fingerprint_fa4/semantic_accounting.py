@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,6 +11,7 @@ from app.device_fingerprint.artifact_content import (
     ArtifactRef,
     canonical_artifact_json,
     canonical_set,
+    decode_artifact_json,
     make_artifact_content,
 )
 from app.device_fingerprint.binding_contracts import (
@@ -26,6 +26,7 @@ from app.device_fingerprint.models import DeviceFingerprintValidationError
 from app.device_fingerprint.source_health_emitter_contracts import (
     build_source_health_emitter_contracts,
 )
+from app.device_fingerprint.validation import parse_utc, validate_site_id
 
 ACCEPTED_BINDING_TIMELINE_ID = (
     "EvidenceSourceBindingTimeline:v1:sha256:"
@@ -109,9 +110,15 @@ def load_semantic_accounting_dependencies(
 ) -> SemanticAccountingDependencies:
     """Load semantic payload JSON files without accepting artifact-ID assertions."""
     try:
-        timeline = json.loads(Path(binding_timeline_path).read_text(encoding="utf-8"))
-        clock = json.loads(Path(binding_clock_policy_path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        timeline = decode_artifact_json(
+            Path(binding_timeline_path).read_text(encoding="utf-8")
+        )
+        clock = decode_artifact_json(
+            Path(binding_clock_policy_path).read_text(encoding="utf-8")
+        )
+        canonical_artifact_json(timeline)
+        canonical_artifact_json(clock)
+    except (OSError, UnicodeError) as exc:
         raise DeviceFingerprintValidationError("Invalid F-A4 dependency input") from exc
     if not isinstance(timeline, dict) or not isinstance(clock, dict):
         _fail("Invalid F-A4 dependency payload")
@@ -186,6 +193,76 @@ def authorized_descriptor(
         raise DeviceFingerprintValidationError("Incomplete snapshot descriptor") from exc
     descriptor["binding_epoch_id"] = epoch["binding_epoch_id"]
     return descriptor, epoch
+
+
+def applicable_binding_epochs(
+    dependencies: SemanticAccountingDependencies,
+    site_id: str,
+    window_start_utc: str,
+    window_end_utc: str,
+) -> list[dict[str, Any]]:
+    """Return every site epoch whose half-open interval intersects the window."""
+    validate_semantic_accounting_dependencies(dependencies)
+    validate_site_id(site_id)
+    start = parse_utc(window_start_utc)
+    end = parse_utc(window_end_utc)
+    valid_from = parse_utc(ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC)
+    if start < valid_from:
+        _fail("Snapshot window starts before classification foundation valid-from")
+    if start >= end:
+        _fail("Invalid snapshot window")
+    applicable = []
+    for epoch in dependencies.binding_timeline.semantic_payload["binding_epochs"]:
+        epoch_start = parse_utc(epoch["effective_from_utc"])
+        epoch_end = (
+            None if epoch["effective_to_utc"] is None
+            else parse_utc(epoch["effective_to_utc"])
+        )
+        if (epoch["site_id"] == site_id
+                and epoch_start < end
+                and (epoch_end is None or start < epoch_end)):
+            applicable.append(epoch)
+    return ordered_binding_descriptors(applicable)
+
+
+def required_health_scopes(
+    applicable_epochs: Iterable[dict[str, Any]],
+) -> tuple[tuple[str, str, str], ...]:
+    scopes = {
+        (epoch["producer_id"], epoch["capture_source_id"], epoch["source_kind"])
+        for epoch in applicable_epochs
+    }
+    return tuple(sorted(scopes))
+
+
+def validate_complete_health_scopes(
+    supplied_scopes: tuple[tuple[str, str, str], ...],
+    required_scopes: tuple[tuple[str, str, str], ...],
+) -> tuple[tuple[str, str, str], ...]:
+    if (not isinstance(supplied_scopes, tuple)
+            or len(supplied_scopes) != len(set(supplied_scopes))
+            or tuple(sorted(supplied_scopes)) != required_scopes):
+        _fail("Complete measurement health scopes do not match applicable bindings")
+    return required_scopes
+
+
+def health_anchor_descriptor(
+    row: dict[str, Any],
+    fields: Iterable[str],
+    target_epoch: dict[str, Any],
+    timeline: ArtifactContent,
+    clock_policy: ArtifactContent,
+) -> dict[str, Any] | None:
+    """Keep an anchor only when it is authoritative for this exact epoch."""
+    epoch = resolve_row_binding(row, timeline, clock_policy)
+    if epoch["binding_epoch_id"] != target_epoch["binding_epoch_id"]:
+        return None
+    try:
+        descriptor = {field: row[field] for field in fields}
+    except KeyError as exc:
+        raise DeviceFingerprintValidationError("Incomplete health anchor descriptor") from exc
+    descriptor["binding_epoch_id"] = epoch["binding_epoch_id"]
+    return descriptor
 
 
 def ordered_binding_descriptors(epochs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

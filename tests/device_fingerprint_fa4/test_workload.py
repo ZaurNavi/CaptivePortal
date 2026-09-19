@@ -39,7 +39,7 @@ def test_disposable_stress_is_deterministic_in_semantics_and_measures_wal(
     assert first["semantic_byte_accounting"]["final_binding_and_dependency_overhead_status"] == "COMPLETE"
     assert first["cardinality"]["total_evidence_rows"] == 5
     assert first["cardinality"]["total_relevant_health_rows"] == 5
-    assert first["pagination"] == {"evidence_pages": 3, "health_pages": 3}
+    assert first["pagination"] == {"evidence_pages": 3, "health_pages": 7}
     assert first["retention_latency"]["deleted_evidence_rows"] == 9
     assert first["retention_latency"]["deleted_health_rows"] == 5
     assert len(first["writer_latency"]["batches"]) == 2

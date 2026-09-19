@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from app.device_fingerprint.artifact_content import (
+    ArtifactRef,
     canonical_artifact_json,
     make_artifact_content,
 )
@@ -23,9 +24,12 @@ from research.device_fingerprint_fa4.semantic_accounting import (
     ACCEPTED_BINDING_TIMELINE_ID,
     ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,
     ACCEPTED_SCHEMA_REGISTRY_ID,
+    ACCEPTED_TTL_PROOF_ID,
+    applicable_binding_epochs,
     authorized_descriptor,
     binding_descriptor_bytes,
     complete_semantic_byte_accounting,
+    health_anchor_descriptor,
     load_semantic_accounting_dependencies,
     ordered_binding_descriptors,
     resolve_row_binding,
@@ -105,6 +109,31 @@ def test_dependency_payload_files_are_rematerialized_not_trusted(tmp_path):
         load_semantic_accounting_dependencies(str(timeline_path), str(clock_path))
 
 
+def test_dependency_payload_import_rejects_duplicate_json_keys(tmp_path):
+    timeline_path = tmp_path / "timeline.json"
+    clock_path = tmp_path / "clock.json"
+    timeline_path.write_text('{"duplicate":1,"duplicate":2}', encoding="utf-8")
+    clock_path.write_text(json.dumps(accepted_clock_payload()), encoding="utf-8")
+    with pytest.raises(DeviceFingerprintValidationError, match="Duplicate"):
+        load_semantic_accounting_dependencies(str(timeline_path), str(clock_path))
+
+
+@pytest.mark.parametrize("invalid_payload", [
+    "{",
+    "[]",
+    '{"\u00e9":1,"e\u0301":2}',
+])
+def test_dependency_payload_import_rejects_invalid_nonobject_and_nfc_collision(
+    tmp_path, invalid_payload,
+):
+    timeline_path = tmp_path / "timeline.json"
+    clock_path = tmp_path / "clock.json"
+    timeline_path.write_text(invalid_payload, encoding="utf-8")
+    clock_path.write_text(json.dumps(accepted_clock_payload()), encoding="utf-8")
+    with pytest.raises(DeviceFingerprintValidationError):
+        load_semantic_accounting_dependencies(str(timeline_path), str(clock_path))
+
+
 def test_evidence_and_health_descriptor_bytes_include_exact_binding_epoch(accepted_dependencies):
     evidence, evidence_epoch = authorized_descriptor(
         _evidence_row(), _EVIDENCE_FIELDS, accepted_dependencies,
@@ -131,6 +160,23 @@ def test_missing_binding_fails_closed(accepted_dependencies):
         )
 
 
+@pytest.mark.parametrize("row_factory,fields", [
+    (_evidence_row, _EVIDENCE_FIELDS),
+    (_health_row, _HEALTH_FIELDS),
+])
+@pytest.mark.parametrize("field,value", [
+    ("producer_id", "wrong-producer"),
+    ("capture_source_id", "wrong-capture"),
+])
+def test_row_authority_mismatch_fails_closed(
+    accepted_dependencies, row_factory, fields, field, value,
+):
+    row = row_factory()
+    row[field] = value
+    with pytest.raises(DeviceFingerprintValidationError, match="authoritative binding"):
+        authorized_descriptor(row, fields, accepted_dependencies)
+
+
 def test_cutover_ambiguity_fails_closed():
     first = binding_epoch(
         "dhcp", "dhcp", "sensor-zefer-01", "zefer-span-01", NETWORK_EMITTER,
@@ -154,6 +200,28 @@ def test_cutover_ambiguity_fails_closed():
         resolve_row_binding(_evidence_row("2026-09-18T10:44:00.000Z"), timeline, clock)
 
 
+def test_previous_epoch_health_anchor_is_not_inherited_across_cutover():
+    first = binding_epoch(
+        "dhcp", "dhcp", "sensor-zefer-01", "zefer-span-01", NETWORK_EMITTER,
+        effective_from=EFFECTIVE_FROM,
+        effective_to="2026-09-18T10:44:00.000Z",
+    )
+    second = {
+        **first,
+        "binding_epoch_id": "zefer-dhcp-v2-20260918T104400000Z",
+        "effective_from_utc": "2026-09-18T10:44:00.000Z",
+        "effective_to_utc": None,
+    }
+    timeline = make_evidence_source_binding_timeline(
+        {"binding_timeline_contract_version": 1, "binding_epochs": [first, second]},
+        build_source_health_emitter_contracts(),
+    )
+    clock = make_binding_clock_policy(accepted_clock_payload())
+    row = _health_row()
+    row["observed_at"] = "2026-09-18T10:43:59.999Z"
+    assert health_anchor_descriptor(row, _HEALTH_FIELDS, second, timeline, clock) is None
+
+
 @pytest.mark.parametrize("field,artifact_type", [
     ("binding_timeline", "EvidenceSourceBindingTimeline"),
     ("binding_clock_policy", "BindingClockPolicy"),
@@ -164,6 +232,43 @@ def test_wrong_dependency_identity_is_rejected(accepted_dependencies, field, art
     with pytest.raises(DeviceFingerprintValidationError, match="Wrong accepted"):
         validate_semantic_accounting_dependencies(
             replace(accepted_dependencies, **{field: wrong}),
+        )
+
+
+def test_wrong_ttl_proof_identity_is_rejected(accepted_dependencies):
+    assert accepted_dependencies.ttl_capture_placement_proof.artifact_id == ACCEPTED_TTL_PROOF_ID
+    wrong = ArtifactRef(
+        "TTLCapturePlacementProof:v1:sha256:" + "0" * 64,
+        "0" * 64,
+    )
+    with pytest.raises(DeviceFingerprintValidationError, match="TTLCapturePlacementProof"):
+        validate_semantic_accounting_dependencies(
+            replace(accepted_dependencies, ttl_capture_placement_proof=wrong),
+        )
+
+
+@pytest.mark.parametrize("window_start", [
+    ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,
+    "2026-09-18T10:43:29.015Z",
+])
+def test_complete_window_at_or_after_valid_from_is_allowed(
+    accepted_dependencies, window_start,
+):
+    assert len(applicable_binding_epochs(
+        accepted_dependencies,
+        SITE_ID,
+        window_start,
+        "2026-09-18T10:43:30.000Z",
+    )) == 5
+
+
+def test_complete_window_before_valid_from_fails_closed(accepted_dependencies):
+    with pytest.raises(DeviceFingerprintValidationError, match="valid-from"):
+        applicable_binding_epochs(
+            accepted_dependencies,
+            SITE_ID,
+            "2026-09-18T10:43:29.013Z",
+            "2026-09-18T10:43:30.000Z",
         )
 
 
