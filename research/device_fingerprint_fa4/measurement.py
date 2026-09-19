@@ -16,11 +16,28 @@ from typing import Any
 from unittest.mock import patch
 
 from app.device_fingerprint.artifact_content import canonical_artifact_json
+from app.device_fingerprint.models import DeviceFingerprintValidationError
 from app.device_fingerprint.payload_integrity import verify_persisted_payload
 from app.device_fingerprint.read_service import DeviceFingerprintReadService
 from app.device_fingerprint.repository import DeviceFingerprintRepository
 from app.device_fingerprint.schema_registry import build_production_schema_registry
-from app.device_fingerprint.validation import parse_utc, validate_mac, validate_site_id
+from app.device_fingerprint.validation import (
+    format_utc, parse_utc, validate_mac, validate_site_id,
+)
+
+from .semantic_accounting import (
+    SemanticAccountingDependencies,
+    applicable_binding_epochs,
+    authorized_descriptor,
+    binding_descriptor_bytes,
+    complete_semantic_byte_accounting,
+    health_anchor_descriptor,
+    required_health_scopes,
+    semantic_dependency_descriptor,
+    semantic_dependency_reference_bytes,
+    validate_complete_health_scopes,
+    validate_semantic_accounting_dependencies,
+)
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _EVIDENCE_FIELDS = (
@@ -80,10 +97,11 @@ def _duration(start: int) -> dict[str, int]:
     return {"duration_ns": ns, "duration_ms": ns // 1_000_000}
 
 
-def _plans(connection: Any, case: InspectionCase, watermark: int) -> list[dict[str, Any]]:
+def _plans(connection: Any, case: InspectionCase, watermark: int,
+           health_scopes: tuple[tuple[str, str, str], ...]) -> list[dict[str, Any]]:
     """Mirror the current read-session SELECT/WHERE/ORDER/LIMIT shapes."""
     site, mac = case.site_id, validate_mac(case.observed_mac)
-    producer, capture, kind = case.health_scopes[0]
+    producer, capture, kind = health_scopes[0]
     evidence_where = "site_id=? AND observed_mac=? AND observed_at>=? AND observed_at<? AND ingest_sequence<=?"
     evidence_params: tuple[Any, ...] = (site, mac, case.from_utc, case.to_utc, watermark)
     health_where = ("site_id=? AND producer_id=? AND capture_source_id=? AND source_kind=? "
@@ -147,9 +165,15 @@ def _rss() -> tuple[int | None, bool]:
         return None, False
 
 
-def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+def inspect_read_only(
+    case: InspectionCase,
+    *,
+    semantic_dependencies: SemanticAccountingDependencies | None = None,
+) -> dict[str, Any]:
     """Measure one fully exhausted pinned snapshot without writing to its DB."""
     _validate(case)
+    if semantic_dependencies is not None:
+        validate_semantic_accounting_dependencies(semantic_dependencies)
     cpu_start, total_start = time.process_time_ns(), _ns()
     tracemalloc.start()
     service = DeviceFingerprintReadService(case.db_path, retention_days=case.retention_days)
@@ -173,7 +197,20 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
             connection = snapshot._connection  # instrumentation of this exact read transaction
             if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
                 raise RuntimeError("Snapshot connection is not query-only")
-            query_plans = _plans(connection, case, watermark.max_committed_ingest_sequence)
+            if semantic_dependencies is None:
+                applicable_epochs: list[dict[str, Any]] = []
+                measurement_health_scopes = case.health_scopes
+            else:
+                applicable_epochs = applicable_binding_epochs(
+                    semantic_dependencies, case.site_id, case.from_utc, case.to_utc,
+                )
+                measurement_health_scopes = validate_complete_health_scopes(
+                    case.health_scopes, required_health_scopes(applicable_epochs),
+                )
+            query_plans = _plans(
+                connection, case, watermark.max_committed_ingest_sequence,
+                measurement_health_scopes,
+            )
             database_summary = {
                 "schema_version": int(connection.execute("PRAGMA user_version").fetchone()[0]),
                 "evidence_rows_all_devices": _count_rows(connection, "device_fingerprint_evidence"),
@@ -184,6 +221,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
             verified_count = materialized_count = unsupported_count = 0
             verified_bytes = materialized_bytes = largest_payload = 0
             evidence_descriptor_bytes = health_descriptor_bytes = 0
+            health_descriptors: dict[str, dict[str, Any]] = {}
             grouped: Counter[tuple[str, int, str]] = Counter()
             verify_ns = 0
             page_start = _ns()
@@ -197,9 +235,12 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
                 for row in page["items"]:
                     evidence_count += 1
                     grouped[(row["source_kind"], row["feature_schema_version"], row["quality_state"])] += 1
-                    evidence_descriptor_bytes += len(canonical_artifact_json({
-                        field: row[field] for field in _EVIDENCE_FIELDS
-                    }))
+                    descriptor = {field: row[field] for field in _EVIDENCE_FIELDS}
+                    if semantic_dependencies is not None:
+                        descriptor, _epoch = authorized_descriptor(
+                            row, _EVIDENCE_FIELDS, semantic_dependencies,
+                        )
+                    evidence_descriptor_bytes += len(canonical_artifact_json(descriptor))
                     verify_start = _ns()
                     verified = verify_persisted_payload(
                         row["source_kind"], row["feature_schema_version"],
@@ -219,7 +260,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
                     break
             evidence_timing = _duration(page_start)
             health_start = _ns()
-            for producer, capture, kind in case.health_scopes:
+            for producer, capture, kind in measurement_health_scopes:
                 cursor = None
                 while True:
                     page = snapshot.list_source_health(
@@ -228,15 +269,64 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
                     )
                     health_pages += 1
                     for row in page["items"]:
-                        health_count += 1
-                        health_descriptor_bytes += len(canonical_artifact_json({
-                            field: row[field] for field in _HEALTH_FIELDS
-                        }))
+                        descriptor = {field: row[field] for field in _HEALTH_FIELDS}
+                        if semantic_dependencies is not None:
+                            descriptor, _epoch = authorized_descriptor(
+                                row, _HEALTH_FIELDS, semantic_dependencies,
+                            )
+                            existing = health_descriptors.get(row["source_health_id"])
+                            if (existing is not None
+                                    and canonical_artifact_json(existing)
+                                    != canonical_artifact_json(descriptor)):
+                                raise DeviceFingerprintValidationError(
+                                    "Conflicting source-health descriptor identity"
+                                )
+                            health_descriptors[row["source_health_id"]] = descriptor
+                        else:
+                            health_count += 1
+                            health_descriptor_bytes += len(canonical_artifact_json(descriptor))
                     cursor = page["next_cursor"]
                     if cursor is None:
                         break
-                snapshot.latest_source_health(
-                    case.site_id, producer, capture, kind, through_utc=case.to_utc,
+                if semantic_dependencies is None:
+                    snapshot.latest_source_health(
+                        case.site_id, producer, capture, kind, through_utc=case.to_utc,
+                    )
+            if semantic_dependencies is not None:
+                window_start = parse_utc(case.from_utc)
+                for epoch in applicable_epochs:
+                    epoch_start = parse_utc(epoch["effective_from_utc"])
+                    segment_start = format_utc(max(window_start, epoch_start))
+                    anchor = snapshot.latest_source_health(
+                        case.site_id,
+                        epoch["producer_id"],
+                        epoch["capture_source_id"],
+                        epoch["source_kind"],
+                        through_utc=segment_start,
+                    )
+                    if anchor is None:
+                        continue
+                    descriptor = health_anchor_descriptor(
+                        anchor,
+                        _HEALTH_FIELDS,
+                        epoch,
+                        semantic_dependencies.binding_timeline,
+                        semantic_dependencies.binding_clock_policy,
+                    )
+                    if descriptor is None:
+                        continue
+                    existing = health_descriptors.get(anchor["source_health_id"])
+                    if (existing is not None
+                            and canonical_artifact_json(existing)
+                            != canonical_artifact_json(descriptor)):
+                        raise DeviceFingerprintValidationError(
+                            "Conflicting source-health descriptor identity"
+                        )
+                    health_descriptors[anchor["source_health_id"]] = descriptor
+                health_count = len(health_descriptors)
+                health_descriptor_bytes = sum(
+                    len(canonical_artifact_json(descriptor))
+                    for descriptor in health_descriptors.values()
                 )
             health_timing = _duration(health_start)
         reader_timing = _duration(transaction_start)
@@ -244,6 +334,47 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
         _current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
     rss, rss_available = _rss()
+    if semantic_dependencies is None:
+        semantic_accounting = {
+            "task01_evidence_descriptor_bytes": evidence_descriptor_bytes,
+            "verified_payload_bytes": verified_bytes,
+            "materialized_payload_bytes": materialized_bytes,
+            "task01_health_descriptor_bytes": health_descriptor_bytes,
+            "known_measurable_input_bytes": evidence_descriptor_bytes + verified_bytes
+            + materialized_bytes + health_descriptor_bytes,
+            "descriptor_scope": "task01_durable_fields_only_binding_epoch_pending",
+            "final_binding_and_dependency_overhead_status": "PENDING_FOUNDATION_DEPENDENCIES",
+        }
+    else:
+        binding_bytes, binding_count = binding_descriptor_bytes(applicable_epochs)
+        dependency_bytes = semantic_dependency_reference_bytes(semantic_dependencies)
+        semantic_accounting = complete_semantic_byte_accounting({
+            "authorized_evidence_descriptor_bytes": evidence_descriptor_bytes,
+            "verified_payload_bytes": verified_bytes,
+            "materialized_payload_bytes": materialized_bytes,
+            "authorized_health_descriptor_bytes": health_descriptor_bytes,
+            "binding_descriptor_bytes": binding_bytes,
+            "semantic_dependency_reference_bytes": dependency_bytes,
+        })
+        semantic_accounting.update({
+            "binding_epoch_count": binding_count,
+            "semantic_dependency_artifact_ids": {
+                "evidence_source_binding_timeline": (
+                    semantic_dependencies.binding_timeline.artifact_id
+                ),
+                "binding_clock_policy": semantic_dependencies.binding_clock_policy.artifact_id,
+                "evidence_schema_registry_contract": (
+                    semantic_dependencies.schema_registry_contract.artifact_id
+                ),
+                "ttl_capture_placement_proof": (
+                    semantic_dependencies.ttl_capture_placement_proof.artifact_id
+                ),
+                "origin_runtime_admission": semantic_dependency_descriptor(
+                    semantic_dependencies
+                )["origin_runtime_admission"]["artifact_id"],
+            },
+            "origin_runtime_admission_status": "PRE_F_ADMIT_SIZING_ONLY",
+        })
     report = {
         "report_schema_version": 1,
         "candidate_identity": {
@@ -275,16 +406,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
             "materialized_payload_bytes": materialized_bytes,
             "unsupported_intact_row_count": unsupported_count,
         },
-        "semantic_byte_accounting": {
-            "task01_evidence_descriptor_bytes": evidence_descriptor_bytes,
-            "verified_payload_bytes": verified_bytes,
-            "materialized_payload_bytes": materialized_bytes,
-            "task01_health_descriptor_bytes": health_descriptor_bytes,
-            "known_measurable_input_bytes": evidence_descriptor_bytes + verified_bytes
-            + materialized_bytes + health_descriptor_bytes,
-            "descriptor_scope": "task01_durable_fields_only_binding_epoch_pending",
-            "final_binding_and_dependency_overhead_status": "PENDING_FOUNDATION_DEPENDENCIES",
-        },
+        "semantic_byte_accounting": semantic_accounting,
         "timing": {"open_snapshot_transaction": open_timing,
                    "watermark_capture": {"duration_ns": watermark_capture_ns,
                                          "duration_ms": watermark_capture_ns // 1_000_000},

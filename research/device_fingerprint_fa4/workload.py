@@ -21,9 +21,14 @@ from app.device_fingerprint.service import DeviceFingerprintService
 from app.device_fingerprint.validation import format_utc
 
 from .measurement import InspectionCase, inspect_read_only, _duration, _ns, _rss
+from .semantic_accounting import (
+    SemanticAccountingDependencies,
+    applicable_binding_epochs,
+    required_health_scopes,
+)
 
 UTC = timezone.utc
-FIXED_NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 FIXED_SITE = "6a64f17630da7c70d232187a"
 FIXED_MAC = "AA:BB:CC:DD:EE:FF"
 
@@ -89,8 +94,13 @@ def _wal_bytes(path: Path) -> int:
     return wal.stat().st_size if wal.exists() else 0
 
 
-def run_disposable_stress(case: StressCase, *, temporary_parent: str | None = None,
-                          target_db_path: str | None = None) -> dict[str, Any]:
+def run_disposable_stress(
+    case: StressCase,
+    *,
+    temporary_parent: str | None = None,
+    target_db_path: str | None = None,
+    semantic_dependencies: SemanticAccountingDependencies | None = None,
+) -> dict[str, Any]:
     """Never stress a supplied/existing database; create a new private temp DB."""
     if target_db_path is not None:
         raise ValueError("Stress target must be internally created and disposable")
@@ -122,13 +132,18 @@ def run_disposable_stress(case: StressCase, *, temporary_parent: str | None = No
             service = DeviceFingerprintService(config, repo, build_production_schema_registry(), now=lambda: FIXED_NOW)
             _seed(service, producer, case.evidence_row_count, _evidence, "evidence_batch")
             _seed(service, producer, case.health_row_count, _health, "source_health_batch")
+            from_utc = format_utc(FIXED_NOW - timedelta(seconds=1))
+            to_utc = format_utc(FIXED_NOW + timedelta(seconds=1))
+            health_scopes = ((producer.producer_id, producer.capture_source_id, "dhcp"),)
+            if semantic_dependencies is not None:
+                health_scopes = required_health_scopes(applicable_binding_epochs(
+                    semantic_dependencies, FIXED_SITE, from_utc, to_utc,
+                ))
             inspection = inspect_read_only(InspectionCase(
                 case.measurement_case_id, str(path), FIXED_SITE, FIXED_MAC,
-                format_utc(FIXED_NOW - timedelta(seconds=1)),
-                format_utc(FIXED_NOW + timedelta(seconds=1)),
-                ((producer.producer_id, producer.capture_source_id, "dhcp"),),
+                from_utc, to_utc, health_scopes,
                 case.page_size, case.repository_commit_sha, case.repository_tree_sha,
-            ))
+            ), semantic_dependencies=semantic_dependencies)
             before = _wal_bytes(path)
             reader_start = _ns()
             cpu_start = time.process_time_ns()

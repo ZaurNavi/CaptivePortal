@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from .measurement import InspectionCase, failed_report, inspect_read_only, write_report_file
+from .semantic_accounting import load_semantic_accounting_dependencies
 from .workload import StressCase, run_disposable_stress
 
 
@@ -16,6 +17,8 @@ def main() -> int:
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--tree-sha", required=True)
     parser.add_argument("--page-size", type=int, required=True)
+    parser.add_argument("--binding-timeline-payload")
+    parser.add_argument("--binding-clock-policy-payload")
     modes = parser.add_subparsers(dest="mode", required=True)
     inspect = modes.add_parser("inspect", help="read-only inspection of an existing DB")
     inspect.add_argument("--db", required=True)
@@ -32,21 +35,30 @@ def main() -> int:
     stress.add_argument("--rows-per-writer-batch", type=int, required=True)
     stress.add_argument("--temporary-parent")
     args = parser.parse_args()
+    if bool(args.binding_timeline_payload) != bool(args.binding_clock_policy_payload):
+        parser.error("Both final F-B1 semantic payload files are required together")
     if args.mode == "inspect" and Path(args.db).resolve() == Path(args.output).resolve():
         parser.error("Report output cannot overwrite the inspected database")
     try:
+        semantic_dependencies = None
+        if args.binding_timeline_payload:
+            semantic_dependencies = load_semantic_accounting_dependencies(
+                args.binding_timeline_payload,
+                args.binding_clock_policy_payload,
+            )
         if args.mode == "inspect":
             report = inspect_read_only(InspectionCase(
                 args.case_id, args.db, args.site, args.mac, args.from_utc,
                 args.to_utc, tuple(tuple(scope) for scope in args.health_scope),
                 args.page_size, args.commit_sha, args.tree_sha,
-            ))
+            ), semantic_dependencies=semantic_dependencies)
         else:
             report = run_disposable_stress(StressCase(
                 args.case_id, args.evidence_rows, args.health_rows,
                 args.page_size, args.writer_batches, args.rows_per_writer_batch,
                 args.commit_sha, args.tree_sha,
-            ), temporary_parent=args.temporary_parent)
+            ), temporary_parent=args.temporary_parent,
+                semantic_dependencies=semantic_dependencies)
     except Exception as exc:
         write_report_file(failed_report(args.commit_sha, args.tree_sha, args.case_id,
                                         args.mode.upper(), type(exc).__name__), args.output)

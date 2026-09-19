@@ -2,18 +2,36 @@
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from app.device_fingerprint.models import DeviceFingerprintValidationError
+from app.device_fingerprint.artifact_content import canonical_artifact_json
+from app.device_fingerprint.models import (
+    DeviceFingerprintValidationError,
+    ValidatedSourceHealth,
+)
 from app.device_fingerprint.repository import DeviceFingerprintRepository
 from app.device_fingerprint.schema_registry import build_production_schema_registry
 from app.device_fingerprint.service import DeviceFingerprintService
-from app.device_fingerprint.validation import canonical_json, canonical_sha256, format_utc
+from app.device_fingerprint.validation import (
+    canonical_json, canonical_sha256, format_utc, parse_utc,
+)
 from research.device_fingerprint_fa4.measurement import (
-    InspectionCase, failed_report, inspect_read_only, report_json, write_report_file,
+    _HEALTH_FIELDS,
+    InspectionCase,
+    failed_report,
+    inspect_read_only,
+    report_json,
+    write_report_file,
+)
+from research.device_fingerprint_fa4.semantic_accounting import (
+    ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,
+    applicable_binding_epochs,
+    authorized_descriptor,
+    required_health_scopes,
 )
 from research.device_fingerprint_fa4.workload import FIXED_MAC, FIXED_NOW, _evidence, _health
 from tests.device_fingerprint import config, producer
@@ -49,6 +67,13 @@ def _fingerprint(path):
             hashlib.sha256(wal.read_bytes()).hexdigest() if wal.exists() else None)
 
 
+def _complete_case(case, dependencies):
+    epochs = applicable_binding_epochs(
+        dependencies, case.site_id, case.from_utc, case.to_utc,
+    )
+    return replace(case, health_scopes=required_health_scopes(epochs))
+
+
 def test_read_only_pages_exhaust_and_report_query_plans_without_mutation(tmp_path):
     cfg, repo, _svc, case = _fixture(tmp_path)
     before = _fingerprint(cfg.db_path)
@@ -73,6 +98,183 @@ def test_read_only_pages_exhaust_and_report_query_plans_without_mutation(tmp_pat
     assert report["timing"]["watermark_capture"]["duration_ns"] >= 0
     assert report["cpu_memory"]["python_peak_allocated_bytes"] >= 0
     assert report["cpu_memory"]["process_cpu_duration_ns"] >= 0
+    repo.close()
+
+
+def test_complete_semantic_accounting_uses_exact_six_category_formula_and_is_private(
+    tmp_path, accepted_dependencies,
+):
+    _cfg, repo, _svc, case = _fixture(tmp_path, count=2)
+    case = _complete_case(case, accepted_dependencies)
+    report = inspect_read_only(case, semantic_dependencies=accepted_dependencies)
+    accounting = report["semantic_byte_accounting"]
+    categories = (
+        "authorized_evidence_descriptor_bytes",
+        "verified_payload_bytes",
+        "materialized_payload_bytes",
+        "authorized_health_descriptor_bytes",
+        "binding_descriptor_bytes",
+        "semantic_dependency_reference_bytes",
+    )
+    assert accounting["total_semantic_input_bytes"] == sum(
+        accounting[field] for field in categories
+    )
+    assert accounting["descriptor_scope"] == "r14_snapshot_semantic_descriptors_complete"
+    assert accounting["final_binding_and_dependency_overhead_status"] == "COMPLETE"
+    assert accounting["binding_epoch_count"] == 5
+    serialized = report_json(report)
+    for forbidden in (
+        FIXED_MAC, FIXED_MAC.lower(), "192.168.8.10", "payload_json",
+        "android-dhcp-13", "LAB-ONLY-NOT-RETAINED", "Bearer", "User-Agent",
+        "Sec-CH-UA-Model",
+    ):
+        assert forbidden not in serialized
+    repo.close()
+
+
+@pytest.mark.parametrize("scope_variant", ["missing", "extra", "duplicate"])
+def test_complete_health_scope_set_fails_closed_when_not_exact(
+    tmp_path, accepted_dependencies, scope_variant,
+):
+    _cfg, repo, _svc, case = _fixture(tmp_path, count=1)
+    exact = _complete_case(case, accepted_dependencies)
+    if scope_variant == "missing":
+        candidate = replace(exact, health_scopes=exact.health_scopes[:-1])
+    elif scope_variant == "extra":
+        candidate = replace(
+            exact,
+            health_scopes=exact.health_scopes + (("extra-producer", "extra-capture", "dhcp"),),
+        )
+    else:
+        candidate = replace(
+            exact,
+            health_scopes=exact.health_scopes + (exact.health_scopes[0],),
+        )
+    with pytest.raises((DeviceFingerprintValidationError, ValueError)):
+        inspect_read_only(candidate, semantic_dependencies=accepted_dependencies)
+    repo.close()
+
+
+def _insert_health(svc, number, observed_at):
+    event = _health(number)
+    event["observed_at"] = observed_at
+    assert svc.source_health_batch(producer(), {
+        "producer_id": producer().producer_id, "events": [event],
+    }).inserted == 1
+
+
+def test_complete_health_includes_same_epoch_predecessor_before_window(
+    tmp_path, accepted_dependencies,
+):
+    _cfg, repo, svc, case = _fixture(tmp_path, count=0)
+    predecessor_at = format_utc(parse_utc(case.from_utc) - timedelta(milliseconds=1))
+    _insert_health(svc, 100, predecessor_at)
+    report = inspect_read_only(
+        _complete_case(case, accepted_dependencies),
+        semantic_dependencies=accepted_dependencies,
+    )
+    assert report["cardinality"]["total_relevant_health_rows"] == 1
+    assert report["semantic_byte_accounting"]["authorized_health_descriptor_bytes"] > 0
+    repo.close()
+
+
+def test_complete_health_boundary_row_is_counted_once(
+    tmp_path, accepted_dependencies,
+):
+    _cfg, repo, svc, case = _fixture(tmp_path, count=0)
+    _insert_health(svc, 101, case.from_utc)
+    report = inspect_read_only(
+        _complete_case(case, accepted_dependencies),
+        semantic_dependencies=accepted_dependencies,
+    )
+    assert report["cardinality"]["total_relevant_health_rows"] == 1
+    repo.close()
+
+
+def test_complete_health_without_predecessor_does_not_fabricate_row(
+    tmp_path, accepted_dependencies,
+):
+    _cfg, repo, _svc, case = _fixture(tmp_path, count=0)
+    report = inspect_read_only(
+        _complete_case(case, accepted_dependencies),
+        semantic_dependencies=accepted_dependencies,
+    )
+    assert report["cardinality"]["total_relevant_health_rows"] == 0
+    assert report["semantic_byte_accounting"]["authorized_health_descriptor_bytes"] == 0
+    assert report["semantic_byte_accounting"]["binding_epoch_count"] == 5
+    assert report["semantic_byte_accounting"]["binding_descriptor_bytes"] > 0
+    repo.close()
+
+
+def test_complete_measurement_omits_all_pre_foundation_health_predecessors(
+    tmp_path, accepted_dependencies,
+):
+    cfg, repo, _svc, base_case = _fixture(tmp_path, count=0)
+    epochs = applicable_binding_epochs(
+        accepted_dependencies,
+        base_case.site_id,
+        ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,
+        "2026-09-18T10:43:31.000Z",
+    )
+    health_events = []
+    for index, epoch in enumerate(epochs):
+        predecessor_at = (
+            "2026-09-18T08:39:36.219Z"
+            if epoch["source_kind"] == "portal_headers"
+            else "2026-09-18T10:43:13.705Z"
+        )
+        for offset, observed_at in enumerate((
+            predecessor_at,
+            "2026-09-18T10:43:30.000Z",
+        )):
+            number = index * 2 + offset + 1
+            health_events.append(ValidatedSourceHealth(
+                producer_id=epoch["producer_id"],
+                source_health_event_id=f"00000000-0000-4000-8000-{number:012d}",
+                site_id=base_case.site_id,
+                capture_source_id=epoch["capture_source_id"],
+                source_kind=epoch["source_kind"],
+                status="available",
+                reason_code=None,
+                observed_at=observed_at,
+                content_sha256=f"{number:064x}",
+            ))
+    result = repo.ingest_source_health(
+        health_events,
+        ingested_at="2026-09-18T10:43:31.000Z",
+    )
+    assert result.inserted == 10
+
+    case = replace(
+        base_case,
+        from_utc=ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,
+        to_utc="2026-09-18T10:43:31.000Z",
+        health_scopes=required_health_scopes(epochs),
+    )
+    report = inspect_read_only(case, semantic_dependencies=accepted_dependencies)
+    accounting = report["semantic_byte_accounting"]
+    assert report["result"] == "MEASUREMENT_COMPLETE"
+    assert accounting["descriptor_scope"] == "r14_snapshot_semantic_descriptors_complete"
+    assert accounting["final_binding_and_dependency_overhead_status"] == "COMPLETE"
+    assert report["cardinality"]["total_relevant_health_rows"] == 5
+
+    authorized_rows = repo.connection.execute(
+        "SELECT * FROM device_fingerprint_source_health_events "
+        "WHERE observed_at>=? ORDER BY observed_at,source_health_id",
+        (ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,),
+    ).fetchall()
+    assert len(authorized_rows) == 5
+    expected_health_bytes = 0
+    for stored_row in authorized_rows:
+        descriptor, _epoch = authorized_descriptor(
+            dict(stored_row), _HEALTH_FIELDS, accepted_dependencies,
+        )
+        expected_health_bytes += len(canonical_artifact_json(descriptor))
+    assert accounting["authorized_health_descriptor_bytes"] == expected_health_bytes
+    assert repo.connection.execute(
+        "SELECT COUNT(*) FROM device_fingerprint_source_health_events WHERE observed_at<?",
+        (ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,),
+    ).fetchone()[0] == 5
     repo.close()
 
 
