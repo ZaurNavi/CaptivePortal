@@ -17,6 +17,7 @@ from .p0f_semantics import RUNTIME_CONTRACT, parse_request_signature
 from .validation import parse_utc
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_GIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SOURCE_FAMILY = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _DIMENSIONS = frozenset({
     "platform_family", "device_class", "manufacturer_family", "model_family",
@@ -53,6 +54,11 @@ _EXTERNAL_PROVENANCE_FIELDS = frozenset({
     "source_governance_record", "retrieved_at_utc",
     "source_provider_version_metadata", "knowledge_freshness_policy",
     "importer_identity", "importer_version",
+})
+_INTERNAL_PROVENANCE_FIELDS = frozenset({
+    "provenance_contract_version", "provenance_kind", "rule_set_artifact",
+    "repository_commit_sha", "repository_tree_sha", "source_artifact_identity",
+    "input_schema_compatibility", "taxonomy_compatibility", "rule_set_version",
 })
 _RECORD_SET_FIELDS = frozenset({
     "record_set_contract_version", "knowledge_slot", "knowledge_provenance", "records",
@@ -225,6 +231,52 @@ def make_external_knowledge_provenance_manifest(
         **value,
         "source_governance_record": governance,
         "knowledge_freshness_policy": freshness,
+    })
+
+
+def make_internal_knowledge_provenance_manifest(
+    payload: dict[str, Any],
+) -> ArtifactContent:
+    """Validate the exact internal arm of R14 KnowledgeProvenanceManifest V1."""
+    value = _shape(payload, _INTERNAL_PROVENANCE_FIELDS, "internal provenance")
+    _int32_positive(value["provenance_contract_version"], "provenance version")
+    if value["provenance_kind"] != "internal":
+        _fail("Invalid internal provenance kind")
+    rule_ref = ArtifactRef.from_dict(value["rule_set_artifact"]).as_dict()
+    taxonomy_ref = _artifact_ref(value["taxonomy_compatibility"], "ClassificationTaxonomy")
+    commit = value["repository_commit_sha"]
+    tree = value["repository_tree_sha"]
+    source = value["source_artifact_identity"]
+    if commit is not None and (not isinstance(commit, str) or _GIT_SHA.fullmatch(commit) is None):
+        _fail("Invalid repository commit SHA")
+    if tree is not None and (not isinstance(tree, str) or _GIT_SHA.fullmatch(tree) is None):
+        _fail("Invalid repository tree SHA")
+    if source is not None and (not isinstance(source, str) or _SHA256.fullmatch(source) is None):
+        _fail("Invalid source artifact identity")
+    if not ((commit is not None and tree is not None) != (source is not None)):
+        _fail("Invalid internal provenance identity")
+    _text(value["rule_set_version"], "rule set version")
+    rows = value["input_schema_compatibility"]
+    if not isinstance(rows, list) or not rows:
+        _fail("Invalid input schema compatibility")
+    normalized = []
+    for raw in rows:
+        row = _shape(raw, frozenset({"source_kind", "feature_schema_version"}),
+                     "schema compatibility")
+        normalized.append({
+            "source_kind": _text(row["source_kind"], "source kind"),
+            "feature_schema_version": _int32_positive(
+                row["feature_schema_version"], "feature schema version",
+            ),
+        })
+    compatibility = canonical_set(
+        normalized, lambda row: (row["source_kind"], row["feature_schema_version"]),
+    )
+    return make_artifact_content("KnowledgeProvenanceManifest", {
+        **value,
+        "rule_set_artifact": rule_ref,
+        "taxonomy_compatibility": taxonomy_ref,
+        "input_schema_compatibility": compatibility,
     })
 
 
