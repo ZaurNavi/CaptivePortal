@@ -72,6 +72,16 @@ _K2B_RECORD_FIELDS = frozenset({
     "canonical_match_rule", "dimension_claims", "source_character",
     "source_record_identity",
 })
+_K4_RECORD_FIELDS = frozenset({
+    "record_type", "canonical_record_id", "prefix_hex", "prefix_length_bits",
+    "assignment_org_id", "assignment_org_label", "registry_family",
+    "source_record_identity", "manufacturer_mapping",
+})
+_K4_MAPPING_FIELDS = frozenset({
+    "manufacturer_id", "mapping_version", "review_basis", "base_claim_strength",
+})
+_K4_PREFIXES = {"MA-L": (24, 6), "MA-M": (28, 7), "MA-S": (36, 9)}
+_LOWER_HEX = re.compile(r"[0-9a-f]+")
 _TAXONOMY_OUTCOME_FIELDS = frozenset({
     "dimension_name", "outcome_kind", "canonical_target_id", "broad_taxon_ref",
     "out_of_scope_taxon_ref", "base_claim_strength",
@@ -532,6 +542,67 @@ def make_canonical_k2b_record_set(payload: dict[str, Any]) -> ArtifactContent:
         identity = (record["record_type"], record["canonical_record_id"])
         if identity in identities:
             _fail("Duplicate canonical K2B record identity")
+        identities.add(identity)
+        normalized_records.append(record)
+    normalized_records = canonical_set(
+        normalized_records,
+        lambda record: (record["record_type"], record["canonical_record_id"]),
+    )
+    return make_artifact_content("CanonicalKnowledgeRecordSet", {
+        **value, "knowledge_provenance": provenance, "records": normalized_records,
+    })
+
+
+def _k4_record(raw: Any) -> dict[str, Any]:
+    value = dict(_shape(raw, _K4_RECORD_FIELDS, "K4 IEEE assignment record"))
+    if value["record_type"] != "K4_IEEE_ASSIGNMENT":
+        _fail("Invalid K4 record type")
+    for field in (
+        "canonical_record_id", "assignment_org_id", "assignment_org_label",
+        "source_record_identity",
+    ):
+        _text(value[field], field)
+    family = value["registry_family"]
+    if not isinstance(family, str) or family not in _K4_PREFIXES:
+        _fail("Invalid K4 registry family")
+    bits, width = _K4_PREFIXES[family]
+    prefix = value["prefix_hex"]
+    if (type(value["prefix_length_bits"]) is not int
+            or value["prefix_length_bits"] != bits
+            or not isinstance(prefix, str)
+            or len(prefix) != width
+            or _LOWER_HEX.fullmatch(prefix) is None):
+        _fail("Invalid canonical K4 prefix")
+    mapping = value["manufacturer_mapping"]
+    if mapping is not None:
+        mapping = dict(_shape(mapping, _K4_MAPPING_FIELDS, "K4 manufacturer mapping"))
+        for field in ("manufacturer_id", "mapping_version", "review_basis"):
+            _text(mapping[field], field)
+        if not isinstance(mapping["base_claim_strength"], str) or mapping["base_claim_strength"] not in _CLAIM_STRENGTHS:
+            _fail("Invalid K4 manufacturer mapping strength")
+        value["manufacturer_mapping"] = mapping
+    return value
+
+
+def make_canonical_k4_record_set(payload: dict[str, Any]) -> ArtifactContent:
+    """Validate and materialize exact R14 CanonicalKnowledgeRecordSet(K4)."""
+    value = _shape(payload, _RECORD_SET_FIELDS, "canonical K4 record set")
+    _int32_positive(value["record_set_contract_version"], "record set version")
+    if value["knowledge_slot"] != "K4":
+        _fail("Invalid K4 knowledge slot")
+    provenance = _artifact_ref(
+        value["knowledge_provenance"], "KnowledgeProvenanceManifest",
+    )
+    records = value["records"]
+    if not isinstance(records, list):
+        _fail("Invalid K4 records")
+    normalized_records = []
+    identities: set[tuple[str, str]] = set()
+    for raw_record in records:
+        record = _k4_record(raw_record)
+        identity = (record["record_type"], record["canonical_record_id"])
+        if identity in identities:
+            _fail("Duplicate canonical K4 record identity")
         identities.add(identity)
         normalized_records.append(record)
     normalized_records = canonical_set(
