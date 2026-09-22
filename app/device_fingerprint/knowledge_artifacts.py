@@ -13,6 +13,7 @@ from .artifact_content import (
     make_artifact_content,
 )
 from .models import DeviceFingerprintValidationError
+from .p0f_semantics import RUNTIME_CONTRACT, parse_request_signature
 from .validation import parse_utc
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -59,6 +60,11 @@ _RECORD_SET_FIELDS = frozenset({
 _K1_RECORD_FIELDS = frozenset({
     "record_type", "canonical_record_id", "dhcp_predicates",
     "candidate_taxonomy_refs", "source_record_identity",
+})
+_K2B_RECORD_FIELDS = frozenset({
+    "record_type", "canonical_record_id", "rule_representation",
+    "canonical_match_rule", "dimension_claims", "source_character",
+    "source_record_identity",
 })
 _TAXONOMY_OUTCOME_FIELDS = frozenset({
     "dimension_name", "outcome_kind", "canonical_target_id", "broad_taxon_ref",
@@ -409,6 +415,79 @@ def make_canonical_k1_record_set(payload: dict[str, Any]) -> ArtifactContent:
         **value,
         "knowledge_provenance": provenance,
         "records": normalized_records,
+    })
+
+
+def canonical_k2b_match_rule(text: str) -> str:
+    """Validate a source token with K2A's pinned request grammar and round trip."""
+    if not isinstance(text, str) or not text:
+        _fail("Invalid K2B match rule")
+    canonical = text.strip()
+    if not canonical:
+        _fail("Invalid K2B match rule")
+    try:
+        first = parse_request_signature(
+            canonical, signature_id="k2b-rule", generic=False, userland=False,
+        )
+        second = parse_request_signature(
+            canonical.strip(), signature_id="k2b-rule", generic=False, userland=False,
+        )
+    except ValueError as exc:
+        raise DeviceFingerprintValidationError("Invalid K2B match rule") from exc
+    if first != second or canonical.strip() != canonical:
+        _fail("K2B match rule does not round trip")
+    return canonical
+
+
+def _k2b_record(raw: Any) -> dict[str, Any]:
+    value = dict(_shape(raw, _K2B_RECORD_FIELDS, "K2B TCP record"))
+    if value["record_type"] != "K2B_TCP":
+        _fail("Invalid K2B record type")
+    _text(value["canonical_record_id"], "canonical record identity")
+    _text(value["source_record_identity"], "source record identity")
+    if value["rule_representation"] != RUNTIME_CONTRACT:
+        _fail("Invalid K2B rule representation")
+    rule = value["canonical_match_rule"]
+    if canonical_k2b_match_rule(rule) != rule:
+        _fail("Noncanonical K2B match rule")
+    if value["source_character"] not in {"current", "legacy"}:
+        _fail("Invalid K2B source character")
+    claims = value["dimension_claims"]
+    if not isinstance(claims, list):
+        _fail("Invalid K2B dimension claims")
+    value["dimension_claims"] = canonical_set(
+        [_taxonomy_outcome(claim) for claim in claims], _taxonomy_primary_key,
+    )
+    return value
+
+
+def make_canonical_k2b_record_set(payload: dict[str, Any]) -> ArtifactContent:
+    """Validate and materialize R14 CanonicalKnowledgeRecordSet(K2B)."""
+    value = _shape(payload, _RECORD_SET_FIELDS, "canonical K2B record set")
+    _int32_positive(value["record_set_contract_version"], "record set version")
+    if value["knowledge_slot"] != "K2B":
+        _fail("Invalid K2B knowledge slot")
+    provenance = _artifact_ref(
+        value["knowledge_provenance"], "KnowledgeProvenanceManifest",
+    )
+    records = value["records"]
+    if not isinstance(records, list):
+        _fail("Invalid K2B records")
+    normalized_records = []
+    identities: set[tuple[str, str]] = set()
+    for raw_record in records:
+        record = _k2b_record(raw_record)
+        identity = (record["record_type"], record["canonical_record_id"])
+        if identity in identities:
+            _fail("Duplicate canonical K2B record identity")
+        identities.add(identity)
+        normalized_records.append(record)
+    normalized_records = canonical_set(
+        normalized_records,
+        lambda record: (record["record_type"], record["canonical_record_id"]),
+    )
+    return make_artifact_content("CanonicalKnowledgeRecordSet", {
+        **value, "knowledge_provenance": provenance, "records": normalized_records,
     })
 
 
