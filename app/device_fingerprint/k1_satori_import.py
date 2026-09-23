@@ -30,7 +30,7 @@ _MESSAGE_TYPES = {
     "Any": "ANY",
 }
 _REJECTED_MESSAGE_TYPES = frozenset({"ACK", "Offer", "NAK"})
-_PLATFORM_MAPPING = {
+SATORI_PLATFORM_TAXONOMY_MAPPING = {
     "Android": "android",
     "iOS": "ios",
     "Windows": "windows",
@@ -38,7 +38,7 @@ _PLATFORM_MAPPING = {
     "ChromeOS": "chromeos",
     "Linux": "linux",
 }
-_DEVICE_CLASS_MAPPING = {
+SATORI_DEVICE_CLASS_TAXONOMY_MAPPING = {
     "Smartphone": "smartphone",
     "Tablet": "tablet",
     "tablet": "tablet",
@@ -157,10 +157,10 @@ def _candidate_taxonomy(fingerprint_attributes: dict[str, str]) -> list[dict[str
     if platform_value is None:
         platform_value = fingerprint_attributes.get("os_name")
     return [
-        _taxonomy_outcome("platform_family", platform_value, _PLATFORM_MAPPING),
+        _taxonomy_outcome("platform_family", platform_value, SATORI_PLATFORM_TAXONOMY_MAPPING),
         _taxonomy_outcome(
             "device_class", fingerprint_attributes.get("device_type"),
-            _DEVICE_CLASS_MAPPING,
+            SATORI_DEVICE_CLASS_TAXONOMY_MAPPING,
         ),
         _taxonomy_outcome("manufacturer_family", None, {}),
         _taxonomy_outcome("model_family", None, {}),
@@ -171,8 +171,8 @@ def _has_direct_taxonomy_mapping(fingerprint_attributes: dict[str, str]) -> bool
     platform_value = fingerprint_attributes.get("os_class")
     if platform_value is None:
         platform_value = fingerprint_attributes.get("os_name")
-    return platform_value in _PLATFORM_MAPPING or (
-        fingerprint_attributes.get("device_type") in _DEVICE_CLASS_MAPPING
+    return platform_value in SATORI_PLATFORM_TAXONOMY_MAPPING or (
+        fingerprint_attributes.get("device_type") in SATORI_DEVICE_CLASS_TAXONOMY_MAPPING
     )
 
 
