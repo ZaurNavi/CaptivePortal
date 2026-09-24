@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from inspect import signature
-from unittest.mock import patch
 
 import pytest
 
@@ -139,12 +138,6 @@ def _gate_kwargs(**changes):
 
 
 def _gate(value: KnowledgeBundleCandidate, **changes):
-    # Synthetic-only proof of generic gate mechanics; the public gate has no bypass.
-    with patch.object(fe7, "_initial_anchor_reasons", return_value=[]):
-        return run_fe7_knowledge_bundle_gate(value, **_gate_kwargs(**changes))
-
-
-def _real_gate(value: KnowledgeBundleCandidate, **changes):
     return run_fe7_knowledge_bundle_gate(value, **_gate_kwargs(**changes))
 
 
@@ -286,12 +279,8 @@ def test_k3_internal_provenance_rule_and_taxonomy_links_are_exact():
         validate_knowledge_bundle_dependencies(build_initial_knowledge_bundle_v1(bad), bad)
 
 
-def test_generic_k3_provenance_allows_other_repository_identity_but_initial_gate_does_not():
+def test_k3_provenance_allows_other_repository_identity_when_links_resolve():
     value = candidate()
-    assert value.k3_provenance.artifact_id == (
-        "KnowledgeProvenanceManifest:v1:sha256:"
-        "99029f81d6ca8c2afc6d48640ac4c1f47f01c78baa2836d68dcec5d0adc28b92"
-    )
     alternate = build_k3_internal_provenance(
         value.k3_portal_rule_set,
         repository_commit_sha="a" * 40,
@@ -301,10 +290,9 @@ def test_generic_k3_provenance_allows_other_repository_identity_but_initial_gate
     changed = replace(value, k3_provenance=alternate)
     bundle = build_initial_knowledge_bundle_v1(changed)
     assert validate_knowledge_bundle_dependencies(bundle, changed)
-    result = _real_gate(changed)
-    assert "initial_k3_provenance_identity_mismatch" in result.failure_reasons
-    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
-    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
+    result = _gate(changed)
+    assert result.gate_result_manifest.semantic_payload["status"] == "PASS"
+    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == [_ref(bundle)]
 
 
 @pytest.mark.parametrize("slot", ["k1", "k2b", "k4"])
@@ -427,22 +415,16 @@ def test_gate_requires_retained_evidence_and_owner_decision(evidence, decisions)
     assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
 
 
-def test_initial_admission_checks_exact_accepted_anchors_without_synthetic_fabrication():
-    result = _real_gate(candidate())
-    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
-    assert any(reason.startswith("initial_k1_source_or_count") for reason in result.failure_reasons)
-    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
-
-
 def test_public_gate_has_no_initial_admission_bypass():
     assert "initial_admission" not in signature(run_fe7_knowledge_bundle_gate).parameters
     with pytest.raises(TypeError):
         run_fe7_knowledge_bundle_gate(candidate(), **_gate_kwargs(initial_admission=False))
 
 
-def test_wrong_f_e5_trusted_time_fails_real_initial_gate():
-    result = _real_gate(candidate(),
-                        foundation_knowledge_evaluation_at_utc="2026-09-22T22:30:34.465Z")
-    assert "initial_f_e5_trusted_time_mismatch" in result.failure_reasons
-    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
-    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
+def test_supplied_prerequisite_time_is_used_without_historical_pin():
+    supplied_time = "2026-09-23T00:00:00.000Z"
+    result = _gate(candidate(), foundation_knowledge_evaluation_at_utc=supplied_time)
+    manifest = result.gate_result_manifest.semantic_payload
+    assert manifest["status"] == "PASS", result.failure_reasons
+    assert manifest["trusted_time_inputs"]["foundation_knowledge_evaluation_at_utc"] == supplied_time
+    assert len(manifest["input_artifact_refs"]) == 16

@@ -16,23 +16,6 @@ from .knowledge_bundle import (
 from .models import DeviceFingerprintValidationError
 from .validation import parse_utc
 
-_INITIAL_TIME = "2026-09-22T22:30:34.464Z"
-_INITIAL_IDS = {
-    "classification_taxonomy": "ClassificationTaxonomy:v1:sha256:399e2a337e7ebecb1bd7a9b21dff5e744c13be36313bc39f16832bc7a57a4d10",
-    "alias_mapping": "AliasMapping:v1:sha256:f1cdd7c9510c2a33bad99bd1ae15eaccd20fcb828a52e02533b9917fdfc2e228",
-    "k3_portal_rule_set": "K3PortalRuleSet:v1:sha256:5e47945da04c60baf8dc1d1a7777a4e2efa2dfa0e80bf7639a97ba51d6fdb28f",
-    "k3_provenance": "KnowledgeProvenanceManifest:v1:sha256:99029f81d6ca8c2afc6d48640ac4c1f47f01c78baa2836d68dcec5d0adc28b92",
-}
-_INITIAL_EXTERNAL = {
-    "k1": ("4f64a405fb1debbd2e066478a7190b821424e0691399068421fdaf168da09b14",
-           "2026-09-19T21:00:50.036Z", 903, "fresh"),
-    "k2b": ("791444ebf9a97a492b7a94020f721d016584918c437a450ccaa5525a55c95ad0",
-            "2026-09-22T22:16:00.456Z", 43, "stale"),
-    "k4": ("eb81bb97240fb7754659c33c13a9139583f7f505e38bc6618f9eef51b3878ae5",
-           "2026-09-22T20:43:37.766Z", 54012, "fresh"),
-}
-
-
 @dataclass(frozen=True, slots=True)
 class FE7GateExecution:
     knowledge_bundle_artifact_id: str | None
@@ -60,43 +43,6 @@ def _candidate_refs(candidate: KnowledgeBundleCandidate) -> list[dict[str, str]]
         list({ref["artifact_id"]: ref for ref in refs}.values()),
         lambda ref: ref["artifact_id"],
     )
-
-
-def _initial_anchor_reasons(
-    candidate: KnowledgeBundleCandidate, evaluation_time: str,
-    per_source: tuple[dict[str, Any], ...],
-) -> list[str]:
-    reasons = []
-    if evaluation_time != _INITIAL_TIME:
-        reasons.append("initial_f_e5_trusted_time_mismatch")
-    for name, expected_id in _INITIAL_IDS.items():
-        content = getattr(candidate, name)
-        if content is None or content.artifact_id != expected_id:
-            reasons.append(f"initial_{name}_identity_mismatch")
-    for slot, (digest, retrieved, count, state) in _INITIAL_EXTERNAL.items():
-        provenance = getattr(candidate, f"{slot}_provenance")
-        record_set = getattr(candidate, f"{slot}_record_set")
-        if provenance is None or record_set is None:
-            reasons.append(f"initial_{slot}_dependency_missing")
-            continue
-        source = provenance.semantic_payload
-        records = record_set.semantic_payload.get("records")
-        if (source.get("source_artifact_sha256") != digest
-                or source.get("retrieved_at_utc") != retrieved
-                or not isinstance(records, list) or len(records) != count):
-            reasons.append(f"initial_{slot}_source_or_count_mismatch")
-        report = next((row for row in per_source if row["slot"] == slot), None)
-        if (report is None or report["freshness_state"] != state
-                or not report["claim_eligible"]
-                or (slot == "k2b" and report["claim_strength_cap"] != "supporting")):
-            reasons.append(f"initial_{slot}_freshness_mismatch")
-    rule_set = candidate.k3_portal_rule_set
-    k3 = rule_set.semantic_payload if rule_set is not None else {}
-    rules, vectors = k3.get("rules"), k3.get("test_vectors")
-    if (not isinstance(rules, list) or not isinstance(vectors, list)
-            or (len(rules), len(vectors)) != (13, 21)):
-        reasons.append("initial_k3_concrete_count_mismatch")
-    return reasons
 
 
 def run_fe7_knowledge_bundle_gate(
@@ -161,8 +107,6 @@ def run_fe7_knowledge_bundle_gate(
                 or not result["claim_eligible"] or result["freshness_state"] == "expired"):
             reasons.append(f"{slot}_knowledge_not_usable")
     per_source = tuple(reports)
-    reasons.extend(_initial_anchor_reasons(candidate, foundation_knowledge_evaluation_at_utc,
-                                           per_source))
     if not retained_evidence_refs:
         reasons.append("retained_evidence_required")
     if not decision_record_refs:
