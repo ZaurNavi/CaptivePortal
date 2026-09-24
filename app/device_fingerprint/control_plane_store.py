@@ -8,14 +8,27 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .artifact_content import ArtifactContent, ArtifactRef
+from .artifact_dependency_graph import extract_direct_artifact_refs
+from .foundation_admission_artifacts import (
+    MANDATORY_PRE_ADMISSION_GATES, build_f_admit_input_refs,
+    make_architecture_contract_reference, make_foundation_admission_manifest,
+    make_origin_runtime_admission,
+    validate_initial_foundation_manifest_lineage,
+)
+from .foundation_gate_artifacts import make_gate_result_manifest
 from .models import DeviceFingerprintValidationError
 from .runtime_profile_artifacts import (
     direct_artifact_refs, make_classification_runtime_profile,
     make_foundation_runtime_profile, make_runtime_profile_activation_record,
     make_runtime_profile_admission_manifest, make_runtime_profile_validity_record,
 )
+from .ttl_capture_placement_proof import make_ttl_capture_placement_proof
+from .validation import parse_utc
 
 _VALIDATORS = {
+    "ArchitectureContractReference": make_architecture_contract_reference,
+    "OriginRuntimeAdmission": make_origin_runtime_admission,
+    "FoundationAdmissionManifest": make_foundation_admission_manifest,
     "FoundationRuntimeProfile": make_foundation_runtime_profile,
     "ClassificationRuntimeProfile": make_classification_runtime_profile,
     "RuntimeProfileAdmissionManifest": make_runtime_profile_admission_manifest,
@@ -37,6 +50,10 @@ class ActiveProfilePointerV1:
     runtime_profile_digest: str
     activation_record_id: str
     activation_generation_id: str
+    updated_at_utc: str
+
+    def __post_init__(self) -> None:
+        parse_utc(self.updated_at_utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,15 +109,45 @@ class DeviceFingerprintControlPlaneStore:
                 );
                 CREATE TABLE IF NOT EXISTS validity_heads (
                     activation_record_id TEXT PRIMARY KEY REFERENCES activations(activation_record_id),
-                    validity_record_id TEXT NOT NULL REFERENCES validities(validity_record_id)
+                    validity_record_id TEXT NOT NULL REFERENCES validities(validity_record_id),
+                    updated_at_utc TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS active_pointers (
                     profile_kind TEXT PRIMARY KEY, runtime_profile_id TEXT NOT NULL,
                     runtime_profile_digest TEXT NOT NULL,
                     activation_record_id TEXT NOT NULL REFERENCES activations(activation_record_id),
-                    activation_generation_id TEXT NOT NULL
+                    activation_generation_id TEXT NOT NULL, updated_at_utc TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS f_admit_publications (
+                    gate_id TEXT PRIMARY KEY CHECK(gate_id='F-ADMIT'),
+                    artifact_id TEXT NOT NULL UNIQUE REFERENCES artifacts(artifact_id),
+                    content_sha256 TEXT NOT NULL
                 );
             """)
+            # Existing F-F5 stores predate these two frozen mutable-row timestamps.
+            for table in ("validity_heads", "active_pointers"):
+                columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if "updated_at_utc" not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN updated_at_utc TEXT")
+            for row in conn.execute("SELECT activation_record_id, validity_record_id FROM validity_heads "
+                                    "WHERE updated_at_utc IS NULL"):
+                validity = self._head(conn, row["activation_record_id"])
+                conn.execute("UPDATE validity_heads SET updated_at_utc=? WHERE activation_record_id=?",
+                             (validity.semantic_payload["effective_at_utc"], row["activation_record_id"]))
+            for row in conn.execute("SELECT activation_record_id FROM active_pointers "
+                                    "WHERE updated_at_utc IS NULL"):
+                activation_row = conn.execute("SELECT artifact_id FROM activations WHERE activation_record_id=?",
+                                              (row["activation_record_id"],)).fetchone()
+                if activation_row is None:
+                    raise ControlPlaneOperationError("activation_lineage_unavailable")
+                activation = self._load(conn, activation_row["artifact_id"])
+                conn.execute("UPDATE active_pointers SET updated_at_utc=? WHERE activation_record_id=?",
+                             (activation.semantic_payload["activated_at_utc"], row["activation_record_id"]))
+            for table in ("validity_heads", "active_pointers"):
+                if conn.execute(f"SELECT 1 FROM {table} WHERE updated_at_utc IS NULL LIMIT 1").fetchone():
+                    raise ControlPlaneOperationError("control_plane_timestamp_unavailable")
+                for row in conn.execute(f"SELECT updated_at_utc FROM {table}"):
+                    parse_utc(row["updated_at_utc"])
 
     @staticmethod
     def _validated(content: ArtifactContent) -> None:
@@ -214,7 +261,11 @@ class DeviceFingerprintControlPlaneStore:
     @staticmethod
     def _pointer(conn: sqlite3.Connection, kind: str) -> ActiveProfilePointerV1 | None:
         row = conn.execute("SELECT * FROM active_pointers WHERE profile_kind=?", (kind,)).fetchone()
-        return ActiveProfilePointerV1(**dict(row)) if row is not None else None
+        if row is None:
+            return None
+        pointer = ActiveProfilePointerV1(**dict(row))
+        parse_utc(pointer.updated_at_utc)
+        return pointer
 
     def get_active_pointer(self, profile_kind: str) -> ActiveProfilePointerV1 | None:
         with self._connect() as conn:
@@ -311,11 +362,11 @@ class DeviceFingerprintControlPlaneStore:
             kind = rp["profile_kind"]
             current = self._pointer(conn, kind)
             expected_ref = rp["previous_active_profile"]
-            expected = None if expected_ref is None else ActiveProfilePointerV1(
+            expected = None if expected_ref is None else (
                 kind, expected_ref["artifact_id"], expected_ref["content_sha256"],
                 rp["expected_previous_activation_record_id"],
                 rp["expected_previous_activation_generation_id"])
-            if current != expected:
+            if (None if current is None else astuple(current)[:5]) != expected:
                 raise ControlPlaneOperationError("active_profile_precondition_mismatch")
             if current is not None:
                 head = self._head(conn, current.activation_record_id)
@@ -331,9 +382,10 @@ class DeviceFingerprintControlPlaneStore:
                         raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
                     self._put(conn, old)
                     self._insert_validity(conn, old)
-                    changed = conn.execute("UPDATE validity_heads SET validity_record_id=? "
+                    changed = conn.execute("UPDATE validity_heads SET validity_record_id=?, updated_at_utc=? "
                                            "WHERE activation_record_id=? AND validity_record_id=?",
-                                           (old.semantic_payload["validity_record_id"], current.activation_record_id,
+                                           (old.semantic_payload["validity_record_id"],
+                                            old.semantic_payload["effective_at_utc"], current.activation_record_id,
                                             head.semantic_payload["validity_record_id"])).rowcount
                     if changed != 1:
                         raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
@@ -347,20 +399,23 @@ class DeviceFingerprintControlPlaneStore:
                 ap["runtime_profile_id"], ap["runtime_profile_digest"], ap["activation_generation_id"]))
             self._put(conn, initial_validity_record)
             self._insert_validity(conn, initial_validity_record)
-            conn.execute("INSERT INTO validity_heads VALUES (?,?)", (
-                ap["activation_record_id"], initial_validity_record.semantic_payload["validity_record_id"]))
+            conn.execute("INSERT INTO validity_heads VALUES (?,?,?)", (
+                ap["activation_record_id"], initial_validity_record.semantic_payload["validity_record_id"],
+                initial_validity_record.semantic_payload["effective_at_utc"]))
             pointer = ActiveProfilePointerV1(kind, ap["runtime_profile_id"], ap["runtime_profile_digest"],
-                                             ap["activation_record_id"], ap["activation_generation_id"])
+                                             ap["activation_record_id"], ap["activation_generation_id"],
+                                             ap["activated_at_utc"])
             if current is None:
-                conn.execute("INSERT INTO active_pointers VALUES (?,?,?,?,?)", astuple(pointer))
+                conn.execute("INSERT INTO active_pointers VALUES (?,?,?,?,?,?)", astuple(pointer))
             else:
                 changed = conn.execute("UPDATE active_pointers SET runtime_profile_id=?, "
-                                       "runtime_profile_digest=?, activation_record_id=?, activation_generation_id=? "
+                                       "runtime_profile_digest=?, activation_record_id=?, activation_generation_id=?, "
+                                       "updated_at_utc=? "
                                        "WHERE profile_kind=? AND runtime_profile_id=? AND runtime_profile_digest=? "
                                        "AND activation_record_id=? AND activation_generation_id=?", (
                                            pointer.runtime_profile_id, pointer.runtime_profile_digest,
                                            pointer.activation_record_id, pointer.activation_generation_id,
-                                           *astuple(current))).rowcount
+                                           pointer.updated_at_utc, *astuple(current)[:5])).rowcount
                 if changed != 1:
                     raise ControlPlaneOperationError("active_profile_precondition_mismatch")
             self._fault("AFTER_WRITES_BEFORE_COMMIT")
@@ -373,6 +428,182 @@ class DeviceFingerprintControlPlaneStore:
             raise
         finally:
             conn.close()
+
+    def publish_initial_foundation(
+        self, admission_manifest: ArtifactContent, activation_record: ArtifactContent,
+        initial_validity_record: ArtifactContent, f_admit_gate_result: ArtifactContent,
+    ) -> ActiveProfilePointerV1:
+        """Publish initial Foundation activation and F-ADMIT PASS in one transaction."""
+        conn = self._connect()
+        try:
+            self._precheck(conn, admission_manifest, activation_record, initial_validity_record, None)
+            rp = admission_manifest.semantic_payload
+            ap = activation_record.semantic_payload
+            vp = initial_validity_record.semantic_payload
+            if (rp["profile_kind"] != "foundation" or rp["update_class"] != "INITIAL_FOUNDATION" or
+                    any(rp[field] is not None for field in (
+                        "previous_active_profile", "expected_previous_activation_record_id",
+                        "expected_previous_activation_generation_id")) or
+                    ap["previous_activation_record_id"] is not None or
+                    ap["previous_active_profile_id"] is not None or
+                    ap["previous_active_profile_digest"] is not None):
+                raise ControlPlaneOperationError("active_profile_precondition_mismatch")
+            foundation_ref = ArtifactRef.from_dict(rp["foundation_admission_manifest"])
+            foundation = self._load(conn, foundation_ref.artifact_id, foundation_ref.content_sha256)
+            if (foundation.artifact_type != "FoundationAdmissionManifest" or
+                    make_foundation_admission_manifest(foundation.semantic_payload).artifact_id != foundation.artifact_id):
+                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
+            foundation_payload = foundation.semantic_payload
+            architecture_ref = ArtifactRef.from_dict(
+                foundation_payload["architecture_contract_reference"])
+            architecture = self._load(conn, architecture_ref.artifact_id,
+                                      architecture_ref.content_sha256)
+            if (architecture.artifact_type != "ArchitectureContractReference" or
+                    architecture.semantic_payload["architecture_document_sha256"] !=
+                    foundation_payload["architecture_document_sha256"]):
+                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
+            if rp["prerequisite_gate_results"] != foundation_payload[
+                    "pre_admission_gate_result_manifests"]:
+                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
+            gate_ids = set()
+            prerequisite_contents = []
+            for prerequisite in foundation_payload["pre_admission_gate_result_manifests"]:
+                prerequisite_ref = ArtifactRef.from_dict(prerequisite)
+                prerequisite_content = self._load(
+                    conn, prerequisite_ref.artifact_id, prerequisite_ref.content_sha256)
+                if (prerequisite_content.artifact_type != "GateResultManifest" or
+                        make_gate_result_manifest(prerequisite_content.semantic_payload).artifact_id !=
+                        prerequisite_content.artifact_id or
+                        prerequisite_content.semantic_payload["status"] != "PASS"):
+                    raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
+                gate_ids.add(prerequisite_content.semantic_payload["gate_id"])
+                prerequisite_contents.append(prerequisite_content)
+            if gate_ids != set(MANDATORY_PRE_ADMISSION_GATES):
+                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
+            origin_ref = ArtifactRef.from_dict(foundation_payload["origin_runtime_admission"])
+            ttl_ref = ArtifactRef.from_dict(foundation_payload["ttl_capture_placement_proof"])
+            origin = self._load(conn, origin_ref.artifact_id, origin_ref.content_sha256)
+            ttl = self._load(conn, ttl_ref.artifact_id, ttl_ref.content_sha256)
+            if (make_origin_runtime_admission(origin.semantic_payload).artifact_id != origin.artifact_id or
+                    make_ttl_capture_placement_proof(ttl.semantic_payload).artifact_id != ttl.artifact_id or
+                    not validate_initial_foundation_manifest_lineage(foundation, origin, ttl)):
+                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
+            profile_ref = ArtifactRef.from_dict(rp["candidate_profile"])
+            profile = self._load(conn, profile_ref.artifact_id, profile_ref.content_sha256)
+            profile_payload = profile.semantic_payload
+            if (profile_payload["origin_runtime_admission"] != origin_ref.as_dict() or
+                    profile_payload["ttl_capture_placement_proof"] != ttl_ref.as_dict() or
+                    profile_payload["classification_foundation_valid_from_utc"] !=
+                    foundation_payload["classification_foundation_valid_from_utc"]):
+                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
+            declared_foundation = extract_direct_artifact_refs(foundation)
+            edges = conn.execute("SELECT dependency_id, dependency_digest FROM artifact_dependencies "
+                                 "WHERE owner_id=? ORDER BY dependency_id", (foundation.artifact_id,)).fetchall()
+            if tuple(ArtifactRef(row[0], row[1]) for row in edges) != declared_foundation:
+                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
+            for ref in declared_foundation:
+                self._load(conn, ref.artifact_id, ref.content_sha256)
+            if (not isinstance(f_admit_gate_result, ArtifactContent) or
+                    f_admit_gate_result.artifact_type != "GateResultManifest" or
+                    make_gate_result_manifest(f_admit_gate_result.semantic_payload).artifact_id !=
+                    f_admit_gate_result.artifact_id):
+                raise ControlPlaneOperationError("f_admit_gate_invalid")
+            gate = f_admit_gate_result.semantic_payload
+            expected_inputs = build_f_admit_input_refs(architecture, prerequisite_contents)
+            for input_ref in expected_inputs:
+                exact = ArtifactRef.from_dict(input_ref)
+                self._load(conn, exact.artifact_id, exact.content_sha256)
+            expected_outputs = {item.artifact_id: item.content_sha256 for item in (
+                origin, foundation, profile, admission_manifest, activation_record, initial_validity_record)}
+            actual_outputs = {ref["artifact_id"]: ref["content_sha256"] for ref in gate["output_artifact_refs"]}
+            if (gate["gate_id"] != "F-ADMIT" or
+                    gate["gate_contract_version"] != "R14-F-ADMIT-v1" or
+                    gate["status"] != "PASS" or
+                    actual_outputs != expected_outputs or
+                    gate["input_artifact_refs"] != expected_inputs or
+                    gate["candidate_repository_commit_sha"] != rp["candidate_repository_commit_sha"] or
+                    gate["candidate_repository_commit_sha"] !=
+                    foundation_payload["foundation_repository_commit_sha"] or
+                    gate["candidate_repository_tree_sha"] != rp["candidate_repository_tree_sha"] or
+                    gate["candidate_repository_tree_sha"] !=
+                    foundation_payload["foundation_repository_tree_sha"] or
+                    gate["trusted_time_inputs"]["foundation_knowledge_evaluation_at_utc"] !=
+                    foundation_payload["foundation_knowledge_evaluation_at_utc"] or
+                    gate["trusted_time_inputs"]["foundation_admission_evaluation_at_utc"] !=
+                    foundation_payload["foundation_admission_evaluation_at_utc"] or
+                    gate["trusted_time_inputs"]["foundation_admission_evaluation_at_utc"] !=
+                    ap["activated_at_utc"] or vp["effective_at_utc"] != ap["activated_at_utc"] or
+                    not gate["decision_record_refs"]):
+                raise ControlPlaneOperationError("f_admit_gate_invalid")
+            self._fault("BEFORE_BEGIN")
+            conn.execute("BEGIN IMMEDIATE")
+            self._fault("AFTER_BEGIN_BEFORE_WRITES")
+            if (self._pointer(conn, "foundation") is not None or
+                    conn.execute("SELECT 1 FROM f_admit_publications WHERE gate_id='F-ADMIT'").fetchone()):
+                raise ControlPlaneOperationError("active_profile_precondition_mismatch")
+            self._put(conn, activation_record)
+            conn.execute("INSERT INTO activations VALUES (?,?,?,?,?,?)", (
+                ap["activation_record_id"], activation_record.artifact_id, "foundation",
+                ap["runtime_profile_id"], ap["runtime_profile_digest"], ap["activation_generation_id"]))
+            self._put(conn, initial_validity_record)
+            self._insert_validity(conn, initial_validity_record)
+            conn.execute("INSERT INTO validity_heads VALUES (?,?,?)", (
+                ap["activation_record_id"], vp["validity_record_id"], vp["effective_at_utc"]))
+            self._fault("AFTER_VALIDITY_BEFORE_GATE")
+            self._put(conn, f_admit_gate_result)
+            conn.execute("INSERT INTO f_admit_publications VALUES (?,?,?)", (
+                "F-ADMIT", f_admit_gate_result.artifact_id, f_admit_gate_result.content_sha256))
+            self._fault("BEFORE_POINTER_WRITE")
+            pointer = ActiveProfilePointerV1(
+                "foundation", ap["runtime_profile_id"], ap["runtime_profile_digest"],
+                ap["activation_record_id"], ap["activation_generation_id"], ap["activated_at_utc"])
+            conn.execute("INSERT INTO active_pointers VALUES (?,?,?,?,?,?)", astuple(pointer))
+            self._fault("AFTER_WRITES_BEFORE_COMMIT")
+            conn.commit()
+            self._fault("AFTER_COMMIT")
+            return pointer
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_published_gate_result(self, gate_id: str) -> ArtifactContent | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT artifact_id, content_sha256 FROM f_admit_publications "
+                               "WHERE gate_id=?", (gate_id,)).fetchone()
+            if row is None:
+                return None
+            gate = self._load(conn, row["artifact_id"], row["content_sha256"])
+            if (gate.artifact_type != "GateResultManifest" or
+                    make_gate_result_manifest(gate.semantic_payload).artifact_id != gate.artifact_id or
+                    gate.semantic_payload["gate_id"] != gate_id or
+                    gate.semantic_payload["status"] != "PASS"):
+                raise ControlPlaneOperationError("f_admit_gate_invalid")
+            return gate
+
+    def load_published_initial_foundation(self) -> tuple[ArtifactContent, PinnedRuntimeProfile,
+                                                          ArtifactContent, ArtifactContent]:
+        """Reconstruct the complete published initial lineage after restart."""
+        gate = self.get_published_gate_result("F-ADMIT")
+        if gate is None:
+            raise ControlPlaneOperationError("activation_lineage_unavailable")
+        pinned = self.pin_active_profile("foundation")
+        foundation_ref = ArtifactRef.from_dict(
+            pinned.admission_manifest.semantic_payload["foundation_admission_manifest"])
+        foundation = self.load_artifact(foundation_ref.artifact_id, foundation_ref.content_sha256)
+        origin_ref = ArtifactRef.from_dict(foundation.semantic_payload["origin_runtime_admission"])
+        origin = self.load_artifact(origin_ref.artifact_id, origin_ref.content_sha256)
+        ttl_ref = ArtifactRef.from_dict(foundation.semantic_payload["ttl_capture_placement_proof"])
+        ttl = self.load_artifact(ttl_ref.artifact_id, ttl_ref.content_sha256)
+        validate_initial_foundation_manifest_lineage(foundation, origin, ttl)
+        if {ref["artifact_id"] for ref in gate.semantic_payload["output_artifact_refs"]} != {
+                origin.artifact_id, foundation.artifact_id, pinned.runtime_profile.artifact_id,
+                pinned.admission_manifest.artifact_id, pinned.activation_record.artifact_id,
+                pinned.validity_record.artifact_id}:
+            raise ControlPlaneOperationError("activation_lineage_unavailable")
+        return gate, pinned, foundation, origin
 
     @staticmethod
     def _insert_validity(conn: sqlite3.Connection, content: ArtifactContent) -> None:
@@ -411,9 +642,11 @@ class DeviceFingerprintControlPlaneStore:
                 raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
             self._put(conn, new_validity_record)
             self._insert_validity(conn, new_validity_record)
-            changed = conn.execute("UPDATE validity_heads SET validity_record_id=? WHERE activation_record_id=? "
-                                   "AND validity_record_id=?", (vp["validity_record_id"], vp["activation_record_id"],
-                                                                expected_head_validity_record_id)).rowcount
+            changed = conn.execute("UPDATE validity_heads SET validity_record_id=?, updated_at_utc=? "
+                                   "WHERE activation_record_id=? "
+                                   "AND validity_record_id=?", (vp["validity_record_id"], vp["effective_at_utc"],
+                                                               vp["activation_record_id"],
+                                                               expected_head_validity_record_id)).rowcount
             if changed != 1:
                 raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
             conn.commit()

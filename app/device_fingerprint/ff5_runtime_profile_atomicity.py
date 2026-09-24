@@ -16,6 +16,10 @@ from .artifact_content import ArtifactContent, ArtifactRef, canonical_set, make_
 from .control_plane_store import (
     ControlPlaneOperationError, DeviceFingerprintControlPlaneStore,
 )
+from .foundation_admission_artifacts import (
+    MANDATORY_PRE_ADMISSION_GATES, make_architecture_contract_reference,
+    make_foundation_admission_manifest,
+)
 from .foundation_gate_artifacts import make_gate_result_manifest
 from .gate_proof_artifacts import make_gate_proof_artifact
 from .models import DeviceFingerprintValidationError
@@ -96,7 +100,7 @@ class _Fixture:
             "SnapshotContentPolicy", "SnapshotExecutionPolicy", "EvidenceSchemaRegistryContract",
             "Task01HealthRetentionContract", "SourceHealthEmitterContract",
             "KnowledgeBundle", "ClassificationPolicy", "EvidenceAdapterContractSet",
-            "ClassifierArtifactManifest", "FoundationAdmissionManifest", "Task04AcceptanceManifest",
+            "ClassifierArtifactManifest", "Task04AcceptanceManifest",
         ):
             content = _synthetic(kind, kind)
             self.leaves[kind] = content
@@ -108,6 +112,55 @@ class _Fixture:
         })
         self.leaves["OriginRuntimeAdmission"] = disabled_origin
         self.store.persist_artifact(disabled_origin)
+        architecture = make_architecture_contract_reference({
+            "architecture_contract_name": "DEVICE-FINGERPRINT-03A-R2 / TASK-04",
+            "architecture_revision": "R14", "architecture_status": "FINAL",
+            "architecture_document_sha256": "d" * 64,
+        })
+        self.leaves["ArchitectureContractReference"] = architecture
+        self.store.persist_artifact(architecture)
+
+        def synthetic_ref(kind: str, label: str) -> dict[str, str]:
+            return _ref(self.leaves.get(kind) or _synthetic(kind, label))
+
+        manifest = make_foundation_admission_manifest({
+            "foundation_manifest_version": 1,
+            "architecture_contract_reference": _ref(architecture),
+            "architecture_document_sha256": architecture.semantic_payload["architecture_document_sha256"],
+            "foundation_repository_commit_sha": "a" * 40,
+            "foundation_repository_tree_sha": "b" * 40,
+            "foundation_knowledge_evaluation_at_utc": _AT,
+            "foundation_admission_evaluation_at_utc": _AT,
+            "classification_foundation_valid_from_utc": _AT,
+            "task01_database_schema_generation_contract_version": 2,
+            "task01_watermark_generation_contract_version": 2,
+            "mandatory_pre_admission_foundation_gate_ids": list(MANDATORY_PRE_ADMISSION_GATES),
+            "pre_admission_gate_result_manifests": [
+                synthetic_ref("GateResultManifest", f"ff5-disposable-{gate_id}")
+                for gate_id in MANDATORY_PRE_ADMISSION_GATES
+            ],
+            "evidence_schema_registry_contract": synthetic_ref("EvidenceSchemaRegistryContract", "registry"),
+            "evidence_adapter_contract_set": synthetic_ref("EvidenceAdapterContractSet", "adapter"),
+            "knowledge_bundle": synthetic_ref("KnowledgeBundle", "knowledge"),
+            "evidence_source_binding_timeline": synthetic_ref("EvidenceSourceBindingTimeline", "binding"),
+            "binding_clock_policy": synthetic_ref("BindingClockPolicy", "clock"),
+            "source_health_policy": synthetic_ref("SourceHealthPolicy", "health"),
+            "source_health_emitter_contracts": [synthetic_ref("SourceHealthEmitterContract", "emitter")],
+            "snapshot_content_policy": synthetic_ref("SnapshotContentPolicy", "snapshot-content"),
+            "snapshot_execution_policy": synthetic_ref("SnapshotExecutionPolicy", "snapshot-execution"),
+            "classification_policy": synthetic_ref("ClassificationPolicy", "classification"),
+            "classification_retention_policy": synthetic_ref("ClassificationRetentionPolicy", "retention"),
+            "product_validation_policy": synthetic_ref("ProductValidationPolicy", "product-validation"),
+            "knowledge_freshness_policies": [synthetic_ref("KnowledgeFreshnessPolicy", "freshness")],
+            "source_governance_records": [synthetic_ref("SourceGovernanceRecord", "governance")],
+            "knowledge_provenance_manifests": [synthetic_ref("KnowledgeProvenanceManifest", "provenance")],
+            "k2a_conformance_package": synthetic_ref("K2AConformancePackage", "k2a"),
+            "ttl_capture_placement_proof": synthetic_ref("TTLCapturePlacementProof", "ttl"),
+            "origin_runtime_admission": _ref(disabled_origin),
+            "portal_headers_v2_capability_disposition": synthetic_ref("CapabilityDisposition", "portal-v2"),
+        })
+        self.leaves["FoundationAdmissionManifest"] = manifest
+        self.store.persist_artifact(manifest)
         second_clock = _synthetic("BindingClockPolicy", "alternate synthetic clock fixture")
         self.store.persist_artifact(second_clock)
         self.leaves["alternate_clock"] = second_clock
