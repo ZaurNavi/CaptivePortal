@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 import uuid
@@ -438,6 +438,7 @@ def _reduce_claims(
     dimension: str, candidates: list[dict[str, Any]], *,
     broad: list[dict[str, Any]] = (), explanations: list[str] = (),
     k1_ambiguous: bool = False, not_evaluable: bool = False,
+    evaluated_evidence_refs: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Apply §102-104 without row counts, arrival order, or derivation priority."""
     candidates = _candidate_set(_unique(candidates))
@@ -516,7 +517,12 @@ def _reduce_claims(
         "same_origin_contradiction_records": contradictions,
         "broad_unresolved_taxon_refs": broad,
         "knowledge_refs": _knowledge_set(_unique([ref for row in candidates for ref in row["knowledge_refs"]])),
-        "evidence_refs": _evidence_set(_unique([ref for row in candidates for ref in row["evidence_refs"]])),
+        "evidence_refs": _evidence_set(_unique([
+            *evaluated_evidence_refs,
+            *(ref for row in candidates for ref in row["evidence_refs"]),
+            *(ref for row in broad for ref in row["evidence_refs"]),
+            *(ref for row in contradictions for ref in row["evidence_refs"]),
+        ])),
         "explanation_codes": _strings(list(set(reasons)), "explanation"),
     }
 
@@ -654,6 +660,8 @@ class DeviceFingerprintOriginAssessmentBuilder:
             dimension: [] for dimension in DIMENSIONS}
         broad: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
             dimension: [] for dimension in DIMENSIONS}
+        evaluated_evidence_refs: dict[str, list[dict[str, Any]]] = {
+            dimension: [] for dimension in DIMENSIONS}
         explanations: list[str] = []
         evidence_refs: list[dict[str, Any]] = []
         knowledge_refs: list[dict[str, str]] = []
@@ -723,6 +731,21 @@ class DeviceFingerprintOriginAssessmentBuilder:
                     continue
                 if adapter["quality_valid_behavior"].startswith("AUDIT_ONLY_"):
                     explanations.append("ja4_no_semantic_claim")
+                    continue
+                eligible_dimensions: set[str] = set()
+                for dimension in DIMENSIONS:
+                    if task01_contract_claim_eligible(
+                            adapter, source_kind=descriptor["source_kind"],
+                            feature_schema_version=descriptor["feature_schema_version"],
+                            source_subtype=descriptor["source_subtype"],
+                            extractor_name=descriptor["extractor_name"],
+                            extractor_version=descriptor["extractor_version"],
+                            rule_version=descriptor["rule_version"],
+                            quality_state=descriptor["quality_state"],
+                            normalized_payload=dict(payload), dimension_name=dimension):
+                        evaluated_evidence_refs[dimension].append(eref)
+                        eligible_dimensions.add(dimension)
+                if not eligible_dimensions:
                     continue
                 if origin == "dhcp":
                     records = match_k1_records(inputs.knowledge.k1_record_set, dict(payload))
@@ -847,6 +870,7 @@ class DeviceFingerprintOriginAssessmentBuilder:
             dimension, _merge_contributions(candidates[dimension]),
             broad=_merge_contributions(broad[dimension], broad=True), explanations=explanations,
             k1_ambiguous=origin == "dhcp",
+            evaluated_evidence_refs=evaluated_evidence_refs[dimension],
             not_evaluable=(origin != "mac_registry" and not rows and coverage_not_evaluable
                            and not tcp_disabled),
         ) for dimension in DIMENSIONS]
