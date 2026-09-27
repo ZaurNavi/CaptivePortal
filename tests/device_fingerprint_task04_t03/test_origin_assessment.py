@@ -385,6 +385,10 @@ def test_expired_external_k1_emits_no_new_claim():
     output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
     assert "knowledge_source_expired" in output["explanation_codes"]
     assert all(row["internal_state"] == "no_claim" for row in output["dimension_assessments"])
+    dimensions = {row["dimension_name"]: row for row in output["dimension_assessments"]}
+    assert len(dimensions["platform_family"]["evidence_refs"]) == 1
+    assert len(dimensions["device_class"]["evidence_refs"]) == 1
+    assert dimensions["manufacturer_family"]["evidence_refs"] == []
 
 
 def test_stale_external_k1_uses_admitted_explanation_and_ceiling():
@@ -520,11 +524,71 @@ def test_k1_no_match_is_empty_and_row_order_is_identity_stable():
     output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
     assert "k1_empty_candidate_set" in output["explanation_codes"]
     assert all(not row["candidate_set"] for row in output["dimension_assessments"])
+    dimensions = {row["dimension_name"]: row for row in output["dimension_assessments"]}
+    for dimension in ("platform_family", "device_class"):
+        assert dimensions[dimension]["internal_state"] == "no_claim"
+        assert len(dimensions[dimension]["evidence_refs"]) == 1
+    assert dimensions["manufacturer_family"]["evidence_refs"] == []
 
     forward = _inputs(evidence_rows=[_dhcp_row(1), _dhcp_row(2)])
     reverse = _inputs(evidence_rows=[_dhcp_row(2), _dhcp_row(1)])
     assert DeviceFingerprintOriginAssessmentBuilder(forward).build("dhcp") == (
         DeviceFingerprintOriginAssessmentBuilder(reverse).build("dhcp"))
+
+
+def _r2_k1_no_match_inputs(*, quality="valid", missing_required=False, extra_rows=()):
+    fixture = build_k1_fixture_definitions()["one_non_any_mismatch"]
+    payload = dict(fixture["evidence"])
+    first = _inputs(evidence_rows=[_dhcp_row(1, payload=payload, quality_state=quality), *extra_rows])
+    if missing_required:
+        # T-01 persisted payload stays schema-valid. Exercise the T-03
+        # materialization boundary with an incomplete normalized view.
+        entries = list(first.materialization.ordered_entries)
+        normalized = dict(entries[0].normalized_payload)
+        normalized.pop("vendor_class")
+        entries[0] = MaterializedEvidenceEntry(entries[0].descriptor, normalized)
+        first = replace(first, materialization=EvidenceSnapshotMaterialization(
+            first.materialization.evidence_snapshot_content, tuple(entries)))
+    records = fixture["record_set"].semantic_payload
+    records["knowledge_provenance"] = _ref(first.knowledge.k1_provenance)
+    knowledge = replace(first.knowledge, k1_record_set=make_canonical_k1_record_set(records))
+    return replace(first, knowledge=knowledge,
+                   knowledge_bundle=build_initial_knowledge_bundle_v1(knowledge))
+
+
+@pytest.mark.parametrize("quality,missing_required,expected", [
+    ("valid", False, 1),
+    ("partial", False, 1),
+    ("partial", True, 0),
+    ("degraded", False, 0),
+])
+def test_r2_dimension_usable_evidence_lineage_for_k1_no_match(quality, missing_required, expected):
+    inputs = _r2_k1_no_match_inputs(quality=quality, missing_required=missing_required)
+    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
+    dimensions = {row["dimension_name"]: row for row in output["dimension_assessments"]}
+    for dimension in ("platform_family", "device_class"):
+        assert dimensions[dimension]["internal_state"] == "no_claim"
+        assert len(dimensions[dimension]["evidence_refs"]) == expected
+    assert dimensions["manufacturer_family"]["evidence_refs"] == []
+    assert len(output["evidence_refs"]) == 1
+
+
+@pytest.mark.parametrize("version,usable_dimension,unusable_dimension", [
+    (1, "platform_family", "device_class"),
+    (2, "device_class", "platform_family"),
+])
+def test_r2_portal_version_dimension_lineage(version, usable_dimension, unusable_dimension):
+    rules = build_k3_portal_rule_set_v1().semantic_payload
+    vector = "k3.vector.unknown_model_ua.no_claim.v1" if version == 1 else (
+        "k3.vector.unknown_model_ch.no_claim.v2")
+    payload = next(row["normalized_input"] for row in rules["test_vectors"]
+                   if row["test_vector_id"] == vector)
+    inputs = _inputs(evidence_rows=[_portal_row(payload=payload, version=version)], origin="portal")
+    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("portal").semantic_payload
+    dimensions = {row["dimension_name"]: row for row in output["dimension_assessments"]}
+    assert len(dimensions[usable_dimension]["evidence_refs"]) == 1
+    assert dimensions[unusable_dimension]["evidence_refs"] == []
+    assert all(row["candidate_set"] == [] for row in dimensions.values())
 
 
 def _network_row(origin, *, version=1, number=1):
@@ -590,6 +654,7 @@ def test_legacy_tcp_and_ja4_are_audit_only(origin, reason):
     assert reason in output["explanation_codes"]
     assert len(output["evidence_refs"]) == 1
     assert all(row["internal_state"] == "no_claim" for row in output["dimension_assessments"])
+    assert all(row["evidence_refs"] == [] for row in output["dimension_assessments"])
 
 
 def test_pinned_tcp_disabled_emits_no_semantic_claim_with_audit_visible_row():
@@ -599,6 +664,7 @@ def test_pinned_tcp_disabled_emits_no_semantic_claim_with_audit_visible_row():
     assert "origin_runtime_disabled" in output["explanation_codes"]
     assert len(output["evidence_refs"]) == 1
     assert all(row["internal_state"] == "no_claim" for row in output["dimension_assessments"])
+    assert all(row["evidence_refs"] == [] for row in output["dimension_assessments"])
 
 
 def test_t03_input_boundary_has_no_later_runtime_profile_or_foundation_proof():
@@ -629,6 +695,7 @@ def test_adapter_incompatibility_is_audit_only_before_k1_matcher(change, monkeyp
     assert not output["knowledge_refs"]
     assert all(not row["candidate_set"] and not row["broad_unresolved_taxon_refs"]
                for row in output["dimension_assessments"])
+    assert all(row["evidence_refs"] == [] for row in output["dimension_assessments"])
 
 
 def test_degraded_compatible_evidence_does_not_run_k1_matcher(monkeypatch):
@@ -642,6 +709,7 @@ def test_degraded_compatible_evidence_does_not_run_k1_matcher(monkeypatch):
     assert "degraded_evidence_no_claim" in output["explanation_codes"]
     assert len(output["evidence_refs"]) == 1
     assert not output["knowledge_refs"]
+    assert all(row["evidence_refs"] == [] for row in output["dimension_assessments"])
 
 
 def test_incompatible_portal_and_tcp_rows_never_reach_k3_or_k2a(monkeypatch):
