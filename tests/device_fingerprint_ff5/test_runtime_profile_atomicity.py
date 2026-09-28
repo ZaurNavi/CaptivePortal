@@ -183,6 +183,75 @@ def test_initial_pointer_activation_and_reopen_exact_chain(tmp_path):
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
 
 
+def test_capture_pinned_commit_lineage_tracks_safe_supersession(tmp_path):
+    fixture = _Fixture(tmp_path / "safe-lineage.sqlite")
+    first_admission = fixture.admission("foundation", fixture.foundation_a)
+    first_pointer, _, active, _ = fixture.activate(first_admission, 91)
+    old_pin = fixture.store.pin_active_profile("foundation")
+    assert fixture.store.capture_pinned_commit_lineage(old_pin) == (active,)
+    second_admission = fixture.admission("foundation", fixture.foundation_b, first_pointer)
+    fixture.activate(second_admission, 92, active)
+    current_head = fixture.store.get_validity_head(first_pointer.activation_record_id)
+    assert current_head.semantic_payload["state"] == "INACTIVE"
+    assert current_head.semantic_payload["reason_code"] == "SUPERSEDED_SAFE"
+    assert current_head.semantic_payload["previous_validity_record_id"] == active.semantic_payload[
+        "validity_record_id"]
+    assert fixture.store.capture_pinned_commit_lineage(old_pin) == (active, current_head)
+    assert fixture.store.check_pinned_commit_allowed(old_pin) is True
+
+
+@pytest.mark.parametrize("reason", ["EXPLICIT_POLICY_SUSPEND", "TTL_CAPTURE_PROOF_INVALIDATED"])
+def test_capture_pinned_commit_lineage_rejects_invalidated_head(tmp_path, reason):
+    fixture = _Fixture(tmp_path / "invalidated-lineage.sqlite")
+    admission = fixture.admission("foundation", fixture.foundation_a)
+    _, _, active, _ = fixture.activate(admission, 93)
+    old_pin = fixture.store.pin_active_profile("foundation")
+    suspended = make_runtime_profile_validity_record({
+        **active.semantic_payload,
+        "validity_record_id": "00000000-0000-4000-8000-000000000931",
+        "state": "SUSPENDED_INVALIDATED", "reason_code": reason,
+        "inflight_commit_rule": "REJECT_PINNED_INFLIGHT",
+        "previous_validity_record_id": active.semantic_payload["validity_record_id"],
+    })
+    fixture.store.transition_validity(
+        suspended, expected_head_validity_record_id=active.semantic_payload["validity_record_id"])
+    for check in (fixture.store.capture_pinned_commit_lineage,
+                  fixture.store.check_pinned_commit_allowed):
+        with pytest.raises(ControlPlaneOperationError) as error:
+            check(old_pin)
+        assert error.value.reason_code == "runtime_profile_invalidated"
+
+
+def test_capture_pinned_commit_lineage_fails_closed_on_missing_head(tmp_path):
+    fixture = _Fixture(tmp_path / "missing-lineage.sqlite")
+    admission = fixture.admission("foundation", fixture.foundation_a)
+    pointer, _, _, _ = fixture.activate(admission, 94)
+    old_pin = fixture.store.pin_active_profile("foundation")
+    with fixture.store._connect() as conn:
+        conn.execute("DELETE FROM validity_heads WHERE activation_record_id=?",
+                     (pointer.activation_record_id,))
+    for check in (fixture.store.capture_pinned_commit_lineage,
+                  fixture.store.check_pinned_commit_allowed):
+        with pytest.raises(ControlPlaneOperationError) as error:
+            check(old_pin)
+        assert error.value.reason_code == "activation_lineage_unavailable"
+
+
+def test_capture_pinned_commit_lineage_fails_closed_on_broken_predecessor(tmp_path):
+    fixture = _Fixture(tmp_path / "broken-predecessor.sqlite")
+    first_admission = fixture.admission("foundation", fixture.foundation_a)
+    pointer, _, active, _ = fixture.activate(first_admission, 95)
+    old_pin = fixture.store.pin_active_profile("foundation")
+    second_admission = fixture.admission("foundation", fixture.foundation_b, pointer)
+    fixture.activate(second_admission, 96, active)
+    with fixture.store._connect() as conn:
+        conn.execute("DELETE FROM validities WHERE validity_record_id=?",
+                     (active.semantic_payload["validity_record_id"],))
+    with pytest.raises(ControlPlaneOperationError) as error:
+        fixture.store.capture_pinned_commit_lineage(old_pin)
+    assert error.value.reason_code == "activation_lineage_unavailable"
+
+
 def test_control_plane_records_are_visible_only_after_transactional_mutation(tmp_path):
     fixture = _Fixture(tmp_path / "record-visibility-test.sqlite")
     rpm = fixture.admission("foundation", fixture.foundation_a)
