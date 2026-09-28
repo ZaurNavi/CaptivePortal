@@ -133,6 +133,8 @@ class DeviceFingerprintClassificationStore:
                     content_sha256 TEXT NOT NULL,
                     PRIMARY KEY (classification_id, artifact_id)
                 );
+                CREATE INDEX IF NOT EXISTS idx_classifications_device_history_v1
+                ON classifications(site_id, observed_mac, classified_at_utc, classification_id);
             """)
 
     @staticmethod
