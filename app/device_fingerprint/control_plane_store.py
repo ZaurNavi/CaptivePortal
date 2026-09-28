@@ -727,22 +727,107 @@ class DeviceFingerprintControlPlaneStore:
         finally:
             conn.close()
 
-    def check_pinned_commit_allowed(self, pinned: PinnedRuntimeProfile) -> bool:
+    def capture_pinned_commit_lineage(
+        self, pinned: PinnedRuntimeProfile,
+    ) -> tuple[ArtifactContent, ...]:
+        """Check the original pin and capture its canonical head in one read transaction."""
         if not isinstance(pinned, PinnedRuntimeProfile):
-            raise ControlPlaneOperationError("runtime_profile_invalidated")
-        with self._connect() as conn:
-            try:
-                head = self._head(conn, pinned.pointer.activation_record_id)
-                state = head.semantic_payload
-                if (state["activation_record_id"] != pinned.pointer.activation_record_id or
-                        state["runtime_profile_id"] != pinned.pointer.runtime_profile_id or
-                        state["runtime_profile_digest"] != pinned.pointer.runtime_profile_digest or
-                        state["inflight_commit_rule"] != "ALLOW_PINNED_INFLIGHT" or
-                        state["state"] == "SUSPENDED_INVALIDATED"):
-                    raise ControlPlaneOperationError("runtime_profile_invalidated")
-                return True
-            except ControlPlaneOperationError as exc:
-                raise ControlPlaneOperationError("runtime_profile_invalidated") from exc
+            raise ControlPlaneOperationError("activation_lineage_unavailable")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            pointer = pinned.pointer
+            if (not isinstance(pointer, ActiveProfilePointerV1)
+                    or pointer.profile_kind not in ("foundation", "classification")):
+                raise ValueError("invalid pin pointer")
+            row = conn.execute("SELECT * FROM activations WHERE activation_record_id=?",
+                               (pointer.activation_record_id,)).fetchone()
+            if (row is None or (row["profile_kind"], row["runtime_profile_id"],
+                                row["runtime_profile_digest"], row["activation_generation_id"]) != (
+                                    pointer.profile_kind, pointer.runtime_profile_id,
+                                    pointer.runtime_profile_digest, pointer.activation_generation_id)):
+                raise ValueError("activation index mismatch")
+            activation = self._load(conn, row["artifact_id"])
+            profile = self._load(conn, pointer.runtime_profile_id, pointer.runtime_profile_digest)
+            admission = self._load(
+                conn, activation.semantic_payload["runtime_profile_admission_manifest_id"],
+                activation.semantic_payload["runtime_profile_admission_manifest_digest"])
+            if (activation != pinned.activation_record or profile != pinned.runtime_profile
+                    or admission != pinned.admission_manifest
+                    or activation.artifact_type != "RuntimeProfileActivationRecord"
+                    or profile.artifact_type != ("FoundationRuntimeProfile" if pointer.profile_kind == "foundation"
+                                                 else "ClassificationRuntimeProfile")
+                    or admission.artifact_type != "RuntimeProfileAdmissionManifest"):
+                raise ValueError("pin artifact mismatch")
+            ap = activation.semantic_payload
+            if (ap["activation_record_id"], ap["profile_kind"], ap["runtime_profile_id"],
+                    ap["runtime_profile_digest"], ap["activation_generation_id"]) != (
+                        pointer.activation_record_id, pointer.profile_kind, pointer.runtime_profile_id,
+                        pointer.runtime_profile_digest, pointer.activation_generation_id):
+                raise ValueError("activation content mismatch")
+            if (admission.semantic_payload["profile_kind"] != pointer.profile_kind
+                    or admission.semantic_payload["candidate_profile"] != {
+                        "artifact_id": pointer.runtime_profile_id,
+                        "content_sha256": pointer.runtime_profile_digest}):
+                raise ValueError("admission mismatch")
+            head_row = conn.execute("SELECT validity_record_id, updated_at_utc FROM validity_heads "
+                                    "WHERE activation_record_id=?", (pointer.activation_record_id,)).fetchone()
+            if head_row is None:
+                raise ValueError("missing canonical head")
+            chain = []
+            seen = set()
+            current_id = head_row["validity_record_id"]
+            while current_id is not None:
+                if current_id in seen:
+                    raise ValueError("validity cycle")
+                seen.add(current_id)
+                validity_row = conn.execute(
+                    "SELECT artifact_id, activation_record_id FROM validities WHERE validity_record_id=?",
+                    (current_id,)).fetchone()
+                if validity_row is None or validity_row["activation_record_id"] != pointer.activation_record_id:
+                    raise ValueError("validity index mismatch")
+                validity = self._load(conn, validity_row["artifact_id"])
+                vp = validity.semantic_payload
+                if (validity.artifact_type != "RuntimeProfileValidityRecord"
+                        or (vp["validity_record_id"], vp["activation_record_id"], vp["profile_kind"],
+                            vp["runtime_profile_id"], vp["runtime_profile_digest"]) != (
+                                current_id, pointer.activation_record_id, pointer.profile_kind,
+                                pointer.runtime_profile_id, pointer.runtime_profile_digest)):
+                    raise ValueError("validity content mismatch")
+                chain.append(validity)
+                current_id = vp["previous_validity_record_id"]
+            chain.reverse()
+            if (not chain or chain[0].semantic_payload["state"] != "ACTIVE"
+                    or chain[0].semantic_payload["previous_validity_record_id"] is not None
+                    or chain[-1].semantic_payload["effective_at_utc"] != head_row["updated_at_utc"]
+                    or pinned.validity_record not in chain
+                    or pinned.validity_record.semantic_payload["state"] != "ACTIVE"):
+                raise ValueError("validity chain mismatch")
+            for previous, current in zip(chain, chain[1:]):
+                if current.semantic_payload["previous_validity_record_id"] != previous.semantic_payload[
+                        "validity_record_id"]:
+                    raise ValueError("validity predecessor mismatch")
+            head = chain[-1].semantic_payload
+            if (head["state"] == "SUSPENDED_INVALIDATED"
+                    or head["inflight_commit_rule"] == "REJECT_PINNED_INFLIGHT"):
+                raise ControlPlaneOperationError("runtime_profile_invalidated")
+            if head["state"] not in ("ACTIVE", "INACTIVE"):
+                raise ValueError("invalid canonical head")
+            conn.commit()
+            return tuple(chain)
+        except ControlPlaneOperationError as exc:
+            if exc.reason_code == "runtime_profile_invalidated":
+                raise
+            raise ControlPlaneOperationError("activation_lineage_unavailable") from exc
+        except (sqlite3.Error, DeviceFingerprintValidationError, KeyError, TypeError, ValueError,
+                AttributeError) as exc:
+            raise ControlPlaneOperationError("activation_lineage_unavailable") from exc
+        finally:
+            conn.close()
+
+    def check_pinned_commit_allowed(self, pinned: PinnedRuntimeProfile) -> bool:
+        self.capture_pinned_commit_lineage(pinned)
+        return True
 
     def validate_startup_integrity(self) -> None:
         conn = self._connect()
