@@ -71,8 +71,16 @@ def persist_candidate(store, assembly, retention):
 def production_setup(tmp_path):
     store, control, candidate, retention = setup(tmp_path)
     profile = candidate.classification_runtime_profile
-    accepted = make_artifact_content("Task04AcceptanceManifest", {"fixture": "accepted"})
     foundation_admission = store._test_foundation_admission
+    foundation_manifest = control.contents[foundation_admission.semantic_payload[
+        "foundation_admission_manifest"]["artifact_id"]]
+    accepted = make_artifact_content("Task04AcceptanceManifest", {
+        "fixture": "accepted",
+        "tested_classification_runtime_profile": ref(profile),
+        "classifier_artifact_manifest": ref(candidate.classifier_artifact_manifest),
+        "foundation_admission_manifest": ref(foundation_manifest),
+        "pre_acceptance_task04_gate_result_manifests": [],
+    })
     admission = make_runtime_profile_admission_manifest({
         "runtime_profile_admission_contract_version": 1,
         "profile_kind": "classification", "candidate_profile": ref(profile),
@@ -155,6 +163,15 @@ def real_production_setup(tmp_path):
                                        store._test_foundation_admission.artifact_id):
             persist_candidate(content)
     foundation_admission = fixture.admission("foundation", candidate.foundation_runtime_profile)
+    accepted = make_artifact_content("Task04AcceptanceManifest", {
+        "fixture": "accepted",
+        "tested_classification_runtime_profile": ref(candidate.classification_runtime_profile),
+        "classifier_artifact_manifest": ref(candidate.classifier_artifact_manifest),
+        "foundation_admission_manifest": ref(fixture.leaves["FoundationAdmissionManifest"]),
+        "pre_acceptance_task04_gate_result_manifests": [],
+    })
+    fixture.store.persist_artifact(accepted, tuple(extract_direct_artifact_refs(accepted)))
+    fixture.leaves["Task04AcceptanceManifest"] = accepted
     classification_admission = fixture.admission(
         "classification", candidate.classification_runtime_profile,
         foundation_admission=foundation_admission)
@@ -190,7 +207,19 @@ def assert_no_dangling_audit_references(store, classification_id):
             assert artifacts[root["artifact_id"]] == root["content_sha256"]
         for artifact_id, digest in artifacts.items():
             content = store.load_artifact(artifact_id, digest)
-            for reference in extract_direct_artifact_refs(content):
+            syntactic = extract_direct_artifact_refs(content)
+            bounded = content.artifact_type in {
+                "RuntimeProfileAdmissionManifest", "FoundationAdmissionManifest",
+                "Task04AcceptanceManifest", "RuntimeProfileActivationRecord",
+            }
+            actual = conn.execute("SELECT dependency_id, dependency_digest "
+                                  "FROM artifact_dependencies WHERE owner_id=?", (artifact_id,))
+            actual_refs = {(row["dependency_id"], row["dependency_digest"]) for row in actual}
+            if not bounded:
+                assert actual_refs == {(item.artifact_id, item.content_sha256) for item in syntactic}
+            for reference in syntactic:
+                if bounded and (reference.artifact_id, reference.content_sha256) not in actual_refs:
+                    continue
                 assert artifacts[reference.artifact_id] == reference.content_sha256
                 target = store.load_artifact(reference.artifact_id, reference.content_sha256)
                 reference.resolve(target, target.artifact_type)
@@ -341,14 +370,14 @@ def test_dependency_edges_are_complete_and_no_dangling_digest(tmp_path):
     assert dangling == 0
 
 
-def test_missing_foundation_lineage_dependency_fails_before_classification_commit(tmp_path):
+def test_missing_runtime_dependency_fails_before_classification_commit(tmp_path):
     store, control, assembly, retention = setup(tmp_path)
     missing_id = assembly.foundation_runtime_profile.semantic_payload[
         "source_health_policy"]["artifact_id"]
     del control.contents[missing_id]
     with pytest.raises(ClassificationPersistenceError) as caught:
         persist_candidate(store, assembly, retention)
-    assert caught.value.reason_code == "activation_lineage_unavailable"
+    assert caught.value.reason_code == "persistence_unavailable"
     with store._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0] == 0
 

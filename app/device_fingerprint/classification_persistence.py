@@ -142,18 +142,15 @@ class DeviceFingerprintClassificationStore:
         return ArtifactRef(content.artifact_id, content.content_sha256)
 
     def _collect_closure(
-        self, seeds: list[ArtifactContent], *, lineage: bool,
+        self, seeds: list[ArtifactContent],
     ) -> dict[str, ArtifactContent]:
-        reason = "activation_lineage_unavailable" if lineage else "persistence_unavailable"
+        """Recursively retain every dependency needed by exact runtime replay."""
+        reason = "persistence_unavailable"
         contents: dict[str, ArtifactContent] = {}
         try:
             for content in seeds:
                 if not isinstance(content, ArtifactContent):
                     raise ClassificationPersistenceError(reason)
-                if lineage:
-                    stored = self._control.load_artifact(content.artifact_id, content.content_sha256)
-                    if stored != content:
-                        raise ClassificationPersistenceError(reason)
                 old = contents.get(content.artifact_id)
                 if old is not None and old != content:
                     raise ClassificationPersistenceError(reason)
@@ -176,10 +173,122 @@ class DeviceFingerprintClassificationStore:
                 DeviceFingerprintValidationError, KeyError, TypeError, ValueError) as exc:
             raise ClassificationPersistenceError(reason) from exc
 
+    def _collect_admission_closure(
+        self, assembly: RequestAssemblyResult,
+        foundation_admission: ArtifactContent | None,
+    ) -> tuple[dict[str, ArtifactContent], dict[str, tuple[ArtifactRef, ...]]]:
+        """Retain the bounded §120 admission lineage, not historical gate inputs."""
+        reason = "activation_lineage_unavailable"
+        contents: dict[str, ArtifactContent] = {}
+        edges: dict[str, tuple[ArtifactRef, ...]] = {}
+
+        def retain(content: ArtifactContent, kind: str) -> ArtifactContent:
+            if not isinstance(content, ArtifactContent) or content.artifact_type != kind:
+                raise ClassificationPersistenceError(reason)
+            stored = self._control.load_artifact(content.artifact_id, content.content_sha256)
+            if stored != content:
+                raise ClassificationPersistenceError(reason)
+            previous = contents.get(content.artifact_id)
+            if previous is not None and previous != content:
+                raise ClassificationPersistenceError(reason)
+            contents[content.artifact_id] = content
+            return content
+
+        def follow(owner: ArtifactContent, value: dict[str, str], kind: str) -> ArtifactContent:
+            reference = ArtifactRef.from_dict(value)
+            if not reference.artifact_id.startswith(f"{kind}:v1:sha256:"):
+                raise ClassificationPersistenceError(reason)
+            target = self._control.load_artifact(reference.artifact_id,
+                                                 reference.content_sha256)
+            reference.resolve(target, kind)
+            retain(target, kind)
+            edges[owner.artifact_id] = (*edges.get(owner.artifact_id, ()), reference)
+            return target
+
+        def foundation_rpm(rpm: ArtifactContent) -> ArtifactContent:
+            retain(rpm, "RuntimeProfileAdmissionManifest")
+            payload = rpm.semantic_payload
+            if (make_runtime_profile_admission_manifest(payload) != rpm
+                    or payload["profile_kind"] != "foundation"
+                    or payload["candidate_profile"] != self._ref(
+                        assembly.foundation_runtime_profile).as_dict()):
+                raise ClassificationPersistenceError(reason)
+            follow(rpm, payload["candidate_profile"], "FoundationRuntimeProfile")
+            manifest = follow(rpm, payload["foundation_admission_manifest"],
+                              "FoundationAdmissionManifest")
+            # The manifest is retained exactly. Its gate results are historical
+            # identities, not a recursively retained classification dependency.
+            edges.setdefault(manifest.artifact_id, ())
+            return manifest
+
+        try:
+            if assembly.execution_context == "PRE_ACCEPTANCE_CANDIDATE":
+                foundation_rpm(foundation_admission)
+            else:
+                pinned = assembly.pinned_runtime_profile
+                activation = retain(pinned.activation_record, "RuntimeProfileActivationRecord")
+                rpm = retain(pinned.admission_manifest, "RuntimeProfileAdmissionManifest")
+                payload = rpm.semantic_payload
+                if (make_runtime_profile_admission_manifest(payload) != rpm
+                        or payload["profile_kind"] != "classification"
+                        or payload["candidate_profile"] != self._ref(
+                            assembly.classification_runtime_profile).as_dict()):
+                    raise ClassificationPersistenceError(reason)
+                activation_payload = activation.semantic_payload
+                if (activation_payload["runtime_profile_id"] !=
+                        assembly.classification_runtime_profile.artifact_id
+                        or activation_payload["runtime_profile_digest"] !=
+                        assembly.classification_runtime_profile.content_sha256
+                        or activation_payload["runtime_profile_admission_manifest_id"] != rpm.artifact_id
+                        or activation_payload["runtime_profile_admission_manifest_digest"] !=
+                        rpm.content_sha256):
+                    raise ClassificationPersistenceError(reason)
+                follow(activation, {
+                    "artifact_id": activation_payload["runtime_profile_id"],
+                    "content_sha256": activation_payload["runtime_profile_digest"],
+                }, "ClassificationRuntimeProfile")
+                follow(activation, {
+                    "artifact_id": activation_payload["runtime_profile_admission_manifest_id"],
+                    "content_sha256": activation_payload["runtime_profile_admission_manifest_digest"],
+                }, "RuntimeProfileAdmissionManifest")
+                follow(rpm, payload["candidate_profile"], "ClassificationRuntimeProfile")
+                foundation_manifest = follow(rpm, payload["foundation_admission_manifest"],
+                                             "FoundationAdmissionManifest")
+                foundation_ref = payload["foundation_runtime_profile_admission_manifest"]
+                if foundation_ref is None:
+                    raise ClassificationPersistenceError(reason)
+                admitted_foundation = follow(rpm, foundation_ref,
+                                             "RuntimeProfileAdmissionManifest")
+                if foundation_rpm(admitted_foundation) != foundation_manifest:
+                    raise ClassificationPersistenceError(reason)
+                acceptance_ref = payload["task04_acceptance_manifest"]
+                if acceptance_ref is None:
+                    raise ClassificationPersistenceError(reason)
+                acceptance = follow(rpm, acceptance_ref, "Task04AcceptanceManifest")
+                accepted = acceptance.semantic_payload
+                for field, content in (
+                    ("tested_classification_runtime_profile",
+                     assembly.classification_runtime_profile),
+                    ("classifier_artifact_manifest", assembly.classifier_artifact_manifest),
+                    ("foundation_admission_manifest", foundation_manifest),
+                ):
+                    if accepted[field] != self._ref(content).as_dict():
+                        raise ClassificationPersistenceError(reason)
+                    follow(acceptance, accepted[field], content.artifact_type)
+                # Pre-acceptance gate results, like RPM prerequisites, remain
+                # immutable bytes in the manifest but are not traversal edges.
+            return contents, edges
+        except ClassificationPersistenceError:
+            raise
+        except (ControlPlaneOperationError, sqlite3.Error, ArtifactDependencyGraphError,
+                DeviceFingerprintValidationError, KeyError, TypeError, ValueError,
+                AttributeError) as exc:
+            raise ClassificationPersistenceError(reason) from exc
+
     def _roots(
         self, assembly: RequestAssemblyResult, retention_policy: ArtifactContent,
         pre_acceptance_foundation_runtime_profile_admission_manifest: ArtifactContent | None,
-    ) -> dict[str, ArtifactContent]:
+    ) -> tuple[dict[str, ArtifactContent], dict[str, tuple[ArtifactRef, ...]]]:
         semantic_seeds = [
             assembly.evidence_snapshot_content, assembly.snapshot_record,
             assembly.source_evaluability, *assembly.origin_assessments,
@@ -190,20 +299,38 @@ class DeviceFingerprintClassificationStore:
             retention_policy, *(getattr(assembly.knowledge_candidate, field.name)
                                 for field in fields(assembly.knowledge_candidate)),
         ]
-        if assembly.execution_context == "PRODUCTION":
-            pinned = assembly.pinned_runtime_profile
-            lineage_roots = [pinned.activation_record, pinned.admission_manifest]
-        else:
-            lineage_roots = [pre_acceptance_foundation_runtime_profile_admission_manifest]
-        # Classify missing durable admission dependencies before the overlapping
-        # semantic/replay closure can mistake them for a Classification DB failure.
-        contents = self._collect_closure(lineage_roots, lineage=True)
-        for artifact_id, content in self._collect_closure(semantic_seeds, lineage=False).items():
+        # The runtime/replay graph stays fully recursive. Admission/governance
+        # lineage has a separate, explicit and bounded retention boundary.
+        contents, edges = self._collect_admission_closure(
+            assembly, pre_acceptance_foundation_runtime_profile_admission_manifest)
+        semantic = self._collect_closure(semantic_seeds)
+        for artifact_id, content in semantic.items():
             old = contents.get(artifact_id)
             if old is not None and old != content:
                 raise ClassificationPersistenceError("activation_lineage_unavailable")
             contents[artifact_id] = content
-        return contents
+            if artifact_id not in edges:
+                edges[artifact_id] = extract_direct_artifact_refs(content)
+        # A Foundation manifest can name current semantic artifacts as well as
+        # historical gates. Only already-retained runtime artifacts gain edges.
+        for content in contents.values():
+            if content.artifact_type == "FoundationAdmissionManifest":
+                try:
+                    current = []
+                    opaque = {ArtifactRef.from_dict(value).artifact_id for value in
+                              content.semantic_payload.get("pre_admission_gate_result_manifests", [])}
+                    for reference in extract_direct_artifact_refs(content):
+                        if reference.artifact_id in opaque:
+                            continue
+                        target = semantic.get(reference.artifact_id)
+                        if target is not None:
+                            reference.resolve(target, target.artifact_type)
+                            current.append(reference)
+                    edges[content.artifact_id] = tuple(current)
+                except (ArtifactDependencyGraphError, DeviceFingerprintValidationError,
+                        KeyError, TypeError, ValueError) as exc:
+                    raise ClassificationPersistenceError("activation_lineage_unavailable") from exc
+        return contents, edges
 
     def _validate_assembly(self, assembly: RequestAssemblyResult,
                            retention_policy: ArtifactContent,
@@ -327,7 +454,7 @@ class DeviceFingerprintClassificationStore:
         except (DeviceFingerprintValidationError, KeyError, TypeError, AttributeError) as exc:
             raise ClassificationPersistenceError("persistence_unavailable") from exc
         try:
-            contents = self._roots(
+            contents, edges = self._roots(
                 assembly, retention_policy,
                 pre_acceptance_foundation_runtime_profile_admission_manifest)
         except (ArtifactDependencyGraphError, DeviceFingerprintValidationError,
@@ -374,7 +501,7 @@ class DeviceFingerprintClassificationStore:
                     content.artifact_id, content.artifact_type, content.content_sha256,
                     content.semantic_payload_json))
             for content in contents.values():
-                for reference in extract_direct_artifact_refs(content):
+                for reference in edges[content.artifact_id]:
                     target = contents[reference.artifact_id]
                     reference.resolve(target, target.artifact_type)
                     conn.execute("INSERT OR IGNORE INTO artifact_dependencies VALUES (?,?,?)", (
