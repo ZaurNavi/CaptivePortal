@@ -20,7 +20,8 @@ _EVIDENCE = [{"evidence_label": "synthetic_source_audit", "file_sha256": "e" * 6
               "media_type": "application/json", "path_or_reference": "test://audit"}]
 _SPEC = {
     "satori_dhcp": ("K1", "current",
-        "direct admitted DHCP taxonomy mappings only; supporting authority; ambiguity preserved",
+        "direct admitted DHCP taxonomy mappings only; supporting platform authority; "
+        "strong canonical device-class authority subject to freshness and evidence caps; ambiguity preserved",
         "captivportal.k1_satori_import", fe5.SATORI_SOURCE_SHA256,
         fe5._SOURCE_METADATA["satori_dhcp"]),
     "p0f3_legacy_tcp": ("K2B", "legacy",
@@ -238,6 +239,28 @@ def test_gate_passes_fresh_current_and_stale_legacy_with_nine_exact_refs(monkeyp
     assert manifest["input_artifact_refs"] == manifest["output_artifact_refs"]
     assert [row["freshness_state"] for row in result.per_source] == ["fresh", "stale", "fresh"]
     assert not result.failure_reasons
+
+
+@pytest.mark.parametrize("caveat", [
+    "direct admitted DHCP taxonomy mappings only; supporting authority; ambiguity preserved",
+    "all DHCP outcomes have strong authority",
+])
+def test_a1_satori_requires_exact_current_caveat(monkeypatch, caveat):
+    k1 = _candidate("satori_dhcp", 0)
+    assert k1.claim_caveat == (
+        "direct admitted DHCP taxonomy mappings only; supporting platform authority; "
+        "strong canonical device-class authority subject to freshness and evidence caps; ambiguity preserved"
+    )
+    assert k1.claim_caveat == fe5._FAMILIES["satori_dhcp"][2]
+    wrong = fe5.ExternalKnowledgeCandidate(
+        k1.knowledge_slot, k1.source_family_id, k1.source_character, caveat,
+        k1.governance, k1.freshness_policy, k1.provenance,
+    )
+    result = _run(monkeypatch, wrong, _candidate("p0f3_legacy_tcp", 1),
+                  _candidate("ieee_ra_mac", 0))
+    assert "satori_dhcp:source_contract_mismatch" in result.failure_reasons
+    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
+    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
 
 
 def test_gate_all_stale_is_usable(monkeypatch):
