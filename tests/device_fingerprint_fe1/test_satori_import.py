@@ -5,6 +5,8 @@ import pytest
 from app.device_fingerprint.artifact_content import ArtifactRef
 from app.device_fingerprint.k1_satori_import import (
     ACCEPTED_SATORI_AUDIT,
+    SATORI_IMPORTER_VERSION,
+    SATORI_SOURCE_BLOB_SHA1,
     SATORI_SOURCE_COMMIT,
     SATORI_SOURCE_SHA256,
     _parse_verified_source,
@@ -119,11 +121,21 @@ def test_exact_signal_and_message_mappings_are_admitted_without_scoring():
 
 
 def test_public_import_requires_exact_pinned_bytes_and_audit():
-    assert SATORI_SOURCE_COMMIT == "1c2f888238ca1e8ebb397b5cf87b240f91711a65"
+    assert SATORI_SOURCE_COMMIT == "c5dfcfbff31620e35248aa86da0c67f2ad4982f5"
     assert SATORI_SOURCE_SHA256 == "4f64a405fb1debbd2e066478a7190b821424e0691399068421fdaf168da09b14"
     assert ACCEPTED_SATORI_AUDIT.source_tests_accepted == 903
     with pytest.raises(DeviceFingerprintValidationError, match="digest mismatch"):
         import_satori_dhcp_bytes(b"<root/>", _PROVENANCE)
+
+
+def test_a1_source_bytes_unchanged_and_importer_semantics_versioned():
+    # Historical byte identities stay frozen despite the corrected upstream ref.
+    assert SATORI_SOURCE_BLOB_SHA1 == "a82926690c28d2147534f24bdbdbeb0d1a2970fb"
+    assert SATORI_SOURCE_SHA256 == "4f64a405fb1debbd2e066478a7190b821424e0691399068421fdaf168da09b14"
+    assert SATORI_IMPORTER_VERSION == "2"
+    assert SATORI_IMPORTER_VERSION != "1"  # Historical supporting-only importer.
+    assert ACCEPTED_SATORI_AUDIT.source_tests_accepted == 903
+    assert ACCEPTED_SATORI_AUDIT.ambiguous_predicate_groups == 164
 
 
 @pytest.mark.parametrize("source_class,target", [

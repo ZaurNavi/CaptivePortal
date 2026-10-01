@@ -10,7 +10,9 @@ from typing import Any
 
 from .artifact_content import ArtifactContent, ArtifactRef
 from .foundation_gate_artifacts import make_gate_result_manifest
-from .k1_satori_import import SATORI_SOURCE_COMMIT, SATORI_SOURCE_PATH, SATORI_SOURCE_SHA256
+from .k1_satori_import import (
+    SATORI_IMPORTER_VERSION, SATORI_SOURCE_COMMIT, SATORI_SOURCE_PATH, SATORI_SOURCE_SHA256,
+)
 from .k2a_conformance_artifacts import make_source_governance_record
 from .k2b_p0f_import import verify_p0f_source_bytes
 from .k4_ieee_import import compute_ieee_k4_source_bundle_sha256
@@ -49,6 +51,11 @@ _IMPORTERS = {
     "satori_dhcp": "captivportal.k1_satori_import",
     "p0f3_legacy_tcp": "captivportal.k2b_p0f_import",
     "ieee_ra_mac": "captivportal.k4_ieee_import",
+}
+_IMPORTER_VERSIONS = {
+    "satori_dhcp": SATORI_IMPORTER_VERSION,
+    "p0f3_legacy_tcp": "1",
+    "ieee_ra_mac": "1",
 }
 
 
@@ -119,7 +126,7 @@ def _external_provenance(
         "source_provider_version_metadata": metadata,
         "knowledge_freshness_policy": freshness_ref,
         "importer_identity": _IMPORTERS[family],
-        "importer_version": "1",
+        "importer_version": _IMPORTER_VERSIONS[family],
     })
 
 
@@ -308,7 +315,7 @@ def run_fe5_external_admission_gate(
         )
         if (provenance["source_provider_version_metadata"] != expected_metadata
                 or provenance["importer_identity"] != _IMPORTERS[family]
-                or provenance["importer_version"] != "1"
+                or provenance["importer_version"] != _IMPORTER_VERSIONS[family]
                 or (family == "satori_dhcp" and provenance["source_artifact_sha256"] != SATORI_SOURCE_SHA256)):
             reasons.append(f"{family}:source_provenance_mismatch")
             continue

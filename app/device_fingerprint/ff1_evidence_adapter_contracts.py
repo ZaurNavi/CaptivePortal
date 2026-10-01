@@ -215,12 +215,19 @@ def _a1_anchor_reasons(
     if k1.get("knowledge_slot") != "K1":
         reasons.append("a1_k1_contract_mismatch")
     allowed_classes = set(SATORI_DEVICE_CLASS_TAXONOMY_MAPPING.values())
+    strong_smartphone_present = False
     for record in k1.get("records", []):
         if record.get("record_type") != "K1_DHCP":
             reasons.append("a1_k1_contract_mismatch")
         for outcome in record.get("candidate_taxonomy_refs", []):
             dimension = outcome.get("dimension_name")
             kind = outcome.get("outcome_kind")
+            if dimension == "device_class" and kind == "CANONICAL_VALUE":
+                if (outcome.get("canonical_target_id") not in allowed_classes
+                        or outcome.get("base_claim_strength") != "strong"):
+                    reasons.append("a1_k1_contract_mismatch")
+                elif outcome["canonical_target_id"] == "smartphone":
+                    strong_smartphone_present = True
             if (dimension in {"manufacturer_family", "model_family"}
                     and kind != "NO_CLAIM"):
                 reasons.append("a1_k1_contract_mismatch")
@@ -228,6 +235,8 @@ def _a1_anchor_reasons(
                     and (dimension != "device_class" or kind != "CANONICAL_VALUE"
                          or outcome.get("canonical_target_id") not in allowed_classes)):
                 reasons.append("a1_k1_contract_mismatch")
+    if not strong_smartphone_present:
+        reasons.append("a1_k1_strong_smartphone_required")
     expected = build_utility_repair_a1_evidence_adapter_contract_set_v1(evidence_schema_registry)
     historical_delta = build_initial_evidence_adapter_contract_set_v1(
         evidence_schema_registry).semantic_payload

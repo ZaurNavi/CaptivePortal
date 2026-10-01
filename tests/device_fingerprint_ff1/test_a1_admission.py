@@ -17,6 +17,7 @@ from app.device_fingerprint.ff1_evidence_adapter_contracts import (
 )
 from app.device_fingerprint.k3_portal_rules import build_k3_portal_rule_set_v1, make_k3_portal_rule_set
 from app.device_fingerprint.knowledge_artifacts import make_canonical_k1_record_set
+from app.device_fingerprint.models import DeviceFingerprintValidationError
 from tests.device_fingerprint_ff1.test_evidence_adapter_contracts import (
     _COMMIT, _TREE, _EVIDENCE, _refs,
 )
@@ -147,6 +148,86 @@ def test_a1_rejects_unadmitted_strong_class_target():
          if row["dimension_name"] == "device_class")["canonical_target_id"] = "printer"
     deps["k1_record_set"] = make_canonical_k1_record_set(payload)
     _assert_fail(_gate(deps))
+
+
+def test_a1_rejects_supporting_only_k1_with_exact_a1_eacs_and_k3():
+    deps = _a1_inputs()
+    payload = deps["k1_record_set"].semantic_payload
+    for record in payload["records"]:
+        for outcome in record["candidate_taxonomy_refs"]:
+            if outcome["dimension_name"] == "device_class":
+                outcome["base_claim_strength"] = "supporting"
+    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
+    result = _gate(deps)
+    _assert_fail(result)
+    assert "a1_k1_contract_mismatch" in result.failure_reasons
+    assert "a1_k1_strong_smartphone_required" in result.failure_reasons
+
+
+def test_a1_accepts_all_reviewed_strong_classes_without_selecting_one():
+    deps = _a1_inputs()
+    payload = deps["k1_record_set"].semantic_payload
+    for target in ("tablet", "laptop"):
+        record = deepcopy(payload["records"][0])
+        record.update(canonical_record_id="synthetic-" + target,
+                      source_record_identity="synthetic-source-" + target)
+        next(row for row in record["candidate_taxonomy_refs"]
+             if row["dimension_name"] == "device_class")["canonical_target_id"] = target
+        payload["records"].append(record)
+    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
+    before = deps["k1_record_set"].semantic_payload_json
+    assert _gate(deps).gate_result_manifest.semantic_payload["status"] == "PASS"
+    assert deps["k1_record_set"].semantic_payload_json == before
+    assert len(deps["k1_record_set"].semantic_payload["records"]) == 3
+
+
+@pytest.mark.parametrize("target", ["tablet", "laptop"])
+def test_a1_requires_strong_smartphone_not_just_other_strong_class(target):
+    deps = _a1_inputs()
+    payload = deps["k1_record_set"].semantic_payload
+    for record in payload["records"]:
+        next(row for row in record["candidate_taxonomy_refs"]
+             if row["dimension_name"] == "device_class")["canonical_target_id"] = target
+    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
+    result = _gate(deps)
+    _assert_fail(result)
+    assert "a1_k1_strong_smartphone_required" in result.failure_reasons
+
+
+@pytest.mark.parametrize("target", ["smartphone", "tablet", "laptop"])
+def test_a1_every_direct_canonical_class_must_be_strong(target):
+    deps = _a1_inputs()
+    payload = deps["k1_record_set"].semantic_payload
+    supporting = deepcopy(payload["records"][0])
+    supporting.update(canonical_record_id="synthetic-supporting-class",
+                      source_record_identity="synthetic-supporting-source")
+    outcome = next(row for row in supporting["candidate_taxonomy_refs"]
+                   if row["dimension_name"] == "device_class")
+    outcome.update(canonical_target_id=target, base_claim_strength="supporting")
+    payload["records"].append(supporting)
+    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
+    result = _gate(deps)
+    _assert_fail(result)
+    assert "a1_k1_contract_mismatch" in result.failure_reasons
+
+
+@pytest.mark.parametrize("kind", ["UNMAPPED", "NO_CLAIM"])
+def test_a1_non_direct_device_class_remains_valid_without_promotion(kind):
+    deps = _a1_inputs()
+    payload = deps["k1_record_set"].semantic_payload
+    other = deepcopy(payload["records"][0])
+    other.update(canonical_record_id="synthetic-no-direct-class",
+                 source_record_identity="synthetic-no-direct-source")
+    outcome = next(row for row in other["candidate_taxonomy_refs"]
+                   if row["dimension_name"] == "device_class")
+    outcome.update(outcome_kind=kind, canonical_target_id=None, base_claim_strength=None)
+    payload["records"].append(other)
+    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
+    assert _gate(deps).gate_result_manifest.semantic_payload["status"] == "PASS"
+    # An UNMAPPED/NO_CLAIM claim promoted to strong is itself schema-invalid.
+    outcome["base_claim_strength"] = "strong"
+    with pytest.raises(DeviceFingerprintValidationError):
+        make_canonical_k1_record_set(payload)
 
 
 @pytest.mark.parametrize("name", ["evidence_schema_registry", "capability_disposition", "k2a_conformance_package"])

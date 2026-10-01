@@ -69,7 +69,8 @@ def _candidate(family, age_ms, *, governance=None, policy=None):
         "retrieved_at_utc": retrieved_at,
         "source_provider_version_metadata": metadata,
         "knowledge_freshness_policy": _ref(policy),
-        "importer_identity": importer, "importer_version": "1",
+        "importer_identity": importer,
+        "importer_version": "2" if family == "satori_dhcp" else "1",
     })
     return fe5.ExternalKnowledgeCandidate(
         slot, family, character, caveat, governance, policy, provenance,
@@ -194,6 +195,7 @@ def test_provenance_builders_use_exact_source_identity_and_resolve_artifacts(mon
         freshness_policy=fe5.build_p0f_k2b_freshness_policy(),
     )
     assert p0f.semantic_payload["source_artifact_sha256"] == "b" * 64
+    assert p0f.semantic_payload["importer_version"] == "1"
     assert p0f.semantic_payload["source_provider_version_metadata"].endswith("source_character=legacy")
     source = (b"MA-L", b"MA-M", b"MA-S")
     ieee = fe5.build_ieee_k4_external_provenance(
@@ -201,6 +203,7 @@ def test_provenance_builders_use_exact_source_identity_and_resolve_artifacts(mon
         freshness_policy=fe5.build_ieee_k4_freshness_policy(),
     )
     assert ieee.semantic_payload["source_artifact_sha256"] == compute_ieee_k4_source_bundle_sha256(*source)
+    assert ieee.semantic_payload["importer_version"] == "1"
     assert ieee.semantic_payload["source_provider_version_metadata"].endswith(
         ieee.semantic_payload["source_artifact_sha256"]
     )
@@ -225,6 +228,51 @@ def test_public_gate_signature_has_no_caller_controlled_time_argument():
         "environment_identity", "retained_evidence_refs", "decision_record_refs",
     }
     assert not any("time" in name or "now" in name for name in parameters)
+
+
+def test_a1_satori_version_and_current_source_binding_are_exact(monkeypatch):
+    k1 = _candidate("satori_dhcp", 0)
+    assert fe5.SATORI_IMPORTER_VERSION == "2"
+    assert k1.provenance.semantic_payload["importer_version"] == "2"
+    assert k1.provenance.semantic_payload["source_provider_version_metadata"] == (
+        "xnih/satori@c5dfcfbff31620e35248aa86da0c67f2ad4982f5:fingerprints/dhcp.xml")
+    assert fe5._IMPORTER_VERSIONS == {
+        "satori_dhcp": "2", "p0f3_legacy_tcp": "1", "ieee_ra_mac": "1",
+    }
+    result = _run(monkeypatch, k1, _candidate("p0f3_legacy_tcp", 1),
+                  _candidate("ieee_ra_mac", 0))
+    assert result.gate_result_manifest.semantic_payload["status"] == "PASS"
+
+
+@pytest.mark.parametrize("family,version", [
+    ("satori_dhcp", "2"), ("p0f3_legacy_tcp", "1"), ("ieee_ra_mac", "1"),
+])
+def test_external_provenance_uses_source_specific_importer_version(family, version):
+    candidate = _candidate(family, 0)
+    provenance = fe5._external_provenance(
+        family, candidate.provenance.semantic_payload["source_artifact_sha256"],
+        retrieved_at_utc=_NOW_TEXT, governance=candidate.governance,
+        freshness_policy=candidate.freshness_policy,
+    )
+    assert provenance.semantic_payload["importer_version"] == version
+    assert provenance == candidate.provenance
+
+
+@pytest.mark.parametrize("wrong_version", ["1", "3", "1.0.0"])
+def test_a1_satori_historical_or_wrong_importer_version_rejected(monkeypatch, wrong_version):
+    first = _candidate("satori_dhcp", 0)
+    provenance = make_external_knowledge_provenance_manifest({
+        **first.provenance.semantic_payload, "importer_version": wrong_version,
+    })
+    mismatched = fe5.ExternalKnowledgeCandidate(
+        first.knowledge_slot, first.source_family_id, first.source_character,
+        first.claim_caveat, first.governance, first.freshness_policy, provenance,
+    )
+    result = _run(monkeypatch, mismatched, _candidate("p0f3_legacy_tcp", 1),
+                  _candidate("ieee_ra_mac", 0))
+    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
+    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
+    assert "satori_dhcp:source_provenance_mismatch" in result.failure_reasons
 
 
 def test_gate_passes_fresh_current_and_stale_legacy_with_nine_exact_refs(monkeypatch):
