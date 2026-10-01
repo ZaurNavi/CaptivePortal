@@ -18,7 +18,7 @@ from app.device_fingerprint.evidence_adapter_contracts import (
 from app.device_fingerprint.ff1_evidence_adapter_contracts import run_ff1_evidence_adapter_contract_gate
 from app.device_fingerprint.foundation_schema_artifacts import build_foundation_schema_artifacts
 from app.device_fingerprint.k2a_conformance_artifacts import build_k2a_conformance_package
-from app.device_fingerprint.k3_portal_rules import build_k3_portal_rule_set_v1
+from app.device_fingerprint.k3_portal_rules import build_k3_portal_rule_set_v1, make_k3_portal_rule_set
 from app.device_fingerprint.knowledge_artifacts import make_canonical_k4_record_set
 from app.device_fingerprint.models import DeviceFingerprintValidationError
 from app.device_fingerprint.network_schemas import _TCP_V2_KEYS
@@ -47,12 +47,17 @@ def _refs():
             "manufacturer_mapping": None,
         }],
     })
+    # This suite proves the historical initial F-F1 admission, not A1.
+    # Preserve its historical supporting-only K3 fixture and immutable identity.
+    historical_k3 = build_k3_portal_rule_set_v1().semantic_payload
+    for rule in historical_k3["rules"]:
+        rule["base_claim_strength"] = "supporting"
     return {
         "evidence_schema_registry": registry,
         "capability_disposition": schema["CapabilityDisposition"],
         "k2a_conformance_package": build_k2a_conformance_package(),
         "k1_record_set": k1,
-        "k3_portal_rule_set": build_k3_portal_rule_set_v1(),
+        "k3_portal_rule_set": make_k3_portal_rule_set(historical_k3),
         "k4_record_set": k4,
     }
 

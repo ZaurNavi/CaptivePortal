@@ -10,7 +10,7 @@ from typing import Any
 
 from .artifact_content import ArtifactContent, ArtifactRef
 from .foundation_gate_artifacts import make_gate_result_manifest
-from .k1_satori_import import SATORI_SOURCE_SHA256
+from .k1_satori_import import SATORI_SOURCE_COMMIT, SATORI_SOURCE_PATH, SATORI_SOURCE_SHA256
 from .k2a_conformance_artifacts import make_source_governance_record
 from .k2b_p0f_import import verify_p0f_source_bytes
 from .k4_ieee_import import compute_ieee_k4_source_bundle_sha256
@@ -23,7 +23,8 @@ from .validation import format_utc, parse_utc
 _FAMILIES = {
     "satori_dhcp": (
         "K1", "current",
-        "direct admitted DHCP taxonomy mappings only; supporting authority; ambiguity preserved",
+        "direct admitted DHCP taxonomy mappings only; supporting platform authority; "
+        "strong canonical device-class authority subject to freshness and evidence caps; ambiguity preserved",
         31536000000, 63072000000,
     ),
     "p0f3_legacy_tcp": (
@@ -38,7 +39,7 @@ _FAMILIES = {
     ),
 }
 _SOURCE_METADATA = {
-    "satori_dhcp": "xnih/satori@c5dfcfbff31620e35248aa86da0c67f2ad4982f5:fingerprints/dhcp.xml",
+    "satori_dhcp": f"xnih/satori@{SATORI_SOURCE_COMMIT}:{SATORI_SOURCE_PATH}",
     "p0f3_legacy_tcp": (
         "peace-maker/p0f3-database@7687e779c42c256c1f36b8c48da7e1f8fe24c2d4:"
         "p0f.fp;source_character=legacy"
