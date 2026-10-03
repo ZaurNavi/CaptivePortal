@@ -132,9 +132,15 @@ class DeviceFingerprintRepository:
         return self._connection
 
     def validate_runtime_health(self) -> None:
+        """Check bounded metadata, never scan live evidence while serializing ingest.
+
+        Full integrity/sequence validation belongs to initialize() before writes
+        are admitted, and to the existing offline migration/recovery lifecycle.
+        SQLite corruption errors from normal operations still fail closed.
+        """
         try:
             with self._access_lock:
-                self._validate_connection(self.connection)
+                self._validate_runtime_connection(self.connection)
         except sqlite3.DatabaseError as exc:
             raise self._sqlite_error(exc) from exc
 
@@ -297,14 +303,7 @@ class DeviceFingerprintRepository:
         cls._validate_schema_signature(
             connection, EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS,
         )
-        state = connection.execute(
-            f"SELECT singleton_id,database_generation_id,last_ingest_sequence FROM {STORAGE_STATE_TABLE}"
-        ).fetchall()
-        if len(state) != 1 or state[0][0] != 1 or not _canonical_generation(state[0][1]):
-            raise DeviceFingerprintStorageCorrupt("Fingerprint generation state is invalid")
-        allocator = state[0][2]
-        if type(allocator) is not int or not 0 <= allocator <= MAX_INGEST_SEQUENCE:
-            raise DeviceFingerprintStorageCorrupt("Fingerprint allocator state is invalid")
+        allocator = cls._validate_storage_state(connection)
         for table in ("device_fingerprint_evidence", "device_fingerprint_source_health_events"):
             invalid = connection.execute(
                 f"SELECT 1 FROM {table} WHERE typeof(ingest_sequence)!='integer' "
@@ -320,6 +319,27 @@ class DeviceFingerprintRepository:
         ).fetchone()
         if duplicate is not None:
             raise DeviceFingerprintStorageCorrupt("Fingerprint ingest sequence state is invalid")
+
+    @classmethod
+    def _validate_runtime_connection(cls, connection: sqlite3.Connection) -> None:
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+            raise DeviceFingerprintStorageCorrupt("Fingerprint schema version is incompatible")
+        cls._validate_schema_signature(
+            connection, EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS,
+        )
+        cls._validate_storage_state(connection)
+
+    @staticmethod
+    def _validate_storage_state(connection: sqlite3.Connection) -> int:
+        state = connection.execute(
+            f"SELECT singleton_id,database_generation_id,last_ingest_sequence FROM {STORAGE_STATE_TABLE} LIMIT 2"
+        ).fetchall()
+        if len(state) != 1 or state[0][0] != 1 or not _canonical_generation(state[0][1]):
+            raise DeviceFingerprintStorageCorrupt("Fingerprint generation state is invalid")
+        allocator = state[0][2]
+        if type(allocator) is not int or not 0 <= allocator <= MAX_INGEST_SEQUENCE:
+            raise DeviceFingerprintStorageCorrupt("Fingerprint allocator state is invalid")
+        return allocator
 
     @classmethod
     def _validate_schema_signature(cls, connection: sqlite3.Connection,

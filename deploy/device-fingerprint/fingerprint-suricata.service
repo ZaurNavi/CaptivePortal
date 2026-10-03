@@ -27,6 +27,9 @@ Nice=10
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+# Suricata only sends to an existing UNIX datagram socket. Never write regular
+# diagnostic EVE files into the host /run tmpfs, including config drift.
+ReadOnlyPaths=/run
 
 [Install]
 WantedBy=multi-user.target

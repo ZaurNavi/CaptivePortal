@@ -135,6 +135,56 @@ def test_retention_failure_degrades_but_keeps_ingest_then_recovers(tmp_path, mon
     assert (value.state, value.reason, value.accepting_writes) == ("ready", None, True)
 
 
+@pytest.mark.parametrize("failure", [None, "unavailable", "unexpected"])
+def test_maintenance_and_recovery_never_call_full_validation_and_ingest_remains_usable(tmp_path, monkeypatch, failure):
+    import sqlite3
+    from app.device_fingerprint.models import DeviceFingerprintStorageUnavailable
+
+    value = runtime(tmp_path)
+    statements = []
+    value.repository.connection.set_trace_callback(statements.append)
+
+    def full_validation_forbidden(*_args):
+        raise AssertionError("Full integrity validation entered the live ingest path")
+
+    monkeypatch.setattr(value.repository, "_validate_connection", full_validation_forbidden)
+    value.repository.connection.set_authorizer(lambda action, name, *_args: (
+        sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA
+        and name.lower() in {"quick_check", "integrity_check"} else sqlite3.SQLITE_OK
+    ))
+    if failure is not None:
+        def failed_cleanup(**_kwargs):
+            if failure == "unavailable":
+                raise DeviceFingerprintStorageUnavailable()
+            raise RuntimeError("synthetic retention failure")
+        monkeypatch.setattr(value.repository, "cleanup", failed_cleanup)
+    try:
+        value.run_maintenance_once()
+        assert value.state == ("ready" if failure is None else "degraded")
+        assert value.accepting_writes
+        assert not any("quick_check" in sql.lower() or "integrity_check" in sql.lower()
+                       or "typeof(ingest_sequence)" in sql or "JOIN device_fingerprint_source_health_events" in sql
+                       for sql in statements)
+        assert value.service.evidence_batch(producer(), {
+            "producer_id": producer().producer_id, "events": [evidence_event()],
+        }).inserted == 1
+    finally:
+        value.repository.connection.set_authorizer(None)
+        value.repository.close()
+
+
+def test_periodic_metadata_corruption_latches_unavailable(tmp_path):
+    value = runtime(tmp_path)
+    value.repository.connection.execute("PRAGMA user_version=3")
+    try:
+        value.run_maintenance_once()
+        assert (value.state, value.reason, value.accepting_writes) == (
+            "unavailable", "storage_corrupt", False)
+        assert value.begin_ingest() is False
+    finally:
+        value.repository.close()
+
+
 def test_storage_limit_recovery_requires_capacity_proof(tmp_path, monkeypatch):
     from app.device_fingerprint.models import DeviceFingerprintStorageLimit
     value = runtime(tmp_path)
@@ -161,14 +211,14 @@ def test_storage_limit_recovery_orders_retention_health_then_capacity(tmp_path, 
             "device_fingerprint_source_health_events": 0,
         }
     ))
-    monkeypatch.setattr(value.repository, "validate_runtime_health", lambda: calls.append("quick-check-and-schema"))
+    monkeypatch.setattr(value.repository, "validate_runtime_health", lambda: calls.append("bounded-metadata"))
     monkeypatch.setattr(value.repository, "capacity", lambda: (
         calls.append("capacity") or {
             "page_count": 9, "max_page_count": 10, "freelist_count": 0,
         }
     ))
     value.run_maintenance_once()
-    assert calls == ["retention", "quick-check-and-schema", "capacity"]
+    assert calls == ["retention", "bounded-metadata", "capacity"]
     assert value.state == "ready"
 
 
