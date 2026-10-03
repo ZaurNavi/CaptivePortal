@@ -33,17 +33,22 @@ def test_deployable_suricata_has_only_unchanged_sensor_datagram_eve():
     assert "filetype: regular" not in config
     assert "diag-eve.json" not in config
     assert config.count("  - eve-log:") == 1
+    assert "\ndefault-log-dir: /run/fingerprint-suricata\n" in config
     assert "interface: enp8s0" in config
     assert 'bpf-filter: "net 192.168.8.0/22"' in config
 
 
-def test_suricata_cannot_write_diagnostic_files_anywhere_in_run():
+def test_suricata_has_separate_writable_runtime_directory_without_run_workarounds():
     service = (DEPLOYMENT / "fingerprint-suricata.service").read_text(encoding="ascii")
-    assert "\nReadOnlyPaths=/run\n" in service
+    assert "\nRuntimeDirectory=fingerprint-suricata\n" in service
+    assert "\nRuntimeDirectoryMode=0750\n" in service
+    assert "ReadOnlyPaths=" not in service
     assert "ReadWritePaths=" not in service
     assert "BindPaths=" not in service
-    assert "RuntimeDirectory=" not in service
     assert "ExecStart=/usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers" in service
     assert "ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0" in service
     assert "until test -S /run/captive-portal/fingerprint-sensor/suricata-eve.sock" in service
     assert "AmbientCapabilities=CAP_NET_RAW" in service
+    assert "CapabilityBoundingSet=CAP_NET_RAW" in service
+    assert "User=suricata" in service
+    assert "ExecStartPre=/usr/bin/suricata -T -c /etc/captive-portal/device-fingerprint/suricata.yaml" in service

@@ -9,6 +9,8 @@ Type=simple
 User=suricata
 Group=suricata
 SupplementaryGroups=fingerprint-eve
+RuntimeDirectory=fingerprint-suricata
+RuntimeDirectoryMode=0750
 ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0
 ExecStartPre=/usr/bin/test -r /etc/captive-portal/device-fingerprint/suricata.yaml
 ExecStartPre=/usr/bin/timeout 1830 /bin/sh -c 'until test -S /run/captive-portal/fingerprint-sensor/suricata-eve.sock; do sleep 1; done'
@@ -27,9 +29,6 @@ Nice=10
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Suricata only sends to an existing UNIX datagram socket. Never write regular
-# diagnostic EVE files into the host /run tmpfs, including config drift.
-ReadOnlyPaths=/run
 
 [Install]
 WantedBy=multi-user.target

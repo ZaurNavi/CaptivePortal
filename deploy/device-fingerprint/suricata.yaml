@@ -9,7 +9,7 @@ vars:
   port-groups:
     HTTP_PORTS: "80"
 
-default-log-dir: /run/captive-portal/fingerprint-sensor
+default-log-dir: /run/fingerprint-suricata
 default-rule-path: /etc/suricata/rules
 rule-files: []
 
@@ -38,7 +38,7 @@ stats:
 
 outputs:
   # Production EVE is socket-only. Do not append a regular diagnostic output.
-  # The service also makes /run read-only; the sensor creates the socket.
+  # The sensor creates the socket; default-log-dir is separate and Suricata-owned.
   - console:
       enabled: no
   - eve-log:
