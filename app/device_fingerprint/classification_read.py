@@ -119,6 +119,17 @@ class DeviceFingerprintClassificationReadService:
             raise DeviceFingerprintValidationError("Classification request digest mismatch")
         return ClassificationReadRecord(core, result)
 
+    def get_by_id(self, classification_id: str) -> ClassificationReadRecord | None:
+        identity = _uuid_v4(classification_id)
+
+        def select(connection: sqlite3.Connection) -> ClassificationReadRecord | None:
+            row = connection.execute(
+                "SELECT * FROM classifications WHERE classification_id=?", (identity,),
+            ).fetchone()
+            return None if row is None else self._record(connection, row)
+
+        return self._read(select)
+
     def get_current(self, site_id: str, observed_mac: str) -> ClassificationReadRecord | None:
         site = validate_site_id(site_id)
         mac = validate_mac(observed_mac)

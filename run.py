@@ -40,6 +40,7 @@ from app.admin_web.home_ap_24h_telemetry import (
 )
 from app.web.web import create_app, auth_executor, auth_manager
 from app.auth.health import authorization_health_tracker_from_settings
+from app.device_fingerprint_integration.runtime import create_fingerprint_integration_submitter
 
 
 _shutdown_lock = threading.Lock()
@@ -404,6 +405,8 @@ def main() -> None:
         app_kwargs["visit_start_submitter"] = (
             _visit_lifecycle.start_submitter
         )
+    if "fingerprint_integration_submitter" in inspect.signature(create_app).parameters:
+        app_kwargs["fingerprint_integration_submitter"] = create_fingerprint_integration_submitter(settings)
     app = create_app(**app_kwargs)
     logger.info("Web application created")
     _observation_foundation = create_observation_foundation(

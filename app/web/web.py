@@ -122,6 +122,7 @@ def create_app(
     controller=None,
     visitor_snapshot_collector=None,
     visit_start_submitter=None,
+    fingerprint_integration_submitter=None,
     authorization_health_tracker=None,
     portal_evidence_sink=_AUTO_PORTAL_EVIDENCE,
     client_hints_probe=_AUTO_CLIENT_HINTS_PROBE,
@@ -361,6 +362,7 @@ def create_app(
         session_manager=auth_manager,
         snapshot_collector=visitor_snapshot_collector,
         visit_start_submitter=visit_start_submitter,
+        fingerprint_integration_submitter=fingerprint_integration_submitter,
         authorization_health_tracker=authorization_health_tracker,
     )
     portal_entry_handler = PortalEntryHandler(
