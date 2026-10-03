@@ -49,7 +49,10 @@ def verify_executable_identities(manifest, *, root=REPOSITORY_ROOT):
         identity, digest = evidence[len(prefix):].rsplit(":sha256:", 1)
         entries = entries + [{"implementation_id": identity, "implementation_digest": digest}]
         for entry in entries:
-            prefix, relative, qualified = entry["implementation_id"].split(":", 2)
+            prefix, relative, identity_tail = entry["implementation_id"].split(":", 2)
+            qualified = identity_tail.partition("/")[0]
+            if not all(component.isidentifier() for component in qualified.split(".")):
+                raise ValueError("Invalid Python qualified symbol")
             digest = entry["implementation_digest"]
             path = PurePosixPath(relative)
             if (prefix != "python" or path.is_absolute() or ".." in path.parts
