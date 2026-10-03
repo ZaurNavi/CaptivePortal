@@ -443,6 +443,7 @@ class DeviceFingerprintClassificationStore:
     def persist(
         self, assembly: RequestAssemblyResult, *, retention_policy: ArtifactContent,
         pre_acceptance_foundation_runtime_profile_admission_manifest: ArtifactContent | None = None,
+        classification_id: str | None = None,
     ) -> ClassificationCoreRecord:
         """Commit whole closure + edges + core, or nothing; never touch Task-01."""
         try:
@@ -461,7 +462,10 @@ class DeviceFingerprintClassificationStore:
                 KeyError, TypeError) as exc:
             raise ClassificationPersistenceError("persistence_unavailable") from exc
         try:
-            classification_id = str(self._uuid_factory())
+            classification_id = (str(self._uuid_factory()) if classification_id is None
+                                 else classification_id)
+            if not isinstance(classification_id, str):
+                raise ClassificationPersistenceError("persistence_unavailable")
             if (str(uuid.UUID(classification_id)) != classification_id
                     or uuid.UUID(classification_id).version != 4):
                 raise ClassificationPersistenceError("persistence_unavailable")

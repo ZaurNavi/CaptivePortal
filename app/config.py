@@ -382,6 +382,16 @@ WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED = os.getenv(
 DEVICE_FINGERPRINT_EVIDENCE_ENABLED = os.getenv(
     "DEVICE_FINGERPRINT_EVIDENCE_ENABLED", "false"
 )
+DEVICE_FINGERPRINT_INTEGRATION_ENABLED = os.getenv("DEVICE_FINGERPRINT_INTEGRATION_ENABLED", "false")
+DEVICE_FINGERPRINT_INTEGRATION_DB_PATH = os.getenv(
+    "DEVICE_FINGERPRINT_INTEGRATION_DB_PATH", "/opt/CaptivePortal/data/device_fingerprint_integration.sqlite3")
+DEVICE_FINGERPRINT_EVIDENCE_DB_PATH = os.getenv(
+    "DEVICE_FINGERPRINT_EVIDENCE_DB_PATH", os.getenv("DEVICE_FINGERPRINT_DB_PATH",
+                                                  "/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3"))
+DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH = os.getenv(
+    "DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH", "/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3")
+DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH = os.getenv(
+    "DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH", "/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3")
 DEVICE_FINGERPRINT_DB_PATH = os.getenv(
     "DEVICE_FINGERPRINT_DB_PATH",
     "/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3",

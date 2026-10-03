@@ -21,6 +21,9 @@ from app.visitor_registry.snapshot_models import (
     AuthorizedClientSnapshotRequest,
 )
 from app.visitor_registry.protocols import VisitorSnapshotSubmitter
+from app.device_fingerprint_integration import DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
+from app.device_fingerprint_integration.models import AuthorizedFingerprintRequest
+from app.device_fingerprint.validation import format_utc, validate_mac
 from .manager import AuthSessionManager
 from .health import (
     DISABLED_AUTHORIZATION_HEALTH_TRACKER,
@@ -117,8 +120,13 @@ class AuthWorker:
         ] = None,
         visit_start_submitter: Optional[VisitStartSubmitter] = None,
         authorization_health_tracker: Any = None,
+        fingerprint_integration_submitter: Any = None,
     ):
         self._provider = provider
+        self._fingerprint_integration_submitter = (
+            fingerprint_integration_submitter if fingerprint_integration_submitter is not None
+            else DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
+        )
         self._session_manager = session_manager
         self._snapshot_collector = (
             snapshot_collector
@@ -1438,6 +1446,24 @@ class AuthWorker:
         )
         self._submit_authorized_snapshot(session, run)
         self._submit_authorized_visit(session, run)
+        self._submit_fingerprint_integration(session, run)
+
+    def _submit_fingerprint_integration(self, session: AuthSession, run: _WorkerRun) -> None:
+        """Auth has already succeeded; no integration failure can change that outcome."""
+        if self._fingerprint_integration_submitter is DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER:
+            return
+        try:
+            state = self._session_manager.run_snapshot(session, run.run_number)
+            if state is None or state.get("final_state") != AuthStatus.AUTHORIZED.value:
+                return
+            authorized_at = datetime.fromisoformat(state["finished_at"])
+            if authorized_at.tzinfo is None:
+                raise ValueError("Authorized time is not timezone-qualified")
+            self._fingerprint_integration_submitter.submit_authorized(AuthorizedFingerprintRequest(
+                session.session_id, state["run_number"], session.site_id,
+                validate_mac(session.client_mac or ""), format_utc(authorized_at)))
+        except Exception:
+            logger.error("fingerprint.integration_submission_failed")
 
     @staticmethod
     def _health_failure_outcome(final_reason: str) -> str | None:

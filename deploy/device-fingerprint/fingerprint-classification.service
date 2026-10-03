@@ -1,0 +1,22 @@
+[Unit]
+Description=CaptivPortal durable fingerprint identity/classification integration
+After=captive-portal.service
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/opt/CaptivePortal
+EnvironmentFile=/etc/default/captive-portal
+ExecStart=/usr/bin/python3 -m app.device_fingerprint_integration.cli run
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=330
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/CaptivePortal/data
+
+[Install]
+WantedBy=multi-user.target
