@@ -11,10 +11,13 @@ from .artifact_content import ArtifactContent, ArtifactRef, canonical_set
 from .evidence_adapter_contracts import (
     _AdapterRegistryCompatibilityError,
     build_initial_evidence_adapter_contract_set_v1,
+    build_utility_repair_a1_evidence_adapter_contract_set_v1,
     make_evidence_adapter_contract_set,
     validate_evidence_adapter_contract_set_dependencies,
 )
 from .foundation_gate_artifacts import make_gate_result_manifest
+from .k1_satori_import import SATORI_DEVICE_CLASS_TAXONOMY_MAPPING
+from .k3_portal_rules import build_k3_portal_rule_set_v1
 from .models import DeviceFingerprintValidationError
 
 _INITIAL_IDS = {
@@ -191,4 +194,141 @@ def run_ff1_evidence_adapter_contract_gate(
         build_2.artifact_id if build_2 else None,
         bytes_equal, permutation_invariant, dependencies_valid, manifest,
         tuple(reasons),
+    )
+
+
+def _a1_anchor_reasons(
+    candidate: ArtifactContent, *, evidence_schema_registry: ArtifactContent,
+    capability_disposition: ArtifactContent, k2a_conformance_package: ArtifactContent,
+    k1_record_set: ArtifactContent, k3_portal_rule_set: ArtifactContent,
+    k4_record_set: ArtifactContent,
+) -> list[str]:
+    """Check A1 authority without changing or bypassing INITIAL admission."""
+    dependencies = locals()
+    reasons = []
+    for name in ("evidence_schema_registry", "capability_disposition", "k2a_conformance_package"):
+        if dependencies[name].artifact_id != _INITIAL_IDS[name]:
+            reasons.append(f"a1_{name}_identity_mismatch")
+    if k3_portal_rule_set != build_k3_portal_rule_set_v1():
+        reasons.append("a1_k3_contract_mismatch")
+    k1 = k1_record_set.semantic_payload
+    if k1.get("knowledge_slot") != "K1":
+        reasons.append("a1_k1_contract_mismatch")
+    allowed_classes = set(SATORI_DEVICE_CLASS_TAXONOMY_MAPPING.values())
+    strong_smartphone_present = False
+    for record in k1.get("records", []):
+        if record.get("record_type") != "K1_DHCP":
+            reasons.append("a1_k1_contract_mismatch")
+        for outcome in record.get("candidate_taxonomy_refs", []):
+            dimension = outcome.get("dimension_name")
+            kind = outcome.get("outcome_kind")
+            if dimension == "device_class" and kind == "CANONICAL_VALUE":
+                if (outcome.get("canonical_target_id") not in allowed_classes
+                        or outcome.get("base_claim_strength") != "strong"):
+                    reasons.append("a1_k1_contract_mismatch")
+                elif outcome["canonical_target_id"] == "smartphone":
+                    strong_smartphone_present = True
+            if (dimension in {"manufacturer_family", "model_family"}
+                    and kind != "NO_CLAIM"):
+                reasons.append("a1_k1_contract_mismatch")
+            if (outcome.get("base_claim_strength") == "strong"
+                    and (dimension != "device_class" or kind != "CANONICAL_VALUE"
+                         or outcome.get("canonical_target_id") not in allowed_classes)):
+                reasons.append("a1_k1_contract_mismatch")
+    if not strong_smartphone_present:
+        reasons.append("a1_k1_strong_smartphone_required")
+    expected = build_utility_repair_a1_evidence_adapter_contract_set_v1(evidence_schema_registry)
+    historical_delta = build_initial_evidence_adapter_contract_set_v1(
+        evidence_schema_registry).semantic_payload
+    for entry in historical_delta["adapter_entries"]:
+        if (entry["adapter_kind"] == "TASK01_EVIDENCE"
+                and (entry["source_kind"], entry["feature_schema_version"])
+                in {("dhcp", 1), ("portal_headers", 1), ("portal_headers", 2)}):
+            entry["base_claim_strength_ceiling"] = "strong"
+    if expected.semantic_payload != historical_delta or candidate != expected:
+        reasons.append("a1_matrix_mismatch")
+    return reasons
+
+
+def run_ff1_utility_repair_a1_evidence_adapter_contract_gate(
+    candidate: ArtifactContent, *, evidence_schema_registry: ArtifactContent,
+    capability_disposition: ArtifactContent, k2a_conformance_package: ArtifactContent,
+    k1_record_set: ArtifactContent, k3_portal_rule_set: ArtifactContent,
+    k4_record_set: ArtifactContent, candidate_repository_commit_sha: str,
+    candidate_repository_tree_sha: str, environment_identity: str,
+    retained_evidence_refs: list[dict[str, Any]],
+) -> FF1GateExecution:
+    """Admit only A1's three-ceiling repair under unchanged R14 F-F1."""
+    if not isinstance(candidate, ArtifactContent) or candidate.artifact_type != "EvidenceAdapterContractSet":
+        raise DeviceFingerprintValidationError("Invalid F-F1 A1 candidate")
+    inputs = (evidence_schema_registry, capability_disposition, k2a_conformance_package,
+              k1_record_set, k3_portal_rule_set, k4_record_set)
+    refs = canonical_set([_ref(content) for content in inputs], lambda ref: ref["artifact_id"])
+    reasons: list[str] = []
+    dependencies_valid = False
+    build_1: ArtifactContent | None = None
+    build_2: ArtifactContent | None = None
+    bytes_equal = False
+    permutation_invariant = False
+    try:
+        build_1 = make_evidence_adapter_contract_set(candidate.semantic_payload)
+        build_2 = make_evidence_adapter_contract_set(deepcopy(candidate.semantic_payload))
+        bytes_equal = (build_1 == build_2 == candidate)
+        if not bytes_equal:
+            reasons.append("double_build_identity_mismatch")
+        permutation_invariant = _permuted_candidate(candidate) == candidate
+        if not permutation_invariant:
+            reasons.append("adapter_set_permutation_mismatch")
+        validate_evidence_adapter_contract_set_dependencies(
+            candidate, evidence_schema_registry=evidence_schema_registry,
+            capability_disposition=capability_disposition,
+            k2a_conformance_package=k2a_conformance_package, k1_record_set=k1_record_set,
+            k3_portal_rule_set=k3_portal_rule_set, k4_record_set=k4_record_set,
+        )
+        dependencies_valid = True
+    except _AdapterRegistryCompatibilityError:
+        reasons.append("adapter_registry_incompatible")
+    except DeviceFingerprintValidationError:
+        reasons.append("adapter_dependency_invalid")
+    # Inspect A1 authority only after the supplied dependency structures validate.
+    if dependencies_valid:
+        try:
+            reasons.extend(_a1_anchor_reasons(
+                candidate, evidence_schema_registry=evidence_schema_registry,
+                capability_disposition=capability_disposition,
+                k2a_conformance_package=k2a_conformance_package, k1_record_set=k1_record_set,
+                k3_portal_rule_set=k3_portal_rule_set, k4_record_set=k4_record_set,
+            ))
+        except DeviceFingerprintValidationError:
+            reasons.append("a1_matrix_mismatch")
+    if not retained_evidence_refs:
+        reasons.append("retained_evidence_required")
+    reasons = sorted(set(reasons))
+    status = "FAIL" if reasons else "PASS"
+    manifest = make_gate_result_manifest({
+        "gate_id": "F-F1", "gate_contract_version": "R14-F-F1-v1", "status": status,
+        "candidate_repository_commit_sha": candidate_repository_commit_sha,
+        "candidate_repository_tree_sha": candidate_repository_tree_sha,
+        "input_artifact_refs": refs,
+        "output_artifact_refs": [_ref(candidate)] if status == "PASS" else [],
+        "retained_evidence_refs": retained_evidence_refs,
+        "proof_execution_identity": {
+            "execution_id": str(uuid.uuid4()), "executor_kind": "TECHLEAD_GATE_TOOL",
+            "repository_commit_sha": candidate_repository_commit_sha,
+            "repository_tree_sha": candidate_repository_tree_sha,
+            "procedure_or_test_suite_id": "F-F1-evidence-adapter-contract-set-a1-v1",
+            "environment_identity": environment_identity,
+            "execution_artifact_sha256": None,
+        },
+        "trusted_time_inputs": {
+            "foundation_knowledge_evaluation_at_utc": None,
+            "foundation_admission_evaluation_at_utc": None,
+            "knowledge_evaluation_at_utc": None,
+        },
+        "decision_record_refs": [],
+    })
+    return FF1GateExecution(
+        candidate.artifact_id, candidate.content_sha256,
+        build_1.artifact_id if build_1 else None, build_2.artifact_id if build_2 else None,
+        bytes_equal, permutation_invariant, dependencies_valid, manifest, tuple(reasons),
     )

@@ -114,12 +114,22 @@ def _rule(raw: Any, versions: list[int]) -> dict[str, Any]:
             _fail("Invalid broad claim strength")
     elif target is not None or strength is not None:
         _fail("Invalid no-claim outcome")
-    if strength == "strong":
-        _fail("K3 V1 cannot emit a strong claim")
     raw_predicates = value["input_predicates"]
     if not isinstance(raw_predicates, list) or not raw_predicates:
         _fail("Invalid K3 predicate set")
     predicates = [_predicate(item) for item in raw_predicates]
+    if strength == "strong":
+        required = (
+            _predicate_row("platform_family", "EQ", target),
+            _predicate_row("platform_source", "EQ", "sec_ch_ua_platform"),
+            _predicate_row("sec_ch_ua_platform_present", "IS_TRUE"),
+        )
+        if (value["dimension_name"] != "platform_family"
+                or kind != "CANONICAL_VALUE"
+                or value["claim_derivation"] != "declared"
+                or target not in _PLATFORMS
+                or any(predicate not in predicates for predicate in required)):
+            _fail("Strong K3 requires an explicit canonical Client Hint platform")
     fields = {item["field_name"] for item in predicates}
     if not any(fields <= _SCHEMA_FIELDS[version] for version in versions):
         _fail("K3 rule spans incompatible portal schemas")
@@ -315,7 +325,8 @@ def build_k3_portal_rule_set_v1() -> ArtifactContent:
                     _predicate_row(presence, "IS_TRUE"),
                 ],
                 "outcome_kind": "CANONICAL_VALUE", "outcome_id_or_ref": platform,
-                "claim_derivation": derivation, "base_claim_strength": "supporting",
+                "claim_derivation": derivation,
+                "base_claim_strength": "strong" if source == "sec_ch_ua_platform" else "supporting",
                 "explanation_code": explanation,
             })
             sample = _portal_v1(platform_family=platform, platform_source=source)

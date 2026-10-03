@@ -14,6 +14,11 @@ from .classification_policy import (
     validate_classification_policy_dependencies,
 )
 from .foundation_gate_artifacts import make_gate_result_manifest
+from .foundation_schema_artifacts import build_foundation_schema_artifacts
+from .evidence_adapter_contracts import (
+    build_initial_evidence_adapter_contract_set_v1,
+    build_utility_repair_a1_evidence_adapter_contract_set_v1,
+)
 from .models import DeviceFingerprintValidationError
 
 _INITIAL_IDS = {
@@ -213,4 +218,125 @@ def run_ff2_classification_policy_gate(
         build_2.artifact_id if build_2 else None,
         bytes_equal, permutation_invariant, dependencies_valid,
         manifest, tuple(reasons),
+    )
+
+
+def _a1_policy_anchor_reasons(
+    candidate: ArtifactContent, *, classification_taxonomy: ArtifactContent,
+    alias_mapping: ArtifactContent, evidence_adapter_contract_set: ArtifactContent,
+) -> list[str]:
+    """Require the unchanged policy semantics with only the exact A1 EACS ref."""
+    reasons = []
+    for name, content in (("classification_taxonomy", classification_taxonomy),
+                          ("alias_mapping", alias_mapping)):
+        if content.artifact_id != _INITIAL_IDS[name]:
+            reasons.append(f"a1_{name}_identity_mismatch")
+    registry = build_foundation_schema_artifacts()["EvidenceSchemaRegistryContract"]
+    expected_eacs = build_utility_repair_a1_evidence_adapter_contract_set_v1(registry)
+    historical_eacs = build_initial_evidence_adapter_contract_set_v1(registry)
+    historical_delta = historical_eacs.semantic_payload
+    for entry in historical_delta["adapter_entries"]:
+        if (entry["adapter_kind"] == "TASK01_EVIDENCE"
+                and (entry["source_kind"], entry["feature_schema_version"])
+                in {("dhcp", 1), ("portal_headers", 1), ("portal_headers", 2)}):
+            entry["base_claim_strength_ceiling"] = "strong"
+    if (evidence_adapter_contract_set != expected_eacs
+            or expected_eacs.semantic_payload != historical_delta):
+        reasons.append("a1_adapter_identity_mismatch")
+    expected = build_initial_classification_policy_v1(
+        classification_taxonomy, alias_mapping, expected_eacs)
+    historical_policy_delta = build_initial_classification_policy_v1(
+        classification_taxonomy, alias_mapping, historical_eacs).semantic_payload
+    historical_policy_delta["evidence_adapter_contract_set"] = _ref(expected_eacs)
+    if candidate != expected or candidate.semantic_payload != historical_policy_delta:
+        reasons.append("a1_classification_policy_semantic_delta")
+    return reasons
+
+
+def run_ff2_utility_repair_a1_classification_policy_gate(
+    candidate: ArtifactContent, *, classification_taxonomy: ArtifactContent,
+    alias_mapping: ArtifactContent, evidence_adapter_contract_set: ArtifactContent,
+    candidate_repository_commit_sha: str, candidate_repository_tree_sha: str,
+    environment_identity: str, retained_evidence_refs: list[dict[str, Any]],
+    decision_record_refs: list[str],
+) -> FF2GateExecution:
+    """Admit only the A1 EACS-reference rebind; never bypass INITIAL F-F2."""
+    if not isinstance(candidate, ArtifactContent) or candidate.artifact_type != "ClassificationPolicy":
+        raise DeviceFingerprintValidationError("Invalid F-F2 A1 candidate")
+    inputs = (classification_taxonomy, alias_mapping, evidence_adapter_contract_set)
+    refs = canonical_set([_ref(content) for content in inputs], lambda ref: ref["artifact_id"])
+    reasons: list[str] = []
+    build_1: ArtifactContent | None = None
+    build_2: ArtifactContent | None = None
+    bytes_equal = False
+    permutation_invariant = False
+    dependencies_valid = False
+    candidate_valid = False
+    try:
+        build_1 = make_classification_policy(candidate.semantic_payload)
+        build_2 = make_classification_policy(deepcopy(candidate.semantic_payload))
+        bytes_equal = (build_1 == build_2 == candidate)
+        permutation_invariant = _permuted_candidate(candidate) == candidate
+        candidate_valid = build_1 == candidate
+        if not bytes_equal or not permutation_invariant or not candidate_valid:
+            reasons.append("classification_policy_invalid")
+    except _PolicyMatrixIncomplete:
+        reasons.append("classification_policy_matrix_incomplete")
+    except _PolicyMatrixMismatch:
+        reasons.append("classification_policy_matrix_mismatch")
+    except _PolicyCrossLayerContamination:
+        reasons.append("classification_policy_cross_layer_contamination")
+    except DeviceFingerprintValidationError:
+        reasons.append("classification_policy_invalid")
+    if candidate_valid:
+        try:
+            validate_classification_policy_dependencies(
+                candidate, classification_taxonomy=classification_taxonomy,
+                alias_mapping=alias_mapping,
+                evidence_adapter_contract_set=evidence_adapter_contract_set,
+            )
+            dependencies_valid = True
+            reasons.extend(_a1_policy_anchor_reasons(
+                candidate, classification_taxonomy=classification_taxonomy,
+                alias_mapping=alias_mapping,
+                evidence_adapter_contract_set=evidence_adapter_contract_set,
+            ))
+        except DeviceFingerprintValidationError:
+            reasons.append("classification_policy_dependency_invalid")
+    evidence_reasons, manifest_evidence = _retained_evidence_check(retained_evidence_refs)
+    reasons.extend(evidence_reasons)
+    if not isinstance(decision_record_refs, list) or any(
+            not isinstance(ref, str) for ref in decision_record_refs):
+        raise DeviceFingerprintValidationError("Invalid decision refs")
+    unique_decisions = sorted(set(decision_record_refs))
+    if len(unique_decisions) < 2:
+        reasons.append("owner_techlead_decisions_required")
+    reasons = sorted(set(reasons))
+    status = "FAIL" if reasons else "PASS"
+    manifest = make_gate_result_manifest({
+        "gate_id": "F-F2", "gate_contract_version": "R14-F-F2-v1", "status": status,
+        "candidate_repository_commit_sha": candidate_repository_commit_sha,
+        "candidate_repository_tree_sha": candidate_repository_tree_sha,
+        "input_artifact_refs": refs,
+        "output_artifact_refs": [_ref(candidate)] if status == "PASS" else [],
+        "retained_evidence_refs": manifest_evidence,
+        "proof_execution_identity": {
+            "execution_id": str(uuid.uuid4()), "executor_kind": "TECHLEAD_GATE_TOOL",
+            "repository_commit_sha": candidate_repository_commit_sha,
+            "repository_tree_sha": candidate_repository_tree_sha,
+            "procedure_or_test_suite_id": "F-F2-classification-policy-a1-v1",
+            "environment_identity": environment_identity,
+            "execution_artifact_sha256": None,
+        },
+        "trusted_time_inputs": {
+            "foundation_knowledge_evaluation_at_utc": None,
+            "foundation_admission_evaluation_at_utc": None,
+            "knowledge_evaluation_at_utc": None,
+        },
+        "decision_record_refs": unique_decisions,
+    })
+    return FF2GateExecution(
+        candidate.artifact_id, candidate.content_sha256,
+        build_1.artifact_id if build_1 else None, build_2.artifact_id if build_2 else None,
+        bytes_equal, permutation_invariant, dependencies_valid, manifest, tuple(reasons),
     )

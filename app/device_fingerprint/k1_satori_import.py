@@ -17,6 +17,7 @@ SATORI_SOURCE_COMMIT = "c5dfcfbff31620e35248aa86da0c67f2ad4982f5"
 SATORI_SOURCE_PATH = "fingerprints/dhcp.xml"
 SATORI_SOURCE_BLOB_SHA1 = "a82926690c28d2147534f24bdbdbeb0d1a2970fb"
 SATORI_SOURCE_SHA256 = "4f64a405fb1debbd2e066478a7190b821424e0691399068421fdaf168da09b14"
+SATORI_IMPORTER_VERSION = "2"
 SATORI_LICENSE_CHANGE_COMMIT = "7116da4ce7ab768b4fb0b3bcb44001f952f24d5d"
 
 _SIGNAL_FIELDS = frozenset({"dhcpoption55", "dhcpoptions", "dhcpvendorcode"})
@@ -64,6 +65,9 @@ class SatoriK1ImportResult:
     audit: SatoriK1ImportAudit
 
 
+# Recomputed from the Owner-supplied A1 source above. The XML bytes, blob and
+# numerical audit match the historical source; the current upstream binding is
+# restored without changing source bytes or historical provenance.
 ACCEPTED_SATORI_AUDIT = SatoriK1ImportAudit(
     fingerprints_total=481,
     source_tests_total=2787,
@@ -137,7 +141,10 @@ def _taxonomy_outcome(dimension: str, raw: str | None, mapping: dict[str, str]) 
     elif raw in mapping:
         kind = "CANONICAL_VALUE"
         target = mapping[raw]
-        strength = "supporting"
+        strength = (
+            "strong" if dimension == "device_class"
+            and mapping is SATORI_DEVICE_CLASS_TAXONOMY_MAPPING else "supporting"
+        )
     else:
         kind = "UNMAPPED"
         target = None

@@ -297,6 +297,20 @@ def build_initial_evidence_adapter_contract_set_v1(
     })
 
 
+def build_utility_repair_a1_evidence_adapter_contract_set_v1(
+    evidence_schema_registry: ArtifactContent,
+) -> ArtifactContent:
+    """Raise only K1/K3 ceilings; preserve the historical initial contract."""
+    payload = build_initial_evidence_adapter_contract_set_v1(
+        evidence_schema_registry).semantic_payload
+    for entry in payload["adapter_entries"]:
+        if (entry["adapter_kind"] == "TASK01_EVIDENCE"
+                and (entry["source_kind"], entry["feature_schema_version"])
+                in {("dhcp", 1), ("portal_headers", 1), ("portal_headers", 2)}):
+            entry["base_claim_strength_ceiling"] = "strong"
+    return make_evidence_adapter_contract_set(payload)
+
+
 def validate_evidence_adapter_contract_set_dependencies(
     contract_set: ArtifactContent, *, evidence_schema_registry: ArtifactContent,
     capability_disposition: ArtifactContent, k2a_conformance_package: ArtifactContent,

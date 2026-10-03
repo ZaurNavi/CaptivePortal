@@ -28,7 +28,9 @@ def test_exact_rules_vectors_and_repeated_identity():
     assert payload["admitted_feature_schema_versions"] == [1, 2]
     assert len(payload["rules"]) == 13
     assert len(payload["test_vectors"]) == 21
-    assert all(rule["base_claim_strength"] == "supporting" for rule in payload["rules"])
+    for rule in payload["rules"]:
+        explicit_platform = rule["dimension_name"] == "platform_family" and rule["claim_derivation"] == "declared"
+        assert rule["base_claim_strength"] == ("strong" if explicit_platform else "supporting")
     assert {rule["outcome_id_or_ref"] for rule in payload["rules"]} == {
         "android", "ios", "windows", "macos", "chromeos", "linux", "tablet",
     }
@@ -86,7 +88,7 @@ def test_independent_conflicting_observations_are_not_resolved_by_priority():
     lambda p: p["rules"][0]["input_predicates"][0].update(operator="IS_TRUE", value="android"),
     lambda p: p["rules"][0]["input_predicates"][0].update(values=["android"]),
     lambda p: p["rules"][0].update(base_claim_strength="invented"),
-    lambda p: p["rules"][0].update(base_claim_strength="strong"),
+    lambda p: p["rules"][0].update(outcome_id_or_ref="unadmitted-platform"),
     lambda p: p["rules"][0].update(extra_field="no"),
     lambda p: p["rules"][0]["input_predicates"].append({
         "field_name": "form_factor_tablet", "operator": "IS_TRUE", "value": None, "values": [],
@@ -97,6 +99,38 @@ def test_rule_validation_fails_closed(mutation):
     mutation(payload)
     with pytest.raises(DeviceFingerprintValidationError):
         make_k3_portal_rule_set(payload)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda rule: rule.update(dimension_name="device_class"),
+    lambda rule: rule.update(outcome_kind="RECOGNIZED_OUT_OF_SCOPE"),
+    lambda rule: rule.update(claim_derivation="deterministic_mapping"),
+    lambda rule: rule.update(outcome_id_or_ref="windows"),
+    lambda rule: rule["input_predicates"].pop(0),
+    lambda rule: rule["input_predicates"].pop(1),
+    lambda rule: rule["input_predicates"].pop(2),
+])
+def test_strong_rule_requires_all_explicit_platform_authority_facts(mutation):
+    payload = _payload()
+    rule = next(rule for rule in payload["rules"]
+                if rule["rule_id"] == "k3.portal.platform.android.sec_ch_ua_platform.v1")
+    payload["rules"] = [rule]
+    payload["test_vectors"] = []
+    mutation(rule)
+    with pytest.raises(DeviceFingerprintValidationError):
+        make_k3_portal_rule_set(payload)
+
+
+def test_user_agent_and_tablet_rules_cannot_promote_themselves_to_strong():
+    for rule_id in ("k3.portal.platform.android.user_agent.v1",
+                    "k3.portal.device_class.tablet.sec_ch_ua_form_factors.v1"):
+        payload = _payload()
+        rule = next(rule for rule in payload["rules"] if rule["rule_id"] == rule_id)
+        rule["base_claim_strength"] = "strong"
+        payload["rules"] = [rule]
+        payload["test_vectors"] = []
+        with pytest.raises(DeviceFingerprintValidationError):
+            make_k3_portal_rule_set(payload)
 
 
 @pytest.mark.parametrize("mutation", [
