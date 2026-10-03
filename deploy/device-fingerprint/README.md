@@ -12,18 +12,28 @@ authorized deployment, replace the installed configuration with this complete
 template; do not merge or append the old diagnostic `eve-log` entry. In particular,
 `/run/fingerprint-suricata/diag-eve.json` must not be an enabled output.
 
-The service's `ReadOnlyPaths=/run` is a second, fail-closed boundary: a configuration
-that attempts a regular file write there cannot exhaust host tmpfs. Sending to the
-existing sensor-owned AF_UNIX datagram socket remains allowed. This distinction is
-documented by [systemd](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml).
-Do not add a writable `/run` exception or a daemon/PID-file mode to this foreground
-service. Capture interface, BPF, socket path and TLS/QUIC output remain unchanged.
+Suricata 8.0.6 requires a writable `default-log-dir` during startup even with
+socket-only EVE. Keep that directory separate from the sensor-owned socket directory:
+
+```text
+default-log-dir: /run/fingerprint-suricata
+RuntimeDirectory=fingerprint-suricata
+RuntimeDirectoryMode=0750
+```
+
+The unit creates this directory for its `suricata` user. Do not restore
+`ReadOnlyPaths=/run` or add a `ReadWritePaths=/run` workaround. The diagnostic-output
+boundary is the complete socket-only configuration, not a blanket read-only tmpfs.
+Do not add a regular EVE output or a daemon/PID-file mode to this foreground service.
+Capture interface, BPF, sensor socket path and TLS/QUIC output remain unchanged.
 
 No deployment, service restart, production file deletion or profile activation is
 performed by this source repair. Existing diagnostic bytes require separate Owner
-cleanup authorization; applying the boundary does not delete them. Linux service
-startup/socket delivery must be verified by Owner during the separately authorized
-deployment, not on production as a Coder test.
+cleanup authorization; applying this configuration does not delete them. The FIX1
+task reports production-proven recovery with this directory arrangement, `-T` and
+service startup PASS, no diagnostic EVE file, and sensor ready with an empty spool.
+That is supplied Owner deployment evidence, not a Linux execution by this Coder.
+Any further deployment/startup verification remains a separate Owner operation.
 
 ## Task-01 integrity lifecycle
 
