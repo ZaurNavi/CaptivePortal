@@ -112,6 +112,73 @@ def test_extra_column_is_strict_schema_error(tmp_path):
         DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()
 
 
+def test_startup_rejects_failed_full_quick_check_before_publishing_connection(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import app.device_fingerprint.repository as module
+
+    real_connect = sqlite3.connect
+    checks = []
+
+    class CorruptQuickCheck(sqlite3.Connection):
+        def execute(self, statement, *args, **kwargs):
+            if statement == "PRAGMA quick_check":
+                checks.append(statement)
+                return SimpleNamespace(fetchall=lambda: [("synthetic page corruption",)])
+            return super().execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(module.sqlite3, "connect", lambda *args, **kwargs: real_connect(
+        *args, factory=CorruptQuickCheck, **kwargs))
+    cfg = config(tmp_path)
+    repo = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
+    with pytest.raises(DeviceFingerprintStorageCorrupt, match="repository is corrupt"):
+        repo.initialize()
+    assert checks == ["PRAGMA quick_check"]
+    assert repo._connection is None
+
+
+def test_runtime_health_neither_checks_full_integrity_nor_reads_evidence_tables(tmp_path):
+    _cfg, repo = initialized(tmp_path)
+    statements = []
+    repo.connection.set_trace_callback(statements.append)
+
+    def bounded_authorizer(action, name, argument, *_unused):
+        if action == sqlite3.SQLITE_PRAGMA and name.lower() in {"quick_check", "integrity_check"}:
+            return sqlite3.SQLITE_DENY
+        if action == sqlite3.SQLITE_READ and name in {
+            "device_fingerprint_evidence", "device_fingerprint_source_health_events",
+        }:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    repo.connection.set_authorizer(bounded_authorizer)
+    try:
+        repo.validate_runtime_health()
+    finally:
+        repo.connection.set_authorizer(None)
+        repo.connection.set_trace_callback(None)
+        repo.close()
+    assert "PRAGMA user_version" in statements
+    assert any("FROM device_fingerprint_storage_state LIMIT 2" in query for query in statements)
+    assert not any("quick_check" in query.lower() or "integrity_check" in query.lower()
+                   for query in statements)
+
+
+@pytest.mark.parametrize("mutation", [
+    "PRAGMA user_version=3",
+    "ALTER TABLE device_fingerprint_evidence ADD COLUMN unexpected TEXT",
+    "DELETE FROM device_fingerprint_storage_state",
+    "UPDATE device_fingerprint_storage_state SET database_generation_id='111111111111111111111111111111111111'",
+])
+def test_bounded_runtime_health_still_rejects_invalid_metadata(tmp_path, mutation):
+    _cfg, repo = initialized(tmp_path)
+    try:
+        repo.connection.execute(mutation)
+        with pytest.raises(DeviceFingerprintStorageCorrupt):
+            repo.validate_runtime_health()
+    finally:
+        repo.close()
+
+
 def test_evidence_atomic_idempotency_and_conflict(tmp_path):
     _cfg, repo, svc = service(tmp_path)
     root = {"producer_id": producer().producer_id, "events": [evidence_event()]}
