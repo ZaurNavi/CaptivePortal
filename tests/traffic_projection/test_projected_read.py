@@ -23,7 +23,6 @@ from app.traffic_projection.source import TrafficProjectionSource
 
 
 SITE = "site-a"
-NOW = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class _ObservationReader:
@@ -41,6 +40,9 @@ class _ObservationReader:
 
 
 def _fixture(tmp_path):
+    now = datetime.now(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
     observation = tmp_path / "observations.sqlite3"
     connection = sqlite3.connect(observation)
     connection.executescript(observation_schema_sql())
@@ -69,31 +71,31 @@ def _fixture(tmp_path):
     connection.close()
     repository = TrafficProjectionRepository(str(tmp_path / "projection.sqlite3"))
     repository.initialize()
-    repository.ensure_version(SEMANTIC_CONTRACT_SHA256, NOW)
+    repository.ensure_version(SEMANTIC_CONTRACT_SHA256, now)
     repository.ensure_site(SITE)
     source = TrafficProjectionSource(str(observation))
     for number in range(2):
-        repository.upsert_cycle(source.cycle(SITE, f"cycle-{number}"), NOW)
+        repository.upsert_cycle(source.cycle(SITE, f"cycle-{number}"), now)
     repository.update_site(
         SITE, status="healthy", source_head_utc="2026-09-03T09:59:00.000Z",
-        source_head_cycle_id="cycle-1", last_incremental_progress_at=NOW,
-        last_full_reconcile_completed_at=NOW,
+        source_head_cycle_id="cycle-1", last_incremental_progress_at=now,
+        last_full_reconcile_completed_at=now,
         last_full_reconcile_source_head_utc="2026-09-03T09:59:00.000Z",
         last_full_reconcile_source_head_cycle_id="cycle-1",
-        last_deep_audit_at=NOW,
+        last_deep_audit_at=now,
         backlog_cycle_count=0,
         available_from_utc="2026-09-03T09:58:01.000Z",
         available_through_utc="2026-09-03T09:59:01.000Z",
         source_watermark_utc="2026-09-03T09:59:01.000Z",
-        source_boundary_proof_at=NOW,
+        source_boundary_proof_at=now,
         source_boundary_proof_head_utc="2026-09-03T09:59:00.000Z",
         source_boundary_proof_head_cycle_id="cycle-1",
     )
     repository.mark_ready(
-        NOW, (SITE,), {SITE: ("2026-09-03T09:59:00.000Z", "cycle-1")}
+        now, (SITE,), {SITE: ("2026-09-03T09:59:00.000Z", "cycle-1")}
     )
     repository.activate(
-        NOW, (SITE,), {SITE: ("2026-09-03T09:59:00.000Z", "cycle-1")}
+        now, (SITE,), {SITE: ("2026-09-03T09:59:00.000Z", "cycle-1")}
     )
     return observation, repository
 
