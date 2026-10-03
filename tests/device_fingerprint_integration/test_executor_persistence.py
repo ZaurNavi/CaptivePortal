@@ -35,7 +35,8 @@ def source_identity(relative, qualified):
 def prepared_production(tmp_path):
     """Fully typed local preflight fixture; never today's production IDs."""
     store, control, assembly, retention = production_setup(tmp_path)
-    identity = source_identity("app/device_fingerprint/origin_assessment.py", "DeviceFingerprintOriginAssessmentBuilder.build")
+    identity = source_identity("app/device_fingerprint/origin_assessment.py",
+                               "DeviceFingerprintOriginAssessmentBuilder.build/dhcp/1/FUSION")
     evidence = source_identity("app/device_fingerprint/validation.py", "canonical_json")
     manifest = make_artifact_content("ClassifierArtifactManifest", {
         "adapter_implementation_identities": [{"adapter_kind": "TASK01_EVIDENCE", "source_kind": "dhcp",
@@ -189,6 +190,70 @@ def test_get_by_id_retained_hash_integrity_and_missing(tmp_path):
         conn.execute("UPDATE artifacts SET semantic_payload_json='{}' WHERE artifact_id=?", (core.classification_result_id,))
     with pytest.raises(ClassificationPersistenceError):
         reader.get_by_id(core.classification_id)
+
+
+@pytest.mark.parametrize("qualified", [
+    "DeviceFingerprintOriginAssessmentBuilder.build/mac_registry/FUSION",
+    "DeviceFingerprintOriginAssessmentBuilder.build/dhcp/1/FUSION",
+    "DeviceFingerprintOriginAssessmentBuilder.build/portal_headers/2/OPTIONAL_IF_ADMITTED",
+    "DeviceFingerprintOriginAssessmentBuilder.build/tcp_syn/1/NON_FUSION_HANDLER",
+    "DeviceFingerprintOriginAssessmentBuilder.build",
+])
+def test_source_identity_resolves_symbol_without_changing_admitted_identity(tmp_path, qualified):
+    _store, control, _assembly, _retention = prepared_production(tmp_path)
+    manifest = control.contents[control.pinned.runtime_profile.semantic_payload["classifier_artifact_manifest"]["artifact_id"]]
+    payload = manifest.semantic_payload
+    payload["adapter_implementation_identities"][0].update(
+        source_identity("app/device_fingerprint/origin_assessment.py", qualified))
+    candidate = make_artifact_content("ClassifierArtifactManifest", payload)
+    before = candidate.semantic_payload
+    identity = candidate.artifact_id
+    assert verify_executable_identities(candidate) is None
+    assert candidate.semantic_payload == before
+    assert candidate.artifact_id == identity
+    assert candidate.semantic_payload["adapter_implementation_identities"][0]["implementation_id"] == (
+        f"python:app/device_fingerprint/origin_assessment.py:{qualified}")
+
+
+@pytest.mark.parametrize("qualified", [
+    "DeviceFingerprintOriginAssessmentBuilder.no_such_symbol/dhcp/1/FUSION",
+    "/dhcp/1/FUSION",
+    "DeviceFingerprintOriginAssessmentBuilder..build/dhcp/1/FUSION",
+])
+def test_invalid_python_symbol_fails_closed(tmp_path, qualified):
+    _store, control, _assembly, _retention = prepared_production(tmp_path)
+    manifest = control.contents[control.pinned.runtime_profile.semantic_payload["classifier_artifact_manifest"]["artifact_id"]]
+    payload = manifest.semantic_payload
+    payload["adapter_implementation_identities"][0].update(
+        source_identity("app/device_fingerprint/origin_assessment.py", qualified))
+    with pytest.raises(IntegrationError, match="runtime_profile_incompatible"):
+        verify_executable_identities(make_artifact_content("ClassifierArtifactManifest", payload))
+
+
+@pytest.mark.parametrize("corrupted", [False, True])
+def test_evidence_canonical_json_source_identity_and_digest(tmp_path, corrupted):
+    _store, control, _assembly, _retention = prepared_production(tmp_path)
+    manifest = control.contents[control.pinned.runtime_profile.semantic_payload["classifier_artifact_manifest"]["artifact_id"]]
+    payload = manifest.semantic_payload
+    evidence = source_identity("app/device_fingerprint/validation.py", "canonical_json")
+    payload["evidence_canonical_json_compatibility_identity"] = (
+        f"EvidenceCanonicalJsonV1:{evidence['implementation_id']}:sha256:"
+        f"{'0' * 64 if corrupted else evidence['implementation_digest']}")
+    candidate = make_artifact_content("ClassifierArtifactManifest", payload)
+    if corrupted:
+        with pytest.raises(IntegrationError, match="runtime_profile_incompatible"):
+            verify_executable_identities(candidate)
+    else:
+        assert verify_executable_identities(candidate) is None
+
+
+def test_source_origin_mismatch_fails_closed(tmp_path, monkeypatch):
+    _store, control, _assembly, _retention = prepared_production(tmp_path)
+    manifest = control.contents[control.pinned.runtime_profile.semantic_payload["classifier_artifact_manifest"]["artifact_id"]]
+    monkeypatch.setattr("app.device_fingerprint_integration.compatibility.inspect.getsourcefile",
+                        lambda _symbol: str(REPOSITORY_ROOT / "app/device_fingerprint/validation.py"))
+    with pytest.raises(IntegrationError, match="runtime_profile_incompatible"):
+        verify_executable_identities(manifest)
 
 
 @pytest.mark.parametrize("bad", ["digest", "escape", "missing"])
