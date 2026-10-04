@@ -59,10 +59,10 @@ const identityEntries = api.deviceIdentityEntries({
   site_snapshot_count: 1,
   site_visit_count: 2,
 });
-const identityType = identityEntries.find((entry) => entry[0] === "Type");
+const identityType = identityEntries.find((entry) => entry[0] === "Controller Platform");
 assert(identityType[1] === " Android " && identityType[2] === "device-type" && identityType[3] === "android", "identity preserves raw Type and carries canonical key");
 const snapshotType = api.deviceDetailEntries({device_type: " Android "}, "android")[0];
-assert(snapshotType[0] === "device type" && snapshotType[1] === " Android " && snapshotType[2] === "device-type" && snapshotType[3] === "android", "latest snapshot preserves raw Type with explicit canonical key");
+assert(snapshotType[0] === "Controller Platform" && snapshotType[1] === " Android " && snapshotType[2] === "device-type" && snapshotType[3] === "android", "latest snapshot preserves raw controller platform with explicit canonical key");
 const ownKeyType = api.deviceDetailEntries({device_type: "phone", device_type_key: "phone"}, "android")[0];
 assert(ownKeyType[1] === "phone" && ownKeyType[3] === "phone", "object canonical key takes precedence over external key");
 const missingType = api.deviceDetailEntries({device_type: null, device_type_key: null})[0];
@@ -208,12 +208,18 @@ headerRow.cells[7].textContent = "Uptime";
 headerRow.cells[8].textContent = "Traffic";
 global.document = {createElement: headerNode};
 api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
-assert(headerRow.cells.length === 10 && headerRow.cells[1].textContent === "Type", "Home Type header is visible after Device / MAC");
-assert(headerRow.cells[1].className === "live-device-type-header", "Home Type header uses the narrow presentation column");
+assert(headerRow.cells.length === 11 && headerRow.cells[1].textContent === "Type", "Home fingerprint Type header is visible after Device / MAC");
+assert(headerRow.cells[1].className === "live-fingerprint-type-header", "Home fingerprint Type has its own column");
+assert(headerRow.cells[2].textContent === "Platform" && headerRow.cells[2].className === "live-device-type-header", "Home controller Platform stays separate");
 api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
-assert(headerRow.cells.length === 10, "Home Type header preparation is idempotent");
+assert(headerRow.cells.length === 11, "Home Type/Platform header preparation is idempotent");
 const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null};
 const androidPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: " Android ", device_type_key: "android"});
+assert(androidPresentation.fingerprintType.textContent === "—", "controller platform cannot backfill missing fingerprint Type");
+const resolvedFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", value: "Laptop"}});
+assert(resolvedFingerprint.fingerprintType.textContent === "Laptop", "Home Type displays only the server fingerprint projection");
+const unknownFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", value: "Unknown"}});
+assert(unknownFingerprint.fingerprintType.textContent === "Unknown", "completed unresolved Type differs from missing value");
 assert(androidPresentation.deviceType.children.length === 1 && androidPresentation.deviceType.children[0].tag === "img", "Home Android canonical key renders SVG");
 assert(androidPresentation.deviceType.attributes["aria-label"] === " Android ", "Home Android presentation preserves raw label");
 const missingPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null});

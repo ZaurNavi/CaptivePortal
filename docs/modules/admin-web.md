@@ -33,6 +33,37 @@ secure cookies, CSP/security headers and no-store.
 `AdminQueryService` owns Site authorization, bounded concurrency/deadline and safe
 error mapping.
 
+## Task-06 — advisory Device Fingerprint presentation
+
+Home Online Devices keeps the existing controller/source `device_type` and
+`device_type_key` normalization and Android icon, now labeled **Platform**.
+The separate **Type** column comes only from persisted PRODUCTION fingerprint
+`device_class_result`. Controller Platform never backfills fingerprint Type.
+Home exposes only the compact fingerprint state/value, not diagnostics.
+
+Device Card labels controller/source data **Controller Platform** and adds a
+separate **Fingerprint Information** card: Status, Classified at, Type,
+Fingerprint Platform, Manufacturer and Model Family. Resolved dimensions show
+their unchanged support level. Expandable Fingerprint details preserve canonical
+values, real dimension status/support, supporting/contradicting/not-evaluable
+origin groups, out-of-scope references, explanation codes and knowledge refs.
+Controller Platform and Fingerprint Platform may disagree; no reconciliation is
+performed and no raw JSON/internal runtime identifiers appear in the summary.
+
+The authoritative source is persisted PRODUCTION `ClassificationResult`, read
+through `DeviceFingerprintClassificationReadService` and the shared typed
+presentation adapter. A newer PRE_ACCEPTANCE_CANDIDATE cannot shadow production.
+Home uses one bounded batch (at most 250 input MACs), one read-only connection
+and transaction, and two bounded SELECTs rather than individual device reads.
+All access remains within existing Site-authorized Admin APIs.
+
+No authoritative result is shown as `—`; a completed unresolved dimension is
+shown as `Unknown`, with its exact status retained in details. Fingerprint is
+advisory: an unavailable/corrupt classification DB yields Home Type `—` and
+Device Card fingerprint Status `Unavailable`, without failing core page data.
+The UI does not classify, query integration jobs, mutate persistence or trigger
+production activation.
+
 ## Device Detail — Historical vs Current
 
 Device Detail keeps two independent evidence domains.
