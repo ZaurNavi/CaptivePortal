@@ -13,9 +13,10 @@ from .control_plane_store import (
     ControlPlaneOperationError, DeviceFingerprintControlPlaneStore, PinnedRuntimeProfile,
 )
 from .fe5_external_knowledge import evaluate_external_knowledge_freshness
-from .fusion import FusionInputs, fuse_classification
+from .fusion import FusionInputs, _fuse_classification_prevalidated
 from .knowledge_bundle import (
-    KnowledgeBundleCandidate, make_knowledge_bundle, validate_knowledge_bundle_dependencies,
+    KnowledgeBundleCandidate, make_knowledge_bundle,
+    _ValidatedKnowledgeBundle, _validate_knowledge_bundle_once,
 )
 from .models import DeviceFingerprintValidationError
 from .origin_assessment import DeviceFingerprintOriginAssessmentBuilder, OriginAssessmentInputs
@@ -97,6 +98,13 @@ class DeviceFingerprintRequestAssembly:
     def reconstruct_knowledge_bundle(
         bundle: ArtifactContent, resolver: Callable[[ArtifactRef], ArtifactContent],
     ) -> KnowledgeBundleCandidate:
+        candidate, _proof = DeviceFingerprintRequestAssembly._reconstruct_validated_knowledge_bundle(bundle, resolver)
+        return candidate
+
+    @staticmethod
+    def _reconstruct_validated_knowledge_bundle(
+        bundle: ArtifactContent, resolver: Callable[[ArtifactRef], ArtifactContent],
+    ) -> tuple[KnowledgeBundleCandidate, _ValidatedKnowledgeBundle]:
         """Follow record-set provenance, never positional inventory assignment."""
         def dependency(value: dict[str, str], kind: str) -> ArtifactContent:
             reference = ArtifactRef.from_dict(value)
@@ -144,8 +152,8 @@ class DeviceFingerprintRequestAssembly:
                 k4_record_set=records["k4"], k4_provenance=external["k4"][0],
                 k4_governance=external["k4"][1], k4_freshness_policy=external["k4"][2],
             )
-            validate_knowledge_bundle_dependencies(bundle, candidate)
-            return candidate
+            validated_knowledge = _validate_knowledge_bundle_once(bundle, candidate)
+            return candidate, validated_knowledge
         except RequestAssemblyError:
             raise
         except (ControlPlaneOperationError, DeviceFingerprintValidationError,
@@ -196,7 +204,7 @@ class DeviceFingerprintRequestAssembly:
             except (ControlPlaneOperationError, DeviceFingerprintValidationError,
                     sqlite3.Error, KeyError, TypeError, AttributeError) as exc:
                 raise RequestAssemblyError(_knowledge_load_reason(exc)) from exc
-            knowledge = self.reconstruct_knowledge_bundle(bundle, self._resolve)
+            knowledge, validated_knowledge = self._reconstruct_validated_knowledge_bundle(bundle, self._resolve)
             policy = self._dependency(p["classification_policy"], "ClassificationPolicy")
             adapters = self._dependency(p["evidence_adapter_contract_set"], "EvidenceAdapterContractSet")
             classifier = self._dependency(p["classifier_artifact_manifest"], "ClassifierArtifactManifest")
@@ -228,13 +236,13 @@ class DeviceFingerprintRequestAssembly:
                 name: ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
                 for name, content in contents.items()
             } | {"knowledge_evaluation_at_utc": knowledge_time}, **contents)
-            origins = DeviceFingerprintOriginAssessmentBuilder(OriginAssessmentInputs(
+            origins = DeviceFingerprintOriginAssessmentBuilder._from_validated(OriginAssessmentInputs(
                 snapshot.evidence_snapshot_content, snapshot.materialization,
-                evaluability, adapters, bundle, knowledge, knowledge_time)).build_all()
-            result = fuse_classification(FusionInputs(
+                evaluability, adapters, bundle, knowledge, knowledge_time), validated_knowledge).build_all()
+            result = _fuse_classification_prevalidated(FusionInputs(
                 request.content_sha256, policy, knowledge.classification_taxonomy,
                 knowledge.alias_mapping, adapters, bundle, knowledge, classifier,
-                snapshot.evidence_snapshot_content, evaluability, origins))
+                snapshot.evidence_snapshot_content, evaluability, origins), validated_knowledge)
             if result.semantic_payload["classification_request_digest"] != request.content_sha256:
                 raise RequestAssemblyError("classifier_internal_error")
             return RequestAssemblyResult(

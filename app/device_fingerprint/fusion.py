@@ -14,9 +14,12 @@ from .classification_policy import (
     make_classification_policy, validate_classification_policy_dependencies,
 )
 from .evidence_adapter_contracts import DIMENSIONS
-from .knowledge_bundle import KnowledgeBundleCandidate, validate_knowledge_bundle_dependencies
+from .knowledge_bundle import (
+    KnowledgeBundleCandidate, _ValidatedKnowledgeBundle,
+    _validate_knowledge_bundle_once, _require_validated_knowledge,
+)
 from .models import DeviceFingerprintValidationError
-from .origin_assessment import ORIGINS, make_origin_assessment
+from .origin_assessment import ORIGINS, _make_origin_assessment_prevalidated
 from .validation import validate_mac
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -129,8 +132,27 @@ class DeviceFingerprintFusionCore:
     def __init__(self, inputs: FusionInputs) -> None:
         if not isinstance(inputs, FusionInputs):
             _fail("Invalid fusion inputs")
-        self._inputs = inputs
         try:
+            validated_knowledge = _validate_knowledge_bundle_once(inputs.knowledge_bundle, inputs.knowledge)
+            self._initialize(inputs, validated_knowledge)
+        except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
+            raise DeviceFingerprintValidationError("Malformed fusion input") from exc
+
+    @classmethod
+    def _from_validated(cls, inputs: FusionInputs,
+                        validated_knowledge: _ValidatedKnowledgeBundle) -> DeviceFingerprintFusionCore:
+        core = cls.__new__(cls)
+        core._initialize(inputs, validated_knowledge)
+        return core
+
+    def _initialize(self, inputs: FusionInputs,
+                    validated_knowledge: _ValidatedKnowledgeBundle) -> None:
+        if not isinstance(inputs, FusionInputs):
+            _fail("Invalid fusion inputs")
+        self._inputs = inputs
+        self._validated_knowledge = validated_knowledge
+        try:
+            _require_validated_knowledge(validated_knowledge, inputs.knowledge_bundle, inputs.knowledge)
             self._validate()
         except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
             raise DeviceFingerprintValidationError("Malformed fusion input") from exc
@@ -147,7 +169,7 @@ class DeviceFingerprintFusionCore:
             value.classification_policy, classification_taxonomy=value.classification_taxonomy,
             alias_mapping=value.alias_mapping,
             evidence_adapter_contract_set=value.evidence_adapter_contract_set)
-        validate_knowledge_bundle_dependencies(value.knowledge_bundle, value.knowledge)
+        _require_validated_knowledge(self._validated_knowledge, value.knowledge_bundle, value.knowledge)
         bundle = value.knowledge_bundle.semantic_payload
         if bundle["classification_taxonomy"] != _ref(value.classification_taxonomy, "ClassificationTaxonomy") or (
                 bundle["alias_mapping"] != _ref(value.alias_mapping, "AliasMapping")):
@@ -163,11 +185,12 @@ class DeviceFingerprintFusionCore:
         for assessment in value.origin_assessments:
             _ref(assessment, "OriginAssessment")
             payload = assessment.semantic_payload
-            rebuilt = make_origin_assessment(
+            rebuilt = _make_origin_assessment_prevalidated(
                 payload, evidence_snapshot_content=value.evidence_snapshot_content,
                 source_evaluability=value.source_evaluability,
                 evidence_adapter_contract_set=value.evidence_adapter_contract_set,
-                knowledge_bundle=value.knowledge_bundle, knowledge=value.knowledge)
+                knowledge_bundle=value.knowledge_bundle, knowledge=value.knowledge,
+                validated_knowledge=self._validated_knowledge)
             if rebuilt != assessment:
                 _fail("Noncanonical OriginAssessment")
             origin = payload["origin_group"]
@@ -347,3 +370,10 @@ class DeviceFingerprintFusionCore:
 def fuse_classification(inputs: FusionInputs) -> ArtifactContent:
     """Build the same deterministic artifact as DeviceFingerprintFusionCore.fuse."""
     return DeviceFingerprintFusionCore(inputs).fuse()
+
+
+def _fuse_classification_prevalidated(
+    inputs: FusionInputs,
+    validated_knowledge: _ValidatedKnowledgeBundle,
+) -> ArtifactContent:
+    return DeviceFingerprintFusionCore._from_validated(inputs, validated_knowledge).fuse()

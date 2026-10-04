@@ -5,7 +5,7 @@ import io
 
 import pytest
 
-from app.device_fingerprint.artifact_content import ArtifactRef, canonical_artifact_json
+from app.device_fingerprint.artifact_content import ArtifactRef, canonical_artifact_json, make_artifact_content
 from app.device_fingerprint.k4_ieee_import import (
     build_ieee_k4_source_governance_candidate,
     compute_ieee_k4_source_bundle_sha256,
@@ -79,6 +79,19 @@ def test_k4_record_validation_fails_closed(mutation):
     mutation(record)
     with pytest.raises(DeviceFingerprintValidationError):
         make_canonical_k4_record_set(_set_with(record))
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_public_k4_matcher_rejects_noncanonical_or_malformed_record_set(malformed):
+    payload = _import(l=(("MA-L", "001122", "Org A", "Address"),
+                         ("MA-L", "001133", "Org B", "Address"))).semantic_payload
+    if malformed:
+        payload["extra"] = "not admitted"
+    else:
+        payload["records"].reverse()
+    record_set = make_artifact_content("CanonicalKnowledgeRecordSet", payload)
+    with pytest.raises(DeviceFingerprintValidationError):
+        match_k4_records(record_set, "00:11:22:33:44:55")
 
 
 def test_k4_slot_and_future_explicit_mapping_validation():

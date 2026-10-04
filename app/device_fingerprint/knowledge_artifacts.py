@@ -657,6 +657,15 @@ def match_k1_records(
     rematerialized = make_canonical_k1_record_set(payload)
     if rematerialized.artifact_id != record_set.artifact_id:
         _fail("Invalid K1 record-set identity")
+    return _match_k1_records_prevalidated(record_set, dhcp_evidence)
+
+
+def _match_k1_records_prevalidated(
+    record_set: ArtifactContent,
+    dhcp_evidence: dict[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    """Match the K1 dependency of an already validated request-local bundle."""
+    payload = record_set.semantic_payload
     observed = _validated_dhcp_evidence(dhcp_evidence)
     matches = []
     for record in payload["records"]:

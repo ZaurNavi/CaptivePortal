@@ -100,6 +100,30 @@ class KnowledgeBundleCandidate:
     k4_freshness_policy: ArtifactContent
 
 
+@dataclass(frozen=True, slots=True)
+class _ValidatedKnowledgeBundle:
+    bundle: ArtifactContent
+    candidate: KnowledgeBundleCandidate
+
+
+def _validate_knowledge_bundle_once(
+    bundle: ArtifactContent,
+    candidate: KnowledgeBundleCandidate,
+) -> _ValidatedKnowledgeBundle:
+    validate_knowledge_bundle_dependencies(bundle, candidate)
+    return _ValidatedKnowledgeBundle(bundle, candidate)
+
+
+def _require_validated_knowledge(
+    proof: _ValidatedKnowledgeBundle,
+    bundle: ArtifactContent,
+    candidate: KnowledgeBundleCandidate,
+) -> None:
+    if (not isinstance(proof, _ValidatedKnowledgeBundle)
+            or proof.bundle is not bundle or proof.candidate is not candidate):
+        _fail("Invalid request-scoped KnowledgeBundle validation proof")
+
+
 def _distinct_refs(refs: list[dict[str, str]]) -> list[dict[str, str]]:
     return list({ref["artifact_id"]: ref for ref in refs}.values())
 

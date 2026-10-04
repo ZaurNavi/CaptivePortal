@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import pytest
 
-from app.device_fingerprint.artifact_content import ArtifactRef
+from app.device_fingerprint.artifact_content import ArtifactRef, make_artifact_content
 from app.device_fingerprint.knowledge_artifacts import (
     make_canonical_k1_record_set,
     make_external_knowledge_provenance_manifest,
@@ -12,6 +12,23 @@ from app.device_fingerprint.knowledge_artifacts import (
 )
 from app.device_fingerprint.models import DeviceFingerprintValidationError
 from research.device_fingerprint_fe1.fixtures import build_k1_fixture_definitions
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_public_k1_matcher_rejects_noncanonical_or_malformed_record_set(malformed):
+    fixture = build_k1_fixture_definitions()["all_any"]
+    payload = fixture["record_set"].semantic_payload
+    if malformed:
+        payload["extra"] = "not admitted"
+    else:
+        second = deepcopy(payload["records"][0])
+        second["canonical_record_id"] += "-second"
+        payload["records"].append(second)
+        payload = make_canonical_k1_record_set(payload).semantic_payload
+        payload["records"].reverse()
+    record_set = make_artifact_content("CanonicalKnowledgeRecordSet", payload)
+    with pytest.raises(DeviceFingerprintValidationError):
+        match_k1_records(record_set, fixture["evidence"])
 
 
 def _reference(artifact_type: str, digit: str) -> dict[str, str]:

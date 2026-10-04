@@ -28,6 +28,7 @@ from app.device_fingerprint.knowledge_artifacts import (
 from app.device_fingerprint.knowledge_bundle import (
     KnowledgeBundleCandidate, build_initial_knowledge_bundle_v1,
     make_knowledge_bundle, validate_knowledge_bundle_dependencies,
+    _require_validated_knowledge, _validate_knowledge_bundle_once,
 )
 from app.device_fingerprint.models import DeviceFingerprintValidationError
 from app.device_fingerprint.taxonomy_artifacts import (
@@ -151,6 +152,34 @@ def _rebuilt_record_set(value: KnowledgeBundleCandidate, slot: str,
                "k4": make_canonical_k4_record_set}[slot]
     return replace(value, **{f"{slot}_provenance": provenance,
                              f"{slot}_record_set": builder(payload)})
+
+
+def test_request_local_proof_requires_exact_objects_and_cannot_validate_a_bad_pair():
+    value = candidate()
+    bundle = build_initial_knowledge_bundle_v1(value)
+    proof = _validate_knowledge_bundle_once(bundle, value)
+    _require_validated_knowledge(proof, bundle, value)
+    assert proof.bundle is bundle and proof.candidate is value
+    assert not hasattr(proof, "artifact_id") and not hasattr(proof, "__dict__")
+    from dataclasses import FrozenInstanceError
+    with pytest.raises(FrozenInstanceError):
+        proof.bundle = bundle
+    equal_bundle = make_artifact_content("KnowledgeBundle", bundle.semantic_payload)
+    equal_candidate = replace(value)
+    assert equal_bundle == bundle and equal_bundle is not bundle
+    assert equal_candidate == value and equal_candidate is not value
+    for wrong_proof, wrong_bundle, wrong_candidate in (
+        (None, bundle, value), (object(), bundle, value),
+        (proof, equal_bundle, value), (proof, bundle, equal_candidate),
+    ):
+        with pytest.raises(DeviceFingerprintValidationError,
+                           match="Invalid request-scoped KnowledgeBundle validation proof"):
+            _require_validated_knowledge(wrong_proof, wrong_bundle, wrong_candidate)
+    bad = replace(value, k1_record_set=value.k4_record_set)
+    with pytest.raises(DeviceFingerprintValidationError):
+        validate_knowledge_bundle_dependencies(bundle, bad)
+    with pytest.raises(DeviceFingerprintValidationError):
+        _validate_knowledge_bundle_once(bundle, bad)
 
 
 def test_exact_schema_rejects_missing_extra_wrong_type_ja4_and_nonpositive_version():
