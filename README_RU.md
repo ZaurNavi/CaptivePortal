@@ -68,6 +68,134 @@ CaptivPortal начинался как внешний Captive Portal для ав
 
 > Repository defaults, production enabled-state и dated acceptance evidence — разные факты.
 
+<!-- README-LANDING-VISUAL-ATLAS:BEGIN -->
+## Зачем существует CaptivPortal — визуальная карта
+
+CaptivPortal уже не просто страница captive-login. Это application layer между
+гостевым доступом, Omada, долговременным network evidence и operator-facing
+product surface.
+
+| Задача | За что отвечает CaptivPortal | Результат |
+|---|---|---|
+| Гостю нужен контролируемый Wi-Fi access | Один verified authorization engine для External Portal + CAPPORT | Bounded guest authorization |
+| Одних auth events недостаточно для истории | Registry + Visit Lifecycle сохраняют durable identity/session facts | История Devices и Visits |
+| Оператору нужен честный current state | Current State хранит active wireless client/AP evidence | Home / Device Current Context |
+| Нужна историческая сеть и Traffic | Observation + Traffic/Analytics читают persisted facts | Traffic и Analytics products |
+| Controller `device_type` не равен fingerprint identity | Passive deterministic Device Fingerprint классифицирует bounded normalized evidence | Fingerprint Type + Fingerprint Information |
+| Product UI не должен зависеть от raw infrastructure | AdminQueryService/read services являются product boundary | Native Admin Web |
+| Инженерам нужна глубокая диагностика | Telemetry → Loki/Grafana остаётся отдельным observability plane | Engineering diagnostics |
+
+### Как платформа работает end to end
+
+```mermaid
+flowchart TB
+    Client[Guest Wi-Fi client]
+
+    subgraph Access["Access / authorization"]
+      Entry[External Portal / CAPPORT]
+      Auth[AuthSessionManager + AuthWorker]
+      Provider[Shared OmadaProvider]
+      Omada[(Omada Controller)]
+    end
+
+    subgraph Facts["Durable facts"]
+      Snap[Authorized Snapshot]
+      Registry[(Visitor Registry)]
+      Visit[(Visit Lifecycle)]
+      Obs[(Observation)]
+      Current[(Current State)]
+    end
+
+    subgraph Fingerprint["Device Fingerprint"]
+      Mirror[SPAN / passive network evidence]
+      PortalEvidence[Portal evidence]
+      FPEvidence[(Fingerprint Evidence)]
+      Classifier[Deterministic classifier]
+      FPResult[(PRODUCTION ClassificationResult)]
+    end
+
+    subgraph Product["Read / product plane"]
+      Reads[Read services / Analytics / Traffic]
+      AdminQuery[AdminQueryService]
+      Admin[Native Admin Web]
+    end
+
+    subgraph Eng["Engineering observability"]
+      Telemetry[Telemetry / journals]
+      Loki[(Loki)]
+      Grafana[Grafana]
+    end
+
+    Client --> Entry --> Auth --> Provider --> Omada
+    Auth --> Snap --> Registry
+    Auth --> Visit
+    Omada --> Obs
+    Omada --> Current
+
+    Client --> Mirror --> FPEvidence
+    Entry --> PortalEvidence --> FPEvidence
+    FPEvidence --> Classifier --> FPResult
+
+    Registry --> Reads
+    Visit --> Reads
+    Obs --> Reads
+    Current --> Reads
+    FPResult --> AdminQuery
+    Reads --> AdminQuery --> Admin
+
+    Auth --> Telemetry
+    Reads --> Telemetry
+    Telemetry --> Loki --> Grafana
+```
+
+### Главное правило обработки данных
+
+```mermaid
+flowchart LR
+    Source[Controller / Portal / passive sensor] --> Acquire[Bounded acquisition]
+    Acquire --> Persist[(Owned persistence)]
+    Persist --> Read[Read service]
+    Read --> Derive[Analytics / product interpretation]
+    Derive --> Present[AdminQueryService / Admin Web]
+    Present -. no direct source polling .-> Blocked[No query-time history manufacturing]
+```
+
+Постоянное направление: **source → normalized fact → owned persistence → read
+boundary → interpretation → presentation**. Product-read не создаёт отсутствующую
+историю query-time опросом Omada.
+
+### Кто чем владеет
+
+| Слой | Зачем нужен | Канонический owner/source | Durable boundary / output |
+|---|---|---|---|
+| Guest authorization | Решить, действительно ли guest access получен | AuthSessionManager / AuthWorker / shared OmadaProvider | verified controller state + telemetry |
+| Visitor identity/history | Сохранить durable device/history identity | Visitor Registry | `visitor_registry.sqlite3` |
+| Visit Lifecycle | Моделировать Site-aware Visit, а не считать AuthSession визитом | Visit Lifecycle | `visits.sqlite3` v2 |
+| Historical wireless/AP facts | Хранить measurements во времени | Observation Foundation | `observations.sqlite3` v1 |
+| Current wireless state | Хранить текущие active client/AP facts | Current State | `current_state.sqlite3` v1 |
+| Traffic / Analytics | Строить product views из сохранённых фактов | Analytics read services | read models; без source writes |
+| Device Fingerprint | Ответить «что это за устройство?» по passive bounded evidence | Device Fingerprint | Evidence / Classification / Integration stores |
+| Admin Web | Показать Site-safe operator view | AdminQueryService + Admin Web | read-only product presentation |
+| Engineering observability | Диагностировать runtime/implementation | telemetry / Alloy / Loki / Grafana | engineering-only observability |
+
+### Жёсткие границы, которые должны быть видны прямо из README
+
+| Граница | Инвариант |
+|---|---|
+| Authorization success | Успешного HTTP transport недостаточно; проверяется final controller state |
+| Analytics | Читает persisted facts и не опрашивает Omada для создания истории |
+| Admin browser | Не читает напрямую SQLite, Omada, Loki, Grafana или internal bearer API |
+| Optional subsystems | Могут degraded/fail независимо от guest authorization |
+| Evidence semantics | `missing / unknown / stale / insufficient / unavailable != 0` |
+| Omada provider | Один process → один shared provider/token lifecycle |
+| Device Fingerprint | Advisory only; не авторизует, не блокирует, не disconnect и не меняет CAPPORT |
+| DTI | Отдельная future program; не является скрытым расширением Device Fingerprint |
+
+Ниже в этом же README находятся подробные схемы authorization, persistence,
+Visit Lifecycle, Analytics, Traffic, Admin Web, Home, observability и полный
+16-схемный Device Fingerprint atlas.
+<!-- README-LANDING-VISUAL-ATLAS:END -->
+
 ## Где проект находится сейчас
 
 Traffic production-active до `TASK-TRAFFIC-09 — Consolidated Traffic Evidence` включительно.
@@ -159,44 +287,472 @@ Presentation-layer задача `TASK-WEB-DEVICE-UI-01` теперь **CLOSED / 
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
 ## Device Fingerprint — текущее production-состояние
 
-Device Fingerprint теперь является production-active пассивной/advisory системой
-классификации устройств, а не только foundation для хранения evidence.
+Device Fingerprint — production-active пассивная/advisory подсистема
+классификации. Полный visual atlas намеренно находится прямо в landing README,
+чтобы архитектуру можно было понять без перехода в другой документ.
 
 ```text
-repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
-repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
-PR #178 = MERGED
+runtime / production implementation checkpoint = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
+runtime / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
 TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
 TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
 TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
-TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
+TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED / ADMIN VISIBLE
 captive-portal.service = active
 fingerprint-classification.service = active
 ```
 
-```mermaid
-flowchart LR
-    E[Passive normalized evidence] --> C[Deterministic Device Fingerprint]
-    C --> P[(Persisted PRODUCTION ClassificationResult)]
-    P --> A[Admin read model]
-    A --> H[Home]
-    A --> D[Device Card]
-```
+### На какие вопросы отвечает Device Fingerprint
 
-Текущая product-терминология Home:
+| Product dimension | Смысл |
+|---|---|
+| `device_class` | широкий класс устройства; в Home это Fingerprint **Type** |
+| `platform_family` | fingerprint-derived platform family |
+| `manufacturer_family` | fingerprint-derived manufacturer family |
+| `model_family` | fingerprint-derived model family |
+
+Support: `none | low | medium | high`; это не probability.
+
+| Состояние | Product meaning |
+|---|---|
+| `resolved` | поддерживаемое значение определено |
+| `recognized_out_of_scope` | evidence распознано, но находится вне admitted taxonomy/scope |
+| `unknown` | классификация завершена без supported value |
+| `insufficient_evidence` | evidence недостаточно |
+| `conflicting_evidence` | admitted evidence конфликтует |
+| authoritative production result ещё нет | UI показывает `—` |
+| classification завершена, dimension не resolved | UI показывает `Unknown` |
+| read/persistence path недоступен | UI показывает `Unavailable` / fail-soft `—` |
+
+Постоянный UI contract:
 
 ```text
 Type     = fingerprint device_class
 Platform = controller / Omada device_type
+
+Type != Platform
+Controller Platform NEVER backfills Fingerprint Type
 ```
 
-Controller Platform никогда не заполняет Fingerprint Type. Device Card отдельно
-показывает **Controller Platform** и **Fingerprint Information**. `—` означает,
-что authoritative production-result ещё отсутствует; `Unknown` — завершённую,
-но не разрешённую dimension; `Unavailable` — недоступность read/persistence path.
+### Evidence origins
 
-Подробный архитектурный контракт и схемы:
-`docs/modules/device-fingerprint.md`.
+| Origin | Роль |
+|---|---|
+| DHCP | passive normalized network evidence |
+| Portal | bounded application/Portal evidence |
+| TCP | passive TCP SYN fingerprint evidence |
+| TLS | normalized TLS client fingerprint evidence |
+| QUIC | normalized QUIC client fingerprint evidence |
+| MAC Registry | knowledge-derived origin, а не packet evidence |
+
+Канонический порядок:
+
+```text
+dhcp, portal, tcp, tls, quic, mac_registry
+```
+
+Повторные строки одного origin не становятся независимыми votes.
+
+### Device Fingerprint architecture atlas — все 16 схем
+
+| ID | Схема | Что показывает |
+|---|---|---|
+| DF-01 | Полный end-to-end путь | Весь production-путь от клиента и passive evidence до persisted ClassificationResult и Home / Device Card. |
+| DF-02 | Источники evidence / origins | Независимые origin families и правило: повторные строки одного origin не становятся дополнительными votes. |
+| DF-03 | Evidence + source health + time | Связь evidence, source health и времени; отсутствие/устаревание источника остаётся явным состоянием. |
+| DF-04 | Сборка snapshot | Bounded snapshot assembly перед классификацией и граница SnapshotContentPolicy / SnapshotExecutionPolicy. |
+| DF-05 | Pure deterministic classification core | Чистое deterministic classification core без Auth/CAPPORT authority и без product-side inference. |
+| DF-06 | Fusion по отдельным dimensions | Независимый fusion для device_class, platform_family, manufacturer_family и model_family. |
+| DF-07 | Knowledge и policy | Versioned knowledge/policy boundary, необходимый для воспроизводимости результата. |
+| DF-08 | Runtime profile / admission lifecycle | Runtime profile, candidate/admission lifecycle и граница между accepted production artifact и новым candidate. |
+| DF-09 | Artifact / audit lineage | Artifact identity, audit lineage и reacceptance boundary при семантическом изменении classifier implementation. |
+| DF-10 | Post-Auth integration / worker | Post-authorization durable job path: подтверждённый AuthRun создаёт bounded classification/integration work. |
+| DF-11 | История классификации устройства | Append/history модель классификаций и связь с Device/Visit без переписывания исходной evidence-history. |
+| DF-12 | Admin presentation read path | Production-only read path из Classification SQLite в presentation service и далее Home / Device Card. |
+| DF-13 | UI state semantics | Разницу между no result, completed Unknown и Unavailable; эти состояния не взаимозаменяемы. |
+| DF-14 | Failure isolation | Failure isolation: сбой fingerprint не ломает guest authorization, CAPPORT или core Admin data. |
+| DF-15 | Production components and stores | Production components, auxiliary services и owned stores; repository component не доказывает live service state. |
+| DF-16 | Current Device Fingerprint vs future Traffic Enrichment | Границу: Device Fingerprint отвечает «что это за устройство?», а future DTI — «как оно использует сеть?». |
+
+#### DF-01 — Полный end-to-end путь
+
+Весь production-путь от клиента и passive evidence до persisted ClassificationResult и Home / Device Card.
+
+```mermaid
+flowchart TD
+    C[Client device] --> W[Wi-Fi / Omada]
+    W --> M[SPAN / mirrored traffic]
+    M --> NS[Network Sensor]
+    NS --> NE[Bounded normalized network evidence]
+
+    C --> P[Portal / CAPPORT request]
+    P --> PP[Portal evidence producer]
+    PP --> PE[Bounded normalized portal evidence]
+
+    NE --> EDB[(Evidence SQLite)]
+    PE --> EDB
+    EDB --> SNAP[Snapshot assembly]
+    SNAP --> SE[SourceEvaluability]
+    SE --> OA[OriginAssessments]
+    OA --> FUS[Cross-origin fusion]
+    FUS --> CR[ClassificationResult]
+    CR --> CDB[(Classification SQLite)]
+    CDB --> I[Task-05 integration / history]
+    I --> ID[Device / Visit relation]
+    CDB --> R[Task-06 production read]
+    R --> H[Home]
+    R --> D[Device Card]
+```
+
+#### DF-02 — Источники evidence / origins
+
+Независимые origin families и правило: повторные строки одного origin не становятся дополнительными votes.
+
+```mermaid
+flowchart LR
+    subgraph Physical["Physical / network origins"]
+      DHCP[DHCP]
+      TCP[TCP]
+      TLS[TLS]
+      QUIC[QUIC]
+    end
+    subgraph Application["Application origin"]
+      PORTAL[Portal]
+    end
+    subgraph Knowledge["Knowledge-based origin"]
+      MAC[MAC Registry]
+    end
+
+    DHCP --> SNAP[Evidence Snapshot]
+    TCP --> SNAP
+    TLS --> SNAP
+    QUIC --> SNAP
+    PORTAL --> SNAP
+    MAC --> OA[OriginAssessments]
+    SNAP --> OA
+
+    AV[available] -.status.-> OA
+    UN[unavailable] -.status.-> OA
+    US[unsupported] -.status.-> OA
+    DI[disabled] -.status.-> OA
+    UK[unknown] -.status.-> OA
+```
+
+#### DF-03 — Evidence + source health + time
+
+Связь evidence, source health и времени; отсутствие/устаревание источника остаётся явным состоянием.
+
+```mermaid
+flowchart TD
+    E[Evidence rows] --> X[Time/binding evaluation]
+    H[Source Health timeline] --> X
+    B[Source binding timeline] --> X
+    C[Clock policy] --> X
+    X --> SE[SourceEvaluability]
+
+    A["absence of evidence"] --> Q{source coverage proven?}
+    Q -->|yes| COV[interpret within admitted semantics]
+    Q -->|no / unknown| N["NOT negative evidence"]
+```
+
+#### DF-04 — Сборка snapshot
+
+Bounded snapshot assembly перед классификацией и граница SnapshotContentPolicy / SnapshotExecutionPolicy.
+
+```mermaid
+flowchart TD
+    W[classification window] --> TX[One consistent Task-01 SQLite read snapshot]
+    TX --> EV[evidence selection]
+    TX --> HL[health selection]
+    B[bindings / clock] --> EV
+    CP[SnapshotContentPolicy] --> EV
+    XP[SnapshotExecutionPolicy] --> TX
+    EV --> ESC[EvidenceSnapshotContent]
+    HL --> ESC
+    ESC --> MAT[Verified transient materialization]
+    MAT --> SE[SourceEvaluability]
+```
+
+#### DF-05 — Pure deterministic classification core
+
+Чистое deterministic classification core без Auth/CAPPORT authority и без product-side inference.
+
+```mermaid
+flowchart TD
+    subgraph PURE["PURE DETERMINISTIC CORE — NO DB / NO NETWORK / NO CURRENT CLOCK / NO PERSISTENCE"]
+      ESC[EvidenceSnapshotContent]
+      MAT[EvidenceSnapshotMaterialization]
+      SE[SourceEvaluability]
+      KB[KnowledgeBundle]
+      CP[ClassificationPolicy]
+      EA[EvidenceAdapterContractSet]
+      CAM[ClassifierArtifactManifest]
+      KT[knowledge_evaluation_at_utc]
+
+      ESC --> OA[6 OriginAssessments]
+      MAT --> OA
+      SE --> OA
+      KB --> OA
+      EA --> OA
+      KT --> OA
+
+      OA --> F[Cross-Origin Fusion]
+      CP --> F
+      CAM --> F
+      F --> DR[4 DimensionResults]
+      DR --> GS[Global classification status]
+      GS --> CR[ClassificationResult]
+    end
+```
+
+#### DF-06 — Fusion по отдельным dimensions
+
+Независимый fusion для device_class, platform_family, manufacturer_family и model_family.
+
+```mermaid
+flowchart TD
+    D[DHCP claim] --> SO[same-origin assessment]
+    P[Portal claim] --> SO
+    T[TCP claim] --> SO
+    L[TLS claim] --> SO
+    Q[QUIC claim] --> SO
+    M[MAC Registry claim] --> SO
+    SO --> XO[cross-origin comparison]
+    XO --> R{Dimension result}
+    R --> RES[resolved]
+    R --> OOS[recognized_out_of_scope]
+    R --> UNK[unknown]
+    R --> INS[insufficient_evidence]
+    R --> CON[conflicting_evidence]
+    RES --> SUP[support: low / medium / high]
+    OOS --> SUP
+    UNK --> NONE[support: none]
+    INS --> NONE
+    CON --> NONE
+```
+
+#### DF-07 — Knowledge и policy
+
+Versioned knowledge/policy boundary, необходимый для воспроизводимости результата.
+
+```mermaid
+flowchart TD
+    TAX[ClassificationTaxonomy] --> KB[KnowledgeBundle]
+    AL[AliasMapping] --> KB
+    K1[K1 Satori DHCP] --> KB
+    K2[K2A/K2B p0f] --> KB
+    K3[K3 Portal rules] --> KB
+    K4[K4 IEEE registry] --> KB
+    PROV[Provenance + freshness] --> KB
+    KB --> REQ[Classification request]
+    POL[ClassificationPolicy] --> REQ
+    AD[EvidenceAdapterContractSet] --> REQ
+```
+
+#### DF-08 — Runtime profile / admission lifecycle
+
+Runtime profile, candidate/admission lifecycle и граница между accepted production artifact и новым candidate.
+
+```mermaid
+flowchart TD
+    FA[Foundation artifacts] --> FRP[FoundationRuntimeProfile candidate]
+    FRP --> FACC[Foundation acceptance/admission]
+    FACC --> FACT[Foundation profile admitted/active]
+
+    FACT --> CRPC[ClassificationRuntimeProfile candidate]
+    K[Knowledge + Policy + Adapters + Classifier] --> CRPC
+    CRPC --> TAC[Task-04 acceptance]
+    TAC --> RPM[RuntimeProfileAdmissionManifest]
+    RPM --> ACT[Activation]
+    ACT --> PIN[Pinned PRODUCTION ClassificationRuntimeProfile]
+
+    C[candidate] -.not equal.-> A[accepted]
+    A -.not equal.-> AD[admitted]
+    AD -.not equal.-> AC[active]
+```
+
+#### DF-09 — Artifact / audit lineage
+
+Artifact identity, audit lineage и reacceptance boundary при семантическом изменении classifier implementation.
+
+```mermaid
+flowchart TD
+    SR[SnapshotRecord] --> CRM[ClassificationRequestManifest]
+    KB[KnowledgeBundle] --> CRM
+    POL[ClassificationPolicy] --> CRM
+    CAM[ClassifierArtifactManifest] --> CRM
+    RP[ClassificationRuntimeProfile] --> CRM
+    ACT[Admission / Activation lineage] --> RP
+    CRM --> CR[ClassificationResult]
+```
+
+#### DF-10 — Post-Auth integration / worker
+
+Post-authorization durable job path: подтверждённый AuthRun создаёт bounded classification/integration work.
+
+```mermaid
+flowchart TD
+    A[Auth success] --> J[Create Integration Job]
+    J --> P[PENDING]
+    P --> DUE[due]
+    DUE --> L[LEASED]
+    L --> W[Single durable worker]
+    W --> ID[Exact identity/session resolution]
+    ID --> RP[Pin admitted ClassificationRuntimeProfile]
+    RP --> S[Assemble snapshot]
+    S --> C[Classify]
+    C --> PS[Persist ClassificationResult]
+    PS --> OK[CLASSIFIED]
+    OK --> LINK[Device / Visit linkage where proven]
+
+    ID -->|temporary unresolved| RETRY[bounded retry]
+    S -->|typed/retryable failure| RETRY
+    C -->|typed/retryable failure| RETRY
+    RETRY --> P
+    RETRY -->|attempt/horizon exhausted| NR[NO_RESULT_FINAL]
+```
+
+#### DF-11 — История классификации устройства
+
+Append/history модель классификаций и связь с Device/Visit без переписывания исходной evidence-history.
+
+```mermaid
+flowchart TD
+    DEV[Device — one Site + MAC]
+    DEV --> V1[Visit #1]
+    DEV --> V2[Visit #2]
+    DEV --> V3[Visit #3]
+    V1 --> R1[ClassificationResult #1]
+    V2 --> R2[ClassificationResult #2]
+    V3 --> R3[ClassificationResult #3]
+    R1 --> SEL[latest authoritative PRODUCTION result]
+    R2 --> SEL
+    R3 --> SEL
+    SEL --> UI[current Device Card / Home]
+```
+
+#### DF-12 — Admin presentation read path
+
+Production-only read path из Classification SQLite в presentation service и далее Home / Device Card.
+
+```mermaid
+flowchart TD
+    DB[(Classification SQLite)] --> PR[production-only read]
+    PR --> PA[typed presentation adapter]
+    PA --> AQ[AdminQueryService]
+    AQ --> H[Home → Online Devices]
+    AQ --> D[Device Card]
+
+    H --> HT["Type = Fingerprint device_class"]
+    H --> HP["Platform = controller device_type"]
+
+    D --> CP["Controller Platform"]
+    D --> FI["Fingerprint Information"]
+```
+
+#### DF-13 — UI state semantics
+
+Разницу между no result, completed Unknown и Unavailable; эти состояния не взаимозаменяемы.
+
+```mermaid
+flowchart TD
+    Q{Fingerprint read available?}
+    Q -->|no| U[Unavailable]
+    Q -->|yes| R{PRODUCTION result exists?}
+    R -->|no| DASH[—]
+    R -->|yes| D{dimension resolved?}
+    D -->|yes| V[display resolved value]
+    D -->|no| K[Unknown]
+```
+
+#### DF-14 — Failure isolation
+
+Failure isolation: сбой fingerprint не ломает guest authorization, CAPPORT или core Admin data.
+
+```mermaid
+flowchart LR
+    SF[Sensor failure] --> FD[Fingerprint degraded / unavailable]
+    DBF[Fingerprint DB failure] --> FD
+    CF[Classifier unavailable] --> FD
+    WF[Worker retry/failure] --> FD
+
+    AUTH[Auth continues]
+    CAP[CAPPORT continues]
+    ADM[Admin core continues]
+    TR[Traffic/current-state continue]
+
+    FD -.does not control.-> AUTH
+    FD -.does not control.-> CAP
+    FD -.does not control.-> ADM
+    FD -.does not control.-> TR
+```
+
+#### DF-15 — Production components and stores
+
+Production components, auxiliary services и owned stores; repository component не доказывает live service state.
+
+```mermaid
+flowchart TD
+    CP[captive-portal.service]
+    FW[fingerprint-classification.service]
+    FE[fingerprint-evidence.service]
+    FS[fingerprint-sensor.service]
+    SU[fingerprint-suricata.service]
+
+    E[(Evidence SQLite)]
+    C[(Classification SQLite)]
+    P[(Control Plane SQLite)]
+    I[(Integration SQLite)]
+
+    FS --> E
+    SU --> FS
+    FE --> E
+    CP --> I
+    FW --> I
+    FW --> E
+    FW --> P
+    FW --> C
+    C --> CP
+    CP --> ADMIN[Admin read consumers]
+```
+
+#### DF-16 — Current Device Fingerprint vs future Traffic Enrichment
+
+Границу: Device Fingerprint отвечает «что это за устройство?», а future DTI — «как оно использует сеть?».
+
+```mermaid
+flowchart TD
+    DF["CURRENT — Device Fingerprint"] --> ID["identity / classification data"]
+    TE["FUTURE — Device Traffic Enrichment"] --> TI["traffic / activity / protocol / quality / behavior / anomaly data"]
+    ID --> CARD[Richer Device Card]
+    TI --> CARD
+```
+
+### Current Device Fingerprint и future DTI — разные программы
+
+Device Traffic Enrichment / Device Intelligence — **отдельная программа**.
+Принятая архитектура v0.3 не меняет Device Fingerprint semantics.
+
+Текущий статус:
+
+```text
+DTI architecture = FINAL / TECH LEAD ACCEPTED
+TASK-DTI-00 = APPROVED FOR SYSADMIN RESEARCH
+TASK-DTI-00 mode = RESEARCH / LAB / INVENTORY
+Implementation = NO
+Coder action = HOLD
+Production feature activation = NO
+Production configuration change = NO
+```
+
+DTI-00 должен доказать реальный SPAN/capture path до любой реализации: topology,
+direction, L2 identity, VLAN/Site binding, pre/post-NAT placement, полный host
+capture path, drops/completeness evidence, resource baseline и безопасное
+сосуществование с accepted Fingerprint sensor. DTI-00 ничего не реализует.
+
+Точный engineering contract остаётся в
+[`docs/modules/device-fingerprint.md`](docs/modules/device-fingerprint.md), но
+его полный visual architecture больше не спрятан за этой ссылкой.
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
 
 ## Admin Web local asset library — historical production provenance
@@ -1151,12 +1707,7 @@ TASK-DEVICE-FINGERPRINT-05-PERF-01 CLOSED
 TASK-DEVICE-FINGERPRINT-06         PRODUCTION PASS / ADMIN VISIBLE
 ```
 
-`Device Traffic Enrichment / Device Intelligence (DTI)` — отдельная
-architecture/roadmap program; архитектура v0.3 имеет статус FINAL / TECH LEAD
-ACCEPTED, а регистрация roadmap авторизована. DTI не является частью
-TASK-DEVICE-FINGERPRINT-06. Implementation по-прежнему НЕ авторизован, Coder
-остаётся HOLD, production не меняется, а следующий executable program step —
-TASK-DTI-00 в режиме RESEARCH / LAB / INVENTORY.
+`Device Traffic Enrichment / Device Intelligence (DTI)` — отдельная architecture/roadmap program. Архитектура v0.3 имеет статус **FINAL / TECH LEAD ACCEPTED**, roadmap registration авторизована. `TASK-DTI-00` теперь **APPROVED FOR SYSADMIN RESEARCH** в режиме `RESEARCH / LAB / INVENTORY`. Implementation остаётся **NO**, Coder — **HOLD**, production feature activation/configuration — **NO**.
 
 ## Реальный второй Site как trigger
 
