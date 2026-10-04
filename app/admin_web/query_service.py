@@ -39,6 +39,7 @@ from app.analytics import (
 from app.analytics.validation import format_utc
 from app.common.mac import format_mac_colon
 from app.common.device_type import normalize_device_type_key
+from .device_fingerprint_presentation import DeviceFingerprintPresentationService
 from app.current_state import (
     CurrentStateSchemaError,
     CurrentStateStorageError,
@@ -263,6 +264,7 @@ class AdminQueryService:
         execution_controls: AdminQueryExecutionControls | None = None,
         device_list_context_state: str = "disabled",
         device_list_context_cursor_codec: Any | None = None,
+        fingerprint_presentation_service: DeviceFingerprintPresentationService | None = None,
     ):
         self._config = config
         self._policy = policy
@@ -281,6 +283,7 @@ class AdminQueryService:
         self._home_ap_24h = home_ap_24h_read_service
         self._device_list_context_state = device_list_context_state
         self._device_list_context_cursor_codec = device_list_context_cursor_codec
+        self._fingerprint = fingerprint_presentation_service or DeviceFingerprintPresentationService(None)
         self._execution_controls = execution_controls or (
             AdminQueryExecutionControls(
                 max_concurrent_queries=config.max_concurrent_queries,
@@ -571,6 +574,9 @@ class AdminQueryService:
                 raise AdminQueryUnavailable() from exc
             except ValueError as exc:
                 raise AdminQueryValidationError() from exc
+            fingerprints = self._fingerprint.get_many(site_id, tuple(item["client_mac"] for item in result["items"]))
+            for item in result["items"]:
+                item["fingerprint_type"] = fingerprints[item["client_mac"]].compact_type()
             return AdminQueryResponse(result, page)
 
         return self._run(query)
@@ -1424,6 +1430,7 @@ class AdminQueryService:
                     "latest_snapshot": device.latest_snapshot,
                     "recent_visits": list(visits),
                     "latest_client_observation": observation,
+                    "fingerprint": self._fingerprint.get(site_id, device.canonical_mac).as_dict(),
                 }
             )
 

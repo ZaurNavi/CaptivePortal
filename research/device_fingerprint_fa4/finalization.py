@@ -46,7 +46,7 @@ _EXECUTION_POLICY_PAYLOAD = {
     "max_read_transaction_duration_ms": 240000,
     "sqlite_busy_timeout_ms": 500,
     "max_retry_count": 0,
-    "process_memory_guard_bytes": 100663296,
+    "process_memory_guard_bytes": 1073741824,
 }
 _CANONICAL_RESULT_SUMMARY = (
     "PASS; production COMPLETE: evidence_rows=7091, health_rows=5340, "

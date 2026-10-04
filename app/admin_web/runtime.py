@@ -334,6 +334,16 @@ def create_admin_web_runtime(
         else None
     )
     query_service = None
+    fingerprint_presentation_service = None
+    try:
+        from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
+        from .device_fingerprint_presentation import DeviceFingerprintPresentationService
+        fingerprint_presentation_service = DeviceFingerprintPresentationService(
+            DeviceFingerprintClassificationReadService(settings.get(
+                "device_fingerprint_classification_db_path",
+                "/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3")))
+    except Exception:
+        logger.error("admin.fingerprint_read_composition_failed")
     current_state_db_path = None
     if config.device_list_context_enabled:
         current_repository = getattr(
@@ -373,6 +383,7 @@ def create_admin_web_runtime(
             device_list_context_state,
             device_list_context_cursor_codec,
             current_state_db_path,
+            fingerprint_presentation_service,
         )
     evidence_state = "active" if config.traffic_evidence_enabled else "disabled"
     evidence_aggregator = None
@@ -449,6 +460,7 @@ def _query_service(
     device_list_context_state: str = "disabled",
     device_list_context_cursor_codec: Any | None = None,
     current_state_db_path: Any | None = None,
+    fingerprint_presentation_service: Any | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
     try:
@@ -474,6 +486,7 @@ def _query_service(
                 observation_repository.db_path,
             ),
             visit_analytics_service=analytics_service,
+            fingerprint_presentation_service=fingerprint_presentation_service,
             current_state_read_service=current_state_read_service,
             current_traffic_read_service=getattr(
                 analytics_runtime, "current_traffic_service", None

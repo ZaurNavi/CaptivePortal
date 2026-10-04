@@ -77,3 +77,23 @@ Task-02 extends only the reserved schema-registry boundary and is governed by
 Task-03 reuses the same API/DB boundary through the isolated asynchronous portal
 producer described in `docs/modules/device-fingerprint-portal.md`; it adds no
 second database or classifier.
+
+## Current Task-06 presentation and operational policy
+
+The current canonical `SnapshotExecutionPolicy.process_memory_guard_bytes` is
+`1073741824` (1024 MiB / 1 GiB), converged to the Owner-accepted production
+operational value. Current deterministic policy identity is
+`SnapshotExecutionPolicy:v1:sha256:36074993bb86daca8c43268c19ce0efab7e0e3ef5d644e07b9b6e65f5fff7f77`.
+Historical acceptance/measurement evidence remains unchanged; changing this
+current builder does not recreate Task-04 semantic acceptance or activate a
+production profile.
+
+Task-06 consumes only persisted PRODUCTION `ClassificationResult` through the
+existing read-only classification service and one typed Admin presentation
+adapter. It does not classify on page/API reads or write classification data.
+Home Platform is the existing controller/source value; Home Type is fingerprint
+device_class. Device Card Controller Platform remains separate from Fingerprint
+Platform. Fingerprint is advisory: no completed result is `—`, unresolved
+dimensions are `Unknown`, and unavailable persistence does not fail core Admin
+pages. See `docs/modules/admin-web.md` for the compact Home and diagnostic Device
+Card surfaces.

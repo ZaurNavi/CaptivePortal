@@ -217,6 +217,12 @@ input[type="radio"] { width: auto; min-height: 0; }
 .live-bar-fill { display: block; height: 100%; background: var(--accent); }
 .table-scroll { max-width: 100%; overflow-x: auto; }
 .live-table { width: 100%; min-width: 920px; border-collapse: collapse; }
+[aria-labelledby="devices-now-title"] .live-table { min-width: 1020px; }
+.live-fingerprint-type-cell, .live-fingerprint-type-header { min-width: 96px; text-align: center; }
+.fingerprint-support { display: inline-block; margin-left: .5rem; padding: .15rem .45rem; border: 1px solid var(--line); border-radius: .4rem; font-size: .75rem; text-transform: capitalize; }
+.fingerprint-details { margin-top: 1rem; }
+.fingerprint-details summary { cursor: pointer; }
+.fingerprint-details dd { overflow-wrap: anywhere; }
 .live-table caption { padding: .4rem 0; text-align: left; color: var(--muted); }
 .live-table th, .live-table td { padding: .7rem .55rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 .live-table th { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }

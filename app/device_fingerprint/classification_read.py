@@ -6,7 +6,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Callable, Mapping, TypeVar
 
 from .artifact_content import ArtifactContent, ArtifactRef
 from .classification_persistence import ClassificationCoreRecord, ClassificationPersistenceError
@@ -33,6 +33,7 @@ class ClassificationHistoryPage:
 
 
 _T = TypeVar("_T")
+MAX_PRODUCTION_READ_MACS = 250
 
 
 def _uuid_v4(value: object) -> str:
@@ -74,7 +75,8 @@ class DeviceFingerprintClassificationReadService:
                     connection.close()
 
     @staticmethod
-    def _record(connection: sqlite3.Connection, row: sqlite3.Row) -> ClassificationReadRecord:
+    def _record(connection: sqlite3.Connection, row: sqlite3.Row, *,
+                retained_results: Mapping[str, sqlite3.Row] | None = None) -> ClassificationReadRecord:
         core = ClassificationCoreRecord(**dict(row))
         _uuid_v4(core.classification_id)
         if validate_site_id(core.site_id) != core.site_id:
@@ -103,10 +105,11 @@ class DeviceFingerprintClassificationReadService:
             _reference(artifact_id, digest, artifact_type)
         result_ref = _reference(core.classification_result_id, core.classification_result_digest,
                                 "ClassificationResult")
-        stored = connection.execute(
-            "SELECT artifact_id, artifact_type, content_sha256, semantic_payload_json "
-            "FROM artifacts WHERE artifact_id=?", (result_ref.artifact_id,),
-        ).fetchone()
+        stored = (retained_results.get(result_ref.artifact_id) if retained_results is not None
+                  else connection.execute(
+                      "SELECT artifact_id, artifact_type, content_sha256, semantic_payload_json "
+                      "FROM artifacts WHERE artifact_id=?", (result_ref.artifact_id,),
+                  ).fetchone())
         if stored is None or stored["artifact_type"] != "ClassificationResult":
             raise ClassificationPersistenceError("persistence_unavailable")
         result = ArtifactContent(
@@ -141,6 +144,54 @@ class DeviceFingerprintClassificationReadService:
                 (site, mac),
             ).fetchone()
             return None if row is None else self._record(connection, row)
+
+        return self._read(select)
+
+    def get_current_production(self, site_id: str, observed_mac: str) -> ClassificationReadRecord | None:
+        mac = validate_mac(observed_mac)
+        return self.get_current_production_many(site_id, (mac,))[mac]
+
+    def get_current_production_many(
+        self, site_id: str, observed_macs: list[str] | tuple[str, ...],
+    ) -> dict[str, ClassificationReadRecord | None]:
+        """Two bounded SELECTs in one readonly snapshot; candidate runs never shadow production."""
+        site = validate_site_id(site_id)
+        if (not isinstance(observed_macs, (list, tuple))
+                or len(observed_macs) > MAX_PRODUCTION_READ_MACS):
+            raise DeviceFingerprintValidationError("Invalid production classification batch")
+        macs = tuple(sorted({validate_mac(mac) for mac in observed_macs}))
+        if not macs:
+            return {}
+
+        def select(connection: sqlite3.Connection) -> dict[str, ClassificationReadRecord | None]:
+            slots = ','.join('?' for _ in macs)
+            rows = connection.execute(
+                "SELECT * FROM classifications AS current WHERE site_id=? "
+                "AND execution_context='PRODUCTION' AND observed_mac IN (" + slots + ") "
+                "AND NOT EXISTS (SELECT 1 FROM classifications AS newer "
+                "WHERE newer.site_id=current.site_id AND newer.observed_mac=current.observed_mac "
+                "AND newer.execution_context='PRODUCTION' AND "
+                "(newer.classified_at_utc>current.classified_at_utc OR "
+                "(newer.classified_at_utc=current.classified_at_utc "
+                "AND newer.classification_id>current.classification_id))) "
+                "ORDER BY observed_mac", (site, *macs),
+            ).fetchall()
+            results: dict[str, ClassificationReadRecord | None] = dict.fromkeys(macs)
+            if not rows:
+                return results
+            artifact_ids = tuple(sorted({row['classification_result_id'] for row in rows}))
+            artifacts = connection.execute(
+                "SELECT artifact_id, artifact_type, content_sha256, semantic_payload_json "
+                "FROM artifacts WHERE artifact_id IN (" + ','.join('?' for _ in artifact_ids) + ")",
+                artifact_ids,
+            ).fetchall()
+            retained = {row['artifact_id']: row for row in artifacts}
+            for row in rows:
+                record = self._record(connection, row, retained_results=retained)
+                if record.core.site_id != site or record.core.execution_context != "PRODUCTION":
+                    raise DeviceFingerprintValidationError("Invalid production classification scope")
+                results[record.core.observed_mac] = record
+            return results
 
         return self._read(select)
 

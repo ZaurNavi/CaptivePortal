@@ -38,6 +38,8 @@ def test_final_snapshot_policies_are_exact_deterministic_and_recomputable():
     execution_second = build_snapshot_execution_policy()
     assert content_first == content_second
     assert execution_first == execution_second
+    assert execution_first.artifact_id == (
+        "SnapshotExecutionPolicy:v1:sha256:36074993bb86daca8c43268c19ce0efab7e0e3ef5d644e07b9b6e65f5fff7f77")
     assert content_first.semantic_payload == {
         "snapshot_content_policy_version": 1,
         "max_authorized_evidence_rows": 40000,
@@ -51,7 +53,7 @@ def test_final_snapshot_policies_are_exact_deterministic_and_recomputable():
         "max_read_transaction_duration_ms": 240000,
         "sqlite_busy_timeout_ms": 500,
         "max_retry_count": 0,
-        "process_memory_guard_bytes": 100663296,
+        "process_memory_guard_bytes": 1073741824,
     }
     _assert_identity_recomputes(content_first)
     _assert_identity_recomputes(execution_first)
@@ -61,6 +63,8 @@ def test_snapshot_performance_proof_is_exact_deterministic_and_private():
     first = build_snapshot_performance_gate_proof(_CANDIDATE_COMMIT, _CANDIDATE_TREE)
     second = build_snapshot_performance_gate_proof(_CANDIDATE_COMMIT, _CANDIDATE_TREE)
     assert first == second
+    assert first.artifact_id == (
+        "GateProofArtifact:v1:sha256:45849de269245e96b8076abd16929cd15330e2e6e58bef6d6c749a28b612e3ee")
     payload = first.semantic_payload
     assert payload["proof_kind"] == "SNAPSHOT_PERFORMANCE"
     assert payload["source_gate_id"] == "F-A4"

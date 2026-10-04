@@ -279,6 +279,94 @@ def test_missing_database_is_not_created(tmp_path):
     assert not missing.exists()
 
 
+def _clone_core(store, original, **changes):
+    with sqlite3.connect(store.database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = dict(connection.execute("SELECT * FROM classifications WHERE classification_id=?",
+                                      (original.classification_id,)).fetchone())
+        row.update(classification_id=str(uuid.uuid4()), **changes)
+        connection.execute(f"INSERT INTO classifications ({','.join(_CORE_FIELDS)}) "
+                           f"VALUES ({','.join('?' for _ in _CORE_FIELDS)})",
+                           tuple(row[field] for field in _CORE_FIELDS))
+    return row
+
+
+def test_production_batch_filters_candidates_orders_latest_and_is_site_scoped(tmp_path, monkeypatch):
+    import hashlib
+    store, _, assembly, retention, _, _ = real_production_setup(tmp_path)
+    first = store.persist(assembly, retention_policy=retention)
+    same_time = [_clone_core(store, first, classified_at_utc=_time(1)) for _ in range(2)]
+    candidate = _clone_core(store, first, execution_context="PRE_ACCEPTANCE_CANDIDATE",
+                           runtime_profile_activation_record_id=None, classified_at_utc=_time(2))
+    other_mac = "00:11:22:33:44:55"
+    other = _clone_core(store, first, observed_mac=other_mac)
+    site_b = "f" * 24
+    other_site = _clone_core(store, first, site_id=site_b, classified_at_utc=_time(5))
+    reader = _read(store)
+    expected = max(same_time, key=lambda row: row["classification_id"])
+    assert reader.get_current(SITE, MAC).core.classification_id == candidate["classification_id"]
+    assert reader.get_current_production(SITE, MAC).core.classification_id == expected["classification_id"]
+    assert reader.get_current_production(site_b, MAC).core.classification_id == other_site["classification_id"]
+    before = hashlib.sha256(store.database_path.read_bytes()).hexdigest()
+    connect = sqlite3.connect
+    opens, statements = [], []
+    def counted(*args, **kwargs):
+        opens.append((args, kwargs))
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+    monkeypatch.setattr(sqlite3, "connect", counted)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Batch used an individual current read")
+    monkeypatch.setattr(reader, "get_current", forbidden)
+    monkeypatch.setattr(reader, "get_current_production", forbidden)
+    result = reader.get_current_production_many(SITE, (MAC, MAC.lower().replace(":", "-"), other_mac,
+                                                       "00:00:00:00:00:00"))
+    assert len(result) == 3
+    assert result[MAC].core.classification_id == expected["classification_id"]
+    assert result[other_mac].core.classification_id == other["classification_id"]
+    assert result["00:00:00:00:00:00"] is None
+    assert len(opens) == 1 and "mode=ro" in opens[0][0][0]
+    assert statements.count("BEGIN") == 1
+    assert len([statement for statement in statements if statement.startswith("SELECT")]) == 2
+    assert hashlib.sha256(store.database_path.read_bytes()).hexdigest() == before
+
+
+@pytest.mark.parametrize("macs", ["AA:BB:CC:DD:EE:FF", ["bad"], [MAC] * 251, None])
+def test_production_batch_rejects_invalid_or_unbounded_input_before_open(tmp_path, macs, monkeypatch):
+    reader = DeviceFingerprintClassificationReadService(tmp_path / "never-created.sqlite")
+    monkeypatch.setattr(reader, "_read", lambda _operation: pytest.fail("Invalid batch opened DB"))
+    with pytest.raises(DeviceFingerprintValidationError):
+        reader.get_current_production_many(SITE, macs)
+    with pytest.raises(DeviceFingerprintValidationError):
+        reader.get_current_production_many("invalid-site", (MAC,))
+    assert reader.get_current_production_many(SITE, ()) == {}
+
+
+def test_candidate_only_is_no_production_and_corrupt_production_fails_closed(tmp_path):
+    store, _, core, reader = _persisted(tmp_path)
+    assert reader.get_current_production(SITE, MAC) is None
+    assert reader.get_current_production_many(SITE, (MAC,)) == {MAC: None}
+    _mutate(store, "UPDATE classifications SET execution_context='PRODUCTION', "
+            "runtime_profile_activation_record_id=?", (str(uuid.uuid4()),))
+    assert reader.get_current_production(SITE, MAC).core.execution_context == "PRODUCTION"
+    _mutate(store, "DELETE FROM artifacts WHERE artifact_id=?", (core.classification_result_id,))
+    _expect_unavailable(lambda: reader.get_current_production_many(SITE, (MAC,)))
+    _expect_unavailable(lambda: DeviceFingerprintClassificationReadService(tmp_path / "missing-production.sqlite")
+                        .get_current_production(SITE, MAC))
+
+
+@pytest.mark.parametrize("column,value", [
+    ("semantic_payload_json", b'{"corrupt":true}'), ("artifact_type", "Other"),
+])
+def test_production_batch_retains_exact_artifact_integrity_checks(tmp_path, column, value):
+    store, _, assembly, retention, _, _ = real_production_setup(tmp_path)
+    core = store.persist(assembly, retention_policy=retention)
+    _mutate(store, f"UPDATE artifacts SET {column}=? WHERE artifact_id=?",
+            (value, core.classification_result_id))
+    _expect_unavailable(lambda: _read(store).get_current_production_many(SITE, (MAC,)))
+
+
 def test_required_history_index_columns_and_read_only_source_boundary(tmp_path):
     store, _, _, _ = setup(tmp_path)
     with sqlite3.connect(store.database_path) as connection:

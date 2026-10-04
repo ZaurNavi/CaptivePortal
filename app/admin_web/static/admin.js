@@ -86,7 +86,7 @@
 
   function detailEntry(key, field) {
     const label = key.replaceAll("_", " ");
-    return key === "device_type" ? [label, field, "device-type"] : [label, field];
+    return key === "device_type" ? ["Controller Platform", field, "device-type"] : [label, field];
   }
 
   function deviceDetailEntries(value, explicitDeviceTypeKey) {
@@ -100,7 +100,7 @@
         if (key === "traffic_up") return ["Traffic up", formatDeviceBytes(field)];
         if (key === "traffic_total") return ["Traffic total", formatDeviceBytes(field)];
         if (key === "uptime") return ["Uptime", formatDeviceDurationSeconds(field)];
-        if (key === "device_type") return ["device type", field, "device-type", deviceTypeKey];
+        if (key === "device_type") return ["Controller Platform", field, "device-type", deviceTypeKey];
         return detailEntry(key, field);
       });
   }
@@ -108,7 +108,7 @@
   function deviceIdentityEntries(identity) {
     return [
       ["MAC", identity.canonical_mac],
-      ["Type", identity.device_type, "device-type", identity.device_type_key],
+      ["Controller Platform", identity.device_type, "device-type", identity.device_type_key],
       ["First seen", identity.site_first_seen_at], ["Last seen", identity.site_last_seen_at],
       ["Snapshot count", identity.site_snapshot_count], ["Visit count", identity.site_visit_count],
     ];
@@ -118,6 +118,50 @@
     const pad = (part) => String(part).padStart(2, "0");
     return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`
       + `T${pad(value.getHours())}:${pad(value.getMinutes())}`;
+  }
+
+  const FINGERPRINT_DIMENSIONS = [
+    ["Type", "device_class_result"], ["Fingerprint Platform", "platform_result"],
+    ["Manufacturer", "manufacturer_result"], ["Model Family", "model_result"],
+  ];
+
+  function fingerprintSummaryEntries(fingerprint) {
+    const data = fingerprint || {};
+    const status = data.state === "unavailable" ? "Unavailable" : data.global_classification_status;
+    return [["Status", status], ["Classified at", data.classified_at_utc],
+      ...FINGERPRINT_DIMENSIONS.map(([label, field]) => {
+        const dimension = data[field];
+        return [label, dimension ? dimension.value : "—", "fingerprint-value",
+          dimension && dimension.status === "resolved" ? dimension.support_level : null];
+      })];
+  }
+
+  function fingerprintDetailEntries(dimension) {
+    if (!dimension) return [];
+    return [["Canonical value", dimension.canonical_value_id], ["Status", dimension.status],
+      ["Support level", dimension.support_level],
+      ["Supporting sources", (dimension.supporting_origin_groups || []).join(", ")],
+      ["Contradicting sources", (dimension.contradicting_origin_groups || []).join(", ")],
+      ["Not-evaluable sources", (dimension.not_evaluable_origin_groups || []).join(", ")],
+      ["Out-of-scope references", (dimension.out_of_scope_taxon_references || []).join(", ")],
+      ["Explanation codes", (dimension.explanation_codes || []).join(", ")],
+      ["Knowledge references", (dimension.knowledge_references || []).map((reference) =>
+        `${reference.canonical_knowledge_record_id} · ${reference.rule_or_source_record_identity} · ${reference.knowledge_provenance_id} · ${reference.knowledge_provenance_digest} · ${reference.knowledge_bundle_id} · ${reference.knowledge_bundle_digest}`).join("; ")]];
+  }
+
+  function fingerprintCard(fingerprint) {
+    const value = card("Fingerprint Information", fingerprintSummaryEntries(fingerprint));
+    value.className += " fingerprint-card";
+    value.append(node("p", "live-detail", "Advisory fingerprint. Values come from a persisted production classification."));
+    if (fingerprint && FINGERPRINT_DIMENSIONS.some(([, field]) => fingerprint[field])) {
+      const details = node("details", "fingerprint-details");
+      details.append(node("summary", null, "Fingerprint details"));
+      FINGERPRINT_DIMENSIONS.forEach(([label, field]) => {
+        if (fingerprint[field]) details.append(node("h3", null, label), definitionList(fingerprintDetailEntries(fingerprint[field])));
+      });
+      value.append(details);
+    }
+    return value;
   }
 
   function parseVisitFilters(fromValue, toValue, statusValue) {
@@ -179,6 +223,8 @@
       detailEntry,
       deviceDetailEntries,
       deviceIdentityEntries,
+      fingerprintSummaryEntries,
+      fingerprintDetailEntries,
       display,
       isAndroidDeviceType,
       localDatetimeValue,
@@ -254,6 +300,10 @@
     entries.forEach(([label, value, presentation, presentationKey]) => {
       const detail = node("dd");
       if (presentation === "device-type") detail.append(deviceTypeValue(value, presentationKey));
+      else if (presentation === "fingerprint-value") {
+        detail.append(node("span", null, display(value)));
+        if (presentationKey) detail.append(node("span", "fingerprint-support", presentationKey));
+      }
       else detail.textContent = display(value);
       list.append(node("dt", null, label), detail);
     });
@@ -500,6 +550,7 @@
     if (!result || typeof result !== "object" || !result.identity) throw {uiFailure: classifyHttp(500, null, null)};
     const identity = result.identity;
     content.append(card("Identity", deviceIdentityEntries(identity)));
+    content.append(fingerprintCard(result.fingerprint));
     content.append(card("Latest Site snapshot", deviceDetailEntries(result.latest_snapshot, identity.device_type_key)));
     content.append(card("Latest client observation", deviceDetailEntries(result.latest_client_observation)));
     const visits = Array.isArray(result.recent_visits) ? result.recent_visits : [];
@@ -4939,14 +4990,21 @@
   function prepareClientTableHeader(table) {
     const row = table && table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : null;
     if (!row) return;
+    if (row.cells.length === 11 && row.cells[1].classList.contains("live-fingerprint-type-header")) return;
     if (row.cells.length === 10
         && row.cells[1].classList.contains("live-device-type-header")
         && row.cells[8].textContent === "Uptime"
-        && row.cells[9].textContent === "Traffic") return;
+        && row.cells[9].textContent === "Traffic") {
+      row.cells[1].textContent = "Platform";
+      row.cells[1].setAttribute("aria-label", "Controller platform");
+      prepareFingerprintTypeHeader(row);
+      return;
+    }
     if (row.cells.length === 9
         && row.cells[7].textContent === "Uptime"
         && row.cells[8].textContent === "Traffic") {
       prepareClientTypeHeader(row);
+      prepareFingerprintTypeHeader(row);
       return;
     }
     if (row.cells.length !== 8) return;
@@ -4958,6 +5016,7 @@
     traffic.textContent = "Traffic";
     row.append(traffic);
     prepareClientTypeHeader(row);
+    prepareFingerprintTypeHeader(row);
   }
 
   function prepareClientTypeHeader(row) {
@@ -4967,12 +5026,24 @@
     const type = document.createElement("th");
     type.scope = "col";
     type.className = "live-device-type-header";
-    type.setAttribute("aria-label", "Device type");
+    type.setAttribute("aria-label", "Controller platform");
+    type.textContent = "Platform";
+    row.insertBefore(type, row.cells[1]);
+  }
+
+  function prepareFingerprintTypeHeader(row) {
+    if (!row || row.cells.length !== 10) return;
+    const type = document.createElement("th");
+    type.scope = "col";
+    type.className = "live-fingerprint-type-header";
+    type.setAttribute("aria-label", "Fingerprint device type");
     type.textContent = "Type";
     row.insertBefore(type, row.cells[1]);
   }
 
   function clientPresentationCells(createNode, item) {
+    const fingerprintType = createNode("td", "live-fingerprint-type-cell",
+      item.fingerprint_type && typeof item.fingerprint_type.value === "string" ? item.fingerprint_type.value : "—");
     const deviceType = createNode("td", "live-device-type-cell");
     if (item.device_type_key === "android") {
       const icon = createNode("img", "device-type-icon");
@@ -5028,7 +5099,7 @@
 
     const uptime = createNode("td", "live-controller-value", controllerDuration(item.controller_uptime));
     const traffic = createNode("td", "live-controller-value", controllerBytes(item.controller_traffic_total));
-    return {deviceType, auth, band, rssi, snr, uptime, traffic};
+    return {fingerprintType, deviceType, auth, band, rssi, snr, uptime, traffic};
   }
 
   if (typeof window !== "undefined") {
@@ -5267,7 +5338,7 @@
     const identity = node("td");
     identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
     const presentation = clientPresentationCells(node, item);
-    [identity, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
+    [identity, presentation.fingerprintType, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
     return row;
   }
   function renderClients(append) {
@@ -5920,7 +5991,7 @@
       const row = node("tr"); const identity = node("td");
       identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
       const presentation = live.clientPresentationCells(node, item);
-      [identity, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
+      [identity, presentation.fingerprintType, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
       clientRows.append(row);
     });
     clientMore.hidden = !sources.client.cursor;
