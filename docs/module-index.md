@@ -1,9 +1,9 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-09-13
-Runtime implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
-Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
+Updated: 2026-10-04
+Runtime implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
 
 `Repository status` describes code/defaults, not production enabled-state.
 
@@ -13,7 +13,7 @@ Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
 | Portal entry | current | `app/web/` | `modules/portal-entry.md` | process memory | via shared provider |
 | CAPPORT | current | `app/capport/` | `modules/capport.md` | bounded caches | yes |
 | Auth telemetry | current | `app/auth_telemetry/` | `modules/auth-telemetry.md` | JSONL | no |
-| Device Fingerprint Evidence | current; default disabled | `app/device_fingerprint/` | `modules/device-fingerprint.md` | isolated SQLite v1 | no |
+| Device Fingerprint Evidence Foundation | current foundation layer | `app/device_fingerprint/` | `modules/device-fingerprint.md` | Evidence SQLite | no |
 | Device Fingerprint Portal Evidence | current; default disabled | `app/device_fingerprint_portal/` | `modules/device-fingerprint-portal.md` | bounded memory; writes through Task-01 API | no |
 | Public authorization counter | current | `app/portal_counter/` | `modules/public-authorization-counter.md` | SQLite | no |
 | Public traffic counter | current | `app/public_traffic/` | `modules/public-traffic-counter.md` | SQLite | no |
@@ -57,13 +57,30 @@ Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
 | Completed Guest Session Traffic | current; default disabled | `app/admin_web/`, `app/analytics/completed_guest_traffic.py` | `modules/traffic.md`, `modules/analytics.md`, `modules/admin-web.md` | reads Visit + Observation | no |
 | Consolidated Traffic Evidence | current; default disabled | `app/admin_web/traffic_evidence.py`, serializer/routes/UI | `modules/traffic.md`, `modules/admin-web.md` | composition only; no persistence | no |
 
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint current routing
+
+| Layer | Status | Owner | Persistence / output |
+|---|---|---|---|
+| Evidence Foundation | current production foundation | `app/device_fingerprint/` | Evidence SQLite |
+| Network Evidence Producer | current implementation / deployed foundation | `app/device_fingerprint_sensor/` | normalized envelopes only |
+| Portal Evidence Producer | current implementation / production foundation | `app/device_fingerprint_portal/` | normalized Portal evidence |
+| Foundation contracts / admission | accepted/current | `app/device_fingerprint/` | control-plane artifacts |
+| Classification Core | TASK-04 closed/accepted | `app/device_fingerprint/` | ClassificationResult |
+| Classification persistence/read | current production | classification persistence/read services | Classification SQLite |
+| Post-Auth integration worker | TASK-05 closed/current | `app/device_fingerprint_integration/` | Integration SQLite |
+| Admin presentation | TASK-06 production pass | `app/admin_web/device_fingerprint_presentation.py` | read-only Home / Device Card |
+
+Canonical detailed contract: `modules/device-fingerprint.md`.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+
 ## Current production evidence
 
-Owner-provided production checkpoint 2026-09-13:
+Owner-provided production checkpoint 2026-10-04:
 
 ```text
-HEAD: 3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
-tree: 8312658be3ba272998f46212d9bad76950e3867e
+HEAD: 7c7c0919c3e546f499b5252ea9479d32c8f494d7
+tree: dbf3e3804931d637ef1ec569128746ebce5c141a
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active
@@ -89,6 +106,11 @@ TASK-TEST-BASELINE-CLEANUP-01: FINAL ACCEPTED / MERGED / DEPLOYED / PRODUCTION P
 TASK-HOME-HEALTH-01: MERGED / repository default disabled / production flag host-verified
 TASK-HOME-AP-24H-01 + fixes: MERGED / repository default disabled / production flag host-verified
 TASK-HOME-AP-24H-TELEMETRY-01: MERGED / repository default disabled
+TASK-DEVICE-FINGERPRINT-04: CLOSED / ACCEPTED / PRODUCTION ELIGIBLE
+TASK-DEVICE-FINGERPRINT-05: CLOSED / INTEGRATED
+TASK-DEVICE-FINGERPRINT-05-PERF-01: CLOSED
+TASK-DEVICE-FINGERPRINT-06: PRODUCTION PASS / DEPLOYED / ADMIN VISIBLE
+fingerprint-classification.service=active
 Windows Central Lab current runner: V7 strict
 Windows Central Lab V6 fixed: historical / audit only
 

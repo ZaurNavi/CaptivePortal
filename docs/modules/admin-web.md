@@ -1,8 +1,8 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-09-13
-Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Updated: 2026-10-04
+Baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
 
 ## Boundary
 
@@ -220,15 +220,60 @@ PR #110 / #118 / #119 / #120=MERGED
 
 Global Online-first remains backend-owned before pagination.
 
-## Admin Web local asset library — current production
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint — current production
+
+Device Fingerprint is now a production-active passive/advisory classification
+capability, not only an evidence foundation.
+
+```text
+repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
+repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
+PR #178 = MERGED
+TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
+TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
+TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
+TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
+captive-portal.service = active
+fingerprint-classification.service = active
+```
+
+High-level flow:
+
+```mermaid
+flowchart LR
+    E[Passive normalized evidence] --> C[Deterministic Device Fingerprint]
+    C --> P[(Persisted PRODUCTION ClassificationResult)]
+    P --> A[Admin read model]
+    A --> H[Home]
+    A --> D[Device Card]
+```
+
+Current Home product terminology:
+
+```text
+Type     = fingerprint device_class
+Platform = controller / Omada device_type
+```
+
+Controller Platform never backfills fingerprint Type. Device Card keeps
+**Controller Platform** separate from **Fingerprint Information**. No-result is
+`—`, a completed unresolved dimension is `Unknown`, and a fingerprint read failure
+is `Unavailable`/`—` without failing core Admin data.
+
+Detailed architecture and all engineering diagrams:
+`docs/modules/device-fingerprint.md`.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+
+## Admin Web local asset library — historical production provenance
 
 ```text
 TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
 TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
 PR #113=MERGED
 PR #114=MERGED / PRODUCTION VERIFIED
-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
-current production tree=8312658be3ba272998f46212d9bad76950e3867e
+historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
 ```
 
 The repository-local Android asset remains:
@@ -251,15 +296,15 @@ device_type_key === "android"
 Raw `device_type` remains source/display evidence. Current Admin Web does not
 trim/lower/casefold/Unicode-normalize or infer Device Type in the browser.
 
-## Canonical Device Type contract — current production
+## Controller Platform lexical contract — current production compatibility
 
 ```text
 TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACTIVE
 TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACCEPTANCE PASS
 PR #119=MERGED
 PR #120=MERGED
-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
-current production tree=8312658be3ba272998f46212d9bad76950e3867e
+historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
 ```
 
 Canonical ownership:
@@ -295,7 +340,7 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
 ```
 
 
-## Device Card Device Type — current presentation
+## Device Card Controller Platform — current presentation
 
 Device Card keeps raw and canonical roles separate:
 
@@ -316,11 +361,12 @@ snapshot raw type and identity raw type belong to the same Device record.
 
 ## Home Online Devices — current presentation
 
-The current production Home table presents:
+Current production columns:
 
 ```text
 Device / MAC
 Type
+Platform
 Auth
 IP
 AP
@@ -331,18 +377,20 @@ Uptime
 Traffic
 ```
 
-The `Type` column is immediately after `Device / MAC`.
+`Type` is the compact Device Fingerprint `device_class` presentation from the
+latest authoritative PRODUCTION `ClassificationResult`.
 
-Type presentation:
+`Platform` is the existing controller/Omada `device_type` presentation and keeps
+the `device_type_key`/Android-icon compatibility contract.
 
 ```text
-device_type_key == "android" -> Android SVG cue
-device_type_key == null AND device_type == null -> NULL
-otherwise -> raw device_type
+Type != Platform
+Controller Platform NEVER backfills Fingerprint Type
 ```
 
-No Device Type inference is performed from hostname, system name, MAC, vendor,
-SSID, AP, IP or history.
+Fingerprint no-result is `—`; a completed unresolved device class is `Unknown`.
+A fingerprint read failure remains fail-soft and does not remove the rest of the
+Home row.
 
 SNR is presentation-only:
 

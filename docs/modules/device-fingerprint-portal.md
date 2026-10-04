@@ -1,6 +1,6 @@
 # Device Fingerprint Portal Evidence
 
-Status: **implemented; repository default disabled**.
+Status: **current production-foundation producer; repository default remains disabled**.
 
 TASK-DEVICE-FINGERPRINT-03 adds passive normalized evidence from the existing
 Omada External Portal and resolved CAPPORT login requests. It reads only the
@@ -25,3 +25,26 @@ or identity-linking model is introduced.
 Configuration is isolated under `DEVICE_FINGERPRINT_PORTAL_*`; the default is
 `DEVICE_FINGERPRINT_PORTAL_ENABLED=false`. The Bearer credential and CA trust
 file remain external to Git. Production activation is a separate Owner action.
+
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Current relationship to the production classifier
+
+Portal evidence is one origin in the current Device Fingerprint system; it is not
+a separate classifier. The normalized Portal evidence joins DHCP/TCP/TLS/QUIC
+evidence in snapshot/origin assessment, while MAC Registry is a knowledge-based
+sixth origin.
+
+Current source-health liveness uses the admitted PERIODIC Portal emitter:
+
+```text
+nominal same-state heartbeat = 60 seconds
+freshness timeout = 180 seconds
+timeout disposition = unknown
+```
+
+The older EVENT_DRIVEN emitter remains historical lineage and has a frozen
+freshness value of 0 seconds.
+
+Raw request headers remain non-durable. The classifier consumes normalized
+persisted evidence only.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->

@@ -1,10 +1,10 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-09-13
-Current repository implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
-Confirmed production deployed HEAD: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
-Confirmed production tree: `8312658be3ba272998f46212d9bad76950e3867e`
+Updated: 2026-10-04
+Current repository implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Confirmed production deployed HEAD: `7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Confirmed production tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
 
 ## Repository vs production
 
@@ -21,6 +21,47 @@ exists or is running. After a controlled update, restart only when separately
 authorized and verify the loaded SHA/tree. Never mutate the checkout while this
 artifact-owned auxiliary process remains alive. TLS, firewall, producer secrets,
 systemd provisioning, database creation and activation remain Owner-controlled.
+
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint production deployment
+
+Current production checkpoint is the document header commit/tree.
+
+Confirmed final Task-06 production state:
+
+```text
+captive-portal.service = active
+fingerprint-classification.service = active
+TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
+```
+
+Device Fingerprint domain stores:
+
+```text
+/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
+/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
+/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3
+/opt/CaptivePortal/data/device_fingerprint_integration.sqlite3
+```
+
+Current canonical SnapshotExecutionPolicy memory guard is 1 GiB
+(`process_memory_guard_bytes=1073741824`). This is a process-RSS guard, not a RAM
+reservation.
+
+`fingerprint-classification.service` is the durable Task-05 consumer. It uses
+claim/lease/retry state and the active admitted ClassificationRuntimeProfile;
+it does not open an Omada/controller listener.
+
+Permanent production rules:
+
+```text
+exact code comes from verified Git SHA/tree
+no local production source patch
+no full pytest on production
+activation is explicit and separate where applicable
+historical failed integration/classification rows remain evidence
+```
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
 
 ## Core precondition
 

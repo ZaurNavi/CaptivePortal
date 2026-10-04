@@ -1,28 +1,54 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-09-13
+Updated: 2026-10-04
 Branch: `main`
-Runtime commit: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
-Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
-Commit source: merge PR #120 / Device Type and SNR presentation, 2026-09-13
+Runtime commit: `7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+Commit source: merge PR #178 / Task-06 Device Fingerprint presentation, 2026-10-04
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
-## Device Fingerprint Evidence
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint — current production subsystem
 
-- process: `fingerprint-evidence.service` via
-  `python3 -m app.device_fingerprint.cli run`;
-- persistence: isolated schema-v1 SQLite with normalized P1 evidence and
-  point-in-time source-health events;
-- state: current, repository default disabled;
-- no producer schemas, credentials, TLS material, production database, packet
-  sensor, classifier, or identity linker are shipped by Task-01.
+Current state is broader than TASK-01 Evidence Foundation.
+
+```text
+Evidence Foundation
++ network / Portal producers
++ source-health/binding/snapshot foundation
++ versioned knowledge/policy
++ Task-04 classification core + persistence/read
++ Task-05 post-Auth integration + durable worker
++ Task-06 Admin presentation
+= current Device Fingerprint system
+```
+
+Production checkpoint is the document header commit/tree. Task-06 is deployed and
+Owner-accepted; `captive-portal.service` and `fingerprint-classification.service`
+are active.
+
+Current owned stores:
+
+```text
+device_fingerprint_evidence.sqlite3
+device_fingerprint_classification.sqlite3
+device_fingerprint_control_plane.sqlite3
+device_fingerprint_integration.sqlite3
+```
+
+Current product read is Site-scoped and production-only. Home uses a bounded
+batch (maximum 250 input MACs) and Device Card consumes the same authoritative
+classification result.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
 
 ## 1. Composition roots
 
 - `run.py` — process entrypoint и верхний lifecycle/composition root основного `captive-portal.service`.
 - `python3 -m app.device_fingerprint.cli run` — независимо разрешённый `TASK-DEVICE-FINGERPRINT-01` auxiliary composition root; в main runtime не регистрируется.
+- `fingerprint-classification.service` — Task-05 durable classification consumer / auxiliary composition root.
+- `fingerprint-sensor.service` + `fingerprint-suricata.service` — isolated passive network evidence stack.
 - `app/web/web.py:create_app()` — Flask composition factory.
 - configuration pipeline: process environment → `app/config.py` → `app/settings.py:get_settings()`.
 - `run.py` создаёт один shared `OmadaProvider` и передаёт его Portal/Auth, Snapshot, Observation, Current State и Pending Cleaner.
@@ -140,6 +166,10 @@ Current State client classification:
 | `observations.sqlite3` | Observation Foundation | Observation read service / Analytics / Admin | authoritative historical client/AP evidence |
 | `current_state.sqlite3` | Current State | CurrentStateReadService / Admin | current snapshots + short history |
 | `traffic_projection.sqlite3` | Traffic Projection worker | TrafficProjectionReadService / Historical Traffic when enabled | derived/disposable Observation materialization |
+| `device_fingerprint_evidence.sqlite3` | Fingerprint Evidence Foundation | snapshot/classifier foundation | normalized evidence + source health |
+| `device_fingerprint_classification.sqlite3` | Task-04 classification persistence | classification read/Admin | ClassificationResult history |
+| `device_fingerprint_control_plane.sqlite3` | runtime-profile/control-plane owner | classifier runtime | admission/activation/validity lineage |
+| `device_fingerprint_integration.sqlite3` | Task-05 integration worker | Task-05 read/worker | durable post-Auth jobs + identity/classification links |
 
 Writers own schema/migrations. Read-only consumers do not mutate source storage.
 

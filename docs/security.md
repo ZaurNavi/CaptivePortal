@@ -1,8 +1,8 @@
 # Security
 
 Status: current
-Updated: 2026-08-25
-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+Updated: 2026-10-04
+Baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
 
 ## Fingerprint evidence endpoint
 
@@ -13,6 +13,29 @@ It requires an exact per-producer Bearer credential and authorizes the direct
 keys are rejected before authentication. Normalized P1 payloads are allowlisted
 by a frozen schema registry; P2 raw packet, destination-name, header, cookie,
 credential and full-user-agent material is rejected.
+
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint security / privacy boundary
+
+Current Device Fingerprint classification is passive and advisory.
+
+```text
+fingerprint result does NOT authorize users
+fingerprint result does NOT change CAPPORT admission
+fingerprint result does NOT block clients
+fingerprint result does NOT trigger destructive Omada actions
+fingerprint result is NOT a security credential
+```
+
+Production classification is Site-scoped and uses admitted normalized evidence.
+Raw packets, raw full EVE, raw User-Agent/Client Hints, cookies and credentials
+are not durable classifier evidence.
+
+The runtime classifier requires no Internet/query-time cloud classification.
+External knowledge enters through versioned/pinned/offline governance and
+admission. Admin fingerprint presentation is read-only and Site-authorized.
+Read/persistence failure is fail-soft to core Home/Device Card/Auth/CAPPORT.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
 
 ## Secrets
 

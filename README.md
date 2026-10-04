@@ -1,9 +1,10 @@
 # CaptivPortal Core Platform
 
-The repository also contains a default-disabled passive Device Fingerprint
-Evidence foundation. It runs only through the separately authorized
-`python3 -m app.device_fingerprint.cli run` composition root and is never
-registered in the main portal runtime. See
+The repository contains a production-active passive/advisory Device Fingerprint
+subsystem. TASK-DEVICE-FINGERPRINT-01 remains its Evidence Foundation layer and
+keeps its independently authorized evidence-service composition root; later
+accepted layers add deterministic classification, post-Auth integration and
+read-only Admin presentation. See
 [`docs/modules/device-fingerprint.md`](docs/modules/device-fingerprint.md).
 
 [Русская версия](README_RU.md)
@@ -31,10 +32,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5` |
-| Repository tree | `8312658be3ba272998f46212d9bad76950e3867e` |
-| Production deployed HEAD | `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5` |
-| Production tree | `8312658be3ba272998f46212d9bad76950e3867e` |
+| Repository implementation checkpoint | `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7` |
+| Repository tree | `dbf3e3804931d637ef1ec569128746ebce5c141a` |
+| Production deployed HEAD | `7c7c0919c3e546f499b5252ea9479d32c8f494d7` |
+| Production tree | `dbf3e3804931d637ef1ec569128746ebce5c141a` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -58,6 +59,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Observation Foundation | Implemented, schema v1 |
 | Current State | Implemented, schema v1 |
 | Current Device Context | **TASK-DEVICE-CARD-01 — COMPLETE / PRODUCTION ACTIVE** |
+| Device Fingerprint | **PRODUCTION ACTIVE / ADMIN VISIBLE** |
 | Home Online Devices presentation | **TASK-WEB-HOME-ONLINE-DEVICE-PRESENTATION-01 — CLOSED / PRODUCTION CURRENT** |
 | Canonical Device Type foundation | **TASK-DEVICE-TYPE-NORMALIZATION-01 — CLOSED / PRODUCTION ACTIVE** |
 | Device Type + SNR presentation | **TASK-WEB-DEVICE-TYPE-PRESENTATION-01 — CLOSED / PRODUCTION ACCEPTANCE PASS** |
@@ -156,15 +158,60 @@ add query-time Omada, Loki, Grafana or external Analytics calls.
 
 The Devices presentation follow-on is now **CLOSED / PRODUCTION ACTIVE** through PR #110. The local Admin Web asset library and Android presentation FIX are **CLOSED / PRODUCTION PASS**.
 
-## Admin Web local asset library — current production
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint — current production
+
+Device Fingerprint is now a production-active passive/advisory classification
+capability, not only an evidence foundation.
+
+```text
+repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
+repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
+PR #178 = MERGED
+TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
+TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
+TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
+TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
+captive-portal.service = active
+fingerprint-classification.service = active
+```
+
+High-level flow:
+
+```mermaid
+flowchart LR
+    E[Passive normalized evidence] --> C[Deterministic Device Fingerprint]
+    C --> P[(Persisted PRODUCTION ClassificationResult)]
+    P --> A[Admin read model]
+    A --> H[Home]
+    A --> D[Device Card]
+```
+
+Current Home product terminology:
+
+```text
+Type     = fingerprint device_class
+Platform = controller / Omada device_type
+```
+
+Controller Platform never backfills fingerprint Type. Device Card keeps
+**Controller Platform** separate from **Fingerprint Information**. No-result is
+`—`, a completed unresolved dimension is `Unknown`, and a fingerprint read failure
+is `Unavailable`/`—` without failing core Admin data.
+
+Detailed architecture and all engineering diagrams:
+`docs/modules/device-fingerprint.md`.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+
+## Admin Web local asset library — historical production provenance
 
 ```text
 TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
 TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
 PR #113=MERGED
 PR #114=MERGED / PRODUCTION VERIFIED
-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
-current production tree=8312658be3ba272998f46212d9bad76950e3867e
+historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
 ```
 
 The repository-local Android asset remains:
@@ -187,15 +234,15 @@ device_type_key === "android"
 Raw `device_type` remains source/display evidence. Current Admin Web does not
 trim/lower/casefold/Unicode-normalize or infer Device Type in the browser.
 
-## Canonical Device Type contract — current production
+## Controller Platform lexical contract — current production compatibility
 
 ```text
 TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACTIVE
 TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACCEPTANCE PASS
 PR #119=MERGED
 PR #120=MERGED
-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
-current production tree=8312658be3ba272998f46212d9bad76950e3867e
+historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
 ```
 
 Canonical ownership:
@@ -233,11 +280,12 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
 
 ## Home Online Devices — current presentation
 
-The current production Home table presents:
+Current production columns:
 
 ```text
 Device / MAC
 Type
+Platform
 Auth
 IP
 AP
@@ -248,41 +296,22 @@ Uptime
 Traffic
 ```
 
-The `Type` column is immediately after `Device / MAC`.
+`Type` is the compact Device Fingerprint `device_class` presentation from the
+latest authoritative PRODUCTION `ClassificationResult`.
 
-Type presentation:
-
-```text
-device_type_key == "android" -> Android SVG cue
-device_type_key == null AND device_type == null -> NULL
-otherwise -> raw device_type
-```
-
-No Device Type inference is performed from hostname, system name, MAC, vendor,
-SSID, AP, IP or history.
-
-SNR is presentation-only:
+`Platform` is the existing controller/Omada `device_type` presentation and keeps
+the `device_type_key`/Android-icon compatibility contract.
 
 ```text
->=25      good    #10b956
-15..24    warning #f2c20d
-<15       danger  #ed3038
-null      neutral / —
+Type != Platform
+Controller Platform NEVER backfills Fingerprint Type
 ```
 
-RSSI and SNR are independent. No combined score or backend quality
-classification exists.
+Fingerprint no-result is `—`; a completed unresolved device class is `Unknown`.
+A fingerprint read failure remains fail-soft and does not remove the rest of the
+Home row.
 
-Home-specific geometry and tones are scoped to:
-
-```css
-.live-section[aria-labelledby="devices-now-title"]
-```
-
-and do not redefine unrelated `.live-table` surfaces.
-
-
-## Device Card Device Type — current presentation
+## Device Card Controller Platform — current presentation
 
 Device Card keeps raw and canonical roles separate:
 
@@ -1091,9 +1120,8 @@ See [`docs/api/omada-open-api.md`](docs/api/omada-open-api.md).
 
 ```mermaid
 flowchart LR
-    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::done --> DB[DB Baseline Sync]:::next --> T8[Traffic 0.8]:::next
+    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::done --> DB[DB Baseline Sync]:::done --> T8[Traffic-08]:::done --> T9[Traffic-09]:::done
     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
-    classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
 ```
 
 ## Near-term direction
@@ -1118,6 +1146,22 @@ next Traffic TASK   NOT YET ASSIGNED
 ```
 
 TASK-TRAFFIC-09 is completed and production-active. No successor Traffic TASK is canonical until separately approved by Owner / Tech Lead.
+
+Device Fingerprint current roadmap/status:
+
+```text
+TASK-DEVICE-FINGERPRINT-04         CLOSED / ACCEPTED
+TASK-DEVICE-FINGERPRINT-05         CLOSED / INTEGRATED
+TASK-DEVICE-FINGERPRINT-05-PERF-01 CLOSED
+TASK-DEVICE-FINGERPRINT-06         PRODUCTION PASS / ADMIN VISIBLE
+```
+
+`Device Traffic Enrichment / Device Intelligence (DTI)` is a separate
+architecture/roadmap program whose v0.3 architecture is FINAL / TECH LEAD
+ACCEPTED and whose roadmap registration is authorized. It is not part of
+TASK-DEVICE-FINGERPRINT-06. Implementation remains NOT authorized, Coder remains
+HOLD, production remains unchanged, and the next executable program step is
+TASK-DTI-00 in RESEARCH / LAB / INVENTORY mode.
 
 ## Real second Site as a trigger
 
