@@ -15,9 +15,12 @@ from .evidence_adapter_contracts import (
     DIMENSIONS, make_evidence_adapter_contract_set, task01_contract_claim_eligible,
 )
 from .fe5_external_knowledge import evaluate_external_knowledge_freshness
-from .k4_ieee_import import match_k4_records
-from .knowledge_artifacts import match_k1_records
-from .knowledge_bundle import KnowledgeBundleCandidate, validate_knowledge_bundle_dependencies
+from .k4_ieee_import import _match_k4_records_prevalidated
+from .knowledge_artifacts import _match_k1_records_prevalidated
+from .knowledge_bundle import (
+    KnowledgeBundleCandidate, _ValidatedKnowledgeBundle,
+    _validate_knowledge_bundle_once, _require_validated_knowledge,
+)
 from .models import DeviceFingerprintValidationError
 from .p0f_semantics import adapt_tcp_syn_v2, match_request, parse_request_signature
 from .snapshot_service import EvidenceSnapshotMaterialization
@@ -270,7 +273,7 @@ def _make_origin_assessment(
     payload: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
     source_evaluability: ArtifactContent,
     evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
-    knowledge: KnowledgeBundleCandidate,
+    knowledge: KnowledgeBundleCandidate, validated_knowledge: _ValidatedKnowledgeBundle,
 ) -> ArtifactContent:
     """Validate C.3.30/§101 exact closed schemas and canonical total order."""
     row = dict(_shape(payload, _TOP, "OriginAssessment"))
@@ -297,7 +300,8 @@ def _make_origin_assessment(
     row["explanation_codes"] = _strings(row["explanation_codes"], "explanation code")
     _validate_reference_lineage(row, evidence_snapshot_content=evidence_snapshot_content,
                                 evidence_adapter_contract_set=evidence_adapter_contract_set,
-                                knowledge_bundle=knowledge_bundle, knowledge=knowledge)
+                                knowledge_bundle=knowledge_bundle, knowledge=knowledge,
+                                validated_knowledge=validated_knowledge)
     return make_artifact_content("OriginAssessment", row)
 
 
@@ -309,11 +313,31 @@ def make_origin_assessment(
 ) -> ArtifactContent:
     """Construct a closed R14 assessment with typed malformed-input failures."""
     try:
+        validated_knowledge = _validate_knowledge_bundle_once(knowledge_bundle, knowledge)
+        return _make_origin_assessment_prevalidated(
+            payload, evidence_snapshot_content=evidence_snapshot_content,
+            source_evaluability=source_evaluability,
+            evidence_adapter_contract_set=evidence_adapter_contract_set,
+            knowledge_bundle=knowledge_bundle, knowledge=knowledge,
+            validated_knowledge=validated_knowledge)
+    except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
+        raise DeviceFingerprintValidationError("Malformed OriginAssessment") from exc
+
+
+def _make_origin_assessment_prevalidated(
+    payload: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
+    source_evaluability: ArtifactContent,
+    evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
+    knowledge: KnowledgeBundleCandidate, validated_knowledge: _ValidatedKnowledgeBundle,
+) -> ArtifactContent:
+    try:
+        _require_validated_knowledge(validated_knowledge, knowledge_bundle, knowledge)
         return _make_origin_assessment(
             payload, evidence_snapshot_content=evidence_snapshot_content,
             source_evaluability=source_evaluability,
             evidence_adapter_contract_set=evidence_adapter_contract_set,
-            knowledge_bundle=knowledge_bundle, knowledge=knowledge)
+            knowledge_bundle=knowledge_bundle, knowledge=knowledge,
+            validated_knowledge=validated_knowledge)
     except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
         raise DeviceFingerprintValidationError("Malformed OriginAssessment") from exc
 
@@ -321,13 +345,12 @@ def make_origin_assessment(
 def _validate_reference_lineage(
     assessment: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
     evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
-    knowledge: KnowledgeBundleCandidate,
+    knowledge: KnowledgeBundleCandidate, validated_knowledge: _ValidatedKnowledgeBundle,
 ) -> None:
     if (make_evidence_adapter_contract_set(evidence_adapter_contract_set.semantic_payload)
             != evidence_adapter_contract_set):
         _fail("Noncanonical adapter contract set")
-    if not validate_knowledge_bundle_dependencies(knowledge_bundle, knowledge):
-        _fail("Unresolved KnowledgeBundle")
+    _require_validated_knowledge(validated_knowledge, knowledge_bundle, knowledge)
     descriptor_by_id = {row["evidence_id"]: row for row in
                         evidence_snapshot_content.semantic_payload["evidence_descriptors"]}
     allowed_slot = {"dhcp": "k1", "portal": "k3", "tcp": "k2b",
@@ -546,7 +569,25 @@ class DeviceFingerprintOriginAssessmentBuilder:
     def __init__(self, inputs: OriginAssessmentInputs) -> None:
         if not isinstance(inputs, OriginAssessmentInputs):
             _fail("Invalid OriginAssessment inputs")
+        validated_knowledge = _validate_knowledge_bundle_once(inputs.knowledge_bundle, inputs.knowledge)
+        self._initialize(inputs, validated_knowledge)
+
+    @classmethod
+    def _from_validated(
+        cls, inputs: OriginAssessmentInputs,
+        validated_knowledge: _ValidatedKnowledgeBundle,
+    ) -> DeviceFingerprintOriginAssessmentBuilder:
+        builder = cls.__new__(cls)
+        builder._initialize(inputs, validated_knowledge)
+        return builder
+
+    def _initialize(self, inputs: OriginAssessmentInputs,
+                    validated_knowledge: _ValidatedKnowledgeBundle) -> None:
+        if not isinstance(inputs, OriginAssessmentInputs):
+            _fail("Invalid OriginAssessment inputs")
+        _require_validated_knowledge(validated_knowledge, inputs.knowledge_bundle, inputs.knowledge)
         self._inputs = inputs
+        self._validated_knowledge = validated_knowledge
         snapshot = inputs.evidence_snapshot_content
         source = inputs.source_evaluability
         if snapshot.artifact_type != "EvidenceSnapshotContent" or source.artifact_type != "SourceEvaluability":
@@ -560,8 +601,6 @@ class DeviceFingerprintOriginAssessmentBuilder:
         if (make_evidence_adapter_contract_set(inputs.evidence_adapter_contract_set.semantic_payload)
                 != inputs.evidence_adapter_contract_set):
             _fail("Noncanonical adapter contract set")
-        if not validate_knowledge_bundle_dependencies(inputs.knowledge_bundle, inputs.knowledge):
-            _fail("Invalid KnowledgeBundle closure")
         parse_utc(inputs.knowledge_evaluation_at_utc)
         descriptors = {row["evidence_id"]: row for row in snap["evidence_descriptors"]}
         materialized: dict[str, Mapping[str, Any]] = {}
@@ -656,6 +695,7 @@ class DeviceFingerprintOriginAssessmentBuilder:
         if origin not in ORIGINS:
             _fail("Unknown origin")
         inputs = self._inputs
+        _require_validated_knowledge(self._validated_knowledge, inputs.knowledge_bundle, inputs.knowledge)
         candidates: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
             dimension: [] for dimension in DIMENSIONS}
         broad: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
@@ -673,7 +713,7 @@ class DeviceFingerprintOriginAssessmentBuilder:
                 explanations.append(freshness["required_explanation_code"])
             if freshness["claim_eligible"]:
                 mac = inputs.evidence_snapshot_content.semantic_payload["observed_mac"].lower()
-                matched = match_k4_records(inputs.knowledge.k4_record_set, mac)
+                matched = _match_k4_records_prevalidated(inputs.knowledge.k4_record_set, mac)
                 if not matched:
                     explanations.append("no_ieee_assignment_claim")
                 for record in matched:
@@ -748,7 +788,7 @@ class DeviceFingerprintOriginAssessmentBuilder:
                 if not eligible_dimensions:
                     continue
                 if origin == "dhcp":
-                    records = match_k1_records(inputs.knowledge.k1_record_set, dict(payload))
+                    records = _match_k1_records_prevalidated(inputs.knowledge.k1_record_set, dict(payload))
                     if not records:
                         explanations.append("k1_empty_candidate_set")
                     for record in records:
@@ -885,11 +925,12 @@ class DeviceFingerprintOriginAssessmentBuilder:
             "knowledge_refs": _knowledge_set(_unique(knowledge_refs)),
             "explanation_codes": _strings(list(set(explanations)), "explanation"),
         }
-        return make_origin_assessment(payload, evidence_snapshot_content=inputs.evidence_snapshot_content,
+        return _make_origin_assessment_prevalidated(payload, evidence_snapshot_content=inputs.evidence_snapshot_content,
                                       source_evaluability=inputs.source_evaluability,
                                       evidence_adapter_contract_set=inputs.evidence_adapter_contract_set,
                                       knowledge_bundle=inputs.knowledge_bundle,
-                                      knowledge=inputs.knowledge)
+                                      knowledge=inputs.knowledge,
+                                      validated_knowledge=self._validated_knowledge)
 
     def build_all(self) -> tuple[ArtifactContent, ...]:
         return tuple(self.build(origin) for origin in ORIGINS)

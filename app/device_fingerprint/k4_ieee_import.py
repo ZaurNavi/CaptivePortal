@@ -149,6 +149,14 @@ def match_k4_records(
     payload = record_set.semantic_payload
     if make_canonical_k4_record_set(payload).artifact_id != record_set.artifact_id:
         _fail("Invalid K4 record-set identity")
+    return _match_k4_records_prevalidated(record_set, observed_mac)
+
+
+def _match_k4_records_prevalidated(
+    record_set: ArtifactContent, observed_mac: str,
+) -> tuple[dict[str, Any], ...]:
+    """Lookup the K4 dependency of an already validated request-local bundle."""
+    payload = record_set.semantic_payload
     if not is_ieee_assignment_lookup_eligible(observed_mac):
         return ()
     hexadecimal = observed_mac.replace(":", "")

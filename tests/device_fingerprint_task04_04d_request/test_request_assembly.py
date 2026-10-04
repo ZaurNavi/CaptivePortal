@@ -99,6 +99,100 @@ def candidate_run(service, profile):
     return service.assemble_pre_acceptance_candidate(profile, SITE, MAC, START, END)
 
 
+# Captured on exact base 97bd1cf924024a38cc3229bfd726a25fe6754b07 before repair.
+@pytest.mark.parametrize("with_dhcp,request_sha,origin_shas,result_sha", [
+    (False, "11cddc6cc4a59a284102d05624923cd6d29bd37399257e2f3bc8a8779b8bff93", {
+        "dhcp": "86e15793c6f0bd4a8f9d184380804636f4ebb87bc545e95e7baa2a6d660e52d3",
+        "mac_registry": "ebecdce07f8997b9b7508ae427b6c74493f4cee86bf21956e80ac8d7b86ca3e5",
+        "portal": "4ad88b312d57df263a79f9d72d62acdb15f58942db7e2a592225d0a554c16e98",
+        "quic": "058f57e4ef5b0323119d28c09bd77f3f7ee44865b9a78429b92a72b749c3c75c",
+        "tcp": "d6b4217ef4878f8943f40cc841d4afa0506119374dfd75e390ca24926c59050a",
+        "tls": "a0f5b388f7360bd93001696a195e58435af33016a0fc140e72546ade153cfd4d",
+    }, "f2250e57ea2cf270c335d2acf4041be465aaedf5416f934be0d13ff7f720b5cb"),
+    (True, "33a7b48dab2b796a0c6b47fabe11964cef3f3ac49b166639d1c6c0823a5b2667", {
+        "dhcp": "1390bd7a0c43844eeb8c5e3209c782c1125ae569977567f305a3ba194fb15f2d",
+        "mac_registry": "0e4f8b2c64efabda9f449efb7f580f8444a27452c6f156d23338eefe977da687",
+        "portal": "d10c4aa382df2319bfb68dc660597d54f06a7fa0b7240c5690a0d062584a6480",
+        "quic": "4accc3c443b627ba228540ec059ba12c3bfde7795faceec942badef7e52e2041",
+        "tcp": "ccdd612e62744fa66f4fd20cdf93e61b46393c49e9c38fea514821d5c9ac7f11",
+        "tls": "16969f498a089885728c131e57af5688e5a6331f368a4eeb0d9ef7efcce65c36",
+    }, "2678b1d02b68515660f1bc89c5145bc8513260f3be668b8a5ae4fd2e654ac942"),
+])
+def test_request_semantic_ids_equal_pre_repair_base(with_dhcp, request_sha, origin_shas, result_sha):
+    _, _, service, profile = prepared(evidence_rows=[_dhcp_row()] if with_dhcp else ())
+    result = candidate_run(service, profile)
+    assert result.classification_request_manifest.artifact_id == (
+        "ClassificationRequestManifest:v1:sha256:" + request_sha)
+    ordered = sorted(result.origin_assessments, key=lambda item: item.semantic_payload["origin_group"])
+    assert [(item.semantic_payload["origin_group"], item.artifact_id) for item in ordered] == [
+        (origin, "OriginAssessment:v1:sha256:" + sha) for origin, sha in origin_shas.items()]
+    assert result.classification_result.artifact_id == "ClassificationResult:v1:sha256:" + result_sha
+
+
+def test_request_validates_knowledge_once_uses_private_matchers_and_drops_proof(monkeypatch):
+    from dataclasses import fields
+    import app.device_fingerprint.knowledge_bundle as module
+    import app.device_fingerprint.knowledge_artifacts as k1
+    import app.device_fingerprint.k4_ieee_import as k4
+    import app.device_fingerprint.origin_assessment as origin
+    import app.device_fingerprint.request_assembly as assembly
+    hook_calls = []
+    _, _, service, profile = prepared(
+        evidence_rows=[_dhcp_row()], hook=lambda *args: hook_calls.append(args) or True)
+    calls, proofs, matches = [], [], []
+    original = module.validate_knowledge_bundle_dependencies
+    factory = assembly._validate_knowledge_bundle_once
+    k1_match = origin._match_k1_records_prevalidated
+    k4_match = origin._match_k4_records_prevalidated
+
+    def counted(bundle, candidate):
+        calls.append((bundle, candidate))
+        return original(bundle, candidate)
+
+    def capture_proof(bundle, candidate):
+        proof = factory(bundle, candidate)
+        proofs.append(proof)
+        return proof
+
+    def private_k1(*args):
+        matches.append("K1")
+        return k1_match(*args)
+
+    def private_k4(*args):
+        matches.append("K4")
+        return k4_match(*args)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Validated request called a public full-validation matcher")
+
+    monkeypatch.setattr(module, "validate_knowledge_bundle_dependencies", counted)
+    monkeypatch.setattr(assembly, "_validate_knowledge_bundle_once", capture_proof)
+    monkeypatch.setattr(k1, "match_k1_records", forbidden)
+    monkeypatch.setattr(k4, "match_k4_records", forbidden)
+    monkeypatch.setattr(origin, "_match_k1_records_prevalidated", private_k1)
+    monkeypatch.setattr(origin, "_match_k4_records_prevalidated", private_k4)
+    for request_index in range(2):
+        result = candidate_run(service, profile)
+        assert len(calls) == len(proofs) == request_index + 1
+        assert matches.count("K1") == matches.count("K4") == request_index + 1
+        assert len(hook_calls[-1]) == 7
+        assert hook_calls[-1] == (
+            result.classification_runtime_profile, result.foundation_runtime_profile,
+            result.knowledge_bundle, result.knowledge_candidate, result.classification_policy,
+            result.evidence_adapter_contract_set, result.classifier_artifact_manifest)
+        assert all(not isinstance(getattr(result, field.name), module._ValidatedKnowledgeBundle)
+                   for field in fields(result))
+        for artifact in (result.classification_request_manifest, *result.origin_assessments,
+                         result.classification_result):
+            assert b"_ValidatedKnowledgeBundle" not in artifact.semantic_payload_json
+            assert b"validated_knowledge" not in artifact.semantic_payload_json
+    assert proofs[0] is not proofs[1] and proofs[0].candidate is not proofs[1].candidate
+    with pytest.raises(DeviceFingerprintValidationError,
+                       match="Invalid request-scoped KnowledgeBundle validation proof"):
+        module._require_validated_knowledge(proofs[0], proofs[1].bundle, proofs[1].candidate)
+
+
+
 def test_request_exact_seven_fields_digest_and_no_runtime_lineage():
     _, _, service, profile = prepared()
     result = candidate_run(service, profile)

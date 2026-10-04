@@ -101,6 +101,33 @@ def _platform(inputs: FusionInputs) -> dict:
     return fuse_classification(inputs).semantic_payload["platform_result"]
 
 
+@pytest.mark.parametrize("malformed", [False, True])
+def test_public_fusion_entry_points_reject_invalid_knowledge_closure(baseline, malformed):
+    if malformed:
+        bad = replace(baseline, knowledge_bundle=make_artifact_content("KnowledgeBundle", {"extra": True}))
+    else:
+        bad = replace(baseline, knowledge=replace(baseline.knowledge, k1_record_set=baseline.knowledge.k4_record_set))
+    with pytest.raises(DeviceFingerprintValidationError):
+        fuse_classification(bad)
+    with pytest.raises(DeviceFingerprintValidationError):
+        DeviceFingerprintFusionCore(bad)
+
+
+def test_public_fusion_validates_knowledge_once_including_six_origin_rebuilds(baseline, monkeypatch):
+    import app.device_fingerprint.knowledge_bundle as module
+    calls = []
+    original = module.validate_knowledge_bundle_dependencies
+    def counted(bundle, candidate):
+        calls.append((bundle, candidate))
+        return original(bundle, candidate)
+    monkeypatch.setattr(module, "validate_knowledge_bundle_dependencies", counted)
+    first = fuse_classification(baseline)
+    assert len(calls) == 1
+    core = DeviceFingerprintFusionCore(baseline)
+    assert core.fuse() == first and core.fuse() == first
+    assert len(calls) == 2
+
+
 def test_exact_six_origins_permutation_and_stable_result(baseline):
     first = fuse_classification(baseline)
     reverse = fuse_classification(replace(baseline, origin_assessments=tuple(reversed(baseline.origin_assessments))))

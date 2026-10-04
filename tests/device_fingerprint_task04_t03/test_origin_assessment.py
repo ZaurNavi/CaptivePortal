@@ -113,6 +113,45 @@ def _candidate(value="android", strength="supporting", evidence_id="one"):
     }
 
 
+@pytest.mark.parametrize("malformed", [False, True])
+def test_public_origin_entry_points_reject_invalid_knowledge_closure(malformed):
+    inputs = _inputs(evidence_rows=[_dhcp_row()])
+    artifact = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp")
+    if malformed:
+        bad = replace(inputs, knowledge_bundle=make_artifact_content("KnowledgeBundle", {"extra": True}))
+    else:
+        bad = replace(inputs, knowledge=replace(inputs.knowledge, k1_record_set=inputs.knowledge.k4_record_set))
+    with pytest.raises(DeviceFingerprintValidationError):
+        DeviceFingerprintOriginAssessmentBuilder(bad)
+    with pytest.raises(DeviceFingerprintValidationError):
+        make_origin_assessment(
+            artifact.semantic_payload, evidence_snapshot_content=bad.evidence_snapshot_content,
+            source_evaluability=bad.source_evaluability,
+            evidence_adapter_contract_set=bad.evidence_adapter_contract_set,
+            knowledge_bundle=bad.knowledge_bundle, knowledge=bad.knowledge)
+
+
+def test_public_origin_builder_and_constructor_validate_knowledge_once(monkeypatch):
+    import app.device_fingerprint.knowledge_bundle as module
+    inputs = _inputs(evidence_rows=[_dhcp_row()])
+    calls = []
+    original = module.validate_knowledge_bundle_dependencies
+    def counted(bundle, candidate):
+        calls.append((bundle, candidate))
+        return original(bundle, candidate)
+    monkeypatch.setattr(module, "validate_knowledge_bundle_dependencies", counted)
+    builder = DeviceFingerprintOriginAssessmentBuilder(inputs)
+    first = builder.build_all()
+    assert builder.build_all() == first
+    assert len(calls) == 1
+    rebuilt = make_origin_assessment(
+        first[0].semantic_payload, evidence_snapshot_content=inputs.evidence_snapshot_content,
+        source_evaluability=inputs.source_evaluability,
+        evidence_adapter_contract_set=inputs.evidence_adapter_contract_set,
+        knowledge_bundle=inputs.knowledge_bundle, knowledge=inputs.knowledge)
+    assert rebuilt == first[0] and len(calls) == 2
+
+
 def test_six_origin_artifacts_have_exact_four_dimensions_and_stable_identity():
     inputs = _inputs()
     builder = DeviceFingerprintOriginAssessmentBuilder(inputs)
@@ -688,7 +727,7 @@ def test_adapter_incompatibility_is_audit_only_before_k1_matcher(change, monkeyp
     inputs = _with_descriptor(_inputs(evidence_rows=[_dhcp_row()]), **change)
     def forbidden(*_args, **_kwargs):
         pytest.fail("K1 matcher ran for an incompatible row")
-    monkeypatch.setattr(module, "match_k1_records", forbidden)
+    monkeypatch.setattr(module, "_match_k1_records_prevalidated", forbidden)
     output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
     assert "unsupported_evidence_contract" in output["explanation_codes"]
     assert len(output["evidence_refs"]) == 1
@@ -704,7 +743,7 @@ def test_degraded_compatible_evidence_does_not_run_k1_matcher(monkeypatch):
     inputs = _inputs(evidence_rows=[_dhcp_row(quality_state="degraded")])
     def forbidden(*_args, **_kwargs):
         pytest.fail("K1 matcher ran for a degraded row")
-    monkeypatch.setattr(module, "match_k1_records", forbidden)
+    monkeypatch.setattr(module, "_match_k1_records_prevalidated", forbidden)
     output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
     assert "degraded_evidence_no_claim" in output["explanation_codes"]
     assert len(output["evidence_refs"]) == 1
