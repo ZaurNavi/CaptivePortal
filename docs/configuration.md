@@ -1,8 +1,8 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-09-13
-Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+Updated: 2026-10-04
+Baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
@@ -488,3 +488,30 @@ All `DEVICE_FINGERPRINT_SENSOR_*` variables are parsed exclusively by
 does not parse them. Repository default is
 `DEVICE_FINGERPRINT_SENSOR_ENABLED=false`. The Bearer credential is supplied
 through systemd `LoadCredential`; it is never stored in `.env.example`.
+
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint configuration map
+
+Repository configuration exposes separate paths for the four ownership domains:
+
+```text
+DEVICE_FINGERPRINT_EVIDENCE_DB_PATH
+  /opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
+
+DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH
+  /opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
+
+DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH
+  /opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3
+
+DEVICE_FINGERPRINT_INTEGRATION_DB_PATH
+  /opt/CaptivePortal/data/device_fingerprint_integration.sqlite3
+```
+
+`DEVICE_FINGERPRINT_INTEGRATION_ENABLED` remains repository-default false; a
+repository default is not evidence of the live production flag.
+
+The current 1-GiB `SnapshotExecutionPolicy.process_memory_guard_bytes` is a
+versioned classifier/foundation policy artifact, not a replacement environment
+variable and not a 1-GiB reservation.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->

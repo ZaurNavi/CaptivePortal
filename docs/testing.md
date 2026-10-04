@@ -1,11 +1,11 @@
 # Testing
 
 Status: current
-Updated: 2026-09-13
+Updated: 2026-10-04
 Central Lab governance effective: 2026-08-27
-Documentation/current-state implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
-Production deployed HEAD: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
-Production tree: `8312658be3ba272998f46212d9bad76950e3867e`
+Documentation/current-state implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Production deployed HEAD: `7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Production tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
 
 ## Responsibility model
 
@@ -1274,3 +1274,25 @@ For a pure documentation change:
 - run Markdown/link tooling only if already available/relevant;
 - run `git diff --check`;
 - request a fresh Central Lab or Linux gate only when an owner/release contract requires exact-artifact runtime evidence.
+
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint — latest acceptance evidence
+
+Historical/current acceptance must be kept separate from production smoke.
+
+```text
+TASK-04 T-ACCEPT R6 = PASS / ACCEPTED / PRODUCTION_ELIGIBLE
+Task-05 accepted integration full-repository evidence = 5171 passed, 30 skipped
+Task-05 R1 full repository = 5184 passed, 28 skipped
+Task-05 PERF-01 full repository (2026-10-04; artifact SHA=0507a1fd66e84d00f105a53e6c36dec74ea14520; tree=439ab64697f2fcdcd5e822527f287ca5404e45ba) = 5198 passed, 28 skipped
+Task-06 focused candidate (2026-10-04; commit=bf4eba5973c6f23b8939396249fac987ae88bdf1; tree=53f8d463eab6dff413e8bbdcc6e181bd2bc25d7f) = 189 passed
+Task-06 R1 (2026-10-04; commit=596f7480c9878d95ac9056a3e9694c5942a48ef4; parent=bf4eba5973c6f23b8939396249fac987ae88bdf1; tree=dbf3e3804931d637ef1ec569128746ebce5c141a) = 22 passed
+```
+
+Task-06 publication and production deployment are separate stages. Production
+verification used exact-code switch + bounded smoke/visual acceptance; the full
+pytest suite was **not** run on production and must not be described as such.
+
+Current documentation sync is docs-only and does not require a full pytest rerun.
+Required checks are diff/Markdown/link/Mermaid sanity plus source-truth review.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->

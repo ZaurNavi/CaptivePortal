@@ -1,17 +1,45 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-09-13
-Runtime implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
-Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
+Updated: 2026-10-04
+Runtime implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
 
-## Controlled auxiliary composition root
+## Controlled auxiliary composition roots
 
 `run.py` remains the lifecycle/composition root for the main
-`captive-portal.service`. TASK-DEVICE-FINGERPRINT-01 authorizes one isolated
-exception: `python3 -m app.device_fingerprint.cli run` for
-`fingerprint-evidence.service`. Its Flask app, SQLite writer, TLS listener and
-maintenance lifecycle are not registered into the main runtime.
+`captive-portal.service`. Device Fingerprint also has explicitly authorized
+auxiliary process roots: Task-01 evidence service, Task-02 sensor/Suricata
+services, and the Task-05 `fingerprint-classification.service` durable consumer.
+They are not folded into the main Flask process merely because their data is
+consumed by Admin presentation.
+
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+## Device Fingerprint production architecture
+
+Device Fingerprint is a Site-scoped advisory subsystem with independent
+evidence, classification/control-plane, integration and presentation boundaries.
+
+```mermaid
+flowchart LR
+    SPAN[SPAN sensor] --> EV[Normalized Evidence]
+    PORTAL[Portal evidence] --> EV
+    EV --> SNAP[Snapshot + SourceEvaluability]
+    SNAP --> CLS[Pure deterministic classifier]
+    CLS --> CDB[(Classification SQLite)]
+    AUTH[Confirmed AuthRun] --> JOB[Task-05 integration job]
+    JOB --> CLS
+    CDB --> READ[production-only read]
+    READ --> ADMIN[Home + Device Card]
+```
+
+The classifier has no Authorization/CAPPORT authority. Current product Type is
+fingerprint `device_class`; the historical/controller `device_type` contract is
+presented as Controller Platform.
+
+Full subsystem architecture, runtime-profile/admission model and 16 focused
+Mermaid diagrams: `modules/device-fingerprint.md`.
+<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
 
 ## 1. Mental model
 
