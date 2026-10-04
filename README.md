@@ -69,6 +69,134 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 > Repository defaults, production enabled-state and dated acceptance evidence are different facts.
 
+<!-- README-LANDING-VISUAL-ATLAS:BEGIN -->
+## Why CaptivPortal exists — visual map
+
+CaptivPortal is no longer only a captive-login page. It is the application layer
+between guest access, Omada, durable network evidence and an operator-facing
+product surface.
+
+| Problem | CaptivPortal responsibility | Product result |
+|---|---|---|
+| Guest must obtain controlled Wi-Fi access | One verified authorization engine for External Portal + CAPPORT | Bounded guest authorization |
+| Authorization events are not enough for history | Registry + Visit Lifecycle preserve durable identity/session facts | Device and Visit history |
+| Operators need trustworthy current state | Current State persists active wireless client/AP evidence | Home / Device Current Context |
+| Operators need historical network evidence | Observation + Traffic/Analytics read persisted facts | Traffic and Analytics products |
+| Controller `device_type` is not enough for device identity | Passive deterministic Device Fingerprint classifies bounded normalized evidence | Fingerprint Type + Fingerprint Information |
+| Product UI must not depend on raw infrastructure | AdminQueryService/read services mediate product data | Native Admin Web |
+| Engineering needs deep diagnostics | Telemetry → Loki/Grafana remains a separate observability plane | Engineering diagnostics |
+
+### How the platform works end to end
+
+```mermaid
+flowchart TB
+    Client[Guest Wi-Fi client]
+
+    subgraph Access["Access / authorization"]
+      Entry[External Portal / CAPPORT]
+      Auth[AuthSessionManager + AuthWorker]
+      Provider[Shared OmadaProvider]
+      Omada[(Omada Controller)]
+    end
+
+    subgraph Facts["Durable facts"]
+      Snap[Authorized Snapshot]
+      Registry[(Visitor Registry)]
+      Visit[(Visit Lifecycle)]
+      Obs[(Observation)]
+      Current[(Current State)]
+    end
+
+    subgraph Fingerprint["Device Fingerprint"]
+      Mirror[SPAN / passive network evidence]
+      PortalEvidence[Portal evidence]
+      FPEvidence[(Fingerprint Evidence)]
+      Classifier[Deterministic classifier]
+      FPResult[(PRODUCTION ClassificationResult)]
+    end
+
+    subgraph Product["Read / product plane"]
+      Reads[Read services / Analytics / Traffic]
+      AdminQuery[AdminQueryService]
+      Admin[Native Admin Web]
+    end
+
+    subgraph Eng["Engineering observability"]
+      Telemetry[Telemetry / journals]
+      Loki[(Loki)]
+      Grafana[Grafana]
+    end
+
+    Client --> Entry --> Auth --> Provider --> Omada
+    Auth --> Snap --> Registry
+    Auth --> Visit
+    Omada --> Obs
+    Omada --> Current
+
+    Client --> Mirror --> FPEvidence
+    Entry --> PortalEvidence --> FPEvidence
+    FPEvidence --> Classifier --> FPResult
+
+    Registry --> Reads
+    Visit --> Reads
+    Obs --> Reads
+    Current --> Reads
+    FPResult --> AdminQuery
+    Reads --> AdminQuery --> Admin
+
+    Auth --> Telemetry
+    Reads --> Telemetry
+    Telemetry --> Loki --> Grafana
+```
+
+### Data-processing rule
+
+```mermaid
+flowchart LR
+    Source[Controller / Portal / passive sensor] --> Acquire[Bounded acquisition]
+    Acquire --> Persist[(Owned persistence)]
+    Persist --> Read[Read service]
+    Read --> Derive[Analytics / product interpretation]
+    Derive --> Present[AdminQueryService / Admin Web]
+    Present -. no direct source polling .-> Blocked[No query-time history manufacturing]
+```
+
+The permanent direction is **source → normalized fact → owned persistence → read
+boundary → interpretation → presentation**. Product reads do not manufacture
+missing history by polling Omada on demand.
+
+### Subsystem ownership matrix
+
+| Layer | Why it exists | Canonical owner/source | Durable boundary / output |
+|---|---|---|---|
+| Guest authorization | Decide whether guest access actually succeeded | AuthSessionManager / AuthWorker / shared OmadaProvider | verified controller state + telemetry |
+| Visitor identity/history | Keep durable device/history identity | Visitor Registry | `visitor_registry.sqlite3` |
+| Visit Lifecycle | Model real Site-aware visits rather than AuthSessions | Visit Lifecycle | `visits.sqlite3` v2 |
+| Historical wireless/AP facts | Preserve measurements over time | Observation Foundation | `observations.sqlite3` v1 |
+| Current wireless state | Preserve current active client/AP evidence | Current State | `current_state.sqlite3` v1 |
+| Traffic / Analytics | Derive bounded product views from stored facts | Analytics read services | read models; no source writes |
+| Device Fingerprint | Answer “what is this device?” from passive bounded evidence | Device Fingerprint | Evidence / Classification / Integration stores |
+| Admin Web | Present Site-safe operator views | AdminQueryService + Admin Web | read-only product presentation |
+| Engineering observability | Diagnose implementation/runtime behavior | telemetry / Alloy / Loki / Grafana | engineering-only observability |
+
+### Hard boundaries visible from the landing page
+
+| Boundary | Invariant |
+|---|---|
+| Authorization success | Successful HTTP call is not enough; final controller state is verified |
+| Analytics | Reads persisted facts; does not call Omada to manufacture history |
+| Admin browser | Does not directly read SQLite, Omada, Loki, Grafana or internal bearer APIs |
+| Optional subsystems | May degrade/fail independently of guest authorization |
+| Evidence semantics | `missing / unknown / stale / insufficient / unavailable != 0` |
+| Omada provider | One process → one shared provider/token lifecycle |
+| Device Fingerprint | Advisory only; never authorizes, blocks, disconnects or changes CAPPORT |
+| DTI | Separate future program; not silently folded into Device Fingerprint |
+
+The rest of this README contains the detailed processing diagrams for
+authorization, persistence, Visit Lifecycle, analytics, Traffic, Admin Web, Home,
+observability and the complete sixteen-diagram Device Fingerprint atlas.
+<!-- README-LANDING-VISUAL-ATLAS:END -->
+
 ## Where the project is now
 
 Traffic is production-active through `TASK-TRAFFIC-09 — Consolidated Traffic Evidence`.
@@ -161,46 +289,553 @@ The Devices presentation follow-on is now **CLOSED / PRODUCTION ACTIVE** through
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
 ## Device Fingerprint — current production
 
-Device Fingerprint is now a production-active passive/advisory classification
-capability, not only an evidence foundation.
+Device Fingerprint is a production-active passive/advisory classification
+subsystem. The landing README intentionally carries the complete visual atlas so
+a reader can understand the subsystem without opening a second document.
 
 ```text
-repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
-repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
-PR #178 = MERGED
+runtime / production implementation checkpoint = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
+runtime / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
 TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
 TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
 TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
-TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
+TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED / ADMIN VISIBLE
 captive-portal.service = active
 fingerprint-classification.service = active
 ```
 
-High-level flow:
+### What Device Fingerprint answers
 
-```mermaid
-flowchart LR
-    E[Passive normalized evidence] --> C[Deterministic Device Fingerprint]
-    C --> P[(Persisted PRODUCTION ClassificationResult)]
-    P --> A[Admin read model]
-    A --> H[Home]
-    A --> D[Device Card]
-```
+| Product dimension | Meaning |
+|---|---|
+| `device_class` | broad device class shown as Fingerprint **Type** |
+| `platform_family` | fingerprint-derived platform family |
+| `manufacturer_family` | fingerprint-derived manufacturer family |
+| `model_family` | fingerprint-derived model family |
 
-Current Home product terminology:
+Classification support is `none | low | medium | high`; it is not a probability.
+
+| Dimension/result state | Product meaning |
+|---|---|
+| `resolved` | supported value exists |
+| `recognized_out_of_scope` | evidence is recognized but outside the admitted taxonomy/scope |
+| `unknown` | classification completed without a supported value |
+| `insufficient_evidence` | available evidence is not sufficient |
+| `conflicting_evidence` | admitted evidence conflicts |
+| no authoritative production result | UI shows `—` |
+| completed unresolved dimension | UI shows `Unknown` |
+| read/persistence path unavailable | UI shows `Unavailable` / fail-soft `—` |
+
+Permanent UI rule:
 
 ```text
 Type     = fingerprint device_class
 Platform = controller / Omada device_type
+
+Type != Platform
+Controller Platform NEVER backfills Fingerprint Type
 ```
 
-Controller Platform never backfills fingerprint Type. Device Card keeps
-**Controller Platform** separate from **Fingerprint Information**. No-result is
-`—`, a completed unresolved dimension is `Unknown`, and a fingerprint read failure
-is `Unavailable`/`—` without failing core Admin data.
+### Evidence origins
 
-Detailed architecture and all engineering diagrams:
-`docs/modules/device-fingerprint.md`.
+| Origin | Role |
+|---|---|
+| DHCP | passive normalized network evidence |
+| Portal | bounded application/Portal evidence |
+| TCP | passive TCP SYN fingerprint evidence |
+| TLS | normalized TLS client fingerprint evidence |
+| QUIC | normalized QUIC client fingerprint evidence |
+| MAC Registry | knowledge-derived origin, not packet evidence |
+
+Canonical origin order:
+
+```text
+dhcp, portal, tcp, tls, quic, mac_registry
+```
+
+Repeated rows from the same origin are not independent votes.
+
+### Device Fingerprint architecture atlas — all 16 diagrams
+
+| ID | Diagram | Why it is on the landing README |
+|---|---|---|
+| DF-01 | Full end-to-end | show the whole production flow in one view. |
+| DF-02 | Evidence sources / origins | distinguish independent origin families. |
+| DF-03 | Evidence + source health + time | explain why absence of evidence is not automatically negative evidence. |
+| DF-04 | Snapshot assembly | separate semantic snapshot contents from transient verified materialization and operational limits. |
+| DF-05 | Pure deterministic classification core | show the I/O-free semantic core. |
+| DF-06 | Per-dimension fusion | explain one dimension without pretending fusion is majority voting. |
+| DF-07 | Knowledge and policy | show how admitted knowledge becomes deterministic classifier input. |
+| DF-08 | Runtime profile / admission lifecycle | make candidate/accepted/admitted/active states visibly different. |
+| DF-09 | Artifact / audit lineage | show why a retained result can be reproduced and explained. |
+| DF-10 | Post-Auth integration / worker | show the durable production classification trigger. |
+| DF-11 | Device classification history | distinguish Device identity from repeated classification history. |
+| DF-12 | Admin presentation read path | show the one authoritative read path shared by product surfaces. |
+| DF-13 | UI state semantics | make no-result/Unknown/Unavailable unambiguous. |
+| DF-14 | Failure isolation | show that Device Fingerprint is advisory and fail-soft to the rest of CaptivPortal. |
+| DF-15 | Production components and stores | show runtime ownership. |
+| DF-16 | Current Device Fingerprint vs future Traffic Enrichment | prevent two initiatives from being conflated. |
+
+#### DF-01 — Full end-to-end
+
+- **Purpose:** show the whole production flow in one view.
+- **Inputs:** mirrored network traffic, Portal/CAPPORT request metadata, post-auth identity context.
+- **Outputs:** persisted authoritative classification and Admin presentation.
+- **Persistence boundary:** normalized evidence, control-plane artifacts, classifications, integration jobs. Raw frames are not durable.
+- **Failure behavior:** fingerprint degrades/fails independently; Auth/CAPPORT and core Admin continue.
+- **Authoritative owner/module:** `app/device_fingerprint*`, `app/admin_web/`.
+
+```mermaid
+flowchart TD
+    C[Client device] --> W[Wi-Fi / Omada]
+    W --> M[SPAN / mirrored traffic]
+    M --> NS[Network Sensor]
+    NS --> NE[Bounded normalized network evidence]
+
+    C --> P[Portal / CAPPORT request]
+    P --> PP[Portal evidence producer]
+    PP --> PE[Bounded normalized portal evidence]
+
+    NE --> EDB[(Evidence SQLite)]
+    PE --> EDB
+    EDB --> SNAP[Snapshot assembly]
+    SNAP --> SE[SourceEvaluability]
+    SE --> OA[OriginAssessments]
+    OA --> FUS[Cross-origin fusion]
+    FUS --> CR[ClassificationResult]
+    CR --> CDB[(Classification SQLite)]
+    CDB --> I[Task-05 integration / history]
+    I --> ID[Device / Visit relation]
+    CDB --> R[Task-06 production read]
+    R --> H[Home]
+    R --> D[Device Card]
+```
+
+#### DF-02 — Evidence sources / origins
+
+- **Purpose:** distinguish independent origin families.
+- **Inputs:** normalized admitted evidence plus MAC-registry knowledge.
+- **Outputs:** per-origin assessments.
+- **Persistence boundary:** five physical/application evidence families persist through Task-01; MAC Registry is knowledge-derived, not packet evidence.
+- **Failure behavior:** unavailable/unsupported/disabled/unknown origin stays explicit and conservative.
+- **Authoritative owner/module:** evidence adapters + `origin_assessment.py`.
+
+```mermaid
+flowchart LR
+    subgraph Physical["Physical / network origins"]
+      DHCP[DHCP]
+      TCP[TCP]
+      TLS[TLS]
+      QUIC[QUIC]
+    end
+    subgraph Application["Application origin"]
+      PORTAL[Portal]
+    end
+    subgraph Knowledge["Knowledge-based origin"]
+      MAC[MAC Registry]
+    end
+
+    DHCP --> SNAP[Evidence Snapshot]
+    TCP --> SNAP
+    TLS --> SNAP
+    QUIC --> SNAP
+    PORTAL --> SNAP
+    MAC --> OA[OriginAssessments]
+    SNAP --> OA
+
+    AV[available] -.status.-> OA
+    UN[unavailable] -.status.-> OA
+    US[unsupported] -.status.-> OA
+    DI[disabled] -.status.-> OA
+    UK[unknown] -.status.-> OA
+```
+
+#### DF-03 — Evidence + source health + time
+
+- **Purpose:** explain why absence of evidence is not automatically negative evidence.
+- **Inputs:** evidence rows, source-health timeline, binding timeline, clock policy.
+- **Outputs:** conservative source coverage/evaluability.
+- **Persistence boundary:** evidence and immutable source-health events persist; evaluability is derived classification input.
+- **Failure behavior:** stale/missing/incompatible health becomes unknown or another explicit non-covered state; no optimistic backfill.
+- **Authoritative owner/module:** `source_health_policy.py`, binding contracts, `source_evaluability.py`.
+
+```mermaid
+flowchart TD
+    E[Evidence rows] --> X[Time/binding evaluation]
+    H[Source Health timeline] --> X
+    B[Source binding timeline] --> X
+    C[Clock policy] --> X
+    X --> SE[SourceEvaluability]
+
+    A["absence of evidence"] --> Q{source coverage proven?}
+    Q -->|yes| COV[interpret within admitted semantics]
+    Q -->|no / unknown| N["NOT negative evidence"]
+```
+
+#### DF-04 — Snapshot assembly
+
+- **Purpose:** separate semantic snapshot contents from transient verified materialization and operational limits.
+- **Inputs:** retained Task-01 evidence/health plus foundation contracts.
+- **Outputs:** `EvidenceSnapshotContent`, verified `EvidenceSnapshotMaterialization`, `SourceEvaluability`.
+- **Persistence boundary:** `EvidenceSnapshotContent`/`SnapshotRecord` are retained audit lineage; materialization is transient.
+- **Failure behavior:** invalid integrity, incompatible binding, or exceeded resource policy fails closed for that classification request.
+- **Authoritative owner/module:** snapshot service/artifacts + foundation runtime profile.
+
+```mermaid
+flowchart TD
+    W[classification window] --> TX[One consistent Task-01 SQLite read snapshot]
+    TX --> EV[evidence selection]
+    TX --> HL[health selection]
+    B[bindings / clock] --> EV
+    CP[SnapshotContentPolicy] --> EV
+    XP[SnapshotExecutionPolicy] --> TX
+    EV --> ESC[EvidenceSnapshotContent]
+    HL --> ESC
+    ESC --> MAT[Verified transient materialization]
+    MAT --> SE[SourceEvaluability]
+```
+
+#### DF-05 — Pure deterministic classification core
+
+- **Purpose:** show the I/O-free semantic core.
+- **Inputs:** exact snapshot/evaluability + admitted knowledge/policy/adapters/classifier identity.
+- **Outputs:** six `OriginAssessment`s, four `DimensionResult`s, global `ClassificationResult`.
+- **Persistence boundary:** none inside the pure core. Persistence happens outside it.
+- **Failure behavior:** malformed/incompatible inputs fail closed; no external fallback.
+- **Authoritative owner/module:** origin assessment + fusion/classification core.
+
+```mermaid
+flowchart TD
+    subgraph PURE["PURE DETERMINISTIC CORE — NO DB / NO NETWORK / NO CURRENT CLOCK / NO PERSISTENCE"]
+      ESC[EvidenceSnapshotContent]
+      MAT[EvidenceSnapshotMaterialization]
+      SE[SourceEvaluability]
+      KB[KnowledgeBundle]
+      CP[ClassificationPolicy]
+      EA[EvidenceAdapterContractSet]
+      CAM[ClassifierArtifactManifest]
+      KT[knowledge_evaluation_at_utc]
+
+      ESC --> OA[6 OriginAssessments]
+      MAT --> OA
+      SE --> OA
+      KB --> OA
+      EA --> OA
+      KT --> OA
+
+      OA --> F[Cross-Origin Fusion]
+      CP --> F
+      CAM --> F
+      F --> DR[4 DimensionResults]
+      DR --> GS[Global classification status]
+      GS --> CR[ClassificationResult]
+    end
+```
+
+#### DF-06 — Per-dimension fusion
+
+- **Purpose:** explain one dimension without pretending fusion is majority voting.
+- **Inputs:** one dimension's independently constructed origin assessments.
+- **Outputs:** status, canonical value when resolved, support and audit references.
+- **Persistence boundary:** result persists only after the pure decision is complete.
+- **Failure behavior:** ambiguity/conflict/insufficient evidence remains an explicit valid outcome.
+- **Authoritative owner/module:** `fusion.py` + `ClassificationPolicy`.
+
+```mermaid
+flowchart TD
+    D[DHCP claim] --> SO[same-origin assessment]
+    P[Portal claim] --> SO
+    T[TCP claim] --> SO
+    L[TLS claim] --> SO
+    Q[QUIC claim] --> SO
+    M[MAC Registry claim] --> SO
+    SO --> XO[cross-origin comparison]
+    XO --> R{Dimension result}
+    R --> RES[resolved]
+    R --> OOS[recognized_out_of_scope]
+    R --> UNK[unknown]
+    R --> INS[insufficient_evidence]
+    R --> CON[conflicting_evidence]
+    RES --> SUP[support: low / medium / high]
+    OOS --> SUP
+    UNK --> NONE[support: none]
+    INS --> NONE
+    CON --> NONE
+```
+
+#### DF-07 — Knowledge and policy
+
+- **Purpose:** show how admitted knowledge becomes deterministic classifier input.
+- **Inputs:** taxonomy, aliases, versioned knowledge families, provenance/freshness.
+- **Outputs:** pinned `KnowledgeBundle` + policy/adapter contracts.
+- **Persistence boundary:** immutable artifact/control-plane content, not query-time cloud results.
+- **Failure behavior:** stale/unadmitted/incompatible knowledge blocks admission or produces conservative no-claim semantics; there is no silent fallback.
+- **Authoritative owner/module:** knowledge artifact builders, governance gates, runtime-profile artifacts.
+
+```mermaid
+flowchart TD
+    TAX[ClassificationTaxonomy] --> KB[KnowledgeBundle]
+    AL[AliasMapping] --> KB
+    K1[K1 Satori DHCP] --> KB
+    K2[K2A/K2B p0f] --> KB
+    K3[K3 Portal rules] --> KB
+    K4[K4 IEEE registry] --> KB
+    PROV[Provenance + freshness] --> KB
+    KB --> REQ[Classification request]
+    POL[ClassificationPolicy] --> REQ
+    AD[EvidenceAdapterContractSet] --> REQ
+```
+
+#### DF-08 — Runtime profile / admission lifecycle
+
+- **Purpose:** make candidate/accepted/admitted/active states visibly different.
+- **Inputs:** immutable foundation/classifier artifacts and acceptance proofs.
+- **Outputs:** one active pinned runtime profile.
+- **Persistence boundary:** dedicated control-plane SQLite.
+- **Failure behavior:** compatibility/predecessor/validity failure blocks activation; no mixed generation.
+- **Authoritative owner/module:** runtime-profile/control-plane admission code.
+
+```mermaid
+flowchart TD
+    FA[Foundation artifacts] --> FRP[FoundationRuntimeProfile candidate]
+    FRP --> FACC[Foundation acceptance/admission]
+    FACC --> FACT[Foundation profile admitted/active]
+
+    FACT --> CRPC[ClassificationRuntimeProfile candidate]
+    K[Knowledge + Policy + Adapters + Classifier] --> CRPC
+    CRPC --> TAC[Task-04 acceptance]
+    TAC --> RPM[RuntimeProfileAdmissionManifest]
+    RPM --> ACT[Activation]
+    ACT --> PIN[Pinned PRODUCTION ClassificationRuntimeProfile]
+
+    C[candidate] -.not equal.-> A[accepted]
+    A -.not equal.-> AD[admitted]
+    AD -.not equal.-> AC[active]
+```
+
+#### DF-09 — Artifact / audit lineage
+
+- **Purpose:** show why a retained result can be reproduced and explained.
+- **Inputs:** exact request artifacts and activation lineage.
+- **Outputs:** retained result with immutable references.
+- **Persistence boundary:** control-plane + classification audit persistence.
+- **Failure behavior:** missing/inconsistent lineage fails closed; random “latest settings” are not substituted.
+- **Authoritative owner/module:** artifact/control-plane + classification persistence.
+
+```mermaid
+flowchart TD
+    SR[SnapshotRecord] --> CRM[ClassificationRequestManifest]
+    KB[KnowledgeBundle] --> CRM
+    POL[ClassificationPolicy] --> CRM
+    CAM[ClassifierArtifactManifest] --> CRM
+    RP[ClassificationRuntimeProfile] --> CRM
+    ACT[Admission / Activation lineage] --> RP
+    CRM --> CR[ClassificationResult]
+```
+
+#### DF-10 — Post-Auth integration / worker
+
+- **Purpose:** show the durable production classification trigger.
+- **Inputs:** confirmed authorization plus exact identity/session context.
+- **Outputs:** persisted production classification linked where exact identity permits.
+- **Persistence boundary:** integration SQLite + classification/control-plane stores.
+- **Failure behavior:** bounded retry, lease recovery and terminal no-result; Auth remains independent.
+- **Authoritative owner/module:** `app/device_fingerprint_integration/`, `fingerprint-classification.service`.
+
+```mermaid
+flowchart TD
+    A[Auth success] --> J[Create Integration Job]
+    J --> P[PENDING]
+    P --> DUE[due]
+    DUE --> L[LEASED]
+    L --> W[Single durable worker]
+    W --> ID[Exact identity/session resolution]
+    ID --> RP[Pin admitted ClassificationRuntimeProfile]
+    RP --> S[Assemble snapshot]
+    S --> C[Classify]
+    C --> PS[Persist ClassificationResult]
+    PS --> OK[CLASSIFIED]
+    OK --> LINK[Device / Visit linkage where proven]
+
+    ID -->|temporary unresolved| RETRY[bounded retry]
+    S -->|typed/retryable failure| RETRY
+    C -->|typed/retryable failure| RETRY
+    RETRY --> P
+    RETRY -->|attempt/horizon exhausted| NR[NO_RESULT_FINAL]
+```
+
+#### DF-11 — Device classification history
+
+- **Purpose:** distinguish Device identity from repeated classification history.
+- **Inputs:** successive auth/visit opportunities for one Site+MAC.
+- **Outputs:** retained classification history and one current production selection.
+- **Persistence boundary:** classification SQLite retains multiple results.
+- **Failure behavior:** a failed/new opportunity does not rewrite older retained evidence.
+- **Authoritative owner/module:** classification persistence/read + Task-05 relation.
+
+```mermaid
+flowchart TD
+    DEV[Device — one Site + MAC]
+    DEV --> V1[Visit #1]
+    DEV --> V2[Visit #2]
+    DEV --> V3[Visit #3]
+    V1 --> R1[ClassificationResult #1]
+    V2 --> R2[ClassificationResult #2]
+    V3 --> R3[ClassificationResult #3]
+    R1 --> SEL[latest authoritative PRODUCTION result]
+    R2 --> SEL
+    R3 --> SEL
+    SEL --> UI[current Device Card / Home]
+```
+
+#### DF-12 — Admin presentation read path
+
+- **Purpose:** show the one authoritative read path shared by product surfaces.
+- **Inputs:** persisted PRODUCTION ClassificationResult.
+- **Outputs:** compact Home Type and detailed Device Card fingerprint information.
+- **Persistence boundary:** read-only; no UI writes/classification.
+- **Failure behavior:** fail-soft presentation on read failure.
+- **Authoritative owner/module:** classification read + Admin fingerprint presentation service.
+
+```mermaid
+flowchart TD
+    DB[(Classification SQLite)] --> PR[production-only read]
+    PR --> PA[typed presentation adapter]
+    PA --> AQ[AdminQueryService]
+    AQ --> H[Home → Online Devices]
+    AQ --> D[Device Card]
+
+    H --> HT["Type = Fingerprint device_class"]
+    H --> HP["Platform = controller device_type"]
+
+    D --> CP["Controller Platform"]
+    D --> FI["Fingerprint Information"]
+```
+
+#### DF-13 — UI state semantics
+
+- **Purpose:** make no-result/Unknown/Unavailable unambiguous.
+- **Inputs:** production read state + dimension status.
+- **Outputs:** stable human-facing presentation.
+- **Persistence boundary:** none.
+- **Failure behavior:** read failure maps to Unavailable/— without breaking core page data.
+- **Authoritative owner/module:** Admin fingerprint presentation.
+
+```mermaid
+flowchart TD
+    Q{Fingerprint read available?}
+    Q -->|no| U[Unavailable]
+    Q -->|yes| R{PRODUCTION result exists?}
+    R -->|no| DASH[—]
+    R -->|yes| D{dimension resolved?}
+    D -->|yes| V[display resolved value]
+    D -->|no| K[Unknown]
+```
+
+#### DF-14 — Failure isolation
+
+- **Purpose:** show that Device Fingerprint is advisory and fail-soft to the rest of CaptivPortal.
+- **Inputs:** possible sensor/store/classifier/worker/read failures.
+- **Outputs:** degraded/unavailable fingerprint only.
+- **Persistence boundary:** failures may be retained in domain history/telemetry; they do not mutate Auth decisions.
+- **Failure behavior:** core Auth/CAPPORT/Admin/Traffic continue according to their own contracts.
+- **Authoritative owner/module:** subsystem boundaries + Admin fail-soft adapter.
+
+```mermaid
+flowchart LR
+    SF[Sensor failure] --> FD[Fingerprint degraded / unavailable]
+    DBF[Fingerprint DB failure] --> FD
+    CF[Classifier unavailable] --> FD
+    WF[Worker retry/failure] --> FD
+
+    AUTH[Auth continues]
+    CAP[CAPPORT continues]
+    ADM[Admin core continues]
+    TR[Traffic/current-state continue]
+
+    FD -.does not control.-> AUTH
+    FD -.does not control.-> CAP
+    FD -.does not control.-> ADM
+    FD -.does not control.-> TR
+```
+
+#### DF-15 — Production components and stores
+
+- **Purpose:** show runtime ownership.
+- **Inputs:** main Auth lifecycle plus passive evidence.
+- **Outputs:** classification and read-only Admin presentation.
+- **Persistence boundary:** four dedicated Device Fingerprint SQLite domains.
+- **Failure behavior:** independent components fail without changing Authorization semantics.
+- **Authoritative owner/module:** deployment templates + integration/classification services.
+
+```mermaid
+flowchart TD
+    CP[captive-portal.service]
+    FW[fingerprint-classification.service]
+    FE[fingerprint-evidence.service]
+    FS[fingerprint-sensor.service]
+    SU[fingerprint-suricata.service]
+
+    E[(Evidence SQLite)]
+    C[(Classification SQLite)]
+    P[(Control Plane SQLite)]
+    I[(Integration SQLite)]
+
+    FS --> E
+    SU --> FS
+    FE --> E
+    CP --> I
+    FW --> I
+    FW --> E
+    FW --> P
+    FW --> C
+    C --> CP
+    CP --> ADMIN[Admin read consumers]
+```
+
+#### DF-16 — Current Device Fingerprint vs future Traffic Enrichment
+
+- **Purpose:** prevent two initiatives from being conflated.
+- **Inputs:** current classification data vs future traffic/activity intelligence.
+- **Outputs:** richer future Device Card without changing what “fingerprint” means.
+- **Persistence boundary:** future initiative requires its own approved architecture.
+- **Failure behavior:** future work cannot silently expand current fingerprint semantics.
+- **Authoritative owner/module:** current Device Fingerprint docs; future Architect/roadmap for enrichment.
+
+```mermaid
+flowchart TD
+    DF["CURRENT — Device Fingerprint"] --> ID["identity / classification data"]
+    TE["FUTURE — Device Traffic Enrichment"] --> TI["traffic / activity / protocol / quality / behavior / anomaly data"]
+    ID --> CARD[Richer Device Card]
+    TI --> CARD
+```
+
+### Current vs future Device Traffic Intelligence
+
+Device Traffic Enrichment / Device Intelligence is a **separate program**. The
+accepted v0.3 architecture does not change Device Fingerprint semantics.
+
+Current program state:
+
+```text
+DTI architecture = FINAL / TECH LEAD ACCEPTED
+TASK-DTI-00 = APPROVED FOR SYSADMIN RESEARCH
+TASK-DTI-00 mode = RESEARCH / LAB / INVENTORY
+Implementation = NO
+Coder action = HOLD
+Production feature activation = NO
+Production configuration change = NO
+```
+
+DTI-00 proves the real SPAN/capture path before any implementation: topology,
+direction, L2 identity, VLAN/Site binding, pre/post-NAT placement, host capture
+path, drops/completeness evidence, resource baseline and coexistence with the
+accepted Fingerprint sensor. It does not implement DTI.
+
+The exact engineering contract remains in
+[`docs/modules/device-fingerprint.md`](docs/modules/device-fingerprint.md); the
+README now mirrors its complete visual architecture instead of hiding that
+architecture behind the link.
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
 
 ## Admin Web local asset library — historical production provenance
@@ -1156,12 +1791,7 @@ TASK-DEVICE-FINGERPRINT-05-PERF-01 CLOSED
 TASK-DEVICE-FINGERPRINT-06         PRODUCTION PASS / ADMIN VISIBLE
 ```
 
-`Device Traffic Enrichment / Device Intelligence (DTI)` is a separate
-architecture/roadmap program whose v0.3 architecture is FINAL / TECH LEAD
-ACCEPTED and whose roadmap registration is authorized. It is not part of
-TASK-DEVICE-FINGERPRINT-06. Implementation remains NOT authorized, Coder remains
-HOLD, production remains unchanged, and the next executable program step is
-TASK-DTI-00 in RESEARCH / LAB / INVENTORY mode.
+`Device Traffic Enrichment / Device Intelligence (DTI)` is a separate architecture/roadmap program. Its v0.3 architecture is **FINAL / TECH LEAD ACCEPTED** and roadmap registration is authorized. `TASK-DTI-00` is now **APPROVED FOR SYSADMIN RESEARCH** in `RESEARCH / LAB / INVENTORY` mode. Implementation remains **NO**, Coder remains **HOLD**, and production feature activation/configuration remain **NO**.
 
 ## Real second Site as a trigger
 
