@@ -126,6 +126,43 @@ def test_home_type_is_batched_separate_from_unchanged_controller(retained, statu
     assert all(set(item["fingerprint_type"]) == {"state", "value"} for item in result["items"])
 
 
+def test_completed_production_global_unknown_stays_classified_on_home_and_device_card(retained):
+    payload = shaped(retained, "unknown").result.semantic_payload
+    payload["global_classification_status"] = "unknown"
+    result = make_artifact_content("ClassificationResult", payload)
+    record = ClassificationReadRecord(
+        replace(retained.core, classification_result_id=result.artifact_id,
+                classification_result_digest=result.content_sha256), result)
+    assert record.core.execution_context == "PRODUCTION"
+    projection = present_classification(record)
+    assert projection.state == "classified"
+    assert projection.global_classification_status == "unknown"
+    assert projection.compact_type() == {"state": "classified", "value": "Unknown"}
+
+    class AndroidController(CurrentSource):
+        def list_current_clients(self, site, **kwargs):
+            return CurrentClientPage(snapshot(), (client_item(device_type="Android"),), None)
+
+    adapter = DeviceFingerprintPresentationService(ProductionReader(record))
+    home = service(AndroidController())
+    home._fingerprint = adapter
+    item = home.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
+    assert item["device_type"] == "Android"
+    assert item["fingerprint_type"] == {"state": "classified", "value": "Unknown"}
+    assert item["fingerprint_type"]["value"] != item["device_type"]
+
+    device, _, _, _ = _service()
+    device._fingerprint = adapter
+    card = device.device_detail(AdminPrincipal("operator"), SITE_ID, DEVICE_ID).result
+    assert card["identity"]["device_type"] == "phone"
+    assert card["fingerprint"]["state"] == "classified"
+    assert card["fingerprint"]["state"] != "unavailable"
+    assert card["fingerprint"]["global_classification_status"] == "unknown"
+    assert card["fingerprint"]["device_class_result"]["status"] == "unknown"
+    assert card["fingerprint"]["device_class_result"]["value"] == "Unknown"
+    assert card["fingerprint"]["device_class_result"]["value"] != card["identity"]["device_type"]
+
+
 @pytest.mark.parametrize("failure", ["storage", "candidate", "site", "malformed", "missing_db"])
 def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_path, failure):
     class BadReader(ProductionReader):

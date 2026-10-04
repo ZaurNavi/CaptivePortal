@@ -58,6 +58,14 @@ assert(diagnostics["Knowledge references"].includes("record-1"));
 assert(diagnostics["Knowledge references"].includes("bundle-digest-1"));
 const controller = ui.deviceIdentityEntries({device_type: "Android", device_type_key: "android"});
 assert.strictEqual(controller.find(row => row[0] === "Controller Platform")[1], "Android");
+const completedUnknown = ui.fingerprintSummaryEntries({...fingerprint,
+  global_classification_status: "unknown",
+  device_class_result: {...dimension, value: "Unknown", status: "unknown", canonical_value_id: null, support_level: "none"}});
+assert.strictEqual(completedUnknown[0][1], "unknown");
+assert.notStrictEqual(completedUnknown[0][1], "Unavailable");
+assert.strictEqual(completedUnknown[2][1], "Unknown");
+assert.strictEqual(completedUnknown[2][3], null);
+assert.notStrictEqual(completedUnknown[2][1], controller.find(row => row[0] === "Controller Platform")[1]);
 '''
     completed = subprocess.run([NODE, "-e", program, str(script)], capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr

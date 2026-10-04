@@ -70,7 +70,7 @@ def present_classification(record: ClassificationReadRecord | None) -> Fingerpri
     parse_utc(record.core.classified_at_utc)
     payload = record.result.semantic_payload
     global_status = payload["global_classification_status"]
-    if global_status not in {"classified", "partial", "recognized_out_of_scope", "insufficient_evidence", "conflicting_evidence"}:
+    if global_status not in {"classified", "partial", "unknown", "recognized_out_of_scope", "insufficient_evidence", "conflicting_evidence"}:
         raise ValueError("Invalid fingerprint global status")
     dimensions = {}
     for name, dimension in _DIMENSIONS.items():
