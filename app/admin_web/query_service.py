@@ -39,7 +39,9 @@ from app.analytics import (
 from app.analytics.validation import format_utc
 from app.common.mac import format_mac_colon
 from app.common.device_type import normalize_device_type_key
-from .device_fingerprint_presentation import DeviceFingerprintPresentationService
+from .device_fingerprint_presentation import (
+    DeviceFingerprintPresentationService, home_platform_presentation,
+)
 from app.current_state import (
     CurrentStateSchemaError,
     CurrentStateStorageError,
@@ -576,7 +578,12 @@ class AdminQueryService:
                 raise AdminQueryValidationError() from exc
             fingerprints = self._fingerprint.get_many(site_id, tuple(item["client_mac"] for item in result["items"]))
             for item in result["items"]:
-                item["fingerprint_type"] = fingerprints[item["client_mac"]].compact_type()
+                fingerprint = fingerprints[item["client_mac"]]
+                item["fingerprint_type"] = fingerprint.compact_type()
+                item["fingerprint_platform"] = fingerprint.compact_platform()
+                item["platform_presentation"] = home_platform_presentation(
+                    item["device_type"], item["device_type_key"], item["fingerprint_platform"],
+                )
             return AdminQueryResponse(result, page)
 
         return self._run(query)

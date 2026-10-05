@@ -208,6 +208,13 @@ input[type="radio"] { width: auto; min-height: 0; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin: 1.25rem 0 .75rem; }
 .section-heading h2 { margin: 0; }
 .live-metric { grid-column: auto; }
+.live-metrics > .live-metric { grid-column: auto; padding-block: .75rem; }
+.live-metrics > .live-metric h2 { min-height: 3.75em; font-size: 1rem; line-height: 1.25; margin: 0 0 .25rem; overflow-wrap: anywhere; }
+.live-metrics > .live-metric .metric { line-height: 1.15; margin: 0; }
+.live-metrics > .live-metric .live-detail { margin-top: .2rem; }
+#home-traffic .metric[data-traffic-tone="good"] { color: #15803d; }
+#home-traffic .metric[data-traffic-tone="warning"] { color: #9a6700; }
+#home-traffic .metric[data-traffic-tone="danger"] { color: var(--danger); }
 .live-detail { margin: .35rem 0 0; color: var(--muted); font-size: .85rem; }
 .live-section { margin-bottom: 1rem; }
 .live-inline-state { margin: .5rem 0; color: var(--muted); }

@@ -55,11 +55,34 @@ class FingerprintPresentation:
         return {"state": self.state,
                 "value": self.device_class_result.value if self.device_class_result else "—"}
 
+    def compact_platform(self) -> dict[str, Any]:
+        platform = self.platform_result
+        return {"state": self.state,
+                "status": platform.status if platform else None,
+                "canonical_value_id": platform.canonical_value_id if platform else None,
+                "value": platform.value if platform else "—"}
+
     def as_dict(self) -> dict[str, Any]:
         return {"state": self.state, "global_classification_status": self.global_classification_status,
                 "classified_at_utc": self.classified_at_utc,
                 **{name: getattr(self, name).as_dict() if getattr(self, name) else None
                    for name in _DIMENSIONS}}
+
+
+def home_platform_presentation(
+    controller_value: str | None, controller_key: str | None,
+    fingerprint_platform: dict[str, Any],
+) -> dict[str, Any]:
+    """Home-only precedence; Device Card continues to expose separate sources."""
+    if controller_key is not None and controller_key != "unknown":
+        return {"source": "controller", "value": controller_value, "key": controller_key}
+    if (fingerprint_platform["state"] == "classified"
+            and fingerprint_platform["status"] == "resolved"
+            and fingerprint_platform["canonical_value_id"] is not None):
+        return {"source": "fingerprint", "value": fingerprint_platform["value"],
+                "key": fingerprint_platform["canonical_value_id"]}
+    unresolved = controller_key == "unknown" or fingerprint_platform["state"] == "classified"
+    return {"source": "none", "value": "Unknown" if unresolved else "—", "key": None}
 
 
 def present_classification(record: ClassificationReadRecord | None) -> FingerprintPresentation:

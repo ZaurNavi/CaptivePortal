@@ -213,7 +213,7 @@ assert(headerRow.cells[1].className === "live-fingerprint-type-header", "Home fi
 assert(headerRow.cells[2].textContent === "Platform" && headerRow.cells[2].className === "live-device-type-header", "Home controller Platform stays separate");
 api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
 assert(headerRow.cells.length === 11, "Home Type/Platform header preparation is idempotent");
-const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null};
+const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null, platform_presentation: {source: "controller", value: " Android ", key: "android"}};
 const androidPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: " Android ", device_type_key: "android"});
 assert(androidPresentation.fingerprintType.textContent === "—", "controller platform cannot backfill missing fingerprint Type");
 const resolvedFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", value: "Laptop"}});
@@ -222,12 +222,28 @@ const unknownFingerprint = api.clientPresentationCells(presentationNode, {...pre
 assert(unknownFingerprint.fingerprintType.textContent === "Unknown", "completed unresolved Type differs from missing value");
 assert(androidPresentation.deviceType.children.length === 1 && androidPresentation.deviceType.children[0].tag === "img", "Home Android canonical key renders SVG");
 assert(androidPresentation.deviceType.attributes["aria-label"] === " Android ", "Home Android presentation preserves raw label");
-const missingPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null});
-assert(missingPresentation.deviceType.children[0].textContent === "NULL", "Home missing Type renders NULL");
-const phonePresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "phone", device_type_key: "phone"});
+const missingPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, platform_presentation: {source: "none", value: "—", key: null}});
+assert(missingPresentation.deviceType.children[0].textContent === "—", "Home absent controller and fingerprint remain absent");
+const phonePresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "phone", device_type_key: "phone", platform_presentation: {source: "controller", value: "phone", key: "phone"}});
 assert(phonePresentation.deviceType.children[0].textContent === "phone" && phonePresentation.deviceType.children[0].tag === "span", "Home non-Android Type renders raw value without icon");
-const invalidAndroidKeyPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "Android"});
+const invalidAndroidKeyPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "Android", platform_presentation: {source: "controller", value: "Android", key: "Android"}});
 assert(invalidAndroidKeyPresentation.deviceType.children[0].textContent === "Android" && invalidAndroidKeyPresentation.deviceType.children[0].tag === "span", "Home non-canonical Android key does not render Android icon");
+for (const platform of [
+  {source: "controller", value: "Android", key: "android"},
+  {source: "fingerprint", value: "Android", key: "android"},
+  {source: "controller", value: "Windows", key: "windows"},
+  {source: "none", value: "Unknown", key: null},
+  {source: "none", value: "—", key: null},
+]) {
+  const rendered = api.clientPresentationCells(presentationNode, {...presentationBase,
+    device_type: "Android", device_type_key: "android", platform_presentation: platform});
+  assert((rendered.deviceType.children[0].tag === "img") === (platform.key === "android"), "icon uses effective key only, not raw controller or source");
+  assert(platform.key === "android" ? rendered.deviceType.attributes["aria-label"] === platform.value
+    : rendered.deviceType.children[0].textContent === platform.value, "server platform value is authoritative without visible provenance");
+}
+const noPlatformObject = api.clientPresentationCells(presentationNode, {...presentationBase,
+  device_type: " Android ", device_type_key: "android", platform_presentation: null});
+assert(noPlatformObject.deviceType.children[0].tag === "span" && noPlatformObject.deviceType.children[0].textContent === "—", "browser never recreates controller/fingerprint precedence");
 const snrGood = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 25});
 const snrGoodAbove = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 31});
 const snrWarningLow = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 15});

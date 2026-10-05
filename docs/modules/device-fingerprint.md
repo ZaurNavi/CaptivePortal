@@ -860,7 +860,7 @@ transaction and bounded grouped SELECTs, not one connection/query per device row
 
 **Purpose:** show the one authoritative read path shared by product surfaces.
 **Inputs:** persisted PRODUCTION ClassificationResult.
-**Outputs:** compact Home Type and detailed Device Card fingerprint information.
+**Outputs:** compact Home Type/Platform and detailed Device Card fingerprint information.
 **Persistence boundary:** read-only; no UI writes/classification.
 **Failure behavior:** fail-soft presentation on read failure.
 **Authoritative owner/module:** classification read + Admin fingerprint presentation service.
@@ -874,7 +874,7 @@ flowchart TD
     AQ --> D[Device Card]
 
     H --> HT["Type = Fingerprint device_class"]
-    H --> HP["Platform = controller device_type"]
+    H --> HP["Platform = Controller-first; resolved Fingerprint fallback"]
 
     D --> CP["Controller Platform"]
     D --> FI["Fingerprint Information"]
@@ -887,7 +887,7 @@ Current Home column semantics:
 ```text
 Device / MAC
 Type       = fingerprint device_class
-Platform   = existing controller / Omada device_type presentation
+Platform   = Controller-first; resolved PRODUCTION Fingerprint fallback only
 Auth
 IP
 AP
@@ -898,9 +898,21 @@ Uptime
 Traffic
 ```
 
-The old backend fields remain `device_type` / `device_type_key`; their current
-product meaning is **Controller Platform**. The existing Android icon and canonical
-lexical key still apply to that controller value.
+Backend `device_type` / `device_type_key` remain unchanged Controller evidence.
+Home uses Controller when its key is neither null nor `unknown`; otherwise only
+resolved authoritative PRODUCTION Fingerprint Platform is eligible. Other keys
+are not heuristically reinterpreted. Both compact projections use the same
+bounded Site-scoped PRODUCTION batch. The server composes
+`platform_presentation = {source, value, key}` (`controller|fingerprint|none`);
+the browser renders its value and uses exact effective key `android` for the icon.
+No visible provenance badge or browser normalization is added.
+
+Explicit Controller Unknown or completed unresolved Fingerprint renders
+`Unknown`; absent Controller plus no-result/unavailable Fingerprint renders
+`—`. Fingerprint failures remain fail-soft and never suppress usable Controller
+data. Type never falls back to Controller; Device Card source separation below
+is unchanged. This HOME-UX-REFINEMENT-01 repository behavior does not claim a new
+production deployment.
 
 Permanent product rule:
 
