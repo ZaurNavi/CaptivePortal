@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import json
+from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -612,6 +613,27 @@ def test_home_template_delivers_traffic_only_when_enabled(tmp_path):
     text = client.get(f"/admin/sites/{SITE_ID}/", base_url="https://localhost").get_data(as_text=True)
     assert 'data-home-traffic-enabled="true"' in text
     assert "Download Now" in text and "not an Internet-only measurement" in text
+    assert text.index('id="live-ap-warning"') < text.index('id="devices-now-title"') < text.index('id="home-traffic"')
+    for hook in (
+        "live-online", "live-authorized", "live-pending", "live-other-unknown", "live-ap-total",
+        "live-client-freshness", "live-other-detail", "live-ap-detail", "live-ap-freshness",
+        "live-client-filters", "live-ssid-label", "live-client-state", "live-client-rows", "live-client-more",
+        "traffic-state", "traffic-download", "traffic-upload", "traffic-total", "traffic-freshness",
+        "traffic-coverage", "traffic-ap-title", "traffic-ap-rows", "traffic-ap-more",
+    ):
+        assert text.count(f'id="{hook}"') == 1
+    assert text.index('id="traffic-now-title"') < text.index('id="traffic-ap-title"')
+    assert 'aria-label="Online devices table" tabindex="0"' in text
+    template = (Path(__file__).parents[2] / "app/admin_web/templates/admin/home.html").read_text(encoding="utf-8")
+    remaining = ["home-activity", "home-ap-24h", "by-ap-title", "aps-now-title"]
+    assert [template.index(f'id="{hook}"') for hook in remaining] == sorted(
+        template.index(f'id="{hook}"') for hook in remaining)
+    assert template.index('id="live-client-more"') < template.index('id="home-traffic"')
+    css = (Path(__file__).parents[2] / "app/admin_web/static/admin.css").read_text(encoding="utf-8")
+    assert '.live-metrics > .live-metric h2' in css
+    assert 'grid-template-columns: repeat(5, minmax(0, 1fr))' in css
+    for tone in ("good", "warning", "danger"):
+        assert f'#home-traffic .metric[data-traffic-tone="{tone}"]' in css
     disabled = traffic_app(tmp_path, source, logging.getLogger("traffic-template-off"), traffic="false")
     other = disabled.test_client(); assert login(other).status_code == 302
     text = other.get(f"/admin/sites/{SITE_ID}/", base_url="https://localhost").get_data(as_text=True)

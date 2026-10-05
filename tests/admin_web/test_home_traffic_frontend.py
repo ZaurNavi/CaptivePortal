@@ -73,7 +73,30 @@ function page(result) {
 const valid = summary();
 assert(api.validateTrafficSummary(valid, site) !== null, "valid summary accepted");
 assert(api.formatMbps(0) === "0.00 Mbps" && api.formatMbps(null) === "—", "exact zero is preserved");
-assert(api.trafficDisplay(valid.result, "fresh").download === "42.13 Mbps", "numeric current display");
+assert(api.trafficDisplay(valid.result, "fresh").download === "↓ 42.13 Mbps", "numeric current display");
+for (const [value, tone] of [[0, "good"], [49.99, "good"], [50, "good"],
+  [50.01, "warning"], [70, "warning"], [70.01, "danger"]]) {
+  const shown = api.trafficMetricPresentation(value, "↓");
+  assert(shown.value === `↓ ${value.toFixed(2)} Mbps` && shown.tone === tone, "exact numeric threshold and zero");
+}
+const independent = copy(valid.result);
+independent.traffic = {download_mbps: 50, upload_mbps: 70, total_mbps: 120, unit: "Mbps"};
+const independentShown = api.trafficDisplay(independent, "fresh");
+assert(independentShown.download === "↓ 50.00 Mbps" && independentShown.downloadTone === "good", "download arrow and tone");
+assert(independentShown.upload === "↑ 70.00 Mbps" && independentShown.uploadTone === "warning", "upload arrow and tone");
+assert(independentShown.total === "↓↑ 120.00 Mbps" && independentShown.totalTone === "danger", "total double arrow and independent tone");
+const roundedBoundary = api.trafficMetricPresentation(50.001, "↑");
+assert(roundedBoundary.value === "↑ 50.00 Mbps" && roundedBoundary.tone === "warning", "tone comes from numeric value, not rounded text");
+const metricNode = {textContent: "", dataset: {}};
+api.renderTrafficMetric(metricNode, independentShown.total, independentShown.totalTone);
+assert(metricNode.dataset.trafficTone === "danger", "numeric line receives semantic tone");
+api.renderTrafficMetric(metricNode, "—", null);
+assert(metricNode.textContent === "—" && !Object.hasOwn(metricNode.dataset, "trafficTone"), "unavailable clears previous tone");
+for (const result of [null, valid.result]) {
+  const shown = api.trafficDisplay(result, "unavailable");
+  assert([shown.download, shown.upload, shown.total].every(value => value === "—"), "unavailable remains neutral without arrows");
+  assert([shown.downloadTone, shown.uploadTone, shown.totalTone].every(value => value === null), "unavailable has no severity");
+}
 assert(api.trafficDisplay(valid.result, "unavailable").download === "—", "local unavailable hides numeric values");
 assert(api.trafficFreshness(valid.result.snapshot, valid.result.freshness_policy, 1000, 73001) === "stale", "fresh progresses to stale");
 assert(api.trafficFreshness(valid.result.snapshot, valid.result.freshness_policy, 1000, 163001) === "unavailable", "stale progresses to unavailable");
@@ -88,6 +111,7 @@ partial.result.coverage.missing_rate_ap_count = 1;
 partial.result.traffic.upload_mbps = null; partial.result.traffic.total_mbps = null;
 assert(api.validateTrafficSummary(partial, site) !== null, "partial direction accepted");
 assert(api.trafficDisplay(partial.result, "fresh").label === "Observed subtotal", "partial values are labeled");
+assert(api.trafficDisplay(partial.result, "fresh").uploadTone === null && api.trafficDisplay(partial.result, "fresh").totalTone === null, "missing directions are neutral");
 
 const empty = summary();
 empty.result.snapshot.empty_population = true;

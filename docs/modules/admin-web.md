@@ -35,11 +35,13 @@ error mapping.
 
 ## Task-06 — advisory Device Fingerprint presentation
 
-Home Online Devices keeps the existing controller/source `device_type` and
-`device_type_key` normalization and Android icon, now labeled **Platform**.
+Home Online Devices keeps controller `device_type` / `device_type_key` evidence
+unchanged. **Platform** is Controller-first, with resolved PRODUCTION Fingerprint
+fallback only when the Controller key is null or `unknown`.
 The separate **Type** column comes only from persisted PRODUCTION fingerprint
 `device_class_result`. Controller Platform never backfills fingerprint Type.
-Home exposes only the compact fingerprint state/value, not diagnostics.
+Home exposes compact Type and Platform projections from the same batch, not
+diagnostics; effective Platform precedence is composed on the server.
 
 Device Card labels controller/source data **Controller Platform** and adds a
 separate **Fingerprint Information** card: Status, Classified at, Type,
@@ -59,7 +61,8 @@ All access remains within existing Site-authorized Admin APIs.
 
 No authoritative result is shown as `—`; a completed unresolved dimension is
 shown as `Unknown`, with its exact status retained in details. Fingerprint is
-advisory: an unavailable/corrupt classification DB yields Home Type `—` and
+advisory: an unavailable/corrupt classification DB yields Home Type `—`, preserves
+usable Controller Platform (otherwise honest `Unknown` / `—`), and
 Device Card fingerprint Status `Unavailable`, without failing core page data.
 The UI does not classify, query integration jobs, mutate persistence or trigger
 production activation.
@@ -253,7 +256,7 @@ Current Home product terminology:
 
 ```text
 Type     = fingerprint device_class
-Platform = controller / Omada device_type
+Platform = Controller-first; resolved PRODUCTION Fingerprint fallback only
 ```
 
 Controller Platform never backfills fingerprint Type. Device Card keeps
@@ -322,11 +325,15 @@ mapping, inference, separator collapsing or truncation.
 The browser consumes the server-provided key. It must not derive a Device Type
 key from raw `device_type`.
 
-Android presentation is therefore strictly:
+Controller-only Android presentation (including Device Card) remains strictly:
 
 ```javascript
 device_type_key === "android"
 ```
+
+Home instead uses the server-composed effective key (exact comparison
+`platform_presentation.key === "android"`), including resolved Fingerprint
+fallback. Controller lexical normalization itself is unchanged.
 
 The earlier browser-owned `trim().toLowerCase()` Android predicate remains
 historical evidence of TASK-WEB-ASSET-LIBRARY-01/FIX and is **superseded as a
@@ -361,7 +368,7 @@ snapshot raw type and identity raw type belong to the same Device record.
 
 ## Home Online Devices — current presentation
 
-Current production columns:
+Current repository Home columns (deployment is separately authorized):
 
 ```text
 Device / MAC
@@ -380,8 +387,30 @@ Traffic
 `Type` is the compact Device Fingerprint `device_class` presentation from the
 latest authoritative PRODUCTION `ClassificationResult`.
 
-`Platform` is the existing controller/Omada `device_type` presentation and keeps
-the `device_type_key`/Android-icon compatibility contract.
+`Platform` uses Controller first when `device_type_key` is neither null nor
+`unknown`. Otherwise only a resolved authoritative PRODUCTION Fingerprint
+platform may supply the value. Raw `device_type` and canonical `device_type_key`
+are unchanged; no other controller keys are reinterpreted. The server returns
+`platform_presentation = {source, value, key}` with source `controller`,
+`fingerprint` or `none`. Home renders that value and uses only exact effective
+key `android` for the existing icon, without a visible provenance badge or
+browser normalization.
+
+Explicit Controller Unknown or completed unresolved Fingerprint renders
+`Unknown`; absent Controller plus no-result/unavailable Fingerprint renders
+`—`. Type never falls back to Controller. Both compact Fingerprint projections
+come from the same bounded, Site-scoped PRODUCTION batch; no second query or
+per-device read is added. Device Card continues to show Controller Platform and
+Fingerprint Platform separately, even when they disagree.
+
+`HOME-UX-REFINEMENT-01` moves Online Devices, including filters and pagination,
+before Traffic Now; the remaining panels keep their relative order. Only Home
+`.live-metrics` summary cards have denser spacing and aligned values; responsive
+breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
+independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
+Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
+page semantics are unchanged. This describes repository implementation, not a
+new production deployment or visual-acceptance claim.
 
 ```text
 Type != Platform

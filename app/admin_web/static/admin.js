@@ -5045,25 +5045,23 @@
     const fingerprintType = createNode("td", "live-fingerprint-type-cell",
       item.fingerprint_type && typeof item.fingerprint_type.value === "string" ? item.fingerprint_type.value : "—");
     const deviceType = createNode("td", "live-device-type-cell");
-    if (item.device_type_key === "android") {
+    const platform = item.platform_presentation;
+    const platformValue = platform && typeof platform.value === "string" ? platform.value : "—";
+    if (platform && platform.key === "android") {
       const icon = createNode("img", "device-type-icon");
       icon.src = "/admin/static/icons/platforms/android.svg";
       icon.alt = "";
       icon.width = 18;
       icon.height = 11;
       icon.setAttribute("aria-hidden", "true");
-      const label = typeof item.device_type === "string" && item.device_type !== "" ? item.device_type : "Android";
+      const label = platformValue;
       deviceType.setAttribute("aria-label", label);
       deviceType.title = label;
       deviceType.append(icon);
-    } else if (item.device_type_key === null && item.device_type === null) {
-      const missing = createNode("span", "live-device-type-null", "NULL");
-      missing.title = "Device type unavailable";
-      deviceType.append(missing);
     } else {
-      const raw = createNode("span", "live-device-type-raw", item.device_type);
-      if (typeof item.device_type === "string" && item.device_type !== "") raw.title = item.device_type;
-      deviceType.append(raw);
+      const value = createNode("span", "live-device-type-raw", platformValue);
+      value.title = platformValue;
+      deviceType.append(value);
     }
 
     const auth = createNode(
@@ -5659,13 +5657,25 @@
     return age <= policy.fresh_max_age_seconds ? "fresh" : "stale";
   }
   function formatMbps(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
+  function trafficMetricPresentation(value, arrow) {
+    if (value === null) return {value: "—", tone: null};
+    return {value: `${arrow} ${formatMbps(value)}`,
+      tone: value <= 50 ? "good" : value <= 70 ? "warning" : "danger"};
+  }
+  function renderTrafficMetric(element, value, tone) {
+    element.textContent = value;
+    if (tone === null) delete element.dataset.trafficTone;
+    else element.dataset.trafficTone = tone;
+  }
   function trafficDisplay(result, effectiveFreshness) {
-    if (!result || effectiveFreshness === "unavailable") return {download: "—", upload: "—", total: "—", label: "", downloadLabel: "", uploadLabel: "", totalLabel: "", state: "Unavailable"};
+    if (!result || effectiveFreshness === "unavailable") return {download: "—", upload: "—", total: "—", downloadTone: null, uploadTone: null, totalTone: null, label: "", downloadLabel: "", uploadLabel: "", totalLabel: "", state: "Unavailable"};
     const partial = result.coverage.coverage_status === "partial";
+    const download = trafficMetricPresentation(result.traffic.download_mbps, "↓");
+    const upload = trafficMetricPresentation(result.traffic.upload_mbps, "↑");
+    const total = trafficMetricPresentation(result.traffic.total_mbps, "↓↑");
     return {
-      download: formatMbps(result.traffic.download_mbps),
-      upload: formatMbps(result.traffic.upload_mbps),
-      total: formatMbps(result.traffic.total_mbps),
+      download: download.value, upload: upload.value, total: total.value,
+      downloadTone: download.tone, uploadTone: upload.tone, totalTone: total.tone,
       label: partial ? "Observed subtotal" : "",
       downloadLabel: partial && result.traffic.download_mbps !== null ? "Observed subtotal" : "",
       uploadLabel: partial && result.traffic.upload_mbps !== null ? "Observed subtotal" : "",
@@ -5775,6 +5785,7 @@
       runActivityPhase, runEligiblePhasedCycle, sourceEligible,
       trafficFailureTransition,
       trafficAge, trafficDisplay, trafficFreshness, trafficPageEligible,
+      trafficMetricPresentation, renderTrafficMetric,
       validateTrafficPage, validateTrafficSummary,
       combinedCoordinatorEnabled,
     });
@@ -6016,7 +6027,7 @@
     document.getElementById("traffic-state").dataset.state = state || "warning";
   }
   function clearTrafficCurrent(message) {
-    ["traffic-download", "traffic-upload", "traffic-total"].forEach((id) => { document.getElementById(id).textContent = "—"; });
+    ["traffic-download", "traffic-upload", "traffic-total"].forEach((id) => { renderTrafficMetric(document.getElementById(id), "—", null); });
     ["traffic-download-label", "traffic-upload-label", "traffic-total-label"].forEach((id) => { document.getElementById(id).textContent = ""; });
     document.getElementById("traffic-freshness").textContent = "Unavailable";
     document.getElementById("traffic-coverage").textContent = "Coverage unavailable";
@@ -6030,9 +6041,9 @@
     const result = sources.traffic.summary;
     const effective = result ? trafficFreshness(result.snapshot, result.freshness_policy, sources.traffic.acceptedAt, performance.now()) : "unavailable";
     const shown = trafficDisplay(result, effective);
-    document.getElementById("traffic-download").textContent = shown.download;
-    document.getElementById("traffic-upload").textContent = shown.upload;
-    document.getElementById("traffic-total").textContent = shown.total;
+    renderTrafficMetric(document.getElementById("traffic-download"), shown.download, shown.downloadTone);
+    renderTrafficMetric(document.getElementById("traffic-upload"), shown.upload, shown.uploadTone);
+    renderTrafficMetric(document.getElementById("traffic-total"), shown.total, shown.totalTone);
     document.getElementById("traffic-download-label").textContent = shown.downloadLabel;
     document.getElementById("traffic-upload-label").textContent = shown.uploadLabel;
     document.getElementById("traffic-total-label").textContent = shown.totalLabel;

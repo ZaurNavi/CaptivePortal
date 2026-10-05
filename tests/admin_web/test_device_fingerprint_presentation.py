@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.admin_web.device_fingerprint_presentation import (
-    DeviceFingerprintPresentationService, present_classification,
+    DeviceFingerprintPresentationService, FingerprintPresentation, present_classification,
 )
 from app.admin_web.models import AdminPrincipal
 from app.admin_web.query_service import AdminQueryForbidden
@@ -80,6 +80,57 @@ def test_no_result_has_no_diagnostic_or_semantic_value():
                                    "classified_at_utc": None, **dict.fromkeys(_DIMENSIONS)}
 
 
+@pytest.mark.parametrize("state", ["no_result", "unavailable"])
+def test_compact_platform_absent_states(state):
+    assert FingerprintPresentation(state).compact_platform() == {
+        "state": state, "status": None, "canonical_value_id": None, "value": "—"}
+
+
+@pytest.mark.parametrize("status", ["resolved", "unknown", "insufficient_evidence",
+                                    "conflicting_evidence", "recognized_out_of_scope"])
+def test_compact_platform_preserves_exact_dimension_status(retained, status):
+    assert present_classification(shaped(retained, status)).compact_platform() == {
+        "state": "classified", "status": status,
+        "canonical_value_id": "android" if status == "resolved" else None,
+        "value": "Android" if status == "resolved" else "Unknown"}
+
+
+@pytest.mark.parametrize("controller,status,platform,source,value,key", [
+    ("Android", "resolved", "chromeos", "controller", "Android", "android"),
+    ("Unknown", "resolved", "android", "fingerprint", "Android", "android"),
+    (None, "resolved", "android", "fingerprint", "Android", "android"),
+    ("Windows", "resolved", "android", "controller", "Windows", "windows"),
+    ("Unknown", "unknown", "android", "none", "Unknown", None),
+    (None, "conflicting_evidence", "android", "none", "Unknown", None),
+    (None, "insufficient_evidence", "android", "none", "Unknown", None),
+    (None, "recognized_out_of_scope", "android", "none", "Unknown", None),
+    (None, None, "android", "none", "—", None),
+    ("Unknown", None, "android", "none", "Unknown", None),
+    (" Android ", "resolved", "chromeos", "controller", " Android ", "android"),
+    *[(name, "resolved", "android", "controller", name, name)
+      for name in ("other", "generic", "n/a", "unavailable", "undefined", "phone", "mobile")],
+])
+def test_home_platform_precedence_uses_same_production_batch(
+    retained, controller, status, platform, source, value, key,
+):
+    class Controller(CurrentSource):
+        def list_current_clients(self, site, **kwargs):
+            return CurrentClientPage(snapshot(), (client_item(device_type=controller),), None)
+    query = service(Controller())
+    reader = ProductionReader(shaped(retained, status, platform=platform) if status else None)
+    query._fingerprint = DeviceFingerprintPresentationService(reader)
+    item = query.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
+    assert reader.calls == [(SITE_ID, (item["client_mac"],))]
+    assert item["device_type"] == controller
+    assert item["platform_presentation"] == {"source": source, "value": value, "key": key}
+    assert item["fingerprint_platform"] == (
+        present_classification(reader.record).compact_platform())
+    assert item["fingerprint_type"] == present_classification(reader.record).compact_type()
+    with pytest.raises(AdminQueryForbidden):
+        query.list_current_clients(AdminPrincipal("operator"), "f" * 24)
+    assert len(reader.calls) == 1
+
+
 def test_adapter_rejects_unbounded_input_and_deduplicates_canonical_macs():
     reader = ProductionReader(None)
     adapter = DeviceFingerprintPresentationService(reader)
@@ -124,6 +175,9 @@ def test_home_type_is_batched_separate_from_unchanged_controller(retained, statu
     assert result["items"][1]["device_type"] == "Windows"
     assert [item["fingerprint_type"]["value"] for item in result["items"]] == [expected, expected]
     assert all(set(item["fingerprint_type"]) == {"state", "value"} for item in result["items"])
+    assert [item["platform_presentation"] for item in result["items"]] == [
+        {"source": "controller", "value": " Android ", "key": "android"},
+        {"source": "controller", "value": "Windows", "key": "windows"}]
 
 
 def test_completed_production_global_unknown_stays_classified_on_home_and_device_card(retained):
@@ -164,7 +218,8 @@ def test_completed_production_global_unknown_stays_classified_on_home_and_device
 
 
 @pytest.mark.parametrize("failure", ["storage", "candidate", "site", "malformed", "missing_db"])
-def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_path, failure):
+@pytest.mark.parametrize("controller", ["phone", "Unknown", None])
+def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_path, failure, controller):
     class BadReader(ProductionReader):
         def get_current_production_many(self, site, macs):
             if failure == "storage":
@@ -183,10 +238,18 @@ def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_pa
         from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
         reader = DeviceFingerprintClassificationReadService(tmp_path / "absent.sqlite")
     adapter = DeviceFingerprintPresentationService(reader)
-    home = service(CurrentSource())
+    class Controller(CurrentSource):
+        def list_current_clients(self, site, **kwargs):
+            return CurrentClientPage(snapshot(), (client_item(device_type=controller),), None)
+    home = service(Controller())
     home._fingerprint = adapter
     item = home.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
     assert item["name"] == "Phone" and item["fingerprint_type"] == {"state": "unavailable", "value": "—"}
+    assert item["fingerprint_platform"] == {
+        "state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"}
+    assert item["platform_presentation"] == (
+        {"source": "controller", "value": "phone", "key": "phone"} if controller == "phone"
+        else {"source": "none", "value": "Unknown" if controller else "—", "key": None})
     device, _, _, _ = _service()
     device._fingerprint = adapter
     result = device.device_detail(AdminPrincipal("operator"), SITE_ID, DEVICE_ID).result
