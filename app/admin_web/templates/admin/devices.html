@@ -7,4 +7,12 @@
   <button class="button button-secondary" type="submit">Search</button>
   <button id="clear-device-search" class="button button-quiet" type="button">Clear</button>
 </form>
+<section id="device-inventory-summary" class="card device-inventory" aria-labelledby="device-inventory-title" aria-live="polite">
+  <h2 id="device-inventory-title">Device Inventory</h2>
+  <div class="device-inventory-metrics">
+    <div><span class="device-row-label">Total Devices</span><strong id="device-inventory-total" class="metric">—</strong></div>
+    <div><span class="device-row-label">New Today</span><strong id="device-inventory-today" class="metric">—</strong></div>
+  </div>
+  <p id="device-inventory-state" class="live-detail"></p>
+</section>
 {% endblock %}

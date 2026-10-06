@@ -1,5 +1,40 @@
 (function () {
   "use strict";
+  const resolved = {
+    smartphone: ["type-smartphone.svg", "Smartphone"],
+    tablet: ["type-tablet.svg", "Tablet"],
+    laptop: ["type-laptop.svg", "Laptop"],
+  };
+  const unresolved = new Set(["unknown", "insufficient_evidence", "conflicting_evidence", "recognized_out_of_scope"]);
+  function mapping(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).sort().join(",") !== "canonical_value_id,state,status,value") return null;
+    if (value.state === "classified") {
+      if (value.status === "resolved" && Object.prototype.hasOwnProperty.call(resolved, value.canonical_value_id)) {
+        return resolved[value.canonical_value_id];
+      }
+      if (unresolved.has(value.status) && value.canonical_value_id === null) return ["type-unresolved.svg", "Device type unresolved"];
+    }
+    if (value.status === null && value.canonical_value_id === null) {
+      if (value.state === "no_result") return ["type-no-result.svg", "No device type result"];
+      if (value.state === "unavailable") return ["type-unavailable.svg", "Device type source unavailable"];
+    }
+    return null;
+  }
+  function icon(createNode, value) {
+    const selected = mapping(value);
+    if (!selected) throw {uiFailure: {kind: "unexpected", title: "Unexpected response", message: "Invalid device Type projection."}};
+    const wrapper = createNode("span", "fingerprint-type-icon");
+    wrapper.setAttribute("aria-label", selected[1]);
+    wrapper.title = selected[1];
+    const image = createNode("img");
+    image.src = "/admin/static/icons/device-types/" + selected[0];
+    image.width = 22; image.height = 22; image.alt = "";
+    image.setAttribute("aria-hidden", "true");
+    wrapper.append(image);
+    return wrapper;
+  }
+  if (typeof window !== "undefined") window.CaptivPortalDeviceTypePresentation = Object.freeze({mapping, icon});
 
   const MAC_PATTERN = /^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$/;
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -457,8 +492,11 @@
     );
 
     const type = node("span", "device-row-field device-row-type-field");
-    const typeValue = deviceTypeValue(item.device_type, item.device_type_key, "device-row-value device-row-type-value");
-    type.append(node("span", "device-row-label", "Type"), typeValue);
+    type.append(node("span", "device-row-label", "Type"),
+      window.CaptivPortalDeviceTypePresentation.icon(node, item.fingerprint_type));
+    const platform = node("span", "device-row-field device-row-platform-field");
+    platform.append(node("span", "device-row-label", "Platform"),
+      deviceTypeValue(item.platform_presentation.value, item.platform_presentation.key, "device-row-value device-row-type-value"));
 
     const lastSeen = node("span", "device-row-field device-row-activity");
     lastSeen.append(
@@ -479,8 +517,31 @@
       stats.append(stat);
     });
 
-    value.append(status, main, type, lastSeen, network, stats, node("span", "device-row-chevron", "›"));
+    value.append(status, main, type, platform, lastSeen, network, stats, node("span", "device-row-chevron", "›"));
     return value;
+  }
+
+  let inventoryGeneration = 0;
+  async function loadDeviceInventory() {
+    const generation = ++inventoryGeneration;
+    const total = document.getElementById("device-inventory-total");
+    const today = document.getElementById("device-inventory-today");
+    const state = document.getElementById("device-inventory-state");
+    total.textContent = "—"; today.textContent = "—"; state.textContent = "";
+    try {
+      const payload = await requestJson(`${context.apiBase}/devices/inventory-summary`);
+      if (generation !== inventoryGeneration) return;
+      const value = payload.result;
+      if (!value || Object.keys(value).sort().join(",") !== "evaluated_at_utc,new_devices_today,timezone,total_devices"
+        || !Number.isSafeInteger(value.total_devices) || !Number.isSafeInteger(value.new_devices_today)
+        || value.new_devices_today < 0 || value.total_devices < value.new_devices_today
+        || typeof value.timezone !== "string" || !value.timezone
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.evaluated_at_utc)) throw new Error("Invalid inventory");
+      total.textContent = String(value.total_devices); today.textContent = String(value.new_devices_today);
+    } catch (_) {
+      if (generation !== inventoryGeneration) return;
+      total.textContent = "—"; today.textContent = "—"; state.textContent = "Unavailable";
+    }
   }
 
   async function loadDevices(append) {
@@ -938,6 +999,7 @@
       if (context.operation) run(context.operation);
       else if (context.page === "observations") run(() => loadObservations(false));
       if (context.page === "device") loadDeviceCurrent();
+      if (context.page === "devices") loadDeviceInventory();
     });
     loadMoreButton.addEventListener("click", () => {
       if (context.page === "devices") run(() => loadDevices(true));
@@ -948,6 +1010,7 @@
     else if (context.operation) {
       run(context.operation);
       if (context.page === "device") loadDeviceCurrent();
+      if (context.page === "devices") loadDeviceInventory();
     }
   }
 
@@ -5041,9 +5104,41 @@
     row.insertBefore(type, row.cells[1]);
   }
 
+  function renderAccessPointRoster(createNode, target, footer, rows, clientSummary, clientAvailable, trafficRows, trafficAvailable, trafficEnabled, formatRate) {
+    target.replaceChildren();
+    const buckets = new Map(clientAvailable ? clientSummary.devices_by_ap.map((item) => [item.ap_mac, item.client_count]) : []);
+    const max = Math.max(1, ...buckets.values());
+    const traffic = new Map(trafficAvailable ? trafficRows.map((item) => [item.ap_mac, item]) : []);
+    rows.forEach((item) => {
+      const row = createNode("article", "data-row access-point-row");
+      const header = createNode("div", "data-row-header");
+      header.append(createNode("strong", null, item.name || "Access point"), createNode("span", "badge", item.product_status_classification));
+      row.append(header, createNode("p", "mono", item.ap_mac));
+      const devices = createNode("div", "ap-device-count");
+      const count = clientAvailable ? (buckets.get(item.ap_mac) || 0) : null;
+      const track = createNode("span", "live-bar-track");
+      if (count !== null) {
+        const fill = createNode("span", "live-bar-fill");
+        fill.style.width = `${count / max * 100}%`; track.append(fill);
+      }
+      devices.append(createNode("span", "live-detail", `Devices · ${count === null ? "—" : count}`), track);
+      row.append(devices);
+      if (trafficEnabled) {
+        const rate = traffic.get(item.ap_mac);
+        if (!rate) row.append(createNode("p", "live-detail", "Traffic · —"));
+        else row.append(createNode("p", "live-detail", `Traffic · ${rate.rate_status}`),
+          createNode("p", "live-detail", `Download ${formatRate(rate.download_mbps)} · Upload ${formatRate(rate.upload_mbps)} · Total ${formatRate(rate.total_mbps)}`),
+          createNode("p", "live-detail", `Source ${rate.selected_source === "lan" ? "LAN" : "Wired"} · observed ${rate.observed_at || "—"}`));
+      }
+      target.append(row);
+    });
+    footer.textContent = clientAvailable && clientSummary.counts.ap_unknown > 0 ? `AP Unknown · ${clientSummary.counts.ap_unknown}` : "";
+    footer.hidden = !footer.textContent;
+  }
+
   function clientPresentationCells(createNode, item) {
-    const fingerprintType = createNode("td", "live-fingerprint-type-cell",
-      item.fingerprint_type && typeof item.fingerprint_type.value === "string" ? item.fingerprint_type.value : "—");
+    const fingerprintType = createNode("td", "live-fingerprint-type-cell");
+    fingerprintType.append(window.CaptivPortalDeviceTypePresentation.icon(createNode, item.fingerprint_type));
     const deviceType = createNode("td", "live-device-type-cell");
     const platform = item.platform_presentation;
     const platformValue = platform && typeof platform.value === "string" ? platform.value : "—";
@@ -5107,7 +5202,7 @@
       failureTransition, neutralAbort, releaseController, resetClientState,
       retainedSelection, unavailableValues,
       standaloneCoordinatorEnabled,
-      clientPresentationCells, prepareClientTableHeader, rssiPresentation,
+      clientPresentationCells, prepareClientTableHeader, rssiPresentation, renderAccessPointRoster,
       validateApSummary, validateClientSummary, validatePage,
     });
   }
@@ -5234,7 +5329,7 @@
     document.getElementById(kind === "client" ? "live-client-freshness" : "live-ap-freshness").textContent = label;
     if (kind === "client") {
       clientRows.closest(".table-scroll").hidden = status === "unavailable";
-      document.getElementById("live-devices-by-ap").hidden = status === "unavailable";
+      renderApEnrichment();
       if (status === "unavailable") clientMore.hidden = true;
     } else {
       apRows.hidden = status === "unavailable";
@@ -5247,15 +5342,14 @@
         document.getElementById("live-other-detail").textContent = values.detail;
         document.getElementById("live-client-state").textContent = values.state;
         clientRows.replaceChildren();
-        const byAp = document.getElementById("live-devices-by-ap");
-        byAp.replaceChildren();
+        renderApEnrichment();
       } else {
         document.getElementById("live-ap-total").textContent = values.primary;
         document.getElementById("live-ap-detail").textContent = values.detail;
         document.getElementById("live-ap-count").textContent = values.count;
         document.getElementById("live-ap-state").textContent = values.state;
         apRows.replaceChildren();
-        if (sources.client.summary) renderByAp();
+        renderApEnrichment();
       }
     }
   }
@@ -5276,7 +5370,7 @@
     if (Array.isArray(ssids)) ssids.forEach((ssid) => { const option = node("option", null, ssid); option.value = ssid; ssidSelect.append(option); });
     ssidSelect.value = retainedSelection(ssids, selectedSsid);
     document.getElementById("live-ssid-label").hidden = !Array.isArray(ssids) || ssids.length <= 1;
-    if (sources.ap.rows.length) renderAps(); else renderByAp();
+    renderApEnrichment();
     renderFreshness("client");
   }
   function renderApSummary() {
@@ -5298,27 +5392,12 @@
       : "unavailable";
     return enrichmentState(sources.ap.rows, sources.ap.cursor, summary, mac, effectiveFreshness);
   }
-  function renderByAp() {
-    const target = document.getElementById("live-devices-by-ap");
-    target.replaceChildren();
-    const result = sources.client.summary;
-    const effectiveFreshness = result
-      ? localFreshness(result.snapshot, result.freshness_policy, sources.client.acceptedAt, performance.now())
-      : "unavailable";
-    if (!result || effectiveFreshness === "unavailable") { target.append(node("p", "live-detail", "Unavailable")); return; }
-    const max = Math.max(1, ...result.devices_by_ap.map((item) => item.client_count));
-    result.devices_by_ap.forEach((item) => {
-      const row = node("div", "live-bar");
-      const track = node("span", "live-bar-track");
-      const fill = node("span", "live-bar-fill");
-      fill.style.width = `${Math.min(100, item.client_count / max * 100)}%`;
-      track.append(fill);
-      const label = node("span");
-      label.append(node("strong", null, apLabel(item.ap_mac)), node("br"), node("small", "live-detail", apEnrichment(item.ap_mac)));
-      row.append(label, track, node("strong", null, item.client_count));
-      target.append(row);
-    });
-    if (result.counts.ap_unknown > 0) target.append(node("p", "live-detail", `AP Unknown · ${result.counts.ap_unknown}`));
+  function renderApEnrichment() {
+    const summary = sources.client.summary;
+    const available = summary && !sources.client.enrichmentUnavailable && localFreshness(summary.snapshot, summary.freshness_policy, sources.client.acceptedAt, performance.now()) !== "unavailable";
+    const apAvailable = sources.ap.summary && localFreshness(sources.ap.summary.snapshot, sources.ap.summary.freshness_policy, sources.ap.acceptedAt, performance.now()) !== "unavailable";
+    renderAccessPointRoster(node, apRows, document.getElementById("live-ap-unknown"),
+      apAvailable ? sources.ap.rows : [], summary, available, [], false, false);
     rebuildApFilter();
   }
   function rebuildApFilter() {
@@ -5347,23 +5426,14 @@
     document.getElementById("live-client-state").textContent = sources.client.rows.length ? `Showing ${sources.client.rows.length} current device(s).` : "No devices in this current snapshot.";
   }
   function renderAps() {
-    apRows.replaceChildren();
-    const buckets = new Map();
-    if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => buckets.set(item.ap_mac, item.client_count));
-    sources.ap.rows.forEach((item) => {
-      const row = node("article", "data-row");
-      const header = node("div", "data-row-header");
-      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.product_status_classification));
-      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Current scoped clients: ${buckets.get(item.ap_mac) || 0}`));
-      apRows.append(row);
-    });
+    renderApEnrichment();
     const total = sources.ap.summary && sources.ap.summary.counts.total;
     document.getElementById("live-ap-count").textContent = total === null || total === undefined
       ? ""
       : (sources.ap.cursor ? `Showing ${sources.ap.rows.length} of ${total}` : `${sources.ap.rows.length} access point(s) loaded`);
     document.getElementById("live-ap-state").textContent = sources.ap.rows.length ? "Current access points loaded." : "No access points in this current snapshot.";
     apMore.hidden = !sources.ap.cursor;
-    rebuildApFilter(); renderByAp();
+    rebuildApFilter();
   }
   function schedule(kind, delaySeconds) {
     const source = sources[kind];
@@ -5372,6 +5442,7 @@
     source.timer = window.setTimeout(() => { source.timer = null; refreshGroup(kind, false); }, delaySeconds * 1000);
   }
   function handleFailure(kind, failure) {
+    if (kind === "client") { sources.client.enrichmentUnavailable = true; renderApEnrichment(); }
     if (failure.global) { stop(failure.kind); return false; }
     const source = sources[kind];
     const transition = failureTransition(source, failure);
@@ -5402,6 +5473,7 @@
       if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0}};
       if (source.generation !== generation) return;
       source.summary = summary; source.acceptedAt = performance.now(); source.rows = []; source.cursor = null;
+      source.enrichmentUnavailable = false;
       if (kind === "client") { renderClientSummary(); renderClients(false); } else { renderApSummary(); renderAps(); }
       if (summary.snapshot.cycle_id !== null && summary.snapshot.freshness_status !== "unavailable") {
         const parameters = kind === "client" ? paramsForClients(summary, null) : paramsForAps(summary, null);
@@ -5814,10 +5886,8 @@
   const refreshButton = document.getElementById("refresh-button");
   const clientRows = document.getElementById("live-client-rows");
   const apRows = document.getElementById("live-ap-rows");
-  const trafficRows = document.getElementById("traffic-ap-rows");
   const clientMore = document.getElementById("live-client-more");
   const apMore = document.getElementById("live-ap-more");
-  const trafficMore = document.getElementById("traffic-ap-more");
   const filters = document.getElementById("live-client-filters");
   const globalPanel = document.getElementById("home-live-global");
   const sources = {
@@ -5932,14 +6002,14 @@
       document.getElementById("live-other-detail").textContent = values.detail;
       document.getElementById("live-client-state").textContent = values.state;
       clientRows.replaceChildren(); clientMore.hidden = true;
-      document.getElementById("live-devices-by-ap").replaceChildren(node("p", "live-detail", "Unavailable"));
+      renderApEnrichment();
     } else {
       document.getElementById("live-ap-total").textContent = values.primary;
       document.getElementById("live-ap-detail").textContent = values.detail;
       document.getElementById("live-ap-count").textContent = values.count;
       document.getElementById("live-ap-state").textContent = values.state;
       apRows.replaceChildren(); apMore.hidden = true;
-      renderByAp();
+      renderApEnrichment();
     }
   }
   function renderClientSummary() {
@@ -5958,7 +6028,7 @@
     if (Array.isArray(ssids)) ssids.forEach((ssid) => { const option = node("option", null, ssid); option.value = ssid; select.append(option); });
     select.value = live.retainedSelection(ssids, selected);
     document.getElementById("live-ssid-label").hidden = !Array.isArray(ssids) || ssids.length <= 1;
-    renderCurrentFreshness("client");
+    renderCurrentFreshness("client"); renderApEnrichment();
   }
   function renderApSummary() {
     const result = sources.ap.summary; const counts = result.counts;
@@ -5971,20 +6041,14 @@
     const item = sources.ap.rows.find((value) => value.ap_mac === mac);
     return item && item.name ? `${item.name} · ${mac}` : mac;
   }
-  function renderByAp() {
-    const target = document.getElementById("live-devices-by-ap"); target.replaceChildren();
-    const result = sources.client.summary;
-    const freshness = result ? live.localFreshness(result.snapshot, result.freshness_policy, sources.client.acceptedAt, performance.now()) : "unavailable";
-    if (!result || freshness === "unavailable") { target.append(node("p", "live-detail", "Unavailable")); return; }
-    const apFreshness = sources.ap.summary ? live.localFreshness(sources.ap.summary.snapshot, sources.ap.summary.freshness_policy, sources.ap.acceptedAt, performance.now()) : "unavailable";
-    const max = Math.max(1, ...result.devices_by_ap.map((item) => item.client_count));
-    result.devices_by_ap.forEach((item) => {
-      const row = node("div", "live-bar"); const track = node("span", "live-bar-track"); const fill = node("span", "live-bar-fill");
-      fill.style.width = `${Math.min(100, item.client_count / max * 100)}%`; track.append(fill);
-      const label = node("span"); label.append(node("strong", null, apLabel(item.ap_mac)), node("br"), node("small", "live-detail", live.enrichmentState(sources.ap.rows, sources.ap.cursor, sources.ap.summary, item.ap_mac, apFreshness)));
-      row.append(label, track, node("strong", null, item.client_count)); target.append(row);
-    });
-    if (result.counts.ap_unknown > 0) target.append(node("p", "live-detail", `AP Unknown · ${result.counts.ap_unknown}`));
+  function renderApEnrichment() {
+    const client = sources.client.summary;
+    const available = client && !sources.client.enrichmentUnavailable && live.localFreshness(client.snapshot, client.freshness_policy, sources.client.acceptedAt, performance.now()) !== "unavailable";
+    const apAvailable = sources.ap.summary && live.localFreshness(sources.ap.summary.snapshot, sources.ap.summary.freshness_policy, sources.ap.acceptedAt, performance.now()) !== "unavailable";
+    const trafficAvailable = trafficEnabled && sources.traffic.rowsReady && sources.traffic.summary
+      && trafficFreshness(sources.traffic.summary.snapshot, sources.traffic.summary.freshness_policy, sources.traffic.acceptedAt, performance.now()) !== "unavailable";
+    live.renderAccessPointRoster(node, apRows, document.getElementById("live-ap-unknown"),
+      apAvailable ? sources.ap.rows : [], client, available, sources.traffic.rows, trafficAvailable, trafficEnabled, formatMbps);
     rebuildApFilter();
   }
   function rebuildApFilter() {
@@ -6009,17 +6073,11 @@
     document.getElementById("live-client-state").textContent = sources.client.rows.length ? `Showing ${sources.client.rows.length} current device(s).` : "No devices in this current snapshot.";
   }
   function renderAps() {
-    apRows.replaceChildren(); const buckets = new Map();
-    if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => buckets.set(item.ap_mac, item.client_count));
-    sources.ap.rows.forEach((item) => {
-      const row = node("article", "data-row"); const header = node("div", "data-row-header");
-      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.product_status_classification));
-      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Current scoped clients: ${buckets.get(item.ap_mac) || 0}`)); apRows.append(row);
-    });
+    renderApEnrichment();
     const total = sources.ap.summary && sources.ap.summary.counts.total;
     document.getElementById("live-ap-count").textContent = total === null || total === undefined ? "" : (sources.ap.cursor ? `Showing ${sources.ap.rows.length} of ${total}` : `${sources.ap.rows.length} access point(s) loaded`);
     document.getElementById("live-ap-state").textContent = sources.ap.rows.length ? "Current access points loaded." : "No access points in this current snapshot.";
-    apMore.hidden = !sources.ap.cursor; rebuildApFilter(); renderByAp();
+    apMore.hidden = !sources.ap.cursor; rebuildApFilter();
   }
   function setTrafficState(title, message, state) {
     document.getElementById("traffic-state-title").textContent = title;
@@ -6034,8 +6092,7 @@
     document.getElementById("traffic-download-coverage").textContent = "Download —/— APs";
     document.getElementById("traffic-upload-coverage").textContent = "Upload —/— APs";
     document.getElementById("traffic-both-coverage").textContent = "Both —/— APs";
-    trafficRows.replaceChildren(); trafficMore.hidden = true;
-    document.getElementById("traffic-ap-state").textContent = message || "Traffic AP details unavailable.";
+    sources.traffic.rowsReady = false; renderApEnrichment();
   }
   function renderTrafficSummary() {
     const result = sources.traffic.summary;
@@ -6058,15 +6115,7 @@
     setTrafficState(effective === "stale" ? "Traffic is stale" : "Traffic updated", c.coverage_status === "partial" ? "Showing persisted observed subtotals for available AP evidence." : "Persisted AP traffic evidence is available.", effective === "stale" || c.coverage_status === "partial" ? "warning" : "ready");
   }
   function renderTrafficRows() {
-    trafficRows.replaceChildren();
-    sources.traffic.rows.forEach((item) => {
-      const row = node("article", "data-row"); const header = node("div", "data-row-header");
-      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.rate_status));
-      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Download ${formatMbps(item.download_mbps)} · Upload ${formatMbps(item.upload_mbps)} · Total ${formatMbps(item.total_mbps)}`), node("p", "live-detail", `Source ${item.selected_source === "lan" ? "LAN" : "Wired"} · observed ${item.observed_at || "—"}`));
-      trafficRows.append(row);
-    });
-    trafficMore.hidden = !sources.traffic.cursor || sources.traffic.pageForbidden;
-    document.getElementById("traffic-ap-state").textContent = sources.traffic.pageForbidden ? "AP traffic detail access denied." : (sources.traffic.rows.length ? `Showing ${sources.traffic.rows.length} AP traffic row(s).` : "No AP traffic rows in this snapshot.");
+    renderApEnrichment();
   }
   function renderTrafficFreshness() {
     if (!trafficEnabled) return;
@@ -6076,6 +6125,7 @@
     if (effective === "unavailable") { clearTrafficPageState(sources.traffic); renderTrafficRows(); }
   }
   function currentFailure(kind, failure) {
+    if (kind === "client") { sources.client.enrichmentUnavailable = true; renderApEnrichment(); }
     if (failure.global) { stopAll(failure.kind); return false; }
     const source = sources[kind]; const clean = markFailure(source, failure, liveRefresh);
     document.getElementById(kind === "client" ? "live-client-state" : "live-ap-state").textContent = failure.kind === "invalid" ? "Unexpected current-state response; bounded clean refresh applied." : "Live source unavailable; retry remains bounded.";
@@ -6091,6 +6141,7 @@
       if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
       if (source.generation !== generation) return {cleanRefresh: false};
       source.summary = summary; source.acceptedAt = performance.now(); source.rows = []; source.cursor = null;
+      source.enrichmentUnavailable = false;
       if (kind === "client") { renderClientSummary(); renderClients(); } else { renderApSummary(); renderAps(); }
       if (summary.snapshot.cycle_id !== null && summary.snapshot.freshness_status !== "unavailable") {
         const params = currentParams(kind, summary, null);
@@ -6115,6 +6166,7 @@
       setTrafficState("Traffic disabled", "Reload after the feature is enabled.", "warning");
       return false;
     }
+    sources.traffic.rowsReady = false; renderApEnrichment();
     const clean = markFailure(sources.traffic, failure, trafficRefresh);
     setTrafficState("Traffic unavailable", failure.kind === "invalid" ? "Unexpected Traffic response; bounded clean refresh applied." : "Traffic retry remains bounded; Current State is unchanged.", "warning");
     return clean;
@@ -6128,14 +6180,29 @@
       if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
       if (source.generation !== generation) return {cleanRefresh: false};
       acceptTrafficSummary(source, summary, performance.now());
+      source.rowsReady = false;
       renderTrafficSummary(); renderTrafficRows();
       if (trafficPageEligible(summary, summary.snapshot.freshness_status, source.pageForbidden)) {
         try {
-          const params = trafficParams(summary, null);
-          const pagePayload = await requestJson(`${trafficBase}/aps?${params.toString()}`, source, generation, trafficTimeout);
-          const valid = validateTrafficPage(pagePayload, siteId, summary);
-          if (!valid) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
-          source.rows = valid.result.items.slice(); source.cursor = valid.page.next_cursor; renderTrafficRows();
+          const rows = [];
+          const seenCursors = new Set();
+          const seenMacs = new Set();
+          let cursor = null;
+          do {
+            const params = trafficParams(summary, cursor);
+            const pagePayload = await requestJson(`${trafficBase}/aps?${params.toString()}`, source, generation, trafficTimeout);
+            if (source.generation !== generation || coordinator.pending || stopped || document.hidden) return {cleanRefresh: false};
+            const valid = validateTrafficPage(pagePayload, siteId, summary);
+            if (!valid) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+            for (const item of valid.result.items) {
+              if (seenMacs.has(item.ap_mac)) throw {liveFailure: {global: false, kind: "unexpected", retryAfter: 0, status: 200}};
+              seenMacs.add(item.ap_mac); rows.push(item);
+            }
+            cursor = valid.page.next_cursor;
+            if (cursor && seenCursors.has(cursor)) throw {liveFailure: {global: false, kind: "unexpected", retryAfter: 0, status: 200}};
+            if (cursor) seenCursors.add(cursor);
+          } while (cursor);
+          source.rows = rows; source.cursor = null; source.rowsReady = true; renderTrafficRows();
         } catch (error) {
           const failure = error && error.liveFailure;
           if (failure && pageFailureEffect(failure) === "preserve_summary_forbidden") {
@@ -6274,18 +6341,17 @@
     if (generation === null) return;
     source.generation = generation;
     try {
-      const params = kind === "traffic" ? trafficParams(source.summary, source.cursor) : currentParams(kind, source.summary, source.cursor);
-      const stem = kind === "traffic" ? `${trafficBase}/aps` : `${currentBase}/${kind === "client" ? "clients" : "aps"}`;
-      const payload = await requestJson(`${stem}?${params.toString()}`, source, generation, kind === "traffic" ? trafficTimeout : liveTimeout);
-      const valid = kind === "traffic" ? validateTrafficPage(payload, siteId, source.summary) : live.validatePage(payload, siteId, kind, source.summary.snapshot);
+      const params = currentParams(kind, source.summary, source.cursor);
+      const stem = `${currentBase}/${kind === "client" ? "clients" : "aps"}`;
+      const payload = await requestJson(`${stem}?${params.toString()}`, source, generation, liveTimeout);
+      const valid = live.validatePage(payload, siteId, kind, source.summary.snapshot);
       if (!valid || source.generation !== generation) throw {liveFailure: {global: false, kind: "unexpected", retryAfter: 0, status: 200}};
       source.rows.push(...valid.result.items); source.cursor = valid.page.next_cursor;
-      if (kind === "client") renderClients(); else if (kind === "ap") renderAps(); else renderTrafficRows();
+      if (kind === "client") renderClients(); else renderAps();
     } catch (error) {
       if (!(error && error.neutral)) {
         const failure = error && error.liveFailure ? error.liveFailure : {global: false, kind: "unexpected", retryAfter: 0, status: 0};
-        if (kind === "traffic" && pageFailureEffect(failure) === "preserve_summary_forbidden") { source.pageForbidden = true; clearTrafficPageState(source); renderTrafficRows(); }
-        else if (kind === "traffic") trafficFailure(failure); else currentFailure(kind, failure);
+        currentFailure(kind, failure);
       }
     } finally {
       endCoordinator(coordinator, generation, busyView);
@@ -6296,7 +6362,6 @@
   refreshButton.addEventListener("click", () => requestRefresh(true));
   clientMore.addEventListener("click", () => loadMore("client"));
   apMore.addEventListener("click", () => loadMore("ap"));
-  if (trafficMore) trafficMore.addEventListener("click", () => loadMore("traffic"));
   filters.addEventListener("change", () => {
     live.resetClientState(sources.client, {clearRows: () => clientRows.replaceChildren(), hideMore: () => { clientMore.hidden = true; }, loading: () => { document.getElementById("live-client-state").textContent = "Loading filtered current clients…"; }});
     requestRefresh(true);

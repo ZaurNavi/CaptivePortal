@@ -75,7 +75,7 @@ def test_all_dimensions_preserve_metadata_and_only_resolved_values_are_named(ret
 
 def test_no_result_has_no_diagnostic_or_semantic_value():
     projection = present_classification(None)
-    assert projection.compact_type() == {"state": "no_result", "value": "—"}
+    assert projection.compact_type() == {"state": "no_result", "status": None, "canonical_value_id": None, "value": "—"}
     assert projection.as_dict() == {"state": "no_result", "global_classification_status": None,
                                    "classified_at_utc": None, **dict.fromkeys(_DIMENSIONS)}
 
@@ -174,7 +174,7 @@ def test_home_type_is_batched_separate_from_unchanged_controller(retained, statu
     assert result["items"][0]["device_type_key"] == "android"
     assert result["items"][1]["device_type"] == "Windows"
     assert [item["fingerprint_type"]["value"] for item in result["items"]] == [expected, expected]
-    assert all(set(item["fingerprint_type"]) == {"state", "value"} for item in result["items"])
+    assert all(set(item["fingerprint_type"]) == {"state", "status", "canonical_value_id", "value"} for item in result["items"])
     assert [item["platform_presentation"] for item in result["items"]] == [
         {"source": "controller", "value": " Android ", "key": "android"},
         {"source": "controller", "value": "Windows", "key": "windows"}]
@@ -191,7 +191,7 @@ def test_completed_production_global_unknown_stays_classified_on_home_and_device
     projection = present_classification(record)
     assert projection.state == "classified"
     assert projection.global_classification_status == "unknown"
-    assert projection.compact_type() == {"state": "classified", "value": "Unknown"}
+    assert projection.compact_type() == {"state": "classified", "status": "unknown", "canonical_value_id": None, "value": "Unknown"}
 
     class AndroidController(CurrentSource):
         def list_current_clients(self, site, **kwargs):
@@ -202,7 +202,7 @@ def test_completed_production_global_unknown_stays_classified_on_home_and_device
     home._fingerprint = adapter
     item = home.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
     assert item["device_type"] == "Android"
-    assert item["fingerprint_type"] == {"state": "classified", "value": "Unknown"}
+    assert item["fingerprint_type"] == {"state": "classified", "status": "unknown", "canonical_value_id": None, "value": "Unknown"}
     assert item["fingerprint_type"]["value"] != item["device_type"]
 
     device, _, _, _ = _service()
@@ -244,7 +244,7 @@ def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_pa
     home = service(Controller())
     home._fingerprint = adapter
     item = home.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
-    assert item["name"] == "Phone" and item["fingerprint_type"] == {"state": "unavailable", "value": "—"}
+    assert item["name"] == "Phone" and item["fingerprint_type"] == {"state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"}
     assert item["fingerprint_platform"] == {
         "state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"}
     assert item["platform_presentation"] == (
