@@ -619,13 +619,13 @@ def test_home_template_delivers_traffic_only_when_enabled(tmp_path):
         "live-client-freshness", "live-other-detail", "live-ap-detail", "live-ap-freshness",
         "live-client-filters", "live-ssid-label", "live-client-state", "live-client-rows", "live-client-more",
         "traffic-state", "traffic-download", "traffic-upload", "traffic-total", "traffic-freshness",
-        "traffic-coverage", "traffic-ap-title", "traffic-ap-rows", "traffic-ap-more",
+        "traffic-coverage", "aps-now-title", "live-ap-rows", "live-ap-more", "live-ap-unknown",
     ):
         assert text.count(f'id="{hook}"') == 1
-    assert text.index('id="traffic-now-title"') < text.index('id="traffic-ap-title"')
+    assert text.index('id="traffic-now-title"') < text.index('id="aps-now-title"')
     assert 'aria-label="Online devices table" tabindex="0"' in text
     template = (Path(__file__).parents[2] / "app/admin_web/templates/admin/home.html").read_text(encoding="utf-8")
-    remaining = ["home-activity", "home-ap-24h", "by-ap-title", "aps-now-title"]
+    remaining = ["home-activity", "home-ap-24h", "aps-now-title"]
     assert [template.index(f'id="{hook}"') for hook in remaining] == sorted(
         template.index(f'id="{hook}"') for hook in remaining)
     assert template.index('id="live-client-more"') < template.index('id="home-traffic"')

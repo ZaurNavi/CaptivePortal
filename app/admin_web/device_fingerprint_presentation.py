@@ -51,9 +51,12 @@ class FingerprintPresentation:
     manufacturer_result: FingerprintDimensionPresentation | None = None
     model_result: FingerprintDimensionPresentation | None = None
 
-    def compact_type(self) -> dict[str, str]:
+    def compact_type(self) -> dict[str, Any]:
+        dimension = self.device_class_result
         return {"state": self.state,
-                "value": self.device_class_result.value if self.device_class_result else "—"}
+                "status": dimension.status if dimension else None,
+                "canonical_value_id": dimension.canonical_value_id if dimension else None,
+                "value": dimension.value if dimension else "—"}
 
     def compact_platform(self) -> dict[str, Any]:
         platform = self.platform_result
@@ -69,11 +72,11 @@ class FingerprintPresentation:
                    for name in _DIMENSIONS}}
 
 
-def home_platform_presentation(
+def effective_platform_presentation(
     controller_value: str | None, controller_key: str | None,
     fingerprint_platform: dict[str, Any],
 ) -> dict[str, Any]:
-    """Home-only precedence; Device Card continues to expose separate sources."""
+    """Shared list precedence; Device Card continues to expose separate sources."""
     if controller_key is not None and controller_key != "unknown":
         return {"source": "controller", "value": controller_value, "key": controller_key}
     if (fingerprint_platform["state"] == "classified"
@@ -110,6 +113,8 @@ def present_classification(record: ClassificationReadRecord | None) -> Fingerpri
                 or status != "resolved" and canonical is not None
                 or row["support_level"] not in {"none", "low", "medium", "high"}):
             raise ValueError("Invalid fingerprint dimension value/support")
+        if dimension == "device_class" and status == "resolved" and canonical not in {"smartphone", "tablet", "laptop"}:
+            raise ValueError("Invalid fingerprint device class")
         for key in _TEXT_SETS:
             if not isinstance(row[key], list) or any(not isinstance(item, str) or not item for item in row[key]):
                 raise ValueError("Invalid fingerprint diagnostic metadata")

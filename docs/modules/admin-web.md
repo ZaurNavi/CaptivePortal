@@ -368,6 +368,51 @@ snapshot raw type and identity raw type belong to the same Device record.
 
 ## Home Online Devices — current presentation
 
+### WEB-UX-PACK-02 / R2 repository candidate
+
+Home and Devices share `effective_platform_presentation()` without changing
+Controller-first precedence. Devices adds Fingerprint Type before Platform;
+the original Controller fields remain unchanged. Home Android is icon-only;
+Devices Android retains its exact Platform text beside the existing Android
+asset. Device Card remains a separate, unchanged presentation surface.
+
+Compact Type has exactly `{state, status, canonical_value_id, value}`. The browser
+chooses only from machine fields: resolved smartphone/tablet/laptop, completed
+unresolved, no_result and unavailable use the six approved local v2 SVGs. Icons
+are 22×22, with wrapper-owned title/aria-label and decorative nested images.
+Malformed machine projections are rejected; Controller never backfills Type.
+
+Devices enrichment keeps the existing page/cursor/filter contract. Per the
+TechLead R2 refinement, pages of up to 250 MACs use one bounded production batch;
+pages up to the existing 500-row maximum use at most two batches of 250. The
+production read limit is unchanged; there are no individual reads or synthetic
+unavailable results caused only by page size.
+
+`GET /admin/api/v1/sites/<site_id>/devices/inventory-summary` requires
+`admin.read.devices`, accepts **no query arguments**, and uses the existing
+Admin deadline/concurrency/response controls. Its result contains exactly
+`total_devices`, `new_devices_today`, `timezone`, `evaluated_at_utc`. Population
+is the existing Site snapshot/visit union grouped by device_id, not the global
+Registry; first evidence is MIN across both sources. New Today includes first
+evidence from local midnight through evaluation, inclusively, using the existing
+validated Registry `PORTAL_COUNTER_TIMEZONE` IANA zone (including DST). Invalid
+source identity fails closed rather than producing a numeric zero.
+
+The Device Inventory card refreshes independently on page load/manual Refresh;
+search, Clear and Load more do not refetch it. Its isolated failure shows two
+neutral dashes and Unavailable, without clearing the list or changing page state.
+
+Home Access Points Now is the sole current AP identity owner. Client buckets
+and persisted per-AP traffic join by exact ap_mac. Device bars scale against all
+client buckets, not only loaded APs; missing buckets mean zero only with an
+available client summary. Unavailable sources are neutral, and AP Unknown is
+one footer above the existing AP pagination. Traffic cursor pages are drained
+sequentially into a generation-bound map; no visible Traffic pagination or
+duplicate identity card remains. Traffic-disabled Home makes no traffic request.
+Traffic Now aggregate rates, arrows, colors, coverage and freshness stay intact.
+
+This is repository candidate work only, not a deployment/production claim.
+
 Current repository Home columns (deployment is separately authorized):
 
 ```text
@@ -408,7 +453,7 @@ before Traffic Now; the remaining panels keep their relative order. Only Home
 `.live-metrics` summary cards have denser spacing and aligned values; responsive
 breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
 independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
-Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
+Unavailable `—` is neutral. Per-AP traffic is now joined into Access Points Now; source/freshness/coverage and Traffic
 page semantics are unchanged. This describes repository implementation, not a
 new production deployment or visual-acceptance claim.
 

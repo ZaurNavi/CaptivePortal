@@ -487,6 +487,7 @@ def _query_service(
             ),
             visit_analytics_service=analytics_service,
             fingerprint_presentation_service=fingerprint_presentation_service,
+            inventory_timezone_name=getattr(getattr(registry_read_service, "service", None), "timezone_name", None),
             current_state_read_service=current_state_read_service,
             current_traffic_read_service=getattr(
                 analytics_runtime, "current_traffic_service", None

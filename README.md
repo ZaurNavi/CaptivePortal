@@ -919,6 +919,15 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
 
 ## Home Online Devices — current presentation
 
+`WEB-UX-PACK-02` R2 extends this repository candidate to Home and Devices:
+six approved 22×22 Fingerprint Type SVGs, shared Controller-first Platform,
+independent Site-safe Device Inventory, and one Access Points Now roster enriched
+with client bars and per-AP traffic. Devices keeps its existing 500-row limit;
+enrichment uses at most two bounded 250-MAC production batches (TechLead refinement).
+No production deployment/activation is implied. See the
+[Admin module contract](docs/modules/admin-web.md#web-ux-pack-02--r2-repository-candidate)
+for the exact API, machine-field/icon and refresh contracts.
+
 Current repository Home columns (deployment is separately authorized):
 
 ```text
@@ -959,7 +968,7 @@ before Traffic Now; the remaining panels keep their relative order. Only Home
 `.live-metrics` summary cards have denser spacing and aligned values; responsive
 breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
 independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
-Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
+Unavailable `—` is neutral. Per-AP traffic is now joined into Access Points Now; source/freshness/coverage and Traffic
 page semantics are unchanged. This describes repository implementation, not a
 new production deployment or visual-acceptance claim.
 

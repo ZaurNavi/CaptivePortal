@@ -12,6 +12,7 @@ from app.analytics.source_gateway import (
     AnalyticsQueryDeadlineExceeded,
     QueryDeadline,
 )
+from app.analytics.validation import parse_utc
 
 
 _REGISTRY_ALIAS = "registry_db"
@@ -53,6 +54,12 @@ class AdminDeviceRow:
 class AdminDevicePage:
     items: tuple[AdminDeviceRow, ...]
     has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AdminDeviceInventorySummary:
+    total_devices: int
+    new_devices_today: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,12 +304,12 @@ ORDER BY site_last_seen_at DESC, device_id DESC
 """
 
 
-_DEVICE_CONTEXT_PREFIX, _DEVICE_CONTEXT_SEPARATOR, _DEVICE_CONTEXT_UNUSED = (
+_DEVICE_POPULATION_SQL, _DEVICE_CONTEXT_SEPARATOR, _DEVICE_CONTEXT_UNUSED = (
     _DEVICE_PAGE_SQL.partition("page AS (\n")
 )
 if not _DEVICE_CONTEXT_SEPARATOR:  # pragma: no cover - module invariant
     raise RuntimeError("device context SQL prefix is unavailable")
-_DEVICE_CONTEXT_PAGE_SQL = _DEVICE_CONTEXT_PREFIX + """context_devices AS (
+_DEVICE_CONTEXT_PAGE_SQL = _DEVICE_POPULATION_SQL + """context_devices AS (
     SELECT
         devices.*,
         CASE
@@ -386,6 +393,40 @@ class AdminDeviceReadGateway:
             if current_state_db_path is None
             else Path(current_state_db_path)
         )
+
+    def device_inventory_summary(
+        self, *, site_id: str, today_start_utc: str, evaluated_at_utc: str, deadline: QueryDeadline,
+    ) -> AdminDeviceInventorySummary:
+        if not isinstance(site_id, str) or not site_id:
+            raise ValueError("site_id must be a non-empty string")
+        if parse_utc(today_start_utc, "today_start_utc") > parse_utc(evaluated_at_utc, "evaluated_at_utc"):
+            raise ValueError("inventory window is invalid")
+        mac_glob = ":".join(["[0-9A-F][0-9A-F]"] * 6)
+        sql = _DEVICE_POPULATION_SQL.rstrip().rstrip(",") + """
+        SELECT COUNT(*) AS total_devices,
+            COALESCE(SUM(site_first_seen_at >= :today_start_utc AND site_first_seen_at <= :evaluated_at_utc), 0) AS new_devices_today,
+            COALESCE(SUM(identity_conflict <> 0 OR canonical_mac IS NULL OR canonical_mac NOT GLOB :mac_glob
+                OR device_id IS NULL OR device_id = ''
+                OR strftime('%Y-%m-%dT%H:%M:%fZ', site_first_seen_at) IS NOT site_first_seen_at), 0) AS invalid_devices
+        FROM devices
+        """
+        connection = self._open(deadline)
+        try:
+            row = connection.execute(sql, {"site_id": site_id, "today_start_utc": today_start_utc,
+                                           "evaluated_at_utc": evaluated_at_utc, "mac_glob": mac_glob}).fetchone()
+        except sqlite3.Error as exc:
+            if deadline.expired() or "interrupt" in str(exc).lower():
+                raise AnalyticsQueryDeadlineExceeded("Admin device query deadline exceeded") from None
+            raise AdminDeviceSourceError("device source unavailable") from None
+        finally:
+            connection.set_progress_handler(None, 0)
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
+        if row["invalid_devices"]:
+            raise AdminDeviceIntegrityError("device identity conflict")
+        return AdminDeviceInventorySummary(row["total_devices"], row["new_devices_today"])
 
     def list_devices(
         self,

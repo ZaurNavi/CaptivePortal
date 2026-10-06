@@ -9,6 +9,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.analytics.serialization import serialize_analytics_value
 from app.analytics.source_gateway import (
@@ -40,7 +41,7 @@ from app.analytics.validation import format_utc
 from app.common.mac import format_mac_colon
 from app.common.device_type import normalize_device_type_key
 from .device_fingerprint_presentation import (
-    DeviceFingerprintPresentationService, home_platform_presentation,
+    DeviceFingerprintPresentationService, MAX_PRODUCTION_READ_MACS, effective_platform_presentation,
 )
 from app.current_state import (
     CurrentStateSchemaError,
@@ -267,6 +268,7 @@ class AdminQueryService:
         device_list_context_state: str = "disabled",
         device_list_context_cursor_codec: Any | None = None,
         fingerprint_presentation_service: DeviceFingerprintPresentationService | None = None,
+        inventory_timezone_name: str | None = None,
     ):
         self._config = config
         self._policy = policy
@@ -286,6 +288,7 @@ class AdminQueryService:
         self._device_list_context_state = device_list_context_state
         self._device_list_context_cursor_codec = device_list_context_cursor_codec
         self._fingerprint = fingerprint_presentation_service or DeviceFingerprintPresentationService(None)
+        self._inventory_timezone_name = inventory_timezone_name
         self._execution_controls = execution_controls or (
             AdminQueryExecutionControls(
                 max_concurrent_queries=config.max_concurrent_queries,
@@ -581,7 +584,7 @@ class AdminQueryService:
                 fingerprint = fingerprints[item["client_mac"]]
                 item["fingerprint_type"] = fingerprint.compact_type()
                 item["fingerprint_platform"] = fingerprint.compact_platform()
-                item["platform_presentation"] = home_platform_presentation(
+                item["platform_presentation"] = effective_platform_presentation(
                     item["device_type"], item["device_type_key"], item["fingerprint_platform"],
                 )
             return AdminQueryResponse(result, page)
@@ -932,6 +935,44 @@ class AdminQueryService:
             )
         )
 
+    def device_inventory_summary(self, principal, site_id):
+        self._authorize(principal, "admin.read.devices", site_id)
+
+        def query(deadline):
+            try:
+                zone = ZoneInfo(self._inventory_timezone_name)
+            except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+                raise AdminQueryUnavailable() from exc
+            evaluated = datetime.now(timezone.utc)
+            local_midnight = evaluated.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0, fold=0)
+            value = self._devices.device_inventory_summary(
+                site_id=site_id, today_start_utc=format_utc(local_midnight.astimezone(timezone.utc)),
+                evaluated_at_utc=format_utc(evaluated), deadline=deadline,
+            )
+            if (type(value.total_devices) is not int or type(value.new_devices_today) is not int
+                    or not 0 <= value.new_devices_today <= value.total_devices):
+                raise AdminQueryIntegrityUnavailable()
+            return AdminQueryResponse({"total_devices": value.total_devices,
+                                       "new_devices_today": value.new_devices_today,
+                                       "timezone": self._inventory_timezone_name,
+                                       "evaluated_at_utc": format_utc(evaluated)})
+
+        return self._run(query)
+
+    def _enrich_device_fingerprints(self, site_id, items):
+        # Devices keeps its existing <=500 page limit. Production reads stay <=250.
+        macs = tuple(item["canonical_mac"] for item in items)
+        fingerprints = {}
+        for offset in range(0, len(macs), MAX_PRODUCTION_READ_MACS):
+            fingerprints.update(self._fingerprint.get_many(site_id, macs[offset:offset + MAX_PRODUCTION_READ_MACS]))
+        for item in items:
+            fingerprint = fingerprints[item["canonical_mac"]]
+            item["fingerprint_type"] = fingerprint.compact_type()
+            item["fingerprint_platform"] = fingerprint.compact_platform()
+            item["platform_presentation"] = effective_platform_presentation(
+                item["device_type"], item["device_type_key"], item["fingerprint_platform"],
+            )
+
     def list_devices(
         self, principal, site_id, *, limit=None, cursor=None, mac=None,
     ):
@@ -961,6 +1002,7 @@ class AdminQueryService:
                     deadline=deadline,
                 )
                 items = [self._device_list_dto(item) for item in page.items]
+                self._enrich_device_fingerprints(site_id, items)
                 next_cursor = None
                 if page.has_more and page.items:
                     last = page.items[-1]
@@ -1359,6 +1401,7 @@ class AdminQueryService:
             )
         except DeviceListContextSerializationError as exc:
             raise AdminQueryIntegrityUnavailable() from exc
+        self._enrich_device_fingerprints(site_id, result["items"])
         next_cursor = None
         if page.has_more:
             if not page.items:

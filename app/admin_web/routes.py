@@ -629,6 +629,16 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             ),
         )
 
+    @blueprint.get("/admin/api/v1/sites/<site_id>/devices/inventory-summary")
+    @authenticated
+    def api_device_inventory_summary(site_id: str) -> Response:
+        if request.args:
+            return _error("invalid_request", 400)
+        return _site_query(
+            site_id,
+            lambda service, selected: service.device_inventory_summary(g.admin_principal, selected),
+        )
+
     @blueprint.get("/admin/api/v1/sites/<site_id>/devices/<device_id>")
     @authenticated
     def api_device(site_id: str, device_id: str) -> Response:

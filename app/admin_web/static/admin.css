@@ -91,7 +91,7 @@ button, input, select { font: inherit; }
 .device-list { grid-column: 1 / -1; display: grid; gap: .55rem; }
 .device-row {
   display: grid;
-  grid-template-columns: 104px minmax(220px, 1.1fr) minmax(105px, .5fr) minmax(180px, .9fr) minmax(145px, .62fr) minmax(140px, .72fr) auto;
+  grid-template-columns: 104px minmax(220px, 1.1fr) 72px minmax(105px, .5fr) minmax(180px, .9fr) minmax(145px, .62fr) minmax(140px, .72fr) auto;
   align-items: center;
   gap: 1rem;
   min-width: 0;
@@ -118,6 +118,16 @@ button, input, select { font: inherit; }
 .device-row-label { display: block; color: var(--muted); font-size: .68rem; font-weight: 750; letter-spacing: .045em; text-transform: uppercase; }
 .device-row-value { display: block; margin-top: .18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .85rem; }
 .device-row-type-value, .device-type-value { display: inline-flex; align-items: center; gap: .42rem; max-width: 100%; }
+.fingerprint-type-icon { display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; vertical-align: middle; }
+.fingerprint-type-icon img { display: block; width: 22px; height: 22px; }
+.live-fingerprint-type-cell, .device-row-type-field { text-align: center; }
+.device-row-type-field .fingerprint-type-icon { margin-top: .18rem; }
+.device-inventory { margin-bottom: 1rem; padding: 1rem 1.15rem; }
+.device-inventory h2 { margin: 0 0 .75rem; font-size: 1rem; }
+.device-inventory-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.device-inventory .metric { display: block; font-size: 1.6rem; margin: .25rem 0 0; }
+.device-inventory #device-inventory-state:empty { display: none; }
+.ap-device-count { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: .75rem; align-items: center; margin: .65rem 0; }
 .device-type-icon { display: block; flex: 0 0 auto; width: 18px; height: 11px; object-fit: contain; }
 .device-row-stats { display: flex; gap: 1rem; }
 .device-row-stat strong { display: block; font-size: .9rem; }
@@ -297,8 +307,12 @@ input[type="radio"] { width: auto; min-height: 0; }
   .live-bar-track { grid-column: 1 / -1; }
 }
 
+@media (min-width: 961px) and (max-width: 1450px) {
+  .device-row { grid-template-columns: 96px minmax(0, 1.1fr) 72px minmax(0, .5fr) minmax(0, .9fr) minmax(0, .62fr) minmax(0, .72fr) auto; gap: .65rem; }
+  .device-row-stats { min-width: 0; gap: .5rem; }
+}
 @media (max-width: 960px) {
-  .device-row { grid-template-columns: 96px minmax(210px, 1fr) minmax(100px, .5fr) minmax(180px, .9fr) minmax(130px, .6fr) auto; }
+  .device-row { grid-template-columns: 96px minmax(0, 1fr) 72px minmax(0, .5fr) minmax(0, .9fr) minmax(0, .6fr) auto; }
   .device-row-network { display: none; }
 }
 
@@ -307,6 +321,8 @@ input[type="radio"] { width: auto; min-height: 0; }
   .device-status { grid-column: 1; }
   .device-row-main { grid-column: 2; }
   .device-row-chevron { grid-column: 3; grid-row: 1; }
-  .device-row-type-field, .device-row-activity, .device-row-stats { grid-column: 2 / 4; }
+  .device-row-type-field, .device-row-platform-field, .device-row-activity, .device-row-stats { grid-column: 2 / 4; }
+  .device-row-type-field { text-align: left; }
+  .device-inventory-metrics { grid-template-columns: minmax(0, 1fr); }
   .device-row-network { display: none; }
 }
