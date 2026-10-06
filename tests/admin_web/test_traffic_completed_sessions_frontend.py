@@ -18,13 +18,15 @@ def _block(source: str, name: str) -> str:
     return source.split(start, 1)[1].split(end, 1)[0]
 
 
-def test_template_contract_places_completed_sessions_between_online_and_history():
+def test_template_contract_places_completed_sessions_last_after_evidence():
     template = TRAFFIC_TEMPLATE.read_text(encoding="utf-8")
     base = BASE_TEMPLATE.read_text(encoding="utf-8")
     assert "data-traffic-completed-sessions-enabled" in base
-    assert template.index('id="traffic-online-guests-panel"') < template.index(
+    assert template.index('id="traffic-history-panel"') < template.index(
+        'id="traffic-evidence-panel"'
+    ) < template.index(
         'id="traffic-completed-sessions-panel"'
-    ) < template.index('id="traffic-history-panel"')
+    )
     for heading in (
         "Guest", "Session Start", "Session End", "Duration", "SSID",
         "Download", "Upload", "Total", "Evidence",

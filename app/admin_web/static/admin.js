@@ -580,7 +580,7 @@
     value.append(header, definitionList([
       ["MAC", item.client_mac], ["Started", item.started_at], ["Closed", item.closed_at],
       ["Duration (s)", item.duration_seconds], ["SSID", item.final_ssid || item.start_ssid],
-      ["AP", item.final_ap_mac || item.start_ap_mac], ["Traffic (bytes)", item.reported_traffic_total_bytes],
+      ["AP", item.final_ap_mac || item.start_ap_mac], ["Traffic", formatDeviceBytes(item.reported_traffic_total_bytes)],
     ]));
     return value;
   }
@@ -2802,6 +2802,11 @@
     return path;
   }
   function apMetric(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
+  function apPresentationOrder(items) {
+    const names = new Intl.Collator("en", {numeric: true, sensitivity: "base"});
+    return [...items].sort((a, b) => names.compare(a.display_name, b.display_name)
+      || (a.ap_mac < b.ap_mac ? -1 : a.ap_mac > b.ap_mac ? 1 : 0));
+  }
   function renderApTraffic(value, history) {
     apElements.items.replaceChildren();
     apElements.applied.textContent = displayRange(history.range.id);
@@ -2824,7 +2829,7 @@
       : (value.status === "partial" ? "Partial" : "Insufficient");
     apElements.current.textContent = value.current_snapshot === null ? "Unavailable"
       : `${displayTime(value.current_snapshot.evaluated_at)} · ${value.current_snapshot.freshness_status} · ${value.current_snapshot.selected_source}`;
-    for (const item of value.items) {
+    for (const item of apPresentationOrder(value.items)) {
       const card = document.createElement("article");
       card.className = "card traffic-ap-card";
       card.dataset.apMac = item.ap_mac;
@@ -4034,7 +4039,24 @@
     return Math.min(300000, 5000 * (2 ** Math.min(Math.max(0, failures - 1), 6)));
   }
   function controllerEnabled(root) { return root && root.dataset.homeAp24hEnabled === "true"; }
-  if (typeof window !== "undefined") window.CaptivPortalHomeAp24Test = Object.freeze({validResult, retryDelay, controllerEnabled});
+  function renderTimeline(createNode, item) {
+    const region = createNode("div", "ap24-history");
+    if (!item) {
+      region.append(createNode("p", "live-detail ap24-unavailable", "24h · — · History unavailable"));
+      return region;
+    }
+    region.append(createNode("p", "live-detail", `24h ${item.history.status} · unavailable ${item.history.unavailable_seconds}s · Observation ${item.observation_quality.status}`));
+    const timeline = createNode("div", "ap24-timeline");
+    item.timeline.forEach((bucket) => {
+      const segment = createNode("span", "ap24-segment");
+      segment.dataset.state = bucket.ap_state;
+      segment.title = `${bucket.from_utc} · ${bucket.ap_state} · Observation ${bucket.observation_quality}`;
+      timeline.append(segment);
+    });
+    region.append(timeline);
+    return region;
+  }
+  if (typeof window !== "undefined") window.CaptivPortalHomeAp24Test = Object.freeze({validResult, retryDelay, controllerEnabled, renderTimeline});
   if (typeof document === "undefined") return;
   const root = document.getElementById("admin-page");
   if (!root || root.dataset.page !== "home" || !controllerEnabled(root)) return;
@@ -4042,10 +4064,10 @@
   const base = root.dataset.apiBase + "/home/ap-24h";
   const refreshMs = Number(root.dataset.homeAp24hRefreshSeconds) * 1000;
   const timeoutMs = Number(root.dataset.homeAp24hRequestTimeoutSeconds) * 1000;
-  const state = {generation: 0, controller: null, active: false, stopped: false, failures: 0, next: 0, cursor: null, timer: null};
+  const state = {generation: 0, controller: null, active: false, stopped: false, failures: 0, next: 0, timer: null, items: new Map(), available: false};
   const panel = document.getElementById("home-ap-24h-state");
-  const target = document.getElementById("home-ap-24h-items");
-  const more = document.getElementById("home-ap-24h-more");
+  const listeners = new Set();
+  function notify() { listeners.forEach((listener) => listener()); }
   function node(tag, className, text) {
     const value = document.createElement(tag);
     if (className) value.className = className;
@@ -4067,17 +4089,6 @@
     });
     document.getElementById("home-ap-24h-window").textContent = `${value.window.from_utc} through ${value.window.to_utc} · ${value.summary.ap_count_in_window} AP(s)`;
   }
-  function renderItems(items, append) {
-    if (!append) target.replaceChildren();
-    items.forEach((item) => {
-      const row = node("article", "data-row"); const heading = node("div", "data-row-header");
-      heading.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.current.status));
-      const detail = node("p", "live-detail", `${item.ap_mac} · 24h ${item.history.status} · unavailable ${item.history.unavailable_seconds}s · Observation ${item.observation_quality.status}`);
-      const timeline = node("div", "ap24-timeline");
-      item.timeline.forEach((bucket) => { const segment = node("span", "ap24-segment"); segment.dataset.state = bucket.ap_state; segment.title = `${bucket.from_utc} · ${bucket.ap_state} · Observation ${bucket.observation_quality}`; timeline.append(segment); });
-      row.append(heading, detail, timeline); target.append(row);
-    });
-  }
   async function request(cursor, generation) {
     const controller = new AbortController(); state.controller = controller;
     const timeout = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
@@ -4097,7 +4108,8 @@
     }
   }
   function failure(error) {
-    if (error && error.status === 404) { state.stopped = true; target.replaceChildren(); more.hidden = true; setPanel("unavailable", "Feature unavailable", "AP 24-hour history is disabled."); return; }
+    state.available = false; notify();
+    if (error && error.status === 404) { state.stopped = true; state.items = new Map(); setPanel("unavailable", "Feature unavailable", "AP 24-hour history is disabled."); return; }
     state.failures += 1; state.next = performance.now() + retryDelay(state.failures, error && error.retryAfter);
     setPanel("unavailable", "Update unavailable", "AP 24-hour evidence could not be refreshed. Other Home panels remain independent.");
   }
@@ -4108,31 +4120,45 @@
     if (state.controller) state.controller.abort("superseded");
     try {
       const value = await request(null, generation); if (!value) return;
-      state.failures = 0; state.next = performance.now() + refreshMs; state.cursor = value.page.next_cursor;
-      renderSummary(value); renderItems(value.items, false); more.hidden = !state.cursor;
+      const accepted = new Map(); const cursors = new Set();
+      let page = value;
+      do {
+        if (state.stopped || generation !== state.generation || document.hidden) return;
+        if (!Object.keys(value.window).every((key) => page.window[key] === value.window[key])
+          || page.summary.ap_count_in_window !== value.summary.ap_count_in_window) throw new Error("AP24 page identity changed");
+        for (const item of page.items) {
+          if (!/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(item.ap_mac) || accepted.has(item.ap_mac)) throw new Error("Invalid AP24 identity");
+          accepted.set(item.ap_mac, item);
+        }
+        if (accepted.size > value.summary.ap_count_in_window) throw new Error("Invalid AP24 population");
+        const cursor = page.page.next_cursor;
+        if (cursor === null) break;
+        if (!cursor || cursors.has(cursor)) throw new Error("Repeated AP24 cursor");
+        cursors.add(cursor);
+        page = await request(cursor, generation); if (!page) return;
+      } while (page);
+      if (generation !== state.generation || state.stopped || document.hidden) return;
+      if (accepted.size !== value.summary.ap_count_in_window) throw new Error("Incomplete AP24 population");
+      state.items = accepted; state.available = true;
+      state.failures = 0; state.next = performance.now() + refreshMs;
+      renderSummary(value); notify();
       setPanel(value.block_status, value.block_status[0].toUpperCase() + value.block_status.slice(1), value.block_reason || "Persisted Current State and Observation evidence loaded.");
     } catch (error) {
-      if (!(error && error.name === "AbortError")) failure(error);
-    } finally { state.active = false; }
-  }
-  async function loadMore() {
-    if (!state.cursor || state.active || state.stopped) return;
-    state.active = true; state.generation += 1; const generation = state.generation;
-    try {
-      const value = await request(state.cursor, generation); if (!value) return;
-      state.cursor = value.page.next_cursor; renderItems(value.items, true); more.hidden = !state.cursor;
-    } catch (error) { if (!(error && error.name === "AbortError")) failure(error); }
-    finally { state.active = false; }
+      if (generation === state.generation) failure(error);
+    } finally { if (generation === state.generation) state.active = false; }
   }
   function abort(reason) {
     if (state.controller) {
       state.generation += 1;
+      state.active = false;
       state.controller.abort(reason);
     }
   }
   function nextEligibleAt() { return state.stopped ? Infinity : state.next; }
-  const api = Object.freeze({run, abort, nextEligibleAt}); window.CaptivPortalHomeAp24Coordinator = api;
-  more.addEventListener("click", loadMore);
+  const api = Object.freeze({run, abort, nextEligibleAt,
+    lookup: (mac) => state.available ? state.items.get(mac) || null : null,
+    subscribe: (listener) => { listeners.add(listener); }});
+  window.CaptivPortalHomeAp24Coordinator = api;
   const combined = root.dataset.homeLiveEnabled === "true" && [root.dataset.homeTrafficEnabled, root.dataset.homeActivityEnabled, root.dataset.homeHealthEnabled, root.dataset.homeAp24hEnabled].some((value) => value === "true");
   if (!combined) {
     const refresh = document.getElementById("refresh-button"); refresh.addEventListener("click", () => run(true));
@@ -5114,6 +5140,8 @@
       const header = createNode("div", "data-row-header");
       header.append(createNode("strong", null, item.name || "Access point"), createNode("span", "badge", item.product_status_classification));
       row.append(header, createNode("p", "mono", item.ap_mac));
+      const ap24 = window.CaptivPortalHomeAp24Coordinator;
+      if (ap24) row.append(window.CaptivPortalHomeAp24Test.renderTimeline(createNode, ap24.lookup(item.ap_mac)));
       const devices = createNode("div", "ap-device-count");
       const count = clientAvailable ? (buckets.get(item.ap_mac) || 0) : null;
       const track = createNode("span", "live-bar-track");
@@ -5125,10 +5153,16 @@
       row.append(devices);
       if (trafficEnabled) {
         const rate = traffic.get(item.ap_mac);
-        if (!rate) row.append(createNode("p", "live-detail", "Traffic · —"));
-        else row.append(createNode("p", "live-detail", `Traffic · ${rate.rate_status}`),
-          createNode("p", "live-detail", `Download ${formatRate(rate.download_mbps)} · Upload ${formatRate(rate.upload_mbps)} · Total ${formatRate(rate.total_mbps)}`),
-          createNode("p", "live-detail", `Source ${rate.selected_source === "lan" ? "LAN" : "Wired"} · observed ${rate.observed_at || "—"}`));
+        row.append(createNode("p", "live-detail", `Traffic · ${rate ? rate.rate_status : "—"}`));
+        const rates = createNode("div", "ap-traffic-rates");
+        for (const [label, key] of [["Download ↓", "download_mbps"], ["Upload ↑", "upload_mbps"], ["Total ↓↑", "total_mbps"]]) {
+          const metric = createNode("div", "ap-traffic-rate");
+          metric.append(createNode("span", "ap-traffic-rate-label", label),
+            createNode("strong", "ap-traffic-rate-value", rate ? formatRate(rate[key]) : "—"));
+          rates.append(metric);
+        }
+        row.append(rates);
+        if (rate) row.append(createNode("p", "live-detail", `Source ${rate.selected_source === "lan" ? "LAN" : rate.selected_source === "wired" ? "Wired" : "—"} · observed ${rate.observed_at || "—"}`));
       }
       target.append(row);
     });
@@ -5400,6 +5434,7 @@
       apAvailable ? sources.ap.rows : [], summary, available, [], false, false);
     rebuildApFilter();
   }
+  if (window.CaptivPortalHomeAp24Coordinator) window.CaptivPortalHomeAp24Coordinator.subscribe(renderApEnrichment);
   function rebuildApFilter() {
     const selected = filters.elements.ap.value;
     const macs = new Set();
@@ -6051,6 +6086,7 @@
       apAvailable ? sources.ap.rows : [], client, available, sources.traffic.rows, trafficAvailable, trafficEnabled, formatMbps);
     rebuildApFilter();
   }
+  if (window.CaptivPortalHomeAp24Coordinator) window.CaptivPortalHomeAp24Coordinator.subscribe(renderApEnrichment);
   function rebuildApFilter() {
     const select = filters.elements.ap; const selected = select.value; const macs = new Set();
     if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => macs.add(item.ap_mac));

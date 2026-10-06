@@ -504,6 +504,14 @@ Observation evidence (96 x 15-minute buckets). AP-24H telemetry is separately
 feature-gated and uses existing Authorization Telemetry. Repository defaults for
 both AP-24H and its telemetry are disabled; production flags remain host-verified.
 
+Home presents this evidence inside Access Points Now, not a second AP card.
+The current roster owns identity and visible pagination. AP-24H cursors are
+consumed sequentially into an atomically published exact-MAC map; each roster
+row shows its 24-hour timeline above Devices and the prominent rate trio.
+Valid unknown buckets are red without changing their state/tooltips; missing
+history is neutral. Home Type icons are 44×44; Devices icons remain 22×22.
+Closed Visit Traffic uses the existing binary byte formatter.
+
 ## Traffic Section
 
 Repository defaults:
@@ -536,19 +544,19 @@ WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=true
 WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED=true
 ```
 
-Current functional panels:
+Visual panel order (the underlying eight product contracts remain separate):
 
 1. Current Network Throughput;
 2. Online Guests Traffic;
-3. Completed Guest Session Traffic;
-4. Network Traffic History;
-5. Period Statistics;
-6. Peak Load;
-7. Traffic by AP;
-8. AP Traffic Share.
+3. Network & AP Traffic History (Network chart first, Traffic by AP subsection);
+4. Period Statistics;
+5. Peak Load;
+6. AP Traffic Share;
+7. standalone `TRAFFIC EVIDENCE` from TASK-TRAFFIC-09;
+8. Completed Guest Session Traffic, always the last enabled panel.
 
-After these eight products, the page contains the standalone `TRAFFIC EVIDENCE`
-area from TASK-TRAFFIC-09.
+AP charts use natural display-name order with a MAC tie-break only after API
+validation; canonical API ordering and AP Traffic Share ordering are unchanged.
 
 Current Network Throughput is range-insensitive.
 
