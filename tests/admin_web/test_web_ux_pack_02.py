@@ -230,7 +230,8 @@ function render(c,t,enabled=true){live.renderAccessPointRoster(node,target,foote
 render(true,true); assert.equal(target.children.length,2); assert.equal(footer.textContent,'AP Unknown · 3');
 assert.equal(target.children[0].children[2].children[1].children[0].style.width,'25%');
 assert.equal(target.children[1].children[2].children[0].textContent,'Devices · 0');
-assert.equal(target.children[0].children[4].textContent,'Download 0 Mbps · Upload — · Total 0 Mbps');
+assert.deepEqual(target.children[0].children[4].children.map(x=>x.children[0].textContent),['Download ↓','Upload ↑','Total ↓↑']);
+assert.deepEqual(target.children[0].children[4].children.map(x=>x.children[1].textContent),['0 Mbps','—','0 Mbps']);
 assert.equal(target.children[0].children[5].textContent,'Source LAN · observed NOW');
 assert.equal(target.children[1].children[3].textContent,'Traffic · —');
 render(false,false); assert.equal(target.children.length,2); assert.equal(footer.hidden,true);

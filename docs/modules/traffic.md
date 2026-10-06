@@ -97,19 +97,20 @@ including `WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED=false` and
 
 ## Current Traffic product surface
 
-Production Traffic contains:
+Traffic presentation order (no product/API contract change):
 
 1. Current Network Throughput;
 2. Online Guests Traffic;
-3. Completed Guest Session Traffic;
-4. Network Traffic History;
-5. Period Statistics;
-6. Peak Load;
-7. Traffic by AP;
-8. AP Traffic Share.
+3. Network & AP Traffic History (one outer card, Network chart before AP charts);
+4. Period Statistics;
+5. Peak Load;
+6. AP Traffic Share;
+7. `TRAFFIC EVIDENCE`, a separate consolidated evidence area, not a business metric;
+8. Completed Guest Session Traffic, last among enabled panels.
 
-After these eight product surfaces, `TRAFFIC EVIDENCE` is a separate consolidated
-evidence area. It is not a ninth business metric.
+Traffic by AP retains its own range semantics and uses a post-validation natural
+display-name sort with MAC tie-break. API MAC ordering and AP Traffic Share are
+unchanged; History-only mode retains the Network Traffic History heading.
 
 Current layout is production-current functional layout, not a permanently approved final visual composition.
 

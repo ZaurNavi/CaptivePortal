@@ -68,7 +68,7 @@ global.document={
   createElement(name){return new Element(name);},
   createElementNS(namespace,name){return new Element(name,namespace);},
 };
-global.Intl={DateTimeFormat(){return{resolvedOptions(){return{timeZone:"UTC"};}}}};
+global.Intl={Collator:Intl.Collator,DateTimeFormat(){return{resolvedOptions(){return{timeZone:"UTC"};}}}};
 function payload(){
   const count=288,start=Date.parse("2026-08-29T12:00:00.000Z"),bucket=300;
   const buckets=Array.from({length:count},(_,index)=>({
@@ -128,7 +128,15 @@ assert(registered!==null,"history panel registered");
   assert(decodeURIComponent(requests[0]).includes("include=statistics,peak,aps"),"canonical decoded combined include");
   const cards=ids["traffic-ap-items"].children;
   assert(cards.length===12,"all twelve AP cards");
+  assert(cards.map(card=>card.children[0].textContent).join(",")===Array.from({length:12},(_,i)=>`AP ${i}`).join(","),"natural presentation order, not lexical AP 10 before AP 2");
   for(const card of cards){const svg=card.children.find((child)=>child.id==="svg");assert(svg,"one AP svg");assert(svg.children.length===2,"two AP paths");}
+  let rejected=false;
+  try {
+    await registered.load({apiBase:"/admin/api/v1/sites/site-a",siteId:"site-a",requestJson:async()=>{
+      const invalid=payload(); invalid.result.ap_traffic.items.reverse(); return invalid;
+    }});
+  } catch (_) { rejected=true; }
+  assert(rejected,"non-canonical API MAC ordering remains rejected before presentation");
   console.log("traffic-ap-node-ok");
 })().catch((error)=>{console.error(error);process.exit(1);});
 '''

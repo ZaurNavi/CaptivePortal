@@ -81,7 +81,7 @@ class Element {
   dispatch(name) { return Promise.all((this.listeners[name] || []).map((callback) => callback())); }
 }
 const ids = ["admin-page", "refresh-button", "home-ap-24h-state", "home-ap-24h-status",
-  "home-ap-24h-message", "home-ap-24h-items", "home-ap-24h-more",
+  "home-ap-24h-message", "live-ap-rows", "live-ap-more",
   "home-ap-24h-summary", "home-ap-24h-window"];
 const elements = Object.fromEntries(ids.map((id) => [id, new Element(id)]));
 const site = "0123456789abcdef01234567";
@@ -101,7 +101,7 @@ global.fetch = (url, options) => { calls.push(url); signals.push(options.signal)
   const next=queue.shift(); if (!next) throw new Error("unexpected fetch"); return next; };
 function response(status,payload,retryAfter=null) { return {ok:status>=200&&status<300,status,
   json:async()=>payload,headers:{get:(name)=>name==="Retry-After"?retryAfter:null}}; }
-function payload(nextCursor=null,name="AP-A") {
+function payload(nextCursor=null,name="AP-A",mac="AA:BB:CC:DD:EE:01",population=1) {
   const start=Date.parse("2026-08-27T12:00:00.000Z");
   const timeline=Array.from({length:96},(_,index)=>({
     from_utc:new Date(start+index*900000).toISOString(),to_utc:new Date(start+(index+1)*900000).toISOString(),
@@ -109,42 +109,60 @@ function payload(nextCursor=null,name="AP-A") {
     observation_reason_codes:[],operational_seconds:900,unavailable_seconds:0,
     unknown_evidence_seconds:0,short_history_seconds:0,authoritative_state_sample_count:1,
     complete_observation_sample_count:1,diagnostic_partial_observation_sample_count:0}));
-  const counts={operational:1,degraded:0,unavailable:0,unknown:0};
+  const counts={operational:population,degraded:0,unavailable:0,unknown:0};
   return {api_version:"admin.read.v1",site_id:site,result:{contract_version:"admin.home_ap_24h.v1",
     window:{kind:"rolling_24h",evaluated_at_utc:"2026-08-28T12:00:00.000Z",
       from_utc:"2026-08-27T12:00:00.000Z",to_utc:"2026-08-28T12:00:00.000Z",bucket_seconds:900,bucket_count:96},
     block_status:"operational",block_reason:null,sources:{current_state:{status:"operational"},observations:{status:"operational"}},
-    summary:{ap_count_in_window:1,current:counts,history:counts,observation_quality:counts,
+    summary:{ap_count_in_window:population,current:counts,history:counts,observation_quality:counts,
       short_history_ap_count:0,status_gap_ap_count:0,observation_problem_ap_count:0},
-    items:[{ap_mac:"AA:BB:CC:DD:EE:01",name,model:"EAP",identity_source:"current_state",
+    items:[{ap_mac:mac,name,model:"EAP",identity_source:"current_state",
       current:{status:"operational",freshness_status:"fresh"},history:{status:"operational",coverage_status:"complete",unavailable_seconds:0},
       observation_quality:{status:"operational"},timeline}],page:{limit:20,next_cursor:nextCursor}}};
 }
 ''' + controller_source + r'''
 const controller=window.CaptivPortalHomeAp24Coordinator;
 (async()=>{
-  queue.push(Promise.resolve(response(200,payload("next"))));
-  await controller.run(true);
-  assert(calls.length===1 && elements["home-ap-24h-items"].children.length===1,"initial page renders");
-  assert(!elements["home-ap-24h-more"].hidden,"pagination is exposed");
-  queue.push(Promise.resolve(response(200,payload(null,"AP-B"))));
-  await elements["home-ap-24h-more"].dispatch("click");
-  assert(calls.length===2 && elements["home-ap-24h-items"].children.length===2,"page appends without replacing");
+  let publications=0; controller.subscribe(()=>{publications++;});
+  let resolveSecond;
+  queue.push(Promise.resolve(response(200,payload("next","AP-A","AA:BB:CC:DD:EE:01",2))));
+  queue.push(new Promise(resolve=>{resolveSecond=resolve;}));
+  const first=controller.run(true); await new Promise(resolve=>setImmediate(resolve));
+  assert(calls.length===2 && publications===0,"sequential exhaustion, no partial map published");
+  assert(controller.lookup("AA:BB:CC:DD:EE:01")===null,"no intermediate page visible");
+  resolveSecond(response(200,payload(null,"AP-B","AA:BB:CC:DD:EE:02",2))); await first;
+  assert(publications===1 && controller.lookup("AA:BB:CC:DD:EE:02").name==="AP-B","one complete map publication including AP not yet in roster");
+  assert(controller.lookup("aa:bb:cc:dd:ee:02")===null,"exact canonical MAC join only");
+  const createNode=(tag,cls,text)=>{const e=new Element(tag);e.className=cls;e.textContent=text;return e;};
+  const timeline=window.CaptivPortalHomeAp24Test.renderTimeline(createNode,controller.lookup("AA:BB:CC:DD:EE:02"));
+  assert(timeline.children[1].children.length===96,"cached history can enrich a later roster page");
+  assert(!timeline.children.some(x=>x.textContent==="AP-B"),"timeline never duplicates AP identity");
+  const absent=window.CaptivPortalHomeAp24Test.renderTimeline(createNode,null);
+  assert(absent.children.length===1 && absent.children[0].textContent.includes("—"),"missing source is neutral, not red unknown bucket");
 
   let resolvePending; now += 200000;
   queue.push(new Promise((resolve)=>{resolvePending=resolve;}));
   const pending=controller.run(true); await new Promise((resolve)=>setImmediate(resolve));
   await controller.run(true); assert(calls.length===3,"active request blocks overlap");
   controller.abort("hidden"); assert(signals.at(-1).aborted,"hidden/page lifecycle aborts owner");
+  queue.push(Promise.resolve(response(200,payload(null,"fresh"))));
+  await controller.run(true);
   resolvePending(response(200,payload(null,"late"))); await pending;
+  assert(controller.lookup("AA:BB:CC:DD:EE:01").name==="fresh","superseded response cannot overwrite current map");
+
+  now += 400000;
+  const timeoutError=new Error("request timed out"); timeoutError.name="AbortError";
+  queue.push(Promise.reject(timeoutError)); await controller.run(true);
+  assert(controller.lookup("AA:BB:CC:DD:EE:01")===null,"current-generation timeout becomes neutral");
 
   now += 400000; queue.push(Promise.resolve(response(503,{error:{code:"query_deadline"}})));
   await controller.run(true);
-  assert(elements["home-ap-24h-items"].children.length===2,"independent failure preserves last safe rows");
+  assert(controller.lookup("AA:BB:CC:DD:EE:01")===null,"failed history becomes neutral without owning roster");
+  assert(elements["live-ap-rows"].children.length===0,"AP24 never creates competing roster rows");
   now += 400000; queue.push(Promise.resolve(response(404,{error:{code:"not_found"}})));
   const before404=calls.length; await controller.run(true); await controller.run(true);
   assert(calls.length===before404+1,"feature 404 stops only AP24 polling");
-  assert(elements["home-ap-24h-items"].children.length===0,"feature 404 clears AP24 current values");
+  assert(controller.lookup("AA:BB:CC:DD:EE:01")===null,"feature 404 clears AP24 current values");
   console.log("ap24 DOM contract passed");
 })().catch((error)=>{console.error(error);process.exitCode=1;});
 ''',
