@@ -293,7 +293,7 @@ class PortalCounterWebTests(unittest.TestCase):
                 self.executor,
             ),
         ):
-            app = web_module.create_app(selected_service)
+            app = web_module.create_app(selected_service, controller=object())
 
         app.config["TESTING"] = True
         return app.test_client()
@@ -406,7 +406,7 @@ class PortalCounterWebTests(unittest.TestCase):
                 self.executor,
             ),
         ):
-            app = web_module.create_app()
+            app = web_module.create_app(controller=object())
 
         app.config["TESTING"] = True
         client = app.test_client()

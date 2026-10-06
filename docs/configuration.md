@@ -559,3 +559,22 @@ The main runtime composes one immutable startup snapshot and durably adopts
 that exact generation before serving. Operational source degradation is not
 Settings activation failure. No service or production activation is performed
 by this implementation.
+
+## Read-only Omada Controller Settings
+
+`WEB_ADMIN_SETTINGS_ENABLED` also gates the GLOBAL Controller read page/API.
+The main process builds one immutable `OmadaControllerRuntimeConfig` from the
+Stage-1 resolved settings, injects it into the shared provider and derives a
+separate secret-free public snapshot for Admin. The provider no longer reads
+settings independently. `create_app(controller=None)` retains compatibility
+by using the same canonical builder on its already-resolved local mapping;
+an injected controller is never rebuilt.
+
+`OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID` and `OMADA_CLIENT_SECRET` remain required.
+Existing trim/base-URL normalization and OAuth/request semantics are unchanged.
+Startup environment-name membership determines public `environment` versus
+`repository_default` provenance; `VERIFY_SSL=false` is a repository constant.
+Client Secret is represented only by presence/source, never its value or any
+derived length/hash/mask. No Controller values are stored in SettingsStore and
+the twelve writable integer settings are unchanged. No live probe, reload,
+restart, deployment or production activation is performed.

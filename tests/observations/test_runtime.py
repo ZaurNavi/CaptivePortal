@@ -262,8 +262,10 @@ def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
     monkeypatch.setattr(process_runtime.signal, "signal", lambda *args: None)
     monkeypatch.setattr(process_runtime, "get_settings", lambda: {
         "host": "127.0.0.1", "port": 8088, "debug": False,
+        "omada_url": "https://controller.invalid", "omada_id": "installation",
+        "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
     })
-    monkeypatch.setattr(process_runtime, "create_controller", lambda: provider)
+    monkeypatch.setattr(process_runtime, "create_controller", lambda runtime_config: provider)
     monkeypatch.setattr(process_runtime, "create_visitor_snapshot_collector", lambda **kwargs: snapshot)
     monkeypatch.setattr(process_runtime, "create_app", lambda **kwargs: app)
     monkeypatch.setattr(process_runtime, "create_pending_session_cleaner", lambda **kwargs: cleaner)

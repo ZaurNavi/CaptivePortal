@@ -873,3 +873,35 @@ Changed writes return 201; no-op writes return 200. Replay returns that original
 full 12-item response even after configured/effective generations advance.
 Settings UI offers Set/Clear Override and Save, never restart/reload controls.
 No activation capability is exposed to Admin handlers.
+
+## GLOBAL Controller Settings — read-only Stage 2
+
+`GET /admin/settings/controller` and `GET /admin/api/v1/settings/controller`
+require `WEB_ADMIN_SETTINGS_ENABLED` and the GLOBAL capability
+`admin.read.settings.controller`. There is no write capability, Site variant,
+generation or mutation route. Unexpected API query parameters return
+`400 invalid_request`. JSON uses `admin.settings.controller.v1`, a request UUID,
+GLOBAL scope, installation-level `omada_controller` resource and
+`management_mode=deployment_controlled`. Responses are `no-store` / `no-cache`.
+
+`ControllerConfigurationReadService` receives only the immutable public
+projection of the exact config adopted by the shared Omada provider at startup.
+It cannot read environment/settings/store/provider state and performs zero
+Omada/OAuth I/O. The five fields show Controller URL, Controller ID,
+Client / Application ID, Client Secret presence and TLS verification, with
+`environment` / `repository_default` sources. No connection/token health is
+claimed and no secret value, substring, length or digest is retained/disclosed.
+
+General and Controller authorization/navigation are independent. The Settings
+top-level link chooses General when allowed, otherwise Controller; secondary
+links are capability-aware. Both pages are GLOBAL. Controller loads only
+`controller_settings.js`, not `settings.js` or Site-oriented `admin.js`.
+
+The Controller read surface has `active`, `disabled` and `unavailable` states.
+Disabled HTML is 404, disabled API is `404 feature_disabled`; unavailable
+projection/read is `503 controller_settings_read_unavailable`. Authentication,
+capability and malformed-query failures are respectively 401, 403 and 400;
+unexpected response serialization errors are sanitized `500 internal_error`.
+SettingsStore failure alone does not disable a trustworthy Controller snapshot.
+Projection failure remains fail-open for the shared provider and Portal/Auth.
+Stage 2 grants no network probe, systemd or production authority.

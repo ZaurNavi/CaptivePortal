@@ -142,7 +142,7 @@ def test_application_wiring_uses_mapping_and_invalid_config_is_fail_open(
         ),
         caplog.at_level(logging.WARNING, logger="captivportal"),
     ):
-        app = web_module.create_app(portal_counter_service=None)
+        app = web_module.create_app(portal_counter_service=None, controller=object())
 
     response = app.test_client(use_cookies=False).post(
         WEBHOOK_PATH,

@@ -1041,6 +1041,8 @@ def test_worker_start_failure_does_not_prevent_flask_start(
         "host": "127.0.0.1",
         "port": 8088,
         "debug": False,
+        "omada_url": "https://controller.invalid", "omada_id": "installation",
+        "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
     }
     with (
         patch.object(run_module, "create_app", return_value=app),
@@ -1088,7 +1090,7 @@ def test_api_keeps_open_counter_when_traffic_is_unavailable(
             return_value=object(),
         ),
     ):
-        app = web_module.create_app(open_service)
+        app = web_module.create_app(open_service, controller=object())
     client = app.test_client()
 
     response = client.get("/api/public/portal-counter")
@@ -1132,6 +1134,7 @@ def test_api_returns_traffic_and_preserves_old_fields(tmp_path):
     ):
         app = web_module.create_app(
             open_service,
+            controller=object(),
             public_traffic_service=traffic_service,
         )
 
@@ -1194,6 +1197,7 @@ def test_corrupt_aggregate_hides_only_traffic_from_api(tmp_path):
     ):
         app = web_module.create_app(
             open_service,
+            controller=object(),
             public_traffic_service=traffic_service,
         )
 
@@ -1719,7 +1723,7 @@ def test_disabled_component_creates_no_database_or_worker(tmp_path):
             return_value=object(),
         ),
     ):
-        app = web_module.create_app(open_service)
+        app = web_module.create_app(open_service, controller=object())
 
     assert app.extensions["public_traffic_worker"] is None
     assert not traffic_path.exists()
@@ -1757,7 +1761,7 @@ def test_invalid_traffic_config_is_fail_safe_for_app(tmp_path):
             return_value=object(),
         ),
     ):
-        app = web_module.create_app(open_service)
+        app = web_module.create_app(open_service, controller=object())
 
     payload = app.test_client().get(
         "/api/public/portal-counter"
@@ -1799,8 +1803,8 @@ def test_create_app_constructs_but_does_not_start_worker(tmp_path):
             return_value=object(),
         ),
     ):
-        first = web_module.create_app(open_service)
-        second = web_module.create_app(open_service)
+        first = web_module.create_app(open_service, controller=object())
+        second = web_module.create_app(open_service, controller=object())
 
     assert not first.extensions["public_traffic_worker"].running
     assert not second.extensions["public_traffic_worker"].running

@@ -13,7 +13,9 @@ def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch,
                         SimpleNamespace(json_line=lambda: "synthetic settings startup test"))
     from tests.admin_web.conftest import enabled_settings
     admin_settings = enabled_settings() if failure == "configuration" else {}
-    boot = stack(tmp_path, **admin_settings, host="127.0.0.1", port=8088, debug=False)
+    boot = stack(tmp_path, **admin_settings, host="127.0.0.1", port=8088, debug=False,
+                 omada_url="https://controller.invalid", omada_id="installation",
+                 client_id="application", client_secret="fixture-secret", verify_ssl=False)
     # Use the real activation service and snapshot, with a disposable disabled Admin.
     monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_kwargs: boot)
     original = boot.activation_service.repository.activation

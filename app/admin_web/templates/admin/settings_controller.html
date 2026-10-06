@@ -1,0 +1,8 @@
+{% extends "admin/base.html" %}
+{% block subtitle %}<p>Omada Controller</p><p>Deployment-controlled. No connection test performed.</p>{% endblock %}
+{% block page_body %}
+<div id="controller-settings-state" class="state-panel" role="status" aria-live="polite">
+  {% if controller_settings_state == 'active' %}Loading Controller configuration…{% else %}Controller configuration is unavailable.{% endif %}
+</div>
+<dl id="controller-settings-fields" class="detail-list" hidden></dl>
+{% endblock %}

@@ -37,6 +37,7 @@ from app.analytics import create_analytics_runtime
 from app.analytics.api import API_PREFIX
 from app.admin_web import create_admin_web_runtime
 from app.settings_control.bootstrap import bootstrap_settings_control
+from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
 from app.admin_web.home_ap_24h_telemetry import (
     create_home_ap_24h_telemetry_worker,
 )
@@ -273,7 +274,8 @@ def _configure_analytics(app, settings, registry_read_service) -> None:
         logger.exception("analytics_api_runtime_configuration_failed")
 
 
-def _configure_admin_web(app, settings, registry_read_service, settings_control=None) -> None:
+def _configure_admin_web(app, settings, registry_read_service, settings_control=None,
+                         controller_public_snapshot=None) -> None:
     """Attach Admin Web after all existing read boundaries are composed."""
     global _admin_web_runtime
 
@@ -298,6 +300,7 @@ def _configure_admin_web(app, settings, registry_read_service, settings_control=
             observation_runtime=_observation_foundation,
             visit_runtime=_visit_lifecycle,
             settings_control=settings_control,
+            controller_public_snapshot=controller_public_snapshot,
         )
         app.extensions["admin_web_runtime"] = _admin_web_runtime
         if _admin_web_runtime.blueprint is not None:
@@ -381,15 +384,22 @@ def main() -> None:
     signal.signal(signal.SIGTERM, signal_handler)
 
     base_settings = get_settings()
+    explicit_environment_names = frozenset(os.environ)
     settings_bootstrap = bootstrap_settings_control(
         base_settings=base_settings,
-        explicit_environment_names=frozenset(os.environ),
+        explicit_environment_names=explicit_environment_names,
         logger=logger,
     )
     settings = settings_bootstrap.runtime_settings
     logger.info("Configuration loaded")
 
-    controller = create_controller()
+    controller_config = build_omada_runtime_config(settings)
+    controller = create_controller(controller_config)
+    try:
+        controller_public_snapshot = public_omada_snapshot(controller_config, explicit_environment_names)
+    except Exception:
+        controller_public_snapshot = None
+        logger.error("admin.controller_settings_projection_unavailable")
     _visitor_snapshot_collector = create_visitor_snapshot_collector(
         settings=settings,
         provider=controller,
@@ -476,7 +486,8 @@ def main() -> None:
     except Exception:
         logger.exception("visit_lifecycle_reconciliation_start_failed")
     _configure_analytics(app, settings, registry_read_service)
-    _configure_admin_web(app, settings, registry_read_service, settings_bootstrap.admin_context)
+    _configure_admin_web(app, settings, registry_read_service, settings_bootstrap.admin_context,
+                         controller_public_snapshot)
     if settings_bootstrap.activation_service is not None:
         settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime)
     _start_public_traffic_worker(app)

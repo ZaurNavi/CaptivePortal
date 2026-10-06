@@ -1019,7 +1019,7 @@ def test_disabled_module_returns_404_and_creates_no_log(
             return_value=object(),
         ),
     ):
-        app = web_module.create_app(portal_counter_service=None)
+        app = web_module.create_app(portal_counter_service=None, controller=object())
     app.config["TESTING"] = True
 
     with caplog.at_level(logging.WARNING):
@@ -1052,7 +1052,7 @@ def test_enabled_webhook_is_isolated_from_existing_routes(tmp_path):
             return_value=object(),
         ),
     ):
-        app = web_module.create_app(portal_counter_service=None)
+        app = web_module.create_app(portal_counter_service=None, controller=object())
     app.config["TESTING"] = True
     client = app.test_client()
 
@@ -1108,7 +1108,7 @@ def test_persist_failure_leaves_portal_and_auth_routes_available(
             return_value=FailingJournal(),
         ),
     ):
-        app = web_module.create_app(portal_counter_service=None)
+        app = web_module.create_app(portal_counter_service=None, controller=object())
     app.config["TESTING"] = True
     client = app.test_client()
 
