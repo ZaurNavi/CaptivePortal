@@ -167,10 +167,13 @@ def _prepare_main(
             "host": "127.0.0.1",
             "port": 8088,
             "debug": False,
+            "omada_url": "https://controller.invalid", "omada_id": "installation",
+            "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
         },
     )
 
-    def create_controller():
+    def create_controller(runtime_config):
+        assert runtime_config.controller_url == "https://controller.invalid"
         events.append("create_controller")
         return controller
 
@@ -239,6 +242,8 @@ def test_main_wires_one_provider_and_starts_collector_before_app(
             "host": "127.0.0.1",
             "port": 8088,
             "debug": False,
+            "omada_url": "https://controller.invalid", "omada_id": "installation",
+            "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
         },
     }
     assert collector.start_calls == 1

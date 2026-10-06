@@ -278,6 +278,7 @@ def create_client(
         ),
     ):
         app = web_module.create_app(
+            controller=controller or AuthorizedProvider(),
             portal_counter_service=None,
             visit_start_submitter=visit_start_submitter,
         )

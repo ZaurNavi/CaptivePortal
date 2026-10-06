@@ -1,4 +1,5 @@
 <!doctype html>
+{% set global_settings_page = page.key in ('settings', 'settings_controller') %}
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -7,6 +8,8 @@
   <link rel="stylesheet" href="{{ url_for('admin_web_v1.static', filename='admin.css') }}">
   {% if page.key == 'settings' %}
   <script defer src="{{ url_for('admin_web_v1.static', filename='settings.js') }}"></script>
+  {% elif page.key == 'settings_controller' %}
+  <script defer src="{{ url_for('admin_web_v1.static', filename='controller_settings.js') }}"></script>
   {% else %}
   <script defer src="{{ url_for('admin_web_v1.static', filename='admin.js') }}"></script>
   {% endif %}
@@ -14,12 +17,12 @@
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="topbar">
-    <a class="brand" href="{% if page.key == 'settings' %}/admin/{% else %}/admin/sites/{{ site_id }}/{% endif %}" aria-label="CaptivPortal admin home">
+    <a class="brand" href="{% if global_settings_page %}/admin/{% else %}/admin/sites/{{ site_id }}/{% endif %}" aria-label="CaptivPortal admin home">
       <span class="brand-mark" aria-hidden="true">CP</span>
       <span>CaptivPortal</span>
     </a>
     <div class="topbar-context">
-      {% if page.key == 'settings' %}
+      {% if global_settings_page %}
       <span class="eyebrow">Global Settings</span>
       {% else %}
       <span class="eyebrow">Current Site</span>
@@ -36,7 +39,7 @@
   </header>
   <div class="app-frame">
     <nav class="sidebar" aria-label="Admin navigation">
-      {% if page.key == 'settings' %}
+      {% if global_settings_page %}
       <a class="nav-link" href="/admin/">Home</a>
       {% else %}
       <a class="nav-link{% if page.key == 'home' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/">Home</a>
@@ -48,22 +51,30 @@
       {% endif %}
       {% endif %}
       {% if settings_nav_enabled %}
-      <a class="nav-link{% if page.key == 'settings' %} is-active{% endif %}" href="/admin/settings">Settings</a>
+      <a class="nav-link{% if global_settings_page %} is-active{% endif %}" href="{{ settings_nav_target }}">Settings</a>
       {% endif %}
     </nav>
     <main id="main-content" class="content">
       <div class="page-heading">
         <div>
-          <p class="eyebrow">{% if page.key == 'settings' %}Global administration{% else %}Read-only operations{% endif %}</p>
+          <p class="eyebrow">{% if global_settings_page %}Global administration{% else %}Read-only operations{% endif %}</p>
           <h1>{{ page.title }}</h1>
           {% block subtitle %}{% endblock %}
         </div>
-        {% if page.key != 'settings' %}<button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>{% endif %}
+        {% if not global_settings_page %}<button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>{% endif %}
       </div>
+      {% if global_settings_page %}
+      <nav class="settings-tabs" aria-label="Settings sections">
+        {% if settings_general_allowed %}<a class="nav-link{% if page.key == 'settings' %} is-active{% endif %}" href="/admin/settings"{% if page.key == 'settings' %} aria-current="page"{% endif %}>General</a>{% endif %}
+        {% if settings_controller_allowed %}<a class="nav-link{% if page.key == 'settings_controller' %} is-active{% endif %}" href="/admin/settings/controller"{% if page.key == 'settings_controller' %} aria-current="page"{% endif %}>Controller</a>{% endif %}
+      </nav>
+      {% endif %}
       <section
         {% if page.key == 'settings' %}
         id="settings-page" data-api-base="/admin/api/v1/settings"
         data-store-state="{{ settings_store_state }}" data-csrf-token="{{ csrf_token }}"
+        {% elif page.key == 'settings_controller' %}
+        id="controller-settings-page" data-controller-state="{{ controller_settings_state }}"
         {% else %}
         id="admin-page"
         data-page="{{ page.key }}"

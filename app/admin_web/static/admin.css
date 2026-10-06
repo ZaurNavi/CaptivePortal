@@ -350,3 +350,5 @@ input[type="radio"] { width: auto; min-height: 0; }
 .settings-item label { display: block; margin-top: .75rem; }
 .settings-item input, .settings-item select { max-width: 100%; padding: .5rem; }
 .settings-actions { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+.settings-tabs { display: flex; gap: .5rem; margin-bottom: 1rem; }
+.controller-settings-source { display: block; color: var(--muted); margin-top: .25rem; }

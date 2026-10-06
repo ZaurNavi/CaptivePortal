@@ -6,6 +6,7 @@ import pytest
 import app.config as config_module
 import app.settings as settings_module
 from app.controllers.omada import OmadaProvider
+from app.controllers.omada_config import build_omada_runtime_config
 from app.exceptions import ConfigurationError
 
 
@@ -51,15 +52,11 @@ def load_settings_from_environment(monkeypatch):
 
 def configuration_error(settings):
     with (
-        patch(
-            "app.controllers.omada.get_settings",
-            return_value=settings,
-        ),
         patch("app.controllers.omada.requests.post") as request_post,
         patch("app.controllers.omada.requests.get") as request_get,
         pytest.raises(ConfigurationError) as exc_info,
     ):
-        OmadaProvider()
+        OmadaProvider(build_omada_runtime_config(settings))
 
     request_post.assert_not_called()
     request_get.assert_not_called()
@@ -200,14 +197,10 @@ def test_valid_configuration_creates_provider_without_network(
     )
 
     with (
-        patch(
-            "app.controllers.omada.get_settings",
-            return_value=settings,
-        ),
         patch("app.controllers.omada.requests.post") as request_post,
         patch("app.controllers.omada.requests.get") as request_get,
     ):
-        provider = OmadaProvider()
+        provider = OmadaProvider(build_omada_runtime_config(settings))
 
     request_post.assert_not_called()
     request_get.assert_not_called()

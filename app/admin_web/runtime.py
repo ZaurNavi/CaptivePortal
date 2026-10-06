@@ -68,6 +68,8 @@ class AdminWebRuntime:
     settings_store_state: str = "disabled"
     settings_read_service: Any | None = None
     settings_mutation_service: Any | None = None
+    controller_settings_state: str = "disabled"
+    controller_settings_read_service: Any | None = None
 
     def clear(self) -> None:
         if self.session_store is not None:
@@ -92,6 +94,7 @@ def create_admin_web_runtime(
     observation_runtime: Any | None = None,
     visit_runtime: Any | None = None,
     settings_control: Any | None = None,
+    controller_public_snapshot: Any | None = None,
 ) -> AdminWebRuntime:
     """Create Admin security state without mutating or querying data sources."""
     try:
@@ -408,6 +411,18 @@ def create_admin_web_runtime(
                         "failure_category": "composition_error",
                     },
                 )
+    settings_feature_enabled = settings.get("web_admin_settings_enabled", "false") in (True, "true")
+    controller_settings_state = "disabled"
+    controller_settings_read_service = None
+    if settings_feature_enabled:
+        controller_settings_state = "unavailable"
+        try:
+            from .controller_settings import ControllerConfigurationReadService
+
+            controller_settings_read_service = ControllerConfigurationReadService(controller_public_snapshot)
+            controller_settings_state = "active"
+        except Exception:
+            logger.error("admin.controller_settings_projection_unavailable")
     runtime = AdminWebRuntime(
         state=(
             "active"
@@ -443,10 +458,12 @@ def create_admin_web_runtime(
         traffic_completed_sessions_service=completed_sessions_service,
         traffic_evidence_state=evidence_state,
         traffic_evidence_aggregator=evidence_aggregator,
-        settings_feature_enabled=bool(settings_control and settings_control.feature_enabled),
+        settings_feature_enabled=settings_feature_enabled,
         settings_store_state=settings_control.store_state if settings_control else "disabled",
         settings_read_service=settings_control.read_service if settings_control else None,
         settings_mutation_service=settings_control.mutation_service if settings_control else None,
+        controller_settings_state=controller_settings_state,
+        controller_settings_read_service=controller_settings_read_service,
     )
     from .routes import create_admin_web_blueprint
 

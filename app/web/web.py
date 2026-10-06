@@ -14,6 +14,7 @@ from flask import Flask, jsonify, make_response, render_template, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app import create_controller, get_settings, logger
+from app.controllers.omada_config import build_omada_runtime_config
 from app.auth.manager import (
     AuthSessionManager,
     RetryOutcome,
@@ -344,7 +345,7 @@ def create_app(
         )
 
     if controller is None:
-        controller = create_controller()
+        controller = create_controller(build_omada_runtime_config(settings))
     if visitor_snapshot_collector is None:
         visitor_snapshot_collector = (
             DISABLED_VISITOR_SNAPSHOT_COLLECTOR

@@ -54,7 +54,8 @@ def create_test_app(portal_evidence_sink=None, *, automatic=False, client_hints_
         ),
         patch.object(web_module, "auth_manager", manager if manager is not None else web_module.auth_manager),
     ):
-        arguments = {"portal_counter_service": None, "client_hints_probe": client_hints_probe}
+        arguments = {"portal_counter_service": None, "client_hints_probe": client_hints_probe,
+                     "controller": object()}
         if not automatic:
             arguments["portal_evidence_sink"] = portal_evidence_sink
         app = web_module.create_app(**arguments)

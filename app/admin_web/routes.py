@@ -160,16 +160,20 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
 
     @blueprint.context_processor
     def settings_navigation():
-        return {"settings_nav_enabled": (
-            getattr(runtime, "settings_feature_enabled", False)
-            and policy.authorize_global(getattr(g, "admin_principal", None), "admin.read.settings.global")
-        )}
+        enabled = getattr(runtime, "settings_feature_enabled", False)
+        principal = getattr(g, "admin_principal", None)
+        general = enabled and policy.authorize_global(principal, "admin.read.settings.global")
+        controller = enabled and policy.authorize_global(principal, "admin.read.settings.controller")
+        return {"settings_general_allowed": general, "settings_controller_allowed": controller,
+                "settings_nav_enabled": general or controller,
+                "settings_nav_target": "/admin/settings" if general else "/admin/settings/controller"}
 
     def settings_gate(capability):
         if not getattr(runtime, "settings_feature_enabled", False):
             return _error("feature_disabled" if _is_api_path(request.path) else "not_found", 404)
         if not policy.authorize_global(g.admin_principal, capability):
-            return _error("settings_forbidden", 403)
+            return _error("controller_settings_forbidden" if capability == "admin.read.settings.controller"
+                          else "settings_forbidden", 403)
         return None
 
     @blueprint.get("/admin/settings")
@@ -185,6 +189,42 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     def settings_failure(error):
         return jsonify({"api_version": "admin.settings.v1", "request_id": g.admin_request_id,
                         "error": {"code": error.code, "details": list(error.details)}}), error.status
+
+    @blueprint.get("/admin/settings/controller")
+    @authenticated
+    def controller_settings_page():
+        rejected = settings_gate("admin.read.settings.controller")
+        if rejected is not None:
+            return rejected
+        if request.args:
+            return _error("invalid_request", 400)
+        return render_template("admin/settings_controller.html",
+            page={"key": "settings_controller", "title": "Controller"},
+            username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token,
+            controller_settings_state=runtime.controller_settings_state)
+
+    @blueprint.get("/admin/api/v1/settings/controller")
+    @authenticated
+    def controller_settings_read():
+        rejected = settings_gate("admin.read.settings.controller")
+        if rejected is not None:
+            return rejected
+        # This GET accepts no body. Inspect at most one byte when length is unknown;
+        # never parse or retain caller body content for the configuration read.
+        if request.args or (request.content_length or 0) > 0 or request.stream.read(1):
+            return _error("invalid_request", 400)
+        if (runtime.controller_settings_state != "active"
+                or runtime.controller_settings_read_service is None):
+            return _error("controller_settings_read_unavailable", 503)
+        try:
+            model = runtime.controller_settings_read_service.read(g.admin_request_id)
+        except Exception:
+            # Never render or log projection exceptions / raw config.
+            return _error("controller_settings_read_unavailable", 503)
+        try:
+            return jsonify(model)
+        except Exception:
+            return _error("internal_error", 500)
 
     @blueprint.get("/admin/api/v1/settings")
     @authenticated
@@ -2144,7 +2184,9 @@ def _error(code: str, status_code: int) -> Response:
     if _is_api_path(request.path):
         return jsonify(
             {
-                "api_version": "admin.settings.v1" if request.path.startswith("/admin/api/v1/settings") else API_VERSION,
+                "api_version": ("admin.settings.controller.v1"
+                    if request.path == "/admin/api/v1/settings/controller"
+                    else "admin.settings.v1" if request.path.startswith("/admin/api/v1/settings") else API_VERSION),
                 "request_id": getattr(g, "admin_request_id", str(uuid.uuid4())),
                 "error": {
                     "code": code,

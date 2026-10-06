@@ -7,10 +7,11 @@ Ensures loose coupling by hiding concrete implementation details.
 
 from app.controllers.base import ControllerInterface
 from app.controllers.omada import OmadaProvider
+from app.controllers.omada_config import OmadaControllerRuntimeConfig
 from app.logger import logger
 
 
-def create_controller() -> ControllerInterface:
+def create_controller(runtime_config: OmadaControllerRuntimeConfig) -> ControllerInterface:
     """
     Create and return a controller provider instance.
     
@@ -22,6 +23,6 @@ def create_controller() -> ControllerInterface:
         ControllerInterface: An instance of a controller provider.
     """
     logger.info("Creating controller provider...")
-    controller = OmadaProvider()
+    controller = OmadaProvider(runtime_config)
     logger.debug("Controller provider created successfully")
     return controller

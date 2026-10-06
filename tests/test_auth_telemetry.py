@@ -887,6 +887,7 @@ class AuthTelemetryWebIntegrationTests(unittest.TestCase):
                 ),
             ):
                 app = web_module.create_app(
+                    controller=object(),
                     portal_counter_service=None
                 )
                 client = app.test_client()
