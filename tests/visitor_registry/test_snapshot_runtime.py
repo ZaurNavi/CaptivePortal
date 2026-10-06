@@ -186,7 +186,8 @@ def _prepare_main(
             raise registry_create_error
         return registry
 
-    def create_app(*, controller, visitor_snapshot_collector):
+    def create_app(*, controller, visitor_snapshot_collector, settings):
+        assert settings["host"] == "127.0.0.1"
         events.append("create_app")
         observed["app_controller"] = controller
         observed["app_collector"] = visitor_snapshot_collector

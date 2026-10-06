@@ -844,3 +844,32 @@ Completed Guest Session Traffic is a separate Visit-scoped guest-session domain.
 
 Admin Web has no business-write worker. Failure of Admin Web remains fail-open
 relative to guest authorization.
+
+## GLOBAL Settings V1
+
+When `WEB_ADMIN_SETTINGS_ENABLED=true`, authorized platform operators receive
+the GLOBAL `/admin/settings` page and navigation entry. This page neither
+resolves a Site nor creates a fake Site context. Its dedicated controller is
+`settings.js`; existing `admin.js` does not control Settings.
+
+`GET /admin/api/v1/settings` returns `admin.settings.v1` with the complete
+ordered 12-item `SettingReadModelV1`, configured/effective generation, ETag,
+override/base values and activation state. Disabled consumers have a null
+effective value. Without a trustworthy adopted runtime snapshot, state is
+`runtime_unavailable`; silence is never synthesized as `activation_failed`.
+Navigation/page remain reachable in the bounded store-unavailable state while
+read and mutation APIs return `503 settings_store_unavailable`.
+
+`POST /admin/api/v1/settings/generations` requires global write authorization,
+the session CSRF header, canonical UUID `Idempotency-Key`, and quoted
+`If-Match: "settings-gN"`. Missing If-Match is 428, malformed input is 400,
+stale generation is 412 and conflicting idempotency payload is 409. This route
+accepts JSON only (32768-byte limit, 64-change structural limit) and does not
+parse form data. Duplicate members, NaN and infinities are rejected.
+
+One `BEGIN IMMEDIATE` transaction validates the complete candidate, persists
+the complete override set and audit, and saves the original success response.
+Changed writes return 201; no-op writes return 200. Replay returns that original
+full 12-item response even after configured/effective generations advance.
+Settings UI offers Set/Clear Override and Save, never restart/reload controls.
+No activation capability is exposed to Admin handlers.

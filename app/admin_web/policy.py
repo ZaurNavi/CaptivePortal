@@ -19,6 +19,10 @@ READ_CAPABILITIES = frozenset(
     }
 )
 
+GLOBAL_SETTINGS_CAPABILITIES = frozenset({
+    "admin.read.settings.global", "admin.write.settings.global",
+})
+
 
 class AdminSiteContextError(ValueError):
     pass
@@ -47,6 +51,13 @@ class AdminSiteContextResolver:
 @dataclass(frozen=True, slots=True)
 class AdminAccessPolicy:
     allowed_site_ids: frozenset[str]
+
+    def authorize_global(self, principal: AdminPrincipal, capability: str) -> bool:
+        return (
+            isinstance(principal, AdminPrincipal)
+            and principal.principal_type == "platform_operator"
+            and capability in GLOBAL_SETTINGS_CAPABILITIES
+        )
 
     def authorize(
         self,

@@ -515,3 +515,47 @@ The current 1-GiB `SnapshotExecutionPolicy.process_memory_guard_bytes` is a
 versioned classifier/foundation policy artifact, not a replacement environment
 variable and not a 1-GiB reservation.
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+
+## Settings Foundation V1
+
+`WEB_ADMIN_SETTINGS_ENABLED=false` is the default. Disabled startup performs no
+SettingsStore I/O and keeps base settings authoritative. `SETTINGS_DB_PATH`
+defaults to `/opt/CaptivePortal/data/settings.sqlite3`; these two bootstrap
+controls are not editable Settings. Provision the parent directory externally;
+the application does not create it or migrate an incompatible database.
+
+When enabled and available, GLOBAL persisted overrides precede explicit
+environment values, which precede the shared typed repository defaults. An
+available but semantically invalid startup configuration aborts; only an
+unavailable SettingsStore permits automatic base-settings fallback.
+
+The ordered writable allowlist is exactly:
+
+| Key | Default | Bounds |
+| --- | ---: | --- |
+| WEB_ADMIN_DEVICE_PAGE_SIZE | 100 | 1–500 |
+| WEB_ADMIN_VISIT_PAGE_SIZE | 100 | 1–500 |
+| WEB_ADMIN_OBSERVATION_PAGE_SIZE | 100 | 1–500 |
+| WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS | 24 | 1–168 |
+| WEB_ADMIN_CURRENT_STATE_PAGE_SIZE | 100 | 1–250 |
+| WEB_ADMIN_HOME_TRAFFIC_PAGE_SIZE | 100 | 1–250 |
+| WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS | 60 | 60–300 |
+| WEB_ADMIN_HOME_TRAFFIC_REFRESH_SECONDS | 60 | 60–300 |
+| WEB_ADMIN_TRAFFIC_REFRESH_SECONDS | 60 | 60–300 |
+| WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS | 60 | 60–300 |
+| WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS | 60 | 60–300 |
+| WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS | 120 | 60–600 |
+
+SQLite schema v1 retains immutable generations, complete per-generation
+override sets, mutation audit, successful idempotency responses and activation
+events, plus the mutable `captive-portal.service` effective-generation target.
+Generation 0 is created with `system / settings_bootstrap`, no overrides, no
+mutation audit and no idempotency record. Foreign keys are enabled and the
+SQLite busy timeout is 1000 ms.
+
+A successful Save persists configuration only. All keys require a main-service
+restart; the Settings API cannot restart services or hot-reload configuration.
+The main runtime composes one immutable startup snapshot and durably adopts
+that exact generation before serving. Operational source degradation is not
+Settings activation failure. No service or production activation is performed
+by this implementation.
