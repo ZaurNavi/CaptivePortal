@@ -342,3 +342,11 @@ input[type="radio"] { width: auto; min-height: 0; }
   .device-inventory-metrics { grid-template-columns: minmax(0, 1fr); }
   .device-row-network { display: none; }
 }
+.settings-item { border-top: 1px solid var(--border, #d8dee9); padding: 1rem 0; min-width: 0; }
+.settings-item h3 { margin-bottom: .4rem; }
+.settings-item .mono { overflow-wrap: anywhere; }
+.settings-facts { display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(0, 2fr); gap: .3rem 1rem; }
+.settings-facts dd { margin: 0; overflow-wrap: anywhere; }
+.settings-item label { display: block; margin-top: .75rem; }
+.settings-item input, .settings-item select { max-width: 100%; padding: .5rem; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }

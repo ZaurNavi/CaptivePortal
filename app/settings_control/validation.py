@@ -1,0 +1,37 @@
+"""Primitive validation plus existing authoritative semantic validators."""
+from app.admin_web.config import admin_web_config_from_settings
+from app.admin_web.home_activity_config import home_activity_config_from_settings
+from app.admin_web.home_health_config import home_health_config_from_settings
+from app.admin_web.home_ap_24h_config import home_ap_24h_config_from_settings
+from app.current_state.config import current_state_config_from_settings
+from .definitions import SettingsDefinitionRegistry
+from .models import SettingsError
+
+
+class SettingsValidationService:
+    def __init__(self, registry=None):
+        self.registry = registry or SettingsDefinitionRegistry()
+
+    def validate(self, snapshot):
+        details = []
+        for item in self.registry:
+            value = snapshot.values[item.settings_dict_key]
+            if type(value) is not int:
+                details.append({"key": item.key, "reason": "integer_required"})
+            elif not item.min_value <= value <= item.max_value:
+                details.append({"key": item.key, "reason": "out_of_range"})
+            base = snapshot.base_value_by_key[item.key]
+            if not item.min_value <= base <= item.max_value:
+                details.append({"key": item.key, "reason": "invalid_base_value"})
+        if details:
+            raise SettingsError("validation_failed", 422, details)
+        try:
+            admin = admin_web_config_from_settings(snapshot.values)
+            current = None
+            if snapshot.values.get("web_admin_home_activity_enabled") in (True, "true"):
+                current = current_state_config_from_settings(snapshot.values)
+            home_activity_config_from_settings(snapshot.values, admin_config=admin, current_state_config=current)
+            home_health_config_from_settings(snapshot.values, admin_config=admin)
+            home_ap_24h_config_from_settings(snapshot.values, admin_config=admin)
+        except (ValueError, TypeError) as exc:
+            raise SettingsError("validation_failed", 422, ({"key": None, "reason": "semantic_validation_failed"},)) from exc

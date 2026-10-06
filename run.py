@@ -8,6 +8,7 @@ No other module should be run standalone.
 
 import atexit
 import inspect
+import os
 import signal
 import sys
 import threading
@@ -35,6 +36,7 @@ from app.current_state import create_current_state_runtime
 from app.analytics import create_analytics_runtime
 from app.analytics.api import API_PREFIX
 from app.admin_web import create_admin_web_runtime
+from app.settings_control.bootstrap import bootstrap_settings_control
 from app.admin_web.home_ap_24h_telemetry import (
     create_home_ap_24h_telemetry_worker,
 )
@@ -271,7 +273,7 @@ def _configure_analytics(app, settings, registry_read_service) -> None:
         logger.exception("analytics_api_runtime_configuration_failed")
 
 
-def _configure_admin_web(app, settings, registry_read_service) -> None:
+def _configure_admin_web(app, settings, registry_read_service, settings_control=None) -> None:
     """Attach Admin Web after all existing read boundaries are composed."""
     global _admin_web_runtime
 
@@ -295,6 +297,7 @@ def _configure_admin_web(app, settings, registry_read_service) -> None:
             current_state_runtime=_current_state_runtime,
             observation_runtime=_observation_foundation,
             visit_runtime=_visit_lifecycle,
+            settings_control=settings_control,
         )
         app.extensions["admin_web_runtime"] = _admin_web_runtime
         if _admin_web_runtime.blueprint is not None:
@@ -377,7 +380,13 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    settings = get_settings()
+    base_settings = get_settings()
+    settings_bootstrap = bootstrap_settings_control(
+        base_settings=base_settings,
+        explicit_environment_names=frozenset(os.environ),
+        logger=logger,
+    )
+    settings = settings_bootstrap.runtime_settings
     logger.info("Configuration loaded")
 
     controller = create_controller()
@@ -392,6 +401,7 @@ def main() -> None:
     app_kwargs = {
         "controller": controller,
         "visitor_snapshot_collector": _visitor_snapshot_collector,
+        "settings": settings,
     }
     if "authorization_health_tracker" in inspect.signature(
         create_app
@@ -466,7 +476,9 @@ def main() -> None:
     except Exception:
         logger.exception("visit_lifecycle_reconciliation_start_failed")
     _configure_analytics(app, settings, registry_read_service)
-    _configure_admin_web(app, settings, registry_read_service)
+    _configure_admin_web(app, settings, registry_read_service, settings_bootstrap.admin_context)
+    if settings_bootstrap.activation_service is not None:
+        settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime)
     _start_public_traffic_worker(app)
 
     host = settings["host"]

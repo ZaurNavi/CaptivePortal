@@ -126,6 +126,7 @@ def create_app(
     authorization_health_tracker=None,
     portal_evidence_sink=_AUTO_PORTAL_EVIDENCE,
     client_hints_probe=_AUTO_CLIENT_HINTS_PROBE,
+    settings=None,
 ) -> Flask:
     """Create and configure the Flask application."""
     template_dir = os.path.abspath(
@@ -142,7 +143,8 @@ def create_app(
         x_port=1,
     )
 
-    settings = get_settings()
+    if settings is None:
+        settings = get_settings()
     auth_telemetry = configure_auth_telemetry(settings)
     portal_evidence_telemetry = PortalEvidenceTelemetry()
     portal_evidence_runtime = None

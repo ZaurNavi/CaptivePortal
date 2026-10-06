@@ -64,6 +64,10 @@ class AdminWebRuntime:
     traffic_evidence_state: str = "disabled"
     traffic_evidence_aggregator: Any | None = None
     blueprint: Any | None = None
+    settings_feature_enabled: bool = False
+    settings_store_state: str = "disabled"
+    settings_read_service: Any | None = None
+    settings_mutation_service: Any | None = None
 
     def clear(self) -> None:
         if self.session_store is not None:
@@ -87,6 +91,7 @@ def create_admin_web_runtime(
     current_state_runtime: Any | None = None,
     observation_runtime: Any | None = None,
     visit_runtime: Any | None = None,
+    settings_control: Any | None = None,
 ) -> AdminWebRuntime:
     """Create Admin security state without mutating or querying data sources."""
     try:
@@ -438,6 +443,10 @@ def create_admin_web_runtime(
         traffic_completed_sessions_service=completed_sessions_service,
         traffic_evidence_state=evidence_state,
         traffic_evidence_aggregator=evidence_aggregator,
+        settings_feature_enabled=bool(settings_control and settings_control.feature_enabled),
+        settings_store_state=settings_control.store_state if settings_control else "disabled",
+        settings_read_service=settings_control.read_service if settings_control else None,
+        settings_mutation_service=settings_control.mutation_service if settings_control else None,
     )
     from .routes import create_admin_web_blueprint
 

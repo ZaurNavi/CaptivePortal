@@ -1,0 +1,14 @@
+{% extends "admin/base.html" %}
+{% block subtitle %}<p>Global presentation and refresh settings. Saves are persisted; activation requires a main-service restart by an operator.</p>{% endblock %}
+{% block page_body %}
+<div id="settings-state" class="state-panel" role="status" aria-live="polite">
+  {% if settings_store_state == 'available' %}Loading Settings…{% else %}Settings store unavailable. No changes can be saved.{% endif %}
+</div>
+<form id="settings-form">
+  <div id="settings-groups" class="content-grid"></div>
+  <div class="settings-actions">
+    <button id="settings-save" class="button" type="submit" disabled>Save changes</button>
+    <button id="settings-refresh" class="button button-secondary" type="button">Read current settings</button>
+  </div>
+</form>
+{% endblock %}

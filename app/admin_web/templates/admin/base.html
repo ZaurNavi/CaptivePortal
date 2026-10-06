@@ -5,18 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page.title }} · CaptivPortal</title>
   <link rel="stylesheet" href="{{ url_for('admin_web_v1.static', filename='admin.css') }}">
+  {% if page.key == 'settings' %}
+  <script defer src="{{ url_for('admin_web_v1.static', filename='settings.js') }}"></script>
+  {% else %}
   <script defer src="{{ url_for('admin_web_v1.static', filename='admin.js') }}"></script>
+  {% endif %}
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="topbar">
-    <a class="brand" href="/admin/sites/{{ site_id }}/" aria-label="CaptivPortal admin home">
+    <a class="brand" href="{% if page.key == 'settings' %}/admin/{% else %}/admin/sites/{{ site_id }}/{% endif %}" aria-label="CaptivPortal admin home">
       <span class="brand-mark" aria-hidden="true">CP</span>
       <span>CaptivPortal</span>
     </a>
     <div class="topbar-context">
+      {% if page.key == 'settings' %}
+      <span class="eyebrow">Global Settings</span>
+      {% else %}
       <span class="eyebrow">Current Site</span>
       <strong class="mono">{{ site_id }}</strong>
+      {% endif %}
     </div>
     <div class="topbar-account">
       <span>{{ username }}</span>
@@ -28,6 +36,9 @@
   </header>
   <div class="app-frame">
     <nav class="sidebar" aria-label="Admin navigation">
+      {% if page.key == 'settings' %}
+      <a class="nav-link" href="/admin/">Home</a>
+      {% else %}
       <a class="nav-link{% if page.key == 'home' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/">Home</a>
       <a class="nav-link{% if page.key in ('devices', 'device') %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/devices">Devices</a>
       <a class="nav-link{% if page.key == 'visits' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/visits">Visits</a>
@@ -35,17 +46,25 @@
       {% if traffic_enabled %}
       <a class="nav-link{% if page.key == 'traffic' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/traffic">Traffic</a>
       {% endif %}
+      {% endif %}
+      {% if settings_nav_enabled %}
+      <a class="nav-link{% if page.key == 'settings' %} is-active{% endif %}" href="/admin/settings">Settings</a>
+      {% endif %}
     </nav>
     <main id="main-content" class="content">
       <div class="page-heading">
         <div>
-          <p class="eyebrow">Read-only operations</p>
+          <p class="eyebrow">{% if page.key == 'settings' %}Global administration{% else %}Read-only operations{% endif %}</p>
           <h1>{{ page.title }}</h1>
           {% block subtitle %}{% endblock %}
         </div>
-        <button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>
+        {% if page.key != 'settings' %}<button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>{% endif %}
       </div>
       <section
+        {% if page.key == 'settings' %}
+        id="settings-page" data-api-base="/admin/api/v1/settings"
+        data-store-state="{{ settings_store_state }}" data-csrf-token="{{ csrf_token }}"
+        {% else %}
         id="admin-page"
         data-page="{{ page.key }}"
         data-site-id="{{ site_id }}"
@@ -83,6 +102,7 @@
         data-home-ap24h-unavailable="{{ 'true' if home_ap_24h_unavailable else 'false' }}"
         data-home-ap24h-refresh-seconds="{{ home_ap_24h_refresh_seconds }}"
         data-home-ap24h-request-timeout-seconds="{{ home_ap_24h_request_timeout_seconds }}"
+        {% endif %}
         {% endif %}
       >
         {% block page_body %}
