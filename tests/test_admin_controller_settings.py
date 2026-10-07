@@ -19,6 +19,7 @@ from app.admin_web.policy import AdminAccessPolicy, GLOBAL_SETTINGS_CAPABILITIES
 from app.controllers.factory import create_controller
 from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
 from app.settings_control.definitions import SettingsDefinitionRegistry
+from app.settings_control.models import SettingsError
 from tests.admin_web.conftest import enabled_settings, login
 
 
@@ -43,10 +44,13 @@ def snapshot():
 
 
 def controller_app(*, enabled=True, projection=True, authenticated=True, policy=None, store="unavailable"):
+    def read_controller():
+        raise SettingsError("settings_store_unavailable")
+
     runtime = create_admin_web_runtime(settings(web_admin_settings_enabled=enabled),
         None, None, None, None, logging.getLogger("as02"),
         settings_control=SimpleNamespace(feature_enabled=enabled, store_state=store,
-                                        read_service=None, mutation_service=None),
+                                        read_service=SimpleNamespace(read_controller=read_controller), mutation_service=None),
         controller_public_snapshot=snapshot() if projection else None)
     if policy is not None:
         runtime.access_policy = policy
@@ -102,7 +106,7 @@ def test_public_projection_provenance_membership_and_secret_absence():
     assert SECRET not in json.dumps(asdict(explicit)) + repr(explicit) + str(explicit)
     assert set(asdict(explicit)) == {"controller_url", "controller_url_source", "controller_id",
         "controller_id_source", "client_id", "client_id_source", "client_secret_presence",
-        "client_secret_source", "tls_certificate_verification", "tls_certificate_verification_source"}
+        "client_secret_source", "tls_certificate_verification", "tls_certificate_verification_source", "effective_generation"}
     with pytest.raises(FrozenInstanceError):
         explicit.controller_url = "changed"
     with pytest.raises(ValueError):
@@ -116,13 +120,13 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
     response = get(client)
     assert response.status_code == 200
     model = response.json
-    assert model["api_version"] == "admin.settings.controller.v1"
+    assert model["api_version"] == "admin.settings.controller.v2"
     assert str(uuid.UUID(model["request_id"])) == model["request_id"]
     assert model["scope"] == {"type": "global"}
     assert model["resource"] == {"type": "omada_controller", "scope": "installation"}
-    assert model["management_mode"] == "deployment_controlled"
+    assert model["management_mode"] == "hybrid"
     assert model["configuration_state"] == "configured"
-    assert model["fields"] == {
+    expected_effective = {
         "controller_url": {"display_label": "Controller URL", "value_type": "url",
             "effective_value": "https://controller.invalid:8043", "effective_source": "environment"},
         "controller_id": {"display_label": "Controller ID", "value_type": "string",
@@ -133,6 +137,15 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
             "effective_presence": "configured", "effective_source": "environment"},
         "tls_certificate_verification": {"display_label": "TLS certificate verification", "value_type": "boolean",
             "effective_value": False, "effective_source": "repository_default"}}
+    assert set(model["fields"]) == set(expected_effective)
+    for name, expected in expected_effective.items():
+        assert {key: model["fields"][name][key] for key in expected} == expected
+    assert model["store_state"] == "unavailable"
+    assert model["mutation_available"] is False
+    assert model["configured_generation"] is None
+    for name in ("controller_url", "controller_id", "client_id"):
+        assert model["fields"][name]["configured_value"] is None
+    assert not model["fields"]["client_secret"]["editable"]
     assert runtime.settings_store_state == "unavailable" and runtime.controller_settings_state == "active"
     assert response.mimetype == "application/json"
     assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
@@ -182,7 +195,7 @@ def test_controller_get_rejects_nonempty_body_without_parsing_or_reading_config(
     runtime.controller_settings_read_service = SimpleNamespace(read=read)
     response = client.get(API, data=body, content_type=content_type, base_url="https://localhost")
     assert response.status_code == 400 and response.json["error"]["code"] == "invalid_request"
-    assert response.json["api_version"] == "admin.settings.controller.v1"
+    assert response.json["api_version"] == "admin.settings.controller.v2"
     assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
     assert SECRET not in response.text + caplog.text
     read.assert_not_called()
@@ -204,7 +217,7 @@ def test_controller_canonical_heading_provider_and_status_wording():
     assert "Controller configuration is unavailable." in unavailable.text
     root = Path(__file__).resolve().parents[1]
     source = (root / "app/admin_web/static/controller_settings.js").read_text(encoding="utf-8")
-    assert 'state.textContent = "Read-only effective startup configuration.";' in source
+    assert '"Current configured and effective Controller configuration."' in source
     assert 'state.textContent = "Controller configuration is unavailable.";' in source
 
 
@@ -245,7 +258,7 @@ def test_global_policy_and_no_site_resolution(monkeypatch):
     assert policy.authorize_global(AdminPrincipal("operator"), "admin.read.settings.controller")
     assert not policy.authorize_global(AdminPrincipal("operator", "site_operator"), "admin.read.settings.controller")
     assert not policy.authorize_global(None, "admin.read.settings.controller")
-    assert "admin.write.settings.controller" not in GLOBAL_SETTINGS_CAPABILITIES
+    assert "admin.write.settings.controller" in GLOBAL_SETTINGS_CAPABILITIES
     _, client, _ = controller_app()
     monkeypatch.setattr("app.admin_web.policy.AdminSiteContextResolver.resolve", lambda *a: pytest.fail("site"))
     monkeypatch.setattr("app.admin_web.policy.AdminSiteContextResolver.default", lambda *a: pytest.fail("site"))
@@ -276,20 +289,21 @@ def test_internal_response_failure_is_sanitized():
     runtime.controller_settings_read_service = SimpleNamespace(read=lambda _: {"invalid": object()})
     response = get(client)
     assert response.status_code == 500 and response.json["error"]["code"] == "internal_error"
-    assert response.json["api_version"] == "admin.settings.controller.v1"
+    assert response.json["api_version"] == "admin.settings.controller.v2"
 
 
-def test_frontend_read_only_and_allowlist_unchanged():
+def test_frontend_nonsecret_writable_and_general_allowlist_unchanged():
     root = Path(__file__).resolve().parents[1]
     source = (root / "app/admin_web/static/controller_settings.js").read_text(encoding="utf-8")
-    for forbidden in ("innerHTML", "localStorage", "sessionStorage", "POST", "systemctl", "console."):
+    for forbidden in ("innerHTML", "localStorage", "sessionStorage", "systemctl", "console."):
         assert forbidden not in source
-    assert source.count("fetch(") == 1 and f'fetch("{API}"' in source
+    assert source.count("fetch(") == 2 and f'fetch("{API}"' in source
     assert 'method: "GET"' in source and 'credentials: "same-origin"' in source
     assert "Configured" in source and "Not configured" in source
     registry = tuple(SettingsDefinitionRegistry())
-    assert len(registry) == 12
-    assert all("OMADA" not in item.key for item in registry)
+    assert len(registry) == 15
+    assert len([item for item in registry if item.domain == "general"]) == 12
+    assert [item.key for item in registry if item.domain == "controller"] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
 
 
 @pytest.mark.parametrize("injected_settings", [True, False])
@@ -348,12 +362,12 @@ def test_main_shared_config_single_environment_capture_and_projection_isolation(
         return controller
     monkeypatch.setattr(run, "create_controller", factory)
     projector = public_omada_snapshot
-    def project(config, names):
+    def project(config, names, settings_snapshot=None):
         assert config is captured["config"]
         assert names is captured["environment_names"]
         if projection_failure:
             raise RuntimeError(SECRET)
-        return projector(config, names)
+        return projector(config, names, settings_snapshot)
     monkeypatch.setattr(run, "public_omada_snapshot", project)
     def admin(actual_app, actual_settings, registry, context, public_snapshot):
         captured["public_snapshot"] = public_snapshot

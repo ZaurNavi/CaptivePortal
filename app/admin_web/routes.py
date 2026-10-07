@@ -107,7 +107,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             and any(len(request.args.getlist(key)) != 1 for key in request.args)
         ):
             return _error("invalid_request", 400)
-        if request.method == "POST" and request.path != "/admin/api/v1/settings/generations":
+        if request.method == "POST" and request.path not in ("/admin/api/v1/settings/generations", "/admin/api/v1/settings/controller/generations"):
             if request.content_length is None:
                 return _error("length_required", 411)
             if request.content_length > config.max_post_bytes:
@@ -172,7 +172,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         if not getattr(runtime, "settings_feature_enabled", False):
             return _error("feature_disabled" if _is_api_path(request.path) else "not_found", 404)
         if not policy.authorize_global(g.admin_principal, capability):
-            return _error("controller_settings_forbidden" if capability == "admin.read.settings.controller"
+            return _error("controller_settings_forbidden" if capability.endswith(".controller")
                           else "settings_forbidden", 403)
         return None
 
@@ -201,7 +201,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         return render_template("admin/settings_controller.html",
             page={"key": "settings_controller", "title": "Controller"},
             username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token,
-            controller_settings_state=runtime.controller_settings_state)
+            controller_settings_state=runtime.controller_settings_state,
+            controller_settings_write_allowed=policy.authorize_global(g.admin_principal, "admin.write.settings.controller"))
 
     @blueprint.get("/admin/api/v1/settings/controller")
     @authenticated
@@ -222,7 +223,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             # Never render or log projection exceptions / raw config.
             return _error("controller_settings_read_unavailable", 503)
         try:
-            return jsonify(model)
+            response = jsonify(model)
+            if model["configured_generation"] is not None:
+                response.headers["ETag"] = f'"settings-g{model["configured_generation"]}"'
+            return response
         except Exception:
             return _error("internal_error", 500)
 
@@ -246,9 +250,17 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     @blueprint.post("/admin/api/v1/settings/generations")
     @authenticated
     def settings_mutation():
+        return mutate_settings("general")
+
+    @blueprint.post("/admin/api/v1/settings/controller/generations")
+    @authenticated
+    def controller_settings_mutation():
+        return mutate_settings("controller")
+
+    def mutate_settings(domain):
         import re
         from app.settings_control.models import SettingsError
-        rejected = settings_gate("admin.write.settings.global")
+        rejected = settings_gate("admin.write.settings.controller" if domain == "controller" else "admin.write.settings.global")
         if rejected is not None:
             return rejected
         try:
@@ -270,7 +282,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             if request.mimetype != "application/json":
                 raise SettingsError("unsupported_media_type", 415)
             if request.content_length is None:
-                raise SettingsError("length_required", 411)
+                raise SettingsError("invalid_request", 400) if domain == "controller" else SettingsError("length_required", 411)
             if request.content_length > 32768:
                 raise SettingsError("request_too_large", 413)
             raw = request.get_data(cache=False)
@@ -280,13 +292,19 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 raise SettingsError("settings_store_unavailable")
             result = runtime.settings_mutation_service.mutate(raw, principal=g.admin_principal,
                 source_ip=g.admin_source_ip, request_id=g.admin_request_id,
-                idempotency_key=key, expected_generation=int(parsed[1]))
+                idempotency_key=key, expected_generation=int(parsed[1]), domain=domain)
             response = jsonify(result.body)
             response.status_code = result.status
             response.headers["ETag"] = f'"settings-g{result.body["configured_generation"]}"'
             return response
         except SettingsError as error:
+            if domain == "controller":
+                return jsonify({"api_version": "admin.settings.controller.mutation.v1", "request_id": g.admin_request_id,
+                    "error": {"code": error.code, "details": list(error.details)}}), error.status
             return settings_failure(error)
+        except Exception:
+            # No raw exception text or caller configuration in public errors/logs.
+            return _error("internal_error", 500)
 
     @blueprint.get("/admin/login")
     def login_form() -> Response:
@@ -2184,7 +2202,9 @@ def _error(code: str, status_code: int) -> Response:
     if _is_api_path(request.path):
         return jsonify(
             {
-                "api_version": ("admin.settings.controller.v1"
+                "api_version": ("admin.settings.controller.mutation.v1"
+                    if request.path == "/admin/api/v1/settings/controller/generations"
+                    else "admin.settings.controller.v2"
                     if request.path == "/admin/api/v1/settings/controller"
                     else "admin.settings.v1" if request.path.startswith("/admin/api/v1/settings") else API_VERSION),
                 "request_id": getattr(g, "admin_request_id", str(uuid.uuid4())),

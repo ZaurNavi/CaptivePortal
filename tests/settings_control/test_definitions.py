@@ -19,7 +19,12 @@ def test_exact_ordered_definitions_and_shared_defaults():
         ("HOME_AP_24H_REFRESH_SECONDS", 120, 60, 600, "home_ap_24h_enabled", "home_ap_24h"),
     ]
     registry = SettingsDefinitionRegistry()
-    assert len(registry.definitions) == 12
+    assert len(registry.definitions) == 15
+    assert len(registry.for_domain("general")) == 12
+    assert [item.key for item in registry.for_domain("controller")] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
+    assert registry.get("OMADA_CLIENT_ID").settings_dict_key == "client_id"
+    assert registry.get("OMADA_CLIENT_SECRET") is None
+    assert registry.get("VERIFY_SSL") is None
     for index, (definition, (suffix, default, minimum, maximum, consumer, validator)) in enumerate(zip(registry, expected)):
         key = "WEB_ADMIN_" + suffix
         assert definition.key == definition.environment_variable_name == key

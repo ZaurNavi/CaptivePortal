@@ -15,10 +15,9 @@ def test_disabled_no_store_access_or_creation(tmp_path, monkeypatch):
     assert not (tmp_path / "not-created.sqlite3").exists()
 
 
-def test_unavailable_parent_fallback_and_no_mkdir(tmp_path):
-    boot = stack(tmp_path, settings_db_path=str(tmp_path / "missing" / "settings.sqlite3"))
-    assert boot.feature_enabled and boot.store_state == "unavailable"
-    assert boot.resolved_snapshot.generation_id is None and boot.activation_service is None
+def test_unavailable_parent_fails_closed_and_no_mkdir(tmp_path):
+    with pytest.raises(SettingsError, match="settings_store_unavailable"):
+        stack(tmp_path, settings_db_path=str(tmp_path / "missing" / "settings.sqlite3"))
     assert not (tmp_path / "missing").exists()
 
 

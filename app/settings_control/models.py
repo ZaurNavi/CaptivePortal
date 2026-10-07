@@ -41,8 +41,8 @@ class ResolvedSettingsSnapshot:
     generation_id: int | None
     values: Mapping[str, Any]
     base_source_by_key: Mapping[str, str]
-    base_value_by_key: Mapping[str, int]
-    persisted_override_by_key: Mapping[str, int | None]
+    base_value_by_key: Mapping[str, int | str | None]
+    persisted_override_by_key: Mapping[str, int | str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +84,7 @@ class SettingsReadModelV1:
 class SettingsMutationChange:
     key: str
     operation: str
-    value: int | None = None
+    value: int | str | None = None
 
 
 @dataclass(frozen=True, slots=True)

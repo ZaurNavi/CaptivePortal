@@ -419,7 +419,8 @@ def create_admin_web_runtime(
         try:
             from .controller_settings import ControllerConfigurationReadService
 
-            controller_settings_read_service = ControllerConfigurationReadService(controller_public_snapshot)
+            controller_settings_read_service = ControllerConfigurationReadService(controller_public_snapshot,
+                settings_control.read_service if settings_control else None)
             controller_settings_state = "active"
         except Exception:
             logger.error("admin.controller_settings_projection_unavailable")

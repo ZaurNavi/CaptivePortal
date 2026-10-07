@@ -20,7 +20,7 @@ READ_CAPABILITIES = frozenset(
 )
 
 GLOBAL_SETTINGS_CAPABILITIES = frozenset({
-    "admin.read.settings.global", "admin.write.settings.global", "admin.read.settings.controller",
+    "admin.read.settings.global", "admin.write.settings.global", "admin.read.settings.controller", "admin.write.settings.controller",
 })
 
 

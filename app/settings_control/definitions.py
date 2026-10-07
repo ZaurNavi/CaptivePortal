@@ -1,4 +1,4 @@
-"""The ordered, closed twelve-key writable Settings definition registry."""
+"""One ordered domain-aware registry: twelve General and three Controller keys."""
 from dataclasses import dataclass
 from app import config
 
@@ -6,9 +6,9 @@ from app import config
 @dataclass(frozen=True, slots=True)
 class SettingsDefinition:
     key: str
-    repository_default_value: int
-    min_value: int
-    max_value: int
+    repository_default_value: int | str
+    min_value: int | None
+    max_value: int | None
     display_label: str
     description: str
     semantic_validator: str
@@ -20,14 +20,11 @@ class SettingsDefinition:
     editable: bool = True
     apply_requirement: str = "main_service_restart"
     activation_target: str = "captive-portal.service"
-
-    @property
-    def settings_dict_key(self):
-        return self.key.lower()
-
-    @property
-    def environment_variable_name(self):
-        return self.key
+    domain: str = "general"
+    settings_dict_key: str = ""
+    environment_variable_name: str = ""
+    presentation_type: str = "integer"
+    required: bool = True
 
 
 _ROWS = (
@@ -55,13 +52,26 @@ class SettingsDefinitionRegistry:
                 label, description, validator + "_config_from_settings",
                 "web_admin_" + consumer,
                 "pagination" if index < 6 else "refresh",
+                settings_dict_key=("WEB_ADMIN_" + suffix).lower(),
+                environment_variable_name="WEB_ADMIN_" + suffix,
             )
             for index, (suffix, minimum, maximum, label, description, validator, consumer)
             in enumerate(_ROWS)
-        )
+        ) + tuple(SettingsDefinition(
+            key, "", None, None, label, "Required shared Omada Controller configuration.",
+            "omada_runtime_config", "", "controller", value_type="string", domain="controller",
+            settings_dict_key=internal, environment_variable_name=key, presentation_type=presentation,
+        ) for key, internal, label, presentation in (
+            ("OMADA_URL", "omada_url", "Controller URL", "url"),
+            ("OMADA_ID", "omada_id", "Controller ID", "string"),
+            ("OMADA_CLIENT_ID", "client_id", "Client / Application ID", "string"),
+        ))
 
     def __iter__(self):
         return iter(self.definitions)
 
     def get(self, key):
         return next((item for item in self if item.key == key), None)
+
+    def for_domain(self, domain):
+        return tuple(item for item in self if item.domain == domain)

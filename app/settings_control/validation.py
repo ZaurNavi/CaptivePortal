@@ -6,6 +6,8 @@ from app.admin_web.home_ap_24h_config import home_ap_24h_config_from_settings
 from app.current_state.config import current_state_config_from_settings
 from .definitions import SettingsDefinitionRegistry
 from .models import SettingsError
+from app.controllers.omada_config import build_omada_runtime_config
+from app.exceptions import ConfigurationError
 
 
 class SettingsValidationService:
@@ -15,6 +17,8 @@ class SettingsValidationService:
     def validate(self, snapshot):
         details = []
         for item in self.registry:
+            if item.domain != "general":
+                continue
             value = snapshot.values[item.settings_dict_key]
             if type(value) is not int:
                 details.append({"key": item.key, "reason": "integer_required"})
@@ -35,3 +39,7 @@ class SettingsValidationService:
             home_ap_24h_config_from_settings(snapshot.values, admin_config=admin)
         except (ValueError, TypeError) as exc:
             raise SettingsError("validation_failed", 422, ({"key": None, "reason": "semantic_validation_failed"},)) from exc
+        try:
+            build_omada_runtime_config(snapshot.values)
+        except (ConfigurationError, KeyError, TypeError) as exc:
+            raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from exc

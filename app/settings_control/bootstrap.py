@@ -1,4 +1,4 @@
-"""One-shot startup resolution, disabled/store-unavailable fail-open boundary."""
+"""One-shot startup resolution; enabled Store failures are fail-closed."""
 from .activation import SettingsActivationService
 from .models import SettingsAdminContext, SettingsBootstrapResult, ResolvedSettingsSnapshot, SettingsError
 from .repository import SettingsRepository
@@ -18,7 +18,7 @@ def bootstrap_settings_control(*, base_settings, explicit_environment_names, log
         generation, overrides = repository.configured()
     except (SettingsError, TypeError, ValueError, OSError):
         logger.error("settings.store_unavailable")
-        return SettingsBootstrapResult(True, "unavailable", base_settings, fallback, SettingsAdminContext(True, "unavailable"))
+        raise SettingsError("settings_store_unavailable") from None
     try:
         snapshot = resolve_settings(base_settings, explicit_environment_names, overrides, generation)
         SettingsValidationService().validate(snapshot)
