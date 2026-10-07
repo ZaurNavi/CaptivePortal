@@ -12,7 +12,7 @@ from .cleanup import ObservationCleanup, ObservationCleanupWorker
 from .client_worker import ClientObservationWorker
 from .config import observation_config_from_settings
 from .integrity import ObservationIntegrityWorker
-from .models import ObservationConfig, ObservationConfigError
+from .models import InitializationResult, ObservationConfig, ObservationConfigError
 from .repository import ObservationRepository
 from .telemetry import ObservationTelemetry
 
@@ -20,6 +20,10 @@ from .telemetry import ObservationTelemetry
 class DisabledObservationFoundation:
     state = "disabled"
     config: ObservationConfig | None = None
+    read_boundary_ready = False
+
+    def prepare_read_boundary(self) -> bool:
+        return False
 
     def start(self) -> bool:
         return False
@@ -30,9 +34,13 @@ class DisabledObservationFoundation:
 
 class UnavailableObservationFoundation:
     state = "unavailable"
+    read_boundary_ready = False
 
     def __init__(self, *, config: ObservationConfig | None = None):
         self.config = config
+
+    def prepare_read_boundary(self) -> bool:
+        return False
 
     def start(self) -> bool:
         return False
@@ -77,6 +85,31 @@ class ObservationFoundationRuntime:
         )
         self._state = "disabled"
         self._lock = threading.RLock()
+        self._initialization_result: InitializationResult | None = None
+
+    @property
+    def read_boundary_ready(self) -> bool:
+        with self._lock:
+            return self._initialization_result is not None and self._state not in {"unavailable", "stopping"}
+
+    def prepare_read_boundary(self) -> bool:
+        """Prepare local storage only; never start workers or contact the provider."""
+        with self._lock:
+            if self._state in {"unavailable", "stopping"}:
+                return False
+            if self._initialization_result is not None:
+                return True
+            try:
+                self._initialization_result = self.repository.initialize()
+            except Exception:
+                self._state = "unavailable"
+                self.telemetry.emit(
+                    "observation.runtime_unavailable",
+                    "error",
+                    failure_category="initialization_error",
+                )
+                return False
+            return True
 
     @property
     def state(self) -> str:
@@ -98,7 +131,10 @@ class ObservationFoundationRuntime:
                 return False
             self._state = "starting"
         try:
-            initialized = self.repository.initialize()
+            if not self.prepare_read_boundary():
+                self._stop_started_workers()
+                return False
+            initialized = self._initialization_result
             started = []
             if self.config.client_enabled:
                 started.append(self.client_worker.start())
@@ -132,6 +168,7 @@ class ObservationFoundationRuntime:
     def stop(self, timeout_seconds: float | None = None) -> bool:
         with self._lock:
             if self._state == "disabled":
+                self._initialization_result = None
                 return True
             self._state = "stopping"
         timeout = self.config.shutdown_timeout_seconds if timeout_seconds is None else max(0.0, float(timeout_seconds))
@@ -151,6 +188,7 @@ class ObservationFoundationRuntime:
         if success:
             with self._lock:
                 self._state = "disabled"
+                self._initialization_result = None
             self.telemetry.emit("observation.runtime_stopped")
             return True
         return False

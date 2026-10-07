@@ -441,6 +441,10 @@ def main() -> None:
         telemetry=app.extensions.get("auth_telemetry"),
         logger=logger,
     )
+    try:
+        _observation_foundation.prepare_read_boundary()
+    except Exception:
+        logger.exception("observation_read_boundary_preparation_failed")
     _configure_current_state(app, settings, controller)
     _pending_session_cleaner = create_pending_session_cleaner(
         settings=settings,
