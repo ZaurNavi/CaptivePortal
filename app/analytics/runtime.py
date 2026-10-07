@@ -267,7 +267,8 @@ def create_analytics_runtime(
 
 
 def _observation_read_service(runtime: Any) -> Any | None:
-    if getattr(runtime, "state", None) not in {"active", "degraded"}:
+    if (getattr(runtime, "state", None) not in {"active", "degraded"}
+            and getattr(runtime, "read_boundary_ready", False) is not True):
         return None
     repository = getattr(runtime, "repository", None)
     return ObservationReadService(repository) if repository is not None else None

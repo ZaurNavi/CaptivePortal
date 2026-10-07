@@ -73,7 +73,8 @@ def test_all_controller_consumers_follow_adoption(tmp_path, monkeypatch, failure
         return invoke
     monkeypatch.setattr(collector, "start", start("collector.start"))
     pending = SimpleNamespace(start=start("pending.start"), stop=lambda *_: None)
-    observation = SimpleNamespace(start=start("observation.start"), stop=lambda: None)
+    observation = SimpleNamespace(prepare_read_boundary=lambda: events.append("observation.prepare"),
+        start=start("observation.start"), stop=lambda: None)
     current = SimpleNamespace(start=start("current.start"), stop=lambda: None, read_service=None)
     monkeypatch.setattr(runtime, "create_pending_session_cleaner", lambda **_: pending)
     monkeypatch.setattr(runtime, "create_observation_foundation", lambda **_: observation)
@@ -117,3 +118,118 @@ def test_enabled_bootstrap_failure_precedes_provider(tmp_path, monkeypatch, fail
         runtime.main()
     assert "create_controller" not in events
     assert "create_app" not in events
+
+
+@pytest.mark.parametrize("adoption_failure", [False, True])
+def test_local_observation_preparation_precedes_composition_and_adoption(tmp_path, monkeypatch, adoption_failure):
+    from app.analytics.runtime import _observation_read_service, _check_source
+    from tests.observations.test_runtime import enabled, Telemetry
+    from tests.observations.test_read_boundary_preparation import workers
+
+    events, _, collector, _, app, _ = _prepare_main(monkeypatch)
+    (tmp_path / "data").mkdir(mode=0o750)
+    boot = stack(tmp_path, **enabled(tmp_path), host="127.0.0.1", port=8088, debug=False)
+    monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_: boot)
+    monkeypatch.setattr(runtime, "capture_loaded_artifact_identity", lambda *_:
+        SimpleNamespace(json_line=lambda: "synthetic FIX2 startup identity"))
+    monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **k: pytest.fail("network"))
+    provider_calls = []
+
+    def provider_call(name):
+        assert boot.admin_context.read_service._adopted, "provider call before durable adoption"
+        provider_calls.append(name)
+
+    provider = SimpleNamespace(probe=provider_call)
+    monkeypatch.setattr(runtime, "create_controller", lambda _: provider)
+    real_factory = runtime.create_observation_foundation
+    captured = {}
+
+    def start(name, *, provider_capable=True):
+        def invoke(*_args):
+            assert boot.admin_context.read_service._adopted
+            events.append(name)
+            if provider_capable:
+                provider.probe(name)
+            return True
+        return invoke
+
+    def observation_factory(**kwargs):
+        observation = real_factory(**{**kwargs, "telemetry": Telemetry()})
+        captured["observation"] = observation
+        initialize = observation.repository.initialize
+
+        def local_initialize():
+            assert not boot.admin_context.read_service._adopted
+            assert provider_calls == []
+            events.append("observation.initialize")
+            return initialize()
+
+        monkeypatch.setattr(observation.repository, "initialize", local_initialize)
+        prepare = observation.prepare_read_boundary
+
+        def local_prepare():
+            events.append("observation.prepare")
+            return prepare()
+
+        monkeypatch.setattr(observation, "prepare_read_boundary", local_prepare)
+        for name, worker in zip(("client", "ap", "cleanup", "integrity"), workers(observation)):
+            monkeypatch.setattr(worker, "start", start("worker." + name,
+                provider_capable=name in ("client", "ap")))
+        original_start = observation.start
+
+        def observation_start():
+            events.append("observation.start")
+            assert boot.admin_context.read_service._adopted
+            return original_start()
+
+        monkeypatch.setattr(observation, "start", observation_start)
+        return observation
+
+    monkeypatch.setattr(runtime, "create_observation_foundation", observation_factory)
+    monkeypatch.setattr(runtime, "create_pending_session_cleaner", lambda **_:
+        SimpleNamespace(start=start("pending.start")))
+    monkeypatch.setattr(collector, "start", start("collector.start"))
+    current = SimpleNamespace(start=start("current.start"), read_service=None)
+    monkeypatch.setattr(runtime, "_configure_current_state", lambda *_:
+        setattr(runtime, "_current_state_runtime", current))
+
+    def analytics(*_):
+        events.append("configure_analytics")
+        observation = captured["observation"]
+        assert observation.read_boundary_ready and observation.state == "disabled"
+        assert _check_source("observations", _observation_read_service(observation)).available
+        assert all(not worker.running for worker in workers(observation))
+        assert provider_calls == []
+
+    def admin(*_):
+        events.append("configure_admin_web")
+        assert not boot.admin_context.read_service._adopted and provider_calls == []
+        runtime._admin_web_runtime = None
+
+    monkeypatch.setattr(runtime, "_configure_analytics", analytics)
+    monkeypatch.setattr(runtime, "_configure_admin_web", admin)
+    activation = boot.activation_service.repository.activation
+
+    def adopt(*args, **kwargs):
+        assert provider_calls == []
+        if adoption_failure:
+            raise SettingsError("settings_store_unavailable")
+        result = activation(*args, **kwargs)
+        events.append("durable_adoption")
+        return result
+
+    monkeypatch.setattr(boot.activation_service.repository, "activation", adopt)
+    if adoption_failure:
+        with pytest.raises(SettingsError):
+            runtime.main()
+        assert provider_calls == [] and not app.run_calls
+        assert "observation.start" not in events
+    else:
+        runtime.main()
+        required = ["observation.prepare", "configure_analytics", "configure_admin_web",
+                    "durable_adoption", "pending.start", "observation.start",
+                    "current.start", "collector.start", "app.run"]
+        positions = [events.index(name) for name in required]
+        assert positions == sorted(positions)
+        assert events.count("observation.initialize") == 1
+        assert provider_calls == ["pending.start", "worker.client", "worker.ap", "current.start", "collector.start"]

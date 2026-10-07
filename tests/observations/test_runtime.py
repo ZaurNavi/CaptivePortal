@@ -241,6 +241,7 @@ def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
     provider = object()
     auth_telemetry = object()
     observation = SimpleNamespace(
+        prepare_read_boundary=lambda: events.append("observation.prepare"),
         start=lambda: events.append("observation.start"),
         stop=lambda *a: events.append("observation.stop"),
     )
@@ -280,7 +281,7 @@ def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
     monkeypatch.setattr(process_runtime, "create_observation_foundation", factory)
     process_runtime.main()
     assert captured == {"provider": provider, "telemetry": auth_telemetry}
-    assert events == ["observation.start", "app.run"]
+    assert events == ["observation.prepare", "observation.start", "app.run"]
 
 
 def test_process_shutdown_orders_cleaner_before_observations(monkeypatch):
