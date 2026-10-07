@@ -979,3 +979,51 @@ Suricata 8.0.6, installs the public CA and protected producer credential, and
 starts the sensor before separately starting its bound Suricata service.
 Before checkout mutation, active fingerprint services must be stopped.
 Activation and enable-at-boot require separate Owner authorization.
+
+## Settings Stage 4 deployment prerequisites (separate authorization required)
+
+The application never provisions or repairs key/DB permissions and never invokes
+systemd. Before authorizing managed Client Secret writes, an operator must provide
+the code-owned raw **32-byte** key (not hex/base64/newline text) at
+`/etc/captiveportal/omada-controller-secret-master.key`. Its parent must be a real
+directory `root:admin 0750`, and the key a regular non-symlink single-link file
+`root:admin 0640`. Do not print key or credential bytes.
+
+Settings DB is code-owned at `/opt/CaptivePortal/data/settings.sqlite3`: a regular
+non-symlink single-link file `admin:admin 0600`; its real parent must be admin-owned
+and not group/other-writable. A deployment-defined parent group and setgid 2750 are
+allowed. The historically deployed `admin:telemetry 0644` DB arrangement is not
+eligible for Stage-4 managed secret writes. Fixing this is an external operator
+deployment action, not application automation. No broad `/run`/filesystem workaround
+or automatic chmod/chown/chgrp is introduced.
+
+Use `cryptography>=3.4.8` with the existing deployment dependency procedure. Explicitly
+grant the secret capability only to authorized Admin login sessions. The source
+default excludes secret-write. Stage-4 SQLite schema v3 migrates v2 (and v1) history
+transactionally without changing adopted/configured state. Stage-3 source rejects
+v3; rollback requires a coherent pre-upgrade DB plus matching authorized code/key
+and separate stopped-service rollback authorization, never audit/history deletion.
+
+Managed secrets activate only on external `captive-portal.service` restart and
+durable adoption before provider-capable I/O/HTTP. There is no Admin restart button,
+live credential test or hot reconnect. Without managed ownership, a valid deployment
+secret does not depend on master-key availability. Managed dependency failure aborts
+startup without environment fallback and without advancing effective generation.
+
+For authorized local recovery **with the service already stopped**, run:
+
+```text
+python3 -m app.settings_control.secret_recovery clear-omada-client-secret --expected-generation <N>
+```
+
+The command requires secure/trustworthy schema-v3 DB and exact configured CAS,
+clears only managed ownership, carries ordinary overrides, creates a safe local
+audit, retains any effective version and does not load/decrypt the master key,
+test Omada, change environment or control the service. No binding is a safe no-op.
+
+A coherent DB backup **and matching master key** are needed for managed-secret
+recovery: DB alone cannot recover it; key alone contains no secret. Historical DB
+backups plus their matching key may decrypt historical ciphertext. Backup retention
+and destruction are operator policy. Live version GC is logical deletion only,
+not forensic erasure of pages, backups or physical storage. This implementation
+does not export/backup a key or change production/services.

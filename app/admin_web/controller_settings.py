@@ -1,4 +1,4 @@
-"""Secret-free Controller V2 composition through the common Settings boundary."""
+"""Secret-free Controller V3 composition through the common Settings boundary."""
 
 from dataclasses import dataclass
 
@@ -10,6 +10,7 @@ from app.settings_control.models import SettingsError
 class ControllerConfigurationReadService:
     snapshot: OmadaControllerPublicConfigSnapshot
     configured_read_service: object = None
+    secret_metadata_service: object = None
 
     def __post_init__(self):
         if type(self.snapshot) is not OmadaControllerPublicConfigSnapshot:
@@ -20,7 +21,7 @@ class ControllerConfigurationReadService:
                 raise ValueError("public Controller snapshot unavailable")
         for name in ("controller_url_source", "controller_id_source", "client_id_source",
                      "client_secret_source", "tls_certificate_verification_source"):
-            allowed = ("environment", "repository_default", "persisted_override") if name in ("controller_url_source", "controller_id_source", "client_id_source") else ("environment", "repository_default")
+            allowed = ("environment", "repository_default", "persisted_override") if name in ("controller_url_source", "controller_id_source", "client_id_source") else ("environment", "repository_default", "managed_secret_override") if name == "client_secret_source" else ("environment", "repository_default")
             if getattr(snapshot, name) not in allowed:
                 raise ValueError("public Controller snapshot unavailable")
         if snapshot.client_secret_presence not in ("configured", "not_configured"):
@@ -67,14 +68,26 @@ class ControllerConfigurationReadService:
                 consumer_state="active", validation={"type": "string", "required": True},
                 last_changed_at=current.get("last_changed_at"), last_changed_by=current.get("last_changed_by"))
             fields[name] = item
-        fields["client_secret"] = {"display_label": "Client Secret", "value_type": "secret_presence",
-            "effective_presence": snapshot.client_secret_presence, "effective_source": snapshot.client_secret_source,
-            "editable": False, "read_only_reason": "deployment_controlled"}
+        secret_metadata = {"configured_presence": None, "configured_source": None,
+                           "persisted_secret_override_present": None, "pending_replacement": None,
+                           "secret_store_state": "unavailable"}
+        if configured and self.secret_metadata_service is not None:
+            source = "environment" if "OMADA_CLIENT_SECRET" in self.configured_read_service.environment_names else "repository_default"
+            try:
+                secret_metadata = self.secret_metadata_service.metadata(generation, snapshot.effective_generation, source)
+            except SettingsError as error:
+                if error.code != "settings_store_unavailable":
+                    raise
+                return self._effective_only(request_id)
+        fields["client_secret"] = {"display_label": "Client Secret", "value_type": "secret_write_only",
+            "management_mode": "write_only", "effective_presence": snapshot.client_secret_presence,
+            "effective_source": snapshot.client_secret_source, **secret_metadata,
+            "apply_requirement": "main_service_restart", "activation_target": "captive-portal.service"}
         fields["tls_certificate_verification"] = value("TLS certificate verification", "boolean",
             snapshot.tls_certificate_verification, snapshot.tls_certificate_verification_source)
         fields["tls_certificate_verification"].update(editable=False, read_only_reason="deployment_controlled")
         return {
-            "api_version": "admin.settings.controller.v2",
+            "api_version": "admin.settings.controller.v3",
             "request_id": request_id,
             "scope": {"type": "global"},
             "resource": {"type": "omada_controller", "scope": "installation"},
@@ -82,10 +95,17 @@ class ControllerConfigurationReadService:
             "configuration_state": "configured",
             "store_state": "available" if configured else "unavailable",
             "mutation_available": configured is not None,
+            "secret_mutation_available": configured is not None and secret_metadata["secret_store_state"] == "available",
             "configured_generation": generation,
             "effective_generation": snapshot.effective_generation,
             "activation_state": configured["activation_state"] if configured else None,
             "restart_required": configured["restart_required"] if configured else None,
-            "pending_controller_setting_count": sum(item.get("pending_value") is not None for item in fields.values()) if configured else None,
+            "pending_controller_setting_count": sum(item.get("pending_value") is not None for item in fields.values()) + int(secret_metadata["pending_replacement"] is True) if configured else None,
             "fields": fields,
         }
+
+    def _effective_only(self, request_id):
+        class Unavailable:
+            def read_controller(self):
+                raise SettingsError("settings_store_unavailable")
+        return ControllerConfigurationReadService(self.snapshot, Unavailable()).read(request_id)

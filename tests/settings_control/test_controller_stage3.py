@@ -31,8 +31,9 @@ def write(boot, changes=None, *, generation=0, key=None, domain="controller"):
 
 
 def read(boot):
-    return ControllerConfigurationReadService(public_omada_snapshot(build_omada_runtime_config(boot.runtime_settings),
-        frozenset(), boot.resolved_snapshot), boot.admin_context.read_service).read(str(uuid.uuid4()))
+    return ControllerConfigurationReadService(public_omada_snapshot(build_omada_runtime_config(boot.runtime_settings, boot.controller_secret_resolution),
+        frozenset(), boot.resolved_snapshot, boot.controller_secret_resolution), boot.admin_context.read_service,
+        boot.admin_context.secret_metadata_service).read(str(uuid.uuid4()))
 
 
 def v1_database(path):
@@ -66,7 +67,7 @@ def test_v1_migration_preserves_all_history_and_replay_bytes(tmp_path):
     repository = SettingsRepository(path)
     assert repository.configured() == (7, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 123})
     with repository.transaction() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         for name, rows in histories.items():
             assert [tuple(row) for row in db.execute("SELECT * FROM " + name)] == rows
         audit = db.execute("SELECT * FROM settings_mutation_audit").fetchone()
@@ -180,7 +181,7 @@ def test_effective_generation_source_pending_and_store_outage(tmp_path):
     boot = stack(tmp_path, client_secret=SECRET)
     boot.activation_service.adopt(boot.runtime_settings, None)
     initial = read(boot)
-    assert initial["api_version"] == "admin.settings.controller.v2"
+    assert initial["api_version"] == "admin.settings.controller.v3"
     mutation(boot)
     general_pending = read(boot)
     assert general_pending["restart_required"] and general_pending["pending_controller_setting_count"] == 0
@@ -201,7 +202,7 @@ def test_effective_generation_source_pending_and_store_outage(tmp_path):
         assert all(outage["fields"][name][key] is None for key in
             ("configured_value", "configured_source", "persisted_override_value", "pending_value", "pending_source"))
     assert SECRET not in json.dumps(outage)
-    assert SECRET not in repr(public_omada_snapshot(build_omada_runtime_config(newer.runtime_settings), frozenset()))
+    assert SECRET not in repr(public_omada_snapshot(build_omada_runtime_config(newer.runtime_settings, newer.controller_secret_resolution), frozenset(), secret_resolution=newer.controller_secret_resolution))
 
 
 @pytest.mark.parametrize("key", ["WEB_ADMIN_DEVICE_PAGE_SIZE", "OMADA_CLIENT_SECRET", "VERIFY_SSL", "UNKNOWN"])
@@ -234,7 +235,9 @@ def test_one_validator_canonicalizes_runtime_and_settings(scheme):
 def test_secret_prerequisite_failure_is_safe_and_atomic(tmp_path):
     boot = stack(tmp_path, client_secret=SECRET)
     read_service = boot.admin_context.read_service
-    read_service.base_settings = {**read_service.base_settings, "client_secret": ""}
+    from dataclasses import replace
+    secrets = boot.admin_context.secret_metadata_service
+    secrets._deployment = replace(secrets._deployment, value="")
     with pytest.raises(SettingsError, match="validation_failed") as error:
         mutation(boot)
     assert error.value.details == ({"key": None, "reason": "controller_prerequisite_invalid"},)

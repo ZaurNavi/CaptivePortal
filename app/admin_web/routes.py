@@ -107,7 +107,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             and any(len(request.args.getlist(key)) != 1 for key in request.args)
         ):
             return _error("invalid_request", 400)
-        if request.method == "POST" and request.path not in ("/admin/api/v1/settings/generations", "/admin/api/v1/settings/controller/generations"):
+        if request.method == "POST" and request.path not in ("/admin/api/v1/settings/generations", "/admin/api/v1/settings/controller/generations", "/admin/api/v1/settings/controller/client-secret/generations"):
             if request.content_length is None:
                 return _error("length_required", 411)
             if request.content_length > config.max_post_bytes:
@@ -202,7 +202,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             page={"key": "settings_controller", "title": "Controller"},
             username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token,
             controller_settings_state=runtime.controller_settings_state,
-            controller_settings_write_allowed=policy.authorize_global(g.admin_principal, "admin.write.settings.controller"))
+            controller_settings_write_allowed=policy.authorize_global(g.admin_principal, "admin.write.settings.controller"),
+            controller_secret_write_allowed=policy.authorize_global(g.admin_principal, "admin.write.settings.controller.secret"))
 
     @blueprint.get("/admin/api/v1/settings/controller")
     @authenticated
@@ -256,6 +257,54 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     @authenticated
     def controller_settings_mutation():
         return mutate_settings("controller")
+
+    @blueprint.post("/admin/api/v1/settings/controller/client-secret/generations")
+    @authenticated
+    def controller_secret_mutation():
+        import re
+        from app.settings_control.controller_secret import SECRET_API_VERSION, valid_uuid4
+        from app.settings_control.models import SettingsError
+        if not getattr(runtime, "settings_feature_enabled", False):
+            return _error("feature_disabled", 404)
+        if not all(policy.authorize_global(g.admin_principal, cap) for cap in (
+                "admin.read.settings.controller", "admin.write.settings.controller.secret")):
+            return _error("controller_secret_forbidden", 403)
+        try:
+            submitted = request.headers.get("X-CSRF-Token", "")
+            if len(submitted) > config.max_csrf_chars or not token_matches(submitted, g.admin_session.csrf_token):
+                raise SettingsError("invalid_csrf", 400)
+            match = request.headers.get("If-Match")
+            if match is None:
+                raise SettingsError("precondition_required", 428)
+            parsed = re.fullmatch(r'"settings-g(0|[1-9][0-9]{0,18})"', match)
+            key = request.headers.get("Idempotency-Key", "")
+            if parsed is None or not valid_uuid4(key) or request.args:
+                raise SettingsError("invalid_request", 400)
+            if request.mimetype != "application/json":
+                raise SettingsError("unsupported_media_type", 415)
+            if request.content_length is None:
+                raise SettingsError("length_required", 411)
+            if request.content_length > 32768:
+                raise SettingsError("request_too_large", 413)
+            raw = request.stream.read(32769)
+            if len(raw) > 32768:
+                raise SettingsError("request_too_large", 413)
+            service = runtime.controller_secret_mutation_service
+            if service is None:
+                raise SettingsError("controller_secret_store_unavailable")
+            result = service.mutate(raw, principal=g.admin_principal, source_ip=g.admin_source_ip,
+                request_id=g.admin_request_id, idempotency_key=key, expected_generation=int(parsed[1]))
+            response = jsonify(result.body)
+            response.status_code = result.status
+            response.headers["ETag"] = f'"settings-g{result.body["configured_generation"]}"'
+            return response
+        except SettingsError as error:
+            if error.code.startswith("controller_secret_") and error.code != "controller_secret_store_unavailable":
+                error = SettingsError("controller_secret_store_unavailable")
+            return jsonify({"api_version": SECRET_API_VERSION, "request_id": g.admin_request_id,
+                "error": {"code": error.code, "details": list(error.details)}}), error.status
+        except Exception:
+            return _error("internal_error", 500)
 
     def mutate_settings(domain):
         import re
@@ -389,7 +438,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                         sessions.revoke(old_tokens[0])
                     token, _session = sessions.commit(
                         reservation,
-                        AdminPrincipal(username=config.username),
+                        AdminPrincipal(username=config.username, global_capabilities=config.global_capabilities),
                     )
                     committed = True
                     attempt_outcome = "success"
@@ -2202,9 +2251,11 @@ def _error(code: str, status_code: int) -> Response:
     if _is_api_path(request.path):
         return jsonify(
             {
-                "api_version": ("admin.settings.controller.mutation.v1"
+                "api_version": ("admin.settings.controller.secret.mutation.v1"
+                    if request.path == "/admin/api/v1/settings/controller/client-secret/generations"
+                    else "admin.settings.controller.mutation.v1"
                     if request.path == "/admin/api/v1/settings/controller/generations"
-                    else "admin.settings.controller.v2"
+                    else "admin.settings.controller.v3"
                     if request.path == "/admin/api/v1/settings/controller"
                     else "admin.settings.v1" if request.path.startswith("/admin/api/v1/settings") else API_VERSION),
                 "request_id": getattr(g, "admin_request_id", str(uuid.uuid4())),

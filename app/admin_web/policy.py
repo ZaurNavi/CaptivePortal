@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from .config import SITE_ID_PATTERN
 from .models import AdminPrincipal
+from .capabilities import GLOBAL_CAPABILITIES
 
 
 READ_CAPABILITIES = frozenset(
@@ -19,9 +20,7 @@ READ_CAPABILITIES = frozenset(
     }
 )
 
-GLOBAL_SETTINGS_CAPABILITIES = frozenset({
-    "admin.read.settings.global", "admin.write.settings.global", "admin.read.settings.controller", "admin.write.settings.controller",
-})
+GLOBAL_SETTINGS_CAPABILITIES = GLOBAL_CAPABILITIES
 
 
 class AdminSiteContextError(ValueError):
@@ -57,6 +56,7 @@ class AdminAccessPolicy:
             isinstance(principal, AdminPrincipal)
             and principal.principal_type == "platform_operator"
             and capability in GLOBAL_SETTINGS_CAPABILITIES
+            and capability in principal.global_capabilities
         )
 
     def authorize(

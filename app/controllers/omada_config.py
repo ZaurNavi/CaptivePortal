@@ -66,10 +66,11 @@ class OmadaControllerRuntimeConfig:
             object.__setattr__(self, attribute, normalize_controller_setting(key, getattr(self, attribute)))
 
 
-def build_omada_runtime_config(settings: Mapping[str, Any]) -> OmadaControllerRuntimeConfig:
+def build_omada_runtime_config(settings: Mapping[str, Any], secret_resolution=None) -> OmadaControllerRuntimeConfig:
     """Resolve only from the caller's already-adopted mapping, with no I/O."""
     return OmadaControllerRuntimeConfig(
-        **{attribute: settings.get(internal) for _, internal, attribute in _REQUIRED},
+        **{attribute: secret_resolution.value if attribute == "client_secret" and secret_resolution is not None
+           else settings.get(internal) for _, internal, attribute in _REQUIRED},
         verify_ssl=settings["verify_ssl"],
     )
 
@@ -93,6 +94,7 @@ def public_omada_snapshot(
     runtime_config: OmadaControllerRuntimeConfig,
     explicit_environment_names: frozenset[str],
     settings_snapshot=None,
+    secret_resolution=None,
 ) -> OmadaControllerPublicConfigSnapshot:
     """Project the same config used by the provider; never expose secret material."""
     def source(name):
@@ -109,7 +111,7 @@ def public_omada_snapshot(
         client_id=runtime_config.client_id,
         client_id_source=source("OMADA_CLIENT_ID"),
         client_secret_presence="configured" if runtime_config.client_secret else "not_configured",
-        client_secret_source=source("OMADA_CLIENT_SECRET"),
+        client_secret_source=secret_resolution.source if secret_resolution is not None else source("OMADA_CLIENT_SECRET"),
         tls_certificate_verification=runtime_config.verify_ssl,
         # VERIFY_SSL is a repository constant, not an environment binding.
         tls_certificate_verification_source="repository_default",

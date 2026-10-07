@@ -120,7 +120,7 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
     response = get(client)
     assert response.status_code == 200
     model = response.json
-    assert model["api_version"] == "admin.settings.controller.v2"
+    assert model["api_version"] == "admin.settings.controller.v3"
     assert str(uuid.UUID(model["request_id"])) == model["request_id"]
     assert model["scope"] == {"type": "global"}
     assert model["resource"] == {"type": "omada_controller", "scope": "installation"}
@@ -133,7 +133,7 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
             "effective_value": "installation", "effective_source": "environment"},
         "client_id": {"display_label": "Client / Application ID", "value_type": "string",
             "effective_value": "application", "effective_source": "environment"},
-        "client_secret": {"display_label": "Client Secret", "value_type": "secret_presence",
+        "client_secret": {"display_label": "Client Secret", "value_type": "secret_write_only",
             "effective_presence": "configured", "effective_source": "environment"},
         "tls_certificate_verification": {"display_label": "TLS certificate verification", "value_type": "boolean",
             "effective_value": False, "effective_source": "repository_default"}}
@@ -145,7 +145,8 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
     assert model["configured_generation"] is None
     for name in ("controller_url", "controller_id", "client_id"):
         assert model["fields"][name]["configured_value"] is None
-    assert not model["fields"]["client_secret"]["editable"]
+    assert model["fields"]["client_secret"]["management_mode"] == "write_only"
+    assert model["secret_mutation_available"] is False
     assert runtime.settings_store_state == "unavailable" and runtime.controller_settings_state == "active"
     assert response.mimetype == "application/json"
     assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
@@ -195,7 +196,7 @@ def test_controller_get_rejects_nonempty_body_without_parsing_or_reading_config(
     runtime.controller_settings_read_service = SimpleNamespace(read=read)
     response = client.get(API, data=body, content_type=content_type, base_url="https://localhost")
     assert response.status_code == 400 and response.json["error"]["code"] == "invalid_request"
-    assert response.json["api_version"] == "admin.settings.controller.v2"
+    assert response.json["api_version"] == "admin.settings.controller.v3"
     assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
     assert SECRET not in response.text + caplog.text
     read.assert_not_called()
@@ -255,7 +256,8 @@ def test_independent_capabilities_and_navigation(general, controller):
 
 def test_global_policy_and_no_site_resolution(monkeypatch):
     policy = AdminAccessPolicy(frozenset())
-    assert policy.authorize_global(AdminPrincipal("operator"), "admin.read.settings.controller")
+    from app.admin_web.capabilities import DEFAULT_GLOBAL_CAPABILITIES
+    assert policy.authorize_global(AdminPrincipal("operator", global_capabilities=DEFAULT_GLOBAL_CAPABILITIES), "admin.read.settings.controller")
     assert not policy.authorize_global(AdminPrincipal("operator", "site_operator"), "admin.read.settings.controller")
     assert not policy.authorize_global(None, "admin.read.settings.controller")
     assert "admin.write.settings.controller" in GLOBAL_SETTINGS_CAPABILITIES
@@ -289,7 +291,7 @@ def test_internal_response_failure_is_sanitized():
     runtime.controller_settings_read_service = SimpleNamespace(read=lambda _: {"invalid": object()})
     response = get(client)
     assert response.status_code == 500 and response.json["error"]["code"] == "internal_error"
-    assert response.json["api_version"] == "admin.settings.controller.v2"
+    assert response.json["api_version"] == "admin.settings.controller.v3"
 
 
 def test_frontend_nonsecret_writable_and_general_allowlist_unchanged():
@@ -297,9 +299,9 @@ def test_frontend_nonsecret_writable_and_general_allowlist_unchanged():
     source = (root / "app/admin_web/static/controller_settings.js").read_text(encoding="utf-8")
     for forbidden in ("innerHTML", "localStorage", "sessionStorage", "systemctl", "console."):
         assert forbidden not in source
-    assert source.count("fetch(") == 2 and f'fetch("{API}"' in source
+    assert source.count("fetch(") == 3 and f'fetch("{API}"' in source
     assert 'method: "GET"' in source and 'credentials: "same-origin"' in source
-    assert "Configured" in source and "Not configured" in source
+    assert "Configured presence" in source and "Effective presence" in source
     registry = tuple(SettingsDefinitionRegistry())
     assert len(registry) == 15
     assert len([item for item in registry if item.domain == "general"]) == 12
@@ -362,12 +364,12 @@ def test_main_shared_config_single_environment_capture_and_projection_isolation(
         return controller
     monkeypatch.setattr(run, "create_controller", factory)
     projector = public_omada_snapshot
-    def project(config, names, settings_snapshot=None):
+    def project(config, names, settings_snapshot=None, secret_resolution=None):
         assert config is captured["config"]
         assert names is captured["environment_names"]
         if projection_failure:
             raise RuntimeError(SECRET)
-        return projector(config, names, settings_snapshot)
+        return projector(config, names, settings_snapshot, secret_resolution)
     monkeypatch.setattr(run, "public_omada_snapshot", project)
     def admin(actual_app, actual_settings, registry, context, public_snapshot):
         captured["public_snapshot"] = public_snapshot

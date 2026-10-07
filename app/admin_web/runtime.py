@@ -68,6 +68,7 @@ class AdminWebRuntime:
     settings_store_state: str = "disabled"
     settings_read_service: Any | None = None
     settings_mutation_service: Any | None = None
+    controller_secret_mutation_service: Any | None = None
     controller_settings_state: str = "disabled"
     controller_settings_read_service: Any | None = None
 
@@ -420,7 +421,8 @@ def create_admin_web_runtime(
             from .controller_settings import ControllerConfigurationReadService
 
             controller_settings_read_service = ControllerConfigurationReadService(controller_public_snapshot,
-                settings_control.read_service if settings_control else None)
+                settings_control.read_service if settings_control else None,
+                getattr(settings_control, "secret_metadata_service", None))
             controller_settings_state = "active"
         except Exception:
             logger.error("admin.controller_settings_projection_unavailable")
@@ -463,6 +465,7 @@ def create_admin_web_runtime(
         settings_store_state=settings_control.store_state if settings_control else "disabled",
         settings_read_service=settings_control.read_service if settings_control else None,
         settings_mutation_service=settings_control.mutation_service if settings_control else None,
+        controller_secret_mutation_service=getattr(settings_control, "secret_mutation_service", None),
         controller_settings_state=controller_settings_state,
         controller_settings_read_service=controller_settings_read_service,
     )

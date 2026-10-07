@@ -1,5 +1,5 @@
 """Immutable Settings boundary models and bounded public errors."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping
@@ -109,13 +109,16 @@ class SettingsAdminContext:
     store_state: str
     read_service: Any = None
     mutation_service: Any = None
+    secret_mutation_service: Any = None
+    secret_metadata_service: Any = None
 
 
 @dataclass(frozen=True, slots=True)
 class SettingsBootstrapResult:
     feature_enabled: bool
     store_state: str
-    runtime_settings: Mapping[str, Any]
+    runtime_settings: Mapping[str, Any] = field(repr=False)
     resolved_snapshot: ResolvedSettingsSnapshot
     admin_context: SettingsAdminContext
     activation_service: Any = None
+    controller_secret_resolution: Any = field(default=None, repr=False)
