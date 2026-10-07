@@ -393,10 +393,16 @@ def main() -> None:
     settings = settings_bootstrap.runtime_settings
     logger.info("Configuration loaded")
 
-    controller_config = build_omada_runtime_config(settings)
-    controller = create_controller(controller_config)
     try:
-        controller_public_snapshot = public_omada_snapshot(controller_config, explicit_environment_names)
+        controller_config = build_omada_runtime_config(settings)
+        controller = create_controller(controller_config)
+    except Exception:
+        if settings_bootstrap.activation_service is not None:
+            settings_bootstrap.activation_service.fail("controller_configuration_adoption_failed")
+        raise
+    try:
+        controller_public_snapshot = public_omada_snapshot(controller_config, explicit_environment_names,
+            settings_bootstrap.resolved_snapshot)
     except Exception:
         controller_public_snapshot = None
         logger.error("admin.controller_settings_projection_unavailable")
@@ -443,23 +449,6 @@ def main() -> None:
         telemetry=app.extensions.get("auth_telemetry"),
     )
     try:
-        _pending_session_cleaner.start()
-    except Exception:
-        logger.exception("pending_session_cleaner_start_failed")
-    try:
-        _observation_foundation.start()
-    except Exception:
-        logger.exception("observation_foundation_start_failed")
-    if _current_state_runtime is not None:
-        try:
-            _current_state_runtime.start()
-        except Exception:
-            logger.exception("current_state_runtime_start_failed")
-    try:
-        _visitor_snapshot_collector.start()
-    except Exception:
-        logger.exception("visitor_snapshot_start_failed")
-    try:
         _visitor_registry = create_visitor_registry(settings)
     except Exception:
         logger.exception("visitor_registry_create_failed")
@@ -490,6 +479,24 @@ def main() -> None:
                          controller_public_snapshot)
     if settings_bootstrap.activation_service is not None:
         settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime)
+    # Shared-provider consumers may use candidate G only after durable adoption.
+    try:
+        _pending_session_cleaner.start()
+    except Exception:
+        logger.exception("pending_session_cleaner_start_failed")
+    try:
+        _observation_foundation.start()
+    except Exception:
+        logger.exception("observation_foundation_start_failed")
+    if _current_state_runtime is not None:
+        try:
+            _current_state_runtime.start()
+        except Exception:
+            logger.exception("current_state_runtime_start_failed")
+    try:
+        _visitor_snapshot_collector.start()
+    except Exception:
+        logger.exception("visitor_snapshot_start_failed")
     _start_public_traffic_worker(app)
 
     host = settings["host"]

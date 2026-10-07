@@ -522,14 +522,17 @@ variable and not a 1-GiB reservation.
 SettingsStore I/O and keeps base settings authoritative. `SETTINGS_DB_PATH`
 defaults to `/opt/CaptivePortal/data/settings.sqlite3`; these two bootstrap
 controls are not editable Settings. Provision the parent directory externally;
-the application does not create it or migrate an incompatible database.
+the application does not create it. Only the exact accepted schema-v1 database
+is migrated automatically to v2 during Settings-enabled startup; incompatible
+or corrupt stores are rejected.
 
 When enabled and available, GLOBAL persisted overrides precede explicit
 environment values, which precede the shared typed repository defaults. An
-available but semantically invalid startup configuration aborts; only an
-unavailable SettingsStore permits automatic base-settings fallback.
+invalid configuration or unavailable SettingsStore aborts enabled startup
+before the shared Omada provider or any Controller-dependent worker starts.
+There is no automatic base-settings fallback when Settings is enabled.
 
-The ordered writable allowlist is exactly:
+The unchanged ordered General integer allowlist is exactly:
 
 | Key | Default | Bounds |
 | --- | ---: | --- |
@@ -546,23 +549,32 @@ The ordered writable allowlist is exactly:
 | WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS | 60 | 60–300 |
 | WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS | 120 | 60–600 |
 
-SQLite schema v1 retains immutable generations, complete per-generation
+SQLite schema v2 retains immutable generations, complete typed per-generation
 override sets, mutation audit, successful idempotency responses and activation
 events, plus the mutable `captive-portal.service` effective-generation target.
 Generation 0 is created with `system / settings_bootstrap`, no overrides, no
 mutation audit and no idempotency record. Foreign keys are enabled and the
 SQLite busy timeout is 1000 ms.
 
+The common definition registry has 15 entries: the twelve General integers
+above and exactly three Controller strings (`OMADA_URL`, `OMADA_ID`,
+`OMADA_CLIENT_ID`). The same Store, generation head and CAS authority serve
+both domains. Idempotency keys are scoped by domain. The transactional v1→v2
+migration preserves generation IDs, original audit/activation history and exact
+successful General response bytes; migration itself creates no generation,
+audit or activation event.
+
 A successful Save persists configuration only. All keys require a main-service
 restart; the Settings API cannot restart services or hot-reload configuration.
 The main runtime composes one immutable startup snapshot and durably adopts
-that exact generation before serving. Operational source degradation is not
+that exact generation before starting Controller-dependent workers or serving
+HTTP. Operational source degradation is not
 Settings activation failure. No service or production activation is performed
 by this implementation.
 
-## Read-only Omada Controller Settings
+## Omada Controller Settings — writable non-secret Stage 3
 
-`WEB_ADMIN_SETTINGS_ENABLED` also gates the GLOBAL Controller read page/API.
+`WEB_ADMIN_SETTINGS_ENABLED` also gates the GLOBAL Controller page/read/write API.
 The main process builds one immutable `OmadaControllerRuntimeConfig` from the
 Stage-1 resolved settings, injects it into the shared provider and derives a
 separate secret-free public snapshot for Admin. The provider no longer reads
@@ -572,9 +584,25 @@ an injected controller is never rebuilt.
 
 `OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID` and `OMADA_CLIENT_SECRET` remain required.
 Existing trim/base-URL normalization and OAuth/request semantics are unchanged.
-Startup environment-name membership determines public `environment` versus
-`repository_default` provenance; `VERIFY_SSL=false` is a repository constant.
+The selected writable value is normalized by the same canonical Omada owner:
+persisted override > explicit startup environment > repository default.
+The immutable effective snapshot retains the adopted generation and each
+writable value's `persisted_override`, `environment` or `repository_default`
+provenance. No environment reread occurs in an Admin request.
+`VERIFY_SSL=false` remains a repository constant.
 Client Secret is represented only by presence/source, never its value or any
-derived length/hash/mask. No Controller values are stored in SettingsStore and
-the twelve writable integer settings are unchanged. No live probe, reload,
-restart, deployment or production activation is performed.
+derived length/hash/mask. `OMADA_CLIENT_SECRET` and `VERIFY_SSL` have no writable
+definition and cannot enter the new Controller override/audit/idempotency paths.
+Only the three non-secret Controller strings may be persisted. General reads
+and successful General receipts still contain exactly the twelve integers.
+
+Controller Save persists configuration, not running provider state. The GLOBAL
+`admin.write.settings.controller` capability is independent of General write
+authorization. A successful Save requires an externally authorized/performed
+`captive-portal.service` restart to activate; no Admin restart control, Test
+Connection, hot reconnect, live-health claim, deployment or production
+activation is supplied here.
+
+After trustworthy startup adoption, Store loss does not invent configured
+truth: the Controller V2 read can return effective-only state with configured
+fields/pending state null, while writes return `503 settings_store_unavailable`.

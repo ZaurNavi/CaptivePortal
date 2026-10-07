@@ -7,9 +7,11 @@ from .models import API_VERSION, SettingsError, SettingReadModelV1, SettingsMuta
 from .repository import canonical_json
 from .resolver import resolve_settings
 from .validation import SettingsValidationService
+from app.controllers.omada_config import normalize_controller_setting
+from app.exceptions import ConfigurationError
 
 
-def parse_changes(raw, registry=None):
+def parse_changes(raw, registry=None, domain="general"):
     registry = registry or SettingsDefinitionRegistry()
 
     def pairs(values):
@@ -28,18 +30,25 @@ def parse_changes(raw, registry=None):
         if type(document) is not dict or set(document) != {"changes"}:
             raise ValueError()
         changes = document["changes"]
-        if type(changes) is not list or not 1 <= len(changes) <= 64:
+        if domain not in ("general", "controller") or type(changes) is not list or not 1 <= len(changes) <= (3 if domain == "controller" else 64):
             raise ValueError()
         seen, result = set(), []
         for change in changes:
             if type(change) is not dict:
                 raise ValueError()
             key, operation = change.get("key"), change.get("operation")
-            if type(key) is not str or registry.get(key) is None or key in seen:
+            definition = registry.get(key) if type(key) is str else None
+            if definition is None or definition.domain != domain or key in seen:
                 raise ValueError()
             seen.add(key)
-            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is int:
-                result.append(SettingsMutationChange(key, operation, change["value"]))
+            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is (str if domain == "controller" else int):
+                value = change["value"]
+                if domain == "controller":
+                    try:
+                        value = normalize_controller_setting(key, value)
+                    except ConfigurationError as exc:
+                        raise SettingsError("validation_failed", 422, ({"key": key, "reason": "required" if not value.strip() else "invalid_url"},)) from exc
+                result.append(SettingsMutationChange(key, operation, value))
             elif operation == "clear_override" and set(change) == {"key", "operation"}:
                 result.append(SettingsMutationChange(key, operation))
             else:
@@ -68,7 +77,7 @@ class SettingsReadService:
             "active" if generation == effective else "activation_failed" if latest_result == "failed" else "pending_main_restart"
         )
         settings = []
-        for item in self.registry:
+        for item in self.registry.for_domain("general"):
             enabled = self.startup_snapshot.values.get(item.consumer_enable_settings_dict_key, "false") in (True, "true")
             consumer = ("active" if enabled else "consumer_disabled") if trustworthy else None
             audit = self.repository.latest_setting_audit(db, item.key, generation)
@@ -97,6 +106,30 @@ class SettingsReadService:
         with self.repository.transaction() as db:
             return self.project(db)
 
+    def read_controller(self):
+        """Safe configured-domain boundary; excludes the secret-bearing mapping."""
+        with self.repository.transaction() as db:
+            generation = self.repository.head(db)
+            overrides = self.repository.overrides(db, generation)
+            snapshot = resolve_settings(self.base_settings, self.environment_names, overrides, generation, self.registry)
+            effective = self.repository.effective(db)
+            trustworthy = self._adopted and effective == self.startup_snapshot.generation_id
+            latest = self.repository.latest_activation_result(db, generation)
+            activation = "runtime_unavailable" if not trustworthy else (
+                "active" if generation == effective else "activation_failed" if latest == "failed" else "pending_main_restart")
+            fields = {}
+            for item in self.registry.for_domain("controller"):
+                audit = self.repository.latest_setting_audit(db, item.key, generation)
+                fields[item.key] = {
+                    "persisted_override_value": overrides.get(item.key),
+                    "configured_value": snapshot.values[item.settings_dict_key],
+                    "configured_source": "persisted_override" if item.key in overrides else snapshot.base_source_by_key[item.key],
+                    "last_changed_at": audit["timestamp_utc"] if audit else None,
+                    "last_changed_by": {"principal_type": audit["principal_type"], "principal_name": audit["principal_name"]} if audit else None,
+                }
+            return {"configured_generation": generation, "activation_state": activation,
+                    "restart_required": generation != effective, "fields": fields}
+
 
 class SettingsMutationService:
     def __init__(self, repository, read_service, validation=None):
@@ -109,19 +142,20 @@ class SettingsMutationService:
             raise SettingsError("idempotency_conflict", 409)
         return SettingsMutationResult(existing["result_http_status"], json.loads(existing["result_response_json"]))
 
-    def mutate(self, raw_body, *, principal, source_ip, request_id, idempotency_key, expected_generation):
-        changes = parse_changes(raw_body, self.read_service.registry)
+    def mutate(self, raw_body, *, principal, source_ip, request_id, idempotency_key, expected_generation, domain="general"):
+        changes = parse_changes(raw_body, self.read_service.registry, domain)
         canonical = {"changes": [
             {"key": change.key, "operation": change.operation, **({"value": change.value} if change.operation == "set" else {})}
             for change in changes
         ]}
         payload_hash = hashlib.sha256(canonical_json(canonical).encode("utf-8")).hexdigest()
-        existing = self.repository.lookup_idempotency(principal, idempotency_key)
+        domain_args = (domain,) if domain != "general" else ()
+        existing = self.repository.lookup_idempotency(principal, idempotency_key, *domain_args)
         if existing:
             return self._replay(existing, payload_hash)
         with self.repository.transaction(write=True) as db:
             # Mandatory re-check: another writer may have accepted this identity.
-            existing = self.repository.idempotency(db, principal, idempotency_key)
+            existing = self.repository.idempotency(db, principal, idempotency_key, *domain_args)
             if existing:
                 return self._replay(existing, payload_hash)
             parent = self.repository.head(db)
@@ -153,11 +187,24 @@ class SettingsMutationService:
                         previous_override=previous.get(change.key), new_override=overrides.get(change.key),
                         previous_value=current.values[definition.settings_dict_key],
                         new_value=candidate.values[definition.settings_dict_key],
-                        apply_requirement=definition.apply_requirement, activation_target=definition.activation_target)
-            projection = self.read_service.project(db, generation)
-            body = {key: projection[key] for key in ("api_version", "scope", "configured_generation", "effective_generation", "restart_required", "settings")}
-            body.update(request_id=request_id, changed=changed,
-                        activation_state="pending_main_restart" if changed else projection["settings"][0]["activation_state"])
+                        apply_requirement=definition.apply_requirement, activation_target=definition.activation_target,
+                        domain=domain, value_type=definition.value_type)
+            if domain == "controller":
+                effective = self.repository.effective(db)
+                latest = self.repository.latest_activation_result(db, generation)
+                activation = "pending_main_restart" if changed else (
+                    "runtime_unavailable" if not self.read_service._adopted else "active" if generation == effective
+                    else "activation_failed" if latest == "failed" else "pending_main_restart")
+                body = {"api_version": "admin.settings.controller.mutation.v1", "request_id": request_id,
+                        "scope": {"type": "global"}, "resource": {"type": "omada_controller", "scope": "installation"},
+                        "changed": changed, "changed_keys": [item.key for item in changes if previous.get(item.key) != overrides.get(item.key)],
+                        "configured_generation": generation, "effective_generation": effective,
+                        "activation_state": activation, "restart_required": generation != effective}
+            else:
+                projection = self.read_service.project(db, generation)
+                body = {key: projection[key] for key in ("api_version", "scope", "configured_generation", "effective_generation", "restart_required", "settings")}
+                body.update(request_id=request_id, changed=changed,
+                            activation_state="pending_main_restart" if changed else projection["settings"][0]["activation_state"])
             status = 201 if changed else 200
-            self.repository.save_idempotency(db, principal, idempotency_key, payload_hash, status, body)
+            self.repository.save_idempotency(db, principal, idempotency_key, payload_hash, status, body, *domain_args)
             return SettingsMutationResult(status, body)

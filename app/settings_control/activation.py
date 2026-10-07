@@ -34,6 +34,6 @@ class SettingsActivationService:
         self.read_service._adopted = True
 
     def fail(self, safe_error_code):
-        if safe_error_code not in {"snapshot_mismatch", "admin_configuration_adoption_failed", "settings_validation_failed"}:
+        if safe_error_code not in {"snapshot_mismatch", "admin_configuration_adoption_failed", "settings_validation_failed", "controller_configuration_adoption_failed"}:
             raise ValueError("invalid activation failure category")
         self.repository.activation(self.snapshot.generation_id, False, safe_error_code)

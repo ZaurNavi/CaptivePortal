@@ -75,6 +75,7 @@
         data-store-state="{{ settings_store_state }}" data-csrf-token="{{ csrf_token }}"
         {% elif page.key == 'settings_controller' %}
         id="controller-settings-page" data-controller-state="{{ controller_settings_state }}"
+        data-write-allowed="{{ 'true' if controller_settings_write_allowed else 'false' }}" data-csrf-token="{{ csrf_token }}"
         {% else %}
         id="admin-page"
         data-page="{{ page.key }}"

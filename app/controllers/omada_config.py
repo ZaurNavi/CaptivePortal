@@ -35,6 +35,18 @@ def _valid_base_url(value: str) -> bool:
     )
 
 
+def normalize_controller_setting(key: str, value: Any) -> str:
+    """The same local semantic boundary for Settings and runtime composition."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigurationError("Missing required configuration: " + key)
+    value = value.strip()
+    if key == "OMADA_URL":
+        if not _valid_base_url(value):
+            raise ConfigurationError("Invalid configuration: OMADA_URL")
+        return value[:-1] if value.endswith("/") else value
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class OmadaControllerRuntimeConfig:
     controller_url: str
@@ -50,11 +62,8 @@ class OmadaControllerRuntimeConfig:
         if missing:
             raise ConfigurationError("Missing required configuration: " + ", ".join(missing))
         for _, _, attribute in _REQUIRED:
-            object.__setattr__(self, attribute, getattr(self, attribute).strip())
-        if not _valid_base_url(self.controller_url):
-            raise ConfigurationError("Invalid configuration: OMADA_URL")
-        if self.controller_url.endswith("/"):
-            object.__setattr__(self, "controller_url", self.controller_url[:-1])
+            key = next(key for key, _, name in _REQUIRED if name == attribute)
+            object.__setattr__(self, attribute, normalize_controller_setting(key, getattr(self, attribute)))
 
 
 def build_omada_runtime_config(settings: Mapping[str, Any]) -> OmadaControllerRuntimeConfig:
@@ -77,14 +86,19 @@ class OmadaControllerPublicConfigSnapshot:
     client_secret_source: str
     tls_certificate_verification: bool
     tls_certificate_verification_source: str
+    effective_generation: int | None = None
 
 
 def public_omada_snapshot(
     runtime_config: OmadaControllerRuntimeConfig,
     explicit_environment_names: frozenset[str],
+    settings_snapshot=None,
 ) -> OmadaControllerPublicConfigSnapshot:
     """Project the same config used by the provider; never expose secret material."""
     def source(name):
+        if settings_snapshot is not None and settings_snapshot.generation_id is not None and name in settings_snapshot.base_source_by_key:
+            return ("persisted_override" if settings_snapshot.persisted_override_by_key[name] is not None
+                    else settings_snapshot.base_source_by_key[name])
         return "environment" if name in explicit_environment_names else "repository_default"
 
     return OmadaControllerPublicConfigSnapshot(
@@ -99,4 +113,5 @@ def public_omada_snapshot(
         tls_certificate_verification=runtime_config.verify_ssl,
         # VERIFY_SSL is a repository constant, not an environment binding.
         tls_certificate_verification_source="repository_default",
+        effective_generation=settings_snapshot.generation_id if settings_snapshot is not None else None,
     )

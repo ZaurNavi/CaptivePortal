@@ -8,18 +8,22 @@ from app.admin_web.models import AdminPrincipal
 from app.admin_web.policy import AdminAccessPolicy
 from app.settings_control.bootstrap import bootstrap_settings_control
 from .conftest import enabled_settings, login
+from tests.settings_control import CONTROLLER_BASE
 
 
 def settings_app(tmp_path, *, enabled=True, unavailable=False):
-    base = enabled_settings(web_admin_settings_enabled="true" if enabled else "false",
-                            settings_db_path=str(tmp_path / ("missing/settings.sqlite3" if unavailable else "settings.sqlite3")))
+    base = {**CONTROLLER_BASE, **enabled_settings(web_admin_settings_enabled="true" if enabled else "false",
+                            settings_db_path=str(tmp_path / "settings.sqlite3"))}
     boot = bootstrap_settings_control(base_settings=base, explicit_environment_names=set(), logger=logging.getLogger("settings-ui"))
+    if unavailable and boot.admin_context.read_service is not None:
+        # Outage of an existing running process, not an enabled new startup fallback.
+        boot.admin_context.read_service.repository.db_path = str(tmp_path / "missing" / "settings.sqlite3")
     runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None,
                                       logging.getLogger("settings-ui"), settings_control=boot.admin_context)
     app = Flask(__name__)
     app.config["TESTING"] = True
     app.register_blueprint(runtime.blueprint)
-    if boot.activation_service:
+    if boot.activation_service and not unavailable:
         boot.activation_service.adopt(boot.runtime_settings, runtime)
     client = app.test_client()
     assert login(client).status_code == 302

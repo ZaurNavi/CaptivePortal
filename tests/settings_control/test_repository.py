@@ -11,7 +11,7 @@ def test_physical_bootstrap_identity_and_idempotent_schema(tmp_path):
     repository = SettingsRepository(tmp_path / "settings.sqlite3")
     SettingsRepository(repository.db_path)
     with repository.transaction() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
         assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 1000
         root = db.execute("SELECT * FROM settings_generations").fetchone()
@@ -33,14 +33,14 @@ def test_incompatible_store_is_not_recreated(tmp_path, mode):
         repository = SettingsRepository(path)
         with sqlite3.connect(path) as db:
             if mode == "newer":
-                db.execute("PRAGMA user_version=2")
+                db.execute("PRAGMA user_version=3")
             elif mode == "old_nonempty":
                 db.execute("PRAGMA user_version=0")
             elif mode == "shape":
                 db.execute("ALTER TABLE settings_target_state ADD COLUMN unexpected TEXT")
             else:
                 db.execute("INSERT INTO settings_generations VALUES(1,0,'global','2026-10-06T00:00:00.000Z','platform_operator','operator','request')")
-                db.execute("INSERT INTO settings_overrides VALUES(1,'UNKNOWN','integer',100)")
+                db.execute("INSERT INTO settings_overrides VALUES(1,'UNKNOWN','integer',100,NULL)")
     before = path.read_bytes()
     with pytest.raises(SettingsError):
         SettingsRepository(path)
@@ -53,8 +53,8 @@ def test_history_immutability_fk_and_uniqueness(tmp_path):
     repository = boot.admin_context.read_service.repository
     for sql in ("DELETE FROM settings_generations", "UPDATE settings_overrides SET integer_value=99",
                 "DELETE FROM settings_mutation_audit", "UPDATE settings_idempotency SET result_changed=0",
-                "INSERT INTO settings_overrides VALUES(999,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100)",
-                "INSERT INTO settings_overrides VALUES(1,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100)"):
+                "INSERT INTO settings_overrides VALUES(999,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100,NULL)",
+                "INSERT INTO settings_overrides VALUES(1,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100,NULL)"):
         with pytest.raises(SettingsError):
             with repository.transaction(write=True) as db:
                 db.execute(sql)

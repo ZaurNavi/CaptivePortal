@@ -5,9 +5,12 @@ import uuid
 from app.admin_web.models import AdminPrincipal
 from app.settings_control.bootstrap import bootstrap_settings_control
 
+CONTROLLER_BASE = {"omada_url": "https://controller.invalid", "omada_id": "installation",
+                   "client_id": "application", "client_secret": "synthetic-secret", "verify_ssl": False}
+
 
 def stack(tmp_path, **values):
-    base = {"web_admin_settings_enabled": "true", "settings_db_path": str(tmp_path / "settings.sqlite3")}
+    base = {**CONTROLLER_BASE, "web_admin_settings_enabled": "true", "settings_db_path": str(tmp_path / "settings.sqlite3")}
     base.update(values)
     return bootstrap_settings_control(base_settings=base, explicit_environment_names=frozenset(), logger=logging.getLogger("settings-test"))
 

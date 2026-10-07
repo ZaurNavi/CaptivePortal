@@ -225,7 +225,7 @@ def _prepare_main(
     return events, controller, collector, registry, app, observed
 
 
-def test_main_wires_one_provider_and_starts_collector_before_app(
+def test_main_wires_one_provider_and_starts_collector_after_composition(
     monkeypatch,
 ):
     events, controller, collector, registry, app, observed = _prepare_main(
@@ -255,13 +255,11 @@ def test_main_wires_one_provider_and_starts_collector_before_app(
         "create_visitor_snapshot_collector"
     ) < events.index("create_app")
     assert events.index("create_app") < events.index("collector.start")
-    assert events.index("collector.start") < events.index(
-        "create_visitor_registry"
-    )
     assert events.index("create_visitor_registry") < events.index(
         "registry.start"
     )
-    assert events.index("registry.start") < events.index("app.run")
+    assert events.index("registry.start") < events.index("collector.start")
+    assert events.index("collector.start") < events.index("app.run")
     assert app.run_calls == [{
         "host": "127.0.0.1",
         "port": 8088,

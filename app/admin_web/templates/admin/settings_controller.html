@@ -1,8 +1,11 @@
 {% extends "admin/base.html" %}
-{% block subtitle %}<p>Omada Controller</p><p>Deployment-controlled. No connection test performed.</p>{% endblock %}
+{% block subtitle %}<p>Omada Controller</p><p>Save persists configuration only. No connection test is performed. Activation requires an externally performed captive-portal.service restart.</p>{% endblock %}
 {% block page_body %}
 <div id="controller-settings-state" class="state-panel" role="status" aria-live="polite">
   {% if controller_settings_state == 'active' %}Loading Controller configuration…{% else %}Controller configuration is unavailable.{% endif %}
 </div>
 <dl id="controller-settings-fields" class="detail-list" hidden></dl>
+{% if controller_settings_write_allowed %}
+<button type="button" id="controller-settings-save" class="button" disabled>Save Controller configuration</button>
+{% endif %}
 {% endblock %}
