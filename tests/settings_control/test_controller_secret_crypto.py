@@ -32,6 +32,49 @@ def test_348_primitives_hkdf_vector_round_trip_and_redaction():
     assert "disposable-value" not in repr(resolution) + str(resolution)
 
 
+@pytest.mark.parametrize("failure", ["import", "initialization"])
+def test_aesgcm_failure_marks_store_unavailable_safely(tmp_path, monkeypatch, failure):
+    import builtins
+    from cryptography.hazmat.primitives.ciphers import aead
+    from .stage4_helpers import secret_stack, secret_mutation, SENTINEL
+    boot, _ = secret_stack(tmp_path)
+    if failure == "import":
+        original = builtins.__import__
+        def blocked(name, *args, **kwargs):
+            if name == "cryptography.hazmat.primitives.ciphers.aead":
+                raise ImportError(SENTINEL)
+            return original(name, *args, **kwargs)
+        monkeypatch.setattr(builtins, "__import__", blocked)
+    else:
+        def blocked(*_a, **_k):
+            raise RuntimeError(SENTINEL)
+        monkeypatch.setattr(aead, "AESGCM", blocked)
+    metadata = boot.admin_context.secret_metadata_service
+    assert metadata.available() is False
+    assert metadata.metadata(0, 0, "environment")["secret_store_state"] == "unavailable"
+    with pytest.raises(SettingsError) as error:
+        secret_mutation(boot)
+    assert error.value.code == "controller_secret_store_unavailable"
+    assert SENTINEL not in str(error.value) + repr(error.value)
+
+
+def test_availability_initializes_aesgcm_without_encrypting(tmp_path, monkeypatch):
+    from cryptography.hazmat.primitives.ciphers import aead
+    from .stage4_helpers import secret_stack
+    boot, filesystem = secret_stack(tmp_path)
+    seen = []
+    class InitOnly:
+        def __init__(self, key):
+            seen.append(key)
+        def encrypt(self, *_a):
+            pytest.fail("availability encryption")
+        def decrypt(self, *_a):
+            pytest.fail("availability decryption")
+    monkeypatch.setattr(aead, "AESGCM", InitOnly)
+    assert boot.admin_context.secret_metadata_service.available() is True
+    assert seen == [derive_keys(filesystem.master)[0]]
+
+
 @pytest.mark.parametrize("value", ["x", "x" * 4096, "é" * 2048, " \t a \n", "界"])
 def test_fixed_length_and_randomized_padding(value):
     key, _ = derive_keys(bytes(32))

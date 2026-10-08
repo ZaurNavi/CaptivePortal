@@ -44,5 +44,5 @@ def bootstrap_settings_control(*, base_settings, explicit_environment_names, log
     mutation.secret_repository = secrets
     secret_mutation = ControllerSecretMutationService(secrets, read)
     return SettingsBootstrapResult(True, "available", snapshot.values, snapshot,
-        SettingsAdminContext(True, "available", read, mutation, secret_mutation, secrets),
+        SettingsAdminContext(True, "available", read, mutation, secret_mutation, secrets.safe_metadata_service()),
         SettingsActivationService(repository, snapshot, read), secret_resolution)

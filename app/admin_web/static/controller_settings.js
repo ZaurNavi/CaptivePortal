@@ -20,7 +20,13 @@
   const secretClear = document.getElementById("controller-secret-clear");
   const secretSave = document.getElementById("controller-secret-save");
   let uncertainKey = null;
+  let uncertainOperation = null;
   let secretBusy = false;
+
+  function discardRetry() {
+    uncertainKey = null;
+    uncertainOperation = null;
+  }
 
   function wipeSecret() {
     secretNew.value = "";
@@ -150,17 +156,22 @@
     }
   }
   if (save) save.addEventListener("click", submit);
-  secretReplace.addEventListener("click", () => { wipeSecret(); secretEditor.hidden = false; secretNew.focus(); });
-  document.getElementById("controller-secret-cancel").addEventListener("click", () => { wipeSecret(); secretEditor.hidden = true; uncertainKey = null; });
+  secretReplace.addEventListener("click", () => {
+    if (uncertainOperation !== "replace_secret") discardRetry();
+    wipeSecret(); secretEditor.hidden = false; secretNew.focus();
+  });
+  document.getElementById("controller-secret-cancel").addEventListener("click", () => { wipeSecret(); secretEditor.hidden = true; discardRetry(); });
   async function submitSecret(operation) {
     if (secretBusy || !model || !etag || model.secret_mutation_available !== true || secretControls.dataset.secretWriteAllowed !== "true") return;
+    if (uncertainOperation !== operation) discardRetry();
     let value = null;
     if (operation === "replace_secret") {
       if (secretNew.value !== secretRepeat.value) { state.textContent = "Client Secret entries must match."; return; }
+      if (!secretNew.value) { state.textContent = "Enter the new Client Secret in both fields."; return; }
       value = secretNew.value;
     }
     const warning = operation === "replace_secret" ? "Replace Client Secret? The value cannot be read back later. Credentials will not be tested against Omada. The running Controller connection remains unchanged. An external captive-portal.service restart is required." : "Managed Client Secret will be removed. After the required external service restart, the deployment/environment secret will be used. No current secret will be displayed.";
-    if (!window.confirm(warning)) { wipeSecret(); value = null; return; }
+    if (!window.confirm(warning)) { wipeSecret(); value = null; discardRetry(); return; }
     const key = uncertainKey || crypto.randomUUID();
     secretBusy = true;
     secretSave.disabled = secretReplace.disabled = secretClear.disabled = true;
@@ -177,7 +188,7 @@
       });
       body = null;
       wipeSecret();
-      uncertainKey = null;
+      discardRetry();
       secretEditor.hidden = true;
       if (response.status === 412) {
         await load("Configuration changed elsewhere. Re-enter the secret after reviewing the reloaded configuration.");
@@ -188,6 +199,7 @@
       }
     } catch (_) {
       uncertainKey = key;
+      uncertainOperation = operation;
       await load("Save outcome unavailable. Re-enter the secret to retry with the same operation key.");
     } finally {
       payload = value = body = null;

@@ -15,7 +15,17 @@ from pathlib import Path
 from .models import SettingsError, SettingsMutationResult, TARGET, utc_now
 from .repository import canonical_json
 
-SECRET_KEY = "OMADA_CLIENT_SECRET"
+@dataclass(frozen=True, slots=True)
+class ControllerSecretDefinitionV1:
+    key: str = field(default="OMADA_CLIENT_SECRET", init=False)
+    scope: str = field(default="global", init=False)
+    secret_class: str = field(default="write_only_secret", init=False)
+    apply_requirement: str = field(default="main_service_restart", init=False)
+    activation_target: str = field(default=TARGET, init=False)
+
+
+CONTROLLER_SECRET_DEFINITION = ControllerSecretDefinitionV1()
+SECRET_KEY = CONTROLLER_SECRET_DEFINITION.key
 MASTER_KEY_PATH = "/etc/captiveportal/omada-controller-secret-master.key"
 SETTINGS_DB_PATH = "/opt/CaptivePortal/data/settings.sqlite3"
 SECRET_API_VERSION = "admin.settings.controller.secret.mutation.v1"
@@ -194,6 +204,53 @@ class OmadaClientSecretResolution:
     __str__ = __repr__
 
 
+def check_secret_db(repository, filesystem):
+    filesystem.validate_db(repository.db_path)
+    with repository.transaction() as db:
+        from .repository import _DDL
+        repository._validate_schema(db, _DDL)
+        repository._validate_history(db)
+        validate_secret_history(db)
+
+
+def secret_store_keys(repository, filesystem):
+    check_secret_db(repository, filesystem)
+    keys = derive_keys(filesystem.load_master_key())
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        AESGCM(keys[0])  # Initialize the primitive; no encryption/decryption.
+    except Exception:
+        raise SettingsError("controller_secret_key_unavailable") from None
+    return keys
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerSecretMetadataService:
+    """Admin read boundary: safe facts only, no resolver/value/decrypt reference."""
+    repository: object
+    filesystem: object
+    deployment_presence: str
+    deployment_source: str
+
+    def available(self):
+        try:
+            secret_store_keys(self.repository, self.filesystem)
+            return True
+        except SettingsError:
+            return False
+
+    def metadata(self, generation, effective_generation, deployment_source):
+        with self.repository.transaction() as db:
+            configured = binding(db, generation)
+            effective = binding(db, effective_generation)
+            validate_secret_history(db)
+        return {"configured_presence": "configured" if configured else self.deployment_presence,
+                "configured_source": "managed_secret_override" if configured else self.deployment_source,
+                "persisted_secret_override_present": configured is not None,
+                "pending_replacement": configured != effective,
+                "secret_store_state": "available" if self.available() else "unavailable"}
+
+
 class ControllerSecretRepository:
     def __init__(self, repository, filesystem=None, deployment_secret=None, deployment_source="repository_default"):
         self.repository = repository
@@ -201,16 +258,10 @@ class ControllerSecretRepository:
         self._deployment = OmadaClientSecretResolution(deployment_secret, deployment_source, None)
 
     def check_db(self):
-        self.filesystem.validate_db(self.repository.db_path)
-        with self.repository.transaction() as db:
-            from .repository import _DDL
-            self.repository._validate_schema(db, _DDL)
-            self.repository._validate_history(db)
-            validate_secret_history(db)
+        check_secret_db(self.repository, self.filesystem)
 
     def keys(self):
-        self.check_db()
-        return derive_keys(self.filesystem.load_master_key())
+        return secret_store_keys(self.repository, self.filesystem)
 
     def available(self):
         try:
@@ -240,21 +291,14 @@ class ControllerSecretRepository:
             raise SettingsError("controller_secret_configuration_invalid") from None
         return OmadaClientSecretResolution(value, self._deployment.source, generation)
 
-    def metadata(self, generation, effective_generation, deployment_source):
-        # No decrypt/no value on the public boundary; availability validates key.
-        with self.repository.transaction() as db:
-            configured = binding(db, generation)
-            effective = binding(db, effective_generation)
-            validate_secret_history(db)
+    def safe_metadata_service(self):
         try:
             normalize_secret(self._deployment.value)
             deployment_presence = "configured"
         except SettingsError:
             deployment_presence = "not_configured"
-        return {"configured_presence": "configured" if configured else deployment_presence, "configured_source": "managed_secret_override" if configured else deployment_source,
-                "persisted_secret_override_present": configured is not None,
-                "pending_replacement": configured != effective,
-                "secret_store_state": "available" if self.available() else "unavailable"}
+        return ControllerSecretMetadataService(self.repository, self.filesystem,
+                                               deployment_presence, self._deployment.source)
 
     @staticmethod
     def audit(db, *, generation, parent, principal, source_ip, request_id, key, operation, previous, new, deployment_source):
@@ -262,11 +306,12 @@ class ControllerSecretRepository:
             generation_id,parent_generation_id,principal_type,principal_name,source_ip,request_id,idempotency_key,
             timestamp_utc,scope_type,scope_id,setting_key,operation,previous_override_present,new_override_present,
             previous_source,new_source,apply_requirement,activation_target)
-            VALUES(?,?,?,?,?,?,?,?,'global',NULL,'OMADA_CLIENT_SECRET',?,?,?,?,?,'main_service_restart','captive-portal.service')""",
+            VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?)""",
             (generation, parent, principal.principal_type, principal.username, source_ip, request_id, key, utc_now(),
-             operation, int(previous is not None), int(new is not None),
+             CONTROLLER_SECRET_DEFINITION.scope, SECRET_KEY, operation, int(previous is not None), int(new is not None),
              "managed_secret_override" if previous else deployment_source,
-             "managed_secret_override" if new else deployment_source))
+             "managed_secret_override" if new else deployment_source,
+             CONTROLLER_SECRET_DEFINITION.apply_requirement, CONTROLLER_SECRET_DEFINITION.activation_target))
 
 
 def parse_secret_mutation(raw):
@@ -353,11 +398,11 @@ class ControllerSecretMutationService:
                 else:
                     new_version = str(uuid.uuid4())
                     nonce, ciphertext = encrypt_secret(value, encryption_key, new_version)
-                    db.execute("INSERT INTO controller_secret_versions VALUES(?,'OMADA_CLIENT_SECRET',1,?,?,?)", (new_version, nonce, ciphertext, utc_now()))
+                    db.execute("INSERT INTO controller_secret_versions VALUES(?,?,1,?,?,?)", (new_version, SECRET_KEY, nonce, ciphertext, utc_now()))
                 generation = repository.create_generation(db, parent=parent, principal=principal, request_id=request_id,
                     created_at=utc_now(), overrides=repository.overrides(db, parent), carry_secret=False)
                 if new_version:
-                    db.execute("INSERT INTO settings_secret_bindings VALUES(?,'OMADA_CLIENT_SECRET',?)", (generation, new_version))
+                    db.execute("INSERT INTO settings_secret_bindings VALUES(?,?,?)", (generation, SECRET_KEY, new_version))
                 self.secrets.audit(db, generation=generation, parent=parent, principal=principal, source_ip=source_ip,
                     request_id=request_id, key=idempotency_key, operation=operation, previous=previous, new=new_version, deployment_source=source)
                 gc_secret_versions(db)

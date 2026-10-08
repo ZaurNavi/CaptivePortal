@@ -25,7 +25,7 @@ def test_replace_ownership_noop_replay_hmac_and_redaction(tmp_path, monkeypatch)
         rows = db.execute("SELECT request_fingerprint_kind,request_fingerprint,result_response_json FROM settings_idempotency").fetchall()
         assert all(row[0] == FINGERPRINT_KIND and SENTINEL not in row[2] for row in rows)
         assert len({row[1] for row in rows}) == 3
-    secrets = boot.admin_context.secret_metadata_service
+    secrets = boot.admin_context.secret_mutation_service.secrets
     monkeypatch.setattr(secrets, "value", lambda *_a: pytest.fail("replay decrypt"))
     transaction = repository.transaction
     @contextmanager
@@ -76,7 +76,7 @@ def test_invalid_fallback_does_not_clear_managed_ownership(tmp_path):
     boot, _ = secret_stack(tmp_path)
     secret_mutation(boot)
     from dataclasses import replace
-    service = boot.admin_context.secret_metadata_service
+    service = boot.admin_context.secret_mutation_service.secrets
     service._deployment = replace(service._deployment, value="")
     with pytest.raises(SettingsError, match="validation_failed") as error:
         secret_mutation(boot, generation=1, operation="clear_secret_override")

@@ -236,7 +236,7 @@ def test_secret_prerequisite_failure_is_safe_and_atomic(tmp_path):
     boot = stack(tmp_path, client_secret=SECRET)
     read_service = boot.admin_context.read_service
     from dataclasses import replace
-    secrets = boot.admin_context.secret_metadata_service
+    secrets = boot.admin_context.secret_mutation_service.secrets
     secrets._deployment = replace(secrets._deployment, value="")
     with pytest.raises(SettingsError, match="validation_failed") as error:
         mutation(boot)

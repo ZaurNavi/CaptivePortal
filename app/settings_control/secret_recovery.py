@@ -1,6 +1,5 @@
 """Local stopped-service recovery; no key access or service-control authority."""
 import argparse
-import getpass
 import os
 import uuid
 from types import SimpleNamespace
@@ -10,7 +9,12 @@ from .models import SettingsError, utc_now
 from .repository import SettingsRepository
 
 
-def clear_managed_secret(repository, expected_generation, *, filesystem=None, operator=getpass.getuser, deployment_source=None):
+def effective_operator_name():
+    import pwd
+    return pwd.getpwuid(os.geteuid()).pw_name
+
+
+def clear_managed_secret(repository, expected_generation, *, filesystem=None, operator=effective_operator_name, deployment_source=None):
     secrets = ControllerSecretRepository(repository, filesystem)
     secrets.check_db()  # Deliberately does not load a master key or decrypt.
     with repository.transaction(write=True) as db:

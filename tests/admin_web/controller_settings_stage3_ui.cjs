@@ -9,6 +9,7 @@ class Element {
   replaceChildren(...items) { this.children = items; }
   setAttribute(key, value) { this[key] = value; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
+  focus() {}
 }
 const page = new Element();
 page.dataset = {controllerState: "active", writeAllowed: scenario === "readonly" ? "false" : "true", csrfToken: "csrf"};
@@ -16,11 +17,13 @@ const state = new Element();
 const fields = new Element();
 const save = scenario === "readonly" ? null : new Element("button");
 const nodes = {"controller-settings-page": page, "controller-settings-state": state, "controller-settings-fields": fields, "controller-settings-save": save};
-const current = {api_version: "admin.settings.controller.v2", store_state: scenario === "outage" ? "unavailable" : "available", mutation_available: !["outage", "mutation-unavailable"].includes(scenario), restart_required: false, pending_controller_setting_count: 0, fields: {}};
+for (const name of ["controls", "editor", "new", "repeat", "replace", "clear", "save", "cancel"]) nodes[`controller-secret-${name}`] = new Element();
+nodes["controller-secret-controls"].dataset.secretWriteAllowed = "false";
+const current = {api_version: "admin.settings.controller.v3", store_state: scenario === "outage" ? "unavailable" : "available", mutation_available: !["outage", "mutation-unavailable"].includes(scenario), secret_mutation_available: true, restart_required: false, pending_controller_setting_count: 0, fields: {}};
 for (const [name, key] of [["controller_url", "OMADA_URL"], ["controller_id", "OMADA_ID"], ["client_id", "OMADA_CLIENT_ID"]]) {
   current.fields[name] = {setting_key: key, display_label: name, configured_value: "old", configured_source: "environment", effective_value: "effective", effective_source: "environment", persisted_override_value: "old", pending_value: null};
 }
-current.fields.client_secret = {display_label: "Client Secret", effective_presence: "configured", effective_source: "environment"};
+current.fields.client_secret = {display_label: "Client Secret", configured_presence: "configured", configured_source: "environment", effective_presence: "configured", effective_source: "environment", persisted_secret_override_present: false, pending_replacement: false, secret_store_state: "available"};
 current.fields.tls_certificate_verification = {display_label: "TLS", effective_value: false, effective_source: "repository_default"};
 const calls = [];
 let uuid = 0;
@@ -40,6 +43,8 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 (async () => {
   vm.runInNewContext(fs.readFileSync(script, "utf8"), context);
   await settle();
+  assert.equal(nodes["controller-secret-controls"].hidden, true);
+  assert.equal(nodes["controller-secret-replace"].disabled, true);
   const inputs = descend(fields).filter(item => item.tag === "input" && item.type === "text");
   if (["outage", "readonly", "mutation-unavailable"].includes(scenario)) {
     assert.equal(current.mutation_available, scenario === "readonly");

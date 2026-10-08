@@ -46,6 +46,11 @@ def post(client, csrf, *, raw=None, key=None, etag='"settings-g0"', headers=None
 
 def test_route_safe_receipt_v3_secret_pending_and_capability_independence(tmp_path, monkeypatch, caplog):
     client, boot, runtime, csrf, fs = setup(tmp_path, monkeypatch)
+    from app.settings_control.controller_secret import ControllerSecretMetadataService
+    metadata = runtime.controller_settings_read_service.secret_metadata_service
+    assert type(metadata) is ControllerSecretMetadataService
+    assert metadata is boot.admin_context.secret_metadata_service
+    assert not hasattr(metadata, "_deployment") and not hasattr(metadata, "value")
     initial = client.get(API, base_url="https://localhost")
     assert initial.status_code == 200 and initial.json["api_version"] == "admin.settings.controller.v3"
     assert initial.json["secret_mutation_available"] is True

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.controllers.omada_config import OmadaControllerPublicConfigSnapshot
 from app.settings_control.models import SettingsError
+from app.settings_control.controller_secret import CONTROLLER_SECRET_DEFINITION
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +73,7 @@ class ControllerConfigurationReadService:
                            "persisted_secret_override_present": None, "pending_replacement": None,
                            "secret_store_state": "unavailable"}
         if configured and self.secret_metadata_service is not None:
-            source = "environment" if "OMADA_CLIENT_SECRET" in self.configured_read_service.environment_names else "repository_default"
+            source = "environment" if CONTROLLER_SECRET_DEFINITION.key in self.configured_read_service.environment_names else "repository_default"
             try:
                 secret_metadata = self.secret_metadata_service.metadata(generation, snapshot.effective_generation, source)
             except SettingsError as error:
@@ -82,7 +83,8 @@ class ControllerConfigurationReadService:
         fields["client_secret"] = {"display_label": "Client Secret", "value_type": "secret_write_only",
             "management_mode": "write_only", "effective_presence": snapshot.client_secret_presence,
             "effective_source": snapshot.client_secret_source, **secret_metadata,
-            "apply_requirement": "main_service_restart", "activation_target": "captive-portal.service"}
+            "apply_requirement": CONTROLLER_SECRET_DEFINITION.apply_requirement,
+            "activation_target": CONTROLLER_SECRET_DEFINITION.activation_target}
         fields["tls_certificate_verification"] = value("TLS certificate verification", "boolean",
             snapshot.tls_certificate_verification, snapshot.tls_certificate_verification_source)
         fields["tls_certificate_verification"].update(editable=False, read_only_reason="deployment_controlled")

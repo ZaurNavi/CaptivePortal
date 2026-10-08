@@ -6,6 +6,73 @@ from app.settings_control.models import SettingsError
 from .stage4_helpers import secret_stack, secret_mutation, SENTINEL
 
 
+def test_secret_definition_is_immutable_and_outside_ordinary_registry():
+    from dataclasses import asdict, FrozenInstanceError
+    from app.settings_control.controller_secret import ControllerSecretDefinitionV1, CONTROLLER_SECRET_DEFINITION
+    from app.settings_control.definitions import SettingsDefinitionRegistry
+    definition = ControllerSecretDefinitionV1()
+    assert definition == CONTROLLER_SECRET_DEFINITION
+    assert asdict(definition) == {"key": "OMADA_CLIENT_SECRET", "scope": "global",
+        "secret_class": "write_only_secret", "apply_requirement": "main_service_restart",
+        "activation_target": "captive-portal.service"}
+    for name in asdict(definition):
+        with pytest.raises(FrozenInstanceError):
+            setattr(definition, name, "changed")
+    registry = SettingsDefinitionRegistry()
+    assert registry.get("OMADA_CLIENT_SECRET") is None
+    assert len(tuple(registry)) == 15
+
+
+def test_admin_metadata_boundary_contains_only_safe_facts(tmp_path, monkeypatch):
+    from dataclasses import fields
+    from app.settings_control.controller_secret import ControllerSecretMetadataService, OmadaClientSecretResolution
+    from app.admin_web.controller_settings import ControllerConfigurationReadService
+    boot, _ = secret_stack(tmp_path, client_secret=SENTINEL)
+    metadata = boot.admin_context.secret_metadata_service
+    secrets = boot.admin_context.secret_mutation_service.secrets
+    assert type(metadata) is ControllerSecretMetadataService and metadata is not secrets
+    assert {item.name for item in fields(metadata)} == {
+        "repository", "filesystem", "deployment_presence", "deployment_source"}
+    assert not any(hasattr(metadata, name) for name in ("_deployment", "resolve", "value", "secrets"))
+    seen = set()
+    def inspect(value):
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        assert not isinstance(value, OmadaClientSecretResolution)
+        if isinstance(value, str):
+            assert SENTINEL not in value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                inspect(key)
+                inspect(item)
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            for item in value:
+                inspect(item)
+        elif not isinstance(value, type):
+            inspect(getattr(value, "__dict__", {}))
+            for name in getattr(type(value), "__slots__", ()):
+                if hasattr(value, name):
+                    inspect(getattr(value, name))
+    inspect(metadata)
+    config = build_omada_runtime_config(boot.runtime_settings, boot.controller_secret_resolution)
+    public = public_omada_snapshot(config, frozenset({"OMADA_CLIENT_SECRET"}),
+                                  boot.resolved_snapshot, boot.controller_secret_resolution)
+    boot.activation_service.adopt(boot.runtime_settings, None)
+    read = ControllerConfigurationReadService(public, boot.admin_context.read_service, metadata)
+    assert read.secret_metadata_service is metadata
+    secret_mutation(boot)
+    monkeypatch.setattr("app.settings_control.controller_secret.decrypt_secret",
+                        lambda *_a: pytest.fail("Controller GET decrypt"))
+    monkeypatch.setattr(secrets, "value", lambda *_a: pytest.fail("raw repository read"))
+    current = read.read("disposable-request")
+    assert current["fields"]["client_secret"]["configured_source"] == "managed_secret_override"
+    assert current["fields"]["client_secret"]["pending_replacement"] is True
+    assert SENTINEL not in repr(metadata) + repr(current)
+    seen.clear()
+    inspect(metadata)  # No managed-secret material appears after mutation either.
+
+
 def test_managed_precedence_one_resolution_no_ordinary_override(tmp_path, monkeypatch):
     boot, filesystem = secret_stack(tmp_path)
     boot.activation_service.adopt(boot.runtime_settings, None)

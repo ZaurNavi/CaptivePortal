@@ -80,7 +80,7 @@ def test_binding_copy_both_domains_gc_and_historical_refs(tmp_path):
 def test_mutation_transaction_failure_rolls_back_everything(tmp_path, monkeypatch, failure):
     boot, _ = secret_stack(tmp_path)
     repository = boot.admin_context.read_service.repository
-    target = boot.admin_context.secret_metadata_service if failure == "audit" else repository
+    target = boot.admin_context.secret_mutation_service.secrets if failure == "audit" else repository
     attribute = {"receipt": "save_idempotency", "audit": "audit", "generation": "create_generation"}[failure]
     def fail(*_a, **_k): raise RuntimeError("synthetic write failure")
     monkeypatch.setattr(target, attribute, fail)
