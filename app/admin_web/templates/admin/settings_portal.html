@@ -1,14 +1,20 @@
 {% extends "admin/base.html" %}
 {% block subtitle %}<p>Global guest-facing presentation settings</p>{% endblock %}
 {% block page_body %}
-<div id="portal-settings-state" class="state-panel" role="status" aria-live="polite">
-  {% if portal_settings_state == 'active' %}Loading Portal settings…{% else %}Settings store unavailable. No changes can be saved.{% endif %}
+<div id="portal-settings-state" class="state-panel" role="status" aria-live="polite" data-state="{{ 'operational' if portal_settings_state == 'active' else 'unavailable' }}">
+  <span class="state-dot" aria-hidden="true"></span>
+  <div>
+    <strong id="portal-settings-state-title">{{ 'Loading' if portal_settings_state == 'active' else 'Unavailable' }}</strong>
+    <p id="portal-settings-state-message">{% if portal_settings_state == 'active' %}Loading Portal settings…{% else %}Settings store unavailable. No changes can be saved.{% endif %}</p>
+    <p id="portal-settings-generation" class="mono muted portal-generation"></p>
+  </div>
 </div>
+<p id="portal-settings-adoption-note" class="muted portal-adoption-note">Saved changes become effective only after an external captive-portal.service restart.</p>
 <form id="portal-settings-form">
   <div id="portal-settings-groups" class="content-grid"></div>
-  <div class="settings-actions">
+  <div class="settings-actions portal-settings-actions">
     <button id="portal-settings-save" class="button" type="submit" disabled>Save changes</button>
-    <button id="portal-settings-refresh" class="button button-secondary" type="button">Read current settings</button>
+    <button id="portal-settings-refresh" class="button button-secondary" type="button">Refresh</button>
   </div>
 </form>
 {% endblock %}

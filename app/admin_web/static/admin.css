@@ -350,5 +350,43 @@ input[type="radio"] { width: auto; min-height: 0; }
 .settings-item label { display: block; margin-top: .75rem; }
 .settings-item input, .settings-item select { max-width: 100%; padding: .5rem; }
 .settings-actions { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
-.settings-tabs { display: flex; gap: .5rem; margin-bottom: 1rem; }
+.settings-tabs { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
+.settings-tabs .nav-link { margin: 0; color: var(--ink); background: var(--surface); border: 1px solid var(--line); }
+.settings-tabs .nav-link:hover, .settings-tabs .nav-link:focus-visible { color: var(--accent-dark); background: #d6f2ef; }
+.settings-tabs .nav-link:focus-visible { outline: 3px solid rgba(0, 127, 120, .25); outline-offset: 2px; }
+.settings-tabs .nav-link[aria-current="page"] { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 700; }
 .controller-settings-source { display: block; color: var(--muted); margin-top: .25rem; }
+
+/* Guest Portal editor: presentation only; other Admin forms retain their styles. */
+#portal-settings-page .muted { color: var(--muted); font-size: .82rem; }
+#portal-settings-page .portal-generation { font-size: .75rem; overflow-wrap: anywhere; }
+#portal-settings-page .portal-adoption-note { margin: -.25rem 0 1rem; }
+#portal-settings-page .portal-settings-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+#portal-settings-page .portal-setting-card { border: 1px solid var(--line); border-radius: 10px; padding: 1rem; background: var(--surface-soft); }
+#portal-settings-page .portal-setting-card h3 { font-size: 1rem; margin: 0 0 .35rem; }
+#portal-settings-page .portal-setting-description { margin: 0 0 .45rem; font-size: .85rem; color: var(--muted); }
+#portal-settings-page .portal-setting-key { margin: 0 0 .8rem; font-size: .7rem; }
+#portal-settings-page .settings-facts { grid-template-columns: minmax(0, .8fr) minmax(0, 1.4fr); gap: .4rem .6rem; font-size: .85rem; }
+#portal-settings-page .settings-facts dt { color: var(--muted); }
+#portal-settings-page .portal-setting-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+#portal-settings-page .portal-setting-pending { color: var(--warning); font-weight: 700; border-left: 3px solid var(--warning); padding-left: .5rem; }
+#portal-settings-page .portal-setting-edit { border-top: 1px solid var(--line); margin-top: .85rem; padding-top: .15rem; }
+#portal-settings-page .portal-setting-edit label { font-size: .85rem; font-weight: 650; }
+#portal-settings-page .portal-setting-input { margin-top: .3rem; scroll-margin-bottom: 8rem; }
+#portal-settings-page textarea.portal-setting-input { font: inherit; width: 100%; max-width: 100%; min-height: 7rem; padding: .55rem .65rem; border: 1px solid #b8c5cd; border-radius: 8px; color: var(--ink); background: #fff; resize: vertical; }
+#portal-settings-page textarea.portal-setting-input:focus-visible { outline: 3px solid rgba(0, 127, 120, .18); border-color: var(--accent); }
+#portal-settings-page .portal-setting-input:disabled, #portal-settings-page select:disabled { background: #eaf0f3; color: var(--muted); cursor: not-allowed; }
+#portal-settings-page .portal-validation-hint { margin: .55rem 0 0; line-height: 1.5; overflow-wrap: anywhere; font-weight: 400; }
+#portal-settings-page .portal-support-warning { padding: .8rem 1rem; border-left: 4px solid var(--warning); border-radius: 6px; color: #734c00; background: #fef0c7; line-height: 1.5; }
+#portal-settings-page .portal-settings-actions { position: sticky; bottom: 0; z-index: 5; margin: 1rem 0 0; padding: .85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 -4px 16px rgba(16, 33, 45, .08); }
+#portal-settings-page .portal-settings-actions .button:disabled { cursor: not-allowed; }
+#portal-settings-page .portal-settings-actions .button:focus-visible { outline: 3px solid rgba(0, 127, 120, .35); outline-offset: 2px; }
+#portal-settings-form { padding-bottom: 1rem; }
+@media (min-width: 1120px) {
+  #portal-settings-page .portal-settings-grid--branding { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #portal-settings-page .portal-settings-grid--support { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  #portal-settings-page .portal-setting-card { padding: .8rem; }
+  #portal-settings-page .portal-settings-actions { gap: .5rem; }
+}

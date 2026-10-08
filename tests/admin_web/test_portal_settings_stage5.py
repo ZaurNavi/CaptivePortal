@@ -133,6 +133,15 @@ def test_portal_shell_is_global_and_navigation_is_capability_bound(tmp_path):
     assert "portal_settings.js" in page and "admin.js" not in page and "controller_settings.js" not in page
     assert 'data-site-id="' not in page and 'data-write-allowed="true"' in page
     assert page.index('href="/admin/settings"') < page.index('href="/admin/settings/controller"') < page.index('href="/admin/settings/portal"')
+    assert 'aria-current="page">Portal</a>' in page
+    for required in ('class="state-dot"', 'id="portal-settings-state-title"',
+                     'id="portal-settings-state-message"', 'id="portal-settings-generation"',
+                     'role="status"', 'aria-live="polite"', 'class="settings-actions portal-settings-actions"'):
+        assert required in page
+    assert '>Refresh</button>' in page and '>Save changes</button>' in page
+    assert "external captive-portal.service restart" in page
+    for forbidden in ("Read current settings", "Apply now", "Reload service", "systemctl"):
+        assert forbidden not in page
     _app, client, _runtime, _boot, _csrf = portal_app(tmp_path / "readonly", grants=(READ,))
     page = client.get("/admin/settings/portal", base_url="https://localhost").get_data(as_text=True)
     assert 'data-write-allowed="false"' in page and 'href="/admin/settings/controller"' not in page
