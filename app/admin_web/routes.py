@@ -107,7 +107,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             and any(len(request.args.getlist(key)) != 1 for key in request.args)
         ):
             return _error("invalid_request", 400)
-        if request.method == "POST" and request.path not in ("/admin/api/v1/settings/generations", "/admin/api/v1/settings/controller/generations", "/admin/api/v1/settings/controller/client-secret/generations"):
+        if request.method == "POST" and request.path not in ("/admin/api/v1/settings/generations", "/admin/api/v1/settings/controller/generations", "/admin/api/v1/settings/controller/client-secret/generations", "/admin/api/v1/settings/portal/generations"):
             if request.content_length is None:
                 return _error("length_required", 411)
             if request.content_length > config.max_post_bytes:
@@ -164,9 +164,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         principal = getattr(g, "admin_principal", None)
         general = enabled and policy.authorize_global(principal, "admin.read.settings.global")
         controller = enabled and policy.authorize_global(principal, "admin.read.settings.controller")
+        portal = enabled and policy.authorize_global(principal, "admin.read.settings.portal")
         return {"settings_general_allowed": general, "settings_controller_allowed": controller,
-                "settings_nav_enabled": general or controller,
-                "settings_nav_target": "/admin/settings" if general else "/admin/settings/controller"}
+                "settings_portal_allowed": portal, "settings_nav_enabled": general or controller or portal,
+                "settings_nav_target": "/admin/settings" if general else "/admin/settings/controller" if controller else "/admin/settings/portal"}
 
     def settings_gate(capability):
         if not getattr(runtime, "settings_feature_enabled", False):
@@ -189,6 +190,47 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     def settings_failure(error):
         return jsonify({"api_version": "admin.settings.v1", "request_id": g.admin_request_id,
                         "error": {"code": error.code, "details": list(error.details)}}), error.status
+
+    @blueprint.get("/admin/settings/portal")
+    @authenticated
+    def portal_settings_page():
+        rejected = settings_gate("admin.read.settings.portal")
+        if rejected is not None:
+            return rejected
+        if request.args:
+            return _error("invalid_request", 400)
+        return render_template("admin/settings_portal.html", page={"key": "settings_portal", "title": "Guest Portal"},
+            username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token,
+            portal_settings_state=runtime.portal_settings_state,
+            portal_settings_write_allowed=policy.authorize_global(g.admin_principal, "admin.write.settings.portal"))
+
+    @blueprint.get("/admin/api/v1/settings/portal")
+    @authenticated
+    def portal_settings_read():
+        from app.settings_control.models import SettingsError
+        rejected = settings_gate("admin.read.settings.portal")
+        if rejected is not None:
+            return rejected
+        if request.args or (request.content_length or 0) > 0 or request.stream.read(1):
+            return _error("invalid_request", 400)
+        try:
+            service = runtime.portal_settings_read_service
+            if runtime.portal_settings_state != "active" or service is None:
+                raise SettingsError("settings_store_unavailable")
+            model = service.read_portal()
+            model["request_id"] = g.admin_request_id
+            response = jsonify(model)
+            response.headers["ETag"] = model["etag"]
+            return response
+        except SettingsError as error:
+            return jsonify({"api_version": "admin.settings.portal.v1", "request_id": g.admin_request_id,
+                "error": {"code": "settings_store_unavailable", "details": []}}), 503
+
+    @blueprint.post("/admin/api/v1/settings/portal/generations")
+    @authenticated
+    def portal_settings_mutation():
+        rejected = settings_gate("admin.read.settings.portal")
+        return rejected if rejected is not None else mutate_settings("portal")
 
     @blueprint.get("/admin/settings/controller")
     @authenticated
@@ -309,7 +351,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
     def mutate_settings(domain):
         import re
         from app.settings_control.models import SettingsError
-        rejected = settings_gate("admin.write.settings.controller" if domain == "controller" else "admin.write.settings.global")
+        rejected = settings_gate("admin.write.settings." + (domain if domain != "general" else "global"))
         if rejected is not None:
             return rejected
         try:
@@ -347,8 +389,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             response.headers["ETag"] = f'"settings-g{result.body["configured_generation"]}"'
             return response
         except SettingsError as error:
-            if domain == "controller":
-                return jsonify({"api_version": "admin.settings.controller.mutation.v1", "request_id": g.admin_request_id,
+            if domain in ("controller", "portal"):
+                return jsonify({"api_version": f"admin.settings.{domain}.mutation.v1", "request_id": g.admin_request_id,
                     "error": {"code": error.code, "details": list(error.details)}}), error.status
             return settings_failure(error)
         except Exception:
@@ -2251,7 +2293,9 @@ def _error(code: str, status_code: int) -> Response:
     if _is_api_path(request.path):
         return jsonify(
             {
-                "api_version": ("admin.settings.controller.secret.mutation.v1"
+                "api_version": ("admin.settings.portal.mutation.v1" if request.path == "/admin/api/v1/settings/portal/generations"
+                    else "admin.settings.portal.v1" if request.path == "/admin/api/v1/settings/portal"
+                    else "admin.settings.controller.secret.mutation.v1"
                     if request.path == "/admin/api/v1/settings/controller/client-secret/generations"
                     else "admin.settings.controller.mutation.v1"
                     if request.path == "/admin/api/v1/settings/controller/generations"

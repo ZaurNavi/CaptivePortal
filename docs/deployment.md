@@ -1016,7 +1016,7 @@ For authorized local recovery **with the service already stopped**, run:
 python3 -m app.settings_control.secret_recovery clear-omada-client-secret --expected-generation <N>
 ```
 
-The command requires secure/trustworthy schema-v3 DB and exact configured CAS,
+The command requires secure/trustworthy current schema-v4 DB and exact configured CAS,
 clears only managed ownership, carries ordinary overrides, creates a safe local
 audit, retains any effective version and does not load/decrypt the master key,
 test Omada, change environment or control the service. No binding is a safe no-op.
@@ -1027,3 +1027,28 @@ backups plus their matching key may decrypt historical ciphertext. Backup retent
 and destruction are operator policy. Live version GC is logical deletion only,
 not forensic erasure of pages, backups or physical storage. This implementation
 does not export/backup a key or change production/services.
+
+## Settings Stage 5 schema and presentation rollout boundary
+
+New enabled stores use schema v4. Exact v1/v2 history follows the existing chain
+through v3. After validating the complete physical v3 schema, ordinary history
+and secret references, v3→v4 replaces only the immutable mutation-audit and
+idempotency leaf tables inside the existing initialization transaction. Original
+IDs, values, response JSON bytes, fingerprints, timestamps, secret versions,
+bindings, configured/effective state and activation history remain unchanged.
+No Portal defaults are persisted during migration. Missing triggers, incompatible
+schema/history or newer versions abort startup; migration failures roll back.
+Old code rejecting v4 needs a separately authorized coherent rollback plan.
+
+Recovery uses an existing-only, non-creating/non-migrating v4 opener with exact
+schema, trigger, integrity, generation/target and secret-reference checks. It
+retains the Stage-4 filesystem policy and never repairs/migrates the DB or loads
+the master key. A local clear carries every ordinary override, including Portal,
+and does not advance effective generation. This documentation does not authorize
+running recovery or changing production.
+
+Portal settings require an externally authorized main-service restart and durable
+startup adoption. The Admin API does not restart services or hot-replace the guest
+projection. Explicitly grant Portal read/write capabilities only to authorized
+sessions; defaults are unchanged. This implementation performs no deployment,
+service restart, Controller API probe or production test.

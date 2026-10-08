@@ -22,6 +22,7 @@ from app.models import Result
 from app.web.portal_entry import PortalClientContext, PortalEntryResult
 from app.web.portal_entry import PortalEntryHandler
 from app.auth.manager import AuthSessionManager
+from app.portal_presentation import PortalPresentationConfigV1, PortalTemplatePresentationV1
 from app.device_fingerprint_portal.client_hints_probe import PortalClientHintsProbe, ProbeConfig
 
 
@@ -91,7 +92,7 @@ def state(
     )
 
 
-def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, client_hints_probe=None):
+def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, client_hints_probe=None, presentation=None):
     template_dir = (
         Path(__file__).parents[1] / "app" / "web" / "templates"
     )
@@ -103,6 +104,7 @@ def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, cli
             portal_entry_handler=handler,
             config=config(),
             telemetry=NoopTelemetry(),
+            portal_template_presentation=presentation or PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({})),
             portal_evidence_extractor=extractor,
             portal_evidence_telemetry=portal_telemetry,
             client_hints_probe=client_hints_probe,
@@ -160,6 +162,7 @@ def test_capport_real_session_submission_and_reuse_are_probe_invariant():
         manager = AuthSessionManager()
         executor = Executor()
         handler = PortalEntryHandler(
+            portal_template_presentation=PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({})),
             session_manager=manager, auth_worker=Mock(), executor=executor,
             auth_telemetry=Mock(),
         )

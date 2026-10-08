@@ -6,7 +6,8 @@ from app.admin_web.home_ap_24h_config import home_ap_24h_config_from_settings
 from app.current_state.config import current_state_config_from_settings
 from .definitions import SettingsDefinitionRegistry
 from .models import SettingsError
-from app.controllers.omada_config import build_omada_runtime_config
+from app.controllers.omada_config import build_omada_runtime_config, normalize_controller_setting
+from app.portal_presentation import PortalPresentationConfigV1, PortalPresentationConfigError
 from app.exceptions import ConfigurationError
 
 
@@ -14,7 +15,7 @@ class SettingsValidationService:
     def __init__(self, registry=None):
         self.registry = registry or SettingsDefinitionRegistry()
 
-    def validate(self, snapshot, *, secret_resolution=None):
+    def _validate_general(self, snapshot):
         details = []
         for item in self.registry:
             if item.domain != "general":
@@ -39,6 +40,25 @@ class SettingsValidationService:
             home_ap_24h_config_from_settings(snapshot.values, admin_config=admin)
         except (ValueError, TypeError) as exc:
             raise SettingsError("validation_failed", 422, ({"key": None, "reason": "semantic_validation_failed"},)) from exc
+
+    @staticmethod
+    def _validate_portal(snapshot):
+        try:
+            PortalPresentationConfigV1.from_settings(snapshot.values)
+        except PortalPresentationConfigError as error:
+            raise SettingsError("validation_failed", 422, ({"key": error.key, "reason": error.reason},)) from None
+
+    def validate_portal_candidate(self, snapshot):
+        self._validate_general(snapshot)
+        try:
+            for item in self.registry.for_domain("controller"):
+                normalize_controller_setting(item.key, snapshot.values.get(item.settings_dict_key))
+        except ConfigurationError:
+            raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
+        self._validate_portal(snapshot)
+
+    def validate(self, snapshot, *, secret_resolution=None):
+        self._validate_general(snapshot)
         try:
             from .controller_secret import OmadaClientSecretResolution
             if not isinstance(secret_resolution, OmadaClientSecretResolution):
@@ -46,3 +66,4 @@ class SettingsValidationService:
             build_omada_runtime_config(snapshot.values, secret_resolution=secret_resolution)
         except (ConfigurationError, KeyError, TypeError):
             raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
+        self._validate_portal(snapshot)

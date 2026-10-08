@@ -9,6 +9,7 @@ import pytest
 from flask import Flask, render_template
 
 from app.web.localization import PORTAL_TRANSLATIONS
+from app.portal_presentation import PortalPresentationConfigV1
 
 
 ROOT = Path(__file__).parents[1]
@@ -32,6 +33,7 @@ def render_portal_script(initial_state):
             initial_progress=initial_state.get("progress", 0),
             initial_state=initial_state,
             portal_translations=PORTAL_TRANSLATIONS,
+            portal_support=PortalPresentationConfigV1.from_settings({}).support,
             portal_counter_visible=False,
             error_message=None,
         )

@@ -2,8 +2,7 @@
 from types import MappingProxyType
 from .definitions import SettingsDefinitionRegistry
 from .models import ResolvedSettingsSnapshot, SettingsError
-from app.controllers.omada_config import normalize_controller_setting
-from app.exceptions import ConfigurationError
+from .value_validation import validate_setting_value
 
 
 def freeze(value):
@@ -26,11 +25,7 @@ def resolve_settings(base_settings, explicit_environment_names, overrides, gener
             # A shadowed invalid deployment value is not the selected candidate.
             base = raw
             selected = overrides.get(definition.key, base)
-            try:
-                selected = normalize_controller_setting(definition.key, selected)
-            except ConfigurationError as exc:
-                raise SettingsError("validation_failed", 422, ({"key": definition.key,
-                    "reason": "required" if not isinstance(selected, str) or not selected.strip() else "invalid_url"},)) from exc
+            selected = validate_setting_value(definition, selected)
             sources[definition.key] = "environment" if definition.environment_variable_name in explicit_environment_names else "repository_default"
             base_values[definition.key] = base
             persisted[definition.key] = overrides.get(definition.key)

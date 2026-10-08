@@ -1,11 +1,12 @@
 """Portal UI translations kept outside the HTML/JavaScript template."""
+from app.portal_presentation import PORTAL_SETTING_DEFAULTS
 
 
 PORTAL_TRANSLATIONS = {
     "az": {
-        "title": "Zəfər Parkı",
-        "greeting": "Xoş gəlmisiniz!",
-        "description": "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!",
+        "title": PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_AZ"],
+        "greeting": PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_AZ"],
+        "description": PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_AZ"],
         "counterHeading": "Wi-Fi qoşulmaları",
         "counterToday": "Bu gün",
         "counterTotal": "Ümumi",
@@ -49,9 +50,9 @@ PORTAL_TRANSLATIONS = {
         ),
     },
     "ru": {
-        "title": "Zəfər Parkı",
-        "greeting": "Добро пожаловать!",
-        "description": "Бесплатный Wi-Fi\nдля гостей парка!!",
+        "title": PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_RU"],
+        "greeting": PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_RU"],
+        "description": PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_RU"],
         "counterHeading": "Подключения к Wi-Fi",
         "counterToday": "Сегодня",
         "counterTotal": "Всего",
@@ -92,9 +93,9 @@ PORTAL_TRANSLATIONS = {
         ),
     },
     "en": {
-        "title": "Zəfər Parkı",
-        "greeting": "Welcome!",
-        "description": "Free Wi-Fi\nfor park guests!!",
+        "title": PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_EN"],
+        "greeting": PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_EN"],
+        "description": PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_EN"],
         "counterHeading": "Wi-Fi connections",
         "counterToday": "Today",
         "counterTotal": "Total",

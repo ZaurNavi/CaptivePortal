@@ -6,6 +6,11 @@ Designed to be extended in future versions to read from files or environment.
 """
 
 from app.config import (
+    PORTAL_UI_TITLE_AZ, PORTAL_UI_TITLE_RU, PORTAL_UI_TITLE_EN,
+    PORTAL_UI_GREETING_AZ, PORTAL_UI_GREETING_RU, PORTAL_UI_GREETING_EN,
+    PORTAL_UI_DESCRIPTION_AZ, PORTAL_UI_DESCRIPTION_RU, PORTAL_UI_DESCRIPTION_EN,
+    PORTAL_SUPPORT_PHONE, PORTAL_SUPPORT_EMAIL, PORTAL_SUPPORT_WHATSAPP_URL,
+    PORTAL_SUPPORT_TELEGRAM_URL, PORTAL_SUPPORT_FACEBOOK_URL,
     HOST, PORT, DEBUG, VERIFY_SSL, LOG_LEVEL,
     PORTAL_COUNTER_ENABLED, PORTAL_COUNTER_DB_PATH,
     PORTAL_COUNTER_TIMEZONE, PORTAL_COUNTER_API_ENABLED,
@@ -717,6 +722,20 @@ def get_settings() -> dict:
         ),
         "omada_url": OMADA_URL,
         "omada_id": OMADA_ID,
+        "portal_ui_title_az": PORTAL_UI_TITLE_AZ,
+        "portal_ui_title_ru": PORTAL_UI_TITLE_RU,
+        "portal_ui_title_en": PORTAL_UI_TITLE_EN,
+        "portal_ui_greeting_az": PORTAL_UI_GREETING_AZ,
+        "portal_ui_greeting_ru": PORTAL_UI_GREETING_RU,
+        "portal_ui_greeting_en": PORTAL_UI_GREETING_EN,
+        "portal_ui_description_az": PORTAL_UI_DESCRIPTION_AZ,
+        "portal_ui_description_ru": PORTAL_UI_DESCRIPTION_RU,
+        "portal_ui_description_en": PORTAL_UI_DESCRIPTION_EN,
+        "portal_support_phone": PORTAL_SUPPORT_PHONE,
+        "portal_support_email": PORTAL_SUPPORT_EMAIL,
+        "portal_support_whatsapp_url": PORTAL_SUPPORT_WHATSAPP_URL,
+        "portal_support_telegram_url": PORTAL_SUPPORT_TELEGRAM_URL,
+        "portal_support_facebook_url": PORTAL_SUPPORT_FACEBOOK_URL,
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         # Pending Session Cleaner settings (raw strings from config.py; parsed by PendingSessionCleanerConfig)

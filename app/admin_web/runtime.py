@@ -71,6 +71,8 @@ class AdminWebRuntime:
     controller_secret_mutation_service: Any | None = None
     controller_settings_state: str = "disabled"
     controller_settings_read_service: Any | None = None
+    portal_settings_state: str = "disabled"
+    portal_settings_read_service: Any | None = None
 
     def clear(self) -> None:
         if self.session_store is not None:
@@ -468,6 +470,10 @@ def create_admin_web_runtime(
         controller_secret_mutation_service=getattr(settings_control, "secret_mutation_service", None),
         controller_settings_state=controller_settings_state,
         controller_settings_read_service=controller_settings_read_service,
+        portal_settings_state=("active" if settings_control and settings_control.store_state == "available"
+                               and settings_control.read_service is not None else "unavailable") if settings_feature_enabled else "disabled",
+        portal_settings_read_service=settings_control.read_service if settings_feature_enabled and settings_control
+                                     and settings_control.store_state == "available" else None,
     )
     from .routes import create_admin_web_blueprint
 

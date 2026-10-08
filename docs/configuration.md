@@ -522,8 +522,8 @@ variable and not a 1-GiB reservation.
 SettingsStore I/O and keeps base settings authoritative. `SETTINGS_DB_PATH`
 defaults to `/opt/CaptivePortal/data/settings.sqlite3`; these two bootstrap
 controls are not editable Settings. Provision the parent directory externally;
-the application does not create it. Only the exact accepted schema-v1 database
-is migrated automatically to v2 during Settings-enabled startup; incompatible
+the application does not create it. Exact accepted schema-v1/v2/v3 databases
+are migrated transactionally to v4 during Settings-enabled startup; incompatible
 or corrupt stores are rejected.
 
 When enabled and available, GLOBAL persisted overrides precede explicit
@@ -549,17 +549,17 @@ The unchanged ordered General integer allowlist is exactly:
 | WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS | 60 | 60–300 |
 | WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS | 120 | 60–600 |
 
-SQLite schema v3 retains immutable generations, complete typed per-generation
+SQLite schema v4 retains immutable generations, complete typed per-generation
 override sets, mutation audit, successful idempotency responses and activation
 events, plus the mutable `captive-portal.service` effective-generation target.
 Generation 0 is created with `system / settings_bootstrap`, no overrides, no
 mutation audit and no idempotency record. Foreign keys are enabled and the
 SQLite busy timeout is 1000 ms.
 
-The common definition registry has 15 entries: the twelve General integers
+The common definition registry has 29 entries: the twelve General integers
 above and exactly three Controller strings (`OMADA_URL`, `OMADA_ID`,
-`OMADA_CLIENT_ID`). The same Store, generation head and CAS authority serve
-all domains. Idempotency keys are scoped by domain. The transactional v1→v2→v3
+`OMADA_CLIENT_ID`) and fourteen public Portal strings. The same Store, generation head and CAS authority serve
+all domains. Idempotency keys are scoped by domain. The transactional v1→v2→v3→v4
 migration preserves generation IDs, original audit/activation history and exact
 successful General response bytes; migration itself creates no generation,
 audit or activation event.
@@ -647,3 +647,42 @@ Managed ownership outranks environment/repository default and fails closed on
 security, reference or decryption failure without fallback. Without a managed
 binding, a valid deployment secret can run even if the managed secret store/key is
 unavailable. There is no live credential test, hot reconnect or restart authority.
+
+## Guest Portal presentation — Settings Stage 5
+
+The ordinary GLOBAL registry now includes exactly fourteen public string settings:
+`PORTAL_UI_TITLE_AZ/RU/EN`, `PORTAL_UI_GREETING_AZ/RU/EN`,
+`PORTAL_UI_DESCRIPTION_AZ/RU/EN`, `PORTAL_SUPPORT_PHONE`, `PORTAL_SUPPORT_EMAIL`,
+`PORTAL_SUPPORT_WHATSAPP_URL`, `PORTAL_SUPPORT_TELEGRAM_URL`, and
+`PORTAL_SUPPORT_FACEBOOK_URL`. Each uppercase key is its environment variable;
+the runtime mapping uses its lowercase name. `.env.example` lists exact defaults.
+Code-owned `PORTAL_SETTING_DEFAULTS` is the single default authority.
+
+Persisted override wins over explicit environment, then the repository default.
+Clear Override removes the persisted value; it does not write a default.
+Branding is NFC plain text, with no trimming/normalization: title 1–80,
+greeting 1–120, description 1–400 Unicode code points. Descriptions allow LF and
+at most four lines; edge whitespace, C0/C1 controls and bidi controls are rejected
+(LF is the description exception). HTML-like text is valid and escaped literally.
+
+Support values can be exactly empty to hide that contact. Phone uses `+` and
+ASCII digits/spaces with 8–15 digits; email is ASCII without display names or
+query parameters. Social links require exact HTTPS authorities (`wa.me`, `t.me`,
+`facebook.com`/`www.facebook.com`), restricted paths, no userinfo/port/fragment,
+and no query except Facebook's single `locale` parameter. Server-derived
+`tel:`/`mailto:` links and escaped HTTPS values are the only link projections.
+
+One validated, immutable `PortalTemplatePresentationV1` is built during startup
+and shared by normal Portal, CAPPORT, discovery and controlled-error HTML. Only
+the nine branding translations are overlaid; other full-catalog translations,
+Auth, counters and JSON contracts are unchanged. Requests do not read Settings
+or environment. Invalid Portal composition records the safe failed-adoption
+category `portal_configuration_adoption_failed` and never advances effective
+generation or serves HTTP. An already adopted projection remains usable during
+SettingsStore outages.
+
+Portal reads/mutations/rendering do not access the Controller secret repository.
+Portal candidate validation checks General/Admin values, canonical non-secret
+Controller prerequisites and all fourteen Portal values. A new generation carries
+its parent secret binding unchanged without decrypting it. General/Controller
+full secret validation and Stage-4 fail-closed startup remain unchanged.

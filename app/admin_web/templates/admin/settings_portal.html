@@ -1,0 +1,14 @@
+{% extends "admin/base.html" %}
+{% block subtitle %}<p>Global guest-facing presentation settings</p>{% endblock %}
+{% block page_body %}
+<div id="portal-settings-state" class="state-panel" role="status" aria-live="polite">
+  {% if portal_settings_state == 'active' %}Loading Portal settings…{% else %}Settings store unavailable. No changes can be saved.{% endif %}
+</div>
+<form id="portal-settings-form">
+  <div id="portal-settings-groups" class="content-grid"></div>
+  <div class="settings-actions">
+    <button id="portal-settings-save" class="button" type="submit" disabled>Save changes</button>
+    <button id="portal-settings-refresh" class="button button-secondary" type="button">Read current settings</button>
+  </div>
+</form>
+{% endblock %}
