@@ -67,7 +67,7 @@ def test_v1_migration_preserves_all_history_and_replay_bytes(tmp_path):
     repository = SettingsRepository(path)
     assert repository.configured() == (7, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 123})
     with repository.transaction() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         for name, rows in histories.items():
             assert [tuple(row) for row in db.execute("SELECT * FROM " + name)] == rows
         audit = db.execute("SELECT * FROM settings_mutation_audit").fetchone()

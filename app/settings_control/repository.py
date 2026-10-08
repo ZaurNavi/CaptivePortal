@@ -1,11 +1,12 @@
 """SQLite-only SettingsStore: bounded connections, immutable history, one writer."""
 import json
 import sqlite3
+from pathlib import Path
 from contextlib import contextmanager
 from .definitions import SettingsDefinitionRegistry
 from .models import SettingsError, TARGET, utc_now
 
-SETTINGS_SCHEMA_VERSION = 3
+SETTINGS_SCHEMA_VERSION = 4
 SETTINGS_SQLITE_BUSY_TIMEOUT_MS = 1000
 _V1_DDL = (
     """CREATE TABLE settings_generations (
@@ -111,9 +112,13 @@ _SECRET_TRIGGERS = tuple(
                            ("settings_secret_mutation_audit", ("UPDATE", "DELETE")))
     for action in actions
 )
-_DDL = tuple(sql.replace("('general','controller')", "('general','controller','controller_secret')")
+_V3_DDL = tuple(sql.replace("('general','controller')", "('general','controller','controller_secret')")
              .replace("request_payload_hash TEXT NOT NULL", "request_fingerprint_kind TEXT NOT NULL CHECK(request_fingerprint_kind IN ('sha256_canonical_json_v1','hmac_sha256_controller_secret_v1')), request_fingerprint TEXT NOT NULL")
              if sql.startswith("CREATE TABLE settings_idempotency ") else sql for sql in _V2_DDL) + _SECRET_DDL
+_DDL = tuple(sql.replace("setting_domain IN ('general','controller')", "setting_domain IN ('general','controller','portal')")
+             .replace("setting_domain='controller' AND", "setting_domain IN ('controller','portal') AND")
+             .replace("mutation_domain IN ('general','controller','controller_secret')",
+                      "mutation_domain IN ('general','controller','controller_secret','portal')") for sql in _V3_DDL)
 
 
 def canonical_json(value):
@@ -122,11 +127,20 @@ def canonical_json(value):
 
 class SettingsRepository:
     @classmethod
-    def open_existing_v3(cls, db_path):
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 3:
+    def open_existing_for_recovery(cls, db_path):
+        # Never run initialization/migration or permit SQLite to create a file.
+        repository = cls.__new__(cls)
+        repository.db_path = str(db_path)
+        repository.registry = SettingsDefinitionRegistry()
+        repository._existing_only = True
+        with repository.transaction() as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] != SETTINGS_SCHEMA_VERSION:
                 raise SettingsError("settings_store_unavailable")
-        return cls(db_path)
+            repository._validate_schema(db, _DDL)
+            repository._validate_history(db)
+            from .controller_secret import validate_secret_history
+            validate_secret_history(db)
+        return repository
 
     def __init__(self, db_path, registry=None):
         self.db_path = str(db_path)
@@ -137,7 +151,11 @@ class SettingsRepository:
     def transaction(self, *, write=False):
         connection = None
         try:
-            connection = sqlite3.connect(self.db_path, timeout=1, isolation_level=None)
+            if getattr(self, "_existing_only", False):
+                connection = sqlite3.connect(Path(self.db_path).resolve().as_uri() + ("?mode=rw" if write else "?mode=ro"),
+                                             uri=True, timeout=1, isolation_level=None)
+            else:
+                connection = sqlite3.connect(self.db_path, timeout=1, isolation_level=None)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(f"PRAGMA busy_timeout={SETTINGS_SQLITE_BUSY_TIMEOUT_MS}")
@@ -163,7 +181,7 @@ class SettingsRepository:
             if version == 0 and not tables:
                 for statement in (*_DDL, *_TRIGGERS, *_SECRET_TRIGGERS):
                     db.execute(statement)
-                db.execute("PRAGMA user_version=3")
+                db.execute("PRAGMA user_version=4")
                 db.execute("INSERT INTO settings_generations VALUES(0,NULL,'global',?,'system','settings_bootstrap',NULL)", (utc_now(),))
                 db.execute("INSERT INTO settings_target_state VALUES(?,NULL,NULL)", (TARGET,))
             elif version == 1:
@@ -171,10 +189,14 @@ class SettingsRepository:
                 self._validate_history(db, legacy=True)
                 self._migrate_v1(db)
                 self._migrate_v2(db)
+                self._migrate_v3(db)
             elif version == 2:
                 self._validate_schema(db, _V2_DDL)
                 self._validate_history(db)
                 self._migrate_v2(db)
+                self._migrate_v3(db)
+            elif version == 3:
+                self._migrate_v3(db)
             elif version != SETTINGS_SCHEMA_VERSION:
                 raise SettingsError("settings_store_unavailable")
             self._validate_schema(db, _DDL)
@@ -184,7 +206,7 @@ class SettingsRepository:
 
     @staticmethod
     def _validate_schema(db, ddl):
-        extra = _SECRET_TRIGGERS if ddl is _DDL else ()
+        extra = _SECRET_TRIGGERS if ddl is _DDL or ddl is _V3_DDL else ()
         expected = {statement.split()[2]: statement for statement in (*ddl, *_TRIGGERS, *extra)}
         actual = {row[0]: row[1] for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type IN ('table','trigger') AND name NOT LIKE 'sqlite_%'")}
         normalize = lambda value: " ".join(value.split())
@@ -216,7 +238,7 @@ class SettingsRepository:
         for action in ("update", "delete"):
             db.execute(f"DROP TRIGGER settings_idempotency_immutable_{action}")
         db.execute("ALTER TABLE settings_idempotency RENAME TO settings_idempotency_v2")
-        db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE settings_idempotency ")))
+        db.execute(next(sql for sql in _V3_DDL if sql.startswith("CREATE TABLE settings_idempotency ")))
         columns = [row[1] for row in db.execute("PRAGMA table_info(settings_idempotency_v2)")]
         target = ["request_fingerprint" if name == "request_payload_hash" else name for name in columns]
         db.execute(f"INSERT INTO settings_idempotency ({','.join(target)},request_fingerprint_kind) SELECT {','.join(columns)},'sha256_canonical_json_v1' FROM settings_idempotency_v2")
@@ -228,6 +250,28 @@ class SettingsRepository:
                 db.execute(sql)
         db.execute("PRAGMA user_version=3")
 
+    def _migrate_v3(self, db):
+        self._validate_schema(db, _V3_DDL)
+        self._validate_history(db)
+        from .controller_secret import validate_secret_history
+        validate_secret_history(db)
+        for table in ("settings_mutation_audit", "settings_idempotency"):
+            for action in ("update", "delete"):
+                db.execute(f"DROP TRIGGER {table}_immutable_{action}")
+            db.execute(f"ALTER TABLE {table} RENAME TO {table}_v3")
+            db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE " + table + " ")))
+            columns = [row[1] for row in db.execute(f"PRAGMA table_info({table}_v3)")]
+            names = ",".join(columns)
+            db.execute(f"INSERT INTO {table} ({names}) SELECT {names} FROM {table}_v3")
+            db.execute(f"DROP TABLE {table}_v3")
+            for statement in _TRIGGERS:
+                if statement.startswith("CREATE TRIGGER " + table + "_"):
+                    db.execute(statement)
+        db.execute("PRAGMA user_version=4")
+        self._validate_schema(db, _DDL)
+        self._validate_history(db)
+        validate_secret_history(db)
+
     def _validate_history(self, db, legacy=False):
         if db.execute("PRAGMA quick_check").fetchall()[0][0] != "ok" or db.execute("PRAGMA foreign_key_check").fetchall():
             raise SettingsError("settings_store_unavailable")
@@ -238,21 +282,18 @@ class SettingsRepository:
             raise SettingsError("settings_store_unavailable")
         if db.execute("SELECT COUNT(*) FROM settings_target_state WHERE target=?", (TARGET,)).fetchone()[0] != 1:
             raise SettingsError("settings_store_unavailable")
+        schema_version = db.execute("PRAGMA user_version").fetchone()[0]
         for row in db.execute("SELECT setting_key,value_type,integer_value" + ("" if legacy else ",string_value") + " FROM settings_overrides"):
             definition = self.registry.get(row[0])
-            if definition is None or row[1] != definition.value_type:
+            if definition is None or row[1] != definition.value_type or (schema_version < 4 and definition.domain == "portal"):
                 raise SettingsError("settings_store_unavailable")
             if row[1] == "integer":
                 if type(row[2]) is not int or not definition.min_value <= row[2] <= definition.max_value:
                     raise SettingsError("settings_store_unavailable")
             else:
-                from app.controllers.omada_config import normalize_controller_setting
-                from app.exceptions import ConfigurationError
-                try:
-                    if legacy or normalize_controller_setting(row[0], row[3]) != row[3]:
-                        raise SettingsError("settings_store_unavailable")
-                except ConfigurationError as exc:
-                    raise SettingsError("settings_store_unavailable") from exc
+                from .value_validation import validate_setting_value
+                if legacy or validate_setting_value(definition, row[3], durable=True) != row[3]:
+                    raise SettingsError("settings_store_unavailable")
 
     @staticmethod
     def head(db):
@@ -283,21 +324,13 @@ class SettingsRepository:
         return dict(row) if row else None
 
     def create_generation(self, db, *, parent, principal, request_id, created_at, overrides, carry_secret=True):
-        from app.controllers.omada_config import normalize_controller_setting
-        from app.exceptions import ConfigurationError
+        from .value_validation import validate_setting_value
         for key, value in overrides.items():
             definition = self.registry.get(key)
             if definition is None:
                 raise SettingsError("settings_store_unavailable")
-            if definition.value_type == "integer":
-                if type(value) is not int or not definition.min_value <= value <= definition.max_value:
-                    raise SettingsError("settings_store_unavailable")
-            else:
-                try:
-                    if normalize_controller_setting(key, value) != value:
-                        raise SettingsError("settings_store_unavailable")
-                except ConfigurationError as exc:
-                    raise SettingsError("settings_store_unavailable") from exc
+            if validate_setting_value(definition, value, durable=True) != value:
+                raise SettingsError("settings_store_unavailable")
         generation = db.execute("""INSERT INTO settings_generations
             (parent_generation_id,scope_type,created_at_utc,created_by_principal_type,created_by_principal_name,request_id)
             VALUES(?,'global',?,?,?,?)""", (parent, created_at, principal.principal_type, principal.username, request_id)).lastrowid

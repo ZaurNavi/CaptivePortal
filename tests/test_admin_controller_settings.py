@@ -303,9 +303,15 @@ def test_frontend_nonsecret_writable_and_general_allowlist_unchanged():
     assert 'method: "GET"' in source and 'credentials: "same-origin"' in source
     assert "Configured presence" in source and "Effective presence" in source
     registry = tuple(SettingsDefinitionRegistry())
-    assert len(registry) == 15
+    assert len(registry) == 29
     assert len([item for item in registry if item.domain == "general"]) == 12
+    assert all(item.key.startswith("WEB_ADMIN_") for item in registry if item.domain == "general")
     assert [item.key for item in registry if item.domain == "controller"] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
+    assert "OMADA_CLIENT_SECRET" not in {item.key for item in registry}
+    portal = [item for item in registry if item.domain == "portal"]
+    assert len(portal) == 14
+    assert all(item.key.startswith("PORTAL_") for item in portal)
+    assert {item.domain for item in registry} == {"general", "controller", "portal"}
 
 
 @pytest.mark.parametrize("injected_settings", [True, False])

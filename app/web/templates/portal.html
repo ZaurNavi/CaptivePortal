@@ -670,21 +670,20 @@
                 class="portal-title"
                 data-i18n="title"
             >
-                Zəfər Parkı
+                {{ portal_translations['az']['title'] }}
             </h1>
 
             <p
                 class="portal-greeting"
                 data-i18n="greeting"
             >
-                Xoş gəlmisiniz!
+                {{ portal_translations['az']['greeting'] }}
             </p>
 
             <p
                 class="portal-description"
                 data-i18n="description"
-            >Parkımızın qonaqları üçün pulsuz
-Wi-Fi!!</p>
+            >{{ portal_translations['az']['description'] }}</p>
 
             <div
                 id="portal-error"
@@ -749,6 +748,7 @@ Wi-Fi!!</p>
                 {% include "components/portal_counter.html" %}
             {% endif %}
 
+            {% if portal_support.phone_display or portal_support.email or portal_support.whatsapp_url or portal_support.telegram_url or portal_support.facebook_url %}
             <section
                 class="portal-support"
                 aria-labelledby="portal-support-title"
@@ -761,38 +761,43 @@ Wi-Fi!!</p>
                     Texniki dəstək
                 </h2>
 
+                {% if portal_support.phone_display %}
                 <a
                     class="portal-support__link"
-                    href="tel:+994504174646"
+                    href="{{ portal_support.phone_href }}"
                 >
                     <span
                         class="portal-support__icon"
                         aria-hidden="true"
                     >📞</span>
-                    <span>+994 50 417 46 46</span>
+                    <span>{{ portal_support.phone_display }}</span>
                 </a>
+                {% endif %}
 
+                {% if portal_support.email %}
                 <a
                     class="portal-support__link"
-                    href="mailto:zaur.navi@gmail.com"
+                    href="{{ portal_support.email_href }}"
                 >
                     <span
                         class="portal-support__icon"
                         aria-hidden="true"
                     >✉️</span>
-                    <span>zaur.navi@gmail.com</span>
+                    <span>{{ portal_support.email }}</span>
                 </a>
+                {% endif %}
 
                 <div
                     class="portal-support__socials"
                     aria-label="Sosial şəbəkələr"
                 >
+                    {% if portal_support.whatsapp_url %}
                     <a
                         class="
                             portal-social-link
                             portal-social-link--whatsapp
                         "
-                        href="https://wa.me/994504174646"
+                        href="{{ portal_support.whatsapp_url }}"
                         target="_blank"
                         rel="noopener noreferrer"
                         aria-label="WhatsApp"
@@ -826,13 +831,15 @@ Wi-Fi!!</p>
                             />
                         </svg>
                     </a>
+                    {% endif %}
 
+                    {% if portal_support.telegram_url %}
                     <a
                         class="
                             portal-social-link
                             portal-social-link--telegram
                         "
-                        href="https://t.me/ZaurNavi"
+                        href="{{ portal_support.telegram_url }}"
                         target="_blank"
                         rel="noopener noreferrer"
                         aria-label="Telegram"
@@ -850,13 +857,15 @@ Wi-Fi!!</p>
                             />
                         </svg>
                     </a>
+                    {% endif %}
 
+                    {% if portal_support.facebook_url %}
                     <a
                         class="
                             portal-social-link
                             portal-social-link--facebook
                         "
-                        href="https://www.facebook.com/zaur.navi/?locale=ru_RU"
+                        href="{{ portal_support.facebook_url }}"
                         target="_blank"
                         rel="noopener noreferrer"
                         aria-label="Facebook"
@@ -874,8 +883,10 @@ Wi-Fi!!</p>
                             />
                         </svg>
                     </a>
+                    {% endif %}
                 </div>
             </section>
+            {% endif %}
 
             <footer class="designer-credit">
                 © Designer: Zaur Navi | Country should know its heroes.

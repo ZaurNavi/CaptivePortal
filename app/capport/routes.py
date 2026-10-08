@@ -18,7 +18,7 @@ from flask import (
 
 from app.auth_telemetry import events
 from app.logger import logger
-from app.web.localization import PORTAL_TRANSLATIONS
+from app.portal_presentation import PortalTemplatePresentationV1
 from app.web.portal_entry import PortalClientContext, PortalEntryResult
 
 from .models import CapportConfig
@@ -33,6 +33,7 @@ def create_capport_blueprint(
     portal_entry_handler,
     config: CapportConfig,
     telemetry,
+    portal_template_presentation: PortalTemplatePresentationV1,
     portal_evidence_extractor=None,
     portal_evidence_telemetry=None,
     client_hints_probe=None,
@@ -91,6 +92,7 @@ def create_capport_blueprint(
                     "Сервис авторизации временно недоступен. "
                     "Попробуйте ещё раз.",
                     503,
+                    portal_template_presentation,
                 ))
         if not state.client_found or state.client is None:
             discovery = _discovery_contract()
@@ -111,7 +113,8 @@ def create_capport_blueprint(
                     "terminal": discovery["terminal"],
                     "retryable": discovery["retryable"],
                 },
-                portal_translations=PORTAL_TRANSLATIONS,
+                portal_translations=portal_template_presentation.translations,
+                portal_support=portal_template_presentation.support,
                 retry_url=discovery["retry_url"],
                 restart_url=discovery["restart_url"],
                 auto_retry=discovery["auto_retry"],
@@ -326,7 +329,7 @@ def _no_store(response, status_code: int | None = None):
     return prepared
 
 
-def _controlled_error(message: str, status_code: int):
+def _controlled_error(message: str, status_code: int, portal_template_presentation: PortalTemplatePresentationV1):
     try:
         initial_state = {
             "state": "FAILED",
@@ -344,7 +347,8 @@ def _controlled_error(message: str, status_code: int):
                 initial_progress=100,
                 error_message=message,
                 initial_state=initial_state,
-                portal_translations=PORTAL_TRANSLATIONS,
+                portal_translations=portal_template_presentation.translations,
+                portal_support=portal_template_presentation.support,
             ),
             status_code,
         )

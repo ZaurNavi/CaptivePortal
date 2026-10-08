@@ -11,7 +11,7 @@ from app.auth.worker import log_auth_event
 from app.auth_telemetry import events as telemetry_events
 from app.logger import logger
 from app.device_fingerprint_portal.telemetry import safe_emit as safe_portal_evidence_emit
-from app.web.localization import PORTAL_TRANSLATIONS
+from app.portal_presentation import PortalTemplatePresentationV1
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,7 @@ class PortalEntryHandler:
         auth_worker: Any,
         executor: Any,
         auth_telemetry: Any,
+        portal_template_presentation: PortalTemplatePresentationV1,
         portal_counter_service: Any = None,
         counter_recording_enabled: bool = False,
         portal_evidence_sink: Any = None,
@@ -54,6 +55,7 @@ class PortalEntryHandler:
         self._auth_worker = auth_worker
         self._executor = executor
         self._auth_telemetry = auth_telemetry
+        self._portal_template_presentation = portal_template_presentation
         self._portal_counter_service = portal_counter_service
         self._counter_recording_enabled = counter_recording_enabled
         self._portal_evidence_sink = portal_evidence_sink
@@ -72,7 +74,8 @@ class PortalEntryHandler:
             ),
             initial_progress=result.initial_state.get("progress", 100),
             initial_state=result.initial_state,
-            portal_translations=PORTAL_TRANSLATIONS,
+            portal_translations=self._portal_template_presentation.translations,
+            portal_support=self._portal_template_presentation.support,
             error_message=result.error_message,
         )
         if result.status_code == 200:

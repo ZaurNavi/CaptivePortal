@@ -945,3 +945,35 @@ every success/replay reloads v3. No browser/OS physical-memory erasure is claime
 Replacement/clear persist ownership only; the existing provider stays unchanged
 until external restart and durable adoption. Settings outage retains only the safe
 effective snapshot; key outage disables secret writes without hot-fallback.
+
+## GLOBAL Guest Portal Settings — Stage 5
+
+`/admin/settings/portal` is a GLOBAL page without a fake Site context. General,
+Controller and Portal tabs appear in that order only when their independent read
+capabilities are granted. `admin.read.settings.portal` and
+`admin.write.settings.portal` are recognized but not granted by default. Portal
+POST requires both. The feature remains gated by `WEB_ADMIN_SETTINGS_ENABLED`.
+
+`GET /admin/api/v1/settings/portal` returns `admin.settings.portal.v1`: an ordered
+fourteen-item ordinary read model with configured/effective/base/override/pending
+values and authoritative validation metadata. No Controller secret or consumer
+feature flag is projected. Effective values require the exact locally adopted
+startup snapshot. All API responses are no-store and use the common generation
+ETag; no Site/query/body input is accepted by the read route.
+
+`POST /admin/api/v1/settings/portal/generations` accepts at most fourteen distinct
+allowlisted string changes under the existing 32768-byte strict JSON boundary,
+CSRF, quoted Settings ETag and UUIDv4 idempotency. Duplicate object members,
+non-finite constants, wrong domains and unknown fields are rejected. Candidate
+validation is atomic. A changed save returns 201, no-op 200; the closed
+`admin.settings.portal.mutation.v1` receipt contains state/changed keys only,
+never settings values. Identical replay precedes CAS and reproduces the stored
+receipt; conflicting reuse is 409 and stale generation 412.
+
+Dedicated `portal_settings.js` uses server metadata, safe text nodes and one
+batch save. Branding descriptions are textareas; optional contacts may be set to
+empty. Reset appears only for a persisted override. The page shows configured,
+effective, source, pending and apply state, with the public-contact warning.
+Inputs are not trimmed or normalized. Success reloads the current model; 412
+requires review of current values. There is no preview, browser persistence,
+credential input, hot application, restart button or systemd authority.

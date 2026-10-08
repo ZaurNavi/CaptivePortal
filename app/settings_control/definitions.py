@@ -1,6 +1,7 @@
-"""One ordered domain-aware registry: twelve General and three Controller keys."""
+"""One ordered domain-aware registry for ordinary GLOBAL settings."""
 from dataclasses import dataclass
 from app import config
+from app.portal_presentation import PORTAL_SETTING_DEFAULTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,32 @@ class SettingsDefinitionRegistry:
             ("OMADA_ID", "omada_id", "Controller ID", "string"),
             ("OMADA_CLIENT_ID", "client_id", "Client / Application ID", "string"),
         ))
+        languages = {"AZ": "Azerbaijani", "RU": "Russian", "EN": "English"}
+        branding = {"TITLE": ("Portal title", "title", "plain_text"),
+                    "GREETING": ("Welcome text", "welcome text", "plain_text"),
+                    "DESCRIPTION": ("Guest description", "short guest description", "multiline_plain_text")}
+        support = {"PHONE": ("Support phone", "phone number", "telephone"),
+                   "EMAIL": ("Support email", "email address", "email"),
+                   "WHATSAPP_URL": ("WhatsApp support link", "WhatsApp support link", "restricted_url"),
+                   "TELEGRAM_URL": ("Telegram support link", "Telegram support link", "restricted_url"),
+                   "FACEBOOK_URL": ("Facebook support link", "Facebook support link", "restricted_url")}
+        portal = []
+        for key, default in PORTAL_SETTING_DEFAULTS.items():
+            if key.startswith("PORTAL_UI_"):
+                _, _, kind, language = key.split("_")
+                label, description, presentation = branding[kind]
+                label += " — " + languages[language]
+                description = f"Public {description} shown to guests in {languages[language]}."
+                group, required = "branding", True
+            else:
+                label, description, presentation = support[key.removeprefix("PORTAL_SUPPORT_")]
+                description = f"Public {description} shown to guests."
+                group, required = "support", False
+            portal.append(SettingsDefinition(key, default, None, None, label, description,
+                "portal_presentation", "", group, value_type="string", domain="portal",
+                settings_dict_key=key.lower(), environment_variable_name=key,
+                presentation_type=presentation, required=required))
+        self.definitions += tuple(portal)
 
     def __iter__(self):
         return iter(self.definitions)

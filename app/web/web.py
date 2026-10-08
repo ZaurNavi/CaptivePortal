@@ -61,7 +61,7 @@ from app.web.portal_entry import (
     PortalClientContext,
     PortalEntryHandler,
 )
-from app.web.localization import PORTAL_TRANSLATIONS
+from app.portal_presentation import PortalPresentationConfigV1, PortalTemplatePresentationV1
 from app.device_fingerprint_portal import (
     PortalEvidenceRuntime,
     extract_portal_evidence_candidate,
@@ -146,6 +146,8 @@ def create_app(
 
     if settings is None:
         settings = get_settings()
+    portal_template_presentation = PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings(settings))
+    app.extensions["portal_template_presentation"] = portal_template_presentation
     auth_telemetry = configure_auth_telemetry(settings)
     portal_evidence_telemetry = PortalEvidenceTelemetry()
     portal_evidence_runtime = None
@@ -369,6 +371,7 @@ def create_app(
         authorization_health_tracker=authorization_health_tracker,
     )
     portal_entry_handler = PortalEntryHandler(
+        portal_template_presentation=portal_template_presentation,
         session_manager=auth_manager,
         auth_worker=auth_worker,
         executor=auth_executor,
@@ -390,6 +393,7 @@ def create_app(
         app.extensions["capport_service"] = capport_service
         app.register_blueprint(
             create_capport_blueprint(
+                portal_template_presentation=portal_template_presentation,
                 service=capport_service,
                 portal_entry_handler=portal_entry_handler,
                 config=capport_config,
@@ -442,7 +446,8 @@ def create_app(
                     "progress": 100,
                     "terminal": True,
                 },
-                portal_translations=PORTAL_TRANSLATIONS,
+                portal_translations=portal_template_presentation.translations,
+                portal_support=portal_template_presentation.support,
                 error_message=(
                     "Не удалось определить параметры подключения."
                 ),

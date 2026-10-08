@@ -20,7 +20,9 @@ def test_secret_definition_is_immutable_and_outside_ordinary_registry():
             setattr(definition, name, "changed")
     registry = SettingsDefinitionRegistry()
     assert registry.get("OMADA_CLIENT_SECRET") is None
-    assert len(tuple(registry)) == 15
+    assert len(tuple(registry)) == 29
+    assert len(registry.for_domain("controller")) == 3
+    assert len(registry.for_domain("portal")) == 14
 
 
 def test_admin_metadata_boundary_contains_only_safe_facts(tmp_path, monkeypatch):

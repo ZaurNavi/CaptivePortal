@@ -433,7 +433,13 @@ def main() -> None:
         )
     if "fingerprint_integration_submitter" in inspect.signature(create_app).parameters:
         app_kwargs["fingerprint_integration_submitter"] = create_fingerprint_integration_submitter(settings)
-    app = create_app(**app_kwargs)
+    from app.portal_presentation import PortalPresentationConfigError
+    try:
+        app = create_app(**app_kwargs)
+    except PortalPresentationConfigError:
+        if settings_bootstrap.activation_service is not None:
+            settings_bootstrap.activation_service.fail("portal_configuration_adoption_failed")
+        raise
     logger.info("Web application created")
     _observation_foundation = create_observation_foundation(
         settings=settings,

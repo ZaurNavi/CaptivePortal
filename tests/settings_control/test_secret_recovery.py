@@ -53,7 +53,7 @@ def test_default_recovery_identity_ignores_spoofed_environment(tmp_path, monkeyp
     assert secret_recovery.effective_operator_name() == expected
     repository = boot.admin_context.read_service.repository
     monkeypatch.setattr(secret_recovery, "SecretFilesystem", lambda: filesystem)
-    monkeypatch.setattr(secret_recovery.SettingsRepository, "open_existing_v3", lambda _path: repository)
+    monkeypatch.setattr(secret_recovery.SettingsRepository, "open_existing_for_recovery", lambda _path: repository)
     reads = filesystem.key_reads
     assert secret_recovery.main(["clear-omada-client-secret", "--expected-generation", "1"]) == 0
     with repository.transaction() as db:

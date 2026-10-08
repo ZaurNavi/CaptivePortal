@@ -45,7 +45,7 @@ def main(argv=None):
     try:
         filesystem = SecretFilesystem()
         filesystem.validate_db(SETTINGS_DB_PATH)
-        generation, changed = clear_managed_secret(SettingsRepository.open_existing_v3(SETTINGS_DB_PATH), args.expected_generation, filesystem=filesystem)
+        generation, changed = clear_managed_secret(SettingsRepository.open_existing_for_recovery(SETTINGS_DB_PATH), args.expected_generation, filesystem=filesystem)
         print(f"configured_generation={generation} changed={str(changed).lower()}")
         return 0
     except SettingsError as error:

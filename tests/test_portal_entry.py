@@ -13,6 +13,12 @@ from app.web.portal_entry import (
     PortalClientContext,
     PortalEntryHandler,
 )
+from functools import partial
+from app.portal_presentation import PortalPresentationConfigV1, PortalTemplatePresentationV1
+
+# Direct handler fixtures now receive the same validated startup projection as create_app.
+PortalEntryHandler = partial(PortalEntryHandler, portal_template_presentation=
+    PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({})))
 
 
 class FailingExecutor:
