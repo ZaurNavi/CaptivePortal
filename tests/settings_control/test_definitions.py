@@ -19,9 +19,28 @@ def test_exact_ordered_definitions_and_shared_defaults():
         ("HOME_AP_24H_REFRESH_SECONDS", 120, 60, 600, "home_ap_24h_enabled", "home_ap_24h"),
     ]
     registry = SettingsDefinitionRegistry()
-    assert len(registry.definitions) == 15
+    assert len(registry.definitions) == 29
     assert len(registry.for_domain("general")) == 12
+    assert [item.key for item in registry.for_domain("general")] == [
+        "WEB_ADMIN_" + suffix for suffix, *_ in expected
+    ]
     assert [item.key for item in registry.for_domain("controller")] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
+    assert [item.key for item in registry.for_domain("portal")] == [
+        "PORTAL_UI_TITLE_AZ",
+        "PORTAL_UI_TITLE_RU",
+        "PORTAL_UI_TITLE_EN",
+        "PORTAL_UI_GREETING_AZ",
+        "PORTAL_UI_GREETING_RU",
+        "PORTAL_UI_GREETING_EN",
+        "PORTAL_UI_DESCRIPTION_AZ",
+        "PORTAL_UI_DESCRIPTION_RU",
+        "PORTAL_UI_DESCRIPTION_EN",
+        "PORTAL_SUPPORT_PHONE",
+        "PORTAL_SUPPORT_EMAIL",
+        "PORTAL_SUPPORT_WHATSAPP_URL",
+        "PORTAL_SUPPORT_TELEGRAM_URL",
+        "PORTAL_SUPPORT_FACEBOOK_URL",
+    ]
     assert registry.get("OMADA_CLIENT_ID").settings_dict_key == "client_id"
     assert registry.get("OMADA_CLIENT_SECRET") is None
     assert registry.get("VERIFY_SSL") is None

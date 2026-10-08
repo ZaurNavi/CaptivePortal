@@ -1,4 +1,7 @@
 from pathlib import Path
+import re
+
+from app.portal_presentation import PORTAL_SETTING_DEFAULTS
 
 
 ROOT = Path(__file__).parents[1]
@@ -34,10 +37,8 @@ def test_portal_uses_requested_flag_colors_and_copy():
     assert "color: #0092CC;" in template
     assert "color: #E4002B;" in template
     assert "color: #00B140;" in template
-    assert (
-        "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!"
-        in template
-    )
+    assert PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_AZ"] == "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!"
+    assert "{{ portal_translations['az']['description'] }}" in template
     assert "white-space: pre-line;" in template
     assert "font-weight: 700;" in template
 
@@ -46,15 +47,24 @@ def test_portal_has_wifi_decor_support_and_compact_credit():
     template = read(PORTAL_TEMPLATE)
 
     assert template.count("portal-logo__wave") >= 4
-    assert 'href="tel:+994504174646"' in template
-    assert 'href="mailto:zaur.navi@gmail.com"' in template
-    assert 'href="https://wa.me/994504174646"' in template
-    assert 'href="https://t.me/ZaurNavi"' in template
-    assert (
-        'href="https://www.facebook.com/zaur.navi/'
-        '?locale=ru_RU"'
-        in template
-    )
+    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_PHONE"] == "+994 50 417 46 46"
+    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_EMAIL"] == "zaur.navi@gmail.com"
+    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_WHATSAPP_URL"] == "https://wa.me/994504174646"
+    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_TELEGRAM_URL"] == "https://t.me/ZaurNavi"
+    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_FACEBOOK_URL"] == "https://www.facebook.com/zaur.navi/?locale=ru_RU"
+    assert 'href="{{ portal_support.phone_href }}"' in template
+    assert "{{ portal_support.phone_display }}" in template
+    assert 'href="{{ portal_support.email_href }}"' in template
+    assert "{{ portal_support.email }}" in template
+    for field in ("whatsapp_url", "telegram_url", "facebook_url"):
+        anchor = re.search(
+            r'<a\b[^>]*href="\{\{ portal_support\.' + field + r' \}\}"[^>]*>',
+            template,
+            re.DOTALL,
+        )
+        assert anchor is not None
+        assert 'target="_blank"' in anchor.group()
+        assert 'rel="noopener noreferrer"' in anchor.group()
     assert 'aria-label="WhatsApp"' in template
     assert 'aria-label="Telegram"' in template
     assert 'aria-label="Facebook"' in template
