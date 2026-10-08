@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 from app.device_fingerprint.validation import validate_machine_id, validate_site_id
 from .canonical import semantic_digest
 from .models import (CaptureScopeBindingV1, NetworkMetadataConfig, NetworkMetadataConfigError,
-    NetworkMetadataValidationError, MAX_DB_BYTES, MIN_DB_BYTES, MAX_RECORD_BYTES,
+    NetworkMetadataValidationError, DEFAULT_MAX_DB_BYTES, MAX_DB_BYTES, MIN_DB_BYTES, MAX_RECORD_BYTES,
     MIN_RECORD_BYTES, MAX_BATCH_RECORDS, MAX_BATCH_BYTES, LOGICAL_SOURCE_ID,
     NORMALIZER_VERSION, SOURCE_CONTRACT_VERSION)
 from .validation import absolute_path, integer, ni_timestamp, ni_format_utc, strict_json, text
@@ -73,7 +73,7 @@ def network_metadata_config_from_env(environ=None):
         binding = make_capture_scope_binding(strict_json(env.get("NETWORK_METADATA_CAPTURE_SCOPE_BINDING_JSON")))
         record_limit = number("NETWORK_METADATA_MAX_RECORD_BYTES", MAX_RECORD_BYTES, MIN_RECORD_BYTES, MAX_RECORD_BYTES)
         config = NetworkMetadataConfig(True, source, db, binding,
-            number("NETWORK_METADATA_MAX_DB_BYTES", MAX_DB_BYTES, MIN_DB_BYTES, MAX_DB_BYTES),
+            number("NETWORK_METADATA_MAX_DB_BYTES", DEFAULT_MAX_DB_BYTES, MIN_DB_BYTES, MAX_DB_BYTES),
             record_limit, number("NETWORK_METADATA_BATCH_MAX_RECORDS", MAX_BATCH_RECORDS, 1, MAX_BATCH_RECORDS),
             number("NETWORK_METADATA_BATCH_MAX_BYTES", MAX_BATCH_BYTES, record_limit, MAX_BATCH_BYTES),
             number("NETWORK_METADATA_POLL_INTERVAL_SECONDS", 1, 1))

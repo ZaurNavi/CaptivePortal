@@ -2,7 +2,7 @@ import json
 import pytest
 from app.network_metadata.config import make_capture_scope_binding, network_metadata_config_from_env
 from app.network_metadata.canonical import semantic_digest
-from app.network_metadata.models import NetworkMetadataConfigError, NetworkMetadataValidationError
+from app.network_metadata.models import NetworkMetadataConfig, NetworkMetadataConfigError, NetworkMetadataValidationError
 from . import binding_input, configuration
 
 
@@ -11,13 +11,23 @@ def test_disabled_zero_parsing():
     assert not network_metadata_config_from_env({"NETWORK_METADATA_ENABLED": "false", "NETWORK_METADATA_MAX_DB_BYTES": "not-a-number"}).enabled
 
 
+def test_default_max_db_bytes(tmp_path):
+    assert NetworkMetadataConfig().max_db_bytes == 8589934592
+    assert configuration(tmp_path).max_db_bytes == 8589934592
+
+
+@pytest.mark.parametrize("value", [8589934593, 51539607552, 68719476736])
+def test_admitted_max_db_bytes(tmp_path, value):
+    assert configuration(tmp_path, NETWORK_METADATA_MAX_DB_BYTES=str(value)).max_db_bytes == value
+
+
 @pytest.mark.parametrize("value", ["TRUE", "False", "1", " true", "false ", "", [], True])
 def test_strict_enabled(value):
     with pytest.raises(NetworkMetadataConfigError):
         network_metadata_config_from_env({"NETWORK_METADATA_ENABLED": value})
 
 
-@pytest.mark.parametrize("key,value", [("MAX_DB_BYTES", "67108863"), ("MAX_DB_BYTES", "8589934593"),
+@pytest.mark.parametrize("key,value", [("MAX_DB_BYTES", "67108863"), ("MAX_DB_BYTES", "68719476737"),
     ("MAX_RECORD_BYTES", "4095"), ("MAX_RECORD_BYTES", "1048577"), ("BATCH_MAX_RECORDS", "257"),
     ("BATCH_MAX_BYTES", "4096"), ("POLL_INTERVAL_SECONDS", "0"), ("POLL_INTERVAL_SECONDS", "1.0"),
     ("BATCH_MAX_RECORDS", " 1"), ("BATCH_MAX_RECORDS", "+1"), ("BATCH_MAX_RECORDS", "١")])
