@@ -36,8 +36,42 @@ def test_timestamp_normalization(value):
     assert ni_format_utc(ni_timestamp(rendered, canonical=True)) == rendered
 
 
+@pytest.mark.parametrize("value,expected", [
+    ("2026-10-08T09:31:20.123456+0400", "2026-10-08T05:31:20.123456Z"),
+    ("2026-10-08T09:31:20+0400", "2026-10-08T05:31:20.000000Z"),
+    ("2026-10-08T09:31:20.1+0400", "2026-10-08T05:31:20.100000Z"),
+    ("2026-01-01T00:00:00-0130", "2026-01-01T01:30:00.000000Z"),
+])
+def test_compact_offset_normalization(value, expected):
+    assert ni_format_utc(ni_timestamp(value)) == expected
+    extended = value[:-2] + ":" + value[-2:]
+    assert ni_timestamp(value) == ni_timestamp(extended)
+    assert ni_format_utc(ni_timestamp(extended)) == expected
+
+
+@pytest.mark.parametrize("value", [
+    "2026-10-08T09:31:20.123456+0400",
+    "2026-10-08T09:31:20.123456+04:00",
+    "2026-10-08T05:31:20Z",
+    "2026-10-08T05:31:20.1Z",
+])
+def test_canonical_timestamp_mode_does_not_admit_source_forms(value):
+    with pytest.raises(NetworkMetadataValidationError):
+        ni_timestamp(value, canonical=True)
+    canonical = "2026-10-08T05:31:20.123456Z"
+    assert ni_format_utc(ni_timestamp(canonical, canonical=True)) == canonical
+
+
+@pytest.mark.parametrize("suffix", ["+2400", "-2400", "+1260", "-1260", "+04", "-04",
+    "+040", "+04000", "+04:000", "+12:60", "z"])
+def test_invalid_timezone_syntax_and_range_remain_rejected(suffix):
+    with pytest.raises(NetworkMetadataValidationError):
+        ni_timestamp("2026-10-08T09:31:20" + suffix)
+
+
 @pytest.mark.parametrize("value", ["2026-01-01T00:00:00.1234567Z", "2026-01-01T00:00:00", " 2026-01-01T00:00:00Z",
-    "2026-02-30T00:00:00Z", "2026-01-01T00:00:60Z", "2026-01-01T00:00:00+24:00", None])
+    "2026-02-30T00:00:00Z", "2026-01-01T00:00:60Z", "2026-01-01T00:00:00+24:00", None,
+    "2026-10-08T09:31:20+0400 ", "2026-10-08T09:31:20.1234567+0400"])
 def test_invalid_timestamp(value):
     with pytest.raises(NetworkMetadataValidationError):
         ni_timestamp(value)

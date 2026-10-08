@@ -11,6 +11,21 @@ def test_dns_uint64_and_crlf_hash(tmp_path):
     assert a.normalized.semantic_payload_sha256 == b.normalized.semantic_payload_sha256
 
 
+def test_dns_v3_compact_offset_through_normalizer(tmp_path):
+    event = source_event(timestamp="2026-10-08T09:31:20.123456+0400")
+    data = record(event)
+    binding = configuration(tmp_path).capture_scope_binding
+    result = outcome(binding, data)
+    assert result.category == "normalized"
+    assert result.normalized.event_at == "2026-10-08T05:31:20.123456Z"
+    assert result.normalized.payload.dns_version == 3
+    event["timestamp"] = "2026-10-08T09:31:20.123456+04:00"
+    extended = outcome(binding, record(event))
+    assert extended.category == "normalized"
+    assert result.normalized.semantic_payload_sha256 == extended.normalized.semantic_payload_sha256
+    assert result.normalized.source_record_sha256 != extended.normalized.source_record_sha256
+
+
 def test_dns_source_caps_and_ordinals(tmp_path):
     event = source_event()
     event["dns"]["queries"] *= 9

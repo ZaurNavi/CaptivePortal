@@ -8,18 +8,20 @@ from datetime import datetime, timezone
 
 from .models import INT64_MAX, NetworkMetadataValidationError
 
-_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})")
+_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:?[0-9]{2})")
 
 
 def ni_timestamp(value, *, canonical=False):
     try:
         if not isinstance(value, str) or len(value.encode("utf-8")) > 64 or _TIME.fullmatch(value) is None:
             raise ValueError
+        normalized = value.replace("Z", "+00:00")
         if value[-1] != "Z":
-            hours, minutes = int(value[-5:-3]), int(value[-2:])
+            if normalized[-3] != ":":
+                normalized = normalized[:-2] + ":" + normalized[-2:]
+            hours, minutes = int(normalized[-5:-3]), int(normalized[-2:])
             if hours > 23 or minutes > 59:
                 raise ValueError
-        normalized = value.replace("Z", "+00:00")
         # Python 3.10 accepts only 3/6 fractional digits; the NI contract accepts 1..6.
         normalized = re.sub(r"\.([0-9]{1,6})(?=[+-])", lambda match: "." + match[1].ljust(6, "0"), normalized)
         parsed = datetime.fromisoformat(normalized).astimezone(timezone.utc)

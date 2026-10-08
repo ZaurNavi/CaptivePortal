@@ -2,6 +2,13 @@ import pytest
 from . import configuration, outcome, record, source_event
 
 
+def test_tls_compact_offset_through_normalizer(tmp_path):
+    event = source_event("tls", timestamp="2026-10-08T09:31:20.123456+0400")
+    result = outcome(configuration(tmp_path).capture_scope_binding, record(event))
+    assert result.category == "normalized"
+    assert result.normalized.event_at == "2026-10-08T05:31:20.123456Z"
+
+
 def test_tls_order_duplicates_caps(tmp_path):
     event = source_event("tls")
     event["tls"]["client_alpns"] = ["h2", "h2"] + [str(index) for index in range(15)]
