@@ -9,6 +9,10 @@ from dataclasses import dataclass
 class AdminPrincipal:
     username: str
     principal_type: str = "platform_operator"
+    global_capabilities: frozenset[str] = frozenset()
+
+    def __post_init__(self):
+        object.__setattr__(self, "global_capabilities", frozenset(self.global_capabilities))
 
 
 @dataclass(frozen=True, slots=True)

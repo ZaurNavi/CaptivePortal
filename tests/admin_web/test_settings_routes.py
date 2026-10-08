@@ -42,8 +42,9 @@ VALID = '{"changes":[{"key":"WEB_ADMIN_DEVICE_PAGE_SIZE","operation":"set","valu
 
 def test_global_policy_site_independent():
     policy = AdminAccessPolicy(frozenset())
-    assert policy.authorize_global(AdminPrincipal("operator"), "admin.read.settings.global")
-    assert policy.authorize_global(AdminPrincipal("operator"), "admin.write.settings.global")
+    from app.admin_web.capabilities import DEFAULT_GLOBAL_CAPABILITIES
+    assert policy.authorize_global(AdminPrincipal("operator", global_capabilities=DEFAULT_GLOBAL_CAPABILITIES), "admin.read.settings.global")
+    assert policy.authorize_global(AdminPrincipal("operator", global_capabilities=DEFAULT_GLOBAL_CAPABILITIES), "admin.write.settings.global")
     assert not policy.authorize_global(AdminPrincipal("operator", "site_operator"), "admin.write.settings.global")
     assert not policy.authorize_global(None, "admin.read.settings.global")
     assert not policy.authorize_global(AdminPrincipal("operator"), "admin.read.devices")

@@ -5,6 +5,16 @@
   {% if controller_settings_state == 'active' %}Loading Controller configuration…{% else %}Controller configuration is unavailable.{% endif %}
 </div>
 <dl id="controller-settings-fields" class="detail-list" hidden></dl>
+<div id="controller-secret-controls" data-secret-write-allowed="{{ 'true' if controller_secret_write_allowed else 'false' }}" hidden>
+  <button type="button" id="controller-secret-replace" class="button" disabled>Replace secret</button>
+  <button type="button" id="controller-secret-clear" class="button button-secondary" disabled hidden>Use deployment secret</button>
+  <div id="controller-secret-editor" hidden>
+    <label>New Client Secret <input id="controller-secret-new" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off" autocorrect="off"></label>
+    <label>Repeat Client Secret <input id="controller-secret-repeat" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off" autocorrect="off"></label>
+    <button type="button" id="controller-secret-save" class="button">Save Client Secret</button>
+    <button type="button" id="controller-secret-cancel" class="button button-secondary">Cancel</button>
+  </div>
+</div>
 {% if controller_settings_write_allowed %}
 <button type="button" id="controller-settings-save" class="button" disabled>Save Controller configuration</button>
 {% endif %}

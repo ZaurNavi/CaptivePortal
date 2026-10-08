@@ -394,7 +394,7 @@ def main() -> None:
     logger.info("Configuration loaded")
 
     try:
-        controller_config = build_omada_runtime_config(settings)
+        controller_config = build_omada_runtime_config(settings, settings_bootstrap.controller_secret_resolution)
         controller = create_controller(controller_config)
     except Exception:
         if settings_bootstrap.activation_service is not None:
@@ -402,7 +402,7 @@ def main() -> None:
         raise
     try:
         controller_public_snapshot = public_omada_snapshot(controller_config, explicit_environment_names,
-            settings_bootstrap.resolved_snapshot)
+            settings_bootstrap.resolved_snapshot, settings_bootstrap.controller_secret_resolution)
     except Exception:
         controller_public_snapshot = None
         logger.error("admin.controller_settings_projection_unavailable")

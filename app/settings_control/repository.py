@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from .definitions import SettingsDefinitionRegistry
 from .models import SettingsError, TARGET, utc_now
 
-SETTINGS_SCHEMA_VERSION = 2
+SETTINGS_SCHEMA_VERSION = 3
 SETTINGS_SQLITE_BUSY_TIMEOUT_MS = 1000
 _V1_DDL = (
     """CREATE TABLE settings_generations (
@@ -56,7 +56,7 @@ _AUDIT_TYPE_CHECK = """CHECK(
      AND typeof(previous_configured_value)='text' AND typeof(new_configured_value)='text'
      AND (previous_persisted_override IS NULL OR typeof(previous_persisted_override)='text')
      AND (new_persisted_override IS NULL OR typeof(new_persisted_override)='text')))"""
-_DDL = tuple(
+_V2_DDL = tuple(
     sql.replace("value_type TEXT NOT NULL CHECK(value_type='integer'),\n        integer_value INTEGER NOT NULL",
                 "value_type TEXT NOT NULL CHECK(value_type IN ('integer','string')),\n        integer_value INTEGER, string_value TEXT,\n        CHECK((value_type='integer' AND typeof(integer_value)='integer' AND string_value IS NULL)\n        OR (value_type='string' AND integer_value IS NULL AND typeof(string_value)='text'))")
     .replace("previous_persisted_override INTEGER, new_persisted_override INTEGER,\n        previous_configured_value INTEGER NOT NULL, new_configured_value INTEGER NOT NULL,",
@@ -78,12 +78,56 @@ _TRIGGERS = tuple(
     for table in _IMMUTABLE for action in ("UPDATE", "DELETE")
 )
 
+_SECRET_DDL = (
+    """CREATE TABLE controller_secret_versions (
+        secret_version_id TEXT PRIMARY KEY, setting_key TEXT NOT NULL CHECK(setting_key='OMADA_CLIENT_SECRET'),
+        crypto_schema_version INTEGER NOT NULL CHECK(crypto_schema_version=1),
+        nonce BLOB NOT NULL CHECK(typeof(nonce)='blob' AND length(nonce)=12),
+        ciphertext BLOB NOT NULL CHECK(typeof(ciphertext)='blob' AND length(ciphertext)=4116),
+        created_at_utc TEXT NOT NULL)""",
+    """CREATE TABLE settings_secret_bindings (
+        generation_id INTEGER PRIMARY KEY REFERENCES settings_generations(generation_id),
+        setting_key TEXT NOT NULL CHECK(setting_key='OMADA_CLIENT_SECRET'), secret_version_id TEXT NOT NULL)""",
+    """CREATE TABLE settings_secret_mutation_audit (
+        audit_id INTEGER PRIMARY KEY, generation_id INTEGER NOT NULL REFERENCES settings_generations(generation_id),
+        parent_generation_id INTEGER NOT NULL REFERENCES settings_generations(generation_id),
+        principal_type TEXT NOT NULL, principal_name TEXT NOT NULL, source_ip TEXT NOT NULL,
+        request_id TEXT NOT NULL, idempotency_key TEXT, timestamp_utc TEXT NOT NULL,
+        scope_type TEXT NOT NULL CHECK(scope_type='global'), scope_id TEXT CHECK(scope_id IS NULL),
+        setting_key TEXT NOT NULL CHECK(setting_key='OMADA_CLIENT_SECRET'),
+        operation TEXT NOT NULL CHECK(operation IN ('replace_secret','clear_secret_override','clear_secret_override_recovery')),
+        previous_override_present INTEGER NOT NULL CHECK(previous_override_present IN (0,1)),
+        new_override_present INTEGER NOT NULL CHECK(new_override_present IN (0,1)),
+        previous_source TEXT NOT NULL CHECK(previous_source IN ('managed_secret_override','environment','repository_default')),
+        new_source TEXT NOT NULL CHECK(new_source IN ('managed_secret_override','environment','repository_default')),
+        apply_requirement TEXT NOT NULL CHECK(apply_requirement='main_service_restart'),
+        activation_target TEXT NOT NULL CHECK(activation_target='captive-portal.service'))""",
+)
+_SECRET_TRIGGERS = tuple(
+    f"CREATE TRIGGER {table}_immutable_{action.lower()} BEFORE {action} ON {table} "
+    "BEGIN SELECT RAISE(ABORT,'immutable settings history'); END"
+    for table, actions in (("controller_secret_versions", ("UPDATE",)),
+                           ("settings_secret_bindings", ("UPDATE", "DELETE")),
+                           ("settings_secret_mutation_audit", ("UPDATE", "DELETE")))
+    for action in actions
+)
+_DDL = tuple(sql.replace("('general','controller')", "('general','controller','controller_secret')")
+             .replace("request_payload_hash TEXT NOT NULL", "request_fingerprint_kind TEXT NOT NULL CHECK(request_fingerprint_kind IN ('sha256_canonical_json_v1','hmac_sha256_controller_secret_v1')), request_fingerprint TEXT NOT NULL")
+             if sql.startswith("CREATE TABLE settings_idempotency ") else sql for sql in _V2_DDL) + _SECRET_DDL
+
 
 def canonical_json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
 class SettingsRepository:
+    @classmethod
+    def open_existing_v3(cls, db_path):
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] != 3:
+                raise SettingsError("settings_store_unavailable")
+        return cls(db_path)
+
     def __init__(self, db_path, registry=None):
         self.db_path = str(db_path)
         self.registry = registry or SettingsDefinitionRegistry()
@@ -117,23 +161,31 @@ class SettingsRepository:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             tables = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
             if version == 0 and not tables:
-                for statement in (*_DDL, *_TRIGGERS):
+                for statement in (*_DDL, *_TRIGGERS, *_SECRET_TRIGGERS):
                     db.execute(statement)
-                db.execute("PRAGMA user_version=2")
+                db.execute("PRAGMA user_version=3")
                 db.execute("INSERT INTO settings_generations VALUES(0,NULL,'global',?,'system','settings_bootstrap',NULL)", (utc_now(),))
                 db.execute("INSERT INTO settings_target_state VALUES(?,NULL,NULL)", (TARGET,))
             elif version == 1:
                 self._validate_schema(db, _V1_DDL)
                 self._validate_history(db, legacy=True)
                 self._migrate_v1(db)
+                self._migrate_v2(db)
+            elif version == 2:
+                self._validate_schema(db, _V2_DDL)
+                self._validate_history(db)
+                self._migrate_v2(db)
             elif version != SETTINGS_SCHEMA_VERSION:
                 raise SettingsError("settings_store_unavailable")
             self._validate_schema(db, _DDL)
             self._validate_history(db)
+            from .controller_secret import validate_secret_history
+            validate_secret_history(db)
 
     @staticmethod
     def _validate_schema(db, ddl):
-        expected = {statement.split()[2]: statement for statement in (*ddl, *_TRIGGERS)}
+        extra = _SECRET_TRIGGERS if ddl is _DDL else ()
+        expected = {statement.split()[2]: statement for statement in (*ddl, *_TRIGGERS, *extra)}
         actual = {row[0]: row[1] for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type IN ('table','trigger') AND name NOT LIKE 'sqlite_%'")}
         normalize = lambda value: " ".join(value.split())
         if actual.keys() != expected.keys() or any(normalize(actual[key]) != normalize(sql) for key, sql in expected.items()):
@@ -146,7 +198,7 @@ class SettingsRepository:
             for action in ("update", "delete"):
                 db.execute(f"DROP TRIGGER {table}_immutable_{action}")
             db.execute(f"ALTER TABLE {table} RENAME TO {table}_v1")
-            db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE " + table + " ")))
+            db.execute(next(sql for sql in _V2_DDL if sql.startswith("CREATE TABLE " + table + " ")))
             columns = [row[1] for row in db.execute(f"PRAGMA table_info({table}_v1)")]
             additions = {"settings_overrides": {"string_value": "NULL"},
                          "settings_mutation_audit": {"setting_domain": "'general'", "value_type": "'integer'"},
@@ -158,6 +210,23 @@ class SettingsRepository:
                 if statement.startswith("CREATE TRIGGER " + table + "_"):
                     db.execute(statement)
         db.execute("PRAGMA user_version=2")
+
+    @staticmethod
+    def _migrate_v2(db):
+        for action in ("update", "delete"):
+            db.execute(f"DROP TRIGGER settings_idempotency_immutable_{action}")
+        db.execute("ALTER TABLE settings_idempotency RENAME TO settings_idempotency_v2")
+        db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE settings_idempotency ")))
+        columns = [row[1] for row in db.execute("PRAGMA table_info(settings_idempotency_v2)")]
+        target = ["request_fingerprint" if name == "request_payload_hash" else name for name in columns]
+        db.execute(f"INSERT INTO settings_idempotency ({','.join(target)},request_fingerprint_kind) SELECT {','.join(columns)},'sha256_canonical_json_v1' FROM settings_idempotency_v2")
+        db.execute("DROP TABLE settings_idempotency_v2")
+        for sql in (*_SECRET_DDL, *_SECRET_TRIGGERS):
+            db.execute(sql)
+        for sql in _TRIGGERS:
+            if sql.startswith("CREATE TRIGGER settings_idempotency_"):
+                db.execute(sql)
+        db.execute("PRAGMA user_version=3")
 
     def _validate_history(self, db, legacy=False):
         if db.execute("PRAGMA quick_check").fetchall()[0][0] != "ok" or db.execute("PRAGMA foreign_key_check").fetchall():
@@ -213,7 +282,7 @@ class SettingsRepository:
         row = db.execute("SELECT timestamp_utc,principal_type,principal_name FROM settings_mutation_audit WHERE setting_key=? AND generation_id<=? ORDER BY audit_id DESC LIMIT 1", (key, generation)).fetchone()
         return dict(row) if row else None
 
-    def create_generation(self, db, *, parent, principal, request_id, created_at, overrides):
+    def create_generation(self, db, *, parent, principal, request_id, created_at, overrides, carry_secret=True):
         from app.controllers.omada_config import normalize_controller_setting
         from app.exceptions import ConfigurationError
         for key, value in overrides.items():
@@ -236,6 +305,8 @@ class SettingsRepository:
             (generation, key, "integer" if type(value) is int else "string",
              value if type(value) is int else None, value if type(value) is str else None)
             for key, value in sorted(overrides.items())])
+        if carry_secret:
+            db.execute("INSERT INTO settings_secret_bindings SELECT ?,setting_key,secret_version_id FROM settings_secret_bindings WHERE generation_id=?", (generation, parent))
         return generation
 
     @staticmethod
@@ -264,16 +335,16 @@ class SettingsRepository:
             return dict(row) if row else None
 
     @staticmethod
-    def save_idempotency(db, principal, key, payload_hash, status, body, domain="general"):
+    def save_idempotency(db, principal, key, payload_hash, status, body, domain="general", fingerprint_kind="sha256_canonical_json_v1"):
         serialized = canonical_json(body)
         if len(serialized.encode("utf-8")) > 65536:
             raise SettingsError("internal_error", 500)
         db.execute("""INSERT INTO settings_idempotency (
-            principal_type,principal_name,scope_type,idempotency_key,request_payload_hash,
-            result_http_status,result_response_json,result_generation,result_changed,created_at_utc,mutation_domain)
-            VALUES(?,?,'global',?,?,?,?,?,?,?,?)""", (
+            principal_type,principal_name,scope_type,idempotency_key,request_fingerprint,
+            result_http_status,result_response_json,result_generation,result_changed,created_at_utc,mutation_domain,request_fingerprint_kind)
+            VALUES(?,?,'global',?,?,?,?,?,?,?,?,?)""", (
                 principal.principal_type, principal.username, key, payload_hash, status,
-                serialized, body["configured_generation"], int(body["changed"]), utc_now(), domain,
+                serialized, body["configured_generation"], int(body["changed"]), utc_now(), domain, fingerprint_kind,
             ))
 
     def activation(self, generation, adopted, safe_error_code=None):
@@ -286,3 +357,5 @@ class SettingsRepository:
                 VALUES(?,?,?,?,?,?)""", (generation, TARGET, now, "adopted" if adopted else "failed", after, safe_error_code))
             if adopted:
                 db.execute("UPDATE settings_target_state SET effective_generation=?,updated_at_utc=? WHERE target=?", (generation, now, TARGET))
+                from .controller_secret import gc_secret_versions
+                gc_secret_versions(db)

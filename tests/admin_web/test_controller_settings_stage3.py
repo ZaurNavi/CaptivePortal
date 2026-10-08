@@ -27,7 +27,7 @@ def setup(tmp_path, monkeypatch, *, authenticated=True):
     base = {**enabled_settings(web_admin_settings_enabled=True), **CONTROLLER_BASE,
             "client_secret": SECRET, "settings_db_path": str(tmp_path / "settings.sqlite3")}
     boot = bootstrap_settings_control(base_settings=base, explicit_environment_names={"OMADA_URL"}, logger=logging.getLogger("as03"))
-    safe = public_omada_snapshot(build_omada_runtime_config(boot.runtime_settings), frozenset({"OMADA_URL"}), boot.resolved_snapshot)
+    safe = public_omada_snapshot(build_omada_runtime_config(boot.runtime_settings, boot.controller_secret_resolution), frozenset({"OMADA_URL"}), boot.resolved_snapshot, boot.controller_secret_resolution)
     runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None, logging.getLogger("as03"),
         settings_control=boot.admin_context, controller_public_snapshot=safe)
     app = Flask(__name__)

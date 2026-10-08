@@ -549,7 +549,7 @@ The unchanged ordered General integer allowlist is exactly:
 | WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS | 60 | 60–300 |
 | WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS | 120 | 60–600 |
 
-SQLite schema v2 retains immutable generations, complete typed per-generation
+SQLite schema v3 retains immutable generations, complete typed per-generation
 override sets, mutation audit, successful idempotency responses and activation
 events, plus the mutable `captive-portal.service` effective-generation target.
 Generation 0 is created with `system / settings_bootstrap`, no overrides, no
@@ -559,7 +559,7 @@ SQLite busy timeout is 1000 ms.
 The common definition registry has 15 entries: the twelve General integers
 above and exactly three Controller strings (`OMADA_URL`, `OMADA_ID`,
 `OMADA_CLIENT_ID`). The same Store, generation head and CAS authority serve
-both domains. Idempotency keys are scoped by domain. The transactional v1→v2
+all domains. Idempotency keys are scoped by domain. The transactional v1→v2→v3
 migration preserves generation IDs, original audit/activation history and exact
 successful General response bytes; migration itself creates no generation,
 audit or activation event.
@@ -572,11 +572,11 @@ HTTP. Operational source degradation is not
 Settings activation failure. No service or production activation is performed
 by this implementation.
 
-## Omada Controller Settings — writable non-secret Stage 3
+## Omada Controller Settings — non-secret settings and write-only Stage 4
 
 `WEB_ADMIN_SETTINGS_ENABLED` also gates the GLOBAL Controller page/read/write API.
 The main process builds one immutable `OmadaControllerRuntimeConfig` from the
-Stage-1 resolved settings, injects it into the shared provider and derives a
+ordinary resolved settings plus one separate secret resolution, injects it into the shared provider and derives a
 separate secret-free public snapshot for Admin. The provider no longer reads
 settings independently. `create_app(controller=None)` retains compatibility
 by using the same canonical builder on its already-resolved local mapping;
@@ -591,9 +591,9 @@ writable value's `persisted_override`, `environment` or `repository_default`
 provenance. No environment reread occurs in an Admin request.
 `VERIFY_SSL=false` remains a repository constant.
 Client Secret is represented only by presence/source, never its value or any
-derived length/hash/mask. `OMADA_CLIENT_SECRET` and `VERIFY_SSL` have no writable
-definition and cannot enter the new Controller override/audit/idempotency paths.
-Only the three non-secret Controller strings may be persisted. General reads
+derived length/hash/mask. `OMADA_CLIENT_SECRET` and `VERIFY_SSL` have no ordinary
+writable definition. Only the three non-secret Controller strings enter ordinary overrides/audit paths.
+The Client Secret uses the separate Stage-4 encrypted boundary below. General reads
 and successful General receipts still contain exactly the twelve integers.
 
 Controller Save persists configuration, not running provider state. The GLOBAL
@@ -604,5 +604,46 @@ Connection, hot reconnect, live-health claim, deployment or production
 activation is supplied here.
 
 After trustworthy startup adoption, Store loss does not invent configured
-truth: the Controller V2 read can return effective-only state with configured
+truth: the Controller V3 read can return effective-only state with configured
 fields/pending state null, while writes return `503 settings_store_unavailable`.
+
+### Stage-4 Controller secret boundary
+
+`WEB_ADMIN_GLOBAL_CAPABILITIES` is a strict comma-separated ASCII startup grant.
+Its default grants `admin.read.settings.global`, `admin.write.settings.global`,
+`admin.read.settings.controller`, `admin.write.settings.controller` only.
+An operator must explicitly grant `admin.write.settings.controller.secret` in
+addition to Controller read for write-only secret management; ordinary Controller
+write does not grant secret write. Grants are captured in each new login session.
+Empty/unknown/duplicate/whitespace-bearing tokens fail closed. Restart and a new
+login are required for a deployment grant change; this is not a managed setting.
+
+Controller v3 exposes independent infrastructure availability for ordinary and
+secret mutations. The secret row exposes configured/effective presence and source,
+managed-override presence, pending replacement and secret-store state, never value,
+mask, length, internal version ID, hash or ciphertext. A secret-only pending change
+counts as one pending Controller setting; unrelated generations do not.
+
+`POST /admin/api/v1/settings/controller/client-secret/generations` accepts exactly
+`replace_secret` with a new `secret`, or `clear_secret_override` without it, under
+strict JSON, session CSRF, global ETag/CAS and UUIDv4 idempotency. Receipts contain
+only safe operation/generation/restart facts; replay returns the original receipt
+at HTTP 200. HMAC-SHA256 fingerprints use a separate HKDF key, principal, operation
+and idempotency key. The same global generation is shared by all mutation domains.
+
+Schema v3 adds immutable secret bindings and safe audit, encrypted live versions,
+and typed domain-scoped idempotency fingerprints. Migration preserves history and
+exact old receipts and creates no new generation, secret, binding or audit. Generic
+generation creation copies secret ownership. Only configured/effective versions
+remain live after replace/clear/adoption; historical bindings may outlive ciphertext.
+Logical deletion does not guarantee forensic erasure from SQLite/backups/storage.
+
+The external raw 32-byte master key is code-owned at
+`/etc/captiveportal/omada-controller-secret-master.key`; HKDF-SHA256 separates
+AES-256-GCM and idempotency keys. Each version has UUIDv4, a random 12-byte nonce,
+exact AAD, random-padded 4100-byte plaintext frame and 4116-byte ciphertext/tag.
+`cryptography>=3.4.8` is required and the implementation supports 3.4.8.
+Managed ownership outranks environment/repository default and fails closed on
+security, reference or decryption failure without fallback. Without a managed
+binding, a valid deployment secret can run even if the managed secret store/key is
+unavailable. There is no live credential test, hot reconnect or restart authority.

@@ -90,6 +90,7 @@ class AdminWebConfig:
     traffic_evidence_enabled: bool
     traffic_refresh_seconds: int
     traffic_request_timeout_seconds: int
+    global_capabilities: frozenset[str] = frozenset()
 
     def __repr__(self) -> str:
         return (
@@ -107,6 +108,8 @@ def admin_web_config_from_settings(
     settings: Mapping[str, Any],
 ) -> AdminWebConfig:
     """Parse repository settings without normalizing security identities."""
+    from .capabilities import DEFAULT_GLOBAL_CAPABILITIES_TEXT, parse_global_capabilities
+    global_capabilities = parse_global_capabilities(settings.get("web_admin_global_capabilities", DEFAULT_GLOBAL_CAPABILITIES_TEXT))
     enabled = _exact_bool(
         settings.get("web_admin_enabled", "false"),
         "WEB_ADMIN_ENABLED",
@@ -353,6 +356,7 @@ def admin_web_config_from_settings(
 
     return AdminWebConfig(
         enabled=enabled,
+        global_capabilities=global_capabilities,
         username=username,
         password_hash=password_hash,
         allowed_networks=networks,

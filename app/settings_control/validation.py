@@ -14,7 +14,7 @@ class SettingsValidationService:
     def __init__(self, registry=None):
         self.registry = registry or SettingsDefinitionRegistry()
 
-    def validate(self, snapshot):
+    def validate(self, snapshot, *, secret_resolution=None):
         details = []
         for item in self.registry:
             if item.domain != "general":
@@ -40,6 +40,9 @@ class SettingsValidationService:
         except (ValueError, TypeError) as exc:
             raise SettingsError("validation_failed", 422, ({"key": None, "reason": "semantic_validation_failed"},)) from exc
         try:
-            build_omada_runtime_config(snapshot.values)
-        except (ConfigurationError, KeyError, TypeError) as exc:
-            raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from exc
+            from .controller_secret import OmadaClientSecretResolution
+            if not isinstance(secret_resolution, OmadaClientSecretResolution):
+                raise ConfigurationError("Missing Controller secret resolution")
+            build_omada_runtime_config(snapshot.values, secret_resolution=secret_resolution)
+        except (ConfigurationError, KeyError, TypeError):
+            raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None

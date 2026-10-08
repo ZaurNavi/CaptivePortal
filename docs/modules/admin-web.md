@@ -874,14 +874,14 @@ full 12-item response even after configured/effective generations advance.
 Settings UI offers Set/Clear Override and Save, never restart/reload controls.
 No activation capability is exposed to Admin handlers.
 
-## GLOBAL Controller Settings — writable non-secret Stage 3
+## GLOBAL Controller Settings — non-secret and write-only Stage 4
 
 `GET /admin/settings/controller` and `GET /admin/api/v1/settings/controller`
 require `WEB_ADMIN_SETTINGS_ENABLED` and the GLOBAL capability
 `admin.read.settings.controller`. Writes additionally require the independent
 GLOBAL capability `admin.write.settings.controller`; there is no Site variant.
 Unexpected API query parameters return
-`400 invalid_request`. Read JSON uses `admin.settings.controller.v2`, a request UUID,
+`400 invalid_request`. Read JSON uses `admin.settings.controller.v3`, a request UUID,
 GLOBAL scope, installation-level `omada_controller` resource and
 `management_mode=hybrid`. Responses are `no-store` / `no-cache`.
 
@@ -891,8 +891,8 @@ Its configured boundary is the common Settings read service's secret-free,
 three-key projection, not environment/systemd/provider rereads. It performs
 zero Omada/OAuth I/O. Controller URL, Controller ID and Client / Application ID
 show configured/effective values, override/source, safe audit metadata and
-pending restart state. Client Secret presence and TLS verification remain
-read-only; no connection/token health, secret value, substring, length, digest
+pending restart state. TLS verification remains read-only; Client Secret is write-only
+through its independent capability/endpoint. No connection/token health, secret value, substring, length, digest
 or mask is retained/disclosed.
 
 `POST /admin/api/v1/settings/controller/generations` accepts at most three
@@ -905,9 +905,9 @@ current CAS/full-candidate validation. Changed/no-op status is 201/200.
 
 The bounded `admin.settings.controller.mutation.v1` receipt carries generation
 and changed-key state, never Controller scalar values. The UI confirms selected
-keys, explains external main-service restart, and always reloads the V2 GET
+keys, explains external main-service restart, and always reloads the V3 GET
 after success/replay. On 412 it reloads, reports conflict and does not auto-retry.
-Secret/TLS editing, Test Connection, restart and service controls are absent.
+Secret read-back, TLS editing, Test Connection, restart and service controls are absent.
 
 General and Controller authorization/navigation are independent. The Settings
 top-level link chooses General when allowed, otherwise Controller; secondary
@@ -926,3 +926,22 @@ use. Controller consumers (pending cleaner, Observation, Current State, visitor
 snapshot collector) start only after durable Settings adoption.
 Projection failure remains fail-open for the shared provider and Portal/Auth.
 Stage 3 grants no network probe, systemd or production authority.
+
+Stage 4 adds `admin.write.settings.controller.secret`, explicitly deployment-granted
+through `WEB_ADMIN_GLOBAL_CAPABILITIES` and captured on login; it is not in the default
+four grants and requires Controller read, not ordinary Controller write. No Site
+context participates. Its independent mutation availability is not a capability grant.
+The write-only route requires strict bounded JSON, CSRF, ETag and UUIDv4 idempotency;
+duplicate members and non-finite constants return `400 invalid_request`. Missing
+Content-Length/If-Match return 411/428; stale CAS/conflict are 412/409; invalid new
+secret or deployment fallback is safe 422; secret-store outage is safe 503.
+
+The secret UI has two empty `new-password` inputs, permits paste, confirms without
+displaying the typed value, and clears both inputs/app references on cancellation
+and every completed request (including network errors). It stores no raw value in
+URL/storage/cookie/model/telemetry. Only an uncertain idempotency key may remain in
+ephemeral page memory; re-entry is mandatory. 412 discards the key and reloads;
+every success/replay reloads v3. No browser/OS physical-memory erasure is claimed.
+Replacement/clear persist ownership only; the existing provider stays unchanged
+until external restart and durable adoption. Settings outage retains only the safe
+effective snapshot; key outage disables secret writes without hot-fallback.

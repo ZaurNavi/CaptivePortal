@@ -499,6 +499,7 @@ ANALYTICS_API_MAX_RESPONSE_BYTES = os.getenv(
 
 # Site-aware read-only Admin Web foundation (safe disabled default)
 WEB_ADMIN_ENABLED = os.getenv("WEB_ADMIN_ENABLED", "false")
+WEB_ADMIN_GLOBAL_CAPABILITIES = os.getenv("WEB_ADMIN_GLOBAL_CAPABILITIES", "admin.read.settings.controller,admin.read.settings.global,admin.write.settings.controller,admin.write.settings.global")
 WEB_ADMIN_USERNAME = os.getenv("WEB_ADMIN_USERNAME", "")
 WEB_ADMIN_PASSWORD_HASH = os.getenv("WEB_ADMIN_PASSWORD_HASH", "")
 WEB_ADMIN_ALLOWED_NETWORKS = os.getenv(

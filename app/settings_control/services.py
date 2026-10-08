@@ -135,10 +135,11 @@ class SettingsMutationService:
     def __init__(self, repository, read_service, validation=None):
         self.repository, self.read_service = repository, read_service
         self.validation = validation or SettingsValidationService(read_service.registry)
+        self.secret_repository = None
 
     @staticmethod
     def _replay(existing, payload_hash):
-        if existing["request_payload_hash"] != payload_hash:
+        if existing["request_fingerprint_kind"] != "sha256_canonical_json_v1" or existing["request_fingerprint"] != payload_hash:
             raise SettingsError("idempotency_conflict", 409)
         return SettingsMutationResult(existing["result_http_status"], json.loads(existing["result_response_json"]))
 
@@ -170,7 +171,15 @@ class SettingsMutationService:
                     overrides.pop(change.key, None)
             current = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, previous, parent, self.read_service.registry)
             candidate = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, overrides, parent, self.read_service.registry)
-            self.validation.validate(candidate)
+            resolution = None
+            if self.secret_repository is not None:
+                try:
+                    resolution = self.secret_repository.resolve(parent, self.read_service.base_settings, self.read_service.environment_names)
+                except SettingsError as error:
+                    if error.code != "controller_secret_configuration_invalid":
+                        raise
+                    raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
+            self.validation.validate(candidate, secret_resolution=resolution)
             changed = previous != overrides
             generation = parent
             if changed:
