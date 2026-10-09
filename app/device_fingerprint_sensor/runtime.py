@@ -24,7 +24,8 @@ SURICATA_HEARTBEAT_TIMEOUT_SECONDS = 30.0
 class SensorRuntime:
     def __init__(self, config: SensorConfig, *, telemetry: SensorTelemetry,
                  monotonic=time.monotonic, now=None, preflight=None, capture=None,
-                 eve=None, spool=None, producer=None) -> None:
+                 eve=None, spool=None, producer=None, attribution_config=None,
+                 attribution_recorder=None) -> None:
         self.config = config
         self.telemetry = telemetry
         self.monotonic = monotonic
@@ -58,6 +59,26 @@ class SensorRuntime:
         }
         self._delivery_available = True
         self._delivery_permanent_fault = False
+        self._attribution = None
+        self._capture_preflight_passed = False
+        if attribution_config is not None and attribution_config.enabled:
+            from app.network_attribution.dhcp_authority import DhcpAuthorityRecorder
+            options = {"clock": now} if now is not None else {}
+            self._attribution = attribution_recorder or DhcpAuthorityRecorder(
+                attribution_config, config, telemetry=telemetry, **options,
+            )
+
+    def _attribution_call(self, method, *args) -> None:
+        if self._attribution is None:
+            return
+        try:
+            getattr(self._attribution, method)(*args)
+        except Exception:
+            # Even failure reporting must never escape into Fingerprint lifecycle.
+            try:
+                self._attribution.fault("attribution_recorder_unavailable")
+            except Exception:
+                pass
 
     def initialize_transport(self) -> None:
         self.spool.initialize()
@@ -66,15 +87,23 @@ class SensorRuntime:
         try:
             self.preflight.validate()
         except Exception:
+            self._attribution_call("fault", "capture_interface_unavailable")
             self.state, self.reason = "unavailable", "capture_interface_unavailable"
             self.spool.enqueue(self.health.all("unavailable", "capture_interface_unavailable"))
             self.telemetry.emit("fingerprint_sensor_unavailable", runtime_state=self.state, reason=self.reason)
             return False
+        self._capture_preflight_passed = True
         return True
 
     def start(self) -> None:
         self.eve.open()
-        self.capture.open()
+        try:
+            self.capture.open()
+        except Exception:
+            self._attribution_call("fault", "raw_capture_unavailable")
+            raise
+        if self._capture_preflight_passed:
+            self._attribution_call("start")
         self._set_local(("dhcp", "tcp_syn"), "available", None)
         self._set_local(("tls_client", "quic_client"), "unavailable", "suricata_unavailable")
         self.state, self.reason = "degraded", "suricata_unavailable"
@@ -93,12 +122,15 @@ class SensorRuntime:
             while not self.stop_event.is_set():
                 received = self.capture.receive()
                 if received is None:
+                    self._attribution_call("poll")
                     continue
                 frame, received_ns, observed_at = received
                 if self.dedup.is_duplicate(frame, received_ns):
                     continue
                 self.spool.enqueue(self.normalizer.raw(frame, observed_at))
+                self._attribution_call("record_frame", frame, observed_at)
         except Exception:
+            self._attribution_call("fault", "raw_capture_unavailable")
             if not self.stop_event.is_set():
                 self.state, self.reason = "degraded", "raw_parser_unavailable"
                 self._set_local(("dhcp", "tcp_syn"), "unavailable", "raw_parser_unavailable")
@@ -245,12 +277,14 @@ class SensorRuntime:
     def shutdown(self) -> bool:
         self.state, self.reason = "stopping", "stopping"
         self.stop_event.set()
+        self._attribution_call("fault", "sensor_shutdown")
         self.capture.close()
         self.eve.close()
         deadline = self.monotonic() + 20.0
         for thread in self.threads:
             thread.join(max(0.0, deadline - self.monotonic()))
         clean = all(not thread.is_alive() for thread in self.threads)
+        self._attribution_call("shutdown")
         self.spool.close()
         self.telemetry.emit("fingerprint_sensor_stopped", runtime_state="stopping")
         return clean

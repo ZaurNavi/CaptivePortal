@@ -8,6 +8,7 @@ import socket
 import time
 
 from app.artifact_identity import ArtifactIdentityError, capture_loaded_artifact_identity
+from app.network_attribution.config import network_attribution_config_from_env
 
 from .config import sensor_config_from_env
 from .runtime import SensorRuntime
@@ -53,7 +54,13 @@ def main(argv: list[str] | None = None) -> int:
     ):
         telemetry.emit("fingerprint_sensor_startup_failed", runtime_state="unavailable", error_category="core_listener_unavailable")
         return 1
-    runtime = SensorRuntime(config, telemetry=telemetry)
+    try:
+        attribution_config = network_attribution_config_from_env()
+    except Exception:
+        # Bad optional NI configuration is not a Fingerprint startup failure.
+        telemetry.emit("network_attribution_unavailable", status="unavailable", reason="invalid_attribution_config")
+        attribution_config = None
+    runtime = SensorRuntime(config, telemetry=telemetry, attribution_config=attribution_config)
     try:
         runtime.initialize_transport()
         runtime.producer.read_credential()
