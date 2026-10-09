@@ -1,0 +1,26 @@
+[Unit]
+Description=Device-relative Network Metadata Projection (NI-02B)
+After=network-metadata.service fingerprint-sensor.service captive-portal.service
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+SupplementaryGroups=fingerprint-sensor
+WorkingDirectory=/opt/CaptivePortal
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=GIT_OPTIONAL_LOCKS=0
+EnvironmentFile=-/etc/captive-portal/network-metadata-projection.env
+ExecStart=/usr/bin/python3 -m app.network_metadata_projection.cli run
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/CaptivePortal/data
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

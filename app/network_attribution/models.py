@@ -84,3 +84,12 @@ class NetworkMetadataAttributionResultV1:
     valid_from: str | None = None
     valid_until: str | None = None
     attribution_source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkAttributionHorizonV1:
+    state: str
+    site_id: str
+    first_usable_at: str | None = None
+    retained_from: str | None = None
+    reason: str | None = None
