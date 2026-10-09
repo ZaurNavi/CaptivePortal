@@ -3,6 +3,8 @@
 import hashlib
 import ipaddress
 import json
+import re
+from datetime import datetime, timezone
 from dataclasses import asdict
 
 from app.device_fingerprint.validation import (
@@ -20,6 +22,30 @@ def query_values(site_id, ipv4, event_at):
             raise ValueError
         parse_utc(event_at)
         return site_id, ipv4, event_at
+    except (ValueError, TypeError, DeviceFingerprintValidationError):
+        raise NetworkAttributionValidationError("invalid_query") from None
+
+
+def read_query_values(site_id, ipv4, event_at):
+    """T1 read-only bridge; writer query_values stays millisecond-only.
+
+    Return both the exact instant and an indexed comparison key. The latter
+    is valid only for <= / < predicates against millisecond-aligned rows.
+    """
+    try:
+        validate_site_id(site_id)
+        if not isinstance(ipv4, str) or str(ipaddress.IPv4Address(ipv4)) != ipv4:
+            raise ValueError
+        if not isinstance(event_at, str) or re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.(?:[0-9]{3}|[0-9]{6})Z",
+                event_at) is None:
+            raise ValueError
+        exact = datetime.strptime(event_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        precision = "milliseconds" if len(event_at) == 24 else "microseconds"
+        if exact.isoformat(timespec=precision).replace("+00:00", "Z") != event_at:
+            raise ValueError
+        floor = exact.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        return exact, floor
     except (ValueError, TypeError, DeviceFingerprintValidationError):
         raise NetworkAttributionValidationError("invalid_query") from None
 
