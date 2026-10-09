@@ -19,7 +19,7 @@ def test_exact_ordered_definitions_and_shared_defaults():
         ("HOME_AP_24H_REFRESH_SECONDS", 120, 60, 600, "home_ap_24h_enabled", "home_ap_24h"),
     ]
     registry = SettingsDefinitionRegistry()
-    assert len(registry.definitions) == 29
+    assert len(registry.definitions) == 46
     assert len(registry.for_domain("general")) == 12
     assert [item.key for item in registry.for_domain("general")] == [
         "WEB_ADMIN_" + suffix for suffix, *_ in expected

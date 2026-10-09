@@ -10,7 +10,17 @@ import pytest
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 from app.admin_web.config import AdminWebConfigError, admin_web_config_from_settings
 from app.admin_web.current_traffic_serialization import (
     CurrentTrafficSerializationError,
@@ -358,11 +368,10 @@ def test_evidence_flag_defaults_off_and_depends_only_on_admin_traffic():
         web_admin_traffic_enabled="true", web_admin_traffic_evidence_enabled="true"
     ))
     assert config.traffic_evidence_enabled is True
-    with pytest.raises(AdminWebConfigError):
-        admin_web_config_from_settings(enabled_settings(
-            web_admin_traffic_enabled="false", web_admin_traffic_evidence_enabled="true"
-        ))
-
+    config = admin_web_config_from_settings(enabled_settings(
+        web_admin_traffic_enabled="false", web_admin_traffic_evidence_enabled="true"
+    ))
+    assert config.traffic_evidence_enabled is False
 
 def test_route_returns_current_evidence_and_fixed_disabled_inventory(tmp_path):
     app, source = _app(tmp_path)

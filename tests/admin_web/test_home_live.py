@@ -9,7 +9,17 @@ import pytest
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 from app.admin_web.config import AdminWebConfigError, admin_web_config_from_settings
 from app.admin_web.current_state_serialization import (
     serialize_ap_page,
@@ -143,7 +153,7 @@ def principal():
     return AdminPrincipal("operator")
 
 
-@pytest.mark.parametrize("value", ["true", True])
+@pytest.mark.parametrize("value", ["true"])
 def test_home_live_exact_boolean_is_accepted(value):
     config = admin_web_config_from_settings(enabled_settings(web_admin_home_live_enabled=value))
     assert config.home_live_enabled is True
@@ -171,10 +181,10 @@ def test_home_live_safe_defaults():
 )
 def test_home_live_numeric_bounds(key, value):
     with pytest.raises(AdminWebConfigError):
-        admin_web_config_from_settings(enabled_settings(**{key: value}))
+        admin_web_config_from_settings(enabled_settings(**{"web_admin_home_live_enabled": "true", key: value}))
 
 
-@pytest.mark.parametrize("value", ["TRUE", "1", 1, None])
+@pytest.mark.parametrize("value", ["TRUE", "1", 1, None, True])
 def test_home_live_non_exact_boolean_is_rejected(value):
     with pytest.raises(AdminWebConfigError):
         admin_web_config_from_settings(enabled_settings(web_admin_home_live_enabled=value))
@@ -183,8 +193,8 @@ def test_home_live_non_exact_boolean_is_rejected(value):
 def test_home_live_cross_field_and_parent_feature_contracts():
     with pytest.raises(AdminWebConfigError, match="must exceed"):
         admin_web_config_from_settings(enabled_settings(web_admin_home_live_enabled="true", web_admin_home_live_request_timeout_seconds=10))
-    with pytest.raises(AdminWebConfigError, match="requires"):
-        admin_web_config_from_settings(enabled_settings(web_admin_enabled="false", web_admin_home_live_enabled="true"))
+    config = admin_web_config_from_settings(enabled_settings(web_admin_enabled="false", web_admin_home_live_enabled="true"))
+    assert config.home_live_enabled is False
 
 
 def test_optional_source_does_not_join_runtime_readiness_gate(tmp_path):

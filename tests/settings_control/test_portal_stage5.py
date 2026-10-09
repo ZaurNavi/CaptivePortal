@@ -1,3 +1,4 @@
+from . import adopt
 """Stage-5 + C1 disposable ordinary Settings proofs; no external I/O."""
 import json
 import logging
@@ -156,7 +157,7 @@ def test_resolution_and_clear_precedence(tmp_path):
 
 def test_mutation_receipts_common_cas_and_exact_response(tmp_path):
     boot = stack(tmp_path)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     key = str(uuid.uuid4())
     changed = portal_write(boot, key=key)
     assert changed.status == 201
@@ -265,7 +266,7 @@ def test_read_adopted_pending_and_untrusted(tmp_path):
     boot = stack(tmp_path)
     read = boot.admin_context.read_service
     assert all(row["effective_value"] is None for row in read.read_portal()["settings"])
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     portal_write(boot)
     body = read.read_portal()
     assert body["pending_setting_count"] == 1

@@ -253,7 +253,7 @@ def _start_public_traffic_worker(app) -> None:
         _public_traffic_worker = None
 
 
-def _configure_analytics(app, settings, registry_read_service) -> None:
+def _configure_analytics(app, settings, registry_read_service, feature_plan) -> None:
     """Attach the demand-only Analytics runtime after source composition."""
     global _analytics_runtime
 
@@ -264,6 +264,7 @@ def _configure_analytics(app, settings, registry_read_service) -> None:
             _visit_lifecycle,
             registry_read_service,
             logger,
+            feature_plan=feature_plan,
         )
         app.extensions["analytics_runtime"] = _analytics_runtime
         if _analytics_runtime.blueprint is not None:
@@ -275,7 +276,7 @@ def _configure_analytics(app, settings, registry_read_service) -> None:
 
 
 def _configure_admin_web(app, settings, registry_read_service, settings_control=None,
-                         controller_public_snapshot=None) -> None:
+                         controller_public_snapshot=None, *, feature_plan) -> None:
     """Attach Admin Web after all existing read boundaries are composed."""
     global _admin_web_runtime
 
@@ -301,6 +302,7 @@ def _configure_admin_web(app, settings, registry_read_service, settings_control=
             visit_runtime=_visit_lifecycle,
             settings_control=settings_control,
             controller_public_snapshot=controller_public_snapshot,
+            feature_plan=feature_plan,
         )
         app.extensions["admin_web_runtime"] = _admin_web_runtime
         if _admin_web_runtime.blueprint is not None:
@@ -484,11 +486,12 @@ def main() -> None:
         )
     except Exception:
         logger.exception("visit_lifecycle_reconciliation_start_failed")
-    _configure_analytics(app, settings, registry_read_service)
+    _configure_analytics(app, settings, registry_read_service, settings_bootstrap.feature_plan)
     _configure_admin_web(app, settings, registry_read_service, settings_bootstrap.admin_context,
-                         controller_public_snapshot)
+                         controller_public_snapshot, feature_plan=settings_bootstrap.feature_plan)
     if settings_bootstrap.activation_service is not None:
-        settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime)
+        settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime, _analytics_runtime,
+                                                    feature_plan=settings_bootstrap.feature_plan)
     # Shared-provider consumers may use candidate G only after durable adoption.
     try:
         _pending_session_cleaner.start()

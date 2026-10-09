@@ -22,6 +22,8 @@ def resolve_settings(base_settings, explicit_environment_names, overrides, gener
     for definition in registry:
         raw = base_settings.get(definition.settings_dict_key, definition.repository_default_value)
         if definition.value_type == "string":
+            if definition.domain == "features":
+                validate_setting_value(definition, raw)
             # A shadowed invalid deployment value is not the selected candidate.
             base = raw
             selected = overrides.get(definition.key, base)

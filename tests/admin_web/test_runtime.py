@@ -4,7 +4,17 @@ import logging
 from types import SimpleNamespace
 
 import run as process_runtime
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 from app.current_state.read_service import CurrentStateReadService
 
 from .conftest import enabled_settings
@@ -253,7 +263,8 @@ def test_process_runtime_composes_admin_after_sources(monkeypatch):
     monkeypatch.setattr(process_runtime, "_observation_foundation", "observation-runtime")
     monkeypatch.setattr(process_runtime, "_visit_lifecycle", "visit-runtime")
     monkeypatch.setattr(process_runtime, "create_admin_web_runtime", create)
-    process_runtime._configure_admin_web(App(), {"web_admin_enabled": "false"}, "registry")
+    process_runtime._configure_admin_web(App(), {"web_admin_enabled": "false"}, "registry",
+        feature_plan=AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, {"web_admin_enabled": "false"}, {}, {}, {})))
     assert seen["analytics"] is analytics
     assert seen["registry"] == "registry"
     assert seen["visits"] == "visit-read"
@@ -309,7 +320,8 @@ def test_process_runtime_starts_ap24_telemetry_after_admin_composition(monkeypat
     )
 
     process_runtime._configure_admin_web(
-        App(), {"web_admin_enabled": "true"}, None
+        App(), {"web_admin_enabled": "true"}, None,
+        feature_plan=AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, {"web_admin_enabled": "true"}, {}, {}, {}))
     )
 
     assert events == ["compose_admin", "compose_worker", "start"]
@@ -326,9 +338,10 @@ def test_process_runtime_admin_failure_is_fail_open(monkeypatch):
     monkeypatch.setattr(
         process_runtime,
         "create_admin_web_runtime",
-        lambda *_: (_ for _ in ()).throw(RuntimeError("boom")),
+        lambda *_, **__: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    process_runtime._configure_admin_web(App(), {}, None)
+    process_runtime._configure_admin_web(App(), {}, None,
+        feature_plan=AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, {}, {}, {}, {})))
     assert process_runtime._admin_web_runtime is None
 
 
@@ -358,7 +371,8 @@ def test_ap24_telemetry_composition_failure_does_not_disable_admin(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    process_runtime._configure_admin_web(App(), {}, None)
+    process_runtime._configure_admin_web(App(), {}, None,
+        feature_plan=AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, {}, {}, {}, {})))
 
     assert process_runtime._admin_web_runtime is selected
     assert App.extensions["admin_web_runtime"] is selected

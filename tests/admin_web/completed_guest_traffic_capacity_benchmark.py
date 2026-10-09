@@ -25,6 +25,8 @@ from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app.admin_web import create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
 from app.analytics.source_gateway import (
     _completed_visit_authorization_sql,
     _completed_visit_evidence_sql,
@@ -292,17 +294,21 @@ def main() -> int:
         visits, observations, registry, immutable, _evaluated = _build(root)
         boundaries = (ReadBoundary(observations), ReadBoundary(visits), ReadBoundary(registry))
         before = {name: _fingerprint(path) for name, path in immutable.items()}
+        settings = enabled_settings(
+            web_admin_allowed_site_ids=SITE,
+            web_admin_default_site_id=SITE,
+            web_admin_traffic_enabled="true",
+            web_admin_traffic_completed_sessions_enabled="true",
+        )
+        feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
         runtime = create_admin_web_runtime(
-            enabled_settings(
-                web_admin_allowed_site_ids=SITE,
-                web_admin_default_site_id=SITE,
-                web_admin_traffic_enabled="true",
-                web_admin_traffic_completed_sessions_enabled="true",
-            ),
+            settings,
             SimpleNamespace(state="active", visit_service=object()),
             boundaries[2], boundaries[1], boundaries[0],
             logging.getLogger("traffic08-product-benchmark"),
+            feature_plan=feature_plan,
         )
+        assert runtime.feature_plan is feature_plan
         app = Flask(__name__)
         app.config.update(TESTING=True)
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)

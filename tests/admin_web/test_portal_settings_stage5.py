@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+from types import SimpleNamespace
 import pytest
 from flask import Flask
 from app.admin_web import create_admin_web_runtime
@@ -22,12 +23,14 @@ def portal_app(tmp_path, *, grants=(READ, WRITE), enabled=True, unavailable=Fals
         settings_db_path=str(tmp_path / "settings.sqlite3"))}
     boot = bootstrap_settings_control(base_settings=base, explicit_environment_names=set(), logger=logging.getLogger("portal-admin-test"))
     runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None,
-        logging.getLogger("portal-admin-test"), settings_control=boot.admin_context)
+        logging.getLogger("portal-admin-test"), settings_control=boot.admin_context, feature_plan=boot.feature_plan)
+    assert runtime.feature_plan is boot.feature_plan
     app = Flask(__name__)
     app.config["TESTING"] = True
     app.register_blueprint(runtime.blueprint)
     if boot.activation_service:
-        boot.activation_service.adopt(boot.runtime_settings, runtime)
+        boot.activation_service.adopt(boot.runtime_settings, runtime,
+            SimpleNamespace(feature_plan=boot.feature_plan, historical_source_mode="base"), feature_plan=boot.feature_plan)
     if unavailable:
         boot.admin_context.read_service.repository.db_path = str(tmp_path / "missing" / "settings.sqlite3")
     client = app.test_client()

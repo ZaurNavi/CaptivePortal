@@ -8,7 +8,17 @@ import pytest
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 from app.admin_web.config import AdminWebConfigError, admin_web_config_from_settings
 
 from .conftest import SITE_ID, enabled_settings, login
@@ -63,15 +73,14 @@ def test_traffic_config_defaults_and_env_example_are_safe():
 )
 def test_traffic_config_rejects_out_of_bounds_or_non_deadline_safe_values(key, value):
     with pytest.raises(AdminWebConfigError):
-        admin_web_config_from_settings(enabled_settings(**{key: value}))
+        admin_web_config_from_settings(enabled_settings(**{"web_admin_traffic_enabled": "true", key: value}))
 
 
 def test_traffic_enabled_requires_admin_enabled():
-    with pytest.raises(AdminWebConfigError, match="requires WEB_ADMIN_ENABLED"):
-        admin_web_config_from_settings(
-            {"web_admin_enabled": "false", "web_admin_traffic_enabled": "true"}
-        )
-
+    config = admin_web_config_from_settings(
+        {"web_admin_enabled": "false", "web_admin_traffic_enabled": "true"}
+    )
+    assert config.traffic_enabled is False
 
 @pytest.mark.parametrize("path", ["", "devices", "visits", "observations"])
 def test_disabled_traffic_hides_navigation_and_authorized_page_is_404(tmp_path, path):

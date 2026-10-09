@@ -129,12 +129,11 @@ def test_config_repr_redacts_username_and_hash():
 def test_device_list_context_admin_flag_defaults_false_and_requires_admin():
     disabled = admin_web_config_from_settings({"web_admin_enabled": "false"})
     assert disabled.device_list_context_enabled is False
-    with pytest.raises(AdminWebConfigError):
-        admin_web_config_from_settings({
-            "web_admin_enabled": "false",
-            "web_admin_device_list_context_enabled": "true",
-        })
-
+    config = admin_web_config_from_settings({
+        "web_admin_enabled": "false",
+        "web_admin_device_list_context_enabled": "true",
+    })
+    assert config.device_list_context_enabled is False
 
 def test_device_list_context_settings_surface_contains_flag_and_secret():
     settings = get_settings()

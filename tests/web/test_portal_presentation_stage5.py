@@ -91,7 +91,8 @@ def test_success_page_is_not_a_portal_settings_consumer():
 
 def test_operational_counter_and_controller_degradation_does_not_change_settings_adoption(tmp_path):
     boot = stack(tmp_path)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    from tests.settings_control import adopt
+    adopt(boot)
     # A failed worker/provider does not own Settings activation; normal error HTML still has the projection.
     app, _ = guest_app(**boot.runtime_settings)
     handler = app.extensions["portal_entry_handler"]

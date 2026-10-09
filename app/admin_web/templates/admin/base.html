@@ -1,5 +1,5 @@
 <!doctype html>
-{% set global_settings_page = page.key in ('settings', 'settings_controller', 'settings_portal') %}
+{% set global_settings_page = page.key in ('settings', 'settings_controller', 'settings_portal', 'settings_features') %}
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="{{ url_for('admin_web_v1.static', filename='admin.css') }}">
   {% if page.key == 'settings' %}
   <script defer src="{{ url_for('admin_web_v1.static', filename='settings.js') }}"></script>
+  {% elif page.key == 'settings_features' %}
+  <script defer src="{{ url_for('admin_web_v1.static', filename='features_settings.js') }}"></script>
   {% elif page.key == 'settings_controller' %}
   <script defer src="{{ url_for('admin_web_v1.static', filename='controller_settings.js') }}"></script>
   {% elif page.key == 'settings_portal' %}
@@ -68,6 +70,7 @@
       {% if global_settings_page %}
       <nav class="settings-tabs" aria-label="Settings sections">
         {% if settings_general_allowed %}<a class="nav-link{% if page.key == 'settings' %} is-active{% endif %}" href="/admin/settings"{% if page.key == 'settings' %} aria-current="page"{% endif %}>General</a>{% endif %}
+        {% if settings_features_allowed %}<a class="nav-link{% if page.key == 'settings_features' %} is-active{% endif %}" href="/admin/settings/features"{% if page.key == 'settings_features' %} aria-current="page"{% endif %}>Features</a>{% endif %}
         {% if settings_controller_allowed %}<a class="nav-link{% if page.key == 'settings_controller' %} is-active{% endif %}" href="/admin/settings/controller"{% if page.key == 'settings_controller' %} aria-current="page"{% endif %}>Controller</a>{% endif %}
         {% if settings_portal_allowed %}<a class="nav-link{% if page.key == 'settings_portal' %} is-active{% endif %}" href="/admin/settings/portal"{% if page.key == 'settings_portal' %} aria-current="page"{% endif %}>Portal</a>{% endif %}
       </nav>
@@ -76,6 +79,10 @@
         {% if page.key == 'settings' %}
         id="settings-page" data-api-base="/admin/api/v1/settings"
         data-store-state="{{ settings_store_state }}" data-csrf-token="{{ csrf_token }}"
+        {% elif page.key == 'settings_features' %}
+        id="features-settings-page" data-api-base="/admin/api/v1/settings/features"
+        data-store-state="{{ features_store_state }}"
+        data-write-allowed="{{ 'true' if features_write_allowed else 'false' }}" data-csrf-token="{{ csrf_token }}"
         {% elif page.key == 'settings_controller' %}
         id="controller-settings-page" data-controller-state="{{ controller_settings_state }}"
         data-write-allowed="{{ 'true' if controller_settings_write_allowed else 'false' }}" data-csrf-token="{{ csrf_token }}"

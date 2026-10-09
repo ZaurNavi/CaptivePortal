@@ -6,6 +6,13 @@ from tests.visitor_registry.test_snapshot_runtime import _prepare_main
 from . import stack
 
 
+def feature_composition(boot, monkeypatch):
+    monkeypatch.setattr(runtime, "_analytics_runtime", SimpleNamespace(
+        feature_plan=boot.feature_plan, historical_source_mode="base"))
+    return SimpleNamespace(feature_plan=boot.feature_plan)
+
+
+
 @pytest.mark.parametrize("failure", [None, "durable_write", "configuration"])
 def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch, failure):
     events, _controller, _collector, _registry, app, _observed = _prepare_main(monkeypatch)
@@ -25,8 +32,8 @@ def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch,
             raise SettingsError("settings_store_unavailable")
         return original(*args, **kwargs)
     monkeypatch.setattr(boot.activation_service.repository, "activation", activation)
-    monkeypatch.setattr(runtime, "_admin_web_runtime", SimpleNamespace(config=None) if failure == "configuration" else None)
-    monkeypatch.setattr(runtime, "_configure_admin_web", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_admin_web_runtime", SimpleNamespace(config=None, feature_plan=boot.feature_plan) if failure == "configuration" else feature_composition(boot, monkeypatch))
+    monkeypatch.setattr(runtime, "_configure_admin_web", lambda *_args, **_kwargs: None)
     def factory(**kwargs):
         assert kwargs["settings"] is boot.runtime_settings
         # The old test helper only observes host; supply an otherwise equivalent fake app.
@@ -79,7 +86,7 @@ def test_all_controller_consumers_follow_adoption(tmp_path, monkeypatch, failure
     monkeypatch.setattr(runtime, "create_pending_session_cleaner", lambda **_: pending)
     monkeypatch.setattr(runtime, "create_observation_foundation", lambda **_: observation)
     monkeypatch.setattr(runtime, "_configure_current_state", lambda *_: setattr(runtime, "_current_state_runtime", current))
-    monkeypatch.setattr(runtime, "_configure_admin_web", lambda *_: setattr(runtime, "_admin_web_runtime", None))
+    monkeypatch.setattr(runtime, "_configure_admin_web", lambda *_, **__: setattr(runtime, "_admin_web_runtime", feature_composition(boot, monkeypatch)))
     if failure == "provider":
         monkeypatch.setattr(runtime, "create_controller", lambda _: (_ for _ in ()).throw(RuntimeError("composition failure")))
     if failure == "projection":
@@ -201,10 +208,10 @@ def test_local_observation_preparation_precedes_composition_and_adoption(tmp_pat
         assert all(not worker.running for worker in workers(observation))
         assert provider_calls == []
 
-    def admin(*_):
+    def admin(*_, **__):
         events.append("configure_admin_web")
         assert not boot.admin_context.read_service._adopted and provider_calls == []
-        runtime._admin_web_runtime = None
+        runtime._admin_web_runtime = feature_composition(boot, monkeypatch)
 
     monkeypatch.setattr(runtime, "_configure_analytics", analytics)
     monkeypatch.setattr(runtime, "_configure_admin_web", admin)

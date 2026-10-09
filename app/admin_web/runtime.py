@@ -37,6 +37,7 @@ from .device_list_context_cursor import DeviceListContextCursorCodec
 @dataclass(slots=True)
 class AdminWebRuntime:
     state: str
+    feature_plan: Any = None
     config: AdminWebConfig | None = None
     session_store: AdminSessionStore | None = None
     preauth_store: AdminPreAuthCsrfStore | None = None
@@ -91,6 +92,7 @@ def create_admin_web_runtime(
     observation_read_service: Any,
     logger: logging.Logger,
     *,
+    feature_plan,
     current_state_read_service: Any | None = None,
     authorization_health_tracker: Any | None = None,
     current_state_runtime: Any | None = None,
@@ -100,11 +102,12 @@ def create_admin_web_runtime(
     controller_public_snapshot: Any | None = None,
 ) -> AdminWebRuntime:
     """Create Admin security state without mutating or querying data sources."""
+    settings = feature_plan.composition_settings(settings)
     try:
-        config = admin_web_config_from_settings(settings)
+        config = admin_web_config_from_settings(settings, feature_plan=feature_plan)
     except AdminWebConfigError:
         logger.exception("admin.runtime_configuration_failed")
-        return AdminWebRuntime(state="unavailable")
+        return AdminWebRuntime(state="unavailable", feature_plan=feature_plan)
     try:
         device_list_context_config = device_list_context_config_from_settings(
             settings,
@@ -133,6 +136,7 @@ def create_admin_web_runtime(
     if not config.enabled:
         return AdminWebRuntime(
             state="disabled",
+            feature_plan=feature_plan,
             config=config,
             device_list_context_config=device_list_context_config,
             device_list_context_state=device_list_context_state,
@@ -171,20 +175,24 @@ def create_admin_web_runtime(
         else None
     )
     try:
+        if activity_requested and current_state_config is None:
+            # Configuration proof is independent of transient read/source readiness.
+            from app.current_state.config import current_state_config_from_settings
+            current_state_config = current_state_config_from_settings(settings)
         activity_config = home_activity_config_from_settings(
             settings,
             admin_config=config,
             current_state_config=current_state_config,
         )
         activity_state = "active" if activity_config.enabled else "disabled"
-    except HomeActivityConfigError as exc:
+    except (HomeActivityConfigError, ValueError) as exc:
         activity_config = None
         activity_state = "unavailable"
         logger.error(
             "admin.home_activity_configuration_failed",
             extra={
                 "event": "admin.home_activity_configuration_failed",
-                "reason": exc.reason,
+                "reason": getattr(exc, "reason", "configuration_error"),
             },
             exc_info=True,
         )
@@ -429,6 +437,7 @@ def create_admin_web_runtime(
         except Exception:
             logger.error("admin.controller_settings_projection_unavailable")
     runtime = AdminWebRuntime(
+        feature_plan=feature_plan,
         state=(
             "active"
             if query_service is not None

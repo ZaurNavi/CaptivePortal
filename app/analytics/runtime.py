@@ -47,6 +47,8 @@ class AnalyticsRuntime:
         self,
         *,
         state: str,
+        feature_plan=None,
+        historical_source_mode="base",
         config: AnalyticsConfig | None,
         api_config: AnalyticsApiConfig | None,
         source_health: Mapping[str, SourceBoundaryHealth] | None = None,
@@ -61,6 +63,8 @@ class AnalyticsRuntime:
         register_routes: bool = False,
     ):
         self.state = state
+        self.feature_plan = feature_plan
+        self.historical_source_mode = historical_source_mode
         self.config = config
         self.api_config = api_config
         self.source_health = dict(source_health or {})
@@ -121,13 +125,17 @@ def create_analytics_runtime(
     visit_runtime: Any,
     registry_read_service: Any,
     logger: logging.Logger,
+    *, feature_plan,
 ) -> AnalyticsRuntime:
     """Create Analytics from existing read boundaries; never initialize them."""
+    historical_source_mode = ("projection" if settings.get("web_admin_enabled", "false") in (True, "true")
+                              and feature_plan.enabled("traffic.projection_read") else "base")
     try:
         api_config = analytics_api_config_from_settings(settings)
     except AnalyticsApiConfigError:
         _event(logger, "analytics.api_runtime_unavailable", "configuration_error")
         return AnalyticsRuntime(
+            feature_plan=feature_plan, historical_source_mode=historical_source_mode,
             state="unavailable",
             config=None,
             api_config=None,
@@ -139,6 +147,7 @@ def create_analytics_runtime(
     except AnalyticsConfigError:
         if not api_config.enabled:
             return AnalyticsRuntime(
+                feature_plan=feature_plan, historical_source_mode=historical_source_mode,
                 state="disabled",
                 config=None,
                 api_config=api_config,
@@ -146,6 +155,7 @@ def create_analytics_runtime(
             )
         _event(logger, "analytics.api_runtime_unavailable", "metric_configuration_error")
         return AnalyticsRuntime(
+            feature_plan=feature_plan, historical_source_mode=historical_source_mode,
             state="unavailable",
             config=None,
             api_config=api_config,
@@ -155,6 +165,7 @@ def create_analytics_runtime(
 
     if not analytics_config.enabled or not api_config.enabled:
         return AnalyticsRuntime(
+            feature_plan=feature_plan, historical_source_mode=historical_source_mode,
             state="disabled",
             config=analytics_config,
             api_config=api_config,
@@ -175,6 +186,7 @@ def create_analytics_runtime(
     if not all(item.available for item in source_health.values()):
         _event(logger, "analytics.api_runtime_unavailable", "source_unavailable")
         return AnalyticsRuntime(
+            feature_plan=feature_plan, historical_source_mode=historical_source_mode,
             state="unavailable",
             config=analytics_config,
             api_config=api_config,
@@ -207,11 +219,9 @@ def create_analytics_runtime(
         _event(logger, "analytics.home_activity_unavailable", "construction_error")
     try:
         historical_gateway = gateway
-        from app.traffic_projection.config import projection_read_enabled
-
-        if projection_read_enabled(settings):
+        if historical_source_mode == "projection":
             from app.traffic_projection.config import (
-                traffic_projection_config_from_settings,
+                traffic_projection_read_config_from_settings,
             )
             from app.traffic_projection.read_service import (
                 TrafficProjectionReadService,
@@ -220,10 +230,10 @@ def create_analytics_runtime(
                 TrafficProjectionRepository,
             )
 
-            projection_config = traffic_projection_config_from_settings(settings)
+            projection_config = traffic_projection_read_config_from_settings(settings)
             historical_gateway = TrafficProjectionReadService(
-                TrafficProjectionRepository(projection_config.db_path),
-                current_observation_db_path=projection_config.source_db_path,
+                TrafficProjectionRepository(projection_config.projection_db_path),
+                current_observation_db_path=projection_config.observation_db_path,
             )
         historical_traffic_service = HistoricalTrafficReadService(
             historical_gateway,
@@ -242,6 +252,7 @@ def create_analytics_runtime(
             "construction_error",
         )
     runtime = AnalyticsRuntime(
+        feature_plan=feature_plan, historical_source_mode=historical_source_mode,
         state="active",
         config=analytics_config,
         api_config=api_config,

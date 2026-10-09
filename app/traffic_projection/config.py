@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .models import TrafficProjectionConfig, TrafficProjectionConfigError
@@ -11,6 +12,29 @@ from .models import TrafficProjectionConfig, TrafficProjectionConfigError
 DEFAULT_DB_PATH = "/opt/CaptivePortal/data/traffic_projection.sqlite3"
 DEFAULT_LOCK_PATH = "/opt/CaptivePortal/data/traffic_projection.writer.lock"
 DEFAULT_SOURCE_DB_PATH = "/opt/CaptivePortal/data/observations.sqlite3"
+
+
+@dataclass(frozen=True, slots=True)
+class TrafficProjectionReadConfigV1:
+    read_enabled: bool
+    projection_db_path: str
+    observation_db_path: str
+    site_ids: tuple[str, ...]
+
+
+def traffic_projection_read_config_from_settings(settings):
+    """Read-only prerequisites; no writer flag, lock, service or health check."""
+    projection = _absolute(settings.get("traffic_projection_db_path", DEFAULT_DB_PATH),
+                           "TRAFFIC_PROJECTION_DB_PATH")
+    observation = _absolute(settings.get("observation_db_path", DEFAULT_SOURCE_DB_PATH),
+                            "OBSERVATION_DB_PATH")
+    if Path(projection).resolve(strict=False) == Path(observation).resolve(strict=False):
+        raise TrafficProjectionConfigError("Projection and Observation paths must be distinct")
+    sites = _csv(settings.get("observation_site_ids", ""))
+    from app.admin_web.config import SITE_ID_PATTERN
+    if any(SITE_ID_PATTERN.fullmatch(site) is None for site in sites):
+        raise TrafficProjectionConfigError("OBSERVATION_SITE_IDS is invalid")
+    return TrafficProjectionReadConfigV1(True, projection, observation, sites)
 
 
 def traffic_projection_config_from_settings(

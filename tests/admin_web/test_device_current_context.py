@@ -18,7 +18,17 @@ from app.admin_web.models import AdminPrincipal
 from app.admin_web.policy import AdminAccessPolicy
 from app.admin_web.query_service import AdminQueryService
 from app.admin_web.query_service import AdminQueryForbidden, AdminQueryResponse
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 from app.analytics.current_guest_traffic import (
     CurrentGuestTrafficClientResult,
     CurrentGuestTrafficReadService,
@@ -279,12 +289,11 @@ def test_device_current_serializer_rejects_reversed_normal_capture_interval():
 
 def test_device_current_flag_defaults_off_and_requires_admin():
     assert admin_web_config_from_settings({"web_admin_enabled": "false"}).device_current_context_enabled is False
-    with pytest.raises(AdminWebConfigError):
-        admin_web_config_from_settings({
-            "web_admin_enabled": "false",
-            "web_admin_device_current_context_enabled": "true",
-        })
-
+    config = admin_web_config_from_settings({
+        "web_admin_enabled": "false",
+        "web_admin_device_current_context_enabled": "true",
+    })
+    assert config.device_current_context_enabled is False
 
 class _DeviceGateway:
     def __init__(self):

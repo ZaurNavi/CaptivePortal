@@ -29,11 +29,13 @@ def setup(tmp_path, monkeypatch, *, authenticated=True):
     boot = bootstrap_settings_control(base_settings=base, explicit_environment_names={"OMADA_URL"}, logger=logging.getLogger("as03"))
     safe = public_omada_snapshot(build_omada_runtime_config(boot.runtime_settings, boot.controller_secret_resolution), frozenset({"OMADA_URL"}), boot.resolved_snapshot, boot.controller_secret_resolution)
     runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None, logging.getLogger("as03"),
-        settings_control=boot.admin_context, controller_public_snapshot=safe)
+        settings_control=boot.admin_context, controller_public_snapshot=safe, feature_plan=boot.feature_plan)
+    assert runtime.feature_plan is boot.feature_plan
     app = Flask(__name__)
     app.config["TESTING"] = True
     app.register_blueprint(runtime.blueprint)
-    boot.activation_service.adopt(boot.runtime_settings, runtime)
+    boot.activation_service.adopt(boot.runtime_settings, runtime,
+        SimpleNamespace(feature_plan=boot.feature_plan, historical_source_mode="base"), feature_plan=boot.feature_plan)
     client = app.test_client()
     csrf = ""
     if authenticated:
@@ -172,7 +174,8 @@ def test_missing_or_malformed_configured_boundary_is_read_surface_unavailable(tm
     runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None, logging.getLogger("as03"),
         settings_control=SimpleNamespace(feature_enabled=True, store_state="available",
             read_service=boundary, mutation_service=boot.admin_context.mutation_service),
-        controller_public_snapshot=original.controller_settings_read_service.snapshot)
+        controller_public_snapshot=original.controller_settings_read_service.snapshot, feature_plan=boot.feature_plan)
+    assert runtime.feature_plan is boot.feature_plan
     assert runtime.controller_settings_state == "unavailable"
     app = Flask("controller-missing-configured-boundary")
     app.register_blueprint(runtime.blueprint)

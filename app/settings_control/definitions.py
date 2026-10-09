@@ -26,6 +26,10 @@ class SettingsDefinition:
     environment_variable_name: str = ""
     presentation_type: str = "integer"
     required: bool = True
+    feature_id: str = ""
+    control_kind: str = ""
+    public_value_type: str = ""
+    parent_feature_keys: tuple[str, ...] = ()
 
 
 _ROWS = (
@@ -93,6 +97,16 @@ class SettingsDefinitionRegistry:
                 settings_dict_key=key.lower(), environment_variable_name=key,
                 presentation_type=presentation, required=required))
         self.definitions += tuple(portal)
+        self.definitions += tuple(SettingsDefinition(
+            "WEB_ADMIN_" + suffix + "_ENABLED", "false", None, None,
+            label, description, "admin_feature_plan", "", group,
+            value_type="string", domain="features",
+            settings_dict_key=("WEB_ADMIN_" + suffix + "_ENABLED").lower(),
+            environment_variable_name="WEB_ADMIN_" + suffix + "_ENABLED",
+            presentation_type="boolean_toggle", feature_id=identity,
+            control_kind=kind, public_value_type="boolean",
+            parent_feature_keys=tuple("WEB_ADMIN_" + parent + "_ENABLED" for parent in parents),
+        ) for suffix, identity, label, description, group, kind, parents in _FEATURE_ROWS)
 
     def __iter__(self):
         return iter(self.definitions)
@@ -102,3 +116,24 @@ class SettingsDefinitionRegistry:
 
     def for_domain(self, domain):
         return tuple(item for item in self if item.domain == domain)
+
+
+_FEATURE_ROWS = (
+    ("HOME_LIVE", "home.live", "Live network state", "Show the Home live network state product.", "home", "surface", ()),
+    ("HOME_TRAFFIC", "home.traffic", "Traffic summary", "Show the Home current traffic summary product.", "home", "surface", ("HOME_LIVE",)),
+    ("HOME_ACTIVITY", "home.activity", "Activity", "Show the Home activity product.", "home", "surface", ("HOME_LIVE",)),
+    ("HOME_HEALTH", "home.health", "System health", "Show the Home system health product.", "home", "surface", ()),
+    ("TRAFFIC", "traffic.root", "Traffic page", "Expose the Admin Traffic product.", "traffic", "surface", ()),
+    ("TRAFFIC_HISTORY", "traffic.history", "Historical traffic", "Expose historical traffic on the Traffic page.", "traffic", "surface", ("TRAFFIC",)),
+    ("TRAFFIC_STATISTICS", "traffic.statistics", "Statistics", "Expose Traffic statistics.", "traffic", "surface", ("TRAFFIC_HISTORY",)),
+    ("TRAFFIC_PEAK", "traffic.peak", "Peak periods", "Expose Traffic peak-period analysis.", "traffic", "surface", ("TRAFFIC_STATISTICS",)),
+    ("TRAFFIC_BY_AP", "traffic.by_ap", "Traffic by AP", "Expose historical Traffic grouped by access point.", "traffic", "surface", ("TRAFFIC_HISTORY",)),
+    ("TRAFFIC_INDEPENDENT_RANGES", "traffic.independent_ranges", "Independent ranges", "Use independent page-local historical ranges for supported Traffic products.", "traffic", "behavior", ("TRAFFIC_HISTORY",)),
+    ("TRAFFIC_AP_SHARE", "traffic.ap_share", "AP share", "Expose AP Traffic Share.", "traffic", "surface", ("TRAFFIC_INDEPENDENT_RANGES",)),
+    ("TRAFFIC_ONLINE_GUESTS", "traffic.online_guests", "Online guests", "Expose current online guest traffic.", "traffic", "surface", ("TRAFFIC",)),
+    ("TRAFFIC_COMPLETED_SESSIONS", "traffic.completed_sessions", "Completed sessions", "Expose completed guest session traffic.", "traffic", "surface", ("TRAFFIC",)),
+    ("TRAFFIC_EVIDENCE", "traffic.evidence", "Evidence / data quality", "Expose Traffic evidence and data-quality information.", "traffic", "surface", ("TRAFFIC",)),
+    ("TRAFFIC_PROJECTION_READ", "traffic.projection_read", "Historical projection read source", "Use the Traffic Projection read boundary for supported historical Traffic products.", "traffic", "source_selector", ("TRAFFIC_HISTORY",)),
+    ("DEVICE_LIST_CONTEXT", "devices.list_context", "Device list context", "Enrich the Devices list with the existing Current State context overlay.", "devices", "overlay", ()),
+    ("DEVICE_CURRENT_CONTEXT", "devices.current_context", "Device current context", "Expose current network context on the Device Card.", "devices", "surface", ()),
+)

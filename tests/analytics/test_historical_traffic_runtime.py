@@ -5,6 +5,8 @@ import threading
 
 from app.analytics.historical_traffic import HistoricalTrafficReadService
 from app.analytics.runtime import create_analytics_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
 from app.analytics.source_gateway import AnalyticsSourceGateway
 from app.visit_lifecycle.read_service import VisitLifecycleReadService
 from app.visitor_registry.registry_read_service import VisitorRegistryReadService
@@ -54,9 +56,12 @@ def test_runtime_exposes_optional_historical_service_without_startup_query(
     monkeypatch.setattr(
         AnalyticsSourceGateway, "historical_traffic_data", unexpected_query
     )
+    settings = _settings()
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
     runtime = create_analytics_runtime(
-        _settings(), observation, visit, registry, logging.getLogger("test")
+        settings, observation, visit, registry, logging.getLogger("test"), feature_plan=feature_plan
     )
+    assert runtime.feature_plan is feature_plan and runtime.historical_source_mode == "base"
     assert isinstance(runtime.historical_traffic_service, HistoricalTrafficReadService)
     assert tuple(thread.ident for thread in threading.enumerate()) == before
 
@@ -68,9 +73,12 @@ def test_historical_construction_failure_is_fail_open(analytics_stack, monkeypat
         raise RuntimeError("controlled")
 
     monkeypatch.setattr(HistoricalTrafficReadService, "__init__", fail)
+    settings = _settings()
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
     runtime = create_analytics_runtime(
-        _settings(), observation, visit, registry, logging.getLogger("test")
+        settings, observation, visit, registry, logging.getLogger("test"), feature_plan=feature_plan
     )
+    assert runtime.feature_plan is feature_plan and runtime.historical_source_mode == "base"
     assert runtime.state == "active"
     assert runtime.historical_traffic_service is None
     assert runtime.current_traffic_service is not None
@@ -81,9 +89,11 @@ def test_historical_construction_failure_is_fail_open(analytics_stack, monkeypat
 
 
 def test_disabled_runtime_has_no_historical_service():
+    settings = _settings(analytics_foundation_enabled="false")
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
     runtime = create_analytics_runtime(
-        _settings(analytics_foundation_enabled="false"),
-        None, None, None, logging.getLogger("test"),
+        settings, None, None, None, logging.getLogger("test"), feature_plan=feature_plan
     )
+    assert runtime.feature_plan is feature_plan and runtime.historical_source_mode == "base"
     assert runtime.state == "disabled"
     assert runtime.historical_traffic_service is None

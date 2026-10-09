@@ -275,14 +275,20 @@ def test_device_card_can_disagree_and_keeps_admin_site_policy(retained):
 def test_read_service_composed_from_existing_setting_without_db_creation(tmp_path):
     import logging
     from app.admin_web import create_admin_web_runtime
+    from app.settings_control.features import AdminFeaturePlanV1
+    from app.settings_control.models import ResolvedSettingsSnapshot
     from .conftest import enabled_settings
     path = tmp_path / "readonly-not-created.sqlite"
+    settings = enabled_settings(device_fingerprint_classification_db_path=str(path))
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
     runtime = create_admin_web_runtime(
-        enabled_settings(device_fingerprint_classification_db_path=str(path)),
+        settings,
         SimpleNamespace(state="active", visit_service=object()),
         SimpleNamespace(repository=SimpleNamespace(config=SimpleNamespace(db_path=tmp_path / "r"))),
         SimpleNamespace(repository=SimpleNamespace(db_path=tmp_path / "v")),
-        SimpleNamespace(_repository=SimpleNamespace(db_path=tmp_path / "o")), logging.getLogger("task06"))
+        SimpleNamespace(_repository=SimpleNamespace(db_path=tmp_path / "o")), logging.getLogger("task06"),
+        feature_plan=feature_plan)
+    assert runtime.feature_plan is feature_plan
     assert runtime.state == "active"
     assert runtime.query_service._fingerprint.get(SITE_ID, "00:11:22:33:44:55").state == "unavailable"
     assert not path.exists()

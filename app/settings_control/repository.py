@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from .definitions import SettingsDefinitionRegistry
 from .models import SettingsError, TARGET, utc_now
 
-SETTINGS_SCHEMA_VERSION = 4
+SETTINGS_SCHEMA_VERSION = 5
 SETTINGS_SQLITE_BUSY_TIMEOUT_MS = 1000
 _V1_DDL = (
     """CREATE TABLE settings_generations (
@@ -115,10 +115,15 @@ _SECRET_TRIGGERS = tuple(
 _V3_DDL = tuple(sql.replace("('general','controller')", "('general','controller','controller_secret')")
              .replace("request_payload_hash TEXT NOT NULL", "request_fingerprint_kind TEXT NOT NULL CHECK(request_fingerprint_kind IN ('sha256_canonical_json_v1','hmac_sha256_controller_secret_v1')), request_fingerprint TEXT NOT NULL")
              if sql.startswith("CREATE TABLE settings_idempotency ") else sql for sql in _V2_DDL) + _SECRET_DDL
-_DDL = tuple(sql.replace("setting_domain IN ('general','controller')", "setting_domain IN ('general','controller','portal')")
+_V4_DDL = tuple(sql.replace("setting_domain IN ('general','controller')", "setting_domain IN ('general','controller','portal')")
              .replace("setting_domain='controller' AND", "setting_domain IN ('controller','portal') AND")
              .replace("mutation_domain IN ('general','controller','controller_secret')",
                       "mutation_domain IN ('general','controller','controller_secret','portal')") for sql in _V3_DDL)
+_DDL = tuple(sql.replace("('general','controller','portal')", "('general','controller','portal','features')")
+             .replace("setting_domain IN ('controller','portal')", "setting_domain IN ('controller','portal','features')")
+             .replace("('general','controller','controller_secret','portal')",
+                      "('general','controller','controller_secret','portal','features')")
+             for sql in _V4_DDL)
 
 
 def canonical_json(value):
@@ -181,7 +186,7 @@ class SettingsRepository:
             if version == 0 and not tables:
                 for statement in (*_DDL, *_TRIGGERS, *_SECRET_TRIGGERS):
                     db.execute(statement)
-                db.execute("PRAGMA user_version=4")
+                db.execute("PRAGMA user_version=5")
                 db.execute("INSERT INTO settings_generations VALUES(0,NULL,'global',?,'system','settings_bootstrap',NULL)", (utc_now(),))
                 db.execute("INSERT INTO settings_target_state VALUES(?,NULL,NULL)", (TARGET,))
             elif version == 1:
@@ -190,13 +195,18 @@ class SettingsRepository:
                 self._migrate_v1(db)
                 self._migrate_v2(db)
                 self._migrate_v3(db)
+                self._migrate_v4(db)
             elif version == 2:
                 self._validate_schema(db, _V2_DDL)
                 self._validate_history(db)
                 self._migrate_v2(db)
                 self._migrate_v3(db)
+                self._migrate_v4(db)
             elif version == 3:
                 self._migrate_v3(db)
+                self._migrate_v4(db)
+            elif version == 4:
+                self._migrate_v4(db)
             elif version != SETTINGS_SCHEMA_VERSION:
                 raise SettingsError("settings_store_unavailable")
             self._validate_schema(db, _DDL)
@@ -206,7 +216,7 @@ class SettingsRepository:
 
     @staticmethod
     def _validate_schema(db, ddl):
-        extra = _SECRET_TRIGGERS if ddl is _DDL or ddl is _V3_DDL else ()
+        extra = _SECRET_TRIGGERS if ddl is _DDL or ddl is _V4_DDL or ddl is _V3_DDL else ()
         expected = {statement.split()[2]: statement for statement in (*ddl, *_TRIGGERS, *extra)}
         actual = {row[0]: row[1] for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type IN ('table','trigger') AND name NOT LIKE 'sqlite_%'")}
         normalize = lambda value: " ".join(value.split())
@@ -259,7 +269,7 @@ class SettingsRepository:
             for action in ("update", "delete"):
                 db.execute(f"DROP TRIGGER {table}_immutable_{action}")
             db.execute(f"ALTER TABLE {table} RENAME TO {table}_v3")
-            db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE " + table + " ")))
+            db.execute(next(sql for sql in _V4_DDL if sql.startswith("CREATE TABLE " + table + " ")))
             columns = [row[1] for row in db.execute(f"PRAGMA table_info({table}_v3)")]
             names = ",".join(columns)
             db.execute(f"INSERT INTO {table} ({names}) SELECT {names} FROM {table}_v3")
@@ -268,6 +278,27 @@ class SettingsRepository:
                 if statement.startswith("CREATE TRIGGER " + table + "_"):
                     db.execute(statement)
         db.execute("PRAGMA user_version=4")
+        self._validate_schema(db, _V4_DDL)
+        self._validate_history(db)
+        validate_secret_history(db)
+
+    def _migrate_v4(self, db):
+        self._validate_schema(db, _V4_DDL)
+        self._validate_history(db)
+        from .controller_secret import validate_secret_history
+        validate_secret_history(db)
+        for table in ("settings_mutation_audit", "settings_idempotency"):
+            for action in ("update", "delete"):
+                db.execute(f"DROP TRIGGER {table}_immutable_{action}")
+            db.execute(f"ALTER TABLE {table} RENAME TO {table}_v4")
+            db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE " + table + " ")))
+            names = ",".join(row[1] for row in db.execute(f"PRAGMA table_info({table}_v4)"))
+            db.execute(f"INSERT INTO {table} ({names}) SELECT {names} FROM {table}_v4")
+            db.execute(f"DROP TABLE {table}_v4")
+            for statement in _TRIGGERS:
+                if statement.startswith("CREATE TRIGGER " + table + "_"):
+                    db.execute(statement)
+        db.execute("PRAGMA user_version=5")
         self._validate_schema(db, _DDL)
         self._validate_history(db)
         validate_secret_history(db)
@@ -285,7 +316,7 @@ class SettingsRepository:
         schema_version = db.execute("PRAGMA user_version").fetchone()[0]
         for row in db.execute("SELECT setting_key,value_type,integer_value" + ("" if legacy else ",string_value") + " FROM settings_overrides"):
             definition = self.registry.get(row[0])
-            if definition is None or row[1] != definition.value_type or (schema_version < 4 and definition.domain == "portal"):
+            if definition is None or row[1] != definition.value_type or (schema_version < 4 and definition.domain == "portal") or (schema_version < 5 and definition.domain == "features"):
                 raise SettingsError("settings_store_unavailable")
             if row[1] == "integer":
                 if type(row[2]) is not int or not definition.min_value <= row[2] <= definition.max_value:
