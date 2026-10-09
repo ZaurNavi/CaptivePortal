@@ -5,7 +5,8 @@ DEFAULT_GLOBAL_CAPABILITIES = frozenset({
 })
 SECRET_WRITE_CAPABILITY = "admin.write.settings.controller.secret"
 GLOBAL_CAPABILITIES = DEFAULT_GLOBAL_CAPABILITIES | {SECRET_WRITE_CAPABILITY,
-    "admin.read.settings.portal", "admin.write.settings.portal"}
+    "admin.read.settings.portal", "admin.write.settings.portal",
+    "admin.read.settings.features", "admin.write.settings.features"}
 DEFAULT_GLOBAL_CAPABILITIES_TEXT = ",".join(sorted(DEFAULT_GLOBAL_CAPABILITIES))
 
 

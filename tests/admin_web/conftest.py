@@ -9,6 +9,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash
 
 from app.admin_web import create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
 
 
 SITE_ID = "0123456789abcdef01234567"
@@ -35,8 +37,11 @@ def enabled_settings(**overrides):
 
 @pytest.fixture
 def admin_app(tmp_path):
+    settings = enabled_settings()
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
     runtime = create_admin_web_runtime(
-        enabled_settings(),
+        settings,
         SimpleNamespace(state="active", visit_service=object()),
         SimpleNamespace(
             repository=SimpleNamespace(
@@ -52,7 +57,9 @@ def admin_app(tmp_path):
             )
         ),
         __import__("logging").getLogger("admin-web-test"),
+        feature_plan=feature_plan,
     )
+    assert runtime.feature_plan is feature_plan
     app = Flask(__name__)
     app.config.update(TESTING=True)
     app.wsgi_app = ProxyFix(

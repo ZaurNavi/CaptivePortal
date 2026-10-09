@@ -3,6 +3,7 @@ import logging
 import uuid
 from pathlib import Path
 from dataclasses import replace
+from types import SimpleNamespace
 import pytest
 from flask import Flask
 from app.admin_web import create_admin_web_runtime
@@ -23,11 +24,13 @@ def setup(tmp_path, monkeypatch, *, secret_grant=True, authenticated=True):
     config = build_omada_runtime_config(boot.runtime_settings, boot.controller_secret_resolution)
     public = public_omada_snapshot(config, frozenset({"OMADA_CLIENT_SECRET"}), boot.resolved_snapshot, boot.controller_secret_resolution)
     runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None, logging.getLogger("s4"),
-                                      settings_control=boot.admin_context, controller_public_snapshot=public)
+                                      settings_control=boot.admin_context, controller_public_snapshot=public, feature_plan=boot.feature_plan)
+    assert runtime.feature_plan is boot.feature_plan
     app = Flask(__name__)
     app.config["TESTING"] = True
     app.register_blueprint(runtime.blueprint)
-    boot.activation_service.adopt(boot.runtime_settings, runtime)
+    boot.activation_service.adopt(boot.runtime_settings, runtime,
+        SimpleNamespace(feature_plan=boot.feature_plan, historical_source_mode="base"), feature_plan=boot.feature_plan)
     client = app.test_client()
     csrf = ""
     if authenticated:

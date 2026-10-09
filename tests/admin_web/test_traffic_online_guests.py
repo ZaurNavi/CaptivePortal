@@ -8,7 +8,17 @@ import pytest
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 from app.admin_web.config import AdminWebConfigError, admin_web_config_from_settings
 from app.admin_web.current_guest_traffic_serialization import (
     CurrentGuestTrafficSerializationError,
@@ -140,11 +150,12 @@ def _url(site=SITE_ID, query=""):
 
 def test_flag_defaults_false_and_requires_only_admin_traffic():
     assert admin_web_config_from_settings({}).traffic_online_guests_enabled is False
-    with pytest.raises(AdminWebConfigError, match="ONLINE_GUESTS_ENABLED requires"):
-        admin_web_config_from_settings(enabled_settings(
-            web_admin_traffic_enabled="false",
-            web_admin_traffic_online_guests_enabled="true",
-        ))
+    config = admin_web_config_from_settings(enabled_settings(
+        web_admin_traffic_enabled="false",
+        web_admin_traffic_online_guests_enabled="true",
+    ))
+    assert config.traffic_online_guests_enabled is False
+
     config = admin_web_config_from_settings(enabled_settings(
         web_admin_traffic_enabled="true",
         web_admin_traffic_history_enabled="false",

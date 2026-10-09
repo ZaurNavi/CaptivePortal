@@ -390,3 +390,10 @@ input[type="radio"] { width: auto; min-height: 0; }
   #portal-settings-page .portal-setting-card { padding: .8rem; }
   #portal-settings-page .portal-settings-actions { gap: .5rem; }
 }
+/* Stage-6 feature controls share the existing Settings visual language. */
+.feature-settings-group { margin-block: 1.5rem; }
+.feature-settings-row { padding: 1rem; margin-block: .75rem; border: 1px solid var(--border, #d9dee8); border-radius: .75rem; }
+.feature-settings-label { display: flex; gap: .75rem; align-items: center; }
+.feature-settings-details { display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(0, 2fr); gap: .35rem 1rem; }
+.feature-settings-details dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .feature-settings-details { grid-template-columns: 1fr; } }

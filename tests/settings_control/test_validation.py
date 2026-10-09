@@ -37,7 +37,7 @@ def test_existing_semantic_authorities_called(monkeypatch):
 
 def test_cross_setting_validation_remains_authoritative():
     from tests.admin_web.conftest import enabled_settings
-    snapshot, resolution = snapshot_with_secret_resolution(**enabled_settings(web_admin_home_live_request_timeout_seconds="5"))
+    snapshot, resolution = snapshot_with_secret_resolution(**enabled_settings(web_admin_home_live_enabled="true", web_admin_home_live_request_timeout_seconds="5"))
     with pytest.raises(SettingsError, match="validation_failed"):
         SettingsValidationService().validate(snapshot, secret_resolution=resolution)
 

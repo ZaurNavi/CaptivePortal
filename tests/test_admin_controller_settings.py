@@ -20,6 +20,8 @@ from app.controllers.factory import create_controller
 from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
 from app.settings_control.definitions import SettingsDefinitionRegistry
 from app.settings_control.models import SettingsError
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
 from tests.admin_web.conftest import enabled_settings, login
 
 
@@ -47,11 +49,14 @@ def controller_app(*, enabled=True, projection=True, authenticated=True, policy=
     def read_controller():
         raise SettingsError("settings_store_unavailable")
 
-    runtime = create_admin_web_runtime(settings(web_admin_settings_enabled=enabled),
+    values = settings(web_admin_settings_enabled=enabled)
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, values, {}, {}, {}))
+    runtime = create_admin_web_runtime(values,
         None, None, None, None, logging.getLogger("as02"),
         settings_control=SimpleNamespace(feature_enabled=enabled, store_state=store,
                                         read_service=SimpleNamespace(read_controller=read_controller), mutation_service=None),
-        controller_public_snapshot=snapshot() if projection else None)
+        controller_public_snapshot=snapshot() if projection else None, feature_plan=feature_plan)
+    assert runtime.feature_plan is feature_plan
     if policy is not None:
         runtime.access_policy = policy
         from app.admin_web.routes import create_admin_web_blueprint
@@ -280,8 +285,11 @@ def test_read_failure_is_sanitized_and_provider_still_usable(monkeypatch, caplog
                          public_traffic_service=None, portal_evidence_sink=None, client_hints_probe=None)
     assert app.test_client().get("/").status_code != 500
     monkeypatch.setattr("app.admin_web.controller_settings.ControllerConfigurationReadService", fail)
-    runtime = create_admin_web_runtime(settings(), None, None, None, None, logging.getLogger("as02"),
-                                      controller_public_snapshot=snapshot())
+    values = settings()
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, values, {}, {}, {}))
+    runtime = create_admin_web_runtime(values, None, None, None, None, logging.getLogger("as02"),
+                                      controller_public_snapshot=snapshot(), feature_plan=feature_plan)
+    assert runtime.feature_plan is feature_plan
     assert runtime.controller_settings_state == "unavailable" and runtime.blueprint is not None
     assert SECRET not in caplog.text
 
@@ -303,15 +311,22 @@ def test_frontend_nonsecret_writable_and_general_allowlist_unchanged():
     assert 'method: "GET"' in source and 'credentials: "same-origin"' in source
     assert "Configured presence" in source and "Effective presence" in source
     registry = tuple(SettingsDefinitionRegistry())
-    assert len(registry) == 29
+    assert len(registry) == 46
     assert len([item for item in registry if item.domain == "general"]) == 12
-    assert all(item.key.startswith("WEB_ADMIN_") for item in registry if item.domain == "general")
+    assert [item.key for item in registry if item.domain == "general"] == ["WEB_ADMIN_" + suffix for suffix in (
+        "DEVICE_PAGE_SIZE", "VISIT_PAGE_SIZE", "OBSERVATION_PAGE_SIZE", "OBSERVATION_MAX_WINDOW_HOURS",
+        "CURRENT_STATE_PAGE_SIZE", "HOME_TRAFFIC_PAGE_SIZE", "HOME_LIVE_REFRESH_SECONDS",
+        "HOME_TRAFFIC_REFRESH_SECONDS", "TRAFFIC_REFRESH_SECONDS", "HOME_ACTIVITY_REFRESH_SECONDS",
+        "HOME_HEALTH_REFRESH_SECONDS", "HOME_AP_24H_REFRESH_SECONDS")]
     assert [item.key for item in registry if item.domain == "controller"] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
     assert "OMADA_CLIENT_SECRET" not in {item.key for item in registry}
     portal = [item for item in registry if item.domain == "portal"]
     assert len(portal) == 14
     assert all(item.key.startswith("PORTAL_") for item in portal)
-    assert {item.domain for item in registry} == {"general", "controller", "portal"}
+    from app.portal_presentation import PORTAL_SETTING_DEFAULTS
+    assert [item.key for item in portal] == list(PORTAL_SETTING_DEFAULTS)
+    assert len([item for item in registry if item.domain == "features"]) == 17
+    assert {item.domain for item in registry} == {"general", "controller", "portal", "features"}
 
 
 @pytest.mark.parametrize("injected_settings", [True, False])
@@ -363,7 +378,9 @@ def test_main_shared_config_single_environment_capture_and_projection_isolation(
     bootstrap = run.bootstrap_settings_control
     def capture_bootstrap(**kwargs):
         captured["environment_names"] = kwargs["explicit_environment_names"]
-        return bootstrap(**kwargs)
+        boot = bootstrap(**kwargs)
+        captured["feature_plan"] = boot.feature_plan
+        return boot
     monkeypatch.setattr(run, "bootstrap_settings_control", capture_bootstrap)
     def factory(config):
         captured["config"] = config
@@ -377,7 +394,8 @@ def test_main_shared_config_single_environment_capture_and_projection_isolation(
             raise RuntimeError(SECRET)
         return projector(config, names, settings_snapshot, secret_resolution)
     monkeypatch.setattr(run, "public_omada_snapshot", project)
-    def admin(actual_app, actual_settings, registry, context, public_snapshot):
+    def admin(actual_app, actual_settings, registry, context, public_snapshot, *, feature_plan):
+        assert feature_plan is captured["feature_plan"]
         captured["public_snapshot"] = public_snapshot
     monkeypatch.setattr(run, "_configure_admin_web", admin)
     run.main()

@@ -1,3 +1,4 @@
+from . import adopt
 import logging
 import pytest
 from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
@@ -20,9 +21,11 @@ def test_secret_definition_is_immutable_and_outside_ordinary_registry():
             setattr(definition, name, "changed")
     registry = SettingsDefinitionRegistry()
     assert registry.get("OMADA_CLIENT_SECRET") is None
-    assert len(tuple(registry)) == 29
+    assert len(tuple(registry)) == 46
+    assert len(registry.for_domain("general")) == 12
     assert len(registry.for_domain("controller")) == 3
     assert len(registry.for_domain("portal")) == 14
+    assert len(registry.for_domain("features")) == 17
 
 
 def test_admin_metadata_boundary_contains_only_safe_facts(tmp_path, monkeypatch):
@@ -60,7 +63,7 @@ def test_admin_metadata_boundary_contains_only_safe_facts(tmp_path, monkeypatch)
     config = build_omada_runtime_config(boot.runtime_settings, boot.controller_secret_resolution)
     public = public_omada_snapshot(config, frozenset({"OMADA_CLIENT_SECRET"}),
                                   boot.resolved_snapshot, boot.controller_secret_resolution)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     read = ControllerConfigurationReadService(public, boot.admin_context.read_service, metadata)
     assert read.secret_metadata_service is metadata
     secret_mutation(boot)
@@ -77,7 +80,7 @@ def test_admin_metadata_boundary_contains_only_safe_facts(tmp_path, monkeypatch)
 
 def test_managed_precedence_one_resolution_no_ordinary_override(tmp_path, monkeypatch):
     boot, filesystem = secret_stack(tmp_path)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     secret_mutation(boot)
     base = {**boot.runtime_settings, "client_secret": ""}
     monkeypatch.setattr("requests.sessions.Session.request", lambda *_a, **_k: pytest.fail("pre-adoption I/O"))
@@ -94,7 +97,7 @@ def test_managed_precedence_one_resolution_no_ordinary_override(tmp_path, monkey
     assert SENTINEL not in repr(config) + repr(public)
     with restarted.admin_context.read_service.repository.transaction() as db:
         assert restarted.admin_context.read_service.repository.effective(db) == 0
-    restarted.activation_service.adopt(restarted.runtime_settings, None)
+    adopt(restarted)
     from . import mutation
     assert mutation(restarted, generation=1).status == 201
 
@@ -102,7 +105,7 @@ def test_managed_precedence_one_resolution_no_ordinary_override(tmp_path, monkey
 @pytest.mark.parametrize("failure", ["key", "permissions", "wrong_key", "ciphertext", "missing_version"])
 def test_managed_failure_no_fallback_or_effective_advance(tmp_path, failure):
     boot, filesystem = secret_stack(tmp_path)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     secret_mutation(boot)
     repository = boot.admin_context.read_service.repository
     if failure == "key": filesystem.key_valid = False
@@ -142,7 +145,7 @@ def test_deployment_without_key_startup_is_normal(tmp_path, unavailable):
     boot, _ = secret_stack(tmp_path, filesystem=filesystem)
     assert boot.controller_secret_resolution.source == "environment"
     assert not boot.admin_context.secret_metadata_service.available()
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
 
 
 def test_startup_and_ordinary_mutation_keep_secret_outside_validation_snapshot(tmp_path, monkeypatch):
@@ -150,16 +153,17 @@ def test_startup_and_ordinary_mutation_keep_secret_outside_validation_snapshot(t
     from . import mutation
     original = SettingsValidationService.validate
     seen = []
-    def checked(self, snapshot, *, secret_resolution):
+    def checked(self, snapshot, *, secret_resolution, feature_plan=None):
         assert "client_secret" not in snapshot.values
         assert secret_resolution is not None
-        seen.append((snapshot, secret_resolution.source))
-        return original(self, snapshot, secret_resolution=secret_resolution)
+        seen.append((snapshot, secret_resolution.source, feature_plan))
+        return original(self, snapshot, secret_resolution=secret_resolution, feature_plan=feature_plan)
     monkeypatch.setattr(SettingsValidationService, "validate", checked)
     boot, _ = secret_stack(tmp_path)
     assert seen[0][0] is boot.resolved_snapshot
+    assert seen[0][2] is boot.feature_plan
     assert mutation(boot).status == 201
-    assert len(seen) == 2 and all(source == "environment" for _, source in seen)
+    assert len(seen) == 2 and all(source == "environment" for _, source, _ in seen)
     service = boot.admin_context.mutation_service
     service.secret_repository = None
     with pytest.raises(SettingsError) as error:

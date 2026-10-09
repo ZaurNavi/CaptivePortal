@@ -1,3 +1,4 @@
+from . import adopt
 """Disposable Stage-3 migration/typing/domain proof; no Controller or production I/O."""
 import json
 import logging
@@ -57,17 +58,33 @@ def v1_database(path):
     return body
 
 
-def test_v1_migration_preserves_all_history_and_replay_bytes(tmp_path):
+def test_v1_migration_preserves_all_history_and_replay_bytes(tmp_path, monkeypatch):
     path = tmp_path / "v1.sqlite3"
     original = v1_database(path)
     with sqlite3.connect(path) as db:
         histories = {name: db.execute("SELECT * FROM " + name).fetchall() for name in
                      ("settings_generations", "settings_target_state", "settings_activation_events")}
         old_audit = db.execute("SELECT * FROM settings_mutation_audit").fetchone()
+    stages = []
+    for version in (1, 2, 3, 4):
+        method = "_migrate_v" + str(version)
+        original_migration = getattr(SettingsRepository, method)
+        def observed(*args, version=version, original_migration=original_migration):
+            db = args[-1]
+            assert db.execute("PRAGMA user_version").fetchone()[0] == version
+            result = original_migration(*args)
+            assert db.execute("PRAGMA user_version").fetchone()[0] == version + 1
+            assert db.execute("SELECT result_response_json FROM settings_idempotency").fetchone()[0] == original
+            for name, rows in histories.items():
+                assert [tuple(row) for row in db.execute("SELECT * FROM " + name)] == rows
+            stages.append((version, version + 1))
+            return result
+        monkeypatch.setattr(SettingsRepository, method, staticmethod(observed) if version < 3 else observed)
     repository = SettingsRepository(path)
+    assert stages == [(1, 2), (2, 3), (3, 4), (4, 5)]
     assert repository.configured() == (7, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 123})
     with repository.transaction() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
         for name, rows in histories.items():
             assert [tuple(row) for row in db.execute("SELECT * FROM " + name)] == rows
         audit = db.execute("SELECT * FROM settings_mutation_audit").fetchone()
@@ -78,7 +95,8 @@ def test_v1_migration_preserves_all_history_and_replay_bytes(tmp_path):
         replay = db.execute("SELECT * FROM settings_idempotency").fetchone()
         assert replay["result_response_json"] == original and replay["mutation_domain"] == "general"
         assert db.execute("SELECT string_value FROM settings_overrides").fetchone()[0] is None
-    SettingsRepository(path)  # Reopening v2 is idempotent.
+    SettingsRepository(path)  # Reopening current v5 is idempotent.
+    assert stages == [(1, 2), (2, 3), (3, 4), (4, 5)]
 
 
 def test_migration_failure_rolls_back_schema_and_history(tmp_path, monkeypatch):
@@ -123,7 +141,7 @@ def test_repository_refuses_unadmitted_or_noncanonical_override(tmp_path, key, v
 
 def test_typed_coexistence_atomic_ownership_noop_clear_and_replay(tmp_path):
     boot = stack(tmp_path, client_secret=SECRET)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     key = str(uuid.uuid4())
     first = write(boot, key=key)
     assert first.status == 201 and first.body["changed_keys"] == ["OMADA_URL"]
@@ -179,7 +197,7 @@ def test_failed_receipt_persistence_rolls_back_everything(tmp_path, monkeypatch)
 
 def test_effective_generation_source_pending_and_store_outage(tmp_path):
     boot = stack(tmp_path, client_secret=SECRET)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     initial = read(boot)
     assert initial["api_version"] == "admin.settings.controller.v3"
     mutation(boot)
@@ -190,7 +208,7 @@ def test_effective_generation_source_pending_and_store_outage(tmp_path):
     assert pending["pending_controller_setting_count"] == 1
     assert pending["fields"]["controller_url"]["pending_source"] == "persisted_override"
     newer = stack(tmp_path, client_secret=SECRET)
-    newer.activation_service.adopt(newer.runtime_settings, None)
+    adopt(newer)
     adopted = read(newer)
     assert adopted["effective_generation"] == 2 and adopted["pending_controller_setting_count"] == 0
     assert adopted["fields"]["controller_url"]["effective_source"] == "persisted_override"

@@ -20,3 +20,11 @@ def mutation(boot, *, generation=0, key=None, changes=None):
     return boot.admin_context.mutation_service.mutate(json.dumps({"changes": changes}),
         principal=AdminPrincipal("operator"), source_ip="127.0.0.1", request_id=str(uuid.uuid4()),
         idempotency_key=key or str(uuid.uuid4()), expected_generation=generation)
+
+
+def adopt(boot):
+    """Attest disposable composed runtimes carrying the exact startup plan."""
+    from types import SimpleNamespace
+    runtime = SimpleNamespace(feature_plan=boot.feature_plan)
+    analytics = SimpleNamespace(feature_plan=boot.feature_plan, historical_source_mode="base")
+    boot.activation_service.adopt(boot.runtime_settings, runtime, analytics, feature_plan=boot.feature_plan)

@@ -122,3 +122,4 @@ class SettingsBootstrapResult:
     admin_context: SettingsAdminContext
     activation_service: Any = None
     controller_secret_resolution: Any = field(default=None, repr=False)
+    feature_plan: Any = None

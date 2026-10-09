@@ -10,6 +10,8 @@ from app.current_state.runtime import create_current_state_runtime
 from app.observations.runtime import ObservationFoundationRuntime
 from app.observations.telemetry import ObservationTelemetry
 from app.analytics.runtime import create_analytics_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
 from tests.admin_web.conftest import enabled_settings
 from tests.observations.test_read_boundary_preparation import ProviderSpy, workers
 from tests.observations.test_runtime import Telemetry
@@ -33,7 +35,11 @@ def test_analytics_requires_explicit_preparation_without_starting_workers(analyt
     if prepared:
         assert observation.prepare_read_boundary() is True
     before = tuple(thread.ident for thread in threading.enumerate())
-    analytics = create_analytics_runtime(_settings(), observation, visit, registry, logging.getLogger("fix2-analytics"))
+    settings = _settings()
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
+    analytics = create_analytics_runtime(settings, observation, visit, registry, logging.getLogger("fix2-analytics"),
+        feature_plan=feature_plan)
+    assert analytics.feature_plan is feature_plan and analytics.historical_source_mode == "base"
     assert analytics.state == ("active" if prepared else "unavailable")
     assert analytics.source_health["observations"].available is prepared
     if prepared:
@@ -51,7 +57,11 @@ def test_prepared_read_boundary_still_requires_exact_source_schema(analytics_sta
     assert observation.prepare_read_boundary() is True
     with observation.repository._connect() as connection:
         connection.execute("PRAGMA user_version=999")
-    analytics = create_analytics_runtime(_settings(), observation, visit, registry, logging.getLogger("fix2-schema"))
+    settings = _settings()
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
+    analytics = create_analytics_runtime(settings, observation, visit, registry, logging.getLogger("fix2-schema"),
+        feature_plan=feature_plan)
+    assert analytics.feature_plan is feature_plan and analytics.historical_source_mode == "base"
     assert analytics.state == "unavailable"
     assert not analytics.source_health["observations"].available
     assert analytics.source_health["observations"].actual_schema_version == 999
@@ -70,12 +80,16 @@ def test_prepared_observation_restores_admin_home_ap24_and_telemetry(analytics_s
     current = create_current_state_runtime(settings, provider, Telemetry())
     assert current.state == "disabled" and current.read_service is not None
     assert observation.prepare_read_boundary() is True
-    analytics = create_analytics_runtime(settings, observation, visit, registry, logging.getLogger("fix2-admin"))
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
+    analytics = create_analytics_runtime(settings, observation, visit, registry, logging.getLogger("fix2-admin"),
+        feature_plan=feature_plan)
+    assert analytics.feature_plan is feature_plan and analytics.historical_source_mode == "base"
     assert analytics.state == "active"
     admin = create_admin_web_runtime(settings, analytics, registry, visit.read_service,
         analytics._source_services["observations"], logging.getLogger("fix2-admin"),
         current_state_read_service=current.read_service, current_state_runtime=current,
-        observation_runtime=observation)
+        observation_runtime=observation, feature_plan=feature_plan)
+    assert admin.feature_plan is feature_plan
     assert admin.state == "active" and admin.query_service is not None
     assert all(source is not None for source in (registry, visit.read_service, analytics._source_services["observations"]))
     assert admin.home_ap_24h_state == "active" and admin.home_ap_24h_service is not None

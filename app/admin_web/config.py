@@ -106,8 +106,17 @@ class AdminWebConfig:
 
 def admin_web_config_from_settings(
     settings: Mapping[str, Any],
+    *, feature_plan=None,
 ) -> AdminWebConfig:
     """Parse repository settings without normalizing security identities."""
+    if feature_plan is None:
+        from app.settings_control.features import AdminFeaturePlanV1
+        from app.settings_control.models import ResolvedSettingsSnapshot, SettingsError
+        try:
+            feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
+        except SettingsError:
+            raise AdminWebConfigError("Invalid Admin feature boolean") from None
+    settings = feature_plan.composition_settings(settings)
     from .capabilities import DEFAULT_GLOBAL_CAPABILITIES_TEXT, parse_global_capabilities
     global_capabilities = parse_global_capabilities(settings.get("web_admin_global_capabilities", DEFAULT_GLOBAL_CAPABILITIES_TEXT))
     enabled = _exact_bool(
@@ -217,124 +226,36 @@ def admin_web_config_from_settings(
         "observation_page_size": _bounded_int(settings, "observation_page_size", 100, 1, 500),
         "observation_max_window_hours": _bounded_int(settings, "observation_max_window_hours", 24, 1, 168),
         "home_live_refresh_seconds": _bounded_int(settings, "home_live_refresh_seconds", 60, 60, 300),
-        "home_live_request_timeout_seconds": _bounded_int(settings, "home_live_request_timeout_seconds", 30, 5, 60),
+        "home_live_request_timeout_seconds": _bounded_int(settings, "home_live_request_timeout_seconds", 30, 5, 60) if enabled and home_live_enabled else 30,
         "current_state_page_size": _bounded_int(settings, "current_state_page_size", 100, 1, 250),
         "home_traffic_refresh_seconds": _bounded_int(settings, "home_traffic_refresh_seconds", 60, 60, 300),
-        "home_traffic_request_timeout_seconds": _bounded_int(settings, "home_traffic_request_timeout_seconds", 30, 5, 60),
+        "home_traffic_request_timeout_seconds": _bounded_int(settings, "home_traffic_request_timeout_seconds", 30, 5, 60) if enabled and home_traffic_enabled else 30,
         "home_traffic_page_size": _bounded_int(settings, "home_traffic_page_size", 100, 1, 250),
-        "home_traffic_fresh_max_age_seconds": _bounded_int(settings, "home_traffic_fresh_max_age_seconds", 90, 30, 300),
-        "home_traffic_stale_max_age_seconds": _bounded_int(settings, "home_traffic_stale_max_age_seconds", 180, 30, 600),
-        "home_traffic_max_ap_skew_seconds": _bounded_int(settings, "home_traffic_max_ap_skew_seconds", 60, 10, 180),
+        "home_traffic_fresh_max_age_seconds": _bounded_int(settings, "home_traffic_fresh_max_age_seconds", 90, 30, 300) if enabled and home_traffic_enabled else 90,
+        "home_traffic_stale_max_age_seconds": _bounded_int(settings, "home_traffic_stale_max_age_seconds", 180, 30, 600) if enabled and home_traffic_enabled else 180,
+        "home_traffic_max_ap_skew_seconds": _bounded_int(settings, "home_traffic_max_ap_skew_seconds", 60, 10, 180) if enabled and home_traffic_enabled else 60,
         "traffic_refresh_seconds": _bounded_int(settings, "traffic_refresh_seconds", 60, 60, 300),
-        "traffic_request_timeout_seconds": _bounded_int(settings, "traffic_request_timeout_seconds", 30, 5, 60),
+        "traffic_request_timeout_seconds": _bounded_int(settings, "traffic_request_timeout_seconds", 30, 5, 60) if enabled and traffic_enabled else 30,
     }
     if values["session_absolute_seconds"] < values["session_idle_seconds"]:
         raise AdminWebConfigError(
             "WEB_ADMIN_SESSION_ABSOLUTE_SECONDS must not be shorter than idle"
         )
-    if values["home_live_request_timeout_seconds"] <= values["max_query_duration_seconds"]:
+    if enabled and home_live_enabled and values["home_live_request_timeout_seconds"] <= values["max_query_duration_seconds"]:
         raise AdminWebConfigError(
             "WEB_ADMIN_HOME_LIVE_REQUEST_TIMEOUT_SECONDS must exceed WEB_ADMIN_MAX_QUERY_DURATION_SECONDS"
         )
-    if values["home_traffic_request_timeout_seconds"] <= values["max_query_duration_seconds"]:
+    if enabled and home_traffic_enabled and values["home_traffic_request_timeout_seconds"] <= values["max_query_duration_seconds"]:
         raise AdminWebConfigError(
             "WEB_ADMIN_HOME_TRAFFIC_REQUEST_TIMEOUT_SECONDS must exceed WEB_ADMIN_MAX_QUERY_DURATION_SECONDS"
         )
-    if values["traffic_request_timeout_seconds"] <= values["max_query_duration_seconds"]:
+    if enabled and traffic_enabled and values["traffic_request_timeout_seconds"] <= values["max_query_duration_seconds"]:
         raise AdminWebConfigError(
             "WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS must exceed WEB_ADMIN_MAX_QUERY_DURATION_SECONDS"
         )
-    if values["home_traffic_stale_max_age_seconds"] < values["home_traffic_fresh_max_age_seconds"]:
+    if enabled and home_traffic_enabled and values["home_traffic_stale_max_age_seconds"] < values["home_traffic_fresh_max_age_seconds"]:
         raise AdminWebConfigError(
             "WEB_ADMIN_HOME_TRAFFIC_STALE_MAX_AGE_SECONDS must not be shorter than fresh"
-        )
-    if home_live_enabled and not enabled:
-        raise AdminWebConfigError(
-            "WEB_ADMIN_HOME_LIVE_ENABLED requires WEB_ADMIN_ENABLED=true"
-        )
-    if device_list_context_enabled and not enabled:
-        raise AdminWebConfigError(
-            "WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED requires WEB_ADMIN_ENABLED=true"
-        )
-    if device_current_context_enabled and not enabled:
-        raise AdminWebConfigError(
-            "WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED requires WEB_ADMIN_ENABLED=true"
-        )
-    if home_traffic_enabled and (not enabled or not home_live_enabled):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_HOME_TRAFFIC_ENABLED requires WEB_ADMIN_ENABLED=true and WEB_ADMIN_HOME_LIVE_ENABLED=true"
-        )
-    if traffic_enabled and not enabled:
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_ENABLED requires WEB_ADMIN_ENABLED=true"
-        )
-    if traffic_history_enabled and (not enabled or not traffic_enabled):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED requires "
-            "WEB_ADMIN_ENABLED=true and WEB_ADMIN_TRAFFIC_ENABLED=true"
-        )
-    if traffic_statistics_enabled and (
-        not enabled or not traffic_enabled or not traffic_history_enabled
-    ):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED requires "
-            "WEB_ADMIN_ENABLED=true, WEB_ADMIN_TRAFFIC_ENABLED=true and "
-            "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true"
-        )
-    if traffic_peak_enabled and (
-        not enabled
-        or not traffic_enabled
-        or not traffic_history_enabled
-        or not traffic_statistics_enabled
-    ):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_PEAK_ENABLED requires WEB_ADMIN_ENABLED=true, "
-            "WEB_ADMIN_TRAFFIC_ENABLED=true, "
-            "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true and "
-            "WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED=true"
-        )
-    if traffic_by_ap_enabled and (
-        not enabled or not traffic_enabled or not traffic_history_enabled
-    ):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_BY_AP_ENABLED requires WEB_ADMIN_ENABLED=true, "
-            "WEB_ADMIN_TRAFFIC_ENABLED=true and "
-            "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true"
-        )
-    if traffic_independent_ranges_enabled and (
-        not enabled or not traffic_enabled or not traffic_history_enabled
-    ):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED requires "
-            "WEB_ADMIN_ENABLED=true, WEB_ADMIN_TRAFFIC_ENABLED=true and "
-            "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true"
-        )
-    if traffic_ap_share_enabled and (
-        not enabled
-        or not traffic_enabled
-        or not traffic_history_enabled
-        or not traffic_independent_ranges_enabled
-    ):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_AP_SHARE_ENABLED requires "
-            "WEB_ADMIN_ENABLED=true, WEB_ADMIN_TRAFFIC_ENABLED=true, "
-            "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true and "
-            "WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true"
-        )
-    if traffic_online_guests_enabled and (not enabled or not traffic_enabled):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_ONLINE_GUESTS_ENABLED requires "
-            "WEB_ADMIN_ENABLED=true and WEB_ADMIN_TRAFFIC_ENABLED=true"
-        )
-    if traffic_completed_sessions_enabled and (not enabled or not traffic_enabled):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_COMPLETED_SESSIONS_ENABLED requires "
-            "WEB_ADMIN_ENABLED=true and WEB_ADMIN_TRAFFIC_ENABLED=true"
-        )
-    if traffic_evidence_enabled and (not enabled or not traffic_enabled):
-        raise AdminWebConfigError(
-            "WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED requires "
-            "WEB_ADMIN_ENABLED=true and WEB_ADMIN_TRAFFIC_ENABLED=true"
         )
 
     if enabled:

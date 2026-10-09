@@ -7,7 +7,17 @@ from types import SimpleNamespace
 
 import run as process_runtime
 
-from app.analytics.runtime import create_analytics_runtime
+from app.analytics.runtime import create_analytics_runtime as _create_analytics_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_analytics_runtime(settings, *args, **kwargs):
+    feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
+    result = _create_analytics_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
+
 from app.visit_lifecycle.read_service import VisitLifecycleReadService
 from app.visitor_registry.registry_read_service import VisitorRegistryReadService
 from app.visitor_registry.registry_service import VisitorRegistryService
@@ -287,7 +297,7 @@ def test_run_composition_passes_existing_source_objects_and_registers_blueprint(
             seen["blueprint"] = value
 
     def create(settings, observation_runtime, visit_runtime,
-               registry_read_service, logger):
+               registry_read_service, logger, *, feature_plan):
         seen.update({
             "settings": settings,
             "observation": observation_runtime,
@@ -300,7 +310,8 @@ def test_run_composition_passes_existing_source_objects_and_registers_blueprint(
     monkeypatch.setattr(process_runtime, "_visit_lifecycle", visit)
     monkeypatch.setattr(process_runtime, "create_analytics_runtime", create)
     app = App()
-    process_runtime._configure_analytics(app, {"key": "value"}, registry)
+    process_runtime._configure_analytics(app, {"key": "value"}, registry,
+        AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, {}, {}, {}, {})))
     assert seen == {
         "settings": {"key": "value"},
         "observation": observation,
@@ -321,5 +332,6 @@ def test_run_composition_failure_is_fail_open(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("failed")),
     )
     app = App()
-    process_runtime._configure_analytics(app, {}, None)
+    process_runtime._configure_analytics(app, {}, None,
+        AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, {}, {}, {}, {})))
     assert app.extensions["analytics_runtime"] is None

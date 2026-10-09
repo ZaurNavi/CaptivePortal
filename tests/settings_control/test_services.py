@@ -1,3 +1,4 @@
+from . import adopt
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -9,7 +10,7 @@ from . import stack, mutation
 
 def test_changed_noop_replay_audit_full_snapshot(tmp_path):
     boot = stack(tmp_path)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     key = str(uuid.uuid4())
     first = mutation(boot, key=key)
     assert first.status == 201 and first.body["changed"]
@@ -21,7 +22,7 @@ def test_changed_noop_replay_audit_full_snapshot(tmp_path):
     assert noop.status == 200 and not noop.body["changed"]
     mutation(boot, generation=1, changes=[{"key": "WEB_ADMIN_VISIT_PAGE_SIZE", "operation": "set", "value": 140}])
     newer = stack(tmp_path)
-    newer.activation_service.adopt(newer.runtime_settings, None)
+    adopt(newer)
     assert mutation(boot, key=key).body == first.body
     assert mutation(boot, generation=1, key=noop_key).body == noop.body
     with pytest.raises(SettingsError, match="idempotency_conflict"):
@@ -64,7 +65,7 @@ def test_disabled_consumer_and_silence_are_not_failure(tmp_path):
     boot = stack(tmp_path)
     model = boot.admin_context.read_service.read()
     assert model["settings"][0]["activation_state"] == "runtime_unavailable"
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     model = boot.admin_context.read_service.read()
     assert all(item["consumer_state"] == "consumer_disabled" and item["effective_value"] is None for item in model["settings"])
     mutation(boot)

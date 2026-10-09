@@ -80,9 +80,8 @@ def test_statistics_flag_defaults_false_and_requires_full_hierarchy():
             "web_admin_traffic_statistics_enabled": "true",
         },
     ):
-        with pytest.raises(AdminWebConfigError):
-            admin_web_config_from_settings(enabled_settings(**overrides))
-
+        config = admin_web_config_from_settings(enabled_settings(**overrides))
+        assert config.traffic_statistics_enabled is False
 
 def test_statistics_serializer_projects_six_metrics_and_real_zero():
     value = _result()

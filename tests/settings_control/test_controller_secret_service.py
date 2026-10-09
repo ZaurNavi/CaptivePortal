@@ -1,3 +1,4 @@
+from . import adopt
 import hmac
 import json
 import uuid
@@ -10,7 +11,7 @@ from .stage4_helpers import secret_stack, secret_mutation, SENTINEL
 
 def test_replace_ownership_noop_replay_hmac_and_redaction(tmp_path, monkeypatch):
     boot, _ = secret_stack(tmp_path, client_secret=SENTINEL)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     key = str(uuid.uuid4())
     first = secret_mutation(boot, key=key)
     assert first.status == 201 and first.body["changed"] and first.body["configured_generation"] == 1
@@ -57,7 +58,7 @@ def test_fingerprint_exact_keyed_identity_not_plain_sha(tmp_path):
 
 def test_clear_ownership_noop_and_effective_retention(tmp_path):
     boot, _ = secret_stack(tmp_path)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     noop = secret_mutation(boot, operation="clear_secret_override")
     assert not noop.body["changed"] and noop.status == 200
     secret_mutation(boot)

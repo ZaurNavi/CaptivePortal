@@ -51,7 +51,7 @@ def test_populated_v3_migrates_one_transaction_and_preserves_every_row(tmp_path,
     assert dump_tables(path) == before
     assert repository.configured() == (7, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 123, "OMADA_ID": "installation-7"})
     with repository.transaction() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
         assert repository.effective(db) == 7
         assert db.execute("SELECT 1 FROM settings_overrides WHERE setting_key LIKE 'PORTAL_%'").fetchone() is None
         assert not db.execute("SELECT name FROM sqlite_master WHERE name LIKE '%_v3'").fetchall()
@@ -89,7 +89,7 @@ def test_v4_schema_and_invalid_durable_values_fail_closed(tmp_path, corruption):
     with sqlite3.connect(path) as db:
         if corruption == "trigger": db.execute("DROP TRIGGER settings_idempotency_immutable_update")
         elif corruption == "column": db.execute("ALTER TABLE settings_idempotency ADD COLUMN unexpected TEXT")
-        elif corruption == "future_version": db.execute("PRAGMA user_version=5")
+        elif corruption == "future_version": db.execute("PRAGMA user_version=6")
         else:
             db.execute("INSERT INTO settings_generations VALUES(1,0,'global','2026-10-08T01:00:00.000Z','platform_operator','operator','r')")
             db.execute("INSERT INTO settings_overrides VALUES(1,'PORTAL_UI_TITLE_EN','string',NULL,' bad ')")

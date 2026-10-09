@@ -7,7 +7,17 @@ from flask import Flask
 from werkzeug.datastructures import MultiDict
 
 import app.admin_web.routes as routes
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 
 from .conftest import PASSWORD, SITE_ID, csrf_from, enabled_settings, login
 

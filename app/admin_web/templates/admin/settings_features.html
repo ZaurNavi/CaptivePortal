@@ -1,0 +1,12 @@
+{% extends "admin/base.html" %}
+{% block subtitle %}<p class="muted">Global Admin product feature controls</p>{% endblock %}
+{% block page_body %}
+<div class="settings-warning">Save persists preferences only. Changes require a captive-portal.service restart by an authorized operator. This page cannot restart or activate services.</div>
+<div id="features-status" class="state-panel" role="status" aria-live="polite">Loading feature preferences…</div>
+<div class="settings-actions">
+  <button id="features-save" class="button" type="button" disabled>Save changes</button>
+  <button id="features-refresh" class="button button-secondary" type="button">Refresh</button>
+  <span id="features-dirty" class="muted" aria-live="polite"></span>
+</div>
+<div id="features-groups"></div>
+{% endblock %}

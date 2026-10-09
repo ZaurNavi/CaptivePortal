@@ -3,7 +3,17 @@ import uuid
 from types import SimpleNamespace
 import pytest
 from flask import Flask
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = kwargs.pop("feature_plan", None) or AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 from app.admin_web.models import AdminPrincipal
 from app.admin_web.policy import AdminAccessPolicy
 from app.settings_control.bootstrap import bootstrap_settings_control
@@ -19,12 +29,14 @@ def settings_app(tmp_path, *, enabled=True, unavailable=False):
         # Outage of an existing running process, not an enabled new startup fallback.
         boot.admin_context.read_service.repository.db_path = str(tmp_path / "missing" / "settings.sqlite3")
     runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None,
-                                      logging.getLogger("settings-ui"), settings_control=boot.admin_context)
+                                      logging.getLogger("settings-ui"), settings_control=boot.admin_context, feature_plan=boot.feature_plan)
     app = Flask(__name__)
     app.config["TESTING"] = True
     app.register_blueprint(runtime.blueprint)
     if boot.activation_service and not unavailable:
-        boot.activation_service.adopt(boot.runtime_settings, runtime)
+        boot.activation_service.adopt(boot.runtime_settings, runtime,
+            SimpleNamespace(feature_plan=boot.feature_plan, historical_source_mode="base"),
+            feature_plan=boot.feature_plan)
     client = app.test_client()
     assert login(client).status_code == 302
     session = client.get("/admin/api/v1/session", base_url="https://localhost").json["result"]

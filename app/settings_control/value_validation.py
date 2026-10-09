@@ -15,6 +15,10 @@ def validate_setting_value(definition, value, *, durable=False):
             return value
         if definition.domain == "portal":
             return validate_portal_setting(definition.key, value)
+        if definition.domain == "features":
+            from .features import feature_boolean
+            feature_boolean(value, definition.key)
+            return value
         return normalize_controller_setting(definition.key, value)
     except PortalPresentationConfigError as error:
         raise SettingsError("settings_store_unavailable" if durable else "validation_failed",

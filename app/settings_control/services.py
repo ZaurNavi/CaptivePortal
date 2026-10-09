@@ -30,7 +30,7 @@ def parse_changes(raw, registry=None, domain="general"):
         if type(document) is not dict or set(document) != {"changes"}:
             raise ValueError()
         changes = document["changes"]
-        if domain not in ("general", "controller", "portal") or type(changes) is not list or not 1 <= len(changes) <= {"general": 64, "controller": 3, "portal": 14}[domain]:
+        if domain not in ("general", "controller", "portal", "features") or type(changes) is not list or not 1 <= len(changes) <= {"general": 64, "controller": 3, "portal": 14, "features": 17}[domain]:
             raise ValueError()
         seen, result = set(), []
         for change in changes:
@@ -41,8 +41,8 @@ def parse_changes(raw, registry=None, domain="general"):
             if definition is None or definition.domain != domain or key in seen:
                 raise ValueError()
             seen.add(key)
-            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is (int if domain == "general" else str):
-                value = change["value"]
+            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is (int if domain == "general" else bool if domain == "features" else str):
+                value = ("true" if change["value"] else "false") if domain == "features" else change["value"]
                 if definition.value_type == "string":
                     value = validate_setting_value(definition, value)
                 result.append(SettingsMutationChange(key, operation, value))
@@ -56,12 +56,13 @@ def parse_changes(raw, registry=None, domain="general"):
 
 
 class SettingsReadService:
-    def __init__(self, repository, base_settings, explicit_environment_names, startup_snapshot, registry=None):
+    def __init__(self, repository, base_settings, explicit_environment_names, startup_snapshot, registry=None, *, feature_plan):
         self.repository = repository
         self.base_settings = startup_snapshot.values if startup_snapshot.generation_id is None else base_settings
         self.environment_names = frozenset(explicit_environment_names)
         self.startup_snapshot = startup_snapshot
         self.registry = registry or SettingsDefinitionRegistry()
+        self.feature_plan = feature_plan
         self._adopted = False
 
     def project(self, db, generation=None):
@@ -76,6 +77,18 @@ class SettingsReadService:
         settings = []
         for item in self.registry.for_domain("general"):
             enabled = self.startup_snapshot.values.get(item.consumer_enable_settings_dict_key, "false") in (True, "true")
+            feature_consumers = {
+                "WEB_ADMIN_CURRENT_STATE_PAGE_SIZE": "home.live",
+                "WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS": "home.live",
+                "WEB_ADMIN_HOME_TRAFFIC_PAGE_SIZE": "home.traffic",
+                "WEB_ADMIN_HOME_TRAFFIC_REFRESH_SECONDS": "home.traffic",
+                "WEB_ADMIN_TRAFFIC_REFRESH_SECONDS": "traffic.root",
+                "WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS": "home.activity",
+                "WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS": "home.health",
+            }
+            if item.key in feature_consumers:
+                enabled = (self.startup_snapshot.values.get("web_admin_enabled", "false") in (True, "true")
+                           and self.feature_plan.enabled(feature_consumers[item.key]))
             consumer = ("active" if enabled else "consumer_disabled") if trustworthy else None
             audit = self.repository.latest_setting_audit(db, item.key, generation)
             value = snapshot.values[item.settings_dict_key]
@@ -161,6 +174,55 @@ class SettingsReadService:
                     "restart_required": generation != effective,
                     "pending_setting_count": sum(item["pending_value"] is not None for item in settings), "settings": settings}
 
+    def read_features(self):
+        from .features import AdminFeaturePlanV1, feature_boolean
+        with self.repository.transaction() as db:
+            generation = self.repository.head(db)
+            snapshot = resolve_settings(self.base_settings, self.environment_names,
+                self.repository.overrides(db, generation), generation, self.registry)
+            plan = AdminFeaturePlanV1.from_snapshot(snapshot, self.registry)
+            effective = self.repository.effective(db)
+            trustworthy = self._adopted and effective == self.startup_snapshot.generation_id
+            latest = self.repository.latest_activation_result(db, generation)
+            activation = "runtime_unavailable" if not trustworthy else (
+                "active" if generation == effective else "activation_failed" if latest == "failed" else "pending_main_restart")
+            rows = []
+            for item in self.registry.for_domain("features"):
+                audit = self.repository.latest_setting_audit(db, item.key, generation)
+                configured = feature_boolean(snapshot.values[item.settings_dict_key], item.key)
+                override = snapshot.persisted_override_by_key[item.key]
+                adopted = self.feature_plan.configured_values[item.key] if trustworthy else None
+                source = "persisted_override" if override is not None else snapshot.base_source_by_key[item.key]
+                effective_override = self.startup_snapshot.persisted_override_by_key.get(item.key)
+                effective_source = ("persisted_override" if effective_override is not None
+                                    else self.startup_snapshot.base_source_by_key[item.key]) if trustworthy else None
+                rows.append({
+                    "key": item.key, "feature_id": item.feature_id, "display_label": item.display_label,
+                    "description": item.description, "group": item.group, "control_kind": item.control_kind,
+                    "public_value_type": item.public_value_type, "presentation_type": item.presentation_type,
+                    "scope_type": "global", "scope_id": None, "editable": item.editable, "secret_class": "normal",
+                    "default_value": False, "base_source": snapshot.base_source_by_key[item.key],
+                    "base_value": feature_boolean(snapshot.base_value_by_key[item.key], item.key),
+                    "persisted_override_value": feature_boolean(override, item.key) if override is not None else None,
+                    "configured_value": configured, "configured_source": source,
+                    "effective_value": adopted, "effective_source": effective_source,
+                    "pending_value": configured if trustworthy and configured != adopted else None,
+                    "configured_generation": generation, "effective_generation": effective,
+                    "activation_state": activation, "apply_requirement": item.apply_requirement,
+                    "activation_target": item.activation_target, "parent_feature_keys": list(item.parent_feature_keys),
+                    "configured_feature_state": plan.configured_state(item.feature_id),
+                    "configured_blocked_by_feature_keys": list(plan.blocked_by[item.feature_id]),
+                    "effective_feature_state": self.feature_plan.effective_state(item.feature_id) if trustworthy else "runtime_unavailable",
+                    "effective_blocked_by_feature_keys": list(self.feature_plan.blocked_by[item.feature_id]) if trustworthy else [],
+                    "validation": {"type": "boolean"}, "last_changed_at": audit["timestamp_utc"] if audit else None,
+                    "last_changed_by": {"principal_type": audit["principal_type"], "principal_name": audit["principal_name"]} if audit else None,
+                })
+            return {"api_version": "admin.settings.features.v1", "scope": {"type": "global"},
+                    "resource": {"type": "admin_product_features", "scope": "installation"}, "store_state": "available",
+                    "configured_generation": generation, "effective_generation": effective,
+                    "etag": f'"settings-g{generation}"', "restart_required": generation != effective,
+                    "pending_setting_count": sum(row["pending_value"] is not None for row in rows), "features": rows}
+
 
 class SettingsMutationService:
     def __init__(self, repository, read_service, validation=None):
@@ -205,20 +267,22 @@ class SettingsMutationService:
                 candidate = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, overrides, parent, self.read_service.registry)
             except SettingsError as error:
                 controller_keys = {item.key for item in self.read_service.registry.for_domain("controller")}
-                if domain == "portal" and error.code == "validation_failed" and any(
+                if domain in ("portal", "features") and error.code == "validation_failed" and any(
                     detail.get("key") in controller_keys for detail in error.details
                 ):
                     raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
                 raise
             resolution = None
-            if domain != "portal" and self.secret_repository is not None:
+            if domain not in ("portal", "features") and self.secret_repository is not None:
                 try:
                     resolution = self.secret_repository.resolve(parent, self.read_service.base_settings, self.read_service.environment_names)
                 except SettingsError as error:
                     if error.code != "controller_secret_configuration_invalid":
                         raise
                     raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
-            if domain == "portal":
+            if domain == "features":
+                self.validation.validate_features_candidate(candidate)
+            elif domain == "portal":
                 self.validation.validate_portal_candidate(candidate)
             else:
                 self.validation.validate(candidate, secret_resolution=resolution)
@@ -240,14 +304,14 @@ class SettingsMutationService:
                         new_value=candidate.values[definition.settings_dict_key],
                         apply_requirement=definition.apply_requirement, activation_target=definition.activation_target,
                         domain=domain, value_type=definition.value_type)
-            if domain in ("controller", "portal"):
+            if domain in ("controller", "portal", "features"):
                 effective = self.repository.effective(db)
                 latest = self.repository.latest_activation_result(db, generation)
                 activation = "pending_main_restart" if changed else (
                     "runtime_unavailable" if not self.read_service._adopted else "active" if generation == effective
                     else "activation_failed" if latest == "failed" else "pending_main_restart")
                 body = {"api_version": f"admin.settings.{domain}.mutation.v1", "request_id": request_id,
-                        "scope": {"type": "global"}, "resource": {"type": "guest_portal" if domain == "portal" else "omada_controller", "scope": "installation"},
+                        "scope": {"type": "global"}, "resource": {"type": "guest_portal" if domain == "portal" else "admin_product_features" if domain == "features" else "omada_controller", "scope": "installation"},
                         "changed": changed, "changed_keys": [item.key for item in changes if previous.get(item.key) != overrides.get(item.key)],
                         "configured_generation": generation, "effective_generation": effective,
                         "activation_state": activation, "restart_required": generation != effective}

@@ -9,7 +9,17 @@ import pytest
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from app.admin_web import create_admin_web_runtime
+from app.admin_web import create_admin_web_runtime as _create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
+
+
+def create_admin_web_runtime(settings, *args, **kwargs):
+    snapshot = ResolvedSettingsSnapshot(None, settings, {}, {}, {})
+    feature_plan = AdminFeaturePlanV1.from_snapshot(snapshot)
+    result = _create_admin_web_runtime(settings, *args, feature_plan=feature_plan, **kwargs)
+    assert result.feature_plan is feature_plan
+    return result
 from app.admin_web.config import AdminWebConfigError, admin_web_config_from_settings
 from app.admin_web.historical_traffic_serialization import (
     HistoricalTrafficSerializationError,
@@ -129,14 +139,13 @@ def _url(query, site=SITE_ID):
 
 def test_peak_flag_defaults_false_and_requires_all_parent_products():
     assert admin_web_config_from_settings({}).traffic_peak_enabled is False
-    with pytest.raises(AdminWebConfigError, match="TRAFFIC_PEAK_ENABLED requires"):
-        admin_web_config_from_settings(enabled_settings(
-            web_admin_traffic_enabled="true",
-            web_admin_traffic_history_enabled="true",
-            web_admin_traffic_statistics_enabled="false",
-            web_admin_traffic_peak_enabled="true",
-        ))
-
+    config = admin_web_config_from_settings(enabled_settings(
+        web_admin_traffic_enabled="true",
+        web_admin_traffic_history_enabled="true",
+        web_admin_traffic_statistics_enabled="false",
+        web_admin_traffic_peak_enabled="true",
+    ))
+    assert config.traffic_peak_enabled is False
 
 def test_peak_include_security_feature_gate_and_exact_forms(tmp_path):
     source = PeakSource()

@@ -1,3 +1,4 @@
+from . import adopt
 import json
 import sqlite3
 import uuid
@@ -37,7 +38,7 @@ def test_v2_migration_preserves_history_and_receipts(tmp_path):
             "settings_generations", "settings_overrides", "settings_target_state", "settings_activation_events", "settings_mutation_audit")}
     repository = SettingsRepository(path)
     with repository.transaction() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
         for table, rows in before.items(): assert [tuple(row) for row in db.execute(f"SELECT * FROM {table}")] == rows
         row = db.execute("SELECT * FROM settings_idempotency").fetchone()
         assert row["request_fingerprint_kind"] == "sha256_canonical_json_v1"
@@ -48,7 +49,7 @@ def test_v2_migration_preserves_history_and_receipts(tmp_path):
 
 def test_binding_copy_both_domains_gc_and_historical_refs(tmp_path):
     boot, _ = secret_stack(tmp_path)
-    boot.activation_service.adopt(boot.runtime_settings, None)
+    adopt(boot)
     secret_mutation(boot)
     repository = boot.admin_context.read_service.repository
     with repository.transaction() as db: first = binding(db, 1)

@@ -21,6 +21,8 @@ from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app.admin_web import create_admin_web_runtime
+from app.settings_control.features import AdminFeaturePlanV1
+from app.settings_control.models import ResolvedSettingsSnapshot
 from app.current_state.read_service import CurrentStateReadService
 from app.current_state.repository import CurrentStateRepository
 from tests.admin_web.conftest import enabled_settings, login
@@ -111,13 +113,15 @@ def main() -> int:
         )
         db_path = Path(repository.config.db_path)
         before = _fingerprint(db_path)
+        settings = enabled_settings(
+            web_admin_allowed_site_ids=SITE,
+            web_admin_default_site_id=SITE,
+            web_admin_traffic_enabled="true",
+            web_admin_traffic_online_guests_enabled="true",
+        )
+        feature_plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
         runtime = create_admin_web_runtime(
-            enabled_settings(
-                web_admin_allowed_site_ids=SITE,
-                web_admin_default_site_id=SITE,
-                web_admin_traffic_enabled="true",
-                web_admin_traffic_online_guests_enabled="true",
-            ),
+            settings,
             SimpleNamespace(state="active", visit_service=object()),
             SimpleNamespace(repository=SimpleNamespace(
                 config=SimpleNamespace(db_path=root / "registry.sqlite3")
@@ -126,7 +130,9 @@ def main() -> int:
             SimpleNamespace(_repository=SimpleNamespace(db_path=root / "observations.sqlite3")),
             logging.getLogger("traffic07-product-benchmark"),
             current_state_read_service=CurrentStateReadService(repository),
+            feature_plan=feature_plan,
         )
+        assert runtime.feature_plan is feature_plan
         if runtime.traffic_online_guests_state != "active":
             raise RuntimeError("Online Guests product did not compose")
         app = Flask(__name__)
