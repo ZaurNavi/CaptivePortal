@@ -76,28 +76,55 @@
     return v;
   }
   function state(heading, detail) { title.textContent = heading; message.textContent = detail; }
-  function field(label, value) {
+  function formatUtcDisplay(value) {
+    return `${value.slice(8, 10)}.${value.slice(5, 7)}.${value.slice(0, 4)}, ${value.slice(11, 19)} UTC`;
+  }
+  function displayTime(value) {
+    const time = document.createElement("time");
+    time.dateTime = value; time.title = value; time.textContent = formatUtcDisplay(value);
+    return time;
+  }
+  function statusBadge(value, labels) {
+    const badge = document.createElement("span");
+    badge.className = "protocol-status"; badge.dataset.state = value; badge.textContent = labels[value];
+    return badge;
+  }
+  function protocolObservation(label, value, className) {
+    const item = document.createElement("span"), name = document.createElement("strong");
+    item.className = className; name.textContent = label;
+    item.append(name, displayTime(value)); return item;
+  }
+  function field(label, value, variant = "") {
     const card = document.createElement("div"), name = document.createElement("strong"), text = document.createElement("p");
-    card.className = "section-card"; name.textContent = label; text.textContent = value;
+    card.className = "card protocol-info-card" + (variant ? " protocol-info-card--" + variant : "");
+    name.className = "protocol-info-label"; name.textContent = label;
+    text.className = "protocol-info-value";
+    if (typeof value === "string") text.textContent = value; else text.append(value);
     card.append(name, text); return card;
   }
   function render(v) {
-    const recent = v.recent_protocols.map((p) => p.display_label + " · " + p.last_observed_at).join("; ") || "—";
+    const recent = document.createElement("span");
+    recent.className = "protocol-chip-list";
+    if (v.recent_protocols.length) {
+      recent.append(...v.recent_protocols.map((p) => protocolObservation(p.display_label, p.last_observed_at, "protocol-chip")));
+    } else recent.textContent = "—";
     const last = v.last_protocol_observation;
     content.replaceChildren(
-      field("Recent Protocols", recent),
-      field("Last Protocol Observation", last ? last.display_label + " · " + last.observed_at : "—"),
-      field("Freshness", freshnessLabels[v.freshness_state]),
-      field("Source coverage", coverageLabels[v.coverage.source_state]),
-      field("Attribution coverage", coverageLabels[v.coverage.attribution_state]),
-      field("Last evaluated", v.evaluated_at_utc));
+      field("Recent Protocols", recent, "recent"),
+      field("Last Protocol Observation", last ? protocolObservation(last.display_label, last.observed_at, "protocol-observation") : "—", "last"),
+      field("Freshness", statusBadge(v.freshness_state, freshnessLabels), "freshness"),
+      field("Source coverage", statusBadge(v.coverage.source_state, coverageLabels)),
+      field("Attribution coverage", statusBadge(v.coverage.attribution_state, coverageLabels)),
+      field("Last evaluated", displayTime(v.evaluated_at_utc)));
     if (v.evidence_state === "identity_pending") {
       state("Device network identity binding pending", "Device-relative protocol evidence is not yet authoritatively linked to this Device for the current Site.");
     } else if (v.evidence_state === "empty") {
       if (v.coverage.source_state === "usable" && v.coverage.attribution_state === "usable") {
         state("No recent protocol evidence", "No DNS, TLS or QUIC evidence is retained for this Device in the last 24 hours. This does not prove there was no network activity.");
       } else state("Insufficient coverage", "Recent protocol evidence cannot be determined reliably from the currently available Network Intelligence coverage.");
-    } else if (v.freshness_state === "stale") state("Stale evidence", "Last evaluated " + v.evaluated_at_utc);
+    } else if (v.freshness_state === "stale") {
+      state("Stale evidence", "Last evaluated "); message.append(displayTime(v.evaluated_at_utc));
+    }
     else state("Protocol evidence", "Recent device-relative protocol evidence; historical completeness is not claimed.");
   }
   function clearTimer() { if (timer !== null) window.clearTimeout(timer); timer = null; }
