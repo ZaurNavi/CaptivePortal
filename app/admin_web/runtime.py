@@ -353,6 +353,22 @@ def create_admin_web_runtime(
         else None
     )
     query_service = None
+    protocol_intelligence_service = None
+    if config.device_protocol_intelligence_enabled:
+        try:
+            from app.network_metadata_projection.config import projection_config_from_env
+            from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
+            from app.network_protocol_intelligence import DeviceProtocolIntelligenceReadService
+
+            projection_config = projection_config_from_env()
+            protocol_intelligence_service = DeviceProtocolIntelligenceReadService(
+                DeviceNetworkMetadataReadService(
+                    db_path=projection_config.db_path,
+                    enabled=projection_config.enabled,
+                    max_db_bytes=projection_config.max_db_bytes))
+        except Exception:
+            # Optional dependency failure never changes existing Admin readiness.
+            logger.error("admin.protocol_intelligence_composition_failed")
     fingerprint_presentation_service = None
     try:
         from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
@@ -403,6 +419,7 @@ def create_admin_web_runtime(
             device_list_context_cursor_codec,
             current_state_db_path,
             fingerprint_presentation_service,
+            protocol_intelligence_service,
         )
     evidence_state = "active" if config.traffic_evidence_enabled else "disabled"
     evidence_aggregator = None
@@ -506,6 +523,7 @@ def _query_service(
     device_list_context_cursor_codec: Any | None = None,
     current_state_db_path: Any | None = None,
     fingerprint_presentation_service: Any | None = None,
+    protocol_intelligence_service: Any | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
     try:
@@ -532,6 +550,7 @@ def _query_service(
             ),
             visit_analytics_service=analytics_service,
             fingerprint_presentation_service=fingerprint_presentation_service,
+            protocol_intelligence_service=protocol_intelligence_service,
             inventory_timezone_name=getattr(getattr(registry_read_service, "service", None), "timezone_name", None),
             current_state_read_service=current_state_read_service,
             current_traffic_read_service=getattr(

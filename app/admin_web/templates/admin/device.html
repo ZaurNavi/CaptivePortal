@@ -2,6 +2,24 @@
 {% block subtitle %}<p>Site-local identity, recent visits and latest safe observation.</p>{% endblock %}
 {% block page_body %}
   {{ super() }}
+  {% if device_protocol_intelligence_enabled %}
+  <section id="device-protocol-intelligence" class="section-card" aria-labelledby="device-protocol-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="device-protocol-title">Network / Protocol Intelligence</h2>
+        <p>Recent protocol evidence derived from device-relative network metadata.</p>
+      </div>
+      <button id="device-protocol-refresh" class="button button-secondary" type="button">Refresh</button>
+    </div>
+    <div id="device-protocol-state" class="state-panel" role="status" aria-live="polite">
+      <div>
+        <strong id="device-protocol-state-title">Loading</strong>
+        <p id="device-protocol-state-message">Requesting protocol evidence…</p>
+      </div>
+    </div>
+    <div id="device-protocol-content" class="content-grid" aria-live="polite"></div>
+  </section>
+  {% endif %}
   {% if device_current_context_enabled %}
   <section id="device-current-context" class="section-card" aria-labelledby="device-current-context-title">
     <div class="section-heading">

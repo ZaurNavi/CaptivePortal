@@ -9,6 +9,8 @@ from .models import ALGORITHM, ProjectionUnavailable, ProjectionValidationError,
 from dataclasses import asdict
 from .schema import validate_schema
 from .validation import read_window
+from app.analytics.source_gateway import AnalyticsQueryDeadlineExceeded
+from app.network_metadata.validation import ni_timestamp
 
 JOIN = " FROM device_network_metadata_edges e LEFT JOIN projection_site_mac_bindings b ON b.site_id=e.site_id AND b.client_mac=e.client_mac"
 COLUMNS = "SELECT e.*,b.site_id AS joined_site,b.device_id,b.binding_state,b.last_evaluated_at,b.authoritative_bound_at"
@@ -19,23 +21,72 @@ class DeviceNetworkMetadataReadService:
         self.db_path, self.enabled, self.max_db_bytes = db_path, enabled, max_db_bytes
 
     @contextmanager
-    def _snapshot(self):
+    def _snapshot(self, *, deadline=None):
         connection = None
         try:
             if not self.enabled:
                 raise ProjectionUnavailable("projection_disabled")
             connection = sqlite3.connect(Path(self.db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=.5, isolation_level=None)
             connection.row_factory = sqlite3.Row
+            if deadline is not None:
+                deadline.require_remaining()
+                connection.set_progress_handler(lambda: int(deadline.expired()), 100)
             for pragma in ("query_only=ON", "foreign_keys=ON", "busy_timeout=500"):
                 connection.execute("PRAGMA " + pragma)
             connection.execute("BEGIN")
             validate_schema(connection)
             yield connection
-        except (sqlite3.Error, OSError, ValueError):
+            if deadline is not None:
+                deadline.require_remaining()
+        except (sqlite3.Error, OSError, ValueError, ProjectionUnavailable):
+            if deadline is not None and deadline.expired():
+                raise AnalyticsQueryDeadlineExceeded("Projection read deadline exceeded") from None
             raise ProjectionUnavailable() from None
         finally:
             if connection is not None:
                 connection.close()
+
+    def read_protocol_evidence_snapshot(self, site_id, device_id, client_mac, from_utc, to_utc, *, max_rows, deadline):
+        """NI-03 narrow read: runtime, identity and facts in the same snapshot."""
+        try:
+            validate_site_id(site_id)
+            canonical_uuid(device_id)
+            if canonical_mac(client_mac) != client_mac or type(max_rows) is not int or max_rows != 20000:
+                raise ValueError
+            first, last = ni_timestamp(from_utc, canonical=True), ni_timestamp(to_utc, canonical=True)
+            if (last - first).total_seconds() != 86400:
+                raise ValueError
+        except Exception:
+            raise ProjectionValidationError() from None
+        with self._snapshot(deadline=deadline) as connection:
+            state = connection.execute("SELECT runtime_state FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+            if state is None:
+                raise ProjectionUnavailable()
+            binding = connection.execute(
+                "SELECT binding_state,device_id FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?",
+                (site_id, client_mac)).fetchone()
+            result = dict(runtime_state=state[0], binding_state=binding[0] if binding else None,
+                          bound_device_id=binding[1] if binding else None, facts=())
+            if binding is None or binding[0] in {"not_yet_registry_resolved", "registry_unavailable"}:
+                return result
+            if binding[0] != "authoritative" or binding[1] != device_id:
+                raise ProjectionUnavailable()
+            # The upper half-open bound excludes future data from aggregation,
+            # but its presence in this exact identity scope is an integrity failure.
+            if connection.execute(
+                "SELECT 1 FROM device_network_metadata_edges INDEXED BY idx_projection_mac_event "
+                "WHERE site_id=? AND client_mac=? AND event_at>=? LIMIT 1",
+                (site_id, client_mac, to_utc)).fetchone() is not None:
+                raise ProjectionUnavailable()
+            rows = connection.execute(
+                "SELECT edge_id,event_at,source_event_family FROM device_network_metadata_edges "
+                "INDEXED BY idx_projection_mac_event WHERE site_id=? AND client_mac=? "
+                "AND event_at>=? AND event_at<? ORDER BY event_at,edge_id LIMIT ?",
+                (site_id, client_mac, from_utc, to_utc, max_rows + 1)).fetchall()
+            if len(rows) > max_rows:
+                raise ProjectionUnavailable()
+            result["facts"] = tuple(dict(row) for row in rows)
+            return result
 
     @staticmethod
     def _logical(row):

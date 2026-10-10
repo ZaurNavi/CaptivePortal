@@ -159,6 +159,7 @@ from app.config import (
     WEB_ADMIN_DEVICE_PAGE_SIZE, WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED,
     WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET,
     WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED,
+    WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED,
     WEB_ADMIN_VISIT_PAGE_SIZE,
     WEB_ADMIN_OBSERVATION_PAGE_SIZE,
     WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS,
@@ -635,6 +636,7 @@ def get_settings() -> dict:
         "web_admin_device_current_context_enabled": (
             WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED
         ),
+        "web_admin_device_protocol_intelligence_enabled": WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED,
         "web_admin_visit_page_size": WEB_ADMIN_VISIT_PAGE_SIZE,
         "web_admin_observation_page_size": (
             WEB_ADMIN_OBSERVATION_PAGE_SIZE

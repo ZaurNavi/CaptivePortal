@@ -17,6 +17,9 @@
   {% else %}
   <script defer src="{{ url_for('admin_web_v1.static', filename='admin.js') }}"></script>
   {% endif %}
+  {% if page.key == 'device' and device_protocol_intelligence_enabled %}
+  <script defer src="{{ url_for('admin_web_v1.static', filename='device_protocol_intelligence.js') }}"></script>
+  {% endif %}
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>

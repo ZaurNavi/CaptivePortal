@@ -248,7 +248,7 @@ def test_recorder_writes_only_sanitized_event_with_private_file_mode(tmp_path):
     assert json.loads(content)["observation"]["model_normalization_state"] == "UNUSABLE"
 
 
-def test_privacy_canaries_never_enter_observation_lifecycle_telemetry_or_output():
+def test_privacy_canaries_never_enter_observation_lifecycle_telemetry_or_output(tmp_path):
     class Telemetry:
         def __init__(self):
             self.events = []
@@ -260,7 +260,7 @@ def test_privacy_canaries_never_enter_observation_lifecycle_telemetry_or_output(
     recorder = Recorder()
     telemetry = Telemetry()
     candidate = PortalClientHintsProbe(
-        ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+        ProbeConfig(True, 3, 2, str((tmp_path / "probe.jsonl").resolve())),
         recorder=recorder, telemetry=telemetry, monotonic=clock.monotonic,
     )
     request_headers = {
