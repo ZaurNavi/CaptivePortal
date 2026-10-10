@@ -114,10 +114,10 @@ def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, cli
     return app, handler
 
 
-def test_capport_probe_only_on_secure_resolved_html_login_not_json_or_discovery():
+def test_capport_probe_only_on_secure_resolved_html_login_not_json_or_discovery(tmp_path):
     recorder = Mock()
     probe = PortalClientHintsProbe(
-        ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+        ProbeConfig(True, 3, 2, str((tmp_path / "probe.jsonl").resolve())),
         recorder=recorder, monotonic=lambda: 0.0,
     )
     service = Mock()
@@ -149,7 +149,7 @@ def test_capport_probe_only_on_secure_resolved_html_login_not_json_or_discovery(
     assert service.resolve_for_login.call_count == 4
 
 
-def test_capport_real_session_submission_and_reuse_are_probe_invariant():
+def test_capport_real_session_submission_and_reuse_are_probe_invariant(tmp_path):
     class Executor:
         def __init__(self):
             self.submissions = []
@@ -168,7 +168,7 @@ def test_capport_real_session_submission_and_reuse_are_probe_invariant():
         )
         recorder = Mock()
         probe = (PortalClientHintsProbe(
-            ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+            ProbeConfig(True, 3, 2, str((tmp_path / "probe.jsonl").resolve())),
             recorder=recorder, monotonic=lambda: 0.0,
         ) if enabled else None)
         service = Mock()

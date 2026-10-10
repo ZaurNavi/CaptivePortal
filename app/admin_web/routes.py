@@ -656,6 +656,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 page.key == "device"
                 and config.device_current_context_enabled
             ),
+            device_protocol_intelligence_enabled=(
+                page.key == "device" and config.device_protocol_intelligence_enabled
+                and policy.authorize(g.admin_principal, "admin.read.device", selected)
+            ),
             home_live_enabled=config.home_live_enabled,
             home_live_refresh_seconds=config.home_live_refresh_seconds,
             home_live_request_timeout_seconds=config.home_live_request_timeout_seconds,
@@ -983,6 +987,49 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             logger.exception("admin.device_current_context_query_failed")
             return _error("internal_error", 500)
         return _success(selected, response.result, enforce_size=True)
+
+    @blueprint.get("/admin/api/v1/sites/<site_id>/devices/<device_id>/protocol-intelligence")
+    @authenticated
+    def api_device_protocol_intelligence(site_id: str, device_id: str) -> Response:
+        try:
+            selected = resolver.resolve(site_id)
+        except AdminSiteContextError:
+            return _error("invalid_request", 400)
+        except AdminAccessDenied:
+            return _error("site_forbidden", 403)
+        try:
+            if not policy.authorize(g.admin_principal, "admin.read.device", selected):
+                return _error("site_forbidden", 403)
+            if request.args or request.get_data(cache=False):
+                return _error("invalid_request", 400)
+            if canonical_device_id(device_id) is None:
+                return _error("invalid_request", 400)
+            if not config.device_protocol_intelligence_enabled:
+                return _error("not_found", 404)
+            if runtime.query_service is None:
+                return _error("source_unavailable", 503)
+            response = runtime.query_service.device_protocol_intelligence(
+                g.admin_principal, selected, device_id, query_parameters_present=False)
+            return _success(selected, response.result, enforce_size=True,
+                            response_limit_bytes=16384, api_version="admin.device.protocol-intelligence.v1")
+        except AdminQueryValidationError:
+            return _error("invalid_request", 400)
+        except AdminQueryForbidden:
+            return _error("site_forbidden", 403)
+        except AdminQueryNotFound:
+            return _error("not_found", 404)
+        except AdminQueryBusy:
+            response = make_response(_error("concurrency_limit", 429))
+            response.headers["Retry-After"] = "1"
+            return response
+        except AdminQueryDeadline:
+            return _error("query_deadline", 503)
+        except AdminQueryUnavailable:
+            return _error("source_unavailable", 503)
+        except Exception:
+            # Never emit exception bodies/tracebacks that can contain Device data.
+            logger.error("admin.protocol_intelligence_query_failed")
+            return _error("internal_error", 500)
 
     @blueprint.get("/admin/api/v1/sites/<site_id>/visits")
     @authenticated
@@ -2299,9 +2346,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         page: dict[str, Any] | None = None,
         enforce_size: bool = False,
         response_limit_bytes: int | None = None,
+        api_version: str = API_VERSION,
     ) -> Response:
         payload = {
-            "api_version": API_VERSION,
+            "api_version": api_version,
             "request_id": g.admin_request_id,
             "site_id": site_id,
             "result": result,
@@ -2333,7 +2381,8 @@ def _error(code: str, status_code: int) -> Response:
     if _is_api_path(request.path):
         return jsonify(
             {
-                "api_version": ("admin.settings.features.mutation.v1" if request.path == "/admin/api/v1/settings/features/generations"
+                "api_version": ("admin.device.protocol-intelligence.v1" if _is_protocol_intelligence_path(request.path)
+                    else "admin.settings.features.mutation.v1" if request.path == "/admin/api/v1/settings/features/generations"
                     else "admin.settings.features.v1" if request.path == "/admin/api/v1/settings/features"
                     else "admin.settings.portal.mutation.v1" if request.path == "/admin/api/v1/settings/portal/generations"
                     else "admin.settings.portal.v1" if request.path == "/admin/api/v1/settings/portal"
@@ -2352,6 +2401,10 @@ def _error(code: str, status_code: int) -> Response:
             }
         ), status_code
     return make_response("The request could not be completed.", status_code)
+
+
+def _is_protocol_intelligence_path(path: str) -> bool:
+    return path.startswith(ADMIN_API_PREFIX + "/sites/") and "/devices/" in path and path.endswith("/protocol-intelligence")
 
 
 def _is_admin_path(path: str) -> bool:

@@ -91,6 +91,7 @@ class AdminWebConfig:
     traffic_refresh_seconds: int
     traffic_request_timeout_seconds: int
     global_capabilities: frozenset[str] = frozenset()
+    device_protocol_intelligence_enabled: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -126,6 +127,10 @@ def admin_web_config_from_settings(
     require_https = _exact_bool(
         settings.get("web_admin_require_https", "true"),
         "WEB_ADMIN_REQUIRE_HTTPS",
+    )
+    device_protocol_intelligence_enabled = _exact_bool(
+        settings.get("web_admin_device_protocol_intelligence_enabled", "false"),
+        "WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED",
     )
     home_live_enabled = _exact_bool(
         settings.get("web_admin_home_live_enabled", "false"),
@@ -278,6 +283,7 @@ def admin_web_config_from_settings(
     return AdminWebConfig(
         enabled=enabled,
         global_capabilities=global_capabilities,
+        device_protocol_intelligence_enabled=device_protocol_intelligence_enabled,
         username=username,
         password_hash=password_hash,
         allowed_networks=networks,

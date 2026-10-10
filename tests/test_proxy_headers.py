@@ -74,7 +74,7 @@ def create_test_app(portal_evidence_sink=None, *, automatic=False, client_hints_
     return app
 
 
-def test_external_portal_probe_only_after_guarded_secure_success():
+def test_external_portal_probe_only_after_guarded_secure_success(tmp_path):
     class Recorder:
         def __init__(self):
             self.events = []
@@ -85,7 +85,7 @@ def test_external_portal_probe_only_after_guarded_secure_success():
     recorder = Recorder()
     clock = Mock(return_value=0.0)
     probe = PortalClientHintsProbe(
-        ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+        ProbeConfig(True, 3, 2, str((tmp_path / "probe.jsonl").resolve())),
         recorder=recorder, monotonic=clock,
     )
     app = create_test_app(client_hints_probe=probe)
@@ -118,7 +118,7 @@ def test_external_portal_probe_disabled_keeps_response_unchanged():
     assert "Clear-Site-Data" not in response.headers
 
 
-def test_external_portal_real_session_submission_and_v1_queue_are_probe_invariant():
+def test_external_portal_real_session_submission_and_v1_queue_are_probe_invariant(tmp_path):
     class Sink:
         def __init__(self):
             self.candidates = []
@@ -132,7 +132,7 @@ def test_external_portal_real_session_submission_and_v1_queue_are_probe_invarian
         sink = Sink()
         recorder = Mock()
         probe = (PortalClientHintsProbe(
-            ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
+            ProbeConfig(True, 3, 2, str((tmp_path / "probe.jsonl").resolve())),
             recorder=recorder, monotonic=lambda: 0.0,
         ) if enabled else None)
         app = create_test_app(sink, client_hints_probe=probe, manager=manager, executor=executor)
