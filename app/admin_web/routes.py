@@ -159,6 +159,14 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         return wrapped
 
     @blueprint.context_processor
+    def current_partial_coverage_context():
+        return {
+            "traffic_partial_coverage_enabled": config.traffic_partial_coverage_enabled,
+            "traffic_fresh_max_age_seconds": config.home_traffic_fresh_max_age_seconds,
+            "traffic_stale_max_age_seconds": config.home_traffic_stale_max_age_seconds,
+        }
+
+    @blueprint.context_processor
     def settings_navigation():
         enabled = getattr(runtime, "settings_feature_enabled", False)
         principal = getattr(g, "admin_principal", None)
@@ -1166,17 +1174,18 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             route_name="current_traffic_summary",
             capability="admin.read.overview",
             feature_enabled=config.home_traffic_enabled,
-            allowed_parameters=frozenset(),
+            allowed_parameters=frozenset({"coverage_mode"}),
             required_parameters=frozenset(),
             operation=lambda service, selected: service.current_traffic_summary(
-                g.admin_principal, selected
+                g.admin_principal, selected,
+                **({"coverage_mode": request.args["coverage_mode"]} if "coverage_mode" in request.args else {}),
             ),
         )
 
     @blueprint.get("/admin/api/v1/sites/<site_id>/current-traffic/aps")
     @authenticated
     def api_current_traffic_aps(site_id: str) -> Response:
-        allowed = frozenset({"cycle_id", "limit", "cursor"})
+        allowed = frozenset({"cycle_id", "limit", "cursor", "coverage_mode"})
         return _current_traffic_query(
             site_id,
             route_name="current_traffic_ap_page",
@@ -1187,7 +1196,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             operation=lambda service, selected: service.list_current_ap_traffic(
                 g.admin_principal,
                 selected,
-                **{key: request.args.get(key) for key in allowed},
+                **{key: request.args.get(key) for key in allowed if key != "coverage_mode" or key in request.args},
             ),
         )
 
@@ -1199,10 +1208,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             route_name="traffic_current",
             capability="admin.read.context",
             feature_enabled=config.traffic_enabled,
-            allowed_parameters=frozenset(),
+            allowed_parameters=frozenset({"coverage_mode"}),
             required_parameters=frozenset(),
             operation=lambda service, selected: service.current_traffic_summary(
-                g.admin_principal, selected
+                g.admin_principal, selected,
+                **({"coverage_mode": request.args["coverage_mode"], "capability": "admin.read.context"} if "coverage_mode" in request.args else {}),
             ),
         )
 
@@ -1625,6 +1635,15 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 response = make_response(_error("invalid_request", 400))
                 reason = "invalid_request"
                 return response
+            if "coverage_mode" in allowed_parameters and "coverage_mode" in keys:
+                if request.args["coverage_mode"] != "partial_v1":
+                    response = make_response(_error("invalid_request", 400))
+                    reason = "invalid_request"
+                    return response
+                if not config.traffic_partial_coverage_enabled:
+                    response = make_response(_error("not_found", 404))
+                    reason = "feature_disabled"
+                    return response
             service = runtime.query_service
             if service is None:
                 response = make_response(_error("source_unavailable", 503))
@@ -1853,7 +1872,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 reason = "feature_disabled"
                 return response
             if (
-                not set(request.args).issubset({"range", "include", "products"})
+                not set(request.args).issubset({"range", "include", "products", "coverage_mode"})
+                or ("coverage_mode" in request.args and (
+                    len(request.args.getlist("coverage_mode")) != 1
+                    or request.args["coverage_mode"] != "partial_v1"))
                 or "range" not in request.args
                 or len(request.args.getlist("range")) != 1
                 or (
@@ -1870,6 +1892,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 reason = "invalid_request"
                 return response
             range_id = request.args.get("range")
+            if "coverage_mode" in request.args and not config.traffic_partial_coverage_enabled:
+                response = make_response(_error("not_found", 404))
+                reason = "feature_disabled"
+                return response
             if "products" in request.args:
                 if not config.traffic_independent_ranges_enabled:
                     response = make_response(_error("not_found", 404))
@@ -1944,6 +1970,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     include_aps=aps_requested,
                     include_ap_share=ap_share_requested,
                     requested_products=requested_products,
+                    **({"coverage_mode": "partial_v1"} if "coverage_mode" in request.args else {}),
                 )
                 result_status = result.result.get("status")
                 coverage = result.result.get("coverage", {})

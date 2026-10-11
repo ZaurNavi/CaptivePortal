@@ -6,11 +6,14 @@ import base64
 import json
 import math
 import re
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .models import (
+    CoverageAwareCurrentSiteTrafficV1,
+    CoverageAwareCurrentApTrafficPageV1,
     CurrentApTrafficItem,
     CurrentApTrafficPage,
     CurrentSiteTraffic,
@@ -195,6 +198,325 @@ class CurrentTrafficReadService:
             raise CurrentTrafficSourceUnavailable(
                 "Current traffic source is unavailable"
             ) from exc
+
+    def get_current_site_traffic_partial_coverage(
+        self, site_id: str, *, status_read_service=None,
+        evaluated_at_utc: str | None = None,
+        fresh_max_age_seconds: float, stale_max_age_seconds: float,
+        max_ap_skew_seconds: float, deadline: QueryDeadline | None = None,
+    ) -> CoverageAwareCurrentSiteTrafficV1:
+        summary, _items = self._partial_read(
+            site_id, None, status_read_service, evaluated_at_utc,
+            fresh_max_age_seconds, stale_max_age_seconds, max_ap_skew_seconds,
+            deadline or QueryDeadline.after(10.0),
+        )
+        return summary
+
+    def list_current_ap_traffic_partial_coverage(
+        self, site_id: str, *, cycle_id: str, status_read_service=None,
+        evaluated_at_utc: str | None = None,
+        fresh_max_age_seconds: float, stale_max_age_seconds: float,
+        max_ap_skew_seconds: float, limit: int = 100, cursor: str | None = None,
+        deadline: QueryDeadline | None = None,
+    ) -> CoverageAwareCurrentApTrafficPageV1:
+        site, cycle, size = _site(site_id), _cycle_id(cycle_id), _limit(limit)
+        summary, items = self._partial_read(
+            site, cycle, status_read_service, evaluated_at_utc,
+            fresh_max_age_seconds, stale_max_age_seconds, max_ap_skew_seconds,
+            deadline or QueryDeadline.after(10.0),
+        )
+        if summary.snapshot["cycle_id"] is None:
+            raise CurrentTrafficValidationError("traffic cycle is unavailable")
+        source = summary.source_selection["selected_source"]
+        # A distinct cursor namespace pins both traffic and aligned status.
+        context = {"kind": "partial_current_aps_v1", "site_id": site,
+                   "cycle_id": cycle, "selected_source": source,
+                   "status_cycle_id": summary.status_evidence["cycle_id"],
+                   "source_scope_hash": summary.status_evidence["source_scope_hash"]}
+        if cursor is not None:
+            try:
+                if not isinstance(cursor, str) or len(cursor) > _MAX_CURSOR_LENGTH:
+                    raise ValueError()
+                decoded = json.loads(base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True))
+                if set(decoded) != set(context) | {"last_ap_mac"} or any(decoded[k] != v for k, v in context.items()):
+                    raise ValueError()
+                if not isinstance(decoded["last_ap_mac"], str) or _MAC_PATTERN.fullmatch(decoded["last_ap_mac"]) is None:
+                    raise ValueError()
+                if _partial_cursor(decoded) != cursor:
+                    raise ValueError()
+                items = tuple(item for item in items if item["ap_mac"] > decoded["last_ap_mac"])
+            except (ValueError, TypeError, KeyError, UnicodeError) as exc:
+                raise CurrentTrafficValidationError("traffic cursor context mismatch") from exc
+        visible = items[:size]
+        next_cursor = _partial_cursor({**context, "last_ap_mac": visible[-1]["ap_mac"]}) if len(items) > size else None
+        return CoverageAwareCurrentApTrafficPageV1(
+            summary, visible, CurrentTrafficPageMetadata(size, next_cursor, cycle, source),
+        )
+
+    def _partial_read(self, site_id, cycle_id, status_reader, evaluated_text,
+                      fresh, stale, skew, deadline):
+        site = _site(site_id)
+        evaluated, text = _evaluation(evaluated_text)
+        policy = _policy(fresh, stale, skew)
+        try:
+            data = self._gateway.read_current_partial_traffic_evidence(
+                site_id=site, cycle_id=cycle_id, deadline=deadline,
+            )
+        except AnalyticsSourceUnavailable as exc:
+            raise CurrentTrafficSourceUnavailable("Current traffic source is unavailable") from exc
+        try:
+            cycle = dict(data["cycle"]) if data["cycle"] is not None else None
+            latest = dict(data["latest"]) if data["latest"] is not None else None
+            attempt = _latest_attempt(latest)
+            if cycle is None:
+                return _partial_unavailable(site, text, None, attempt, "no_valid_rate"), ()
+            rows = tuple(dict(row) for row in data["rows"])
+            _validate_partial_cycle(site, cycle, rows, data.get("row_count", len(rows)))
+        except (CurrentTrafficIntegrityUnavailable, AnalyticsQueryValidationError, KeyError, TypeError, ValueError, OverflowError):
+            # Never select an older cycle after integrity failure.
+            return _partial_unavailable(site, text, None, ("none", None, None), "source_integrity_unavailable"), ()
+        from app.current_state.models import (
+            CurrentApStatusEvidenceV1, CurrentStateStorageError,
+            CurrentStateSchemaError, CurrentStateValidationError,
+        )
+        status = CurrentApStatusEvidenceV1(site)
+        if status_reader is not None:
+            try:
+                status = status_reader.read_ap_status_evidence_at(site, cycle["finished_at"], deadline=deadline)
+            except (sqlite3.ProgrammingError, sqlite3.InterfaceError):
+                raise
+            except (CurrentStateStorageError, CurrentStateSchemaError, CurrentStateValidationError,
+                    sqlite3.Error, OSError):
+                # Status storage failure disables Offline promotion, not rates.
+                # The shared deadline below still rejects interrupted/late reads.
+                pass
+        deadline.require_remaining()
+        if not isinstance(status, CurrentApStatusEvidenceV1) or status.site_id != site:
+            status = CurrentApStatusEvidenceV1(site)
+        try:
+            return _partial_evaluate(site, text, evaluated, policy, cycle, latest, rows, status)
+        except (CurrentTrafficIntegrityUnavailable, OverflowError):
+            return _partial_unavailable(site, text, None, attempt, "source_integrity_unavailable"), ()
+
+
+def _partial_cursor(payload):
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _validate_partial_cycle(site, cycle, rows, actual_count):
+    _validate_partial_cycle_header(site, cycle, actual_count)
+    if len(rows) != actual_count:
+        raise ValueError("Invalid partial traffic cycle")
+    seen = set()
+    for row in rows:
+        _validate_partial_row(site, cycle, row, seen)
+
+
+def _validate_partial_cycle_header(site, cycle, actual_count):
+    started, finished = parse_utc(cycle["started_at"], "cycle started_at"), parse_utc(cycle["finished_at"], "cycle finished_at")
+    count = cycle["items_stored"]
+    if (
+        cycle["site_id"] != site or cycle["kind"] != "ap_dynamic"
+        or cycle["state"] != "completed" or cycle["result"] not in {"success", "partial"}
+        or type(count) is not int or count <= 0 or actual_count != count
+        or started > finished or cycle["items_seen"] != count or cycle["source_rows_reported"] != count
+        or cycle["items_skipped"] != 0 or cycle["data_quality_warning_count"] != 0
+        or type(cycle["error_count"]) is not int or cycle["error_count"] < 0
+        or cycle["complete"] not in (0, 1)
+    ):
+        raise ValueError("Invalid partial traffic cycle")
+
+
+def _validate_partial_row(site, cycle, row, seen):
+    started, finished = parse_utc(cycle["started_at"], "cycle started_at"), parse_utc(cycle["finished_at"], "cycle finished_at")
+    mac = row["ap_mac"]
+    if (row["site_id"] != site or row["cycle_id"] != cycle["cycle_id"]
+        or not isinstance(mac, str) or _MAC_PATTERN.fullmatch(mac) is None or mac in seen
+        or row["name"] is not None and not isinstance(row["name"], str)
+        or any(row[key] not in (0, 1) for key in (
+            "partial", "overview_ok", "wired_uplink_ok", "lan_traffic_ok", "radios_ok"))):
+        raise ValueError("Invalid AP identity")
+    seen.add(mac)
+    for source in ("wired", "lan"):
+        down, up, dr, ur, at = _partial_values(row, source)
+        for value, reason in ((down, dr), (up, ur)):
+            if reason not in RATE_REASONS:
+                raise ValueError("Invalid rate reason")
+            if reason == "ok":
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                    raise ValueError("Invalid rate value")
+                if not started <= parse_utc(at, "source observed_at") <= finished:
+                    raise ValueError("Invalid rate timestamp")
+            elif value is not None:
+                raise ValueError("Non-ok numeric rate")
+        if at is not None:
+            parse_utc(at, "source observed_at")
+
+
+def _partial_values(row, source):
+    if source == "wired":
+        keys = ("wired_download_mbps", "wired_upload_mbps", "wired_download_rate_reason", "wired_upload_rate_reason", "wired_observed_at")
+    else:
+        keys = ("lan_rx_mbps", "lan_tx_mbps", "lan_rx_rate_reason", "lan_tx_rate_reason", "lan_observed_at")
+    return tuple(row[key] for key in keys)
+
+
+def _partial_unavailable(site, text, cycle, attempt, reason):
+    return CoverageAwareCurrentSiteTrafficV1(
+        site, text, "unavailable", "none",
+        {"cycle_id": None, "started_at": None, "finished_at": None, "source_result": None,
+         "source_complete": False, "latest_attempt_state": attempt[0], "latest_attempt_result": attempt[1],
+         "latest_attempt_at": attempt[2], "using_previous_snapshot": False,
+         "observed_at": None, "newest_observed_at": None, "age_seconds": None,
+         "source_skew_seconds": None, "freshness_status": "unavailable",
+         "freshness_reason": "no_complete_snapshot" if reason == "no_valid_rate" else "source_unavailable"},
+        {"download_mbps": None, "upload_mbps": None, "total_mbps": None, "unit": "Mbps"},
+        {"primary_source": "wired", "selected_source": None, "selection_reason": "no_complete_snapshot",
+         "source_mixing_allowed": False, "wired_pair_valid_ap_count": 0, "lan_pair_valid_ap_count": 0},
+        {"observation_ap_count": 0, "installed_ap_count": None, "online_ap_count": None,
+         "offline_ap_count": None, "other_ap_count": None, "unknown_ap_count": None,
+         "measured_pair_ap_count": 0, "measured_download_ap_count": 0, "measured_upload_ap_count": 0,
+         "required_measurement_ap_count": None, "missing_required_ap_count": None,
+         "offline_excluded_ap_count": 0, "observation_only_ap_count": 0, "inventory_only_ap_count": 0,
+         "population_match_state": "status_unavailable", "coverage_reasons": [reason]},
+        {"state": "unavailable", "cycle_id": None, "capture_started_at": None,
+         "capture_finished_at": None, "age_at_traffic_seconds": None, "source_scope_hash": None},
+    )
+
+
+def _partial_evaluate(site, text, evaluated, policy, cycle, latest, rows, status):
+    r = {row["ap_mac"] for row in rows}
+    aligned = status.state == "aligned_fresh"
+    i = set(status.statuses) if aligned else set()
+    online = {mac for mac in i if status.statuses[mac] == "online"}
+    offline = {mac for mac in i if status.statuses[mac] == "offline"}
+    other = {mac for mac in i if status.statuses[mac] == "other"}
+    unknown = i - online - offline - other
+    matched = aligned and r == i
+    pairs = {source: {row["ap_mac"] for row in rows if _partial_values(row, source)[2:4] == ("ok", "ok")} for source in ("wired", "lan")}
+    if pairs["wired"] == r:
+        source, reason = "wired", "primary_full_observation_coverage"
+    elif pairs["lan"] == r:
+        source, reason = "lan", "fallback_full_observation_coverage"
+    elif matched and not (other | unknown) and online <= pairs["wired"]:
+        source, reason = "wired", "primary_full_online_coverage"
+    elif matched and not (other | unknown) and online <= pairs["lan"]:
+        source, reason = "lan", "fallback_full_online_coverage"
+    elif len(pairs["lan"]) > len(pairs["wired"]):
+        source, reason = "lan", "fallback_higher_measured_coverage"
+    else:
+        source, reason = "wired", "primary_preferred_tie_or_higher"
+    values = {row["ap_mac"]: _partial_values(row, source) for row in rows}
+    d = {mac for mac in r if values[mac][2] == "ok"}
+    u = {mac for mac in r if values[mac][3] == "ok"}
+    p = d & u
+    excluded = {mac for mac in offline & r if values[mac][:4] == (None, None, "source_unavailable", "source_unavailable")}
+    conflicts = offline & r - excluded
+    reasons = set()
+    if cycle["result"] == "partial":
+        reasons.add("source_cycle_partial")
+    if latest and latest["result"] in {"failed", "shutdown"}:
+        reasons.add("source_cycle_failed")
+    if not aligned:
+        reasons.add("status_evidence_stale" if status.state == "stale" else "status_evidence_unavailable")
+    if aligned and not matched:
+        reasons.add("population_mismatch")
+    if conflicts:
+        reasons.add("status_measurement_conflict")
+    for members, label in ((online, "online"), (other, "other_status"), (unknown, "unknown_status")):
+        if members - p:
+            reasons.add(f"{label}_measurement_missing")
+    for mac in r - p - excluded:
+        reasons.update(reason for reason in values[mac][2:4] if reason != "ok")
+    if d != u:
+        reasons.add("missing_direction")
+    # Legacy installed proof is strict, not merely the complete bit.
+    strict = (cycle["complete"] == 1 and cycle["result"] == "success" and cycle["error_count"] == 0
+              and all(row["partial"] == 0 and all(row[key] == 1 for key in (
+                  "overview_ok", "wired_uplink_ok", "lan_traffic_ok", "radios_ok")) for row in rows))
+    if (matched and p == i) or (strict and p == r and not aligned):
+        state, scope = "complete_installed", "installed"
+        reasons.add("complete_installed_population")
+    elif matched and not (other | unknown) and p == online and excluded == offline:
+        state, scope = "complete_online_population", "confirmed_online"
+        reasons.update(("complete_confirmed_online_population", "confirmed_offline_excluded"))
+    elif d or u:
+        state, scope = "partial_measured", "measured_only"
+    else:
+        state, scope = "unavailable", "none"
+        reasons.add("no_valid_rate")
+    times = [parse_utc(values[mac][4], "source observed_at") for mac in d | u]
+    oldest, newest = (min(times), max(times)) if times else (None, None)
+    age = (evaluated - oldest).total_seconds() if oldest else None
+    skew = (newest - oldest).total_seconds() if times else None
+    freshness, freshness_reason = "unavailable", "source_unavailable"
+    if times:
+        if newest > evaluated or parse_utc(cycle["finished_at"], "cycle finished_at") > evaluated:
+            freshness_reason = "clock_anomaly"
+            reasons.add("clock_anomaly")
+        elif skew > policy.max_ap_skew_seconds:
+            reasons.add("temporal_skew")
+        elif age > policy.stale_max_age_seconds:
+            freshness_reason = "age_exceeded"
+            reasons.add("age_exceeded")
+        else:
+            freshness = "fresh" if age <= policy.fresh_max_age_seconds else "stale"
+            freshness_reason = "within_freshness_window" if freshness == "fresh" else "within_stale_window"
+    down = math.fsum(values[mac][0] for mac in sorted(d)) if d else None
+    up = math.fsum(values[mac][1] for mac in sorted(u)) if u else None
+    if down is not None and not math.isfinite(down) or up is not None and not math.isfinite(up):
+        raise CurrentTrafficIntegrityUnavailable("Current traffic sum is not finite")
+    if freshness == "unavailable":
+        down, up, state, scope = None, None, "unavailable", "none"
+    total = down + up if down is not None and up is not None else None
+    if total is not None and not math.isfinite(total):
+        raise CurrentTrafficIntegrityUnavailable("Current traffic total is not finite")
+    attempt = _latest_attempt(latest)
+    previous = bool(latest and (latest["started_at"], latest["cycle_id"]) > (cycle["started_at"], cycle["cycle_id"]))
+    required = i - excluded if aligned else None
+    summary = CoverageAwareCurrentSiteTrafficV1(
+        site, text, state, scope,
+        {"cycle_id": cycle["cycle_id"], "started_at": cycle["started_at"], "finished_at": cycle["finished_at"],
+         "source_result": cycle["result"], "source_complete": bool(cycle["complete"]),
+         "latest_attempt_state": attempt[0], "latest_attempt_result": attempt[1], "latest_attempt_at": attempt[2],
+         "using_previous_snapshot": previous,
+         "observed_at": format_utc(oldest) if oldest else None, "newest_observed_at": format_utc(newest) if newest else None,
+         "age_seconds": max(age, 0) if age is not None else None, "source_skew_seconds": skew,
+         "freshness_status": freshness, "freshness_reason": freshness_reason},
+        {"download_mbps": down, "upload_mbps": up, "total_mbps": total, "unit": "Mbps"},
+        {"primary_source": "wired", "selected_source": source, "selection_reason": reason,
+         "source_mixing_allowed": False, "wired_pair_valid_ap_count": len(pairs["wired"]), "lan_pair_valid_ap_count": len(pairs["lan"])},
+        {"observation_ap_count": len(r), "installed_ap_count": len(i) if aligned else None,
+         "online_ap_count": len(online) if aligned else None, "offline_ap_count": len(offline) if aligned else None,
+         "other_ap_count": len(other) if aligned else None, "unknown_ap_count": len(unknown) if aligned else None,
+         "measured_pair_ap_count": len(p), "measured_download_ap_count": len(d), "measured_upload_ap_count": len(u),
+         "required_measurement_ap_count": len(required) if required is not None else None,
+         "missing_required_ap_count": len(required - p) if required is not None else None,
+         "offline_excluded_ap_count": len(excluded), "observation_only_ap_count": len(r - i) if aligned else 0,
+         "inventory_only_ap_count": len(i - r) if aligned else 0,
+         "population_match_state": "matched" if matched else "mismatch" if aligned else "status_unavailable",
+         "coverage_reasons": sorted(reasons)},
+        {"state": "population_mismatch" if aligned and not matched else status.state,
+         "cycle_id": status.cycle_id, "capture_started_at": status.capture_started_at,
+         "capture_finished_at": status.capture_finished_at, "age_at_traffic_seconds": status.age_at_traffic_seconds,
+         "source_scope_hash": status.source_scope_hash},
+    )
+    items = []
+    for row in rows:
+        mac = row["ap_mac"]
+        down, up, dr, ur, observed = values[mac]
+        at = parse_utc(observed, "source observed_at") if observed is not None else None
+        if at is None or at > evaluated or (evaluated - at).total_seconds() > policy.stale_max_age_seconds:
+            down, up = None, None
+        rate_status = "valid" if down is not None and up is not None else "partial" if down is not None or up is not None else "unavailable"
+        role = "population_conflict" if aligned and mac not in i else "offline_excluded" if mac in excluded else "measured" if mac in p else "required_unknown" if not aligned or mac in other | unknown else "missing"
+        items.append({"ap_mac": mac, "name": row["name"], "selected_source": source,
+                      "download_mbps": down, "upload_mbps": up, "total_mbps": down + up if down is not None and up is not None else None,
+                      "download_reason": dr, "upload_reason": ur, "rate_status": rate_status,
+                      "coverage_role": role, "status_classification": status.statuses.get(mac) if aligned else None,
+                      "observed_at": observed})
+    return summary, tuple(items)
 
 
 def _context_or_unavailable(*args: Any, **kwargs: Any) -> dict[str, Any]:

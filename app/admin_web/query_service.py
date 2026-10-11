@@ -83,6 +83,8 @@ from .current_state_serialization import (
     serialize_client_summary,
 )
 from .current_traffic_serialization import (
+    serialize_partial_current_summary,
+    serialize_partial_current_ap_page,
     CurrentTrafficSerializationError,
     serialize_current_ap_traffic_page,
     serialize_current_traffic_summary,
@@ -109,6 +111,7 @@ from .home_health_serialization import (
     serialize_home_health,
 )
 from .historical_traffic_serialization import (
+    serialize_partial_historical_traffic,
     HistoricalTrafficSerializationError,
     serialize_historical_traffic,
 )
@@ -640,26 +643,37 @@ class AdminQueryService:
 
         return self._run(query)
 
-    def current_traffic_summary(self, principal, site_id):
-        self._authorize(principal, "admin.read.overview", site_id)
+    def current_traffic_summary(self, principal, site_id, *, coverage_mode=None, capability="admin.read.overview"):
+        partial = self._partial_current_mode(coverage_mode)
+        self._authorize(principal, capability if partial else "admin.read.overview", site_id)
 
         def query(deadline):
             value = self._traffic_call(
                 deadline,
                 "summary",
-                "get_current_site_traffic",
+                "get_current_site_traffic_partial_coverage" if partial else "get_current_site_traffic",
                 site_id,
+                **({"status_read_service": self._current_state} if partial else {}),
                 fresh_max_age_seconds=self._config.home_traffic_fresh_max_age_seconds,
                 stale_max_age_seconds=self._config.home_traffic_stale_max_age_seconds,
                 max_ap_skew_seconds=self._config.home_traffic_max_ap_skew_seconds,
             )
             try:
-                result = serialize_current_traffic_summary(value, site_id)
+                result = (serialize_partial_current_summary if partial else serialize_current_traffic_summary)(value, site_id)
             except CurrentTrafficSerializationError as exc:
                 raise AdminQueryUnavailable() from exc
             return AdminQueryResponse(result)
 
         return self._run(query)
+
+    def _partial_current_mode(self, mode):
+        if mode is None:
+            return False
+        if mode != "partial_v1":
+            raise AdminQueryValidationError()
+        if not self._config.traffic_partial_coverage_enabled:
+            raise AdminQueryUnavailable()
+        return True
 
     def _read_current_site_raw(self, site_id, *, evaluated_at_utc, deadline):
         options = {
@@ -700,8 +714,10 @@ class AdminQueryService:
         include_peak=False, include_aps=False, include_ap_share=False,
         include_history=True,
         requested_products=None,
+        coverage_mode=None,
     ):
         self._authorize(principal, "admin.read.overview", site_id)
+        partial = self._partial_current_mode(coverage_mode)
         try:
             resolved_range = resolve_traffic_network_range(
                 range_id, datetime.now(timezone.utc)
@@ -723,6 +739,7 @@ class AdminQueryService:
                 include_ap_share=include_ap_share,
                 include_history=include_history,
                 requested_products=requested_products,
+                coverage_mode="partial_v1" if partial else None,
             )
 
         return self._run(query)
@@ -732,6 +749,7 @@ class AdminQueryService:
         include_peak=False, include_aps=False, include_ap_share=False,
         include_history=True, requested_products=None,
         prefetched_current=_PREFETCH_NOT_PROVIDED,
+        coverage_mode=None,
     ):
         source = self._historical_traffic
         if source is None:
@@ -835,7 +853,8 @@ class AdminQueryService:
                         current_population_status = (
                             "unavailable" if include_ap_share else "available"
                         )
-            value = source.get_site_history(
+            read_history = source.get_site_history_partial_coverage if coverage_mode == "partial_v1" else source.get_site_history
+            value = read_history(
                 site_id,
                 from_utc=resolved_range.from_utc,
                 to_utc=resolved_range.to_utc,
@@ -849,13 +868,20 @@ class AdminQueryService:
                 current_cycle_id=current_cycle_id,
             )
             if include_aps:
-                value = source.compose_current_ap_traffic(
-                    value,
+                strict_value = value.strict if coverage_mode == "partial_v1" else value
+                composed = source.compose_current_ap_traffic(
+                    strict_value,
                     current_snapshot=current_snapshot,
                     current_population_count=current_population_count,
                     current_items=tuple(current_items),
                 )
-            result = serialize_historical_traffic(
+                if coverage_mode == "partial_v1":
+                    from dataclasses import replace
+                    value = replace(value, strict=composed)
+                else:
+                    value = composed
+            serialize = serialize_partial_historical_traffic if coverage_mode == "partial_v1" else serialize_historical_traffic
+            result = serialize(
                 value,
                 site_id,
                 resolved_range=resolved_range,
@@ -880,9 +906,10 @@ class AdminQueryService:
             raise AdminQueryUnavailable() from exc
 
     def list_current_ap_traffic(
-        self, principal, site_id, *, cycle_id, limit=None, cursor=None,
+        self, principal, site_id, *, cycle_id, limit=None, cursor=None, coverage_mode=None,
     ):
         self._authorize(principal, "admin.read.observations", site_id)
+        partial = self._partial_current_mode(coverage_mode)
         selected_cycle = self._current_cycle(cycle_id)
         if selected_cycle is None:
             raise AdminQueryValidationError()
@@ -893,8 +920,9 @@ class AdminQueryService:
             value = self._traffic_call(
                 deadline,
                 "page",
-                "list_current_ap_traffic",
+                "list_current_ap_traffic_partial_coverage" if partial else "list_current_ap_traffic",
                 site_id,
+                **({"status_read_service": self._current_state} if partial else {}),
                 cycle_id=selected_cycle,
                 fresh_max_age_seconds=self._config.home_traffic_fresh_max_age_seconds,
                 stale_max_age_seconds=self._config.home_traffic_stale_max_age_seconds,
@@ -903,7 +931,7 @@ class AdminQueryService:
                 cursor=selected_cursor,
             )
             try:
-                result, page = serialize_current_ap_traffic_page(
+                result, page = (serialize_partial_current_ap_page if partial else serialize_current_ap_traffic_page)(
                     value,
                     site_id,
                     cycle_id=selected_cycle,

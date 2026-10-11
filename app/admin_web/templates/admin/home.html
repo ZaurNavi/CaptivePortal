@@ -52,7 +52,10 @@
   <div class="pagination"><button id="live-client-more" class="button button-secondary" type="button" hidden>Load more devices</button></div>
 </section>
 {% if home_traffic_enabled %}
-<section id="home-traffic" aria-labelledby="traffic-now-title">
+<section id="home-traffic" aria-labelledby="traffic-now-title"
+  data-partial-coverage="{{ 'true' if traffic_partial_coverage_enabled else 'false' }}"
+  data-fresh-max-age-seconds="{{ traffic_fresh_max_age_seconds }}"
+  data-stale-max-age-seconds="{{ traffic_stale_max_age_seconds }}">
   <div class="section-heading">
     <div><h2 id="traffic-now-title">Traffic Now</h2><p class="live-detail">Derived from persisted AP traffic counters. May include local/service traffic and is not an Internet-only measurement.</p></div>
   </div>

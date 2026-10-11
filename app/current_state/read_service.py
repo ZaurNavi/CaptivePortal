@@ -14,6 +14,7 @@ from app.common.mac import format_mac_colon
 
 from .models import (
     CurrentApBucket,
+    CurrentApStatusEvidenceV1,
     CurrentApPage,
     CurrentApState,
     CurrentApSummary,
@@ -108,6 +109,87 @@ class CurrentStateReadService:
         """Yield the repository's existing URI-mode read-only connection."""
         with self.repository.read_connection() as connection:
             yield connection
+
+    def read_ap_status_evidence_at(
+        self, site_id: str, traffic_finished_at: str, *, deadline=None,
+    ) -> CurrentApStatusEvidenceV1:
+        """Read a bounded prior successful inventory, never a future snapshot.
+
+        Corrupt newest evidence is unavailable, not a license to seek an older
+        convenient Offline classification. Nothing is written to Current State.
+        """
+        site = require_site_id(site_id)
+        if site not in self.config.site_ids:
+            raise CurrentStateValidationError("site_id is not configured")
+        at = parse_utc(traffic_finished_at, "traffic_finished_at")
+        unavailable = CurrentApStatusEvidenceV1(site)
+        scope_json, scope_hash = canonical_scope("ap", site, ())
+        with self.repository.read_connection() as connection:
+            if deadline is not None:
+                deadline.require_remaining()
+                connection.set_progress_handler(lambda: int(deadline.expired()), 1000)
+            try:
+                connection.execute("BEGIN")
+                cycle = connection.execute(
+                    """SELECT * FROM current_state_cycles
+                       WHERE site_id=? AND kind='ap' AND result='success'
+                         AND complete=1 AND capture_finished_at<=?
+                       ORDER BY capture_finished_at DESC, cycle_id DESC LIMIT 1""",
+                    (site, traffic_finished_at),
+                ).fetchone()
+                if cycle is None:
+                    return unavailable
+                rows = connection.execute(
+                    """SELECT cycle_id, site_id, ap_mac, observed_at,
+                              status_classification FROM current_ap_state
+                       WHERE cycle_id=? ORDER BY ap_mac LIMIT ?""",
+                    (cycle["cycle_id"], self.config.ap_max_rows + 1),
+                ).fetchall()
+                if deadline is not None:
+                    deadline.require_remaining()
+                try:
+                    started = parse_utc(cycle["capture_started_at"])
+                    finished = parse_utc(cycle["capture_finished_at"])
+                    age = (at - finished).total_seconds()
+                    if (
+                        started > finished or age < 0
+                        or cycle["source_scope_version"] != 1
+                        or cycle["source_scope_json"] != scope_json
+                        or cycle["source_scope_hash"] != scope_hash
+                        or cycle["source_rows_reported"] != len(rows)
+                        or cycle["items_seen"] != len(rows)
+                        or cycle["items_stored"] != len(rows)
+                        or len(rows) > self.config.ap_max_rows
+                        or any(cycle[key] != 0 for key in (
+                            "items_skipped", "unidentified_count", "duplicate_identity_count",
+                            "error_count", "data_quality_warning_count",
+                        ))
+                    ):
+                        return unavailable
+                    statuses = {}
+                    for row in rows:
+                        mac = row["ap_mac"]
+                        if (
+                            row["site_id"] != site or row["cycle_id"] != cycle["cycle_id"]
+                            or not isinstance(mac, str) or format_mac_colon(mac) != mac
+                            or mac in statuses
+                            or row["status_classification"] not in {"online", "offline", "other", "unknown"}
+                            or not started <= parse_utc(row["observed_at"]) <= finished
+                        ):
+                            return unavailable
+                        statuses[mac] = row["status_classification"]
+                    if cycle["unknown_status_count"] != sum(value == "unknown" for value in statuses.values()):
+                        return unavailable
+                    return CurrentApStatusEvidenceV1(
+                        site, "aligned_fresh" if age <= self.config.ap_fresh_max_age_seconds else "stale",
+                        cycle["cycle_id"], cycle["capture_started_at"], cycle["capture_finished_at"],
+                        age, scope_hash, statuses,
+                    )
+                except (ValueError, TypeError, KeyError):
+                    return unavailable
+            finally:
+                connection.rollback()
+                connection.set_progress_handler(None, 0)
 
     def get_current_client(
         self,

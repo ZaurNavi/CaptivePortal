@@ -7,9 +7,11 @@ import time
 from datetime import datetime
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol, Sequence
 
 from app.observations.read_service import ObservationReadService
+from app.observations.config import MAX_AP_ROWS
+from .validation import parse_utc
 from app.visit_lifecycle.read_service import VisitLifecycleReadService
 from app.visitor_registry.registry_read_service import (
     VisitorRegistryReadService,
@@ -22,6 +24,21 @@ SOURCE_SCHEMA_VERSIONS = {
     "registry": 1,
 }
 MAX_CROSS_SOURCE_IDENTIFIERS = 250_000
+MAX_PARTIAL_CYCLES_PER_REQUEST = 10_080
+MAX_PARTIAL_AP_ROWS_PER_REQUEST = 150_000
+PARTIAL_AP_ROW_BATCH_SIZE = 2_000
+
+
+class PartialTrafficEvidenceReadBoundaryV1(Protocol):
+    def read_partial_ap_traffic_evidence(
+        self, *, site_id: str, from_utc: str, to_utc: str, deadline: "QueryDeadline",
+        consume_cycle: Callable[[Mapping[str, Any], Iterator[Mapping[str, Any]]], bool],
+    ) -> Mapping[str, Any]: ...
+
+
+class PartialTrafficCapacityLimited(RuntimeError):
+    """An incomplete bounded overlay must publish neither numbers nor counts."""
+
 _SQLITE_PROGRESS_OPCODES = 100
 _SNAPSHOT_BATCH_SIZE = 800
 _VISIT_WINDOW_BATCH_SIZE = 100
@@ -1902,6 +1919,125 @@ class AnalyticsSourceGateway:
                     "stats": stats,
                     "rows": tuple(rows),
                 }
+            finally:
+                connection.rollback()
+
+    def read_current_partial_traffic_evidence(
+        self, *, site_id: str, cycle_id: str | None, deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        """One coherent read of the newest completed candidate, even if corrupt.
+
+        Do not filter integrity fields in SQL: a corrupt newest cycle must not
+        silently expose older numbers. Reads remain under the query deadline.
+        """
+        with self._connection("observations", deadline) as connection:
+            connection.execute("BEGIN")
+            try:
+                clause = "" if cycle_id is None else " AND cycle_id=?"
+                cycle = self._one(connection, f"""
+                    SELECT * FROM observation_cycles
+                    WHERE site_id=? AND kind='ap_dynamic' AND state='completed'
+                      AND result IN ('success','partial'){clause}
+                    ORDER BY started_at DESC, cycle_id DESC LIMIT 1
+                    """, (site_id,) if cycle_id is None else (site_id, cycle_id), deadline)
+                latest = self._one(connection, """
+                    SELECT cycle_id, state, result, started_at, finished_at
+                    FROM observation_cycles WHERE site_id=? AND kind='ap_dynamic'
+                    ORDER BY started_at DESC, cycle_id DESC LIMIT 1
+                    """, (site_id,), deadline)
+                if cycle is None:
+                    return {"cycle": None, "latest": latest, "rows": ()}
+                count = self._one(connection, "SELECT COUNT(*) AS n FROM ap_observations WHERE cycle_id=?",
+                                  (cycle["cycle_id"],), deadline)["n"]
+                # Bound corrupt/cross-generation storage before materialization;
+                # the public page size is not a bound on this coherent read.
+                if count > MAX_AP_ROWS or count != cycle["items_stored"]:
+                    return {"cycle": cycle, "latest": latest, "rows": (), "row_count": count}
+                rows = self._all(connection, """
+                    SELECT cycle_id, site_id, ap_mac, name,
+                           partial, overview_ok, wired_uplink_ok, lan_traffic_ok, radios_ok,
+                           wired_observed_at, wired_download_mbps, wired_upload_mbps,
+                           wired_download_rate_reason, wired_upload_rate_reason,
+                           lan_observed_at, lan_rx_mbps, lan_tx_mbps,
+                           lan_rx_rate_reason, lan_tx_rate_reason
+                    FROM ap_observations WHERE cycle_id=? ORDER BY ap_mac LIMIT ?
+                    """, (cycle["cycle_id"], count + 1), deadline)
+                deadline.require_remaining()
+                return {"cycle": cycle, "latest": latest, "rows": tuple(rows), "row_count": count}
+            finally:
+                connection.rollback()
+
+    @contextmanager
+    def _partial_evidence_connection(self, deadline):
+        with self._connection("observations", deadline) as connection:
+            yield connection
+
+    def read_partial_ap_traffic_evidence(
+        self, *, site_id, from_utc, to_utc, deadline, consume_cycle,
+    ):
+        """Read raw evidence in one RO snapshot, streaming into the owner.
+
+        Projection-backed subclasses supply their existing raw Observation
+        boundary, not projection rows. No SQL rewriting is used here.
+        """
+        counts = dict(partial_cycle_count_examined=0, partial_cycle_count_admitted=0,
+                      partial_cycle_count_integrity_rejected=0, partial_ap_rows_examined=0)
+        with self._partial_evidence_connection(deadline) as connection:
+            connection.execute("BEGIN")
+            try:
+                with _statement_deadline(connection, deadline):
+                    first = connection.execute("""
+                        SELECT started_at FROM observation_cycles
+                        INDEXED BY idx_cycles_site_kind_started
+                        WHERE site_id=? AND kind='ap_dynamic'
+                        ORDER BY started_at,cycle_id LIMIT 1
+                    """, (site_id,)).fetchone()
+                    cycles = connection.execute("""
+                        SELECT * FROM observation_cycles
+                        INDEXED BY idx_cycles_site_kind_started
+                        WHERE site_id=? AND kind='ap_dynamic' AND state='completed'
+                          AND result='partial' AND complete=0 AND items_stored>0
+                          AND finished_at>=? AND finished_at<?
+                        ORDER BY started_at,cycle_id LIMIT ?
+                    """, (site_id, from_utc, to_utc, MAX_PARTIAL_CYCLES_PER_REQUEST + 1))
+                    for cycle in cycles:
+                        deadline.require_remaining()
+                        counts['partial_cycle_count_examined'] += 1
+                        if counts['partial_cycle_count_examined'] > MAX_PARTIAL_CYCLES_PER_REQUEST:
+                            raise PartialTrafficCapacityLimited()
+                        # The cycle index preserves all rows, including wrong-Site
+                        # corruption, for the shared structural validator.
+                        cursor = connection.execute("""
+                            SELECT * FROM ap_observations WHERE cycle_id=?
+                            ORDER BY ap_mac LIMIT ?
+                        """, (cycle['cycle_id'], MAX_PARTIAL_AP_ROWS_PER_REQUEST + 1))
+
+                        def rows():
+                            while True:
+                                deadline.require_remaining()
+                                batch = cursor.fetchmany(PARTIAL_AP_ROW_BATCH_SIZE)
+                                if not batch:
+                                    return
+                                for row in batch:
+                                    counts['partial_ap_rows_examined'] += 1
+                                    if counts['partial_ap_rows_examined'] > MAX_PARTIAL_AP_ROWS_PER_REQUEST:
+                                        raise PartialTrafficCapacityLimited()
+                                    yield row
+
+                        admitted = consume_cycle(cycle, rows())
+                        counts['partial_cycle_count_admitted' if admitted
+                               else 'partial_cycle_count_integrity_rejected'] += 1
+                deadline.require_remaining()
+                if first is not None:
+                    try:
+                        parse_utc(first['started_at'], "retained source boundary")
+                    except ValueError as exc:
+                        raise AnalyticsSourceUnavailable("Invalid retained source boundary") from exc
+                return {**counts, 'source_coverage_insufficient':
+                        True if first is not None and first['started_at'] > from_utc else None}
+            except sqlite3.OperationalError as exc:
+                _translate_sqlite_error(exc, deadline)
+                raise
             finally:
                 connection.rollback()
 

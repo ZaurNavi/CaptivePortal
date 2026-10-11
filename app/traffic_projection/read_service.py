@@ -148,6 +148,25 @@ class _ReadSnapshot:
 class TrafficProjectionReadService(AnalyticsSourceGateway):
     """Expose one coherent projected range through the existing semantic owner."""
 
+    @contextmanager
+    def _partial_evidence_connection(self, deadline):
+        """Reuse the configured raw source; never infer partials from projection."""
+        if self._current_path is None:
+            raise AnalyticsSourceUnavailable("Raw Observation source is unavailable")
+        try:
+            with closing(sqlite3.connect(sqlite3_uri(self._current_path), uri=True,
+                                        timeout=0.5)) as connection:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA busy_timeout=500")
+                connection.execute("PRAGMA query_only=ON")
+                with _statement_deadline(connection, deadline):
+                    if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
+                        raise AnalyticsSourceUnavailable("Raw Observation schema is invalid")
+                    yield connection
+        except sqlite3.OperationalError as exc:
+            _translate_sqlite_error(exc, deadline)
+            raise
+
     def __init__(
         self,
         repository: TrafficProjectionRepository,

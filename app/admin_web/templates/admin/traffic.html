@@ -20,7 +20,8 @@
   </div>
 </div>
 <div id="traffic-panels" class="content-grid" aria-live="polite">
-  <section id="traffic-current-panel" class="card card-wide" aria-labelledby="traffic-current-heading">
+  <section id="traffic-current-panel" class="card card-wide" aria-labelledby="traffic-current-heading"
+    data-partial-coverage="{{ 'true' if traffic_partial_coverage_enabled else 'false' }}">
     <div class="card-heading">
       <div>
         <p class="eyebrow">Live estimate</p>
@@ -99,6 +100,7 @@
     class="card card-wide traffic-history"
     aria-labelledby="traffic-history-heading"
     data-history-enabled="true"
+    data-partial-coverage="{{ 'true' if traffic_partial_coverage_enabled else 'false' }}"
   >
     <div class="card-heading traffic-history-heading-row">
       <div>
@@ -129,7 +131,8 @@
     <div id="traffic-history-legend" class="traffic-history-legend" aria-label="Chart legend">
       <span><i class="traffic-history-key traffic-history-key-download" aria-hidden="true"></i>Download</span>
       <span><i class="traffic-history-key traffic-history-key-upload" aria-hidden="true"></i>Upload</span>
-      <span><i class="traffic-history-key traffic-history-key-partial" aria-hidden="true"></i>Partial evidence</span>
+      <span><i class="traffic-history-key traffic-history-key-partial" aria-hidden="true"></i>{{ 'Measured partial coverage' if traffic_partial_coverage_enabled else 'Partial evidence' }}</span>
+      {% if traffic_partial_coverage_enabled %}<span>Complete AP coverage</span><span>No reliable data</span>{% endif %}
     </div>
     <div id="traffic-history-chart" class="traffic-history-chart" role="group" aria-label="Network traffic history chart">
       <svg id="traffic-history-chart-svg" viewBox="0 0 960 320" role="img" aria-labelledby="traffic-history-chart-title traffic-history-chart-description">
@@ -181,7 +184,7 @@
     </div>
     <div class="traffic-statistics-groups">
       <section aria-labelledby="traffic-statistics-average-heading">
-        <h3 id="traffic-statistics-average-heading">Average</h3>
+        <h3 id="traffic-statistics-average-heading">{{ 'Average · complete-coverage intervals only' if traffic_partial_coverage_enabled else 'Average' }}</h3>
         <div class="traffic-statistics-metrics">
           <article class="card live-metric"><p>Download</p><strong id="traffic-statistics-average-download">—</strong></article>
           <article class="card live-metric"><p>Upload</p><strong id="traffic-statistics-average-upload">—</strong></article>
@@ -189,7 +192,7 @@
         </div>
       </section>
       <section aria-labelledby="traffic-statistics-peak-heading">
-        <h3 id="traffic-statistics-peak-heading">Peak</h3>
+        <h3 id="traffic-statistics-peak-heading">{{ 'Max observed with complete AP coverage' if traffic_partial_coverage_enabled else 'Peak' }}</h3>
         <div class="traffic-statistics-metrics">
           <article class="card live-metric"><p>Download</p><strong id="traffic-statistics-peak-download">—</strong></article>
           <article class="card live-metric"><p>Upload</p><strong id="traffic-statistics-peak-upload">—</strong></article>

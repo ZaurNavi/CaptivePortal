@@ -92,6 +92,7 @@ class AdminWebConfig:
     traffic_request_timeout_seconds: int
     global_capabilities: frozenset[str] = frozenset()
     device_protocol_intelligence_enabled: bool = False
+    traffic_partial_coverage_enabled: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -151,6 +152,10 @@ def admin_web_config_from_settings(
     traffic_enabled = _exact_bool(
         settings.get("web_admin_traffic_enabled", "false"),
         "WEB_ADMIN_TRAFFIC_ENABLED",
+    )
+    traffic_partial_coverage_enabled = _exact_bool(
+        settings.get("web_admin_traffic_partial_coverage_enabled", "false"),
+        "WEB_ADMIN_TRAFFIC_PARTIAL_COVERAGE_ENABLED",
     )
     traffic_history_enabled = _exact_bool(
         settings.get("web_admin_traffic_history_enabled", "false"),
@@ -295,6 +300,7 @@ def admin_web_config_from_settings(
         device_current_context_enabled=device_current_context_enabled,
         home_traffic_enabled=home_traffic_enabled,
         traffic_enabled=traffic_enabled,
+        traffic_partial_coverage_enabled=traffic_partial_coverage_enabled,
         traffic_history_enabled=traffic_history_enabled,
         traffic_statistics_enabled=traffic_statistics_enabled,
         traffic_peak_enabled=traffic_peak_enabled,

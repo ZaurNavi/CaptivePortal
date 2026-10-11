@@ -29,6 +29,37 @@ def freeze(value: Any) -> Any:
 
 
 @dataclass(frozen=True, slots=True)
+class CoverageAwareCurrentSiteTrafficV1:
+    """Separate opt-in contract; legacy CurrentSiteTraffic is untouched."""
+
+    site_id: str
+    evaluated_at_utc: str
+    measurement_state: str
+    population_scope: str
+    snapshot: Mapping[str, Any]
+    traffic: Mapping[str, Any]
+    source_selection: Mapping[str, Any]
+    coverage: Mapping[str, Any]
+    status_evidence: Mapping[str, Any]
+    metric_version: str = "network_traffic_current_partial_coverage.v1"
+
+    def __post_init__(self):
+        for name in ("snapshot", "traffic", "source_selection", "coverage", "status_evidence"):
+            object.__setattr__(self, name, freeze(getattr(self, name)))
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageAwareCurrentApTrafficPageV1:
+    summary: CoverageAwareCurrentSiteTrafficV1
+    items: tuple[Mapping[str, Any], ...]
+    page: "CurrentTrafficPageMetadata"
+    metric_version: str = "network_traffic_current_ap_partial_coverage.v1"
+
+    def __post_init__(self):
+        object.__setattr__(self, "items", freeze(self.items))
+
+
+@dataclass(frozen=True, slots=True)
 class AnalyticsQuality:
     quality_mode: str
     reason: str | None = None
@@ -1203,6 +1234,22 @@ class HistoricalSiteTraffic:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "buckets", tuple(self.buckets))
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalTrafficPartialCoverageOverlayV1:
+    """Positive retained evidence, never a whole-period absence proof."""
+
+    evidence: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "evidence", freeze(self.evidence))
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageAwareHistoricalSiteTrafficV1:
+    strict: HistoricalSiteTraffic
+    partial_coverage: HistoricalTrafficPartialCoverageOverlayV1
 
 
 @dataclass(frozen=True, slots=True)
