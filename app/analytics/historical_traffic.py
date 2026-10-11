@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import math
 import re
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from .models import (
+    CoverageAwareHistoricalSiteTrafficV1,
+    HistoricalTrafficPartialCoverageOverlayV1,
     CurrentApTrafficItem,
     CurrentTrafficSnapshot,
     HistoricalSiteTraffic,
@@ -40,7 +43,9 @@ from .source_gateway import (
     AnalyticsSourceGateway,
     AnalyticsSourceUnavailable,
     QueryDeadline,
+    PartialTrafficCapacityLimited,
 )
+from .current_traffic import _partial_values, _validate_partial_cycle_header, _validate_partial_row
 from .validation import AnalyticsQueryValidationError, format_utc, parse_utc, require_site
 
 
@@ -369,6 +374,104 @@ class HistoricalTrafficReadService:
             ap_traffic=ap_traffic,
             ap_traffic_share=ap_traffic_share,
         )
+
+    def get_site_history_partial_coverage(self, site_id, **options):
+        """Compose an unchanged strict History with positive retained evidence."""
+        deadline = options.get("deadline") or QueryDeadline.after(self._query_seconds)
+        options["deadline"] = deadline
+        strict = self.get_site_history(site_id, **options)
+        duration = (parse_utc(strict.range.to_utc, "to_utc") - parse_utc(strict.range.from_utc, "from_utc")).total_seconds()
+        if (duration, strict.range.bucket_seconds) not in ((86400, 300), (604800, 900)) or len(strict.buckets) > MAX_SITE_HISTORY_BUCKETS:
+            raise HistoricalTrafficValidationError("Partial History requires the bounded 24h/7d axis")
+        local = QueryDeadline(min(deadline.expires_at, deadline.monotonic() + 5.0), deadline.monotonic)
+        start = parse_utc(strict.range.from_utc, "from_utc")
+        end = parse_utc(strict.range.to_utc, "to_utc")
+        accumulators = {}
+
+        def consume(cycle, rows):
+            count, seen, valid = 0, set(), True
+            families = {source: _partial_family() for source in ("wired", "lan")}
+            for row in rows:
+                count += 1
+                try:
+                    _validate_partial_row(site_id, cycle, row, seen)
+                    for source, family in families.items():
+                        down, up, dr, ur, _at = _partial_values(row, source)
+                        d, u = dr == "ok", ur == "ok"
+                        family["d"] += d
+                        family["u"] += u
+                        family["p"] += d and u
+                        if d:
+                            family["download"] = math.fsum((family["download"], down))
+                        if u:
+                            family["upload"] = math.fsum((family["upload"], up))
+                        family["reasons"].update(reason for reason in (dr, ur) if reason != "ok")
+                except (ValueError, TypeError, KeyError, OverflowError):
+                    valid = False
+            try:
+                _validate_partial_cycle_header(site_id, cycle, count)
+                finished = parse_utc(cycle["finished_at"], "finished_at")
+                if cycle["result"] != "partial" or cycle["complete"] != 0 or not start <= finished < end:
+                    raise ValueError("Invalid partial lifecycle")
+                if not valid or any(not math.isfinite(f["download"] + f["upload"]) for f in families.values()):
+                    return False
+            except (ValueError, TypeError, KeyError):
+                return False
+            index = int((finished - start).total_seconds() // strict.range.bucket_seconds)
+            bucket = accumulators.setdefault(index, _partial_accumulator())
+            bucket["n"] += 1
+            bucket["observed"] += count
+            bucket["min_observed"] = min(bucket["min_observed"], count)
+            bucket["max_observed"] = max(bucket["max_observed"], count)
+            for source, f in families.items():
+                target = bucket[source]
+                coherent = f["d"] == f["u"] == f["p"] and f["p"] > 0
+                target["full"] += f["p"] == count
+                for key in ("d", "u", "p"):
+                    target[key] += f[key]
+                target["min_pair"] = min(target["min_pair"], f["p"])
+                target["max_pair"] = max(target["max_pair"], f["p"])
+                for key, has, subtotal in (("download", f["d"] > 0, f["download"]),
+                                           ("upload", f["u"] > 0, f["upload"]),
+                                           ("total", coherent, f["download"] + f["upload"])):
+                    if has:
+                        target[key] = math.fsum((target[key], subtotal))
+                        target[key + "_samples"] += 1
+                target["reasons"].update(f["reasons"])
+                if f["d"] != f["p"] or f["u"] != f["p"]:
+                    target["reasons"].add("missing_direction")
+                if f["d"] == f["u"] == 0:
+                    target["reasons"].add("no_valid_rate")
+            return True
+
+        evidence = {
+            "metric_version": "network_traffic_partial_coverage_overlay.v1",
+            "source_kind": "observation_ap_dynamic",
+            "range_from_utc": strict.range.from_utc, "range_to_utc": strict.range.to_utc,
+            "statistics_scope": "complete_coverage_intervals_only",
+            "comparison_allowed": False, "ap_share_allowed": False,
+        }
+        try:
+            counts = self._gateway.read_partial_ap_traffic_evidence(
+                site_id=site_id, from_utc=strict.range.from_utc, to_utc=strict.range.to_utc,
+                deadline=local, consume_cycle=consume)
+            local.require_remaining()
+            buckets = [_partial_bucket(index, bucket, start, strict.range.bucket_seconds)
+                       for index, bucket in sorted(accumulators.items())]
+            local.require_remaining()
+            positive = counts["partial_cycle_count_admitted"] > 0
+            evidence.update(counts, buckets=buckets, bucket_count_returned=len(buckets),
+                            has_partial_measurements=True if positive else None,
+                            status="partial_evidence" if positive else "source_coverage_insufficient",
+                            reason="partial_measurements_observed" if positive else (
+                                "raw_observation_range_incomplete" if counts["source_coverage_insufficient"]
+                                else "raw_observation_range_unproven"))
+        except (PartialTrafficCapacityLimited, AnalyticsQueryDeadlineExceeded, OverflowError):
+            evidence.update(_partial_failure("capacity_limited", "overlay_capacity_limited"))
+        except (AnalyticsSourceUnavailable, sqlite3.Error, OSError):
+            evidence.update(_partial_failure("unavailable", "overlay_source_unavailable"))
+        return CoverageAwareHistoricalSiteTrafficV1(
+            strict, HistoricalTrafficPartialCoverageOverlayV1(evidence))
 
     def compose_current_ap_traffic(
         self,
@@ -1278,6 +1381,76 @@ class HistoricalTrafficReadService:
                 lan_pair_valid_ap_opportunities=lan_pairs,
             ),
         )
+
+
+_PARTIAL_REASONS = (
+    "source_cycle_partial", "source_unavailable", "missing_direction", "no_valid_rate",
+    "no_baseline", "counter_reset", "gap_too_large", "invalid_elapsed",
+)
+
+
+def _partial_family():
+    return dict(d=0, u=0, p=0, download=0.0, upload=0.0, reasons=set())
+
+
+def _partial_accumulator():
+    def family():
+        return {**_partial_family(), "full": 0, "total": 0.0,
+                "download_samples": 0, "upload_samples": 0, "total_samples": 0,
+                "min_pair": math.inf, "max_pair": 0}
+    return dict(n=0, observed=0, min_observed=math.inf, max_observed=0,
+                wired=family(), lan=family())
+
+
+def _partial_source(bucket):
+    w, l, n = bucket["wired"], bucket["lan"], bucket["n"]
+    if w["full"] == n:
+        return "wired", "primary_full_partial_bucket_coverage"
+    if l["full"] == n:
+        return "lan", "fallback_full_partial_bucket_coverage"
+    if l["full"] > w["full"]:
+        return "lan", "fallback_more_full_partial_cycles"
+    if w["full"] > l["full"]:
+        return "wired", "primary_more_full_partial_cycles"
+    if l["p"] > w["p"]:
+        return "lan", "fallback_higher_partial_pair_coverage"
+    if w["p"] > l["p"]:
+        return "wired", "primary_higher_partial_pair_coverage"
+    if l["d"] + l["u"] > w["d"] + w["u"]:
+        return "lan", "fallback_higher_partial_direction_coverage"
+    return "wired", "primary_preferred_partial_tie_or_higher"
+
+
+def _partial_bucket(index, bucket, start, seconds):
+    source, reason = _partial_source(bucket)
+    f = bucket[source]
+    at = start + timedelta(seconds=index * seconds)
+    total = f["total_samples"]
+    numeric = {key + "_mbps": f[key] / f[key + "_samples"] if f[key + "_samples"] else None
+               for key in ("download", "upload", "total")}
+    if any(value is not None and not math.isfinite(value) for value in numeric.values()):
+        raise OverflowError("Partial aggregate is not finite")
+    return {
+        "bucket_start_utc": format_utc(at), "bucket_end_utc": format_utc(at + timedelta(seconds=seconds)),
+        "status": "partial_measured" if total else (
+            "partial_directional" if f["download_samples"] or f["upload_samples"] else "partial_unmeasured"),
+        **numeric, "unit": "Mbps", "selected_source": source, "selection_reason": reason,
+        "partial_cycle_count": bucket["n"], "download_sample_count": f["download_samples"],
+        "upload_sample_count": f["upload_samples"], "measured_sample_count": total,
+        "observed_ap_opportunities": bucket["observed"],
+        "measured_download_ap_opportunities": f["d"], "measured_upload_ap_opportunities": f["u"],
+        "measured_pair_ap_opportunities": f["p"], "coverage_ratio": f["p"] / bucket["observed"],
+        "min_observed_ap_count": bucket["min_observed"], "max_observed_ap_count": bucket["max_observed"],
+        "min_measured_ap_count": f["min_pair"], "max_measured_ap_count": f["max_pair"],
+        "reasons": [r for r in _PARTIAL_REASONS if r == "source_cycle_partial" or r in f["reasons"]],
+    }
+
+
+def _partial_failure(status, reason):
+    return dict(status=status, reason=reason, buckets=[], bucket_count_returned=0,
+                has_partial_measurements=None, source_coverage_insufficient=None,
+                partial_cycle_count_examined=None, partial_cycle_count_admitted=None,
+                partial_cycle_count_integrity_rejected=None, partial_ap_rows_examined=None)
 
 
 def _peak_samples(

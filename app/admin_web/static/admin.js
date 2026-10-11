@@ -1974,6 +1974,8 @@
   const rangeContext = independentRanges
     ? null : window.CaptivPortalTrafficNetworkRange;
   const panel = document.getElementById("traffic-history-panel");
+  const partialCoverage = Boolean(panel && panel.dataset.partialCoverage === "true");
+  const coverageSuffix = partialCoverage ? "&coverage_mode=partial_v1" : "";
   if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
       || !panel || panel.dataset.historyEnabled !== "true" || !coordinator
       || typeof coordinator.registerPanel !== "function"
@@ -2211,6 +2213,7 @@
         !== requestedProducts.includes("aps")) {
       throw new Error("Invalid historical Traffic AP axis projection");
     }
+    validatePartialOverlay(value);
     return value;
   }
 
@@ -2486,6 +2489,7 @@
   }
 
   function validateApShare(value, history) {
+    const coverageAware = Boolean(history.partial_coverage);
     const statuses = new Set(["ok", "partial", "insufficient_data", "unsupported_population"]);
     const denominatorStatuses = new Set(["positive", "zero_traffic", "insufficient_data"]);
     if (!object(value) || !statuses.has(value.status)
@@ -2554,10 +2558,11 @@
       }
       return Object.freeze(value);
     }
-    if (population.population_count > 12
-        || population.returned_ap_count !== population.population_count
-        || value.items.length !== population.population_count
-        || (currentAvailable && !population.population_complete)) {
+    if ((!coverageAware && population.population_count > 12)
+        || (coverageAware && population.population_count > 12 && value.items.length !== 0)
+        || population.returned_ap_count !== (population.population_count > 12 ? 0 : population.population_count)
+        || value.items.length !== population.returned_ap_count
+        || (currentAvailable && population.population_count <= 12 && !population.population_complete)) {
       throw new Error("Invalid AP Traffic Share response");
     }
     let previous = null;
@@ -2590,7 +2595,7 @@
             || !Number.isFinite(fraction) || fraction < 0 || fraction > 1)) {
           throw new Error("Invalid AP Traffic Share response");
         }
-        if (!item.range_presence_proven || status !== "positive") {
+        if (coverageAware || !item.range_presence_proven || status !== "positive") {
           if (fraction !== null) throw new Error("Invalid AP Traffic Share response");
         } else {
           if (fraction === null) throw new Error("Invalid AP Traffic Share response");
@@ -2616,7 +2621,7 @@
       previous = order;
     }
     for (const direction of ["download", "upload", "total"]) {
-      if (denominators[`${direction}_status`] === "positive"
+      if (!coverageAware && denominators[`${direction}_status`] === "positive"
           && (fractionCounts[direction] === 0
             || Math.abs(fractionSums[direction] - 1) > 1e-9)) {
         throw new Error("Invalid AP Traffic Share response");
@@ -2632,6 +2637,12 @@
       && coverage.excluded_source_transition_interval_count === 0
       && coverage.invalid_period_interval_count === 0;
     const anyPresence = value.items.some((item) => item.range_presence_proven);
+    if (coverageAware) {
+      const reason = {partial_evidence: "partial_ap_coverage", unavailable: "partial_coverage_unknown",
+        capacity_limited: "partial_coverage_capacity_limited", source_coverage_insufficient: "source_coverage_insufficient"}[history.partial_coverage.status];
+      if (value.status !== "insufficient_data" || value.reason !== reason) throw new Error("Invalid partial AP share");
+      return Object.freeze(value);
+    }
     if ((value.status === "ok" && !complete)
         || (value.status === "partial" && (complete || !anyPresence))
         || (value.status === "insufficient_data" && (
@@ -2712,7 +2723,99 @@
         || coverage.source_transition_count !== aggregate.transitions) {
       throw new Error("Invalid historical Traffic response");
     }
+    validatePartialOverlay(value);
     return Object.freeze(value);
+  }
+
+  function validatePartialOverlay(history) {
+    const o = history.partial_coverage;
+    if (!partialCoverage) {
+      if (o !== undefined) throw new Error("Unexpected partial History contract");
+      return;
+    }
+    const reasons = {partial_evidence: "partial_measurements_observed", unavailable: "overlay_source_unavailable",
+      capacity_limited: "overlay_capacity_limited", source_coverage_insufficient:
+        o && o.source_coverage_insufficient === true ? "raw_observation_range_incomplete" : "raw_observation_range_unproven"};
+    const counters = ["partial_cycle_count_examined", "partial_cycle_count_admitted", "partial_cycle_count_integrity_rejected", "partial_ap_rows_examined"];
+    const keys = ["metric_version", "source_kind", "range_from_utc", "range_to_utc", "status", "reason", "buckets",
+      "bucket_count_returned", "has_partial_measurements", "source_coverage_insufficient", "statistics_scope",
+      "comparison_allowed", "ap_share_allowed", ...counters].sort().join(",");
+    if (!object(o) || Object.keys(o).sort().join(",") !== keys || !(o.status in reasons) || o.reason !== reasons[o.status]
+        || o.metric_version !== "network_traffic_partial_coverage_overlay.v1" || o.source_kind !== "observation_ap_dynamic"
+        || o.range_from_utc !== history.range.from_utc || o.range_to_utc !== history.range.to_utc
+        || o.statistics_scope !== "complete_coverage_intervals_only" || o.comparison_allowed !== false || o.ap_share_allowed !== false
+        || o.has_partial_measurements !== (o.status === "partial_evidence" ? true : null)
+        || ![true, null].includes(o.source_coverage_insufficient) || !Array.isArray(o.buckets)
+        || !count(o.bucket_count_returned) || o.bucket_count_returned !== o.buckets.length || o.buckets.length > 720) {
+      throw new Error("Invalid partial History envelope");
+    }
+    const failed = ["unavailable", "capacity_limited"].includes(o.status);
+    if ((failed && (counters.some((key) => o[key] !== null) || o.source_coverage_insufficient !== null))
+        || (!failed && (counters.some((key) => !count(o[key]))
+          || o.partial_cycle_count_examined !== o.partial_cycle_count_admitted + o.partial_cycle_count_integrity_rejected
+          || o.partial_cycle_count_examined > 10080 || o.partial_ap_rows_examined > 150000))) throw new Error("Invalid partial counters");
+    const orderedReasons = ["source_cycle_partial", "source_unavailable", "missing_direction", "no_valid_rate", "no_baseline", "counter_reset", "gap_too_large", "invalid_elapsed"];
+    const selection = {wired: ["primary_full_partial_bucket_coverage", "primary_more_full_partial_cycles", "primary_higher_partial_pair_coverage", "primary_preferred_partial_tie_or_higher"],
+      lan: ["fallback_full_partial_bucket_coverage", "fallback_more_full_partial_cycles", "fallback_higher_partial_pair_coverage", "fallback_higher_partial_direction_coverage"]};
+    let previous = Date.parse(history.range.from_utc), admitted = 0;
+    for (const b of o.buckets) {
+      const fields = ["partial_cycle_count", "download_sample_count", "upload_sample_count", "measured_sample_count", "observed_ap_opportunities",
+        "measured_download_ap_opportunities", "measured_upload_ap_opportunities", "measured_pair_ap_opportunities", "min_observed_ap_count", "max_observed_ap_count", "min_measured_ap_count", "max_measured_ap_count"];
+      const bucketKeys = [...fields, "bucket_start_utc", "bucket_end_utc", "status", "download_mbps", "upload_mbps", "total_mbps", "unit", "selected_source", "selection_reason", "coverage_ratio", "reasons"];
+      if (!object(b) || Object.keys(b).sort().join(",") !== bucketKeys.sort().join(",")
+          || !utc(b.bucket_start_utc) || !utc(b.bucket_end_utc)
+          || Date.parse(b.bucket_start_utc) < previous || Date.parse(b.bucket_end_utc) > Date.parse(history.range.to_utc)
+          || Date.parse(b.bucket_end_utc) - Date.parse(b.bucket_start_utc) !== history.range.bucket_seconds * 1000
+          || (Date.parse(b.bucket_start_utc) - Date.parse(history.range.from_utc)) % (history.range.bucket_seconds * 1000) !== 0
+          || fields.some((key) => !count(b[key])) || b.partial_cycle_count === 0 || b.observed_ap_opportunities === 0
+          || b.unit !== "Mbps" || !selection[b.selected_source]?.includes(b.selection_reason)
+          || !Array.isArray(b.reasons) || b.reasons.join(",") !== orderedReasons.filter((r) => b.reasons.includes(r)).join(",")
+          || !b.reasons.includes("source_cycle_partial") || !metric(b.coverage_ratio) || b.coverage_ratio === null
+          || Math.abs(b.coverage_ratio - b.measured_pair_ap_opportunities / b.observed_ap_opportunities) > 1e-9
+          || b.measured_sample_count > Math.min(b.download_sample_count, b.upload_sample_count)
+          || Math.max(b.download_sample_count, b.upload_sample_count) > b.partial_cycle_count
+          || b.measured_pair_ap_opportunities > Math.min(b.measured_download_ap_opportunities, b.measured_upload_ap_opportunities)
+          || Math.max(b.measured_download_ap_opportunities, b.measured_upload_ap_opportunities) > b.observed_ap_opportunities
+          || b.min_observed_ap_count === 0 || b.min_observed_ap_count > b.max_observed_ap_count
+          || b.min_measured_ap_count > b.max_measured_ap_count || b.max_measured_ap_count > b.max_observed_ap_count) {
+        throw new Error("Invalid partial bucket");
+      }
+      for (const [key, n] of [["download_mbps", b.download_sample_count], ["upload_mbps", b.upload_sample_count], ["total_mbps", b.measured_sample_count]]) {
+        if (!metric(b[key]) || (b[key] !== null) !== (n > 0)) throw new Error("Invalid partial direction");
+      }
+      const state = b.measured_sample_count > 0 ? "partial_measured" : b.download_sample_count || b.upload_sample_count ? "partial_directional" : "partial_unmeasured";
+      if (b.status !== state) throw new Error("Invalid partial bucket state");
+      previous = Date.parse(b.bucket_end_utc);
+      admitted += b.partial_cycle_count;
+    }
+    const comparison = {partial_evidence: "unavailable_partial_coverage", unavailable: "unavailable_overlay_unavailable",
+      capacity_limited: "unavailable_overlay_capacity_limited", source_coverage_insufficient: "unavailable_source_coverage_insufficient"}[o.status];
+    if (history.comparison_state !== comparison || (o.status === "partial_evidence") !== (o.buckets.length > 0)
+        || !failed && (admitted !== o.partial_cycle_count_admitted || (admitted > 0) !== (o.status === "partial_evidence"))) {
+      throw new Error("Invalid partial inventory");
+    }
+  }
+
+  function partialCopy(history) {
+    const o = history.partial_coverage;
+    if (!o) return null;
+    if (o.status === "partial_evidence") return {
+      message: "Observed partial AP measurements are shown separately; they are not included in the strict Average or Peak." + (o.source_coverage_insufficient === true ? " Partial-coverage evidence is incomplete for part of this period." : ""),
+      qualifier: "", comparison: "Comparison unavailable because AP coverage is partial.",
+      share: "AP share unavailable for the full period because AP coverage is partial."};
+    if (o.status === "capacity_limited") return {message: "Partial-coverage evidence exceeded the bounded query limit for this period.",
+      qualifier: " · partial coverage not fully evaluated", comparison: "Comparison unavailable because partial coverage could not be fully evaluated.",
+      share: "AP share unavailable because partial coverage could not be fully evaluated."};
+    if (o.status === "unavailable") return {message: "Partial-coverage evidence is unavailable for this period.",
+      qualifier: " · partial coverage not verified", comparison: "Comparison unavailable because partial-coverage status is unknown.",
+      share: "AP share unavailable because partial-coverage status is unknown."};
+    return {message: o.source_coverage_insufficient === true ? "Partial-coverage evidence is incomplete for part of this period."
+      : "No partial AP measurements were found in retained evidence; full-period partial coverage is not verified.",
+      qualifier: o.source_coverage_insufficient === true ? " · partial coverage not fully covered" : " · partial coverage not verified",
+      comparison: o.source_coverage_insufficient === true ? "Comparison unavailable because partial-coverage source coverage is incomplete."
+        : "Comparison unavailable because partial-coverage status is not verified.",
+      share: o.source_coverage_insufficient === true ? "AP share unavailable because partial-coverage source coverage is incomplete."
+        : "AP share unavailable because partial-coverage status is not verified."};
   }
 
   function displayRange(value) { return value === "24h" ? "Last 24 hours" : "Last 7 days"; }
@@ -2765,8 +2868,38 @@
     });
     return output;
   }
+  function overlayMarkers(history, maximum) {
+    const output = [];
+    for (const b of history.partial_coverage?.buckets || []) {
+      const index = (Date.parse(b.bucket_start_utc) - Date.parse(history.range.from_utc)) / (history.range.bucket_seconds * 1000);
+      const x = 48 + ((index + .5) / history.range.bucket_count) * 888;
+      const details = b.status === "partial_unmeasured" ? ["Partial coverage — no reliable traffic measurement"]
+        : b.status === "partial_measured" ? [`Measured traffic: ${b.total_mbps.toFixed(2)} Mbps`, `Partial data · pair coverage ${b.measured_pair_ap_opportunities}/${b.observed_ap_opportunities} AP opportunities`]
+          : [b.download_mbps === null ? "Download unavailable" : `Measured download: ${b.download_mbps.toFixed(2)} Mbps`,
+             b.upload_mbps === null ? "Upload unavailable" : `Measured upload: ${b.upload_mbps.toFixed(2)} Mbps`, "Combined total unavailable"];
+      if (b.min_measured_ap_count !== b.max_measured_ap_count) details.push(`Measured pair APs per sample: ${b.min_measured_ap_count}–${b.max_measured_ap_count}`);
+      if (b.min_observed_ap_count !== b.max_observed_ap_count) details.push(`Observed APs per sample: ${b.min_observed_ap_count}–${b.max_observed_ap_count}`);
+      if (history.buckets[index].complete_site_sample_count > 0) details.push("This interval contains both complete and partial AP measurements.");
+      const tooltip = details.join("\n");
+      for (const field of ["download_mbps", "upload_mbps"]) {
+        if (b[field] === null) continue;
+        const y = 284 - (b[field] / maximum) * 248;
+        const marker = svgElement("polygon", {points: `${x},${y - 5} ${x + 5},${y} ${x},${y + 5} ${x - 5},${y}`,
+          class: `traffic-history-partial-marker ${field === "download_mbps" ? "traffic-history-partial-marker-download" : "traffic-history-partial-marker-upload"}`,
+          tabindex: "0", role: "img", "aria-label": tooltip, "data-partial-state": b.status});
+        const title = svgElement("title", {}); title.textContent = tooltip; marker.appendChild(title); output.push(marker);
+      }
+      if (b.status === "partial_unmeasured") {
+        const marker = svgElement("text", {x, y: 24, class: "traffic-history-axis-label", tabindex: "0", role: "img",
+          "aria-label": tooltip, "data-partial-state": b.status});
+        marker.textContent = "◇";
+        const title = svgElement("title", {}); title.textContent = tooltip; marker.appendChild(title); output.push(marker);
+      }
+    }
+    return output;
+  }
   function renderChart(value) {
-    const numeric = value.buckets.flatMap((bucket) => [bucket.download_mbps, bucket.upload_mbps]).filter((item) => item !== null);
+    const numeric = [...value.buckets, ...(value.partial_coverage?.buckets || [])].flatMap((bucket) => [bucket.download_mbps, bucket.upload_mbps]).filter((item) => item !== null);
     const maximum = Math.max(1, ...numeric);
     const title = svgElement("title", {id: "traffic-history-chart-title"});
     title.textContent = `Download and Upload network traffic history for ${displayRange(value.range.id)}`;
@@ -2789,7 +2922,8 @@
       ...paths(value.buckets, "download_mbps", maximum, "traffic-history-line-download"),
       ...paths(value.buckets, "upload_mbps", maximum, "traffic-history-line-upload"),
       ...partialMarkers(value.buckets, "download_mbps", maximum, "traffic-history-partial-marker-download"),
-      ...partialMarkers(value.buckets, "upload_mbps", maximum, "traffic-history-partial-marker-upload"));
+      ...partialMarkers(value.buckets, "upload_mbps", maximum, "traffic-history-partial-marker-upload"),
+      ...overlayMarkers(value, maximum));
   }
   function renderLoading() {
     elements.state.dataset.state = "warning";
@@ -2847,6 +2981,16 @@
     statisticsElements.intervals.textContent = `${(evidence.interval_coverage_ratio * 100).toFixed(1)}% · ${evidence.accepted_interval_count}/${evidence.candidate_interval_count} intervals`;
     statisticsElements.watermark.textContent = history.coverage.source_watermark_utc === null
       ? "—" : displayTime(history.coverage.source_watermark_utc);
+    const copy = partialCopy(history);
+    if (copy) {
+      for (const [id, label] of [["traffic-statistics-average-heading", "Average · complete-coverage intervals only"],
+        ["traffic-statistics-peak-heading", "Max observed with complete AP coverage"]]) {
+        const heading = document.getElementById(id);
+        if (heading) heading.textContent = label + copy.qualifier;
+      }
+      statisticsElements.state.dataset.state = "warning";
+      statisticsElements.message.textContent += ` ${copy.message} ${copy.comparison}`;
+    }
   }
   function renderPeak(value, history) {
     if (value === null) {
@@ -3007,6 +3151,8 @@
         : (partial
           ? "Shares cover accepted comparable historical evidence; current population or range evidence is incomplete."
           : "Shares cover accepted Site Network Traffic evidence for the applied range."));
+    const copy = partialCopy(history);
+    if (copy) apShareElements.message.textContent = copy.share;
     apShareElements.coverage.textContent = `${(value.coverage.interval_coverage_ratio * 100).toFixed(1)}% · ${value.coverage.accepted_interval_count}/${value.coverage.candidate_interval_count} intervals`;
     for (const item of value.items) {
       const card = document.createElement("article");
@@ -3049,6 +3195,11 @@
       ? "No canonical persisted traffic samples are available for the selected range."
       : (partial ? "Accepted samples are shown; gaps and partial buckets remain visible."
         : "Persisted traffic history has complete bucket coverage.");
+    const copy = partialCopy(value);
+    if (copy) {
+      elements.state.dataset.state = "warning";
+      elements.message.textContent += ` ${copy.message}`;
+    }
     elements.applied.textContent = displayRange(appliedRange);
     elements.coverage.textContent = value.coverage.status === "complete" ? "Complete"
       : (value.coverage.status === "partial" ? "Partial" : "No data");
@@ -3112,7 +3263,7 @@
             : (apEnabled ? "aps" : null));
         const suffix = include === null ? "" : `&include=${encodeURIComponent(include)}`;
         const value = validate(
-          await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}`),
+          await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}${coverageSuffix}`),
           context.siteId,
         );
         let ap = null;
@@ -3358,7 +3509,7 @@
       const products = batch.products.join(",");
       try {
         const payload = await context.requestJson(
-          `${context.apiBase}/traffic/history?range=${encodeURIComponent(batch.range)}&products=${encodeURIComponent(products)}`,
+          `${context.apiBase}/traffic/history?range=${encodeURIComponent(batch.range)}&products=${encodeURIComponent(products)}${coverageSuffix}`,
         );
         return Object.freeze({
           batch,

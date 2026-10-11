@@ -305,42 +305,53 @@ def _partial_cursor(payload):
 
 
 def _validate_partial_cycle(site, cycle, rows, actual_count):
+    _validate_partial_cycle_header(site, cycle, actual_count)
+    if len(rows) != actual_count:
+        raise ValueError("Invalid partial traffic cycle")
+    seen = set()
+    for row in rows:
+        _validate_partial_row(site, cycle, row, seen)
+
+
+def _validate_partial_cycle_header(site, cycle, actual_count):
     started, finished = parse_utc(cycle["started_at"], "cycle started_at"), parse_utc(cycle["finished_at"], "cycle finished_at")
     count = cycle["items_stored"]
     if (
         cycle["site_id"] != site or cycle["kind"] != "ap_dynamic"
         or cycle["state"] != "completed" or cycle["result"] not in {"success", "partial"}
-        or type(count) is not int or count <= 0 or actual_count != count or len(rows) != count
+        or type(count) is not int or count <= 0 or actual_count != count
         or started > finished or cycle["items_seen"] != count or cycle["source_rows_reported"] != count
         or cycle["items_skipped"] != 0 or cycle["data_quality_warning_count"] != 0
         or type(cycle["error_count"]) is not int or cycle["error_count"] < 0
         or cycle["complete"] not in (0, 1)
     ):
         raise ValueError("Invalid partial traffic cycle")
-    seen = set()
-    for row in rows:
-        mac = row["ap_mac"]
-        if (row["site_id"] != site or row["cycle_id"] != cycle["cycle_id"]
-            or not isinstance(mac, str) or _MAC_PATTERN.fullmatch(mac) is None or mac in seen
-            or row["name"] is not None and not isinstance(row["name"], str)
-            or any(row[key] not in (0, 1) for key in (
-                "partial", "overview_ok", "wired_uplink_ok", "lan_traffic_ok", "radios_ok"))):
-            raise ValueError("Invalid AP identity")
-        seen.add(mac)
-        for source in ("wired", "lan"):
-            down, up, dr, ur, at = _partial_values(row, source)
-            for value, reason in ((down, dr), (up, ur)):
-                if reason not in RATE_REASONS:
-                    raise ValueError("Invalid rate reason")
-                if reason == "ok":
-                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-                        raise ValueError("Invalid rate value")
-                    if not started <= parse_utc(at, "source observed_at") <= finished:
-                        raise ValueError("Invalid rate timestamp")
-                elif value is not None:
-                    raise ValueError("Non-ok numeric rate")
-            if at is not None:
-                parse_utc(at, "source observed_at")
+
+
+def _validate_partial_row(site, cycle, row, seen):
+    started, finished = parse_utc(cycle["started_at"], "cycle started_at"), parse_utc(cycle["finished_at"], "cycle finished_at")
+    mac = row["ap_mac"]
+    if (row["site_id"] != site or row["cycle_id"] != cycle["cycle_id"]
+        or not isinstance(mac, str) or _MAC_PATTERN.fullmatch(mac) is None or mac in seen
+        or row["name"] is not None and not isinstance(row["name"], str)
+        or any(row[key] not in (0, 1) for key in (
+            "partial", "overview_ok", "wired_uplink_ok", "lan_traffic_ok", "radios_ok"))):
+        raise ValueError("Invalid AP identity")
+    seen.add(mac)
+    for source in ("wired", "lan"):
+        down, up, dr, ur, at = _partial_values(row, source)
+        for value, reason in ((down, dr), (up, ur)):
+            if reason not in RATE_REASONS:
+                raise ValueError("Invalid rate reason")
+            if reason == "ok":
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                    raise ValueError("Invalid rate value")
+                if not started <= parse_utc(at, "source observed_at") <= finished:
+                    raise ValueError("Invalid rate timestamp")
+            elif value is not None:
+                raise ValueError("Non-ok numeric rate")
+        if at is not None:
+            parse_utc(at, "source observed_at")
 
 
 def _partial_values(row, source):

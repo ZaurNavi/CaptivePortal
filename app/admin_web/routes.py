@@ -1872,7 +1872,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 reason = "feature_disabled"
                 return response
             if (
-                not set(request.args).issubset({"range", "include", "products"})
+                not set(request.args).issubset({"range", "include", "products", "coverage_mode"})
+                or ("coverage_mode" in request.args and (
+                    len(request.args.getlist("coverage_mode")) != 1
+                    or request.args["coverage_mode"] != "partial_v1"))
                 or "range" not in request.args
                 or len(request.args.getlist("range")) != 1
                 or (
@@ -1889,6 +1892,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 reason = "invalid_request"
                 return response
             range_id = request.args.get("range")
+            if "coverage_mode" in request.args and not config.traffic_partial_coverage_enabled:
+                response = make_response(_error("not_found", 404))
+                reason = "feature_disabled"
+                return response
             if "products" in request.args:
                 if not config.traffic_independent_ranges_enabled:
                     response = make_response(_error("not_found", 404))
@@ -1963,6 +1970,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                     include_aps=aps_requested,
                     include_ap_share=ap_share_requested,
                     requested_products=requested_products,
+                    **({"coverage_mode": "partial_v1"} if "coverage_mode" in request.args else {}),
                 )
                 result_status = result.result.get("status")
                 coverage = result.result.get("coverage", {})

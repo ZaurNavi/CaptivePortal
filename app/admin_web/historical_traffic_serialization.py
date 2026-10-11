@@ -328,6 +328,111 @@ def serialize_historical_traffic(
     return result
 
 
+def serialize_partial_historical_traffic(value, site_id, **options):
+    """Validate strict contracts first; project the separate closed R3 overlay."""
+    from app.analytics.models import CoverageAwareHistoricalSiteTrafficV1
+    from app.analytics.historical_traffic import _PARTIAL_REASONS
+    if not isinstance(value, CoverageAwareHistoricalSiteTrafficV1):
+        raise HistoricalTrafficSerializationError("Partial History contract is invalid")
+    result = serialize_historical_traffic(value.strict, site_id, **options)
+    overlay = value.partial_coverage.evidence
+    counts = ("partial_cycle_count_examined", "partial_cycle_count_admitted",
+              "partial_cycle_count_integrity_rejected", "partial_ap_rows_examined")
+    keys = {"metric_version", "source_kind", "range_from_utc", "range_to_utc", "status", "reason",
+            "buckets", "bucket_count_returned", "has_partial_measurements", "source_coverage_insufficient",
+            "statistics_scope", "comparison_allowed", "ap_share_allowed", *counts}
+    reasons = {"partial_evidence": "partial_measurements_observed", "unavailable": "overlay_source_unavailable",
+               "capacity_limited": "overlay_capacity_limited", "source_coverage_insufficient":
+               "raw_observation_range_incomplete" if overlay.get("source_coverage_insufficient") is True
+               else "raw_observation_range_unproven"}
+    status = overlay.get("status")
+    if (set(overlay) != keys or status not in reasons or overlay["reason"] != reasons[status]
+        or overlay["metric_version"] != "network_traffic_partial_coverage_overlay.v1"
+        or overlay["source_kind"] != "observation_ap_dynamic"
+        or overlay["statistics_scope"] != "complete_coverage_intervals_only"
+        or overlay["range_from_utc"] != result["range"]["from_utc"]
+        or overlay["range_to_utc"] != result["range"]["to_utc"]
+        or overlay["comparison_allowed"] is not False or overlay["ap_share_allowed"] is not False
+        or overlay["has_partial_measurements"] is not (True if status == "partial_evidence" else None)
+        or (overlay["source_coverage_insufficient"] is not None and overlay["source_coverage_insufficient"] is not True)):
+        raise HistoricalTrafficSerializationError("Partial History envelope is invalid")
+    failed = status in {"unavailable", "capacity_limited"}
+    if failed:
+        if any(overlay[key] is not None for key in counts) or overlay["source_coverage_insufficient"] is not None:
+            raise HistoricalTrafficSerializationError("Partial failure counters are invalid")
+    else:
+        for key in counts:
+            _count(overlay[key])
+        if (overlay[counts[0]] != overlay[counts[1]] + overlay[counts[2]]
+            or overlay[counts[0]] > 10080 or overlay[counts[3]] > 150000
+            or (overlay[counts[1]] > 0) != (status == "partial_evidence")):
+            raise HistoricalTrafficSerializationError("Partial counter accounting is invalid")
+    projected = []
+    start, end = _utc(overlay["range_from_utc"]), _utc(overlay["range_to_utc"])
+    seconds = result["range"]["bucket_seconds"]
+    previous = None
+    selection_reasons = {
+        "wired": {"primary_full_partial_bucket_coverage", "primary_more_full_partial_cycles",
+                  "primary_higher_partial_pair_coverage", "primary_preferred_partial_tie_or_higher"},
+        "lan": {"fallback_full_partial_bucket_coverage", "fallback_more_full_partial_cycles",
+                "fallback_higher_partial_pair_coverage", "fallback_higher_partial_direction_coverage"},
+    }
+    bucket_counts = ("partial_cycle_count", "download_sample_count", "upload_sample_count", "measured_sample_count",
+                     "observed_ap_opportunities", "measured_download_ap_opportunities", "measured_upload_ap_opportunities",
+                     "measured_pair_ap_opportunities", "min_observed_ap_count", "max_observed_ap_count",
+                     "min_measured_ap_count", "max_measured_ap_count")
+    bucket_keys = {"bucket_start_utc", "bucket_end_utc", "status", "download_mbps", "upload_mbps", "total_mbps",
+                   "unit", "selected_source", "selection_reason", "coverage_ratio", "reasons", *bucket_counts}
+    for bucket in overlay["buckets"]:
+        if set(bucket) != bucket_keys:
+            raise HistoricalTrafficSerializationError("Partial bucket fields are invalid")
+        at, through = _utc(bucket["bucket_start_utc"]), _utc(bucket["bucket_end_utc"])
+        n = _count(bucket["partial_cycle_count"])
+        for key in bucket_counts:
+            _count(bucket[key])
+        d, u, t = (bucket[key] for key in ("download_sample_count", "upload_sample_count", "measured_sample_count"))
+        state = "partial_measured" if t else "partial_directional" if d or u else "partial_unmeasured"
+        observed, pairs = bucket["observed_ap_opportunities"], bucket["measured_pair_ap_opportunities"]
+        if (n == 0 or observed == 0 or bucket["status"] != state or bucket["unit"] != "Mbps"
+            or not start <= at < through <= end or (through - at).total_seconds() != seconds
+            or (at - start).total_seconds() % seconds != 0 or previous is not None and at < previous
+            or bucket["selected_source"] not in selection_reasons
+            or bucket["selection_reason"] not in selection_reasons[bucket["selected_source"]]
+            or not t <= min(d, u) <= max(d, u) <= n
+            or not pairs <= min(bucket["measured_download_ap_opportunities"], bucket["measured_upload_ap_opportunities"])
+            or max(bucket["measured_download_ap_opportunities"], bucket["measured_upload_ap_opportunities"]) > observed
+            or not 0 < bucket["min_observed_ap_count"] <= bucket["max_observed_ap_count"]
+            or not 0 <= bucket["min_measured_ap_count"] <= bucket["max_measured_ap_count"] <= bucket["max_observed_ap_count"]
+            or not math.isclose(_number(bucket["coverage_ratio"]), pairs / observed, rel_tol=1e-9, abs_tol=1e-9)
+            or tuple(bucket["reasons"]) != tuple(r for r in _PARTIAL_REASONS if r in bucket["reasons"])
+            or "source_cycle_partial" not in bucket["reasons"]):
+            raise HistoricalTrafficSerializationError("Partial bucket accounting is invalid")
+        for key, count in (("download_mbps", d), ("upload_mbps", u), ("total_mbps", t)):
+            if (_optional_number(bucket[key]) is not None) != (count > 0):
+                raise HistoricalTrafficSerializationError("Partial directional value is invalid")
+        # Independently denominated means deliberately have no D+U=T check.
+        projected.append({**dict(bucket), "reasons": list(bucket["reasons"])})
+        previous = through
+    if (_count(overlay["bucket_count_returned"]) != len(projected) or len(projected) > 720
+        or (bool(projected) != (status == "partial_evidence"))
+        or not failed and sum(b["partial_cycle_count"] for b in projected) != overlay[counts[1]]):
+        raise HistoricalTrafficSerializationError("Partial sparse bucket inventory is invalid")
+    result["partial_coverage"] = {**dict(overlay), "buckets": projected}
+    suffix = {"partial_evidence": "partial_coverage", "unavailable": "overlay_unavailable",
+              "capacity_limited": "overlay_capacity_limited", "source_coverage_insufficient": "source_coverage_insufficient"}[status]
+    result["comparison_state"] = "unavailable_" + suffix
+    if "ap_traffic_share" in result:
+        share = result["ap_traffic_share"]
+        share["status"] = "insufficient_data"
+        share["reason"] = {"partial_evidence": "partial_ap_coverage", "unavailable": "partial_coverage_unknown",
+                           "capacity_limited": "partial_coverage_capacity_limited", "source_coverage_insufficient": "source_coverage_insufficient"}[status]
+        for item in share["items"]:
+            for direction in ("download", "upload", "total"):
+                item[direction + "_share_fraction"] = None
+        share["items"].sort(key=lambda item: item["ap_mac"])
+    return result
+
+
 def _ap_share(
     value: Any, *, history_status: str, range_seconds: float,
 ) -> dict[str, Any]:

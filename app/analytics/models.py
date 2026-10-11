@@ -1237,6 +1237,22 @@ class HistoricalSiteTraffic:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalTrafficPartialCoverageOverlayV1:
+    """Positive retained evidence, never a whole-period absence proof."""
+
+    evidence: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "evidence", freeze(self.evidence))
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageAwareHistoricalSiteTrafficV1:
+    strict: HistoricalSiteTraffic
+    partial_coverage: HistoricalTrafficPartialCoverageOverlayV1
+
+
+@dataclass(frozen=True, slots=True)
 class HomeActivityCoverage:
     coverage_from_utc: str | None
     coverage_through_utc: str | None

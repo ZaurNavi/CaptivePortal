@@ -111,6 +111,7 @@ from .home_health_serialization import (
     serialize_home_health,
 )
 from .historical_traffic_serialization import (
+    serialize_partial_historical_traffic,
     HistoricalTrafficSerializationError,
     serialize_historical_traffic,
 )
@@ -713,8 +714,10 @@ class AdminQueryService:
         include_peak=False, include_aps=False, include_ap_share=False,
         include_history=True,
         requested_products=None,
+        coverage_mode=None,
     ):
         self._authorize(principal, "admin.read.overview", site_id)
+        partial = self._partial_current_mode(coverage_mode)
         try:
             resolved_range = resolve_traffic_network_range(
                 range_id, datetime.now(timezone.utc)
@@ -736,6 +739,7 @@ class AdminQueryService:
                 include_ap_share=include_ap_share,
                 include_history=include_history,
                 requested_products=requested_products,
+                coverage_mode="partial_v1" if partial else None,
             )
 
         return self._run(query)
@@ -745,6 +749,7 @@ class AdminQueryService:
         include_peak=False, include_aps=False, include_ap_share=False,
         include_history=True, requested_products=None,
         prefetched_current=_PREFETCH_NOT_PROVIDED,
+        coverage_mode=None,
     ):
         source = self._historical_traffic
         if source is None:
@@ -848,7 +853,8 @@ class AdminQueryService:
                         current_population_status = (
                             "unavailable" if include_ap_share else "available"
                         )
-            value = source.get_site_history(
+            read_history = source.get_site_history_partial_coverage if coverage_mode == "partial_v1" else source.get_site_history
+            value = read_history(
                 site_id,
                 from_utc=resolved_range.from_utc,
                 to_utc=resolved_range.to_utc,
@@ -862,13 +868,20 @@ class AdminQueryService:
                 current_cycle_id=current_cycle_id,
             )
             if include_aps:
-                value = source.compose_current_ap_traffic(
-                    value,
+                strict_value = value.strict if coverage_mode == "partial_v1" else value
+                composed = source.compose_current_ap_traffic(
+                    strict_value,
                     current_snapshot=current_snapshot,
                     current_population_count=current_population_count,
                     current_items=tuple(current_items),
                 )
-            result = serialize_historical_traffic(
+                if coverage_mode == "partial_v1":
+                    from dataclasses import replace
+                    value = replace(value, strict=composed)
+                else:
+                    value = composed
+            serialize = serialize_partial_historical_traffic if coverage_mode == "partial_v1" else serialize_historical_traffic
+            result = serialize(
                 value,
                 site_id,
                 resolved_range=resolved_range,

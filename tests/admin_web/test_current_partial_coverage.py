@@ -254,9 +254,9 @@ global.document={getElementById:id=>elements.get(id)||null};
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_A_T15_history_js_block_is_byte_identical_to_baseline():
+def test_A_T15_protected_non_history_js_blocks_are_byte_identical_to_baseline():
     candidate = Path("app/admin_web/static/admin.js").read_text(encoding="utf-8")
     baseline = subprocess.run(["git", "show", "e8061de9fbd6da8be5cd269779070a4db4d59d64:app/admin_web/static/admin.js"], capture_output=True, text=True, encoding="utf-8", check=True).stdout
-    for marker in ("TRAFFIC_HISTORY_PANEL", "TRAFFIC_NETWORK_RANGE_CONTEXT", "TRAFFIC_ONLINE_GUESTS_PANEL", "TRAFFIC_COMPLETED_SESSIONS_PANEL", "TRAFFIC_EVIDENCE_PANEL"):
+    for marker in ("TRAFFIC_NETWORK_RANGE_CONTEXT", "TRAFFIC_ONLINE_GUESTS_PANEL", "TRAFFIC_COMPLETED_SESSIONS_PANEL", "TRAFFIC_EVIDENCE_PANEL"):
         segment = lambda text: text.split(f"/* {marker}_START */", 1)[1].split(f"/* {marker}_END */", 1)[0]
         assert segment(candidate) == segment(baseline), marker
