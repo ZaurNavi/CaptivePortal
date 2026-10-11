@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import shutil
+import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -94,6 +95,29 @@ def test_A_T12_strict_response_unchanged_and_history_mode_not_admitted(retained)
     for c in clients:
         assert c.get(f"/admin/api/v1/sites/{SITE}/current-traffic/aps?cycle_id=incident&limit=251&coverage_mode=partial_v1", base_url="https://localhost").status_code in (400, 404)
         assert c.get(f"/admin/api/v1/sites/{SITE}/traffic/history?range=24h&coverage_mode=partial_v1", base_url="https://localhost").status_code != 200
+
+
+@pytest.mark.parametrize("route", ["current-traffic/summary", f"current-traffic/aps?cycle_id={API_CYCLE}", "traffic/current"])
+@pytest.mark.parametrize("error", [sqlite3.OperationalError("database is locked"), PermissionError("synthetic-private-status-path")])
+def test_R1_P1_status_open_failure_is_safe_partial_200(retained, monkeypatch, route, error):
+    publish(retained, cycle_id=API_CYCLE, missing="source_unavailable", fourth="offline")
+    app = app_for(retained)
+    def fail_open(*, write):
+        assert write is False
+        raise error
+    monkeypatch.setattr(retained[1].repository, "_connect", fail_open)
+    client = app.test_client()
+    assert login(client).status_code == 302
+    path = f"/admin/api/v1/sites/{SITE}/{route}"
+    response = client.get(path + ("&" if "?" in path else "?") + "coverage_mode=partial_v1", base_url="https://localhost")
+    assert response.status_code == 200
+    value = response.get_json()["result"]
+    assert value["measurement_state"] == "partial_measured"
+    assert value["traffic"]["total_mbps"] == 21
+    assert value["status_evidence"]["state"] == "unavailable"
+    assert "status_evidence_unavailable" in value["coverage"]["coverage_reasons"]
+    assert value["coverage"]["offline_excluded_ap_count"] == 0
+    assert str(error) not in response.get_data(as_text=True)
 
 
 def test_flag_default_and_exact_boolean():

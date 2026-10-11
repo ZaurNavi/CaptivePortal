@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from app.observations.read_service import ObservationReadService
+from app.observations.config import MAX_AP_ROWS
 from app.visit_lifecycle.read_service import VisitLifecycleReadService
 from app.visitor_registry.registry_read_service import (
     VisitorRegistryReadService,
@@ -1932,8 +1933,9 @@ class AnalyticsSourceGateway:
                     return {"cycle": None, "latest": latest, "rows": ()}
                 count = self._one(connection, "SELECT COUNT(*) AS n FROM ap_observations WHERE cycle_id=?",
                                   (cycle["cycle_id"],), deadline)["n"]
-                # A mismatch needs no materialized rows to fail closed.
-                if count != cycle["items_stored"]:
+                # Bound corrupt/cross-generation storage before materialization;
+                # the public page size is not a bound on this coherent read.
+                if count > MAX_AP_ROWS or count != cycle["items_stored"]:
                     return {"cycle": cycle, "latest": latest, "rows": (), "row_count": count}
                 rows = self._all(connection, """
                     SELECT cycle_id, site_id, ap_mac, name,

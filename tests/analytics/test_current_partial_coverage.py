@@ -7,6 +7,7 @@ import pytest
 
 from app.analytics.current_traffic import CurrentTrafficReadService, CurrentTrafficValidationError
 from app.analytics.source_gateway import QueryDeadline, AnalyticsQueryDeadlineExceeded
+from app.observations.config import MAX_AP_ROWS
 from app.current_state.config import current_state_config_from_settings
 from app.current_state.repository import CurrentStateRepository
 from app.current_state.read_service import CurrentStateReadService
@@ -305,3 +306,116 @@ def test_partial_current_reads_do_not_write_source_databases(retained):
     summary(retained)
     page(retained)
     assert [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths] == before
+
+
+@pytest.mark.parametrize("error", [
+    sqlite3.OperationalError("database is locked"),
+    sqlite3.DatabaseError("database disk image is malformed"),
+    PermissionError("synthetic status path is inaccessible"),
+    FileNotFoundError("synthetic status path is missing"),
+    OSError("synthetic status I/O failure"),
+])
+def test_R1_P1_status_storage_failure_preserves_measured_partial(retained, monkeypatch, error):
+    publish(retained, missing="source_unavailable", fourth="offline")
+    def fail_open(*, write):
+        assert write is False
+        raise error
+    monkeypatch.setattr(retained[1].repository, "_connect", fail_open)
+    value = summary(retained)
+    assert value.measurement_state == "partial_measured"
+    assert value.population_scope == "measured_only"
+    assert dict(value.traffic) == dict(download_mbps=18, upload_mbps=3, total_mbps=21, unit="Mbps")
+    assert value.status_evidence["state"] == "unavailable"
+    assert "status_evidence_unavailable" in value.coverage["coverage_reasons"]
+    assert value.coverage["offline_excluded_ap_count"] == 0
+    assert serialize_partial_current_summary(value, SITE)["traffic"]["total_mbps"] == 21
+    assert page(retained).items[-1]["coverage_role"] != "offline_excluded"
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_R1_P1_status_timeout_is_not_partial_fallback(retained, interrupted):
+    publish(retained, missing="source_unavailable", fourth="offline")
+    clock = [0.0]
+    deadline = QueryDeadline.after(1, monotonic=lambda: clock[0])
+    class StatusReader:
+        def read_ap_status_evidence_at(self, site, finished, *, deadline):
+            clock[0] = 1.0
+            if interrupted:
+                raise sqlite3.OperationalError("interrupted")
+            deadline.require_remaining()
+    with pytest.raises(AnalyticsQueryDeadlineExceeded):
+        CurrentTrafficReadService(retained[0].gateway).get_current_site_traffic_partial_coverage(
+            SITE, status_read_service=StatusReader(), evaluated_at_utc=EVALUATED,
+            deadline=deadline, **POLICY)
+
+
+@pytest.mark.parametrize("error", [RuntimeError("synthetic programming defect"),
+                                  sqlite3.ProgrammingError("synthetic programming defect"),
+                                  sqlite3.InterfaceError("synthetic programming defect")])
+def test_R1_P1_status_programming_error_is_not_swallowed(retained, error):
+    publish(retained, missing="source_unavailable", fourth="offline")
+    class StatusReader:
+        def read_ap_status_evidence_at(self, *args, **kwargs):
+            raise error
+    with pytest.raises(type(error), match="synthetic programming defect"):
+        CurrentTrafficReadService(retained[0].gateway).get_current_site_traffic_partial_coverage(
+            SITE, status_read_service=StatusReader(), evaluated_at_utc=EVALUATED, **POLICY)
+
+
+@pytest.mark.parametrize("count", [MAX_AP_ROWS + 1, 1_000_000_000])
+def test_R1_P2_oversized_count_never_materializes_rows(retained, monkeypatch, count):
+    publish(retained, result="success", cycle_id="old")
+    publish(retained, cycle_id="new", started="2026-01-01T12:00:01.000Z")
+    gateway = retained[0].gateway
+    original_one = gateway._one
+    def counted(connection, sql, parameters, deadline):
+        value = original_one(connection, sql, parameters, deadline)
+        if "SELECT COUNT(*) AS n FROM ap_observations" in sql:
+            return {"n": count}
+        if "SELECT * FROM observation_cycles" in sql:
+            return dict(value) | {"items_stored": count, "items_seen": count, "source_rows_reported": count}
+        return value
+    def forbidden_bulk_fetch(*args, **kwargs):
+        pytest.fail("oversized current cycle must not request bulk AP rows")
+    monkeypatch.setattr(gateway, "_one", counted)
+    monkeypatch.setattr(gateway, "_all", forbidden_bulk_fetch)
+    value = summary(retained)
+    assert value.measurement_state == "unavailable"
+    assert value.traffic["total_mbps"] is None
+    assert "source_integrity_unavailable" in value.coverage["coverage_reasons"]
+
+
+@pytest.mark.parametrize("count", [MAX_AP_ROWS, MAX_AP_ROWS + 1])
+def test_R1_P2_retained_rows_at_hard_limit_and_above(retained, monkeypatch, count):
+    repository = retained[0].observations
+    repository.create_cycle(kind="ap_dynamic", site_id=SITE, started_at=START, cycle_id="large")
+    def mac(index):
+        suffix = f"{index:08X}"
+        return "02:AA:" + ":".join(suffix[i:i + 2] for i in range(0, 8, 2))
+    repository.insert_ap_batch([
+        (_row("large", mac(index), wired=(1, 2, "ok", "ok"), lan=MISSING, observed=OBSERVED) | {"site_id": SITE}, ())
+        for index in range(count)
+    ])
+    repository.finalize_cycle("large", finished_at=FINISHED, complete=False, result="partial",
+                              source_rows_reported=count, items_seen=count, items_stored=count, error_count=2)
+    gateway = retained[0].gateway
+    original_all = gateway._all
+    calls = []
+    def bounded_all(connection, sql, parameters, deadline):
+        calls.append(tuple(parameters))
+        assert parameters[-1] <= MAX_AP_ROWS + 1
+        return original_all(connection, sql, parameters, deadline)
+    monkeypatch.setattr(gateway, "_all", bounded_all)
+    value = summary(retained)
+    if count > MAX_AP_ROWS:
+        assert calls == []
+        assert value.measurement_state == "unavailable" and value.traffic["total_mbps"] is None
+        assert "source_integrity_unavailable" in value.coverage["coverage_reasons"]
+    else:
+        assert calls == [("large", MAX_AP_ROWS + 1)]
+        assert value.measurement_state == "partial_measured"
+        assert value.coverage["measured_pair_ap_count"] == MAX_AP_ROWS
+        assert value.traffic["total_mbps"] == 3 * MAX_AP_ROWS
+        first = page(retained, cycle_id="large", limit=250)
+        assert len(first.items) == 250 and first.page.next_cursor is not None
+        assert first.summary == value

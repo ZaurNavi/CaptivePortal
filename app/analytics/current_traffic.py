@@ -6,6 +6,7 @@ import base64
 import json
 import math
 import re
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -282,7 +283,12 @@ class CurrentTrafficReadService:
         if status_reader is not None:
             try:
                 status = status_reader.read_ap_status_evidence_at(site, cycle["finished_at"], deadline=deadline)
-            except (CurrentStateStorageError, CurrentStateSchemaError, CurrentStateValidationError):
+            except (sqlite3.ProgrammingError, sqlite3.InterfaceError):
+                raise
+            except (CurrentStateStorageError, CurrentStateSchemaError, CurrentStateValidationError,
+                    sqlite3.Error, OSError):
+                # Status storage failure disables Offline promotion, not rates.
+                # The shared deadline below still rejects interrupted/late reads.
                 pass
         deadline.require_remaining()
         if not isinstance(status, CurrentApStatusEvidenceV1) or status.site_id != site:
