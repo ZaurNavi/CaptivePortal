@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -33,6 +33,23 @@ class CurrentStateSchemaError(RuntimeError):
 
 class CurrentStateStorageError(RuntimeError):
     """A sanitized Current State SQLite operation failed."""
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentApStatusEvidenceV1:
+    """Exact, time-aligned AP inventory; unavailable is never inferred Offline."""
+
+    site_id: str
+    state: str = "unavailable"
+    cycle_id: str | None = None
+    capture_started_at: str | None = None
+    capture_finished_at: str | None = None
+    age_at_traffic_seconds: float | None = None
+    source_scope_hash: str | None = None
+    statuses: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self):
+        object.__setattr__(self, "statuses", MappingProxyType(dict(self.statuses or {})))
 
 
 @dataclass(frozen=True, slots=True, repr=False)

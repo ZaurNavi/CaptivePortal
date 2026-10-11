@@ -7,7 +7,11 @@ import re
 from datetime import datetime
 from typing import Any
 
-from app.analytics.models import CurrentApTrafficPage, CurrentSiteTraffic
+from app.analytics.models import (
+    CurrentApTrafficPage, CurrentSiteTraffic, CoverageAwareCurrentSiteTrafficV1,
+    CoverageAwareCurrentApTrafficPageV1,
+)
+from collections.abc import Mapping
 from app.analytics.validation import AnalyticsQueryValidationError, format_utc, parse_utc
 
 
@@ -39,6 +43,193 @@ _RATE_STATUS = frozenset({"valid", "partial", "unavailable"})
 _LATEST_STATES = frozenset({"none", "running", "completed", "abandoned"})
 _LATEST_RESULTS = frozenset({"success", "partial", "failed", "shutdown"})
 _MAC_PATTERN = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
+
+_PARTIAL_REASONS = frozenset({
+    "complete_installed_population", "complete_confirmed_online_population", "confirmed_offline_excluded",
+    "online_measurement_missing", "other_status_measurement_missing", "unknown_status_measurement_missing",
+    "status_evidence_stale", "status_evidence_unavailable", "population_mismatch", "no_valid_rate",
+    "missing_direction", "no_baseline", "counter_reset", "gap_too_large", "source_unavailable",
+    "invalid_elapsed", "temporal_skew", "source_cycle_partial", "source_cycle_failed",
+    "source_integrity_unavailable", "status_measurement_conflict", "clock_anomaly", "age_exceeded",
+})
+_PARTIAL_SELECTION = frozenset({
+    "no_complete_snapshot", "primary_full_observation_coverage", "fallback_full_observation_coverage",
+    "primary_full_online_coverage", "fallback_full_online_coverage", "fallback_higher_measured_coverage",
+    "primary_preferred_tie_or_higher",
+})
+
+
+def _plain(value):
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _closed(value, keys):
+    if not isinstance(value, dict) or set(value) != set(keys.split()):
+        raise CurrentTrafficSerializationError("partial current fields are invalid")
+
+
+def serialize_partial_current_summary(value, site_id):
+    try:
+        return _serialize_partial_current_summary(value, site_id)
+    except CurrentTrafficSerializationError:
+        raise
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise CurrentTrafficSerializationError("partial current source is malformed") from exc
+
+
+def _serialize_partial_current_summary(value, site_id):
+    if not isinstance(value, CoverageAwareCurrentSiteTrafficV1) or value.site_id != site_id:
+        raise CurrentTrafficSerializationError("partial current identity is invalid")
+    if value.metric_version != "network_traffic_current_partial_coverage.v1":
+        raise CurrentTrafficSerializationError("partial metric is invalid")
+    if {"complete_installed": "installed", "complete_online_population": "confirmed_online",
+        "partial_measured": "measured_only", "unavailable": "none"}.get(value.measurement_state) != value.population_scope:
+        raise CurrentTrafficSerializationError("partial population state is invalid")
+    _timestamp(value.evaluated_at_utc)
+    snapshot, coverage, selection, status, traffic = map(_plain, (
+        value.snapshot, value.coverage, value.source_selection, value.status_evidence, value.traffic,
+    ))
+    _closed(snapshot, "cycle_id started_at finished_at source_result source_complete latest_attempt_state latest_attempt_result latest_attempt_at using_previous_snapshot observed_at newest_observed_at age_seconds source_skew_seconds freshness_status freshness_reason")
+    for key in ("started_at", "finished_at", "latest_attempt_at", "observed_at", "newest_observed_at"):
+        _timestamp(snapshot[key], optional=True)
+    if snapshot["cycle_id"] is not None and (not isinstance(snapshot["cycle_id"], str) or not 1 <= len(snapshot["cycle_id"]) <= 128):
+        raise CurrentTrafficSerializationError("partial cycle identity is invalid")
+    if snapshot["cycle_id"] is None:
+        if any(snapshot[key] is not None for key in ("started_at", "finished_at", "source_result")) or snapshot["source_complete"]:
+            raise CurrentTrafficSerializationError("missing partial cycle has facts")
+    elif snapshot["started_at"] is None or snapshot["finished_at"] is None or snapshot["started_at"] > snapshot["finished_at"]:
+        raise CurrentTrafficSerializationError("partial cycle interval is invalid")
+    for key in ("age_seconds", "source_skew_seconds"):
+        _number(snapshot[key], optional=True, nonnegative=True)
+    if snapshot["freshness_status"] not in _FRESHNESS or snapshot["freshness_reason"] not in _FRESHNESS_REASONS:
+        raise CurrentTrafficSerializationError("partial freshness is invalid")
+    if type(snapshot["source_complete"]) is not bool or type(snapshot["using_previous_snapshot"]) is not bool:
+        raise CurrentTrafficSerializationError("partial snapshot is invalid")
+    if snapshot["source_result"] not in {None, "success", "partial"}:
+        raise CurrentTrafficSerializationError("partial source result is invalid")
+    _latest_attempt(snapshot["latest_attempt_state"], snapshot["latest_attempt_result"], snapshot["latest_attempt_at"])
+    _closed(selection, "primary_source selected_source selection_reason source_mixing_allowed wired_pair_valid_ap_count lan_pair_valid_ap_count")
+    if (selection["primary_source"] != "wired" or selection["selected_source"] not in _SOURCES | {None}
+        or selection["selection_reason"] not in _PARTIAL_SELECTION or selection["source_mixing_allowed"] is not False):
+        raise CurrentTrafficSerializationError("partial selection is invalid")
+    _closed(coverage, "observation_ap_count installed_ap_count online_ap_count offline_ap_count other_ap_count unknown_ap_count measured_pair_ap_count measured_download_ap_count measured_upload_ap_count required_measurement_ap_count missing_required_ap_count offline_excluded_ap_count observation_only_ap_count inventory_only_ap_count population_match_state coverage_reasons")
+    nullable = {"installed_ap_count", "online_ap_count", "offline_ap_count", "other_ap_count", "unknown_ap_count", "required_measurement_ap_count", "missing_required_ap_count"}
+    for key, count in coverage.items():
+        if key.endswith("_count") and not (key in nullable and count is None):
+            _count(count)
+    for key in ("wired_pair_valid_ap_count", "lan_pair_valid_ap_count"):
+        if _count(selection[key]) > coverage["observation_ap_count"]:
+            raise CurrentTrafficSerializationError("partial selection counts are invalid")
+    for key in ("measured_pair_ap_count", "measured_download_ap_count", "measured_upload_ap_count", "offline_excluded_ap_count"):
+        if coverage[key] > coverage["observation_ap_count"]:
+            raise CurrentTrafficSerializationError("partial coverage exceeds population")
+    if coverage["measured_pair_ap_count"] > min(coverage["measured_download_ap_count"], coverage["measured_upload_ap_count"]):
+        raise CurrentTrafficSerializationError("partial directional counts are invalid")
+    if coverage["installed_ap_count"] is not None:
+        if any(coverage[key] is None for key in nullable) or sum(coverage[key] for key in ("online_ap_count", "offline_ap_count", "other_ap_count", "unknown_ap_count")) != coverage["installed_ap_count"]:
+            raise CurrentTrafficSerializationError("partial installed counts are invalid")
+        if (coverage["required_measurement_ap_count"] != coverage["installed_ap_count"] - coverage["offline_excluded_ap_count"]
+            or coverage["missing_required_ap_count"] > coverage["required_measurement_ap_count"]):
+            raise CurrentTrafficSerializationError("partial required counts are invalid")
+    elif any(coverage[key] is not None for key in nullable):
+        raise CurrentTrafficSerializationError("unproven inventory counts are invalid")
+    if coverage["population_match_state"] not in {"matched", "observation_only", "inventory_only", "mismatch", "status_unavailable"}:
+        raise CurrentTrafficSerializationError("partial population match is invalid")
+    reasons = coverage["coverage_reasons"]
+    if not isinstance(reasons, list) or reasons != sorted(set(reasons)) or any(reason not in _PARTIAL_REASONS for reason in reasons):
+        raise CurrentTrafficSerializationError("partial coverage reasons are invalid")
+    _closed(status, "state cycle_id capture_started_at capture_finished_at age_at_traffic_seconds source_scope_hash")
+    if status["state"] not in {"aligned_fresh", "stale", "unavailable", "population_mismatch"}:
+        raise CurrentTrafficSerializationError("partial status evidence is invalid")
+    for key in ("capture_started_at", "capture_finished_at"):
+        _timestamp(status[key], optional=True)
+    _number(status["age_at_traffic_seconds"], optional=True, nonnegative=True)
+    if status["source_scope_hash"] is not None and re.fullmatch(r"[0-9a-f]{64}", status["source_scope_hash"]) is None:
+        raise CurrentTrafficSerializationError("partial status scope is invalid")
+    if status["state"] in {"aligned_fresh", "population_mismatch"}:
+        if any(status[key] is None for key in ("cycle_id", "capture_started_at", "capture_finished_at", "age_at_traffic_seconds", "source_scope_hash")) or status["capture_finished_at"] > snapshot["finished_at"]:
+            raise CurrentTrafficSerializationError("future or missing status evidence")
+    if status["cycle_id"] is not None and (not isinstance(status["cycle_id"], str) or not 1 <= len(status["cycle_id"]) <= 128):
+        raise CurrentTrafficSerializationError("partial status identity is invalid")
+    _closed(traffic, "download_mbps upload_mbps total_mbps unit")
+    if traffic["unit"] != "Mbps":
+        raise CurrentTrafficSerializationError("partial traffic unit is invalid")
+    down, up, total = (_number(traffic[key], optional=True, nonnegative=True) for key in ("download_mbps", "upload_mbps", "total_mbps"))
+    _total_consistent(down, up, total)
+    if value.measurement_state == "unavailable" or snapshot["freshness_status"] == "unavailable":
+        if any(number is not None for number in (down, up, total)):
+            raise CurrentTrafficSerializationError("unavailable partial traffic has numbers")
+    elif down is None and up is None:
+        raise CurrentTrafficSerializationError("partial traffic has no measurements")
+    if value.measurement_state == "complete_online_population":
+        if (status["state"] != "aligned_fresh" or coverage["population_match_state"] != "matched"
+            or coverage["other_ap_count"] or coverage["unknown_ap_count"]
+            or coverage["measured_pair_ap_count"] != coverage["online_ap_count"]
+            or coverage["measured_download_ap_count"] != coverage["online_ap_count"]
+            or coverage["measured_upload_ap_count"] != coverage["online_ap_count"]
+            or coverage["offline_excluded_ap_count"] != coverage["offline_ap_count"]
+            or "status_measurement_conflict" in reasons):
+            raise CurrentTrafficSerializationError("unproven complete-online population")
+    if value.measurement_state == "complete_installed":
+        if (coverage["measured_pair_ap_count"] != coverage["observation_ap_count"]
+            or coverage["population_match_state"] == "mismatch"
+            or not (status["state"] == "aligned_fresh" and coverage["population_match_state"] == "matched"
+                    or snapshot["source_complete"] and snapshot["source_result"] == "success")):
+            raise CurrentTrafficSerializationError("unproven installed population")
+    return {"metric_version": value.metric_version, "site_id": value.site_id,
+            "evaluated_at_utc": value.evaluated_at_utc, "measurement_state": value.measurement_state,
+            "population_scope": value.population_scope, "snapshot": snapshot, "traffic": traffic,
+            "source_selection": selection, "coverage": coverage, "status_evidence": status}
+
+
+def serialize_partial_current_ap_page(value, site_id, *, cycle_id, limit):
+    try:
+        return _serialize_partial_current_ap_page(value, site_id, cycle_id=cycle_id, limit=limit)
+    except CurrentTrafficSerializationError:
+        raise
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise CurrentTrafficSerializationError("partial current AP source is malformed") from exc
+
+
+def _serialize_partial_current_ap_page(value, site_id, *, cycle_id, limit):
+    if not isinstance(value, CoverageAwareCurrentApTrafficPageV1) or value.metric_version != "network_traffic_current_ap_partial_coverage.v1":
+        raise CurrentTrafficSerializationError("partial AP page is invalid")
+    result = serialize_partial_current_summary(value.summary, site_id)
+    if value.page.cycle_id != cycle_id or value.page.limit != limit or not 1 <= limit <= 250 or len(value.items) > limit or value.page.selected_source != result["source_selection"]["selected_source"]:
+        raise CurrentTrafficSerializationError("partial AP page context is invalid")
+    items = _plain(value.items)
+    seen = set()
+    for item in items:
+        _closed(item, "ap_mac name selected_source download_mbps upload_mbps total_mbps download_reason upload_reason rate_status coverage_role status_classification observed_at")
+        if not isinstance(item["ap_mac"], str) or _MAC_PATTERN.fullmatch(item["ap_mac"]) is None or item["ap_mac"] in seen:
+            raise CurrentTrafficSerializationError("partial AP identity is invalid")
+        seen.add(item["ap_mac"])
+        if item["name"] is not None and not isinstance(item["name"], str):
+            raise CurrentTrafficSerializationError("partial AP name is invalid")
+        if item["selected_source"] != value.page.selected_source or item["rate_status"] not in _RATE_STATUS or item["coverage_role"] not in {"measured", "offline_excluded", "missing", "required_unknown", "population_conflict"} or item["status_classification"] not in {None, "online", "offline", "other", "unknown"}:
+            raise CurrentTrafficSerializationError("partial AP role is invalid")
+        for direction in ("download", "upload"):
+            if item[f"{direction}_reason"] not in _RATE_REASONS:
+                raise CurrentTrafficSerializationError("partial AP rate reason is invalid")
+            number = _number(item[f"{direction}_mbps"], optional=True, nonnegative=True)
+            if number is not None and item[f"{direction}_reason"] != "ok":
+                raise CurrentTrafficSerializationError("partial AP rate shape is invalid")
+        total = _number(item["total_mbps"], optional=True, nonnegative=True)
+        _total_consistent(item["download_mbps"], item["upload_mbps"], total)
+        expected_status = "valid" if item["download_mbps"] is not None and item["upload_mbps"] is not None else "partial" if item["download_mbps"] is not None or item["upload_mbps"] is not None else "unavailable"
+        if item["rate_status"] != expected_status:
+            raise CurrentTrafficSerializationError("partial AP rate status is inconsistent")
+        _timestamp(item["observed_at"], optional=True)
+        if item["coverage_role"] == "offline_excluded" and (item["status_classification"] != "offline" or item["download_reason"] != "source_unavailable" or item["upload_reason"] != "source_unavailable" or any(item[key] is not None for key in ("download_mbps", "upload_mbps", "total_mbps"))):
+            raise CurrentTrafficSerializationError("Offline AP is not excluded")
+    result["metric_version"] = value.metric_version
+    result["items"] = items
+    return result, {"limit": limit, "cycle_id": cycle_id, "selected_source": value.page.selected_source,
+                    "next_cursor": value.page.next_cursor}
 
 
 def serialize_current_traffic_summary(

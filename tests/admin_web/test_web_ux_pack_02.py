@@ -306,6 +306,7 @@ const start=source.indexOf('  async function refreshTraffic(generation)');
 const end=source.indexOf('  function nextDelay()',start);
 global.document={hidden:false};global.coordinator={pending:false};global.stopped=false;
 global.trafficEnabled=true;global.trafficBase='/traffic';global.trafficTimeout=1;global.trafficRefresh=1;global.siteId='SITE';
+global.partialMode=false;
 global.sources={traffic:{rows:['old'],generation:1}};
 const pending=[],urls=[];global.requestJson=url=>{urls.push(url);return new Promise((resolve,reject)=>pending.push({resolve,reject}))};
 global.validateTrafficSummary=x=>x;global.acceptTrafficSummary=(s,v)=>{s.summary=v};

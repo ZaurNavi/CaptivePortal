@@ -20,7 +20,8 @@
   </div>
 </div>
 <div id="traffic-panels" class="content-grid" aria-live="polite">
-  <section id="traffic-current-panel" class="card card-wide" aria-labelledby="traffic-current-heading">
+  <section id="traffic-current-panel" class="card card-wide" aria-labelledby="traffic-current-heading"
+    data-partial-coverage="{{ 'true' if traffic_partial_coverage_enabled else 'false' }}">
     <div class="card-heading">
       <div>
         <p class="eyebrow">Live estimate</p>

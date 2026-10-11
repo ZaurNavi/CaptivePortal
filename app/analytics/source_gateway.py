@@ -1905,6 +1905,50 @@ class AnalyticsSourceGateway:
             finally:
                 connection.rollback()
 
+    def read_current_partial_traffic_evidence(
+        self, *, site_id: str, cycle_id: str | None, deadline: QueryDeadline,
+    ) -> Mapping[str, Any]:
+        """One coherent read of the newest completed candidate, even if corrupt.
+
+        Do not filter integrity fields in SQL: a corrupt newest cycle must not
+        silently expose older numbers. Reads remain under the query deadline.
+        """
+        with self._connection("observations", deadline) as connection:
+            connection.execute("BEGIN")
+            try:
+                clause = "" if cycle_id is None else " AND cycle_id=?"
+                cycle = self._one(connection, f"""
+                    SELECT * FROM observation_cycles
+                    WHERE site_id=? AND kind='ap_dynamic' AND state='completed'
+                      AND result IN ('success','partial'){clause}
+                    ORDER BY started_at DESC, cycle_id DESC LIMIT 1
+                    """, (site_id,) if cycle_id is None else (site_id, cycle_id), deadline)
+                latest = self._one(connection, """
+                    SELECT cycle_id, state, result, started_at, finished_at
+                    FROM observation_cycles WHERE site_id=? AND kind='ap_dynamic'
+                    ORDER BY started_at DESC, cycle_id DESC LIMIT 1
+                    """, (site_id,), deadline)
+                if cycle is None:
+                    return {"cycle": None, "latest": latest, "rows": ()}
+                count = self._one(connection, "SELECT COUNT(*) AS n FROM ap_observations WHERE cycle_id=?",
+                                  (cycle["cycle_id"],), deadline)["n"]
+                # A mismatch needs no materialized rows to fail closed.
+                if count != cycle["items_stored"]:
+                    return {"cycle": cycle, "latest": latest, "rows": (), "row_count": count}
+                rows = self._all(connection, """
+                    SELECT cycle_id, site_id, ap_mac, name,
+                           partial, overview_ok, wired_uplink_ok, lan_traffic_ok, radios_ok,
+                           wired_observed_at, wired_download_mbps, wired_upload_mbps,
+                           wired_download_rate_reason, wired_upload_rate_reason,
+                           lan_observed_at, lan_rx_mbps, lan_tx_mbps,
+                           lan_rx_rate_reason, lan_tx_rate_reason
+                    FROM ap_observations WHERE cycle_id=? ORDER BY ap_mac LIMIT ?
+                    """, (cycle["cycle_id"], count + 1), deadline)
+                deadline.require_remaining()
+                return {"cycle": cycle, "latest": latest, "rows": tuple(rows), "row_count": count}
+            finally:
+                connection.rollback()
+
     def _historical_boundary_candidates(
         self,
         connection: sqlite3.Connection,
