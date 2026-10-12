@@ -15,7 +15,7 @@ from .models import SensorConfig
 from .normalizer import NetworkNormalizer
 from .producer import EvidenceProducer
 from .spool import SensorSpool
-from .telemetry import SensorTelemetry, resource_snapshot
+from .telemetry import SensorTelemetry, SensorRoutineAggregate, resource_snapshot
 
 SURICATA_STATS_INTERVAL_SECONDS = 10.0
 SURICATA_HEARTBEAT_TIMEOUT_SECONDS = 30.0
@@ -40,7 +40,10 @@ class SensorRuntime:
             main_db_max_bytes=config.spool_main_db_max_bytes,
             max_events=config.spool_max_events,
             write_headroom_bytes=config.spool_write_headroom_bytes, now=now,
+            io_stale_purge_gate_enabled=config.io_stale_purge_gate_enabled,
         )
+        if isinstance(self.spool, SensorSpool) or config.io_stale_purge_gate_enabled:
+            self.spool.io_stale_purge_gate_enabled = config.io_stale_purge_gate_enabled
         self.producer = producer or EvidenceProducer(config, self.spool)
         self.normalizer = NetworkNormalizer(config, monotonic=monotonic)
         self.health = SourceHealthTracker(config, monotonic=monotonic, now=now)
@@ -61,6 +64,19 @@ class SensorRuntime:
         self._delivery_permanent_fault = False
         self._attribution = None
         self._capture_preflight_passed = False
+        self._routine_aggregate = None
+        if config.io_telemetry_aggregation_enabled:
+            try:
+                self._routine_aggregate = SensorRoutineAggregate(monotonic=monotonic)
+            except Exception:
+                self._io_fallback_notice("telemetry_aggregation")
+        self._ingress = None
+        if config.io_ingress_coalesce_enabled:
+            try:
+                from .ingress_coalescer import IngressCoalescer
+                self._ingress = IngressCoalescer(self.spool, monotonic=monotonic, on_fault=self._ingress_fault)
+            except Exception:
+                self._io_fallback_notice("ingress_coalescer")
         if attribution_config is not None and attribution_config.enabled:
             from app.network_attribution.dhcp_authority import DhcpAuthorityRecorder
             options = {"clock": now} if now is not None else {}
@@ -82,6 +98,45 @@ class SensorRuntime:
 
     def initialize_transport(self) -> None:
         self.spool.initialize()
+        if self._ingress is not None:
+            self._ingress.start()
+
+    def _submit(self, events) -> int:
+        if self._ingress is None:
+            return self.spool.enqueue(events)
+        return self._ingress.submit(events)
+
+    def _submit_health(self, events) -> int:
+        if self._ingress is None:
+            return self.spool.enqueue(events)
+        if not events:
+            return 0  # Health dedup generated no transition/heartbeat to order.
+        return self._ingress.barrier(events)
+
+    def _ingress_fault(self, category: str) -> None:
+        if category == "spool_write":
+            self._delivery_available = False
+            self.state, self.reason = "degraded", "spool_capacity" if self.spool.capacity_blocked else "ingest_delivery_unavailable"
+        self._io_fallback_notice(category)
+        if category == "spool_write":
+            if not self.stop_event.is_set():
+                try:
+                    self._submit_health(self.health.all("unavailable", "ingest_delivery_unavailable"))
+                except Exception:
+                    pass  # No successful source-health claim from failed storage.
+
+    def _io_fallback_notice(self, category: str) -> None:
+        try:
+            self.telemetry.emit("fingerprint_sensor_io_fallback", error_category=category)
+        except Exception:
+            pass
+
+    def _flush_ingress_fault_exit(self) -> None:
+        if self._ingress is not None:
+            try:
+                self._ingress.barrier()
+            except Exception:
+                self._io_fallback_notice("ingress_flush")
 
     def preflight_or_report(self) -> bool:
         try:
@@ -89,7 +144,7 @@ class SensorRuntime:
         except Exception:
             self._attribution_call("fault", "capture_interface_unavailable")
             self.state, self.reason = "unavailable", "capture_interface_unavailable"
-            self.spool.enqueue(self.health.all("unavailable", "capture_interface_unavailable"))
+            self._submit_health(self.health.all("unavailable", "capture_interface_unavailable"))
             self.telemetry.emit("fingerprint_sensor_unavailable", runtime_state=self.state, reason=self.reason)
             return False
         self._capture_preflight_passed = True
@@ -125,11 +180,14 @@ class SensorRuntime:
                     self._attribution_call("poll")
                     continue
                 frame, received_ns, observed_at = received
+                if self._ingress is not None and self.stop_event.is_set():
+                    break
                 if self.dedup.is_duplicate(frame, received_ns):
                     continue
-                self.spool.enqueue(self.normalizer.raw(frame, observed_at))
+                self._submit(self.normalizer.raw(frame, observed_at))
                 self._attribution_call("record_frame", frame, observed_at)
         except Exception:
+            self._flush_ingress_fault_exit()
             self._attribution_call("fault", "raw_capture_unavailable")
             if not self.stop_event.is_set():
                 self.state, self.reason = "degraded", "raw_parser_unavailable"
@@ -140,6 +198,8 @@ class SensorRuntime:
         try:
             while not self.stop_event.is_set():
                 value = self.eve.receive()
+                if self._ingress is not None and self.stop_event.is_set():
+                    break
                 self._check_suricata_heartbeat()
                 if self.eve.truncated != last_truncated:
                     last_truncated = self.eve.truncated
@@ -153,16 +213,33 @@ class SensorRuntime:
                     self._emit_stats(value)
                     continue
                 events = self.normalizer.eve(value)
-                self.spool.enqueue(events)
+                self._submit(events)
                 for event in events:
                     if self._suricata_ready and event.source_kind in {"tls_client", "quic_client"}:
                         self._set_local((event.source_kind,), "available", None)
         except Exception:
+            self._flush_ingress_fault_exit()
             if not self.stop_event.is_set():
                 self.state, self.reason = "degraded", "suricata_unavailable"
                 self._set_local(("tls_client", "quic_client"), "unavailable", "suricata_unavailable")
 
     def _delivery_loop(self) -> None:
+        if self._ingress is None:
+            return self._delivery_loop_inner()
+        try:
+            self._delivery_loop_inner()
+        except Exception:
+            self._flush_ingress_fault_exit()
+            self._delivery_available = False
+            self.state, self.reason = "degraded", "ingest_delivery_unavailable"
+            self.telemetry.emit("fingerprint_delivery_retry", delivery_retry=1)
+            if not self.stop_event.is_set():
+                try:
+                    self._submit_health(self.health.all("unavailable", "ingest_delivery_unavailable"))
+                except Exception:
+                    pass
+
+    def _delivery_loop_inner(self) -> None:
         while not self.stop_event.is_set():
             try:
                 result = self.producer.deliver_once()
@@ -170,10 +247,12 @@ class SensorRuntime:
                 result = None
             if result is None or result.status == "retry":
                 self._delivery_available = False
-                self.spool.enqueue(self.health.all("unavailable", "ingest_delivery_unavailable"))
+                if self._ingress is None or not self.stop_event.is_set():
+                    self._submit_health(self.health.all("unavailable", "ingest_delivery_unavailable"))
                 delay = result.delay_seconds if result is not None else 1.0
                 self.telemetry.emit("fingerprint_delivery_retry", delivery_retry=1)
             elif result.status == "permanent":
+                self._flush_ingress_fault_exit()
                 self._delivery_available = False
                 self._delivery_permanent_fault = True
                 self.state, self.reason = "degraded", "delivery_permanent_reject"
@@ -181,10 +260,18 @@ class SensorRuntime:
                 return
             else:
                 if result.status == "delivered":
-                    if not self._delivery_available:
+                    if not self._delivery_available and (self._ingress is None or not self.stop_event.is_set()):
                         self._delivery_available = True
                         self._publish_local_health()
-                    self.telemetry.emit("fingerprint_delivery_completed", delivery_success=result.delivered)
+                    if self._routine_aggregate is not None:
+                        try:
+                            self._routine_aggregate.delivery(result.delivered)
+                        except Exception:
+                            self._routine_aggregate = None
+                            self._io_fallback_notice("telemetry_aggregation")
+                            self.telemetry.emit("fingerprint_delivery_completed", delivery_success=result.delivered)
+                    else:
+                        self.telemetry.emit("fingerprint_delivery_completed", delivery_success=result.delivered)
                 delay = 1.0
             self.stop_event.wait(delay)
 
@@ -203,7 +290,7 @@ class SensorRuntime:
                 event = self.health.transition(kind, status, reason)
                 if event is not None:
                     events.append(event)
-        self.spool.enqueue(events)
+        self._submit_health(events)
         self._refresh_state()
 
     def _publish_local_health(self) -> None:
@@ -212,11 +299,18 @@ class SensorRuntime:
             event = self.health.transition(kind, status, reason)
             if event is not None:
                 events.append(event)
-        self.spool.enqueue(events)
+        self._submit_health(events)
         self._refresh_state()
 
     def _emit_stats(self, value: dict[str, Any]) -> None:
         capture = value["stats"]["capture"]
+        if self._routine_aggregate is not None:
+            try:
+                self._routine_aggregate.stats(capture)
+                return
+            except Exception:
+                self._routine_aggregate = None
+                self._io_fallback_notice("telemetry_aggregation")
         self.telemetry.emit(
             "fingerprint_suricata_stats",
             suricata_version="8.0.6",
@@ -239,6 +333,21 @@ class SensorRuntime:
             self._suricata_ready = False
             self._set_local(("tls_client", "quic_client"), "unavailable", "suricata_unavailable")
 
+    def _take_routine_aggregate(self, *, final: bool = False) -> dict[str, Any]:
+        if self._routine_aggregate is None:
+            return {}
+        try:
+            return self._routine_aggregate.snapshot_reset(final=final)
+        except Exception:
+            self._routine_aggregate = None
+            self._io_fallback_notice("telemetry_aggregation")
+            return {}
+
+    def _emit_final_routine(self) -> None:
+        fields = self._take_routine_aggregate(final=True)
+        if fields:
+            self.telemetry.emit("fingerprint_sensor_metrics", runtime_state=self.state, **fields)
+
     def _emit_metrics(self) -> None:
         metrics = self.spool.metrics()
         counters = dict(self.normalizer.counters)
@@ -253,6 +362,7 @@ class SensorRuntime:
             spool_rows=metrics["rows"], spool_bytes=metrics["spool_bytes"],
             oldest_spool_age=metrics["oldest_spool_age"],
             stale_spool_event_dropped=self.spool.stale_dropped,
+            **self._take_routine_aggregate(),
             **counters, **resource_snapshot(),
         )
 
@@ -275,6 +385,8 @@ class SensorRuntime:
                 self.reason = "spool_capacity"
 
     def shutdown(self) -> bool:
+        if self._ingress is not None:
+            return self._shutdown_coalesced()
         self.state, self.reason = "stopping", "stopping"
         self.stop_event.set()
         self._attribution_call("fault", "sensor_shutdown")
@@ -286,5 +398,46 @@ class SensorRuntime:
         clean = all(not thread.is_alive() for thread in self.threads)
         self._attribution_call("shutdown")
         self.spool.close()
+        self._emit_final_routine()
         self.telemetry.emit("fingerprint_sensor_stopped", runtime_state="stopping")
         return clean
+
+    def _shutdown_coalesced(self) -> bool:
+        deadline = self.monotonic() + 20.0
+        self.state, self.reason = "stopping", "stopping"
+        self.stop_event.set()
+        self._attribution_call("fault", "sensor_shutdown")
+        closed_sources = True
+        for source in (self.capture, self.eve):
+            try:
+                source.close()
+            except Exception:
+                closed_sources = False
+        source_threads = [thread for thread in self.threads if thread.name in {"fingerprint-raw", "fingerprint-eve"}]
+        for thread in source_threads:
+            thread.join(max(0.0, deadline - self.monotonic()))
+        sources_done = all(not thread.is_alive() for thread in source_threads)
+        try:
+            flushed = self._ingress.shutdown(deadline=deadline)
+        except Exception:
+            flushed = False
+            self._io_fallback_notice("ingress_shutdown")
+        for thread in self.threads:
+            if thread not in source_threads:
+                thread.join(max(0.0, deadline - self.monotonic()))
+        workers_done = all(not thread.is_alive() for thread in self.threads)
+        clean = closed_sources and sources_done and workers_done and flushed and self.monotonic() <= deadline
+        # Never close SQLite underneath a still-running writer/producer.
+        if workers_done and self._ingress.timer_stopped:
+            self._attribution_call("shutdown")
+            try:
+                self.spool.close()
+            except Exception:
+                clean = False
+        self._emit_final_routine()
+        clean = clean and self.monotonic() <= deadline
+        if clean:
+            self.telemetry.emit("fingerprint_sensor_stopped", runtime_state="stopping")
+        else:
+            self.telemetry.emit("fingerprint_sensor_stopped", runtime_state="stopping", status="unclean")
+        return clean and self.monotonic() <= deadline

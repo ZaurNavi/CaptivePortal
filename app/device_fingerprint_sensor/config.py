@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+from dataclasses import replace
 from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -30,9 +31,14 @@ _SITE = re.compile(r"[0-9a-f]{24}")
 def sensor_config_from_env(env: Mapping[str, str] | None = None) -> SensorConfig:
     values = os.environ if env is None else env
     enabled = _boolean(values.get("DEVICE_FINGERPRINT_SENSOR_ENABLED", "false"), "ENABLED")
+    # Explicit invalid Wave-2 flags fail configuration even on the disabled path.
+    options = {
+        field: _boolean(values.get("DEVICE_FINGERPRINT_SENSOR_" + field.upper(), "false"), field.upper())
+        for field in ("io_stale_purge_gate_enabled", "io_telemetry_aggregation_enabled", "io_ingress_coalesce_enabled")
+    }
     if not enabled:
-        return _build(False, {})
-    return _build(True, values)
+        return replace(_build(False, {}), **options)
+    return replace(_build(True, values), **options)
 
 
 def _build(enabled: bool, env: Mapping[str, str]) -> SensorConfig:
