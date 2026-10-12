@@ -211,10 +211,29 @@ def load_bundle(taxonomy_bytes, manifest_bytes, ruleset_bytes, *, previous=None)
         raise RecognitionValidationError() from None
 
 
-def load_local_bundle():
+def load_local_bundle(*, version=2):
+    """Select only the frozen local tuple; v1 is explicit rollback, never fallback."""
+    from hashlib import sha256
+    pinned = {
+        1: ("58ff1a1e49cf07229f0247bbeeca6db79acc99b6cd19437aa6245a1ab5c8cfc0",
+            "6f1617441b8ce20aed6d91056a685c9efa444b04cfe79e42f57e7db0091d57a0",
+            "e6493f24b802a21e34fcbc436f2e7b150172d3bab3e04db7cb4c7005466c94c1"),
+        2: ("9dfc0a2ed699f09a4f70e32f30e2d259d96f0f70eb2e8eb06366e5198486c7ee",
+            "8f09b6cc685a103a9b4515367980ccefbaa9755a28134b9c6b184cad3e1834f3",
+            "595c6982ddf2625de1dbf0262a8da68e5e0cfcb12894a9883cf21bc63a226db8"),
+    }
+    if type(version) is not int or version not in pinned:
+        raise RecognitionValidationError("recognition_configuration_unavailable")
     directory = Path(__file__).parent / "knowledge"
     try:
-        return load_bundle(*(directory.joinpath(name).read_bytes() for name in (
-            "recognition-taxonomy-v1.json", "recognition-knowledge-manifest-v1.json", "recognition-ruleset-v1.json")))
+        raw = tuple(directory.joinpath(f"{name}-v{version}.json").read_bytes() for name in (
+            "recognition-taxonomy", "recognition-knowledge-manifest", "recognition-ruleset"))
+        if tuple(sha256(value).hexdigest() for value in raw) != pinned[version]:
+            raise RecognitionValidationError("recognition_configuration_unavailable")
+        result = load_bundle(*raw)
+        if any(parent[kind + "_version"] != version for parent, kind in (
+                (result.taxonomy, "taxonomy"), (result.manifest, "knowledge_manifest"), (result.ruleset, "ruleset"))):
+            raise RecognitionValidationError("recognition_configuration_unavailable")
+        return result
     except OSError:
         raise RecognitionValidationError("recognition_configuration_unavailable") from None
