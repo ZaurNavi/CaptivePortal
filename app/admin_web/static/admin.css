@@ -398,6 +398,17 @@ input[type="radio"] { width: auto; min-height: 0; }
 .feature-settings-details dd { margin: 0; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .feature-settings-details { grid-template-columns: 1fr; } }
 
+#device-service-intelligence { min-width: 0; margin-top: 1.25rem; padding: 1.25rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow-wrap: anywhere; }
+#device-service-intelligence .section-heading > div { min-width: 0; }
+#device-service-intelligence .section-heading p { color: var(--muted); font-size: .85rem; }
+#device-service-intelligence .service-info-card { grid-column: span 6; min-width: 0; padding: .9rem 1rem; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius); }
+#device-service-intelligence .service-info-card h3 { font-size: .9rem; margin: 0 0 .6rem; }
+#device-service-intelligence .service-info-card p { font-size: .85rem; margin: .4rem 0; }
+@media (max-width: 560px) {
+  #device-service-intelligence .section-heading { flex-direction: column; align-items: stretch; }
+  #device-service-intelligence .service-info-card { grid-column: 1 / -1; }
+}
+
 /* NI-03 presentation only; other cards and grids retain their styles. */
 #device-protocol-intelligence { min-width: 0; margin-top: 1.25rem; padding: 1.25rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow-wrap: anywhere; }
 #device-protocol-intelligence .section-heading { margin: 0 0 .85rem; }

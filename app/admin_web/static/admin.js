@@ -6690,3 +6690,187 @@
   }
   ageTick(); requestRefresh(true);
 }());
+
+/* NI-04: independent bounded Service Intelligence coordinator. */
+(function () {
+  "use strict";
+  if (typeof document === "undefined") return;
+  const section = document.getElementById("device-service-intelligence");
+  const page = document.getElementById("admin-page");
+  if (!section || !page || page.dataset.page !== "device") return;
+  const site = page.dataset.siteId, device = page.dataset.deviceId;
+  const content = document.getElementById("device-service-content");
+  const status = document.getElementById("device-service-state");
+  const button = document.getElementById("device-service-refresh");
+  const categories = new Set(["video_streaming", "audio_streaming", "messaging", "social", "cloud_storage",
+    "productivity_collaboration", "gaming", "software_distribution", "web_search", "other_supported"].map((x) => `category.${x}`));
+  const evidenceLabels = {
+    supported_results_present: "Supported web-host evidence observed.",
+    no_supported_result_observed_with_sufficient_coverage: "No supported services recognized in the last 24 hours. This does not prove no Internet services or network activity.",
+    insufficient_source_coverage: "Source coverage is insufficient; service activity is unknown.",
+    insufficient_attribution: "Device attribution is insufficient; service activity is unknown.",
+    recognition_limited: "Recognition is limited; service activity is unknown.",
+    identity_pending: "Device identity is pending; service activity is unknown.",
+  };
+  let visible = false, stopped = false, active = null, pending = false, timer = null;
+  let ageTimer = null, lastGood = null, failures = 0, nextAutomaticAt = null;
+  const endpoint = `/admin/api/v1/sites/${encodeURIComponent(site)}/devices/${encodeURIComponent(device)}/service-intelligence`;
+  function exact(value, keys) {
+    return value !== null && typeof value === "object" && !Array.isArray(value) &&
+      Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+  }
+  function utc(value) {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value)) throw new Error("shape");
+    const short = value.slice(0, 23) + "Z", parsed = Date.parse(short);
+    if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== short) throw new Error("shape");
+    return parsed * 1000 + Number(value.slice(23, 26));
+  }
+  function label(value) {
+    if (typeof value !== "string" || value.length < 1 || value.length > 64 || value !== value.trim() ||
+      value !== value.normalize("NFC") || /[\x00-\x1f\x7f]/.test(value)) throw new Error("shape");
+  }
+  function validate(payload) {
+    if (!exact(payload, ["api_version", "request_id", "site_id", "result", "page"]) ||
+      payload.api_version !== "admin.device.service-intelligence.v1" || payload.site_id !== site || payload.page !== null ||
+      typeof payload.request_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(payload.request_id)) throw new Error("shape");
+    const v = payload.result;
+    if (!exact(v, ["schema_version", "site_id", "device_id", "evaluated_at_utc", "window", "availability_state", "evidence_state",
+      "identity_binding_state", "recent_services", "service_categories", "last_service_observation", "freshness_state", "coverage",
+      "recognition_ruleset_id", "recognition_ruleset_version", "recognition_ruleset_digest_sha256", "taxonomy_id", "taxonomy_version", "taxonomy_digest_sha256"]) ||
+      v.schema_version !== 1 || v.site_id !== site || v.device_id !== device ||
+      !["authoritative", "pending", "unavailable", "absent"].includes(v.identity_binding_state) ||
+      !Object.hasOwn(evidenceLabels, v.evidence_state) || !["fresh", "recent", "stale", "unavailable"].includes(v.freshness_state) ||
+      !["usable", "degraded"].includes(v.availability_state)) throw new Error("shape");
+    for (const kind of ["recognition_ruleset", "taxonomy"]) {
+      if (v[`${kind}_id`] !== (kind === "taxonomy" ? "captivportal.network-intelligence.recognition-taxonomy" :
+        "captivportal.network-intelligence.service-recognition") || !Number.isSafeInteger(v[`${kind}_version`]) || v[`${kind}_version`] < 1 ||
+        typeof v[`${kind}_digest_sha256`] !== "string" || !/^[0-9a-f]{64}$/.test(v[`${kind}_digest_sha256`])) throw new Error("shape");
+    }
+    const at = utc(v.evaluated_at_utc), w = v.window, c = v.coverage;
+    if (!exact(w, ["from_utc", "to_utc", "duration_seconds", "recent_from_utc", "recent_duration_seconds"]) ||
+      w.to_utc !== v.evaluated_at_utc || w.duration_seconds !== 86400 || w.recent_duration_seconds !== 3600 ||
+      utc(w.from_utc) !== at - 86400000000 || utc(w.recent_from_utc) !== at - 3600000000 ||
+      w.from_utc.slice(23) !== v.evaluated_at_utc.slice(23) || w.recent_from_utc.slice(23) !== v.evaluated_at_utc.slice(23) ||
+      !exact(c, ["scope", "source_state", "attribution_state", "projection_state", "recognition_state", "historical_window_completeness_claimed"]) ||
+      c.scope !== "current_pipeline" || c.historical_window_completeness_claimed !== false || !["usable", "limited"].includes(c.recognition_state) ||
+      !["usable/usable/usable", "degraded/usable/usable", "degraded/usable/degraded", "degraded/unavailable/unknown", "degraded/degraded/degraded", "degraded/unknown/unknown"]
+        .includes(`${c.projection_state}/${c.source_state}/${c.attribution_state}`) ||
+      !Array.isArray(v.recent_services) || v.recent_services.length > 12 || !Array.isArray(v.service_categories) || v.service_categories.length > 10) throw new Error("shape");
+    function service(row, key, lower) {
+      if (!exact(row, ["service_id", "display_name", "organization_id", "organization_display_name", "service_category_id",
+        "service_category_display_name", key, "support_state"]) || typeof row.service_id !== "string" ||
+        !/^service\.[a-z0-9][a-z0-9._-]{1,58}[a-z0-9]$/.test(row.service_id) || typeof row.organization_id !== "string" ||
+        !/^org\.[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$/.test(row.organization_id) ||
+        !categories.has(row.service_category_id) || row.support_state !== "directly_supported") throw new Error("shape");
+      label(row.display_name); label(row.organization_display_name); label(row.service_category_display_name);
+      const event = utc(row[key]);
+      if (event < lower || row[key] >= v.evaluated_at_utc) throw new Error("shape");
+      return event;
+    }
+    const seen = new Set(), categoryLatest = new Map(); let previous = null;
+    for (const row of v.recent_services) {
+      service(row, "last_observed_at", at - 3600000000);
+      if (seen.has(row.service_id) || previous && (previous.last_observed_at < row.last_observed_at ||
+        previous.last_observed_at === row.last_observed_at && previous.service_id >= row.service_id)) throw new Error("shape");
+      seen.add(row.service_id); previous = row;
+      if (!categoryLatest.has(row.service_category_id)) categoryLatest.set(row.service_category_id, row);
+    }
+    const categorySeen = new Set(); previous = null;
+    for (const row of v.service_categories) {
+      if (!exact(row, ["service_category_id", "display_name", "last_observed_at"]) || !categoryLatest.has(row.service_category_id) ||
+        categorySeen.has(row.service_category_id) || row.last_observed_at !== categoryLatest.get(row.service_category_id).last_observed_at ||
+        row.display_name !== categoryLatest.get(row.service_category_id).service_category_display_name ||
+        previous && (previous.last_observed_at < row.last_observed_at || previous.last_observed_at === row.last_observed_at && previous.service_category_id >= row.service_category_id)) throw new Error("shape");
+      categorySeen.add(row.service_category_id); previous = row;
+    }
+    if (categorySeen.size !== categoryLatest.size) throw new Error("shape");
+    const last = v.last_service_observation; let expectedFreshness = "unavailable";
+    if (last !== null) {
+      const event = service(last, "observed_at", at - 86400000000), age = (at - event) / 1000000;
+      expectedFreshness = age <= 300 ? "fresh" : age <= 3600 ? "recent" : "stale";
+      if (["unavailable", "unknown"].includes(c.source_state)) expectedFreshness = "stale";
+      else if (expectedFreshness === "fresh" && (c.source_state !== "usable" || c.attribution_state !== "usable" || c.recognition_state !== "usable")) expectedFreshness = "recent";
+      if (event >= at - 3600000000 && (!v.recent_services.length || v.recent_services[0].service_id !== last.service_id || v.recent_services[0].last_observed_at !== last.observed_at) ||
+        event < at - 3600000000 && v.recent_services.length) throw new Error("shape");
+    } else if (v.recent_services.length) throw new Error("shape");
+    const expectedEvidence = v.identity_binding_state !== "authoritative" ? "identity_pending" : last !== null ? "supported_results_present" :
+      c.source_state !== "usable" ? "insufficient_source_coverage" : c.attribution_state !== "usable" ? "insufficient_attribution" :
+      c.recognition_state !== "usable" ? "recognition_limited" : "no_supported_result_observed_with_sufficient_coverage";
+    if (v.freshness_state !== expectedFreshness || v.evidence_state !== expectedEvidence || v.availability_state !== (
+      v.identity_binding_state === "authoritative" && c.projection_state === "usable" && c.recognition_state === "usable" ? "usable" : "degraded") ||
+      v.identity_binding_state !== "authoritative" && last !== null) throw new Error("shape");
+    return v;
+  }
+  function card(title, lines) {
+    const node = document.createElement("div"); node.className = "service-info-card";
+    const heading = document.createElement("h3"); heading.textContent = title; node.appendChild(heading);
+    for (const line of lines) { const p = document.createElement("p"); p.textContent = line; node.appendChild(p); }
+    content.appendChild(node);
+  }
+  function render(v, stale) {
+    content.replaceChildren();
+    card("Recent Services · last 60 minutes", v.recent_services.length ? v.recent_services.map((row) =>
+      `${row.display_name} · ${row.organization_display_name} · ${row.last_observed_at}`) : ["No supported recent result. This is not an activity measurement."]);
+    card("Service Categories", v.service_categories.length ? v.service_categories.map((row) => `${row.display_name} · ${row.last_observed_at}`) : ["No supported category result."]);
+    card("Last Service Observation · last 24 hours", v.last_service_observation ?
+      [`${v.last_service_observation.display_name} · ${v.last_service_observation.observed_at}`] : ["No supported observation available."]);
+    card("Freshness / coverage", [`Freshness: ${stale ? "stale (refresh failed)" : v.freshness_state}`, `Source: ${v.coverage.source_state}`,
+      `Attribution: ${v.coverage.attribution_state}`, `Recognition: ${v.coverage.recognition_state}`, `Last evaluated: ${v.evaluated_at_utc}`]);
+    status.textContent = (stale ? "Refresh unavailable; showing stale last-good data. " : "") + evidenceLabels[v.evidence_state];
+  }
+  function clearTimer() { if (timer !== null) window.clearTimeout(timer); timer = null; }
+  function schedule() {
+    clearTimer();
+    if (!stopped && visible && !document.hidden && nextAutomaticAt !== null)
+      timer = window.setTimeout(() => { timer = null; refresh(false); }, Math.max(0, nextAutomaticAt - Date.now()));
+  }
+  function expireLastGood() {
+    if (ageTimer !== null) window.clearTimeout(ageTimer); ageTimer = null;
+    if (lastGood) ageTimer = window.setTimeout(() => {
+      ageTimer = null; lastGood = null; content.replaceChildren(); status.textContent = "Last-good service evidence has expired. Activity is unknown.";
+    }, Math.max(0, 900000 - (Date.now() - lastGood.received)));
+  }
+  function suspend(reason) { clearTimer(); pending = false; if (active) { active.cancelled = true; active.controller.abort(reason); } }
+  async function refresh(manual) {
+    if (stopped || !visible || document.hidden) return;
+    if (active) { if (manual) pending = true; return; }
+    // Visibility notifications are not manual Refresh and cannot bypass cadence.
+    if (!manual && nextAutomaticAt !== null && Date.now() < nextAutomaticAt) { schedule(); return; }
+    clearTimer();
+    nextAutomaticAt = Date.now() + (failures ? [120, 300, 600][Math.min(failures - 1, 2)] : 120) * 1000;
+    const state = {controller: new AbortController(), cancelled: false}; active = state; section.setAttribute("aria-busy", "true");
+    const timeout = window.setTimeout(() => state.controller.abort("timeout"), 10000); let delay = 120;
+    try {
+      const response = await window.fetch(endpoint, {method: "GET", credentials: "same-origin", cache: "no-store", signal: state.controller.signal});
+      if (state.cancelled || stopped) return;
+      if ([401, 403, 404].includes(response.status)) {
+        stopped = true; pending = false; lastGood = null; content.replaceChildren(); status.textContent = "Service Intelligence is unavailable for this session or Device.";
+        if (ageTimer !== null) window.clearTimeout(ageTimer); ageTimer = null; return;
+      }
+      if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) throw new Error("response");
+      const text = await response.text(); if (new TextEncoder().encode(text).length > 16384) throw new Error("size");
+      const value = validate(JSON.parse(text)); if (state.cancelled || stopped) return;
+      lastGood = {value, received: Date.now()}; failures = 0; render(value, false); expireLastGood();
+    } catch (_) {
+      if (!state.cancelled && !stopped) {
+        failures += 1; delay = [120, 300, 600][Math.min(failures - 1, 2)];
+        if (lastGood && Date.now() - lastGood.received < 900000) render(lastGood.value, true);
+        else { lastGood = null; content.replaceChildren(); status.textContent = "Service evidence is unavailable. Activity is unknown; retry later."; }
+      }
+    } finally {
+      window.clearTimeout(timeout); active = null; section.setAttribute("aria-busy", "false");
+      if (!state.cancelled && !stopped) nextAutomaticAt = Date.now() + delay * 1000;
+      if (pending && !stopped && visible && !document.hidden) { pending = false; refresh(true); } else schedule();
+    }
+  }
+  button.addEventListener("click", () => refresh(true));
+  document.addEventListener("visibilitychange", () => { if (document.hidden) suspend("hidden"); else if (visible) refresh(false); });
+  window.addEventListener("pagehide", () => { stopped = true; suspend("pagehide"); lastGood = null; if (ageTimer !== null) window.clearTimeout(ageTimer); });
+  if (typeof IntersectionObserver === "function") {
+    const observer = new IntersectionObserver((entries) => { visible = entries.some((entry) => entry.isIntersecting); if (visible) refresh(false); else suspend("not-visible"); }); observer.observe(section);
+  } else {
+    const check = () => { const bounds = section.getBoundingClientRect(), next = bounds.top < window.innerHeight && bounds.bottom > 0;
+      if (next !== visible) { visible = next; if (visible) refresh(false); else suspend("not-visible"); } };
+    window.addEventListener("scroll", check, {passive: true}); window.addEventListener("resize", check); check();
+  }
+}());
