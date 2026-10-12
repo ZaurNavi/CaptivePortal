@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from .models import FAULT_CATEGORIES
+from .success_telemetry import SuccessCounters, MAX_COUNTER
 
 EVENTS = frozenset({"service_started", "service_stopped", "source_absent", "source_generation_opened",
     "source_generation_closed", "batch_committed", "duplicate_noop", "ingest_fault_aggregate_updated",
@@ -21,6 +22,23 @@ class NetworkMetadataTelemetry:
     def __init__(self, logger=None):
         self.logger = logger or logging.getLogger("captivportal.network_metadata")
         self.logger.propagate = False
+        self._success = None
+
+    def enable_aggregation(self, *, monotonic):
+        if self._success is None:
+            self._success = SuccessCounters(self._publish_summary, monotonic=monotonic)
+
+    def _publish_summary(self, summary):
+        self.logger.info(json.dumps(summary, sort_keys=True, separators=(",", ":")))
+
+    def observe_success(self, **counts):
+        if self._success is not None:
+            self._success.flush_due()
+            self._success.observe(**counts)
+
+    def flush_due(self):
+        if self._success is not None:
+            self._success.flush_due()
 
     def emit(self, event, **fields):
         if event not in EVENTS:
@@ -55,6 +73,22 @@ class NetworkMetadataTelemetry:
                     safe[key] = value
             elif type(value) is int and value >= 0:
                 safe[key] = value
+        if self._success is not None:
+            self._success.flush_due()
+            if event in {"batch_committed", "duplicate_noop"}:
+                counts = {"suppressed_event_count": 1}
+                if event == "batch_committed":
+                    counts["batch_count"] = 1
+                    if "count" in safe:
+                        counts["record_count"] = min(MAX_COUNTER, safe["count"])
+                elif "count" in safe:
+                    counts["duplicate_count"] = min(MAX_COUNTER, safe["count"])
+                self._success.observe(**counts)
+                return
+            if event == "ingest_fault_aggregate_updated":
+                # No category/transition identity exists in this event. Keep
+                # every fault signal immediate rather than guess it is a repeat.
+                self._success.observe(fault_aggregate_update_count=1)
         self.logger.info(json.dumps(safe, sort_keys=True, separators=(",", ":")))
 
 

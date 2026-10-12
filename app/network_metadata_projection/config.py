@@ -11,7 +11,21 @@ PREFIX = "NETWORK_METADATA_PROJECTION_"
 
 
 def configuration_digest(config):
-    return hashlib.sha256(ni01_canonical_json(asdict(config))).hexdigest()
+    values = asdict(config)
+    # New OFF fields are absent from the original canonical configuration.
+    for name in ("idle_write_reduction_enabled", "checkpoint_opt_enabled", "telemetry_aggregation_enabled"):
+        if not values[name]:
+            values.pop(name)
+    return hashlib.sha256(ni01_canonical_json(values)).hexdigest()
+
+
+def idle_read_guard_from_env(environ=None):
+    """Reader process opt-in; must be enabled together with the writer flag."""
+    env = os.environ if environ is None else environ
+    value = env.get(PREFIX + "IDLE_WRITE_REDUCTION_ENABLED", "false")
+    if type(value) is not str or value not in {"true", "false"}:
+        raise ProjectionValidationError()
+    return value == "true"
 
 
 def projection_config_from_env(environ=None):
@@ -29,7 +43,12 @@ def projection_config_from_env(environ=None):
         key = {"source_db_path": "NETWORK_METADATA_DB_PATH", "registry_db_path": "VISITOR_REGISTRY_DB_PATH"}.get(name, PREFIX + name.upper())
         default = getattr(defaults, name)
         value = env.get(key, str(default))
-        if name.endswith("db_path"):
+        if type(default) is bool:
+            value = env.get(key, "true" if default else "false")
+            if type(value) is not str or value not in {"true", "false"}:
+                raise ProjectionValidationError()
+            value = value == "true"
+        elif name.endswith("db_path"):
             if not isinstance(value, str) or not value or "\0" in value or not Path(value).is_absolute():
                 raise ProjectionValidationError()
         else:

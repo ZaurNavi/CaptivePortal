@@ -106,13 +106,32 @@ class BinarySourceReader:
     def tail_length(self):
         return self._count
 
-    def read_batch(self, max_records, max_bytes):
+    def read_batch(self, max_records, max_bytes, *, retained_limit=None):
         records, retained = [], 0
         budget = max_bytes + SOURCE_READ_CHUNK_BYTES
         self.at_eof = False
         try:
             while budget > 0 and len(records) < max_records:
-                chunk = os.pread(self.fd, min(SOURCE_READ_CHUNK_BYTES, budget), self.scan_offset)
+                read_size = min(SOURCE_READ_CHUNK_BYTES, budget)
+                if retained_limit is not None and not self._discard:
+                    available = retained_limit - retained - len(self._buffer)
+                    if available <= 0:
+                        # A delimiter needs no retained payload space. A record
+                        # over the existing record ceiling retains only its hash.
+                        peek = os.pread(self.fd, 1, self.scan_offset)
+                        if not peek:
+                            self.at_eof = True
+                            break
+                        if peek == b"\n":
+                            read_size = 1
+                        elif self._count >= self.max_record_bytes:
+                            self._discard = True
+                            self._buffer.clear()
+                        else:
+                            break  # Commit the completed prefix before growing this tail.
+                    else:
+                        read_size = min(read_size, available)
+                chunk = os.pread(self.fd, read_size, self.scan_offset)
                 if not chunk:
                     self.at_eof = True
                     break

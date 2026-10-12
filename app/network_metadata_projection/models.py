@@ -55,6 +55,9 @@ class ProjectionConfig:
     shutdown_timeout_seconds: int = 20
     source_db_path: str = "/opt/CaptivePortal/data/network_metadata.sqlite3"
     registry_db_path: str = "/opt/CaptivePortal/data/visitor_registry.sqlite3"
+    idle_write_reduction_enabled: bool = False
+    checkpoint_opt_enabled: bool = False
+    telemetry_aggregation_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True, repr=False)

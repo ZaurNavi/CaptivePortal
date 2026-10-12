@@ -1,5 +1,6 @@
 """One bounded auxiliary loop. Durable block precedes every source transition."""
 import os
+import hashlib
 import threading
 import time
 from .health import HealthController
@@ -42,6 +43,8 @@ class NetworkMetadataService:
         self.run_id = self.boot_id = None
         self.started = self.storage_failed = False
         self.last_health_tick = self.last_retention_tick = 0
+        if config.telemetry_aggregation_enabled and repository.telemetry is not None:
+            repository.telemetry.enable_aggregation(monotonic=monotonic)
 
     def stop(self):
         self.stop_event.set()
@@ -205,6 +208,85 @@ class NetworkMetadataService:
         # The ordinary open path starts at 0 and consults durable closed-gap lineage.
         return self._lifecycle()
 
+    def _coalescing_source(self, generation, checkpoint):
+        """Read-only lifecycle probe; never transition while a prefix is buffered."""
+        try:
+            owned = os.fstat(self.fd)
+            if (physical_identity(owned) != (generation.st_dev, generation.st_ino)
+                    or owned.st_size < checkpoint.committed_byte_offset
+                    or not _source_anchor_matches(self.fd, checkpoint)):
+                raise _SourceUnavailable()
+            current = self._path_info()
+            closing = (current is None or physical_identity(current) != (generation.st_dev, generation.st_ino)
+                       or owned.st_size < self.reader.scan_offset
+                       or generation.capture_scope_binding_digest != self.config.capture_scope_binding.binding_digest)
+            return owned.st_size, closing
+        except (OSError, NetworkMetadataValidationError):
+            raise _SourceUnavailable() from None
+
+    def _verify_buffered_prefix(self, records, generation, checkpoint):
+        """Do not commit vanished/rewritten transient bytes as a successful prefix."""
+        self._coalescing_source(generation, checkpoint)
+        try:
+            for record in records:
+                position, checksum = record.start, hashlib.sha256()
+                payload_end = record.end - 1
+                while position < payload_end:
+                    data = os.pread(self.fd, min(65536, payload_end - position), position)
+                    if not data:
+                        raise OSError
+                    checksum.update(data)
+                    position += len(data)
+                if (os.pread(self.fd, 1, payload_end) != b"\n"
+                        or checksum.hexdigest() != record.source_record_sha256):
+                    raise OSError
+        except OSError:
+            raise _SourceUnavailable() from None
+
+    def _coalesced_records(self, generation, checkpoint):
+        # Start the deadline at the first complete record, not an empty/partial read.
+        reader = self.reader
+        records = reader.read_batch(1, self.config.batch_max_bytes,
+                                    retained_limit=self.config.batch_max_bytes)
+        if not records:
+            return records
+        if records[0].data is None:
+            # Oversized records keep the existing standalone hash/fault path,
+            # with no delay or retained payload coalescing.
+            return records
+        deadline = self.monotonic() + self.config.ingest_coalesce_max_ms / 1000
+        retained = sum(item.byte_length for item in records if item.data is not None)
+        while records[-1].data is not None and len(records) < self.config.batch_max_records:
+            size, closing = self._coalescing_source(generation, checkpoint)
+            if closing or self.stop_event.is_set() or self.monotonic() >= deadline:
+                break
+            remaining = self.config.batch_max_bytes - retained
+            if remaining <= reader.retained_unfinished_bytes:
+                break
+            # Fill the immediately available prefix before considering a wait.
+            extra = reader.read_batch(self.config.batch_max_records - len(records), remaining,
+                                      retained_limit=remaining)
+            if extra and extra[0].data is None:
+                # The legacy oversized-record fault is a standalone batch,
+                # never appended to a previously buffered ordinary prefix.
+                reader.reset(extra[0].start)
+                break
+            records.extend(extra)
+            retained += sum(item.byte_length for item in extra if item.data is not None)
+            if (len(records) >= self.config.batch_max_records or retained >= self.config.batch_max_bytes
+                    or records[-1].data is None):
+                break
+            size, closing = self._coalescing_source(generation, checkpoint)
+            remaining_time = deadline - self.monotonic()
+            if (closing or self.stop_event.is_set() or remaining_time <= 0
+                    or size - checkpoint.committed_byte_offset >= 4194304
+                    or retained + reader.retained_unfinished_bytes >= self.config.batch_max_bytes):
+                break
+            # No BEGIN, write lock, background thread or adaptive pacing here.
+            self.stop_event.wait(min(remaining_time, .01))
+        self._verify_buffered_prefix(records, generation, checkpoint)
+        return records
+
     def poll_once(self):
         if not self.started:
             self.startup()
@@ -237,7 +319,10 @@ class NetworkMetadataService:
                 if not blocked and self.reader is not None and "source_absent" not in self.health.local_reasons:
                     repo.ensure_headroom()
                     try:
-                        records = self.reader.read_batch(self.config.batch_max_records, self.config.batch_max_bytes)
+                        if self.config.ingest_coalesce_enabled:
+                            records = self._coalesced_records(generation, checkpoint)
+                        else:
+                            records = self.reader.read_batch(self.config.batch_max_records, self.config.batch_max_bytes)
                     except NetworkMetadataStorageUnavailable:
                         raise _SourceUnavailable() from None
                     if self.health.local_reasons & {"source_absent", "source_unavailable"} and (
@@ -310,6 +395,8 @@ class NetworkMetadataService:
             self.startup()
             while not self.stop_event.is_set():
                 work = self.poll_once()
+                if self.config.telemetry_aggregation_enabled and self.repository.telemetry is not None:
+                    self.repository.telemetry.flush_due()
                 if not work:
                     self.stop_event.wait(self.config.poll_interval_seconds)
         finally:
