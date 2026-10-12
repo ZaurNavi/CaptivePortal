@@ -1,6 +1,7 @@
 """Single writer, atomic dispositions, monotonic Registry joins and hard cap."""
 import os
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -15,12 +16,23 @@ from .validation import timestamp, semantic_digest
 
 
 class ProjectionRepository:
-    def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None):
+    def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None,
+                 monotonic=time.monotonic):
         self.config, self.clock, self.crash_point = config, clock, crash_point
         self.connection = self._writer_fd = None
         self._retention_authorized = False
         self.live_state, self.live_reason = "initializing", None
         self.active_run_id = None
+        self.monotonic = monotonic
+        self.source_verified_in_run = False
+        self.last_durable_source_poll_at = self.last_durable_source_poll_tick = None
+        self._transaction_source_poll_at = None
+        self._last_soft_checkpoint_tick = None
+        self.telemetry = None
+
+    def _count_success(self, **counts):
+        if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
+            self.telemetry.observe_success(**counts)
 
     def footprint(self):
         try:
@@ -73,16 +85,31 @@ class ProjectionRepository:
             self.close()
             raise ProjectionUnavailable() from None
 
-    def maintain_capacity(self, *, post_commit=False):
-        """PASSIVE after every commit; TRUNCATE only under headroom pressure.
+    def maintain_capacity(self, *, post_commit=False, retention_ran=False):
+        """Legacy PASSIVE cadence or opt-in conditional soft maintenance.
 
         Pinned readers defer writes, never rewind a durable disposition. Live
         diagnostics deliberately need not be persisted when the cap forbids it.
         """
         try:
-            pressure = self.footprint() + PROJECTION_TRANSACTION_HEADROOM_BYTES > self.config.max_db_bytes
+            reserved_footprint = self.footprint() + PROJECTION_TRANSACTION_HEADROOM_BYTES
+            pressure = reserved_footprint > self.config.max_db_bytes
+            if self.config.checkpoint_opt_enabled:
+                recovery = self.live_state in {"capacity_waiting_reader", "capacity_halted"}
+                try:
+                    wal_bytes = Path(self.config.db_path + "-wal").stat().st_size
+                except FileNotFoundError:
+                    wal_bytes = 0
+                soft = wal_bytes >= 16777216 or (retention_ran and wal_bytes > 0)
+                tick = self.monotonic()
+                if reserved_footprint < self.config.max_db_bytes and not recovery:
+                    if not soft or (self._last_soft_checkpoint_tick is not None
+                                    and tick - self._last_soft_checkpoint_tick < 60):
+                        return True
+                    self._last_soft_checkpoint_tick = tick
             busy, frames, completed = self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
             reader_blocked = bool(busy or frames > completed)
+            self._count_success(checkpoint_attempt_count=1, checkpoint_busy_count=int(reader_blocked))
             if pressure:
                 self.connection.execute("PRAGMA busy_timeout=0")
                 try:
@@ -116,9 +143,15 @@ class ProjectionRepository:
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             self._retention_authorized = retention
+            self._transaction_source_poll_at = None
             yield
             self.crash_point("before_commit")
             self.connection.execute("COMMIT")
+            if self.config.idle_write_reduction_enabled and self._transaction_source_poll_at is not None:
+                self.last_durable_source_poll_at = self._transaction_source_poll_at
+                self.last_durable_source_poll_tick = self.monotonic()
+                self.source_verified_in_run = True
+            self._count_success(commit_count=1)
             self.crash_point("after_commit")
         except BaseException as error:
             if self.connection.in_transaction:
@@ -128,8 +161,12 @@ class ProjectionRepository:
             raise
         finally:
             self._retention_authorized = False
+            self._transaction_source_poll_at = None
         # Do not turn a committed batch into a pretend rollback on pressure.
-        self.maintain_capacity(post_commit=True)
+        if self.config.checkpoint_opt_enabled:
+            self.maintain_capacity(post_commit=True, retention_ran=retention)
+        else:
+            self.maintain_capacity(post_commit=True)
 
     def insert(self, table, values):
         if table not in TABLES:
@@ -141,6 +178,8 @@ class ProjectionRepository:
         digest(identity.artifact_tree, 40)
         run_id = str(uuid.uuid4())
         with self.transaction():
+            if self.config.idle_write_reduction_enabled and self.live_state != "blocked_conflict":
+                self.runtime("initializing")
             self.insert("projection_runs", dict(projection_run_id=run_id, started_at_utc=timestamp(self.clock()),
                 repository_head=identity.artifact_sha, repository_tree=identity.artifact_tree,
                 projection_contract_version=1, projection_algorithm_version=ALGORITHM,
@@ -199,6 +238,8 @@ class ProjectionRepository:
                       updated_at_utc=timestamp(self.clock()), **times)
         self.connection.execute("UPDATE projection_runtime_state SET " + ",".join(key + "=?" for key in values) +
             ",pending_attribution_count=(SELECT count(*) FROM projection_pending_attribution) WHERE singleton_id=1", tuple(values.values()))
+        if self.config.idle_write_reduction_enabled and "last_source_poll_at" in times:
+            self._transaction_source_poll_at = times["last_source_poll_at"]
 
     def set_failure(self, state, reason=None, *, observation=None):
         self.live_state, self.live_reason = state, reason
@@ -209,8 +250,19 @@ class ProjectionRepository:
             # No status-only capacity exemption. Remain live fail-closed.
             pass
 
+    def successful_source_state(self):
+        """Read-only candidate state; no idle UPDATE needed to evaluate it."""
+        if self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
+            return "attribution_unavailable"
+        if self.connection.execute("SELECT 1 FROM projection_site_mac_bindings WHERE binding_state='registry_unavailable' LIMIT 1").fetchone():
+            return "registry_degraded"
+        return "usable"
+
     def success_state(self, *, source_verified=False, **times):
-        if not source_verified and self.live_state in {"source_unavailable", "blocked_conflict"}:
+        if (self.config.idle_write_reduction_enabled and not source_verified
+                and not self.source_verified_in_run):
+            self.runtime(self.live_state, self.live_reason, **times)
+        elif not source_verified and self.live_state in {"source_unavailable", "blocked_conflict"}:
             self.runtime(self.live_state, self.live_reason, **times)
         elif self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
             self.runtime("attribution_unavailable", **times)

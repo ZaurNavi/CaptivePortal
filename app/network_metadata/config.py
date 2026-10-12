@@ -65,6 +65,12 @@ def network_metadata_config_from_env(environ=None):
             raise NetworkMetadataConfigError()
         return parsed
 
+    def boolean(key):
+        value = env.get(key, "false")
+        if type(value) is not str or value not in {"true", "false"}:
+            raise NetworkMetadataConfigError()
+        return value == "true"
+
     try:
         source = absolute_path(env.get("NETWORK_METADATA_SOURCE_PATH", "/run/fingerprint-suricata/dti-ni-v1.eve.json"))
         db = absolute_path(env.get("NETWORK_METADATA_DB_PATH", "/opt/CaptivePortal/data/network_metadata.sqlite3"))
@@ -77,6 +83,13 @@ def network_metadata_config_from_env(environ=None):
             record_limit, number("NETWORK_METADATA_BATCH_MAX_RECORDS", MAX_BATCH_RECORDS, 1, MAX_BATCH_RECORDS),
             number("NETWORK_METADATA_BATCH_MAX_BYTES", MAX_BATCH_BYTES, record_limit, MAX_BATCH_BYTES),
             number("NETWORK_METADATA_POLL_INTERVAL_SECONDS", 1, 1))
+        coalesce = boolean("NETWORK_METADATA_INGEST_COALESCE_ENABLED")
+        delay = number("NETWORK_METADATA_INGEST_COALESCE_MAX_MS", 0, 0, 500)
+        if (not coalesce and delay != 0) or (coalesce and delay not in {100, 250, 500}):
+            raise NetworkMetadataConfigError()
+        aggregation = boolean("NETWORK_METADATA_TELEMETRY_AGGREGATION_ENABLED")
+        config = replace(config, ingest_coalesce_enabled=coalesce, ingest_coalesce_max_ms=delay,
+                         telemetry_aggregation_enabled=aggregation)
         binding_value = asdict(binding)
         binding_value["ipv4_cidrs"] = list(binding.ipv4_cidrs)
         configuration = {"capture_scope_binding": binding_value, "db_path": db,
@@ -85,6 +98,10 @@ def network_metadata_config_from_env(environ=None):
             "batch_max_bytes": config.batch_max_bytes, "normalizer_version": NORMALIZER_VERSION,
             "poll_interval_seconds": config.poll_interval_seconds,
             "source_contract_version": SOURCE_CONTRACT_VERSION, "source_path": source}
+        if coalesce:
+            configuration.update(ingest_coalesce_enabled=True, ingest_coalesce_max_ms=delay)
+        if aggregation:
+            configuration["telemetry_aggregation_enabled"] = True
         return replace(config, configuration_digest=semantic_digest(configuration))
     except NetworkMetadataValidationError:
         raise NetworkMetadataConfigError() from None

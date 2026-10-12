@@ -53,8 +53,8 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
         except Exception:
             raise ProjectionValidationError() from None
         with self._snapshot(deadline=deadline) as connection:
-            state = connection.execute("SELECT runtime_state FROM projection_runtime_state WHERE singleton_id=1").fetchone()
-            if state is None or state[0] not in RUNTIME_STATES:
+            state = self._runtime_state(connection)
+            if state not in RUNTIME_STATES:
                 raise ProjectionUnavailable()
             binding = connection.execute(
                 "SELECT binding_state,device_id FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?",
@@ -66,7 +66,7 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
             if identity != "authoritative":
                 if bound is not None:
                     raise ProjectionUnavailable()
-                return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state[0], None, ())
+                return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state, None, ())
             if bound != device_id:
                 raise ProjectionUnavailable()
             registry_identity = connection.execute(
@@ -109,4 +109,4 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
                     facts.append(RecognitionProjectionEdgeFactV1(**dict(row)))
             except (ValueError, TypeError):
                 raise ProjectionUnavailable() from None
-            return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state[0], bound, tuple(facts))
+            return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state, bound, tuple(facts))

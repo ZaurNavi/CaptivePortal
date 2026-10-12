@@ -1,5 +1,6 @@
 """Projection-only set-based reads. No upstream calls or query-time attribution."""
 import sqlite3
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 from app.device_fingerprint.validation import validate_site_id
@@ -11,14 +12,34 @@ from .schema import validate_schema
 from .validation import read_window
 from app.analytics.source_gateway import AnalyticsQueryDeadlineExceeded
 from app.network_metadata.validation import ni_timestamp
+from .config import idle_read_guard_from_env
+from .effective_runtime_state import effective_runtime_state
 
 JOIN = " FROM device_network_metadata_edges e LEFT JOIN projection_site_mac_bindings b ON b.site_id=e.site_id AND b.client_mac=e.client_mac"
 COLUMNS = "SELECT e.*,b.site_id AS joined_site,b.device_id,b.binding_state,b.last_evaluated_at,b.authoritative_bound_at"
 
 
 class DeviceNetworkMetadataReadService:
-    def __init__(self, db_path, *, enabled=True, max_db_bytes=17179869184):
+    def __init__(self, db_path, *, enabled=True, max_db_bytes=17179869184,
+                 idle_write_reduction_enabled=None, clock=lambda: datetime.now(timezone.utc)):
         self.db_path, self.enabled, self.max_db_bytes = db_path, enabled, max_db_bytes
+        if enabled and idle_write_reduction_enabled is None:
+            idle_write_reduction_enabled = idle_read_guard_from_env()
+        if idle_write_reduction_enabled is not None and type(idle_write_reduction_enabled) is not bool:
+            raise ProjectionValidationError()
+        self.idle_write_reduction_enabled = bool(enabled and idle_write_reduction_enabled)
+        self.clock = clock
+
+    def _runtime_state(self, connection):
+        if not self.idle_write_reduction_enabled:
+            row = connection.execute("SELECT runtime_state FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+            if row is None:
+                raise ProjectionUnavailable()
+            return row[0]
+        row = connection.execute("SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+        if row is None:
+            raise ProjectionUnavailable()
+        return effective_runtime_state(row, enabled=True, evaluated_at_utc=self.clock())[0]
 
     @contextmanager
     def _snapshot(self, *, deadline=None):
@@ -59,13 +80,11 @@ class DeviceNetworkMetadataReadService:
         except Exception:
             raise ProjectionValidationError() from None
         with self._snapshot(deadline=deadline) as connection:
-            state = connection.execute("SELECT runtime_state FROM projection_runtime_state WHERE singleton_id=1").fetchone()
-            if state is None:
-                raise ProjectionUnavailable()
+            state = self._runtime_state(connection)
             binding = connection.execute(
                 "SELECT binding_state,device_id FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?",
                 (site_id, client_mac)).fetchone()
-            result = dict(runtime_state=state[0], binding_state=binding[0] if binding else None,
+            result = dict(runtime_state=state, binding_state=binding[0] if binding else None,
                           bound_device_id=binding[1] if binding else None, facts=())
             if binding is None or binding[0] in {"not_yet_registry_resolved", "registry_unavailable"}:
                 return result
@@ -158,6 +177,9 @@ class DeviceNetworkMetadataReadService:
                 row = connection.execute("SELECT * FROM projection_runtime_state WHERE singleton_id=1").fetchone()
                 for key in ("runtime_state", "safe_reason", "last_projection_commit_at", "last_registry_reconcile_at", "pending_attribution_count"):
                     defaults[key] = row[key]
+                if self.idle_write_reduction_enabled:
+                    defaults["runtime_state"], defaults["safe_reason"] = effective_runtime_state(
+                        row, enabled=True, evaluated_at_utc=self.clock())
                 defaults["checkpoint_count"] = connection.execute("SELECT count(*) FROM projection_source_checkpoints").fetchone()[0]
                 total = 0
                 for suffix in ("", "-wal", "-shm", "-journal"):

@@ -120,6 +120,9 @@ class NetworkMetadataConfig:
     batch_max_bytes: int = MAX_BATCH_BYTES
     poll_interval_seconds: int = 1
     configuration_digest: str | None = None
+    ingest_coalesce_enabled: bool = False
+    ingest_coalesce_max_ms: int = 0
+    telemetry_aggregation_enabled: bool = False
 
     @property
     def writer_lock_path(self):

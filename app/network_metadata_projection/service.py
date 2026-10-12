@@ -13,6 +13,7 @@ from .models import (ALGORITHM, ATTRIBUTION_STATES, ProjectionConflict, Projecti
                      ProjectionUnavailable, RegistryEvaluation)
 from .models import NetworkMetadataProjectionResultV1, PreparedDisposition
 from .validation import edge_id, semantic_digest, timestamp
+from .effective_runtime_state import effective_runtime_state
 
 
 class NetworkMetadataProjectionService:
@@ -23,6 +24,9 @@ class NetworkMetadataProjectionService:
         self.telemetry, self.stop_event, self.monotonic = telemetry, stop_event or threading.Event(), monotonic
         self.run_id = None
         self.last_retry = self.last_reconcile = self.last_retention = None
+        if config.telemetry_aggregation_enabled and telemetry is not None:
+            telemetry.enable_aggregation(monotonic=monotonic)
+            repository.telemetry = telemetry
 
     def emit(self, event, **fields):
         if self.telemetry is not None:
@@ -35,6 +39,9 @@ class NetworkMetadataProjectionService:
         if not self.config.enabled:
             return False
         self.repository.initialize()
+        if self.config.idle_write_reduction_enabled:
+            self.repository.source_verified_in_run = False
+            self.repository.last_durable_source_poll_at = self.repository.last_durable_source_poll_tick = None
         self.run_id = self.repository.create_run(self.identity)
         return True
 
@@ -220,8 +227,13 @@ class NetworkMetadataProjectionService:
                     if self.repository.live_state.startswith("capacity_"):
                         self.emit("projection_unavailable", reason_code=self.repository.live_reason)
                     return tuple(item.result for item in prepared)  # One bounded batch, not unbounded catch-up.
-            with self.repository.transaction():
-                self.repository.success_state(source_verified=True, last_source_poll_at=timestamp(self.repository.clock()))
+            if self.config.idle_write_reduction_enabled:
+                self._successful_empty_poll()
+            else:
+                with self.repository.transaction():
+                    self.repository.success_state(source_verified=True, last_source_poll_at=timestamp(self.repository.clock()))
+            if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
+                self.telemetry.observe_success(idle_poll_count=1)
         except ProjectionConflict as error:
             self.repository.set_failure("blocked_conflict", error.reason, observation=observation)
             self.emit("projection_conflict", reason_code=error.reason)
@@ -231,6 +243,24 @@ class NetworkMetadataProjectionService:
         except Exception:
             self.repository.set_failure("source_unavailable", "source_unavailable")
             self.emit("source_unavailable")
+
+    def _successful_empty_poll(self):
+        repo = self.repository
+        now = repo.clock()
+        desired = repo.successful_source_state()
+        row = repo.connection.execute(
+            "SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+        if row is None:
+            raise ProjectionUnavailable()
+        unchanged = (repo.source_verified_in_run and repo.live_state == desired
+                     and row["runtime_state"] == desired and row["safe_reason"] is None
+                     and repo.live_reason is None)
+        fresh = effective_runtime_state(row, enabled=True, evaluated_at_utc=now)[0] == desired
+        previous = repo.last_durable_source_poll_tick
+        elapsed = None if previous is None else self.monotonic() - previous
+        if not (unchanged and fresh and elapsed is not None and 0 <= elapsed < 10):
+            with repo.transaction():
+                repo.success_state(source_verified=True, last_source_poll_at=timestamp(now))
 
     def retry(self):
         selected = self.repository.pending()
@@ -302,6 +332,8 @@ class NetworkMetadataProjectionService:
             return
         from .retention import ProjectionRetention
         totals = ProjectionRetention(self.repository, self.source).run()
+        if self.config.checkpoint_opt_enabled:
+            self.repository.maintain_capacity(retention_ran=True)
         self.emit("retention_completed", count=sum(totals.values()))
         return totals
 
@@ -311,6 +343,10 @@ class NetworkMetadataProjectionService:
         try:
             while not self.stop_event.is_set():
                 self.tick()
+                if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
+                    self.telemetry.flush_due()
                 self.stop_event.wait(self.config.poll_interval_seconds)
         finally:
+            if self.config.idle_write_reduction_enabled and self.repository.live_state != "blocked_conflict":
+                self.repository.set_failure("stopping")
             self.repository.close()
