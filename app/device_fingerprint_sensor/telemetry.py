@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,12 +17,59 @@ SAFE_FIELDS = frozenset({
     "quic_eve_count", "quic_normalized_count", "eve_datagram_truncated",
     "eve_json_invalid", "quic_version_invalid", "missing_l2_identity", "spool_rows", "spool_bytes",
     "oldest_spool_age", "delivery_success", "delivery_retry",
+    "delivery_success_batches",
     "delivery_permanent_reject", "stale_spool_event_dropped", "artifact_sha",
     "artifact_tree", "service_name", "process_started_at", "suricata_version",
     "capture_kernel_packets", "capture_kernel_drops", "capture_kernel_ifdrops",
     "sensor_cpu_usec", "sensor_memory_current", "suricata_cpu_usec",
     "suricata_memory_current", "suricata_process_active",
 })
+_MAX_ROUTINE_COUNTER = 9223372036854775807
+
+
+class SensorRoutineAggregate:
+    """Non-authoritative minute counters, atomically consumed by metrics/shutdown."""
+    def __init__(self, *, monotonic) -> None:
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._window_started = monotonic()
+        self._delivered = self._batches = 0
+        self._stats: dict[str, int | float] = {}
+
+    def delivery(self, delivered: int) -> None:
+        if type(delivered) is not int or not 0 <= delivered <= _MAX_ROUTINE_COUNTER:
+            raise ValueError("invalid delivery counter")
+        with self._lock:
+            self._delivered = min(_MAX_ROUTINE_COUNTER, self._delivered + delivered)
+            self._batches = min(_MAX_ROUTINE_COUNTER, self._batches + 1)
+
+    def stats(self, capture: Mapping[str, Any]) -> None:
+        fields = {}
+        for key in ("kernel_packets", "kernel_drops", "kernel_ifdrops"):
+            if key == "kernel_ifdrops" and key not in capture:
+                continue
+            value = capture.get(key)
+            if (type(value) not in {int, float} or not 0 <= value <= _MAX_ROUTINE_COUNTER
+                    or not math.isfinite(value)):
+                return  # Invalid stats cannot replace the last real valid sample.
+            fields["capture_" + key] = value
+        with self._lock:
+            self._stats = fields
+
+    def snapshot_reset(self, *, final: bool = False) -> dict[str, Any]:
+        with self._lock:
+            current = self._monotonic()
+            if not final and current - self._window_started < 60:
+                return {}
+            result: dict[str, Any] = dict(self._stats)
+            if self._batches:
+                result.update(delivery_success=self._delivered, delivery_success_batches=self._batches)
+            if self._stats:
+                result["suricata_version"] = "8.0.6"
+            self._delivered = self._batches = 0
+            self._stats = {}
+            self._window_started = current
+            return result
 
 
 class SensorTelemetry:
@@ -33,6 +81,9 @@ class SensorTelemetry:
         try:
             payload = {"event": str(event)[:128]}
             for key, value in {**fields, **self.runtime_fields}.items():
+                if key == "delivery_success_batches" and (
+                        type(value) is not int or not 0 <= value <= _MAX_ROUTINE_COUNTER):
+                    continue
                 if key in SAFE_FIELDS and _safe(value):
                     payload[key] = value
             self.logger.info(json.dumps(payload, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")))

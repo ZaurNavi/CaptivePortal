@@ -52,6 +52,9 @@ class SensorConfig:
     eve_max_datagram_bytes: int
     eve_socket_path: str
     eve_socket_wait_seconds: int
+    io_stale_purge_gate_enabled: bool = False
+    io_telemetry_aggregation_enabled: bool = False
+    io_ingress_coalesce_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
