@@ -1,0 +1,451 @@
+{
+  "schema": "captivportal.ni04.unified55.launch_scope.v1",
+  "non_runtime": true,
+  "production_activation": false,
+  "registry_sha256": "70893ee3ec5ccd283c9bccce7948a5d914d8ad3a8f5ca81785a1654a9cbf79c7",
+  "catalog_count": 55,
+  "admitted_rule_count": 5,
+  "direct_SNI_supported_meaning": "Accepted rule capability for retained qualifying outbound TLS/QUIC SNI, not observed production usage.",
+  "services": [
+    {
+      "catalog_target": "service.youtube",
+      "host_candidate": "www.youtube.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": true,
+      "direct_SNI_supported": true,
+      "reason_if_not_admitted": null
+    },
+    {
+      "catalog_target": "service.tiktok",
+      "host_candidate": "www.tiktok.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.whatsapp",
+      "host_candidate": "web.whatsapp.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": true,
+      "direct_SNI_supported": true,
+      "reason_if_not_admitted": null
+    },
+    {
+      "catalog_target": "service.instagram",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.telegram",
+      "host_candidate": "web.telegram.org",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": true,
+      "direct_SNI_supported": true,
+      "reason_if_not_admitted": null
+    },
+    {
+      "catalog_target": "service.facebook",
+      "host_candidate": "www.facebook.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.chatgpt",
+      "host_candidate": "chatgpt.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "CATEGORY_REPAIR_NOT_BUNDLE_ADMISSION"
+    },
+    {
+      "catalog_target": "service.spotify",
+      "host_candidate": "open.spotify.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": true,
+      "direct_SNI_supported": true,
+      "reason_if_not_admitted": null
+    },
+    {
+      "catalog_target": "service.netflix",
+      "host_candidate": "www.netflix.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": true,
+      "direct_SNI_supported": true,
+      "reason_if_not_admitted": null
+    },
+    {
+      "catalog_target": "service.pinterest",
+      "host_candidate": "pinterest.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.roblox",
+      "host_candidate": "www.roblox.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.snapchat",
+      "host_candidate": "web.snapchat.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.messenger",
+      "host_candidate": "messenger.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.discord",
+      "host_candidate": "discord.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.twitch",
+      "host_candidate": "www.twitch.tv",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.x_platform",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.google_drive",
+      "host_candidate": "drive.google.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.teams",
+      "host_candidate": "teams.microsoft.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.zoom",
+      "host_candidate": "join.zoom.us",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.linkedin",
+      "host_candidate": "www.linkedin.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.threads",
+      "host_candidate": "threads.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.reddit",
+      "host_candidate": "www.reddit.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.vk_platform",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.signal",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.viber",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.onedrive",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.dropbox",
+      "host_candidate": "www.dropbox.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.google_meet",
+      "host_candidate": "meet.google.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.google_docs",
+      "host_candidate": "docs.google.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.gemini",
+      "host_candidate": "gemini.google.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.claude",
+      "host_candidate": "claude.ai",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.deepseek",
+      "host_candidate": "chat.deepseek.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.apple_music",
+      "host_candidate": "music.apple.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.soundcloud",
+      "host_candidate": "soundcloud.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.youtube_music",
+      "host_candidate": "music.youtube.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.prime_video",
+      "host_candidate": "www.primevideo.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.disney_plus",
+      "host_candidate": "www.disneyplus.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.steam",
+      "host_candidate": "store.steampowered.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.epic_games_store",
+      "host_candidate": "store.epicgames.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.birmarket",
+      "host_candidate": "birmarket.az",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.tap_az",
+      "host_candidate": "tap.az",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.turbo_az",
+      "host_candidate": "turbo.az",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.lalafo_az",
+      "host_candidate": "lalafo.az",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.oxu_az",
+      "host_candidate": "oxu.az",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.yandex_search",
+      "host_candidate": "yandex.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.temu",
+      "host_candidate": "www.temu.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.trendyol",
+      "host_candidate": "www.trendyol.com",
+      "host_semantic_accepted": true,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.aliexpress",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.bolt",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.wolt",
+      "host_candidate": null,
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "ARCH_HOLD"
+    },
+    {
+      "catalog_target": "service.gmail",
+      "host_candidate": "mail.google.com",
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.google_maps",
+      "host_candidate": "maps.google.com",
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.google_translate",
+      "host_candidate": "translate.google.com",
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.outlook_com",
+      "host_candidate": "outlook.live.com",
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    },
+    {
+      "catalog_target": "service.booking_com",
+      "host_candidate": "www.booking.com",
+      "host_semantic_accepted": false,
+      "rule_bundle_admitted": false,
+      "direct_SNI_supported": false,
+      "reason_if_not_admitted": "IMMUTABLE_RULE_EVIDENCE_NOT_ADMITTED"
+    }
+  ]
+}

@@ -160,6 +160,10 @@ class AdminQueryUnavailable(AdminQueryError):
     code = "source_unavailable"
 
 
+class AdminRecognitionUnavailable(AdminQueryUnavailable):
+    code = "recognition_unavailable"
+
+
 class AdminQueryIntegrityUnavailable(AdminQueryUnavailable):
     """A returned source/product projection contradicted its safe contract."""
 
@@ -273,9 +277,11 @@ class AdminQueryService:
         fingerprint_presentation_service: DeviceFingerprintPresentationService | None = None,
         inventory_timezone_name: str | None = None,
         protocol_intelligence_service: Any | None = None,
+        service_intelligence_service: Any | None = None,
     ):
         self._config = config
         self._protocol_intelligence = protocol_intelligence_service
+        self._service_intelligence = service_intelligence_service
         self._policy = policy
         self._devices = device_gateway
         self._reads = read_gateway
@@ -1553,6 +1559,43 @@ class AdminQueryService:
             except ProtocolUnavailable:
                 raise AdminQueryUnavailable() from None
 
+        return self._run(query)
+
+    def device_service_intelligence(self, principal, site_id, device_id, *, query_parameters_present=False):
+        self._authorize(principal, "admin.read.device", site_id)
+        selected_id = self._uuid(device_id, "device_id")
+        if query_parameters_present:
+            raise AdminQueryValidationError()
+        if not self._config.device_service_intelligence_enabled:
+            raise AdminQueryNotFound()
+
+        def query(deadline):
+            from app.network_service_recognition.models import (
+                ServiceValidationError, ServiceBusy, ServiceDeadline, ServiceUnavailable)
+            from app.network_service_recognition.serialization import serialize_device_service_intelligence
+            from app.network_metadata.validation import ni_format_utc
+            device = self._devices.get_device(site_id=site_id, device_id=selected_id, deadline=deadline)
+            if device is None:
+                raise AdminQueryNotFound()
+            if self._service_intelligence is None:
+                raise AdminRecognitionUnavailable()
+            try:
+                value = self._service_intelligence.get_device_service_summary(site_id, selected_id, device.canonical_mac,
+                    evaluated_at_utc=ni_format_utc(datetime.now(timezone.utc)), deadline=deadline)
+                result = serialize_device_service_intelligence(value, self._service_intelligence.bundle)
+                if result["site_id"] != site_id or result["device_id"] != selected_id:
+                    raise ServiceUnavailable()
+                return AdminQueryResponse(result)
+            except ServiceValidationError:
+                raise AdminQueryValidationError() from None
+            except ServiceBusy:
+                raise AdminQueryBusy() from None
+            except ServiceDeadline:
+                raise AdminQueryDeadline() from None
+            except ServiceUnavailable as error:
+                if error.reason == "recognition_unavailable":
+                    raise AdminRecognitionUnavailable() from None
+                raise AdminQueryUnavailable() from None
         return self._run(query)
 
     def device_current_context(

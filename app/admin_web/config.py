@@ -92,6 +92,7 @@ class AdminWebConfig:
     traffic_request_timeout_seconds: int
     global_capabilities: frozenset[str] = frozenset()
     device_protocol_intelligence_enabled: bool = False
+    device_service_intelligence_enabled: bool = False
     traffic_partial_coverage_enabled: bool = False
 
     def __repr__(self) -> str:
@@ -132,6 +133,13 @@ def admin_web_config_from_settings(
     device_protocol_intelligence_enabled = _exact_bool(
         settings.get("web_admin_device_protocol_intelligence_enabled", "false"),
         "WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED",
+    )
+    service_flag = settings.get("web_admin_device_service_intelligence_enabled", "false")
+    if type(service_flag) is not str:
+        raise AdminWebConfigError("WEB_ADMIN_DEVICE_SERVICE_INTELLIGENCE_ENABLED is invalid")
+    device_service_intelligence_enabled = _exact_bool(
+        service_flag,
+        "WEB_ADMIN_DEVICE_SERVICE_INTELLIGENCE_ENABLED",
     )
     home_live_enabled = _exact_bool(
         settings.get("web_admin_home_live_enabled", "false"),
@@ -289,6 +297,7 @@ def admin_web_config_from_settings(
         enabled=enabled,
         global_capabilities=global_capabilities,
         device_protocol_intelligence_enabled=device_protocol_intelligence_enabled,
+        device_service_intelligence_enabled=device_service_intelligence_enabled,
         username=username,
         password_hash=password_hash,
         allowed_networks=networks,

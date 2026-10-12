@@ -370,6 +370,25 @@ def create_admin_web_runtime(
             # Optional dependency failure never changes existing Admin readiness.
             logger.error("admin.protocol_intelligence_composition_failed")
     fingerprint_presentation_service = None
+    service_intelligence_service = None
+    if config.device_service_intelligence_enabled:
+        try:
+            from app.network_metadata.config import network_metadata_config_from_env
+            from app.network_metadata.recognition_read_service import NetworkMetadataRecognitionReadService
+            from app.network_metadata_projection.config import projection_config_from_env
+            from app.network_metadata_projection.recognition_read_service import DeviceNetworkMetadataRecognitionReadService
+            from app.network_service_recognition.artifacts import load_local_bundle
+            from app.network_service_recognition.read_service import DeviceServiceRecognitionReadService
+            # Only the existing owners parse their deployment-owned environment.
+            source_config = network_metadata_config_from_env()
+            recognition_projection_config = projection_config_from_env()
+            service_intelligence_service = DeviceServiceRecognitionReadService(
+                DeviceNetworkMetadataRecognitionReadService(recognition_projection_config.db_path,
+                    enabled=recognition_projection_config.enabled, max_db_bytes=recognition_projection_config.max_db_bytes),
+                NetworkMetadataRecognitionReadService(source_config.db_path, enabled=source_config.enabled),
+                load_local_bundle())
+        except Exception:
+            logger.error("admin.service_intelligence_composition_failed")
     try:
         from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
         from .device_fingerprint_presentation import DeviceFingerprintPresentationService
@@ -420,6 +439,7 @@ def create_admin_web_runtime(
             current_state_db_path,
             fingerprint_presentation_service,
             protocol_intelligence_service,
+            service_intelligence_service,
         )
     evidence_state = "active" if config.traffic_evidence_enabled else "disabled"
     evidence_aggregator = None
@@ -524,6 +544,7 @@ def _query_service(
     current_state_db_path: Any | None = None,
     fingerprint_presentation_service: Any | None = None,
     protocol_intelligence_service: Any | None = None,
+    service_intelligence_service: Any | None = None,
 ):
     """Build 01B only when concrete read boundaries expose local paths."""
     try:
@@ -551,6 +572,7 @@ def _query_service(
             visit_analytics_service=analytics_service,
             fingerprint_presentation_service=fingerprint_presentation_service,
             protocol_intelligence_service=protocol_intelligence_service,
+            service_intelligence_service=service_intelligence_service,
             inventory_timezone_name=getattr(getattr(registry_read_service, "service", None), "timezone_name", None),
             current_state_read_service=current_state_read_service,
             current_traffic_read_service=getattr(
