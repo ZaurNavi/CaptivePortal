@@ -113,17 +113,18 @@ class LastServiceObservationV1:
 
 
 @dataclass(frozen=True, slots=True)
-class ServiceRecognitionCoverageV1:
+class ServiceRecognitionCoverageV2:
     scope: str
     source_state: str
-    attribution_state: str
-    projection_state: str
+    pipeline_attribution_state: str
+    device_evidence_binding_state: str
+    device_linked_pending: bool
     recognition_state: str
     historical_window_completeness_claimed: bool
 
 
 @dataclass(frozen=True, slots=True)
-class DeviceServiceSummaryV1:
+class DeviceServiceSummaryV2:
     schema_version: int
     site_id: str
     device_id: str
@@ -136,7 +137,7 @@ class DeviceServiceSummaryV1:
     service_categories: tuple[RecentServiceCategoryV1, ...]
     last_service_observation: LastServiceObservationV1 | None
     freshness_state: str
-    coverage: ServiceRecognitionCoverageV1
+    coverage: ServiceRecognitionCoverageV2
     recognition_ruleset_id: str
     recognition_ruleset_version: int
     recognition_ruleset_digest_sha256: str
@@ -149,7 +150,7 @@ def evidence_state(identity, last, coverage):
     if identity != "authoritative": return "identity_pending"
     if last is not None: return "supported_results_present"
     if coverage.source_state != "usable": return "insufficient_source_coverage"
-    if coverage.attribution_state != "usable": return "insufficient_attribution"
+    if coverage.pipeline_attribution_state != "usable" or coverage.device_linked_pending: return "insufficient_attribution"
     if coverage.recognition_state != "usable": return "recognition_limited"
     return "no_supported_result_observed_with_sufficient_coverage"
 
@@ -157,8 +158,35 @@ def evidence_state(identity, last, coverage):
 def freshness(age, coverage):
     if age is None: return "unavailable"
     if not 0 <= age <= 86400: raise ServiceUnavailable()
-    base = "fresh" if age <= 300 else "recent" if age <= 3600 else "stale"
-    if coverage.source_state in {"unavailable", "unknown"}: return "stale"
-    if base == "fresh" and (coverage.source_state != "usable" or coverage.attribution_state != "usable"
-                             or coverage.recognition_state != "usable"): return "recent"
-    return base
+    return "fresh" if age <= 300 else "recent" if age <= 3600 else "stale"
+
+
+def pipeline_coverage(state, reason):
+    """NI-04 owned mapping: pipeline uncertainty is never a fact veto."""
+    if reason is not None and (type(reason) is not str or not reason or len(reason) > 128):
+        raise ServiceUnavailable()
+    if state == "usable":
+        if reason is not None:
+            raise ServiceUnavailable()
+        return "usable", "usable"
+    if state == "registry_degraded":
+        return "usable", "usable"
+    if state == "attribution_unavailable":
+        attribution = {None: "unknown", "pending_attribution": "degraded",
+                       "attribution_authority_unavailable": "unavailable"}
+        if reason not in attribution:
+            raise ServiceUnavailable()
+        return "usable", attribution[reason]
+    if state == "source_unavailable":
+        return "unavailable", "unknown"
+    if state in {"capacity_waiting_reader", "capacity_halted", "blocked_conflict", "degraded"}:
+        return "degraded", "degraded"
+    if state in {"initializing", "stopping"}:
+        return "unknown", "unknown"
+    raise ServiceUnavailable()
+
+
+def availability(identity, coverage):
+    return ("usable" if identity == "authoritative" and coverage.source_state == "usable"
+            and coverage.pipeline_attribution_state == "usable" and not coverage.device_linked_pending
+            and coverage.recognition_state == "usable" else "degraded")

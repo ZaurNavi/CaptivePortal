@@ -23,7 +23,9 @@ def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
     assert prefix.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n")
     for name in ("app/admin_web/static/device_protocol_intelligence.js", "app/network_protocol_intelligence/read_service.py",
                  "app/network_protocol_intelligence/models.py", "app/network_metadata_projection/read_service.py"):
-        accepted = subprocess.check_output(["git", "show", "22cdde5d4168de02d142c840028a4d66167e47f7:" + name], cwd=ROOT)
+        # Recovery freezes the current accepted baseline, including the admitted
+        # Wave-1 idle-source guard in the shared projection reader.
+        accepted = subprocess.check_output(["git", "show", "5c7b4c46afa5a57d55fe044c4326da3a10b9e145:" + name], cwd=ROOT)
         current = ROOT.joinpath(name).read_bytes().replace(b"\r\n", b"\n")
         assert current == accepted.replace(b"\r\n", b"\n")
 

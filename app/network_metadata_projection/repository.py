@@ -29,6 +29,9 @@ class ProjectionRepository:
         self._transaction_source_poll_at = None
         self._last_soft_checkpoint_tick = None
         self.telemetry = None
+        # Process-local observed authority read state, never inferred from a
+        # successful NI-01 poll or restored optimistically after restart.
+        self.attribution_read_state = None
 
     def _count_success(self, **counts):
         if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
@@ -252,24 +255,36 @@ class ProjectionRepository:
 
     def successful_source_state(self):
         """Read-only candidate state; no idle UPDATE needed to evaluate it."""
-        if self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
+        if (self.attribution_read_state == "unavailable"
+                or self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone()):
             return "attribution_unavailable"
         if self.connection.execute("SELECT 1 FROM projection_site_mac_bindings WHERE binding_state='registry_unavailable' LIMIT 1").fetchone():
             return "registry_degraded"
         return "usable"
 
+    def successful_source_reason(self, state):
+        if state != "attribution_unavailable":
+            return None
+        return ("pending_attribution" if self.attribution_read_state == "available"
+                else "attribution_authority_unavailable")
+
+    def pending_metrics(self):
+        row = self.connection.execute(
+            "SELECT count(*),min(first_pending_at) FROM projection_pending_attribution").fetchone()
+        age = 0 if row[1] is None else max(0, int((self.clock() - ni_timestamp(row[1], canonical=True)).total_seconds()))
+        return int(row[0]), age
+
     def success_state(self, *, source_verified=False, **times):
-        if (self.config.idle_write_reduction_enabled and not source_verified
+        if self.live_state in {"blocked_conflict", "capacity_halted", "capacity_waiting_reader"}:
+            self.runtime(self.live_state, self.live_reason, **times)
+        elif (self.config.idle_write_reduction_enabled and not source_verified
                 and not self.source_verified_in_run):
             self.runtime(self.live_state, self.live_reason, **times)
         elif not source_verified and self.live_state in {"source_unavailable", "blocked_conflict"}:
             self.runtime(self.live_state, self.live_reason, **times)
-        elif self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
-            self.runtime("attribution_unavailable", **times)
-        elif self.connection.execute("SELECT 1 FROM projection_site_mac_bindings WHERE binding_state='registry_unavailable' LIMIT 1").fetchone():
-            self.runtime("registry_degraded", **times)
         else:
-            self.runtime("usable", **times)
+            state = self.successful_source_state()
+            self.runtime(state, self.successful_source_reason(state), **times)
 
     def commit_dispositions(self, dispositions, evaluations, run_id, *, checkpoint=None):
         if not 1 <= len(dispositions) <= 256:

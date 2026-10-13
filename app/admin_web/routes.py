@@ -1065,7 +1065,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             response = runtime.query_service.device_service_intelligence(
                 g.admin_principal, selected, device_id, query_parameters_present=False)
             return _success(selected, response.result, enforce_size=True, response_limit_bytes=16384,
-                            api_version="admin.device.service-intelligence.v1")
+                            api_version="admin.device.service-intelligence.v2")
         except AdminQueryValidationError:
             return _error("invalid_request", 400)
         except AdminQueryForbidden:
@@ -2455,7 +2455,7 @@ def _error(code: str, status_code: int) -> Response:
     if _is_api_path(request.path):
         return jsonify(
             {
-                "api_version": ("admin.device.service-intelligence.v1" if _is_service_intelligence_path(request.path)
+                "api_version": ("admin.device.service-intelligence.v2" if _is_service_intelligence_path(request.path)
                     else "admin.device.protocol-intelligence.v1" if _is_protocol_intelligence_path(request.path)
                     else "admin.settings.features.mutation.v1" if request.path == "/admin/api/v1/settings/features/generations"
                     else "admin.settings.features.v1" if request.path == "/admin/api/v1/settings/features"

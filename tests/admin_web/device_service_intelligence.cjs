@@ -9,14 +9,16 @@ const service = {service_id: "service.youtube", display_name: "YouTube", organiz
   organization_display_name: "Google", service_category_id: "category.video_streaming",
   service_category_display_name: "Video Streaming", last_observed_at: event, support_state: "directly_supported"};
 const {last_observed_at, ...last} = service;
-const base = {api_version: "admin.device.service-intelligence.v1", request_id: device, site_id: site, page: null,
-  result: {schema_version: 1, site_id: site, device_id: device, evaluated_at_utc: at,
+const base = {api_version: "admin.device.service-intelligence.v2", request_id: device, site_id: site, page: null,
+  result: {schema_version: 2, site_id: site, device_id: device, evaluated_at_utc: at,
     window: {from_utc: "2026-10-11T00:00:00.123456Z", to_utc: at, duration_seconds: 86400,
       recent_from_utc: "2026-10-11T23:00:00.123456Z", recent_duration_seconds: 3600},
     availability_state: "usable", evidence_state: "supported_results_present", identity_binding_state: "authoritative",
     recent_services: [service], service_categories: [{service_category_id: service.service_category_id, display_name: service.service_category_display_name, last_observed_at: event}],
     last_service_observation: {...last, observed_at: event}, freshness_state: "fresh",
-    coverage: {scope: "current_pipeline", source_state: "usable", attribution_state: "usable", projection_state: "usable", recognition_state: "usable", historical_window_completeness_claimed: false},
+    coverage: {scope: "confirmed_device_evidence", source_state: "usable", pipeline_attribution_state: "usable",
+      device_evidence_binding_state: "authoritative", device_linked_pending: false,
+      recognition_state: "usable", historical_window_completeness_claimed: false},
     recognition_ruleset_id: "captivportal.network-intelligence.service-recognition", recognition_ruleset_version: 1, recognition_ruleset_digest_sha256: "a".repeat(64),
     taxonomy_id: "captivportal.network-intelligence.recognition-taxonomy", taxonomy_version: 1, taxonomy_digest_sha256: "b".repeat(64)}};
 class Element {
@@ -119,7 +121,11 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
   const timeout = fixture(); timeout.hold(); timeout.visible(); await settle(); timeout.fire(10000); await settle();
   assert.equal(timeout.calls[0].options.signal.aborted, true); assert.match(timeout.ids["device-service-state"].textContent, /unavailable/);
   for (const mutate of [
-    (v) => {v.result.peer_ip = "raw-privacy-canary";}, (v) => {v.result.schema_version = 2;},
+    (v) => {v.result.peer_ip = "raw-privacy-canary";}, (v) => {v.result.schema_version = 1;},
+    (v) => {v.api_version = "admin.device.service-intelligence.v1";},
+    (v) => {v.result.coverage.device_linked_pending_count = 1;},
+    (v) => {v.result.coverage.attribution_state = "usable";},
+    (v) => {v.result.coverage.device_linked_pending = 1;},
     (v) => {v.result.recent_services[0].sni = "raw-privacy-canary";},
     (v) => {v.result.recent_services.push(v.result.recent_services[0]);},
     (v) => {v.result.service_categories = [];}, (v) => {v.result.coverage.historical_window_completeness_claimed = true;},
@@ -137,6 +143,36 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
   empty.setPayload(value); empty.visible(); await settle();
   assert.match(empty.ids["device-service-state"].textContent, /does not prove/);
   assert.equal(empty.ids["device-service-content"].children.length, 4);
+  assert.equal(empty.ids["device-service-state"].textContent,
+    "No supported services recognized in the current window. This does not prove no Internet services or network activity.");
+  // T20-T24: coverage warnings never suppress confirmed cards or age a fresh fact.
+  for (const [positive, pipeline, expected] of [
+    [true, "degraded", "Confirmed service evidence is shown. Attribution coverage is partial; additional activity may be missing."],
+    [true, "unavailable", "Confirmed historical service evidence is shown. Current device attribution is unavailable; additional activity may be missing."],
+    [false, "degraded", "No supported service evidence is confirmed for this device in the current window. Attribution coverage is partial, so this is not evidence of no activity."],
+    [false, "unavailable", "Service evidence cannot be fully evaluated because device attribution is currently unavailable."],
+    [true, "unknown", "Confirmed service evidence is shown. Attribution coverage is partial; additional activity may be missing."],
+  ]) {
+    const t = fixture(), v = structuredClone(positive ? base : value);
+    v.result.coverage.pipeline_attribution_state = pipeline;
+    v.result.availability_state = "degraded";
+    if (!positive) v.result.evidence_state = "insufficient_attribution";
+    t.setPayload(v); t.visible(); await settle();
+    assert.equal(t.ids["device-service-state"].textContent, expected);
+    assert.equal(t.ids["device-service-content"].children.length, 4);
+    assert.equal(t.ids["device-service-content"].textContent.includes("YouTube"), positive);
+    if (positive) assert.match(t.ids["device-service-content"].textContent, /Fresh/);
+  }
+  for (const linked of [false, true]) {
+    const t = fixture(), v = structuredClone(base);
+    v.result.coverage.pipeline_attribution_state = "degraded";
+    v.result.coverage.device_linked_pending = linked;
+    v.result.availability_state = "degraded";
+    t.setPayload(v); t.visible(); await settle();
+    assert.match(t.ids["device-service-content"].textContent, /YouTube/);
+    assert.doesNotMatch(t.ids["device-service-state"].textContent, /device attribution is unavailable/);
+  }
+  console.log("NI04_ATTRIBUTION_RECOVERY_V2_PASS");
   for (const forbidden of ["innerHTML", "localStorage", "sessionStorage", "indexedDB", "document.cookie", "console.log"])
     assert.ok(!source.includes(forbidden));
   console.log("NI04_FRONTEND_PASS");

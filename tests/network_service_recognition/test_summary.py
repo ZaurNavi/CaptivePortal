@@ -12,7 +12,7 @@ from app.network_metadata.recognition_read_service import (NetworkMetadataRecogn
     RecognitionSourceEvidenceV1, RecognitionSniV1, RecognitionDnsV1, RecognitionDnsQueryV1)
 from app.network_metadata.projection_source import NetworkMetadataProjectionSourceReadService
 from app.network_metadata_projection.recognition_read_service import (DeviceNetworkMetadataRecognitionReadService,
-    RecognitionProjectionSnapshotV1, RecognitionProjectionEdgeFactV1)
+    RecognitionProjectionSnapshotV2, RecognitionProjectionEdgeFactV1)
 from app.network_metadata_projection.models import RegistryEvaluation
 from app.network_service_recognition.read_service import DeviceServiceRecognitionReadService
 from app.network_service_recognition.models import ServiceUnavailable, ServiceDeadline, ServiceBusy
@@ -31,7 +31,7 @@ REF = "10000000-0000-5000-8000-000000000001"
 def synthetic(host="www.youtube.com", family="tls", presence="observed_retained", *, event=EVENT):
     fact = RecognitionProjectionEdgeFactV1("a" * 64, event, REF, family, GEN,
         "synthetic-sensor", "lab-scope", "b" * 64, "src", "10.73.0.7", 12345, "203.0.113.93", 443, "TCP", "external", "outbound")
-    snapshot = RecognitionProjectionSnapshotV1(1, SITE, DEVICE, "authoritative", "usable", DEVICE, (fact,))
+    snapshot = RecognitionProjectionSnapshotV2(2, SITE, DEVICE, "authoritative", "usable", None, DEVICE, (fact,), 0)
     payloads = dict(dns=None, tls=None, quic=None)
     payloads[family] = (RecognitionDnsV1("dns", "request", None, 1, 0, False, False, "observed_retained", "not_observed",
         (RecognitionDnsQueryV1(0, host, "A"),), ()) if family == "dns" else RecognitionSniV1(host, presence))
@@ -165,7 +165,7 @@ def test_legitimately_expired_endpoints_preserve_existing_limited_behavior():
         dst_ip=None, dst_port=None, transport_protocol=None)
     result = read(snapshot, source)
     assert result.last_service_observation.service_id == "service.youtube"
-    assert result.coverage.recognition_state == "limited" and result.freshness_state == "recent"
+    assert result.coverage.recognition_state == "limited" and result.freshness_state == "fresh"
 
 
 @pytest.mark.parametrize("binding,expected", [("not_yet_registry_resolved", "pending"), ("registry_unavailable", "unavailable"), ("absent", "absent")])
@@ -177,8 +177,8 @@ def test_pending_identity_does_not_read_sensitive_store(binding, expected):
     assert result.identity_binding_state == expected and result.evidence_state == "identity_pending" and reader.calls == []
 
 
-@pytest.mark.parametrize("runtime,expected", [("registry_degraded", "fresh"), ("attribution_unavailable", "recent"), ("source_unavailable", "stale"),
-    ("capacity_halted", "recent"), ("initializing", "stale")])
+@pytest.mark.parametrize("runtime,expected", [("registry_degraded", "fresh"), ("attribution_unavailable", "fresh"), ("source_unavailable", "fresh"),
+    ("capacity_halted", "fresh"), ("initializing", "fresh")])
 def test_coverage_and_freshness_do_not_erase_supported(runtime, expected):
     snapshot, source = synthetic()
     result = read(replace(snapshot, projection_runtime_state=runtime), source)
