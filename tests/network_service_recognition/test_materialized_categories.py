@@ -27,7 +27,7 @@ def setup_many(lane, *, count=13,old=False,tied=False):
     sources=[];history=[]
     for i in range(count):
         sid=f'service.synthetic_{i:02d}'
-        taxonomy['services'].append(dict(service_id=sid,display_name=f'Synthetic {i:02d}',organization_id='org.google',service_category_id=category_last if i==12 else category_first,lifecycle_state='active'))
+        taxonomy['services'].append(dict(service_id=sid,display_name=f'Synthetic {i:02d}',organization_id='org.google',service_category_id=category_last if i==count-1 else category_first,lifecycle_state='active'))
         ruleset['rules'].append(dict(template,rule_id=f'rule.synthetic_{i:02d}',rule_kind='service_sni_exact',target_type='service',target_id=sid,hostname_pattern=f'case-{i}.example',ambiguity_group_id=None))
         event=ni_format_utc(ni_timestamp(AT,canonical=True)-timedelta(seconds=3700 if old and i==12 else 60+(0 if tied else i)))
         ref=str(uuid.uuid5(uuid.NAMESPACE_URL,f'category-fixture:{i}'))
@@ -75,3 +75,10 @@ def test_no_independent_category_table(lane):
     b,_,_=setup_many(lane)
     assert not lane.repo.connection.execute("SELECT 1 FROM sqlite_schema WHERE name='device_category_rollups'").fetchone()
     assert result(lane,b).schema_version==3
+
+
+def test_equal_category_timestamps_use_category_id_order(lane):
+    b,first,last=setup_many(lane,count=12,tied=True)
+    value=result(lane,b)
+    assert [c.service_category_id for c in value.service_categories]==sorted((first,last))
+    assert len({c.last_observed_at for c in value.service_categories})==1

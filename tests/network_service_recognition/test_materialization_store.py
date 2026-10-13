@@ -163,3 +163,44 @@ def test_forged_observation_digest_rejected(materialized):
     with pytest.raises(MaterializationConflict):batch(repo,gen,value)
     assert repo.checkpoint(gen)['last_edge_feed_seq']==0
     assert not repo.connection.execute('SELECT 1 FROM service_recognition_observations').fetchone()
+
+
+@pytest.mark.parametrize('point',['binding_job_enqueued','before_commit','after_commit'])
+def test_binding_enqueue_crash_on_full_closed_store(materialized,point):
+    repo,gen=materialized
+    def crash(p):
+        if p==point:raise RuntimeError('synthetic')
+    repo.crash_point=crash
+    change=AuthoritativeBindingChangeV1(3,SITE,MAC,DEVICE,AT)
+    with pytest.raises(RuntimeError):enqueue_binding_changes(repo,gen,0,(change,),AT)
+    committed=point=='after_commit'
+    assert repo.checkpoint(gen)['last_binding_change_seq']==3*int(committed)
+    assert repo.connection.execute('SELECT count(*) FROM service_binding_replay_jobs').fetchone()[0]==int(committed)
+    repo.crash_point=lambda _:None
+    enqueue_binding_changes(repo,gen,3 if committed else 0,() if committed else (change,),AT)
+    assert repo.connection.execute('SELECT count(*) FROM service_binding_replay_jobs').fetchone()[0]==1
+
+
+def test_real_sqlite_full_rolls_back_whole_batch(materialized):
+    import uuid
+    from dataclasses import asdict
+    from hashlib import sha256
+    from app.network_service_recognition.canonical import canonical_json
+    from app.network_service_recognition.worker import ServiceMaterializationWorker
+    repo,gen=materialized
+    pages=repo.connection.execute('PRAGMA page_count').fetchone()[0]
+    repo.connection.execute(f'PRAGMA max_page_count={pages}')
+    original=evaluation()
+    with pytest.raises(sqlite3.Error) as failed:
+        with repo.transaction():
+            for i in range(256):
+                obs=original.observation
+                ref=replace(obs.evidence_refs[0],edge_id=sha256(str(i).encode()).hexdigest(),source_observation_ref=str(uuid.uuid5(uuid.NAMESPACE_URL,'disposable-full:'+str(i))))
+                obs=replace(obs,evidence_refs=(ref,))
+                encoded=asdict(obs);encoded.pop('service_observation_id');encoded.pop('resolution_state')
+                obs=replace(obs,service_observation_id=sha256(canonical_json(encoded)).hexdigest())
+                repo.put_evaluated(gen,replace(original,observation=obs),bundle(),AT)
+            repo.connection.execute('UPDATE service_materialization_checkpoints SET last_edge_feed_seq=256 WHERE generation_id=?',(gen,))
+    assert ServiceMaterializationWorker.failure_state(failed.value)=='capacity_halted'
+    assert repo.checkpoint(gen)['last_edge_feed_seq']==0
+    assert repo.connection.execute('SELECT count(*) FROM service_recognition_observations').fetchone()[0]==0

@@ -31,6 +31,15 @@ class ServiceMaterializationWorker:
 
     def stop(self):self._stop.set()
 
+    @staticmethod
+    def failure_state(error):
+        # Python versions without sqlite_errorcode retain the canonical SQLite
+        # FULL text. Neither arbitrary exception text nor payload is logged.
+        full=isinstance(error,sqlite3.Error) and ((getattr(error,'sqlite_errorcode',0)&255)==13
+            or str(error).lower()=='database or disk is full')
+        return ('capacity_halted' if isinstance(error,MaterializationCapacity) or full else
+            'blocked_conflict' if isinstance(error,(MaterializationConflict,BindingReplayConflict)) else 'source_unavailable')
+
     def _deadline(self):return QueryDeadline(self.monotonic()+30,self.monotonic)
 
     def _evidence(self,candidates,at,deadline, *, window_from_utc=None):
@@ -277,8 +286,7 @@ class ServiceMaterializationWorker:
                 busy=self.cycle()
                 if not busy:self._stop.wait(1)
             except Exception as error:
-                disk_full=isinstance(error,sqlite3.Error) and (getattr(error,'sqlite_errorcode',0)&255)==13
-                state='capacity_halted' if isinstance(error,MaterializationCapacity) or disk_full else 'blocked_conflict' if isinstance(error,(MaterializationConflict,BindingReplayConflict)) else 'source_unavailable'
+                state=self.failure_state(error)
                 self.repository.live_state=state
                 # Best effort honest heartbeat; capacity never permits cursor writes.
                 try:
