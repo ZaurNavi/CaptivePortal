@@ -1,5 +1,6 @@
-"""Exact nine-table SQLite V1; no migrations or permissive schema repair."""
+"""Exact Core V1 with an optional, separately versioned Service extension."""
 import sqlite3
+from functools import lru_cache
 from .models import ALGORITHM, ATTRIBUTION_STATES, RUNTIME_STATES, ProjectionUnavailable
 from .validation import timestamp
 from app.network_metadata.validation import ni_timestamp
@@ -84,22 +85,55 @@ def signature(connection):
         "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
 
 
+@lru_cache(maxsize=1)
+def _expected_signatures():
+    from .service_extension import create_extension_objects
+    with sqlite3.connect(":memory:") as reference:
+        create_schema(reference, "2000-01-01T00:00:00.000000Z")
+        core = signature(reference)
+        create_extension_objects(reference)
+        extension = tuple(row for row in signature(reference) if row not in core)
+    return core, extension
+
+
+def validate_core_schema_v1(connection):
+    expected, _ = _expected_signatures()
+    names = {row[1] for row in expected}
+    actual = tuple(row for row in signature(connection) if row[1] in names)
+    rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
+    runtime = connection.execute("SELECT * FROM projection_runtime_state").fetchall()
+    if (actual != expected or connection.execute("PRAGMA user_version").fetchone()[0] != 1
+            or len(rows) != 1 or tuple(rows[0])[:4] != (1, 1, 1, ALGORITHM)
+            or len(runtime) != 1 or runtime[0][0] != 1
+            or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
+            or connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"):
+        raise ValueError
+    ni_timestamp(rows[0][4], canonical=True)
+
+
+def validate_service_recognition_extension_v1(connection):
+    from .service_extension import validate_extension_metadata
+    _, expected = _expected_signatures()
+    names = {row[1] for row in expected}
+    actual = tuple(row for row in signature(connection) if row[1] in names)
+    if not actual:
+        return False
+    if actual != expected:
+        raise ValueError
+    validate_extension_metadata(connection)
+    return True
+
+
 def validate_schema(connection, *, integrity=False):
     try:
-        with sqlite3.connect(":memory:") as reference:
-            create_schema(reference, "2000-01-01T00:00:00.000000Z")
-            expected = signature(reference)
-        rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
-        runtime = connection.execute("SELECT * FROM projection_runtime_state").fetchall()
-        if (connection.execute("PRAGMA user_version").fetchone()[0] != 1 or signature(connection) != expected
-                or len(rows) != 1 or tuple(rows[0])[:4] != (1, 1, 1, ALGORITHM)
-                or len(runtime) != 1 or runtime[0][0] != 1
-                or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
-                or connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"):
+        validate_core_schema_v1(connection)
+        present = validate_service_recognition_extension_v1(connection)
+        core, extension = _expected_signatures()
+        if signature(connection) != tuple(sorted(core + (extension if present else ()))):
             raise ValueError
-        ni_timestamp(rows[0][4], canonical=True)
         if integrity and (connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
                           or connection.execute("PRAGMA foreign_key_check").fetchone() is not None):
             raise ValueError
+        return "CORE_PLUS_EXTENSION_V1" if present else "CORE_ONLY"
     except Exception:
         raise ProjectionUnavailable() from None

@@ -13,6 +13,7 @@ from .models import (ALGORITHM, PROJECTION_TRANSACTION_HEADROOM_BYTES, Projectio
                      ProjectionCapacity, ProjectionConflict, RUNTIME_STATES)
 from .schema import TABLES, create_schema, validate_schema
 from .validation import timestamp, semantic_digest
+from .service_extension import append_candidate, maintain_authoritative_change
 
 
 class ProjectionRepository:
@@ -32,6 +33,7 @@ class ProjectionRepository:
         # Process-local observed authority read state, never inferred from a
         # successful NI-01 poll or restored optimistically after restart.
         self.attribution_read_state = None
+        self.service_recognition_extension_present = False
 
     def _count_success(self, **counts):
         if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
@@ -80,7 +82,8 @@ class ProjectionRepository:
             if objects == 0 and self.connection.execute("PRAGMA user_version").fetchone()[0] == 0:
                 with self.transaction():
                     create_schema(self.connection, timestamp(self.clock()))
-            validate_schema(self.connection, integrity=True)
+            self.service_recognition_extension_present = (
+                validate_schema(self.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1")
             row = self.connection.execute("SELECT runtime_state,safe_reason FROM projection_runtime_state").fetchone()
             self.live_state, self.live_reason = row
             return self
@@ -232,6 +235,9 @@ class ProjectionRepository:
                 previous_state=None if old is None else old["binding_state"], new_state=state, device_id=device_id,
                 evaluated_at=now, registry_schema_version=1 if evaluation.state != "registry_unavailable" else None,
                 registry_record_updated_at=evaluation.record_updated_at, safe_reason=evaluation.reason, projection_run_id=run_id))
+        if self.service_recognition_extension_present:
+            maintain_authoritative_change(self.connection, old, site=site, mac=mac, state=state,
+                                          device=device_id, evaluated_at=now)
 
     def runtime(self, state, reason=None, *, observation=None, **times):
         if state not in RUNTIME_STATES or not set(times) <= {"last_source_poll_at", "last_projection_commit_at", "last_registry_reconcile_at", "last_retention_at"}:
@@ -299,6 +305,8 @@ class ProjectionRepository:
                             raise ProjectionConflict("edge_semantic_conflict")
                         continue
                     self.insert("device_network_metadata_edges", edge)
+                    if self.service_recognition_extension_present:
+                        append_candidate(self.connection, edge, now)
                     site, mac = edge["site_id"], edge["client_mac"]
                     if self.binding(site, mac) is None:
                         self._registry_binding(site, mac, evaluations[(site, mac)], run_id, now, edge_at=edge["event_at"])
