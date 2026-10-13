@@ -128,6 +128,35 @@ def test_source_failure_no_cursor_advance(lane):
     assert lane.repo.checkpoint(lane.worker.generation_id)['last_edge_feed_seq']==0
 
 
+def test_worker_deadline_rolls_back_progress(lane):
+    from app.analytics.source_gateway import AnalyticsQueryDeadlineExceeded
+    lane.projection.history=()
+    lane.worker.cycle()
+    lane.projection.entries=(RecognitionFeedEntryV1(1,AT,lane.projection.fact,lane.projection.identity),)
+    original=lane.worker.source.read_recognition_evidence
+    def slow(*args,**kwargs):
+        values=original(*args,**kwargs)
+        lane.now.tick+=31
+        return values
+    lane.worker.source.read_recognition_evidence=slow
+    with pytest.raises(AnalyticsQueryDeadlineExceeded):lane.worker.cycle()
+    assert lane.repo.checkpoint(lane.worker.generation_id)['last_edge_feed_seq']==0
+    assert not lane.repo.connection.execute('SELECT 1 FROM service_recognition_observations').fetchone()
+
+
+def test_repeated_live_events_do_not_bypass_coverage_cadence(lane):
+    lane.worker.cycle()
+    calls=[]
+    original=lane.projection.read_recognition_device_coverage
+    def counted(*args,**kwargs):
+        calls.append(args)
+        return original(*args,**kwargs)
+    lane.projection.read_recognition_device_coverage=counted
+    lane.projection.entries=(RecognitionFeedEntryV1(1,AT,lane.projection.fact,lane.projection.identity),)
+    lane.worker.cycle()
+    assert not calls
+
+
 def test_gap_no_false_cursor_progress(lane):
     lane.worker.cycle()
     lane.projection.entries=(RecognitionFeedEntryV1(4,AT,lane.projection.fact,lane.projection.identity),)
