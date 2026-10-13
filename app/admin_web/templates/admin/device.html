@@ -3,7 +3,7 @@
 {% block page_body %}
   {{ super() }}
   {% if device_service_intelligence_enabled %}
-  <section id="device-service-intelligence" class="section-card" aria-labelledby="device-service-title">
+  <section id="device-service-intelligence" class="section-card" aria-labelledby="device-service-title" data-materialization-mode="{{ network_service_materialization_mode }}">
     <div class="section-heading">
       <div>
         <h2 id="device-service-title">Service Intelligence</h2>

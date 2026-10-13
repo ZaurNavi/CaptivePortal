@@ -93,6 +93,8 @@ class AdminWebConfig:
     global_capabilities: frozenset[str] = frozenset()
     device_protocol_intelligence_enabled: bool = False
     device_service_intelligence_enabled: bool = False
+    network_service_materialization_mode: str = "off"
+    network_service_materialization_db_path: str = "/opt/CaptivePortal/data/network_service_intelligence.sqlite3"
     traffic_partial_coverage_enabled: bool = False
 
     def __repr__(self) -> str:
@@ -141,6 +143,13 @@ def admin_web_config_from_settings(
         service_flag,
         "WEB_ADMIN_DEVICE_SERVICE_INTELLIGENCE_ENABLED",
     )
+    materialization_mode = settings.get("network_service_materialization_mode", "off")
+    materialization_path = settings.get("network_service_materialization_db_path", "/opt/CaptivePortal/data/network_service_intelligence.sqlite3")
+    from pathlib import Path, PurePosixPath
+    if type(materialization_mode) is not str or materialization_mode not in {"off", "shadow", "serve"}:
+        raise AdminWebConfigError("NETWORK_SERVICE_MATERIALIZATION_MODE is invalid")
+    if type(materialization_path) is not str or not (Path(materialization_path).is_absolute() or PurePosixPath(materialization_path).is_absolute()):
+        raise AdminWebConfigError("NETWORK_SERVICE_MATERIALIZATION_DB_PATH is invalid")
     home_live_enabled = _exact_bool(
         settings.get("web_admin_home_live_enabled", "false"),
         "WEB_ADMIN_HOME_LIVE_ENABLED",
@@ -298,6 +307,8 @@ def admin_web_config_from_settings(
         global_capabilities=global_capabilities,
         device_protocol_intelligence_enabled=device_protocol_intelligence_enabled,
         device_service_intelligence_enabled=device_service_intelligence_enabled,
+        network_service_materialization_mode=materialization_mode,
+        network_service_materialization_db_path=materialization_path,
         username=username,
         password_hash=password_hash,
         allowed_networks=networks,

@@ -5,11 +5,13 @@ from app.device_fingerprint.validation import validate_site_id
 from app.network_metadata.validation import canonical_uuid, ni_timestamp
 from .models import (DeviceServiceSummaryV2, ServiceWindowV1, ServiceRecognitionCoverageV2,
     RecentServiceV1, RecentServiceCategoryV1, LastServiceObservationV1, ServiceUnavailable, freshness, evidence_state, availability)
+from .models import DeviceServiceSummaryV3, ServiceMaterializationV1, materialized_evidence_state, materialized_availability
 
 
 def serialize_device_service_intelligence(value, bundle):
     try:
-        if type(value) is not DeviceServiceSummaryV2 or type(value.window) is not ServiceWindowV1 or type(value.coverage) is not ServiceRecognitionCoverageV2:
+        v3 = type(value) is DeviceServiceSummaryV3
+        if type(value) not in {DeviceServiceSummaryV2, DeviceServiceSummaryV3} or type(value.window) is not ServiceWindowV1 or type(value.coverage) is not ServiceRecognitionCoverageV2:
             raise ValueError
         validate_site_id(value.site_id)
         canonical_uuid(value.device_id)
@@ -17,7 +19,7 @@ def serialize_device_service_intelligence(value, bundle):
         window, coverage = value.window, value.coverage
         start = ni_timestamp(window.from_utc, canonical=True)
         recent = ni_timestamp(window.recent_from_utc, canonical=True)
-        if (type(value.schema_version) is not int or value.schema_version != 2
+        if (type(value.schema_version) is not int or value.schema_version != (3 if v3 else 2)
                 or window.to_utc != value.evaluated_at_utc
                 or type(window.duration_seconds) is not int or window.duration_seconds != 86400
                 or type(window.recent_duration_seconds) is not int or window.recent_duration_seconds != 3600
@@ -70,6 +72,14 @@ def serialize_device_service_intelligence(value, bundle):
             category_order.append((at - event, row.service_category_id))
         if category_seen != set(category_latest) or category_order != sorted(category_order): raise ValueError
         last = value.last_service_observation
+        if v3:
+            mat = value.materialization
+            if (type(mat) is not ServiceMaterializationV1 or mat.state not in {"current","backfilling","lagging","unavailable","capacity_halted","conflict"}
+                    or mat.window_coverage_state not in {"complete","partial","unknown"}
+                    or mat.lag_seconds is not None and (type(mat.lag_seconds) is not int or mat.lag_seconds < 0)
+                    or mat.last_successful_update_at_utc is not None and ni_timestamp(mat.last_successful_update_at_utc,canonical=True)>at
+                    or mat.state == "current" and mat.lag_seconds is None):
+                raise ValueError
         age = None
         if last is not None:
             event = check_service(last, LastServiceObservationV1, "observed_at", start)
@@ -79,9 +89,10 @@ def serialize_device_service_intelligence(value, bundle):
             elif value.recent_services: raise ValueError
         elif value.recent_services or value.service_categories: raise ValueError
         if value.identity_binding_state != "authoritative" and (last is not None or value.recent_services): raise ValueError
-        if value.freshness_state != freshness(age, coverage) or value.evidence_state != evidence_state(value.identity_binding_state, last, coverage): raise ValueError
+        expected_evidence = materialized_evidence_state(value.identity_binding_state,last,coverage,value.materialization) if v3 else evidence_state(value.identity_binding_state,last,coverage)
+        if value.freshness_state != freshness(age, coverage) or value.evidence_state != expected_evidence: raise ValueError
         if coverage.recognition_state == "unavailable" and last is not None: raise ValueError
-        expected_availability = availability(value.identity_binding_state, coverage)
+        expected_availability = materialized_availability(value.identity_binding_state,coverage,value.materialization) if v3 else availability(value.identity_binding_state,coverage)
         if value.availability_state != expected_availability: raise ValueError
         result = asdict(value)
         result["recent_services"] = list(result["recent_services"])

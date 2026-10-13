@@ -373,20 +373,26 @@ def create_admin_web_runtime(
     service_intelligence_service = None
     if config.device_service_intelligence_enabled:
         try:
-            from app.network_metadata.config import network_metadata_config_from_env
-            from app.network_metadata.recognition_read_service import NetworkMetadataRecognitionReadService
-            from app.network_metadata_projection.config import projection_config_from_env
-            from app.network_metadata_projection.recognition_read_service import DeviceNetworkMetadataRecognitionReadService
             from app.network_service_recognition.artifacts import load_local_bundle
-            from app.network_service_recognition.read_service import DeviceServiceRecognitionReadService
-            # Only the existing owners parse their deployment-owned environment.
-            source_config = network_metadata_config_from_env()
-            recognition_projection_config = projection_config_from_env()
-            service_intelligence_service = DeviceServiceRecognitionReadService(
-                DeviceNetworkMetadataRecognitionReadService(recognition_projection_config.db_path,
-                    enabled=recognition_projection_config.enabled, max_db_bytes=recognition_projection_config.max_db_bytes),
-                NetworkMetadataRecognitionReadService(source_config.db_path, enabled=source_config.enabled),
-                load_local_bundle())
+            if config.network_service_materialization_mode == "serve":
+                from app.network_service_recognition.materialized_read_service import MaterializedDeviceServiceReadService
+                service_intelligence_service = MaterializedDeviceServiceReadService(
+                    config.network_service_materialization_db_path, load_local_bundle(),
+                    admitted_bundles=(load_local_bundle(version=1),))
+            else:
+                from app.network_metadata.config import network_metadata_config_from_env
+                from app.network_metadata.recognition_read_service import NetworkMetadataRecognitionReadService
+                from app.network_metadata_projection.config import projection_config_from_env
+                from app.network_metadata_projection.recognition_read_service import DeviceNetworkMetadataRecognitionReadService
+                from app.network_service_recognition.read_service import DeviceServiceRecognitionReadService
+                # Only legacy off/shadow composition uses upstream readers.
+                source_config = network_metadata_config_from_env()
+                recognition_projection_config = projection_config_from_env()
+                service_intelligence_service = DeviceServiceRecognitionReadService(
+                    DeviceNetworkMetadataRecognitionReadService(recognition_projection_config.db_path,
+                        enabled=recognition_projection_config.enabled, max_db_bytes=recognition_projection_config.max_db_bytes),
+                    NetworkMetadataRecognitionReadService(source_config.db_path, enabled=source_config.enabled),
+                    load_local_bundle())
         except Exception:
             logger.error("admin.service_intelligence_composition_failed")
     try:
