@@ -2,6 +2,8 @@
 import os
 import sqlite3
 import uuid
+from dataclasses import asdict
+from hashlib import sha256
 from contextlib import contextmanager
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
@@ -11,6 +13,7 @@ from app.network_attribution.validation import canonical_mac
 from app.device_fingerprint.validation import validate_site_id
 from .artifacts import RecognitionBundle,AdmittedArtifact
 from .materialization_schema import create_schema,validate_schema,MaterializationUnavailable
+from .canonical import canonical_json
 
 HEADROOM = 4 * 1024 * 1024
 
@@ -212,6 +215,9 @@ class ServiceMaterializationRepository:
         """Caller owns atomic batch. Evaluation contains no persisted raw evidence."""
         if not self.connection.in_transaction:
             raise MaterializationConflict()
+        generation=self.connection.execute('SELECT * FROM service_materialization_generations WHERE generation_id=?',(gen,)).fetchone()
+        if generation is None or generation['state'] not in {'building','active'} or generation['publishable_until_utc']<=at or any(generation[k]!=v for k,v in bundle_identity(bundle).items()):
+            raise MaterializationConflict()
         ident=evaluation.identity
         validate_site_id(ident.site_id)
         canonical_uuid(ident.device_id)
@@ -227,6 +233,21 @@ class ServiceMaterializationRepository:
                 raise MaterializationConflict()
             ref=observation.evidence_refs[0]
             digest(observation.service_observation_id)
+            encoded=asdict(observation)
+            encoded.pop('service_observation_id');encoded.pop('resolution_state')
+            if sha256(canonical_json(encoded)).hexdigest()!=observation.service_observation_id:
+                raise MaterializationConflict()
+            for kind,parent in (('recognition_ruleset',bundle.ruleset),('taxonomy',bundle.taxonomy)):
+                original='ruleset' if kind=='recognition_ruleset' else kind
+                if any(getattr(observation,kind+s)!=parent[original+s] for s in ('_id','_version','_digest_sha256')):
+                    raise MaterializationConflict()
+            rule=next((r for r in bundle.ruleset['rules'] if r['rule_id']==evaluation.matched_rule_id),None)
+            if (rule is None or rule['target_type']!='service' or rule['target_id']!=observation.service_id
+                    or rule['lifecycle_state']!='active' or rule['rule_kind'] not in {'service_sni_exact','service_sni_suffix'}):
+                raise MaterializationConflict()
+            reviewed,due=bundle.manifest.index[rule['rule_id']]
+            if not reviewed<=ni_timestamp(at,canonical=True)<due:raise MaterializationConflict()
+            digest(ref.edge_id);canonical_uuid(ref.source_observation_ref,5)
             values=dict(service_observation_id=observation.service_observation_id,generation_id=gen,edge_id=ref.edge_id,source_observation_ref=ref.source_observation_ref,
                 site_id=ident.site_id,device_id=ident.device_id,client_mac=ident.client_mac,registry_binding_change_seq=ident.registry_binding_change_seq,
                 observed_at=observation.observed_at,source_event_family=ref.signal_type.removesuffix("_sni"),service_id=observation.service_id,organization_id=observation.organization_id,

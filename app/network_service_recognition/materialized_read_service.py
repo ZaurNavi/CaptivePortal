@@ -120,9 +120,9 @@ class MaterializedDeviceServiceReadService:
             complete=(state is not None and valid and runtime['backfill_state']=='complete' and runtime['recovery_feed_highwater_seq'] is None
                 and state['coverage_valid_from_utc']<=window_cutoff and runtime['backfill_from_utc']<=window_cutoff
                 and (runtime['last_feed_gap_at_utc'] is None or runtime['last_feed_gap_at_utc']<window_cutoff))
-            # No recency claim based on stale per-device coverage.
+            # Stale cached coverage blocks completeness. It does not repurpose
+            # upstream source/attribution states to encode materializer lag.
             if state and (at-ni_timestamp(state['coverage_evaluated_at_utc'],canonical=True)).total_seconds()>60:
-                source,attribute='unknown','unknown'
                 complete=False
             if state and ni_timestamp(state['coverage_evaluated_at_utc'],canonical=True)>at:raise ServiceUnavailable()
             window_state='complete' if complete else 'partial' if state is not None else 'unknown'

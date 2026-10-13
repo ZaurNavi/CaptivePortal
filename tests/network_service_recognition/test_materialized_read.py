@@ -43,6 +43,7 @@ def test_worker_outage_and_cutoff_without_write(lane,seconds,mat,recent,last):
     assert result.materialization.state==mat
     assert bool(result.recent_services)==recent and (result.last_service_observation is not None)==last
     assert result.availability_state=='degraded'
+    assert result.coverage.source_state=='usable' and result.coverage.pipeline_attribution_state=='usable'
     if last:assert result.evidence_state=='supported_results_present'
     else:assert result.evidence_state=='materialization_incomplete'
 

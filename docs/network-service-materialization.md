@@ -77,3 +77,18 @@ Only then may a separately authorized shadow-to-serve sequence begin.
 After migration, rollback uses the accepted bridge or a later extension-aware release.
 Never restore b1442efc code against the migrated DB, drop the extension, edit sqlite_schema
 or sqlite_sequence, reset source checkpoints or purge evidence to satisfy an old validator.
+
+# G2 disposition and production authority
+
+The original four sequential load samples remain externally retained without
+rewriting. Pair 1: p95 commit +3.7100%, throughput +2.2946%. Pair 2: p95 commit
++9.0447%, throughput -6.3078%. G2 correctness: 369 targeted tests passed.
+G2 performance: **ACCEPTED BY OWNER EXCEPTION**, not a formal performance PASS.
+The Owner explicitly accepted the reported 6.31% throughput loss against the
+normal 5% limit and cancelled the proposed 12-run retest. No further G2 load runs
+or hot-path optimization were performed under that superseded request.
+
+All commits in this development lane are local review artifacts. They do not
+authorize installation, migration, restarting services, shadow activation or serve.
+The G1 bridge SHA is a proposed rollback floor until Tech Lead independently
+accepts and records `NI04_MAT_COMPAT_BASE_SHA`; it is not an operational approval.

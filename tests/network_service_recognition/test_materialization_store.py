@@ -103,7 +103,12 @@ def test_latest_rollup_only_advances(materialized):
     # A distinct edge/ref is mandatory for a distinct immutable observation.
     obs=older.observation
     from app.network_service_recognition.models import RecognitionEvidenceRefV1
-    older=replace(older,observation=replace(obs,service_observation_id='c'*64,evidence_refs=(replace(obs.evidence_refs[0],edge_id='d'*64),)))
+    obs=replace(obs,evidence_refs=(replace(obs.evidence_refs[0],edge_id='d'*64),))
+    from dataclasses import asdict
+    from hashlib import sha256
+    from app.network_service_recognition.canonical import canonical_json
+    encoded=asdict(obs);encoded.pop('service_observation_id');encoded.pop('resolution_state')
+    older=replace(older,observation=replace(obs,service_observation_id=sha256(canonical_json(encoded)).hexdigest()))
     batch(repo,gen,older,after=1,end=2)
     assert repo.connection.execute('SELECT last_observed_at FROM device_service_rollups').fetchone()[0]==newer.observed_at
 
@@ -149,3 +154,12 @@ def test_validation_entire_batch_before_matching():
     def forbidden(**kwargs):raise AssertionError('matcher_must_not_run')
     with pytest.raises(ServiceUnavailable):
         ServiceRecognitionEvaluatorV1(bundle(),matcher=forbidden).evaluate_batch(((snapshot.facts[0],identity),(snapshot.facts[0],identity)),{REF:replace(source,dst_ip='203.0.113.99')},AT,deadline=QueryDeadline.after(5))
+
+
+def test_forged_observation_digest_rejected(materialized):
+    repo,gen=materialized
+    value=evaluation()
+    value=replace(value,observation=replace(value.observation,service_observation_id='f'*64))
+    with pytest.raises(MaterializationConflict):batch(repo,gen,value)
+    assert repo.checkpoint(gen)['last_edge_feed_seq']==0
+    assert not repo.connection.execute('SELECT 1 FROM service_recognition_observations').fetchone()

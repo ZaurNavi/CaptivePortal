@@ -136,7 +136,12 @@ def validate_schema(connection, *, integrity=False):
         if len(rows) != 1 or tuple(rows[0][:4]) != (1,1,1,ALGORITHM):
             raise ValueError
         ni_timestamp(rows[0][4],canonical=True)
-        if connection.execute("SELECT count(*) FROM service_materialization_runtime").fetchone()[0] != 1:
+        runtime=connection.execute("SELECT active_generation_id,updated_at_utc FROM service_materialization_runtime").fetchall()
+        if len(runtime)!=1:
+            raise ValueError
+        ni_timestamp(runtime[0][1],canonical=True)
+        active=connection.execute("SELECT generation_id FROM service_materialization_generations WHERE state='active' LIMIT 2").fetchall()
+        if len(active)>1 or runtime[0][0]!=(active[0][0] if active else None):
             raise ValueError
         if integrity and (tuple(row[0] for row in connection.execute("PRAGMA quick_check")) != ("ok",)
                 or connection.execute("PRAGMA foreign_key_check").fetchone() is not None):
