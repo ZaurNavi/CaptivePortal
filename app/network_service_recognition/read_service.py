@@ -8,14 +8,14 @@ from app.network_attribution.validation import canonical_mac
 from app.network_metadata.validation import canonical_uuid, ni_timestamp, ni_format_utc
 from app.network_metadata.recognition_read_service import RecognitionSourceEvidenceV1
 from app.network_metadata_projection.recognition_read_service import (
-    RecognitionProjectionSnapshotV1, RecognitionProjectionEdgeFactV1)
-from app.network_protocol_intelligence.read_service import _COVERAGE
+    RecognitionProjectionSnapshotV2, RecognitionProjectionEdgeFactV1)
 from .artifacts import RecognitionBundle
 from .canonical import canonical_hostname
 from .matcher import match_direct_sni_v1, matching_rules, rule_eligible
 from .models import (ServiceUnavailable, ServiceValidationError, ServiceBusy, ServiceDeadline,
-    ServiceWindowV1, ServiceRecognitionCoverageV1, RecentServiceV1, RecentServiceCategoryV1,
-    LastServiceObservationV1, DeviceServiceSummaryV1, service_observation, freshness, evidence_state)
+    ServiceWindowV1, ServiceRecognitionCoverageV2, RecentServiceV1, RecentServiceCategoryV1,
+    LastServiceObservationV1, DeviceServiceSummaryV2, service_observation, freshness, evidence_state,
+    pipeline_coverage, availability)
 from .serialization import serialize_device_service_intelligence
 
 _READ_SLOTS = threading.BoundedSemaphore(1)
@@ -42,15 +42,18 @@ class DeviceServiceRecognitionReadService:
             start, recent = at - timedelta(days=1), at - timedelta(hours=1)
             snapshot = self._projection_reader.read_service_recognition_snapshot(site_id, device_id, client_mac,
                 ni_format_utc(start), evaluated_at_utc, max_rows=5000, deadline=bounded)
-            if (type(snapshot) is not RecognitionProjectionSnapshotV1 or snapshot.schema_version != 1
+            if (type(snapshot) is not RecognitionProjectionSnapshotV2 or type(snapshot.schema_version) is not int or snapshot.schema_version != 2
                     or snapshot.site_id != site_id or snapshot.device_id != device_id
                     or snapshot.historical_window_completeness_claimed is not False
-                    or type(snapshot.facts) is not tuple or len(snapshot.facts) > 5000):
+                    or type(snapshot.facts) is not tuple or len(snapshot.facts) > 5000
+                    or type(snapshot.device_linked_pending_count) is not int
+                    or not 0 <= snapshot.device_linked_pending_count <= 5000):
                 raise ServiceUnavailable()
-            projection, source, attribution = _COVERAGE[snapshot.projection_runtime_state]
+            source, attribution = pipeline_coverage(snapshot.projection_runtime_state, snapshot.projection_safe_reason)
             identity = {"authoritative": "authoritative", "not_yet_registry_resolved": "pending",
                         "registry_unavailable": "unavailable", "absent": "absent"}[snapshot.identity_binding_state]
-            if identity != "authoritative" and (snapshot.bound_device_id is not None or snapshot.facts): raise ServiceUnavailable()
+            if identity != "authoritative" and (snapshot.bound_device_id is not None or snapshot.facts
+                                                or snapshot.device_linked_pending_count): raise ServiceUnavailable()
             if identity == "authoritative" and snapshot.bound_device_id != device_id: raise ServiceUnavailable()
             observations, limited = [], False
             if identity == "authoritative":
@@ -122,7 +125,7 @@ class DeviceServiceRecognitionReadService:
                     observations.append(service_observation(site_id, device_id, fact, matched))
                 if len(observations) > 5000: raise ServiceUnavailable()
             result = self._summary(site_id, device_id, evaluated_at_utc, start, recent, at, identity,
-                                   projection, source, attribution, observations, limited)
+                                   source, attribution, bool(snapshot.device_linked_pending_count), observations, limited)
             serialize_device_service_intelligence(result, self.bundle)
             bounded.require_remaining()
             return result
@@ -135,7 +138,7 @@ class DeviceServiceRecognitionReadService:
         finally:
             _READ_SLOTS.release()
 
-    def _summary(self, site, device, evaluated, start, recent, at, identity, projection, source, attribution, observations, limited):
+    def _summary(self, site, device, evaluated, start, recent, at, identity, source, attribution, linked_pending, observations, limited):
         ordered = sorted((row for row in observations if row.resolution_state == "service_resolved"),
                          key=lambda row: (at - ni_timestamp(row.observed_at, canonical=True), row.service_id, row.service_observation_id))
         services = self.bundle.taxonomy.index["services"]
@@ -157,12 +160,14 @@ class DeviceServiceRecognitionReadService:
             latest_categories.setdefault(row.service_category_id, row.last_observed_at)
         category_rows = tuple(RecentServiceCategoryV1(key, categories[key]["display_name"], event) for key, event in
             sorted(latest_categories.items(), key=lambda pair: (at - ni_timestamp(pair[1], canonical=True), pair[0])))
-        coverage = ServiceRecognitionCoverageV1("current_pipeline", source, attribution, projection, "limited" if limited else "usable", False)
+        coverage = ServiceRecognitionCoverageV2("confirmed_device_evidence", source, attribution,
+            "authoritative" if identity == "authoritative" else "none", linked_pending,
+            "unavailable" if identity != "authoritative" else "limited" if limited else "usable", False)
         identity_values = {"recognition_" + key: self.bundle.ruleset[key] for key in ("ruleset_id", "ruleset_version", "ruleset_digest_sha256")}
         identity_values.update({key: self.bundle.taxonomy[key] for key in ("taxonomy_id", "taxonomy_version", "taxonomy_digest_sha256")})
-        return DeviceServiceSummaryV1(1, site, device, evaluated,
+        return DeviceServiceSummaryV2(2, site, device, evaluated,
             ServiceWindowV1(ni_format_utc(start), evaluated, 86400, ni_format_utc(recent), 3600),
-            "usable" if projection == "usable" and identity == "authoritative" and not limited else "degraded",
+            availability(identity, coverage),
             evidence_state(identity, last, coverage), identity, visible, category_rows, last,
             freshness(None if last is None else (at - ni_timestamp(last.observed_at, canonical=True)).total_seconds(), coverage),
             coverage, **identity_values)

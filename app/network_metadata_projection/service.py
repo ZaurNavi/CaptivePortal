@@ -14,6 +14,7 @@ from .models import (ALGORITHM, ATTRIBUTION_STATES, ProjectionConflict, Projecti
 from .models import NetworkMetadataProjectionResultV1, PreparedDisposition
 from .validation import edge_id, semantic_digest, timestamp
 from .effective_runtime_state import effective_runtime_state
+from .telemetry import RETRY_COUNTER_FIELDS, MAX_COUNTER
 
 
 class NetworkMetadataProjectionService:
@@ -24,6 +25,8 @@ class NetworkMetadataProjectionService:
         self.telemetry, self.stop_event, self.monotonic = telemetry, stop_event or threading.Event(), monotonic
         self.run_id = None
         self.last_retry = self.last_reconcile = self.last_retention = None
+        self._retry_counts = dict.fromkeys(RETRY_COUNTER_FIELDS, 0)
+        self._authority_failed_in_batch = False
         if config.telemetry_aggregation_enabled and telemetry is not None:
             telemetry.enable_aggregation(monotonic=monotonic)
             repository.telemetry = telemetry
@@ -39,11 +42,31 @@ class NetworkMetadataProjectionService:
         if not self.config.enabled:
             return False
         self.repository.initialize()
+        self.repository.attribution_read_state = None
         if self.config.idle_write_reduction_enabled:
             self.repository.source_verified_in_run = False
             self.repository.last_durable_source_poll_at = self.repository.last_durable_source_poll_tick = None
         self.run_id = self.repository.create_run(self.identity)
         return True
+
+    def _count_retry(self, name, amount=1):
+        self._retry_counts[name] = min(MAX_COUNTER, self._retry_counts[name] + amount)
+
+    def _authority_read(self, available):
+        if not available:
+            self._authority_failed_in_batch = True
+            self.repository.attribution_read_state = "unavailable"
+            self._count_retry("attribution_authority_unavailable_count")
+        elif not self._authority_failed_in_batch:
+            self.repository.attribution_read_state = "available"
+
+    def _emit_retry_counters(self):
+        pending, age = self.repository.pending_metrics()
+        values = dict(self._retry_counts)
+        values.update(pending_attribution_count=min(MAX_COUNTER, pending),
+                      pending_oldest_age_seconds=min(MAX_COUNTER, age))
+        self.emit("attribution_retry_counters", **values)
+        self._retry_counts = dict.fromkeys(RETRY_COUNTER_FIELDS, 0)
 
     @staticmethod
     def _source_identity(source):
@@ -75,9 +98,13 @@ class NetworkMetadataProjectionService:
         try:
             value = self.attribution.resolve_ipv4(source.site_id, address, source.event_at)
         except Exception:
+            self._authority_read(False)
             return result("unavailable", "attribution_store_unavailable")
         if value.state not in ATTRIBUTION_STATES or value.state == "invalid":
             raise ProjectionConflict("attribution_query_contract_invalid")
+        if value.state == "unavailable" and value.reason in {
+                "attribution_disabled", "authority_horizon_unavailable", "attribution_store_unavailable"}:
+            self._authority_read(False)
         if value.state == "resolved":
             try:
                 if (value.site_id != source.site_id or value.ipv4 != address or value.event_at != source.event_at
@@ -134,12 +161,15 @@ class NetworkMetadataProjectionService:
             horizon = self.attribution.get_authority_horizon(source.site_id)
         except Exception:
             horizon = SimpleNamespace(state="unavailable")
+        self._authority_read(horizon.state == "available")
         states = {}
         for role in ("src", "dst"):
             if prior_pending is not None and not prior_pending["pending_" + role]:
                 states[role] = NetworkMetadataAttributionResultV1(prior_pending[role + "_snapshot_state"],
                     binding_id=prior_pending[role + "_snapshot_binding_id"])
             else:
+                if prior_pending is not None:
+                    self._count_retry("attribution_retry_attempted_roles")
                 states[role] = self._resolve(source, role, horizon)
         existing = self.repository.existing_edges(source.observation_id) if prior_pending is not None else {}
         edges = []
@@ -210,6 +240,7 @@ class NetworkMetadataProjectionService:
                 after = self._checkpoint_verified(generation)
                 batch = self.source.read_projection_batch(generation.source_generation_id, after, self.config.batch_max_observations)
                 if batch:
+                    self._authority_failed_in_batch = False
                     offsets = [source.record_start_byte_offset for source in batch]
                     if offsets != sorted(set(offsets)) or (after is not None and offsets[0] <= after):
                         raise ProjectionConflict("checkpoint_source_conflict")
@@ -248,13 +279,14 @@ class NetworkMetadataProjectionService:
         repo = self.repository
         now = repo.clock()
         desired = repo.successful_source_state()
+        desired_reason = repo.successful_source_reason(desired)
         row = repo.connection.execute(
             "SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
         if row is None:
             raise ProjectionUnavailable()
         unchanged = (repo.source_verified_in_run and repo.live_state == desired
-                     and row["runtime_state"] == desired and row["safe_reason"] is None
-                     and repo.live_reason is None)
+                     and row["runtime_state"] == desired and row["safe_reason"] == desired_reason
+                     and repo.live_reason == desired_reason)
         fresh = effective_runtime_state(row, enabled=True, evaluated_at_utc=now)[0] == desired
         previous = repo.last_durable_source_poll_tick
         elapsed = None if previous is None else self.monotonic() - previous
@@ -266,6 +298,7 @@ class NetworkMetadataProjectionService:
         selected = self.repository.pending()
         results = []
         for start in range(0, len(selected), 256):
+            self._authority_failed_in_batch = False
             prepared = []
             for row in selected[start:start + 256]:
                 if self.stop_event.is_set():
@@ -282,7 +315,19 @@ class NetworkMetadataProjectionService:
             if self.stop_event.is_set():
                 return tuple(results)
             self.repository.commit_dispositions(prepared, evaluations, self.run_id)
+            # Outcomes describe committed dispositions, not abandoned prepare
+            # attempts. A failed transaction must never claim a resolved role.
+            for prior, item in zip(selected[start:start + 256], prepared):
+                if item.result.projection_state == "expired_unresolved":
+                    self._count_retry("attribution_retry_expired_unresolved")
+                else:
+                    for role in ("src", "dst"):
+                        if prior["pending_" + role]:
+                            state = getattr(item.result, role + "_attribution_state")
+                            suffix = {"resolved": "resolved", "unavailable": "still_unavailable"}.get(state, "terminal")
+                            self._count_retry("attribution_retry_" + suffix + "_roles")
             results.extend(item.result for item in prepared)
+        self._emit_retry_counters()
         return tuple(results)
 
     def reconcile(self):

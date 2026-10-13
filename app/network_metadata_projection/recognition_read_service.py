@@ -5,6 +5,7 @@ from app.network_attribution.validation import canonical_mac
 from app.network_metadata.validation import canonical_uuid, ni_timestamp, digest, ip, integer, text
 from .read_service import DeviceNetworkMetadataReadService
 from .models import ProjectionUnavailable, ProjectionValidationError, RUNTIME_STATES
+from .effective_runtime_state import effective_runtime_state
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -28,14 +29,16 @@ class RecognitionProjectionEdgeFactV1:
 
 
 @dataclass(frozen=True, slots=True, repr=False)
-class RecognitionProjectionSnapshotV1:
+class RecognitionProjectionSnapshotV2:
     schema_version: int
     site_id: str
     device_id: str
     identity_binding_state: str
     projection_runtime_state: str
+    projection_safe_reason: str | None
     bound_device_id: str | None
     facts: tuple[RecognitionProjectionEdgeFactV1, ...]
+    device_linked_pending_count: int
     historical_window_completeness_claimed: bool = False
 
 
@@ -53,7 +56,12 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
         except Exception:
             raise ProjectionValidationError() from None
         with self._snapshot(deadline=deadline) as connection:
-            state = self._runtime_state(connection)
+            runtime = connection.execute(
+                "SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+            if runtime is None:
+                raise ProjectionUnavailable()
+            state, reason = effective_runtime_state(runtime, enabled=self.idle_write_reduction_enabled,
+                                                    evaluated_at_utc=self.clock())
             if state not in RUNTIME_STATES:
                 raise ProjectionUnavailable()
             binding = connection.execute(
@@ -66,7 +74,7 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
             if identity != "authoritative":
                 if bound is not None:
                     raise ProjectionUnavailable()
-                return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state, None, ())
+                return RecognitionProjectionSnapshotV2(2, site_id, device_id, identity, state, reason, None, (), 0)
             if bound != device_id:
                 raise ProjectionUnavailable()
             registry_identity = connection.execute(
@@ -109,4 +117,15 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
                     facts.append(RecognitionProjectionEdgeFactV1(**dict(row)))
             except (ValueError, TypeError):
                 raise ProjectionUnavailable() from None
-            return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state, bound, tuple(facts))
+            # Any committed role edge can link pending to this exact Device.
+            # Both-pending/no-edge observations cannot enter this join.
+            linked = connection.execute(
+                "SELECT DISTINCT p.observation_id FROM device_network_metadata_edges AS e INDEXED BY idx_projection_mac_event "
+                "JOIN projection_pending_attribution AS p ON p.observation_id=e.source_observation_ref AND p.site_id=e.site_id "
+                "WHERE e.site_id=? AND e.client_mac=? AND e.event_at>=? AND e.event_at<? "
+                "AND p.event_at>=? AND p.event_at<? LIMIT ?",
+                (site_id, client_mac, from_utc, to_utc, from_utc, to_utc, max_rows + 1)).fetchall()
+            if len(linked) > max_rows:
+                raise ProjectionUnavailable()
+            return RecognitionProjectionSnapshotV2(2, site_id, device_id, identity, state, reason, bound,
+                                                   tuple(facts), len(linked))

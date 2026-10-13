@@ -13,7 +13,7 @@ from app.admin_web.query_service import (AdminQueryResponse, AdminQueryUnavailab
 from app.admin_web.runtime import create_admin_web_runtime
 from app.network_service_recognition.read_service import DeviceServiceRecognitionReadService
 from app.network_service_recognition.models import ServiceBusy, ServiceUnavailable, ServiceDeadline
-from app.network_metadata_projection.recognition_read_service import RecognitionProjectionSnapshotV1
+from app.network_metadata_projection.recognition_read_service import RecognitionProjectionSnapshotV2
 from app.settings_control.features import AdminFeaturePlanV1
 from app.settings_control.models import ResolvedSettingsSnapshot
 from tests.network_service_recognition.support import bundle
@@ -31,7 +31,7 @@ def service_app(admin_app):
     query._config = runtime.config
     query._devices = SimpleNamespace(get_device=lambda **kw: SimpleNamespace(canonical_mac=MAC))
     query._service_intelligence = DeviceServiceRecognitionReadService(
-        Projection(RecognitionProjectionSnapshotV1(1, SITE_ID, DEVICE, "authoritative", "usable", DEVICE, ())), Source(()), bundle())
+        Projection(RecognitionProjectionSnapshotV2(2, SITE_ID, DEVICE, "authoritative", "usable", None, DEVICE, (), 0)), Source(()), bundle())
     app = Flask(__name__); app.config["TESTING"] = True
     app.register_blueprint(create_admin_web_blueprint(runtime, logger=logging.getLogger("ni04-test")))
     app.extensions["admin_web_runtime"] = runtime
@@ -44,7 +44,7 @@ def test_api_exact_safe_dto_and_headers(service_app):
     assert response.status_code == 200 and len(response.data) <= 16384
     value = response.json
     assert set(value) == {"api_version", "request_id", "site_id", "result", "page"}
-    assert value["api_version"] == "admin.device.service-intelligence.v1" and value["page"] is None
+    assert value["api_version"] == "admin.device.service-intelligence.v2" and value["page"] is None
     assert value["result"]["evidence_state"] == "no_supported_result_observed_with_sufficient_coverage"
     assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
     for private in (MAC, "peer_ip", "source_observation_ref", "edge_id", "sni", "knowledge_ref", "hostname"):
@@ -67,7 +67,7 @@ def test_off_and_unauthorized_never_lookup_evidence(admin_app, monkeypatch, auth
     response = client.get(f"/admin/api/v1/sites/{site}/devices/{device}/service-intelligence" + suffix,
         data=body, base_url="https://localhost")
     assert response.status_code == status and response.json["error"]["code"] == code
-    assert response.json["api_version"] == "admin.device.service-intelligence.v1"
+    assert response.json["api_version"] == "admin.device.service-intelligence.v2"
 
 
 @pytest.mark.parametrize("error,status,code", [(AdminQueryBusy, 429, "concurrency_limit"),

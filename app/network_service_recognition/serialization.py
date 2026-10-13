@@ -3,14 +3,13 @@ from dataclasses import asdict
 from datetime import timedelta
 from app.device_fingerprint.validation import validate_site_id
 from app.network_metadata.validation import canonical_uuid, ni_timestamp
-from app.network_protocol_intelligence.read_service import _COVERAGE
-from .models import (DeviceServiceSummaryV1, ServiceWindowV1, ServiceRecognitionCoverageV1,
-    RecentServiceV1, RecentServiceCategoryV1, LastServiceObservationV1, ServiceUnavailable, freshness, evidence_state)
+from .models import (DeviceServiceSummaryV2, ServiceWindowV1, ServiceRecognitionCoverageV2,
+    RecentServiceV1, RecentServiceCategoryV1, LastServiceObservationV1, ServiceUnavailable, freshness, evidence_state, availability)
 
 
 def serialize_device_service_intelligence(value, bundle):
     try:
-        if type(value) is not DeviceServiceSummaryV1 or type(value.window) is not ServiceWindowV1 or type(value.coverage) is not ServiceRecognitionCoverageV1:
+        if type(value) is not DeviceServiceSummaryV2 or type(value.window) is not ServiceWindowV1 or type(value.coverage) is not ServiceRecognitionCoverageV2:
             raise ValueError
         validate_site_id(value.site_id)
         canonical_uuid(value.device_id)
@@ -18,14 +17,18 @@ def serialize_device_service_intelligence(value, bundle):
         window, coverage = value.window, value.coverage
         start = ni_timestamp(window.from_utc, canonical=True)
         recent = ni_timestamp(window.recent_from_utc, canonical=True)
-        if (type(value.schema_version) is not int or value.schema_version != 1
+        if (type(value.schema_version) is not int or value.schema_version != 2
                 or window.to_utc != value.evaluated_at_utc
                 or type(window.duration_seconds) is not int or window.duration_seconds != 86400
                 or type(window.recent_duration_seconds) is not int or window.recent_duration_seconds != 3600
                 or at - start != timedelta(days=1) or at - recent != timedelta(hours=1)
-                or coverage.scope != "current_pipeline" or coverage.historical_window_completeness_claimed is not False
-                or (coverage.projection_state, coverage.source_state, coverage.attribution_state) not in set(_COVERAGE.values())
-                or coverage.recognition_state not in {"usable", "limited"}
+                or coverage.scope != "confirmed_device_evidence" or coverage.historical_window_completeness_claimed is not False
+                or coverage.source_state not in {"usable", "degraded", "unavailable", "unknown"}
+                or coverage.pipeline_attribution_state not in {"usable", "degraded", "unavailable", "unknown"}
+                or coverage.device_evidence_binding_state != ("authoritative" if value.identity_binding_state == "authoritative" else "none")
+                or type(coverage.device_linked_pending) is not bool
+                or (value.identity_binding_state != "authoritative" and coverage.device_linked_pending)
+                or coverage.recognition_state not in {"usable", "limited", "unavailable"}
                 or value.identity_binding_state not in {"authoritative", "pending", "unavailable", "absent"}
                 or type(value.recent_services) is not tuple or len(value.recent_services) > 12
                 or type(value.service_categories) is not tuple or len(value.service_categories) > 10):
@@ -77,7 +80,8 @@ def serialize_device_service_intelligence(value, bundle):
         elif value.recent_services or value.service_categories: raise ValueError
         if value.identity_binding_state != "authoritative" and (last is not None or value.recent_services): raise ValueError
         if value.freshness_state != freshness(age, coverage) or value.evidence_state != evidence_state(value.identity_binding_state, last, coverage): raise ValueError
-        expected_availability = "usable" if value.identity_binding_state == "authoritative" and coverage.projection_state == "usable" and coverage.recognition_state == "usable" else "degraded"
+        if coverage.recognition_state == "unavailable" and last is not None: raise ValueError
+        expected_availability = availability(value.identity_binding_state, coverage)
         if value.availability_state != expected_availability: raise ValueError
         result = asdict(value)
         result["recent_services"] = list(result["recent_services"])
