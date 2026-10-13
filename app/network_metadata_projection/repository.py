@@ -18,7 +18,10 @@ from .service_extension import append_candidate, maintain_authoritative_change
 
 class ProjectionRepository:
     def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None,
-                 monotonic=time.monotonic):
+                 monotonic=time.monotonic, install_service_recognition_extension=False):
+        if type(install_service_recognition_extension) is not bool:
+            raise ProjectionUnavailable()
+        self._install_service_recognition_extension = install_service_recognition_extension
         self.config, self.clock, self.crash_point = config, clock, crash_point
         self.connection = self._writer_fd = None
         self._retention_authorized = False
@@ -86,6 +89,9 @@ class ProjectionRepository:
                 validate_schema(self.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1")
             row = self.connection.execute("SELECT runtime_state,safe_reason FROM projection_runtime_state").fetchone()
             self.live_state, self.live_reason = row
+            if self._install_service_recognition_extension:
+                from .service_extension import install_service_recognition_extension
+                install_service_recognition_extension(self)
             return self
         except (sqlite3.Error, OSError, ProjectionUnavailable):
             self.close()

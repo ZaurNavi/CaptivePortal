@@ -51,3 +51,34 @@ def maintain_authoritative_change(connection, old, *, site, mac, state, device, 
             "INSERT INTO projection_registry_binding_change_index"
             "(site_id,client_mac,binding_state,device_id,evaluated_at_utc) VALUES(?,?,'authoritative',?,?)",
             (site, mac, device, evaluated_at))
+
+
+def install_service_recognition_extension(repository):
+    """Explicit one-time install by the already locked NI-02B writer only."""
+    from .schema import validate_schema
+    from .validation import timestamp
+    connection = repository.connection
+    if connection is None or repository._writer_fd is None or connection.in_transaction:
+        raise ProjectionUnavailable()
+    if validate_schema(connection, integrity=True) == "CORE_PLUS_EXTENSION_V1":
+        repository.service_recognition_extension_present = True
+        return False
+    with repository.transaction():
+        for name, ddl in TABLES.items():
+            connection.execute(f"CREATE TABLE {name} ({ddl})")
+            repository.crash_point("extension_created_" + name)
+        connection.execute(
+            "INSERT INTO projection_registry_binding_change_index"
+            "(site_id,client_mac,binding_state,device_id,evaluated_at_utc) "
+            "SELECT site_id,client_mac,binding_state,device_id,last_evaluated_at "
+            "FROM projection_site_mac_bindings WHERE binding_state='authoritative' "
+            "ORDER BY site_id,client_mac")
+        repository.crash_point("extension_seeded_bindings")
+        connection.execute("INSERT INTO projection_service_recognition_extension_meta VALUES(1,1,?)",
+                           (timestamp(repository.clock()),))
+        repository.crash_point("extension_inserted_metadata")
+        if validate_schema(connection, integrity=True) != "CORE_PLUS_EXTENSION_V1":
+            raise ProjectionUnavailable()
+        repository.crash_point("extension_validated")
+    repository.service_recognition_extension_present = True
+    return True

@@ -47,6 +47,10 @@ The existing b1442efc baseline is NOT a post-migration rollback target.
 The G1 bridge commit is a proposed rollback floor until independently accepted by Tech Lead.
 NI04_MAT_COMPAT_BASE_SHA must be recorded from that accepted commit before production migration.
 
+Proposed compatibility bridge commit: 36e2b462a39533c32954215e40d9097167591237.
+Its exact tree is 2541384db1c6a0c4a8b307c54fc1c966ed6c4152.
+This source identity is a candidate for Tech Lead acceptance; it is not an authorization to deploy.
+
 G1 Coder targeted verification: 329 PASS / 0 FAIL / 0 SKIP.
 Command: python -m pytest -q -rs tests/network_metadata_projection
 tests/network_protocol_intelligence tests/network_service_recognition/test_protected_readers.py.

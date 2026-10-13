@@ -17,7 +17,9 @@ from .telemetry import ProjectionTelemetry
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Independent NI-02B projection worker")
     parser.add_argument("command", choices=("run",))
-    parser.parse_args(argv)
+    parser.add_argument("--install-service-recognition-extension", action="store_true",
+                        help="Owner-authorized one-time extension install after acquiring the writer lock")
+    args = parser.parse_args(argv)
     repo = None
     try:
         config = projection_config_from_env()
@@ -27,7 +29,7 @@ def main(argv=None):
         if Path(config.db_path).resolve() == Path(attribution_config.db_path).resolve():
             raise ValueError
         identity = capture_loaded_artifact_identity("network-metadata-projection.service")
-        repo = ProjectionRepository(config)
+        repo = ProjectionRepository(config, install_service_recognition_extension=args.install_service_recognition_extension)
         service = NetworkMetadataProjectionService(config, repo,
             NetworkMetadataProjectionSourceReadService(config.source_db_path), NetworkAttributionReadService(attribution_config),
             RegistryAdapter(config.registry_db_path), identity, telemetry=ProjectionTelemetry())

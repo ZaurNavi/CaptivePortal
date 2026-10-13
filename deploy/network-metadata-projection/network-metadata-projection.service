@@ -14,6 +14,7 @@ EnvironmentFile=-/etc/captive-portal/network-metadata-projection.env
 ExecStart=/usr/bin/python3 -m app.network_metadata_projection.cli run
 Restart=on-failure
 RestartSec=30
+TimeoutStartSec=180
 TimeoutStopSec=20
 NoNewPrivileges=yes
 PrivateTmp=yes
