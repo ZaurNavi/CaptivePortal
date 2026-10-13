@@ -89,6 +89,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         if not _is_admin_path(request.path):
             return None
         g.admin_request_id = str(uuid.uuid4())
+        g.admin_service_api_version = ("admin.device.service-intelligence.v3"
+            if config.network_service_materialization_mode == "serve" else "admin.device.service-intelligence.v2")
         g.admin_started_at = time.monotonic()
         if config.require_https and not request.is_secure:
             return _error("https_required", 403)
@@ -673,6 +675,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 page.key == "device" and config.device_service_intelligence_enabled
                 and policy.authorize(g.admin_principal, "admin.read.device", selected)
             ),
+            network_service_materialization_mode=config.network_service_materialization_mode,
             home_live_enabled=config.home_live_enabled,
             home_live_refresh_seconds=config.home_live_refresh_seconds,
             home_live_request_timeout_seconds=config.home_live_request_timeout_seconds,
@@ -1065,7 +1068,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             response = runtime.query_service.device_service_intelligence(
                 g.admin_principal, selected, device_id, query_parameters_present=False)
             return _success(selected, response.result, enforce_size=True, response_limit_bytes=16384,
-                            api_version="admin.device.service-intelligence.v2")
+                            api_version=g.admin_service_api_version)
         except AdminQueryValidationError:
             return _error("invalid_request", 400)
         except AdminQueryForbidden:
@@ -2455,7 +2458,7 @@ def _error(code: str, status_code: int) -> Response:
     if _is_api_path(request.path):
         return jsonify(
             {
-                "api_version": ("admin.device.service-intelligence.v2" if _is_service_intelligence_path(request.path)
+                "api_version": (getattr(g, "admin_service_api_version", "admin.device.service-intelligence.v2") if _is_service_intelligence_path(request.path)
                     else "admin.device.protocol-intelligence.v1" if _is_protocol_intelligence_path(request.path)
                     else "admin.settings.features.mutation.v1" if request.path == "/admin/api/v1/settings/features/generations"
                     else "admin.settings.features.v1" if request.path == "/admin/api/v1/settings/features"

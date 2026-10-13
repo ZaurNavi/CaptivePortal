@@ -1582,7 +1582,12 @@ class AdminQueryService:
             try:
                 value = self._service_intelligence.get_device_service_summary(site_id, selected_id, device.canonical_mac,
                     evaluated_at_utc=ni_format_utc(datetime.now(timezone.utc)), deadline=deadline)
-                result = serialize_device_service_intelligence(value, self._service_intelligence.bundle)
+                expected_schema = 3 if self._config.network_service_materialization_mode == "serve" else 2
+                if value.schema_version != expected_schema:
+                    raise ServiceUnavailable("recognition_unavailable")
+                selected_bundle = (self._service_intelligence.publication_bundle(value) if expected_schema == 3
+                                   else self._service_intelligence.bundle)
+                result = serialize_device_service_intelligence(value, selected_bundle)
                 if result["site_id"] != site_id or result["device_id"] != selected_id:
                     raise ServiceUnavailable()
                 return AdminQueryResponse(result)

@@ -146,6 +146,31 @@ class DeviceServiceSummaryV2:
     taxonomy_digest_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class ServiceMaterializationV1:
+    state: str
+    window_coverage_state: str
+    last_successful_update_at_utc: str | None
+    lag_seconds: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceServiceSummaryV3(DeviceServiceSummaryV2):
+    materialization: ServiceMaterializationV1
+
+
+def materialized_evidence_state(identity, last, coverage, materialization):
+    if identity != "authoritative": return "identity_pending"
+    if last is not None: return "supported_results_present"
+    if materialization.state != "current" or materialization.window_coverage_state != "complete":
+        return "materialization_incomplete"
+    return evidence_state(identity, last, coverage)
+
+
+def materialized_availability(identity, coverage, materialization):
+    return availability(identity, coverage) if materialization.state == "current" and materialization.window_coverage_state == "complete" else "degraded"
+
+
 def evidence_state(identity, last, coverage):
     if identity != "authoritative": return "identity_pending"
     if last is not None: return "supported_results_present"

@@ -6702,6 +6702,9 @@
   const content = document.getElementById("device-service-content");
   const status = document.getElementById("device-service-state");
   const button = document.getElementById("device-service-refresh");
+  const materializationMode = section.dataset.materializationMode || "off";
+  if (!["off", "shadow", "serve"].includes(materializationMode)) return;
+  const materialized = materializationMode === "serve";
   const categories = new Set(["video_streaming", "audio_streaming", "messaging", "social", "cloud_storage",
     "productivity_collaboration", "gaming", "software_distribution", "web_search", "other_supported"].map((x) => `category.${x}`));
   const evidenceLabels = {
@@ -6711,6 +6714,7 @@
     insufficient_attribution: "Device attribution is insufficient; service activity is unknown.",
     recognition_limited: "Recognition is limited; service activity is unknown.",
     identity_pending: "Device identity is pending; service activity is unknown.",
+    materialization_incomplete: "Service Intelligence is not fully materialized for this window; activity is unknown.",
   };
   let visible = false, stopped = false, active = null, pending = false, timer = null;
   let ageTimer = null, lastGood = null, failures = 0, nextAutomaticAt = null;
@@ -6731,13 +6735,13 @@
   }
   function validate(payload) {
     if (!exact(payload, ["api_version", "request_id", "site_id", "result", "page"]) ||
-      payload.api_version !== "admin.device.service-intelligence.v2" || payload.site_id !== site || payload.page !== null ||
+      payload.api_version !== (materialized ? "admin.device.service-intelligence.v3" : "admin.device.service-intelligence.v2") || payload.site_id !== site || payload.page !== null ||
       typeof payload.request_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(payload.request_id)) throw new Error("shape");
     const v = payload.result;
     if (!exact(v, ["schema_version", "site_id", "device_id", "evaluated_at_utc", "window", "availability_state", "evidence_state",
       "identity_binding_state", "recent_services", "service_categories", "last_service_observation", "freshness_state", "coverage",
-      "recognition_ruleset_id", "recognition_ruleset_version", "recognition_ruleset_digest_sha256", "taxonomy_id", "taxonomy_version", "taxonomy_digest_sha256"]) ||
-      v.schema_version !== 2 || v.site_id !== site || v.device_id !== device ||
+      "recognition_ruleset_id", "recognition_ruleset_version", "recognition_ruleset_digest_sha256", "taxonomy_id", "taxonomy_version", "taxonomy_digest_sha256", ...(materialized ? ["materialization"] : [])]) ||
+      v.schema_version !== (materialized ? 3 : 2) || v.site_id !== site || v.device_id !== device ||
       !["authoritative", "pending", "unavailable", "absent"].includes(v.identity_binding_state) ||
       !Object.hasOwn(evidenceLabels, v.evidence_state) || !["fresh", "recent", "stale", "unavailable"].includes(v.freshness_state) ||
       !["usable", "degraded"].includes(v.availability_state)) throw new Error("shape");
@@ -6747,6 +6751,15 @@
         typeof v[`${kind}_digest_sha256`] !== "string" || !/^[0-9a-f]{64}$/.test(v[`${kind}_digest_sha256`])) throw new Error("shape");
     }
     const at = utc(v.evaluated_at_utc), w = v.window, c = v.coverage;
+    if (materialized) {
+      const m = v.materialization;
+      if (!exact(m, ["state", "window_coverage_state", "last_successful_update_at_utc", "lag_seconds"]) ||
+        !["current", "backfilling", "lagging", "unavailable", "capacity_halted", "conflict"].includes(m.state) ||
+        !["complete", "partial", "unknown"].includes(m.window_coverage_state) ||
+        m.lag_seconds !== null && (!Number.isSafeInteger(m.lag_seconds) || m.lag_seconds < 0) ||
+        m.last_successful_update_at_utc !== null && utc(m.last_successful_update_at_utc) > at ||
+        m.state === "current" && m.lag_seconds === null) throw new Error("shape");
+    }
     if (!exact(w, ["from_utc", "to_utc", "duration_seconds", "recent_from_utc", "recent_duration_seconds"]) ||
       w.to_utc !== v.evaluated_at_utc || w.duration_seconds !== 86400 || w.recent_duration_seconds !== 3600 ||
       utc(w.from_utc) !== at - 86400000000 || utc(w.recent_from_utc) !== at - 3600000000 ||
@@ -6794,10 +6807,12 @@
         event < at - 3600000000 && v.recent_services.length) throw new Error("shape");
     } else if (v.recent_services.length) throw new Error("shape");
     const expectedEvidence = v.identity_binding_state !== "authoritative" ? "identity_pending" : last !== null ? "supported_results_present" :
+      materialized && (v.materialization.state !== "current" || v.materialization.window_coverage_state !== "complete") ? "materialization_incomplete" :
       c.source_state !== "usable" ? "insufficient_source_coverage" : c.pipeline_attribution_state !== "usable" || c.device_linked_pending ? "insufficient_attribution" :
       c.recognition_state !== "usable" ? "recognition_limited" : "no_supported_result_observed_with_sufficient_coverage";
     if (v.freshness_state !== expectedFreshness || v.evidence_state !== expectedEvidence || v.availability_state !== (
       v.identity_binding_state === "authoritative" && c.source_state === "usable" && c.pipeline_attribution_state === "usable" &&
+      (!materialized || v.materialization.state === "current" && v.materialization.window_coverage_state === "complete") &&
       !c.device_linked_pending && c.recognition_state === "usable" ? "usable" : "degraded") ||
       c.recognition_state === "unavailable" && last !== null ||
       v.identity_binding_state !== "authoritative" && last !== null) throw new Error("shape");
@@ -6811,6 +6826,8 @@
   }
   function coverageMessage(v) {
     const c = v.coverage, positive = v.last_service_observation !== null;
+    if (materialized && (v.materialization.state !== "current" || v.materialization.window_coverage_state !== "complete")) return positive ?
+      "Confirmed stored service evidence is shown. Background Service Intelligence is behind; newer activity may be missing." : evidenceLabels.materialization_incomplete;
     if (c.pipeline_attribution_state === "unavailable") return positive ?
       "Confirmed historical service evidence is shown. Current device attribution is unavailable; additional activity may be missing." :
       "Service evidence cannot be fully evaluated because device attribution is currently unavailable.";
@@ -6828,7 +6845,7 @@
       [`${v.last_service_observation.display_name} · ${v.last_service_observation.observed_at}`] : ["No supported observation available."]);
     card("Freshness / coverage", [`Freshness: ${stale ? "stale (refresh failed)" : v.freshness_state}`, `Source: ${v.coverage.source_state}`,
       `Pipeline attribution: ${v.coverage.pipeline_attribution_state}`, `Device evidence binding: ${v.coverage.device_evidence_binding_state}`,
-      `Recognition: ${v.coverage.recognition_state}`, `Last evaluated: ${v.evaluated_at_utc}`]);
+      `Recognition: ${v.coverage.recognition_state}`, ...(materialized ? [`Materialization: ${v.materialization.state}`] : []), `Last evaluated: ${v.evaluated_at_utc}`]);
     status.textContent = (stale ? "Refresh unavailable; showing stale last-good data. " : "") + coverageMessage(v);
   }
   function clearTimer() { if (timer !== null) window.clearTimeout(timer); timer = null; }

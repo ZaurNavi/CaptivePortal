@@ -161,6 +161,7 @@ from app.config import (
     WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED,
     WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED,
     WEB_ADMIN_DEVICE_SERVICE_INTELLIGENCE_ENABLED,
+    NETWORK_SERVICE_MATERIALIZATION_MODE, NETWORK_SERVICE_MATERIALIZATION_DB_PATH,
     WEB_ADMIN_VISIT_PAGE_SIZE,
     WEB_ADMIN_OBSERVATION_PAGE_SIZE,
     WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS,
@@ -640,6 +641,8 @@ def get_settings() -> dict:
         ),
         "web_admin_device_protocol_intelligence_enabled": WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED,
         "web_admin_device_service_intelligence_enabled": WEB_ADMIN_DEVICE_SERVICE_INTELLIGENCE_ENABLED,
+        "network_service_materialization_mode": NETWORK_SERVICE_MATERIALIZATION_MODE,
+        "network_service_materialization_db_path": NETWORK_SERVICE_MATERIALIZATION_DB_PATH,
         "web_admin_visit_page_size": WEB_ADMIN_VISIT_PAGE_SIZE,
         "web_admin_observation_page_size": (
             WEB_ADMIN_OBSERVATION_PAGE_SIZE
