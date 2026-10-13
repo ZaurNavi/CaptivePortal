@@ -17,6 +17,8 @@ from .models import (ServiceUnavailable, ServiceValidationError, ServiceBusy, Se
     LastServiceObservationV1, DeviceServiceSummaryV2, service_observation, freshness, evidence_state,
     pipeline_coverage, availability)
 from .serialization import serialize_device_service_intelligence
+from .evaluator import ServiceRecognitionEvaluatorV1
+from app.network_metadata_projection.service_delivery_read_service import RecognitionIdentityV1
 
 _READ_SLOTS = threading.BoundedSemaphore(1)
 
@@ -78,51 +80,13 @@ class DeviceServiceRecognitionReadService:
                             if sni is not None and sni.sni is not None: scalar_count += 1
                         if scalar_count > 25000: raise ServiceUnavailable()
                         evidence[value.observation_id] = value
-                # Check the entire set before evaluating any positive result.
-                for fact in snapshot.facts:
-                    bounded.require_remaining()
-                    if (type(fact) is not RecognitionProjectionEdgeFactV1 or fact.direction != "outbound"
-                            or fact.peer_scope != "external" or fact.device_endpoint_role != "src"
-                            or not start <= ni_timestamp(fact.event_at, canonical=True) < at): raise ServiceUnavailable()
-                    value = evidence[fact.source_observation_ref]
-                    if (value.schema_version != 1 or value.site_id != site_id
-                            or value.observation_id != fact.source_observation_ref
-                            or any(getattr(value, key) != getattr(fact, key) for key in (
-                                "event_at", "source_event_family", "source_generation_id", "capture_source_id",
-                                "network_scope_id", "capture_scope_binding_digest"))): raise ServiceUnavailable()
-                    if sum(payload is not None for payload in (value.dns, value.tls, value.quic)) != 1 or getattr(value, value.source_event_family) is None:
-                        raise ServiceUnavailable()
-                    if value.sensitive_endpoint_presence_state == "observed_retained":
-                        if (value.src_ip, value.src_port, value.dst_ip, value.dst_port, value.transport_protocol) != (
-                                fact.device_ip, fact.device_port, fact.peer_ip, fact.peer_port, fact.transport_protocol):
-                            raise ServiceUnavailable()
-                    elif value.sensitive_endpoint_presence_state != "expired": raise ServiceUnavailable()
-                b = self.bundle
-                if not any(rule_eligible(row, b.manifest, at) for row in b.ruleset["rules"]
-                           if row["target_type"] == "service" and "_sni_" in row["rule_kind"]): limited = True
-                for fact in snapshot.facts:
-                    bounded.require_remaining()
-                    value = evidence[fact.source_observation_ref]
-                    if value.sensitive_endpoint_presence_state == "expired": limited = True
-                    if value.dns is not None:
-                        dns = value.dns
-                        if (dns.queries_truncated or dns.answers_truncated
-                                or dns.query_names_presence_state == "expired" or dns.answer_values_presence_state == "expired"
-                                or any(canonical_hostname(row.query_name) is None or matching_rules(row.query_name, b.ruleset)
-                                       for row in dns.queries)):
-                            limited = True
-                        continue
-                    payload = value.tls if value.tls is not None else value.quic
-                    host = canonical_hostname(payload.sni)
-                    if payload.sni_presence_state != "observed_retained" or host is None:
-                        limited = True
-                        continue
-                    matching = matching_rules(host, b.ruleset)
-                    if any(row["lifecycle_state"] == "active" and not rule_eligible(row, b.manifest, at) for row in matching): limited = True
-                    matched = match_direct_sni_v1(hostname=host, signal_family=fact.source_event_family + "_sni",
-                        evaluated_at_utc=evaluated_at_utc, taxonomy=b.taxonomy, manifest=b.manifest, ruleset=b.ruleset)
-                    if matched.resolution_state == "ambiguous": limited = True
-                    observations.append(service_observation(site_id, device_id, fact, matched))
+                evaluated, limited = ServiceRecognitionEvaluatorV1(
+                    self.bundle, matcher=match_direct_sni_v1).evaluate_batch(
+                        tuple((fact, RecognitionIdentityV1(site_id, client_mac, device_id,
+                            "authoritative", None)) for fact in snapshot.facts),
+                        evidence, evaluated_at_utc, deadline=bounded, maximum=5000)
+                observations = [row.observation for row in evaluated if row.observation is not None]
+                limited |= any(row.limited for row in evaluated)
                 if len(observations) > 5000: raise ServiceUnavailable()
             result = self._summary(site_id, device_id, evaluated_at_utc, start, recent, at, identity,
                                    source, attribution, bool(snapshot.device_linked_pending_count), observations, limited)
