@@ -1,15 +1,18 @@
 """Closed NI-02B constants and safe errors; no import-time composition."""
 from dataclasses import dataclass
 
-ALGORITHM = "dti-ni-02b-projection-v1"
+ALGORITHM = "dti-ni-02b-projection-v2"
+PROJECTION_CONTRACT_VERSION = 2
 PROJECTION_TRANSACTION_HEADROOM_BYTES = 16777216
 ATTRIBUTION_STATES = frozenset({"resolved", "ambiguous", "unattributed", "unavailable",
-    "outside_historical_horizon", "invalid", "unsupported_address_family", "endpoint_absent"})
+    "outside_historical_horizon", "invalid", "unsupported_address_family", "endpoint_absent",
+    "not_applicable_outside_guest_scope"})
 BINDING_STATES = frozenset({"authoritative", "not_yet_registry_resolved", "registry_unavailable"})
 RUNTIME_STATES = frozenset({"initializing", "usable", "degraded", "source_unavailable", "attribution_unavailable",
     "registry_degraded", "capacity_waiting_reader", "capacity_halted", "blocked_conflict", "stopping"})
 CONFLICTS = frozenset({"source_observation_identity_conflict", "resolved_endpoint_outside_capture_scope",
-    "attribution_query_contract_invalid", "edge_semantic_conflict", "registry_identity_conflict", "checkpoint_source_conflict"})
+    "attribution_query_contract_invalid", "edge_semantic_conflict", "registry_identity_conflict", "checkpoint_source_conflict",
+    "scope_admission_untrusted"})
 
 
 class ProjectionError(RuntimeError):
@@ -58,6 +61,19 @@ class ProjectionConfig:
     idle_write_reduction_enabled: bool = False
     checkpoint_opt_enabled: bool = False
     telemetry_aggregation_enabled: bool = False
+    scope_admission_json: str | None = None
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class EndpointDisposition:
+    """NI-02B-owned non-identity terminal; never an invented NI-02A result."""
+    state: str
+    binding_id: None = None
+
+    def __post_init__(self):
+        if self.state not in {"not_applicable_outside_guest_scope", "endpoint_absent",
+                              "unsupported_address_family"} or self.binding_id is not None:
+            raise ProjectionValidationError()
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -69,7 +85,7 @@ class RegistryEvaluation:
 
 
 @dataclass(frozen=True, slots=True)
-class NetworkMetadataProjectionResultV1:
+class NetworkMetadataProjectionResultV2:
     observation_id: str
     src_attribution_state: str
     dst_attribution_state: str
@@ -120,7 +136,7 @@ class PreparedDisposition:
     source: object
     edges: list
     pending: dict | None
-    result: NetworkMetadataProjectionResultV1
+    result: NetworkMetadataProjectionResultV2
 
     def __iter__(self):
         yield self.source

@@ -1,0 +1,1 @@
+{"placement_kind":"verified_pre_nat_guest_ipv4","schema_version":1,"scopes":[{"binding_valid_from_utc":"2026-01-01T00:00:00.000000Z","capture_scope_binding_digest":"5d2ce1358f69c2f53d6ba702be72f88883a31230c367007d2c29865896d7da00","capture_source_id":"synthetic-sensor","ipv4_cidrs":["10.73.0.0/16"],"network_scope_id":"synthetic-scope","site_id":"6a64f17630da7c70d232187a"}]}

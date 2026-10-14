@@ -16,6 +16,10 @@ from .schema import validate_schema
 from .validation import canonical_uuid, digest, integer, ip, ni_timestamp
 
 
+class NetworkMetadataProjectionScopeUntrusted(NetworkMetadataStorageUnavailable):
+    """Closed source-scope proof failure, distinct from a storage outage."""
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class NetworkMetadataProjectionSourceRecordV1:
     observation_id: str
@@ -37,6 +41,7 @@ class NetworkMetadataProjectionSourceRecordV1:
     src_port: int | None
     dst_port: int | None
     transport_protocol: str | None
+    binding_valid_from_utc: str | None = None
 
 
 class NetworkMetadataProjectionSourceReadService:
@@ -55,6 +60,8 @@ class NetworkMetadataProjectionSourceReadService:
             connection.execute("BEGIN")
             validate_schema(connection, writer=False)
             yield connection
+        except NetworkMetadataProjectionScopeUntrusted:
+            raise
         except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, NetworkMetadataError):
             raise NetworkMetadataStorageUnavailable() from None
         finally:
@@ -63,6 +70,13 @@ class NetworkMetadataProjectionSourceReadService:
 
     @staticmethod
     def _binding(connection, generation):
+        try:
+            return NetworkMetadataProjectionSourceReadService._checked_binding(connection, generation)
+        except Exception:
+            raise NetworkMetadataProjectionScopeUntrusted() from None
+
+    @staticmethod
+    def _checked_binding(connection, generation):
         if generation.logical_source_id != LOGICAL_SOURCE_ID:
             raise ValueError
         row = connection.execute("SELECT * FROM network_metadata_capture_scope_bindings WHERE binding_digest=?",
@@ -88,6 +102,8 @@ class NetworkMetadataProjectionSourceReadService:
             raise ValueError
         generation = SourceGenerationV1(**dict(row))
         self._binding(connection, generation)
+        integer(generation.generation_start_offset)
+        integer(generation.committed_byte_offset, generation.generation_start_offset)
         return generation
 
     def list_source_generations(self):
@@ -104,11 +120,25 @@ class NetworkMetadataProjectionSourceReadService:
         with self._snapshot() as connection:
             return self._generation(connection, source_generation_id)
 
+    def validate_generation_admission(self, source_generation_id, *, admission):
+        from types import SimpleNamespace
+        with self._snapshot() as connection:
+            generation = self._generation(connection, source_generation_id)
+            binding = self._binding(connection, generation)
+            admission.binding_for(SimpleNamespace(site_id=binding.site_id, capture_source_id=binding.capture_source_id,
+                network_scope_id=binding.network_scope_id, capture_scope_binding_digest=binding.binding_digest,
+                capture_scope_ipv4_cidrs=binding.ipv4_cidrs, binding_valid_from_utc=binding.valid_from_utc,
+                network_scope_state="within_intended_scope", event_at=binding.valid_from_utc))
+
     def _record(self, connection, row, generation):
         values = dict(row)
         binding = self._binding(connection, generation)
         offset = integer(values["record_start_byte_offset"])
         identity = source_event_identity(generation.source_generation_id, offset)
+        if (values["network_scope_state"] != "within_intended_scope"
+                or any(values[name] != getattr(binding, name) for name in ("site_id", "capture_source_id", "network_scope_id"))
+                or values["capture_scope_binding_digest"] != binding.binding_digest):
+            raise NetworkMetadataProjectionScopeUntrusted()
         if (values["source_generation_id"] != generation.source_generation_id
                 or values["source_event_identity"] != identity
                 or values["observation_id"] != observation_uuid(values["source_event_family"], identity)
@@ -119,7 +149,8 @@ class NetworkMetadataProjectionSourceReadService:
                 or values["capture_scope_binding_digest"] != binding.binding_digest
                 or not generation.generation_start_offset <= offset < generation.committed_byte_offset):
             raise ValueError
-        ni_timestamp(values["event_at"], canonical=True)
+        if ni_timestamp(values["event_at"], canonical=True) < ni_timestamp(binding.valid_from_utc, canonical=True):
+            raise NetworkMetadataProjectionScopeUntrusted()
         ni_timestamp(values["ingested_at"], canonical=True)
         # Only dependencies of this selected observation: never audit the store.
         health = connection.execute("SELECT * FROM network_metadata_source_health WHERE health_id=?",
@@ -164,7 +195,36 @@ class NetworkMetadataProjectionSourceReadService:
         # Never expose stale endpoints even if a damaged source leaves old rows.
         names = NetworkMetadataProjectionSourceRecordV1.__dataclass_fields__
         selected = {name: values[name] for name in names if name in values}
-        return NetworkMetadataProjectionSourceRecordV1(**selected, capture_scope_ipv4_cidrs=binding.ipv4_cidrs, **endpoints)
+        return NetworkMetadataProjectionSourceRecordV1(**selected, capture_scope_ipv4_cidrs=binding.ipv4_cidrs,
+                                                       binding_valid_from_utc=binding.valid_from_utc, **endpoints)
+
+    def read_reset_snapshot(self, *, admission):
+        """One consistent, query-only generation/tail snapshot; no raw-file floors."""
+        from types import SimpleNamespace
+        floors = []
+        with self._snapshot() as connection:
+            rows = connection.execute("SELECT * FROM network_metadata_source_generations ORDER BY source_generation_id")
+            for row in rows:
+                generation = self._generation(connection, row["source_generation_id"])
+                binding = self._binding(connection, generation)
+                proof = SimpleNamespace(site_id=binding.site_id, capture_source_id=binding.capture_source_id,
+                    network_scope_id=binding.network_scope_id, capture_scope_binding_digest=binding.binding_digest,
+                    capture_scope_ipv4_cidrs=binding.ipv4_cidrs, binding_valid_from_utc=binding.valid_from_utc,
+                    network_scope_state="within_intended_scope", event_at=binding.valid_from_utc)
+                admission.binding_for(proof)
+                tail = connection.execute("SELECT * FROM network_metadata_observations WHERE source_generation_id=? "
+                    "ORDER BY record_start_byte_offset DESC LIMIT 1", (generation.source_generation_id,)).fetchone()
+                record = None if tail is None else self._record(connection, tail, generation)
+                if record is not None:
+                    admission.binding_for(record)
+                floors.append(dict(source_generation_id=generation.source_generation_id, site_id=binding.site_id,
+                    capture_source_id=binding.capture_source_id, network_scope_id=binding.network_scope_id,
+                    capture_scope_binding_digest=binding.binding_digest, binding_valid_from_utc=binding.valid_from_utc,
+                    generation_start_offset=generation.generation_start_offset,
+                    committed_byte_offset=generation.committed_byte_offset,
+                    last_retained_record_start_byte_offset=None if record is None else record.record_start_byte_offset,
+                    last_retained_observation_id=None if record is None else record.observation_id))
+        return tuple(floors)
 
     def read_projection_batch(self, source_generation_id, after_record_start_byte_offset, limit):
         integer(limit, 1, 256)

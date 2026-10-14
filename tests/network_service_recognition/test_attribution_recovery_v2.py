@@ -125,11 +125,15 @@ def test_T02_T03_T04_T10_T29_T30_pending_requires_exact_materialized_device_link
     # First edge is confirmed. The independent second observation may be pending.
     first = source_record(dst_ip="203.0.113.93")
     second = source_record(100, src_ip="10.73.0.9", dst_ip="203.0.113.94")
+    # In Core V2 only a genuine guest role may remain pending. A separate local
+    # observation links that guest gap to the same Device; outbound facts remain.
+    third = source_record(101, src_ip="10.73.0.9", dst_ip="10.73.0.8")
     if kind == "other_site":
-        second = replace(second, site_id="f" * 24)
-    state = stack(tmp_path, [first, second])
+        second = source_record(100, src_ip="10.73.0.9", dst_ip="203.0.113.94", site_id="f" * 24)
+        third = source_record(101, src_ip="10.73.0.9", dst_ip="10.73.0.8", site_id="f" * 24)
+    state = stack(tmp_path, [first, second, third])
     try:
-        state.attribution.states.update({"203.0.113.93": "endpoint_absent", "203.0.113.94": "unavailable"})
+        state.attribution.states["10.73.0.8"] = "unavailable"
         state.attribution.macs["10.73.0.9"] = OTHER_MAC if kind == "other_device" else MAC
         if kind == "both_pending":
             state.attribution.states["10.73.0.9"] = "unavailable"
@@ -170,9 +174,9 @@ def test_v2_serialization_golden_field_order_and_coverage():
 
 
 def test_runtime_binding_facts_and_pending_share_one_read_snapshot(tmp_path):
-    state = stack(tmp_path, [source_record(dst_ip="203.0.113.93")])
+    state = stack(tmp_path, [source_record(dst_ip="203.0.113.93"), source_record(100)])
     try:
-        state.attribution.states["203.0.113.93"] = "unavailable"
+        state.attribution.states["10.73.0.8"] = "unavailable"
         state.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
         state.service.poll()
         reader = DeviceNetworkMetadataRecognitionReadService(state.config.db_path)
@@ -215,10 +219,10 @@ def test_runtime_binding_facts_and_pending_share_one_read_snapshot(tmp_path):
         state.repo.close()
 
 
-def test_pending_window_half_open_and_inbound_edge_can_link_without_service_fact(tmp_path):
-    state = stack(tmp_path, [source_record(src_ip="203.0.113.93", dst_ip="10.73.0.7")])
+def test_pending_window_half_open_and_local_edge_can_link_without_service_fact(tmp_path):
+    state = stack(tmp_path, [source_record(src_ip="10.73.0.8", dst_ip="10.73.0.7")])
     try:
-        state.attribution.states["203.0.113.93"] = "unavailable"
+        state.attribution.states["10.73.0.8"] = "unavailable"
         state.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
         state.service.poll()
         snapshot = snapshot_for(state)

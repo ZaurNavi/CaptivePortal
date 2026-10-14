@@ -55,7 +55,7 @@ def test_G1_R2_QA01_core_only_default_no_installer(state):
     state.service.poll()
     assert len(edges(state)) == 1
     assert not any(name in TABLES for _, name, _ in signature(state.repo.connection))
-    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_G1_R2_QA02_R2_QA09_core_plus_extension_off_upkeep(state):
@@ -86,7 +86,7 @@ def test_G1_R2_QA03_old_baseline_is_not_rollback_floor(state):
     "DROP INDEX idx_projection_mac_event",
     "DROP TRIGGER immutable_device_network_metadata_edges",
     "DELETE FROM projection_service_recognition_extension_meta",
-    "PRAGMA user_version=2",
+    "PRAGMA user_version=1",
 ])
 def test_G1_R2_QA06_QA07_QA08_closed_object_and_metadata_validation(state, damage):
     install_fixture(state)

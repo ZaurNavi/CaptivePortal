@@ -1,4 +1,4 @@
-"""Closed optional Service Recognition Extension V1; Core V1 stays unchanged."""
+"""Closed optional Service Recognition Extension V1 over exact fresh Core V2."""
 from app.network_metadata.validation import ni_timestamp
 from .models import ProjectionUnavailable
 
@@ -34,7 +34,10 @@ def validate_extension_metadata(connection):
 
 def append_candidate(connection, edge, committed_at):
     if (edge["device_endpoint_role"] == "src" and edge["direction"] == "outbound"
-            and edge["peer_scope"] == "external" and edge["source_event_family"] in {"dns", "tls", "quic"}):
+            and edge["peer_scope"] == "external" and edge["source_event_family"] in {"dns", "tls", "quic"}
+            and edge["projection_contract_version"] == 2
+            and edge["attribution_state"] == "resolved"
+            and edge["peer_attribution_state"] == "not_applicable_outside_guest_scope"):
         connection.execute(
             "INSERT INTO projection_service_recognition_feed(edge_id,committed_at_utc) VALUES(?,?)",
             (edge["edge_id"], committed_at))

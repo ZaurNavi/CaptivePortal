@@ -4,7 +4,7 @@ from app.device_fingerprint.validation import validate_site_id
 from app.network_attribution.validation import canonical_mac
 from app.network_metadata.validation import canonical_uuid, digest, integer, ip, ni_timestamp, text
 from app.network_metadata.canonical import observation_uuid, source_event_identity
-from .models import ProjectionUnavailable, ProjectionValidationError
+from .models import ProjectionUnavailable, ProjectionValidationError, ALGORITHM
 from .read_service import DeviceNetworkMetadataReadService
 from .recognition_read_service import RecognitionProjectionEdgeFactV1
 from .validation import edge_id, semantic_digest, read_window
@@ -107,7 +107,10 @@ class ServiceRecognitionDeliveryReadService(DeviceNetworkMetadataReadService):
                 or edge["peer_scope"] != "external" or edge["source_event_family"] not in {"dns", "tls", "quic"}
                 or edge["attribution_state"] != "resolved" or edge["attribution_source"] != "trusted_dhcp_v4"
                 or edge["network_scope_state"] != "within_intended_scope"
-                or edge["projection_contract_version"] != 1):
+                or edge["projection_contract_version"] != 2
+                or edge["projection_algorithm_version"] != ALGORITHM
+                or edge["peer_attribution_state"] != "not_applicable_outside_guest_scope"
+                or edge["peer_attribution_binding_id"] is not None):
             raise ValueError
         canonical_uuid(edge["source_generation_id"], 4)
         canonical_uuid(edge["source_observation_ref"], 5)

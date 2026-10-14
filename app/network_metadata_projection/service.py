@@ -11,7 +11,10 @@ from app.network_attribution.models import NetworkMetadataAttributionResultV1
 from app.network_attribution.validation import canonical_mac
 from .models import (ALGORITHM, ATTRIBUTION_STATES, ProjectionConflict, ProjectionError,
                      ProjectionUnavailable, RegistryEvaluation)
-from .models import NetworkMetadataProjectionResultV1, PreparedDisposition
+from .models import NetworkMetadataProjectionResultV2, PreparedDisposition
+from .models import EndpointDisposition
+from .config import ScopeAdmission
+from app.network_metadata.projection_source import NetworkMetadataProjectionScopeUntrusted
 from .validation import edge_id, semantic_digest, timestamp
 from .effective_runtime_state import effective_runtime_state
 from .telemetry import RETRY_COUNTER_FIELDS, MAX_COUNTER
@@ -27,6 +30,7 @@ class NetworkMetadataProjectionService:
         self.last_retry = self.last_reconcile = self.last_retention = None
         self._retry_counts = dict.fromkeys(RETRY_COUNTER_FIELDS, 0)
         self._authority_failed_in_batch = False
+        self._scope_admission = None if not config.enabled else ScopeAdmission(config.scope_admission_json)
         if config.telemetry_aggregation_enabled and telemetry is not None:
             telemetry.enable_aggregation(monotonic=monotonic)
             repository.telemetry = telemetry
@@ -42,6 +46,11 @@ class NetworkMetadataProjectionService:
         if not self.config.enabled:
             return False
         self.repository.initialize()
+        # Deleting a derived DB and launching the ordinary writer must never
+        # silently replay retained NI-01 history. V2 startup requires the explicit
+        # offline bootstrap epoch (even for a source snapshot with zero floors).
+        if self.repository.connection.execute("SELECT 1 FROM projection_source_reset_epoch WHERE singleton_id=1").fetchone() is None:
+            raise ProjectionUnavailable("reset_bootstrap_required")
         self.repository.attribution_read_state = None
         if self.config.idle_write_reduction_enabled:
             self.repository.source_verified_in_run = False
@@ -87,9 +96,12 @@ class NetworkMetadataProjectionService:
         result = NetworkMetadataAttributionResultV1
         address = getattr(source, role + "_ip")
         if address is None:
-            return result("endpoint_absent")
+            return EndpointDisposition("endpoint_absent")
         if ipaddress.ip_address(address).version != 4:
-            return result("unsupported_address_family")
+            return EndpointDisposition("unsupported_address_family")
+        if not any(ipaddress.IPv4Address(address) in ipaddress.IPv4Network(cidr)
+                   for cidr in source.capture_scope_ipv4_cidrs):
+            return EndpointDisposition("not_applicable_outside_guest_scope")
         if horizon.state != "available":
             return result("unavailable", "authority_horizon_unavailable")
         instant = ni_timestamp(source.event_at, canonical=True)
@@ -100,7 +112,7 @@ class NetworkMetadataProjectionService:
         except Exception:
             self._authority_read(False)
             return result("unavailable", "attribution_store_unavailable")
-        if value.state not in ATTRIBUTION_STATES or value.state == "invalid":
+        if value.state not in ATTRIBUTION_STATES - {"invalid", "not_applicable_outside_guest_scope"}:
             raise ProjectionConflict("attribution_query_contract_invalid")
         if value.state == "unavailable" and value.reason in {
                 "attribution_disabled", "authority_horizon_unavailable", "attribution_store_unavailable"}:
@@ -140,14 +152,15 @@ class NetworkMetadataProjectionService:
             attribution_source="trusted_dhcp_v4", attribution_binding_id=own.binding_id,
             attribution_valid_from=own.valid_from, attribution_valid_until=own.valid_until,
             peer_attribution_state=peer.state, peer_attribution_binding_id=peer.binding_id if peer.state == "resolved" else None,
-            projection_contract_version=1, projection_algorithm_version=ALGORITHM, projection_run_id=self.run_id)
+            projection_contract_version=2, projection_algorithm_version=ALGORITHM, projection_run_id=self.run_id)
         edge["edge_semantic_digest"] = semantic_digest(edge)
         return edge
 
     def prepare(self, source, *, prior_pending=None):
         self._source_identity(source)
+        self._scope_admission.binding_for(source)
         if not self._eligible(source):
-            result = NetworkMetadataProjectionResultV1(source.observation_id,
+            result = NetworkMetadataProjectionResultV2(source.observation_id,
                 prior_pending["src_snapshot_state"] if prior_pending is not None else "endpoint_absent",
                 prior_pending["dst_snapshot_state"] if prior_pending is not None else "endpoint_absent",
                 len(self.repository.existing_edges(source.observation_id)),
@@ -157,16 +170,24 @@ class NetworkMetadataProjectionService:
                 ("site_id", "site_id"), ("source_generation_id", "source_generation_id"),
                 ("record_start_byte_offset", "record_start_byte_offset"), ("event_at", "event_at"), ("source_ingested_at", "ingested_at"))):
             raise ProjectionConflict("source_observation_identity_conflict")
-        try:
-            horizon = self.attribution.get_authority_horizon(source.site_id)
-        except Exception:
-            horizon = SimpleNamespace(state="unavailable")
-        self._authority_read(horizon.state == "available")
+        horizon = SimpleNamespace(state="unavailable")
+        guest = any(address is not None and ipaddress.ip_address(address).version == 4
+                    and any(ipaddress.IPv4Address(address) in ipaddress.IPv4Network(cidr)
+                            for cidr in source.capture_scope_ipv4_cidrs)
+                    for address in (source.src_ip, source.dst_ip))
+        if guest:
+            try:
+                horizon = self.attribution.get_authority_horizon(source.site_id)
+            except Exception:
+                pass
+            self._authority_read(horizon.state == "available")
         states = {}
         for role in ("src", "dst"):
             if prior_pending is not None and not prior_pending["pending_" + role]:
-                states[role] = NetworkMetadataAttributionResultV1(prior_pending[role + "_snapshot_state"],
-                    binding_id=prior_pending[role + "_snapshot_binding_id"])
+                state = prior_pending[role + "_snapshot_state"]
+                states[role] = (EndpointDisposition(state) if state in {"not_applicable_outside_guest_scope",
+                    "endpoint_absent", "unsupported_address_family"} else NetworkMetadataAttributionResultV1(state,
+                    binding_id=prior_pending[role + "_snapshot_binding_id"]))
             else:
                 if prior_pending is not None:
                     self._count_retry("attribution_retry_attempted_roles")
@@ -192,7 +213,7 @@ class NetworkMetadataProjectionService:
                 pending[role + "_snapshot_binding_id"] = value.binding_id if value.state == "resolved" else None
         count = len(existing) + len(edges)
         status = ("partial_pending" if count else "pending") if pending is not None else ("complete" if count else "terminal_no_edge")
-        result = NetworkMetadataProjectionResultV1(source.observation_id, states["src"].state, states["dst"].state, count, status)
+        result = NetworkMetadataProjectionResultV2(source.observation_id, states["src"].state, states["dst"].state, count, status)
         return PreparedDisposition(source, edges, pending, result)
 
     def _evaluations(self, dispositions):
@@ -230,6 +251,20 @@ class NetworkMetadataProjectionService:
             raise ProjectionConflict("checkpoint_source_conflict")
         return offset
 
+    def _read_after(self, generation):
+        processed = self._checkpoint_verified(generation)
+        floor = self.repository.reset_floor(generation.source_generation_id)
+        discarded = None
+        if floor is not None:
+            if (floor["generation_start_offset"] != generation.generation_start_offset
+                    or floor["committed_byte_offset"] > generation.committed_byte_offset
+                    or floor["capture_scope_binding_digest"] != generation.capture_scope_binding_digest
+                    or floor["binding_valid_from_utc"] != generation.binding_valid_from_utc):
+                raise ProjectionConflict("checkpoint_source_conflict")
+            discarded = floor["last_retained_record_start_byte_offset"]
+        values = [value for value in (processed, discarded) if value is not None]
+        return max(values) if values else None
+
     def poll(self):
         if self.stop_event.is_set() or self.repository.live_state == "blocked_conflict":
             return
@@ -237,7 +272,8 @@ class NetworkMetadataProjectionService:
         try:
             generations = self.source.list_source_generations()
             for generation in generations:
-                after = self._checkpoint_verified(generation)
+                self.source.validate_generation_admission(generation.source_generation_id, admission=self._scope_admission)
+                after = self._read_after(generation)
                 batch = self.source.read_projection_batch(generation.source_generation_id, after, self.config.batch_max_observations)
                 if batch:
                     self._authority_failed_in_batch = False
@@ -265,10 +301,14 @@ class NetworkMetadataProjectionService:
                     self.repository.success_state(source_verified=True, last_source_poll_at=timestamp(self.repository.clock()))
             if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
                 self.telemetry.observe_success(idle_poll_count=1)
+        except NetworkMetadataProjectionScopeUntrusted:
+            self.repository.set_failure("blocked_conflict", "scope_admission_untrusted", observation=observation)
+            self.emit("projection_conflict", reason_code="scope_admission_untrusted")
+            return ()
         except ProjectionConflict as error:
             self.repository.set_failure("blocked_conflict", error.reason, observation=observation)
             self.emit("projection_conflict", reason_code=error.reason)
-            return (NetworkMetadataProjectionResultV1(observation, "invalid", "invalid", 0, "conflict", error.reason),) if observation else ()
+            return (NetworkMetadataProjectionResultV2(observation, "invalid", "invalid", 0, "conflict", error.reason),) if observation else ()
         except ProjectionError:
             raise
         except Exception:
@@ -305,7 +345,7 @@ class NetworkMetadataProjectionService:
                     return tuple(results)
                 source = self.source.get_projection_source_record(row["observation_id"])
                 if source is None:
-                    result = NetworkMetadataProjectionResultV1(row["observation_id"], row["src_snapshot_state"], row["dst_snapshot_state"],
+                    result = NetworkMetadataProjectionResultV2(row["observation_id"], row["src_snapshot_state"], row["dst_snapshot_state"],
                         len(self.repository.existing_edges(row["observation_id"])), "expired_unresolved")
                     prepared.append(PreparedDisposition(SimpleNamespace(observation_id=row["observation_id"]), [], None, result))
                     self.emit("expired_unresolved", observation_id=row["observation_id"])

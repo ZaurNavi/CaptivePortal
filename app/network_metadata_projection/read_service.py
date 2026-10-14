@@ -167,7 +167,7 @@ class DeviceNetworkMetadataReadService:
 
     def get_status(self):
         defaults = dict(enabled=self.enabled, store_state="unavailable" if self.enabled else "disabled",
-            runtime_state=None, safe_reason=None, schema_version=None, projection_contract_version=1,
+            runtime_state=None, safe_reason=None, schema_version=None, projection_contract_version=2,
             projection_algorithm_version=ALGORITHM, last_projection_commit_at=None, last_registry_reconcile_at=None,
             pending_attribution_count=0, checkpoint_count=0, db_bytes=0, capacity_limit_bytes=self.max_db_bytes)
         if not self.enabled:
@@ -187,7 +187,7 @@ class DeviceNetworkMetadataReadService:
                         total += Path(self.db_path + suffix).stat().st_size
                     except FileNotFoundError:
                         pass
-                defaults.update(store_state="available", schema_version=1, db_bytes=total)
+                defaults.update(store_state="available", schema_version=2, db_bytes=total)
         except (ProjectionUnavailable, OSError):
             defaults["safe_reason"] = "projection_store_unavailable"
         return defaults
