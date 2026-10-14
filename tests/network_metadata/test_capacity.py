@@ -6,6 +6,24 @@ from . import store, source_event, record, outcome
 CAPACITY_METRICS = {}
 
 
+def test_io_hotpath_capacity_guard_precedes_transactional_probe(tmp_path, monkeypatch):
+    import pytest
+    from app.network_metadata.models import NetworkMetadataStorageLimit
+    from .test_repository import _a_store, _a_outcomes, _a_rows
+    with _a_store(tmp_path, True) as state:
+        before = _a_rows(state.repo)
+        def no_headroom():
+            raise NetworkMetadataStorageLimit()
+        def forbidden(*_):
+            pytest.fail("no identity probe may run without capacity reservation")
+        monkeypatch.setattr(state.repo, "ensure_headroom", no_headroom)
+        monkeypatch.setattr(state.repo, "identity_range_empty", forbidden)
+        with pytest.raises(NetworkMetadataStorageLimit):
+            state.repo.ingest_batch(_a_outcomes(state, [record()]), state.run, state.health, state.anchor)
+        assert _a_rows(state.repo) == before
+        assert not state.repo.connection.in_transaction
+
+
 def test_3000_temporary_observation_capacity(tmp_path):
     data = [record(source_event(family)) for family in ("dns", "tls", "quic") for _ in range(1000)]
     source = b"\n".join(data) + b"\n"

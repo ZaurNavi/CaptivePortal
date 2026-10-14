@@ -80,3 +80,47 @@ def test_closed_binding(tmp_path):
             make_capture_scope_binding(candidate)
     with pytest.raises(NetworkMetadataConfigError):
         configuration(tmp_path, NETWORK_METADATA_CAPTURE_SCOPE_BINDING_JSON='{"x":1,"x":2}')
+
+
+@pytest.mark.parametrize("value", ["TRUE", "False", "1", "", " true", "false ", True, 1, None, []])
+def test_io_hotpath_strict_flag_and_disabled_short_circuit(tmp_path, value):
+    with pytest.raises(NetworkMetadataConfigError):
+        configuration(tmp_path, NETWORK_METADATA_IO_HOTPATH_V1_ENABLED=value)
+    disabled = network_metadata_config_from_env({
+        "NETWORK_METADATA_ENABLED": "false", "NETWORK_METADATA_IO_HOTPATH_V1_ENABLED": value,
+    })
+    assert disabled == NetworkMetadataConfig()
+
+
+@pytest.mark.parametrize("coalesce,aggregation", [(False, False), (True, False), (False, True), (True, True)])
+def test_io_hotpath_default_off_preserves_frozen_digest(tmp_path, coalesce, aggregation):
+    from dataclasses import asdict, FrozenInstanceError
+    from app.network_metadata.models import LOGICAL_SOURCE_ID, NORMALIZER_VERSION, SOURCE_CONTRACT_VERSION
+    variables = {}
+    if coalesce:
+        variables.update(NETWORK_METADATA_INGEST_COALESCE_ENABLED="true", NETWORK_METADATA_INGEST_COALESCE_MAX_MS="100")
+    if aggregation:
+        variables["NETWORK_METADATA_TELEMETRY_AGGREGATION_ENABLED"] = "true"
+    default = configuration(tmp_path, **variables)
+    off = configuration(tmp_path, **variables, NETWORK_METADATA_IO_HOTPATH_V1_ENABLED="false")
+    on = configuration(tmp_path, **variables, NETWORK_METADATA_IO_HOTPATH_V1_ENABLED="true")
+    binding = asdict(default.capture_scope_binding)
+    binding["ipv4_cidrs"] = list(default.capture_scope_binding.ipv4_cidrs)
+    legacy = dict(capture_scope_binding=binding, db_path=default.db_path,
+        logical_source_id=LOGICAL_SOURCE_ID, max_db_bytes=default.max_db_bytes,
+        max_record_bytes=default.max_record_bytes, batch_max_records=default.batch_max_records,
+        batch_max_bytes=default.batch_max_bytes, normalizer_version=NORMALIZER_VERSION,
+        poll_interval_seconds=default.poll_interval_seconds, source_contract_version=SOURCE_CONTRACT_VERSION,
+        source_path=default.source_path)
+    if coalesce:
+        legacy.update(ingest_coalesce_enabled=True, ingest_coalesce_max_ms=100)
+    if aggregation:
+        legacy["telemetry_aggregation_enabled"] = True
+    assert default == off
+    assert default.io_hotpath_v1_enabled is off.io_hotpath_v1_enabled is False
+    assert default.configuration_digest == semantic_digest(legacy)
+    assert on.io_hotpath_v1_enabled is True
+    assert on.configuration_digest == semantic_digest({**legacy, "io_hotpath_v1_enabled": True})
+    assert on.configuration_digest != off.configuration_digest
+    with pytest.raises(FrozenInstanceError):
+        on.io_hotpath_v1_enabled = False

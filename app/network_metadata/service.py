@@ -329,6 +329,8 @@ class NetworkMetadataService:
                             "source_absent" not in self.health.local_reasons or self._path_info() is not None):
                         self.health.source_available()
                     if records:
+                        all_new = self.config.io_hotpath_v1_enabled and repo.identity_range_empty(
+                            generation.source_generation_id, records[0].start, records[-1].start)
                         outcomes = []
                         for record in records:
                             result = (normalize_record(record.data, source_generation_id=generation.source_generation_id,
@@ -337,7 +339,7 @@ class NetworkMetadataService:
                                 else RecordOutcome(record.start, record.end, record.byte_length, "record_too_large",
                                     source_record_sha256=record.source_record_sha256))
                             outcomes.append(result)
-                            if repo.identity_outcome(generation.source_generation_id, result) in {
+                            if not all_new and repo.identity_outcome(generation.source_generation_id, result) in {
                                 "source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"}:
                                 break
                         repo.ingest_batch(outcomes, self.run_id, self.health,

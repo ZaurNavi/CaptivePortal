@@ -712,3 +712,29 @@ Portal candidate validation checks General/Admin values, canonical non-secret
 Controller prerequisites and all fourteen Portal values. A new generation carries
 its parent secret binding unchanged without decrypting it. General/Controller
 full secret validation and Stage-4 fail-closed startup remain unchanged.
+### NI-01 ingestion hot path — PERF-IO-NI01-A
+
+`NETWORK_METADATA_IO_HOTPATH_V1_ENABLED` is an independent process-startup
+boolean, **default OFF** (unset or literal `false`). Only lowercase `true`
+and `false` are accepted when `NETWORK_METADATA_ENABLED=true`; malformed
+values cause controlled NI-01 startup failure. Disabled NI-01 does not parse it.
+
+The single switch enables all three A optimizations together: an exact
+generation/start-offset range probe before normalization plus an independent
+probe under `BEGIN IMMEDIATE`; a validated connection-owned immutable insert
+column allowlist; and one fault UPSERT per actually reached batch-local group.
+Any overlap uses the original ordered per-record identity checks.
+
+OFF preserves the legacy SQL path and omits the new flag from canonical
+configuration-digest inputs. ON includes `io_hotpath_v1_enabled=true` in that
+digest for explicit run lineage. There is no Admin/runtime toggle; changing
+the environment requires a separately authorized controlled restart.
+
+SQLite V1 schema/indexes, WAL/FULL durability, source/replay/checkpoint semantics,
+health, event-count telemetry and all downstream read contracts are unchanged.
+Package B retention optimization is not implemented by A.
+
+This opt-in reduces measured SQL statement amplification only. Physical IOPS
+or host-load improvement is not established by statement counts. Publication
+does not authorize production activation; independent Tech Lead release and
+performance checks plus Owner authorization remain required.
