@@ -633,3 +633,30 @@ def test_runtime_start_requires_discard_epoch_no_implicit_replay(tmp_path):
         assert not repo.connection.execute("SELECT 1 FROM projection_source_checkpoints").fetchone()
     finally:
         repo.close()
+
+
+def test_T06_V2_12_complete_disposable_pair_discards_derived_only(tmp_path):
+    with store(tmp_path) as source:
+        manifest, keep = staged(source, tmp_path)
+        protected = {p: Path(p).read_bytes() for p in keep}
+        targets = [manifest["projection_target"], manifest["materialization_target"]]
+        for target in targets:
+            with sqlite3.connect(target) as connection:
+                connection.execute("CREATE TABLE old_derived_history(value TEXT)")
+                connection.execute("INSERT INTO old_derived_history VALUES('disposable derived history')")
+        paired = dict(manifest, state="REPLACED_NOT_STARTED")
+        for member, target in zip(("projection", "materialization"), targets):
+            # Simulation under tmp_path only; no executable reset capability in
+            # the shipped helper and no production paths or services are used.
+            shutil.copyfile(manifest[member]["path"], target)
+            paired[member] = dict(manifest[member], path=target)
+        path = tmp_path / "replaced-pair.json"
+        path.write_text(json.dumps(paired))
+        frozen = hashlib.sha256(path.read_bytes()).hexdigest()
+        report = verify(manifest_path=str(path), admission_json=admitted_source(source),
+                        expected_manifest_sha256=frozen)
+        assert report["state"] == "VERIFIED" and report["activation_authorized"] is False
+        for target in targets:
+            with sqlite3.connect(Path(target).as_uri()+"?mode=ro", uri=True) as connection:
+                assert not connection.execute("SELECT 1 FROM sqlite_master WHERE name='old_derived_history'").fetchone()
+        assert {p: Path(p).read_bytes() for p in keep} == protected
