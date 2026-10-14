@@ -1,4 +1,4 @@
-﻿# CaptivPortal Core Platform
+# CaptivPortal Core Platform
 
 The repository contains a production-active passive/advisory Device Fingerprint
 subsystem. TASK-DEVICE-FINGERPRINT-01 remains its Evidence Foundation layer and
@@ -9,7 +9,7 @@ read-only Admin presentation. See
 
 [Русская версия](README_RU.md)
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://www.python.org/)
 [![Omada](https://img.shields.io/badge/Omada-5.14.31-1f8ceb.svg)]()
 [![Status](https://img.shields.io/badge/status-production%20platform-blue.svg)]()

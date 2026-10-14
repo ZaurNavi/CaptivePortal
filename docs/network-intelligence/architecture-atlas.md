@@ -1,4 +1,4 @@
-﻿# Network Intelligence V1 — Visual Architecture Atlas
+# Network Intelligence V1 — Visual Architecture Atlas
 
 Status: current production architecture
 Updated: 2026-10-14

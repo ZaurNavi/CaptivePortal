@@ -1,11 +1,12 @@
 # Инвентаризация CaptivPortal
 
-Status: current runtime snapshot
+Status: current repository + production provenance snapshot
 Updated: 2026-10-14
 Branch: `main`
-Runtime commit: `27087766d3f2e104a44da3f36aa6e72a082b12de`
-Runtime tree: `3fe941f1962e6df72d102ba36da60bf25f3bd70a`
-Commit source: merge PR #178 / Task-06 Device Fingerprint presentation, 2026-10-04
+Repository main HEAD: `27087766d3f2e104a44da3f36aa6e72a082b12de`
+Repository main tree: `3fe941f1962e6df72d102ba36da60bf25f3bd70a`
+Repository baseline source: merge PR #207 / NI-05 Organization Context (`feat(ni05): Organization Context in Device Card`)
+Historical Device Fingerprint checkpoint: PR #178 / Task-06 Device Fingerprint presentation, 2026-10-04
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
 
@@ -46,11 +47,21 @@ classification result.
 <!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
 ## Network Intelligence V1 — current production subsystem
 
-Current verified production baseline:
-- HEAD 27087766d3f2e104a44da3f36aa6e72a082b12de
-- tree 3fe941f1962e6df72d102ba36da60bf25f3bd70a
+Current provenance is intentionally split into separate identities:
 
-Current independently supervised services:
+| Layer | Verified identity / state | Meaning |
+|---|---|---|
+| Repository `main` HEAD | `27087766d3f2e104a44da3f36aa6e72a082b12de` / tree `3fe941f1962e6df72d102ba36da60bf25f3bd70a` | Current Git source baseline; merge PR #207 / NI-05 Organization Context |
+| Production filesystem checkout HEAD | `27087766d3f2e104a44da3f36aa6e72a082b12de` | Files present in the production checkout at Tech Lead R1 verification |
+| Running `network-metadata.service` | `active`; process started `2026-10-12` | Process lifetime/state evidence; it is not inferred from checkout HEAD |
+| Recorded NI-01 ingest-run artifact | `385fecebd2bd8778c3a2034514d9e72587984753` | Loaded/run artifact identity recorded for the ingest process |
+| Other running NI process loaded identities | **not established by this docs correction** | Must be verified separately when restart/deploy identity matters |
+
+Repository HEAD and production checkout HEAD being equal does **not** prove that
+every already-running NI process loaded that checkout. Loaded process identity is
+a separate production check at restart/deploy time.
+
+Current independently supervised services (service-state observation only; not a loaded-code identity claim):
 | Service | Role | Current closure evidence |
 |---|---|---|
 | captive-portal.service | Admin/API read composition | active, NRestarts=0 |

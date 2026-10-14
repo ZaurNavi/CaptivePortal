@@ -2,7 +2,7 @@
 
 Status: **current production capability / functionally closed**
 Updated: 2026-10-14
-Repository / production baseline: main@27087766d3f2e104a44da3f36aa6e72a082b12de
+Repository baseline: main@27087766d3f2e104a44da3f36aa6e72a082b12de
 Tree: 3fe941f1962e6df72d102ba36da60bf25f3bd70a
 
 Network Intelligence V1 is the production metadata-intelligence path that turns bounded passive network observations into Device-scoped protocol and recognized-service summaries without making the Device Card a packet-analysis engine.
@@ -329,7 +329,24 @@ Repository defaults:
 - WEB_ADMIN_DEVICE_SERVICE_INTELLIGENCE_ENABLED=false;
 - NETWORK_SERVICE_MATERIALIZATION_MODE=off.
 
-Repository default-off is not a statement that production is disabled. The 2026-10-14 production baseline was independently verified with the NI services active.
+Repository default-off is not a statement that production is disabled.
+
+### Repository, production checkout and loaded runtime identity
+
+These are separate provenance facts and must not be collapsed:
+
+| Layer | Verified identity / state | Interpretation |
+|---|---|---|
+| Repository `main` HEAD | `27087766d3f2e104a44da3f36aa6e72a082b12de` / tree `3fe941f1962e6df72d102ba36da60bf25f3bd70a` | Current source baseline; merge PR #207 / NI-05 Organization Context |
+| Production filesystem checkout HEAD | `27087766d3f2e104a44da3f36aa6e72a082b12de` | Filesystem checkout observed by Tech Lead R1 |
+| Running `network-metadata.service` | `active`; process started `2026-10-12` | Runtime process state/lifetime |
+| Recorded NI-01 ingest-run artifact | `385fecebd2bd8778c3a2034514d9e72587984753` | Loaded/run artifact identity recorded for NI-01 ingestion |
+| Other running NI process loaded identities | **not established by this correction** | Verify separately when restart/deploy identity matters |
+
+A running process can predate the current filesystem checkout. Therefore
+`repository HEAD == production checkout HEAD` is **not** evidence that every
+running NI process executes that checkout. Restart/deploy verification must
+capture loaded process identity separately.
 
 Host-verified non-secret runtime state at the closure baseline:
 - NETWORK_METADATA_ENABLED=true;
@@ -411,7 +428,7 @@ absence of recognized Service != absence of network activity
 
 ## 13. Process and failure isolation
 
-Current production process boundaries independently verified at the closure baseline:
+Current production process boundaries observed at the closure baseline (service/process topology only; not a claim that every running process loaded the current checkout):
 - captive-portal.service — Admin/read composition;
 - fingerprint-sensor.service — raw fingerprint sensor and NI-02A trusted DHCP authority recorder;
 - fingerprint-suricata.service — Suricata packet consumer;

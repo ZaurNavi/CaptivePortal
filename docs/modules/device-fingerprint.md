@@ -1,4 +1,4 @@
-﻿# Device Fingerprint
+# Device Fingerprint
 
 Status: **current production capability**
 Updated: 2026-10-14
