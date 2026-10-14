@@ -2,7 +2,77 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[2]
+
+
+def test_real_node_ni05_organization_context():
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the NI-05 frontend contract"
+    result = subprocess.run(
+        [node, str(ROOT / "tests/admin_web/ni05_organization_context.cjs"),
+         str(ROOT / "app/admin_web/static/admin.js")],
+        cwd=ROOT, capture_output=True, text=True, timeout=25,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NI05_ORGANIZATION_CONTEXT_PASS" in result.stdout
+
+
+def test_ni05_preserves_ni04_lifecycle_and_coverage_bytes():
+    marker = "/* NI-04: independent bounded Service Intelligence coordinator. */"
+    current = (ROOT / "app/admin_web/static/admin.js").read_text(encoding="utf8").split(marker)[1]
+    accepted = subprocess.check_output(
+        ["git", "show", "3b5f70cec467939995fecc7667169239000b7308:app/admin_web/static/admin.js"],
+        cwd=ROOT, text=True,
+    ).split(marker)[1]
+    assert current[current.index("  function clearTimer()"):] == accepted[accepted.index("  function clearTimer()"):]
+    assert current[current.index("  function coverageMessage("):current.index("  function render(v, stale)")] == (
+        accepted[accepted.index("  function coverageMessage("):accepted.index("  function render(v, stale)")]
+    )
+    assert current.count("window.fetch(") == accepted.count("window.fetch(") == 1
+
+
+@pytest.mark.parametrize("name", [
+    "organizations/generic.svg", "services/generic.svg",
+    "services/instagram.svg", "services/whatsapp.svg",
+])
+def test_ni05_local_svg_is_passive(name):
+    import xml.etree.ElementTree as ET
+    source = (ROOT / "app/admin_web/static/icons" / name).read_text(encoding="utf8")
+    svg = ET.fromstring(source)
+    assert svg.tag == "{http://www.w3.org/2000/svg}svg"
+    assert "viewBox" in svg.attrib
+    allowed = {"svg", "path", "rect", "defs", "style"}
+    for element in svg.iter():
+        assert element.tag.rsplit("}", 1)[-1] in allowed
+        for key, value in element.attrib.items():
+            assert not key.lower().startswith("on")
+            assert key.rsplit("}", 1)[-1] not in {"href", "src"}
+            assert not any(token in value.lower() for token in ("javascript:", "data:", "http:", "https:", "url("))
+    assert not any(token in source.lower() for token in ("@import", "url(", "foreignobject", "<script", "<!entity"))
+
+
+def test_ni05_generic_brand_exceptions_and_provenance_are_explicit():
+    text = (ROOT / "app/admin_web/static/icons/README.md").read_text(encoding="utf8")
+    for token in ("Owner Exception 01", "Owner Exception 02", "clause 6",
+                  "Instagram_Glyph_Black.svg", "Digital_Glyph_Green_RGB_2026.svg"):
+        assert token in text
+    for name in ("organizations/google.svg", "organizations/meta.svg", "services/youtube.svg"):
+        assert not (ROOT / "app/admin_web/static/icons" / name).exists()
+
+
+@pytest.mark.parametrize("name", [
+    "organizations/generic.svg", "services/generic.svg",
+    "services/instagram.svg", "services/whatsapp.svg",
+])
+def test_ni05_assets_use_existing_flask_static_boundary(admin_app, name):
+    response = admin_app.test_client().get(
+        "/admin/static/icons/" + name, base_url="https://localhost",
+    )
+    assert response.status_code == 200
+    assert response.mimetype == "image/svg+xml"
+    assert response.data == (ROOT / "app/admin_web/static/icons" / name).read_bytes()
 
 
 def test_real_node_service_intelligence_coordinator():

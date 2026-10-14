@@ -56,7 +56,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
   const off = fixture({enabled: false}); await settle(); assert.equal(off.calls.length, 0);
   const f = fixture(); await settle(); assert.equal(f.calls.length, 0);
   f.visible(); await settle(); assert.equal(f.calls.length, 1);
-  assert.equal(f.ids["device-service-content"].children.length, 4);
+  assert.equal(f.ids["device-service-content"].children.length, 5);
   assert.match(f.ids["device-service-content"].textContent, /YouTube/);
   assert.ok(!f.ids["device-service-content"].textContent.includes("www.youtube.com"));
   assert.ok(f.calls[0].url.endsWith("/service-intelligence")); assert.equal(f.calls[0].options.cache, "no-store");
@@ -142,7 +142,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
     evidence_state: "no_supported_result_observed_with_sufficient_coverage"});
   empty.setPayload(value); empty.visible(); await settle();
   assert.match(empty.ids["device-service-state"].textContent, /does not prove/);
-  assert.equal(empty.ids["device-service-content"].children.length, 4);
+  assert.equal(empty.ids["device-service-content"].children.length, 5);
   assert.equal(empty.ids["device-service-state"].textContent,
     "No supported services recognized in the current window. This does not prove no Internet services or network activity.");
   // T20-T24: coverage warnings never suppress confirmed cards or age a fresh fact.
@@ -159,7 +159,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
     if (!positive) v.result.evidence_state = "insufficient_attribution";
     t.setPayload(v); t.visible(); await settle();
     assert.equal(t.ids["device-service-state"].textContent, expected);
-    assert.equal(t.ids["device-service-content"].children.length, 4);
+    assert.equal(t.ids["device-service-content"].children.length, 5);
     assert.equal(t.ids["device-service-content"].textContent.includes("YouTube"), positive);
     if (positive) assert.match(t.ids["device-service-content"].textContent, /Fresh/);
   }

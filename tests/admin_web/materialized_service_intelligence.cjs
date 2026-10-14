@@ -35,7 +35,7 @@ function fixture(payload,mode='serve'){
 const settle=()=>new Promise(r=>setImmediate(r));
 (async()=>{
  let f=fixture(base);f.visible();await settle();
- assert.equal(f.ids['device-service-content'].children.length,4);
+ assert.equal(f.ids['device-service-content'].children.length,5);
  assert.match(f.ids['device-service-content'].textContent,/Materialization: lagging/);
  assert.match(f.ids['device-service-state'].textContent,/Confirmed stored service evidence is shown/);
  assert.ok([...f.timers.values()].some(t=>t.ms===120000));
