@@ -5,13 +5,14 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 
 from .canonical import ni01_canonical_json
 from .models import (LOGICAL_SOURCE_ID, NORMALIZER_VERSION, CONFLICT_CATEGORIES,
     FAULT_CATEGORIES, SourceGenerationV1, SourceCheckpointV1,
     NetworkMetadataStorageUnavailable, NetworkMetadataStorageCorrupt,
     NetworkMetadataStorageLimit, NetworkMetadataWriterUnavailable,
-    NetworkMetadataValidationError)
+    NetworkMetadataValidationError, INT64_MAX)
 from .schema import TABLE_DDL, create_schema, validate_schema
 from .validation import integer, digest, canonical_uuid, ni_format_utc, ni_timestamp
 
@@ -42,12 +43,15 @@ class NetworkMetadataRepository:
         self.config, self.clock, self.telemetry = config, clock, telemetry
         self.connection = None
         self.capacity_halted = False
+        self._insert_columns = self._insert_columns_connection = self._insert_columns_path = None
 
     def emit(self, event, **fields):
         if self.telemetry is not None:
             self.telemetry.emit(event, **fields)
 
     def initialize(self):
+        if self.config.io_hotpath_v1_enabled:
+            self.close()
         try:
             self.connection = sqlite3.connect(self.config.db_path, timeout=.5, isolation_level=None)
             self.connection.row_factory = sqlite3.Row
@@ -62,6 +66,22 @@ class NetworkMetadataRepository:
                 with self.transaction():
                     create_schema(self.connection, ni_format_utc(self.clock()))
             validate_schema(self.connection)
+            if self.config.io_hotpath_v1_enabled:
+                columns = {}
+                for table in TABLE_DDL:
+                    rows = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+                    if (not rows or any(not isinstance(row, (sqlite3.Row, tuple)) or
+                            len(row) != 6 or type(row[0]) is not int or row[0] != index or
+                            type(row[1]) is not str or not row[1].isascii() or not row[1].isidentifier()
+                            for index, row in enumerate(rows))):
+                        raise NetworkMetadataStorageCorrupt()
+                    names = frozenset(row[1] for row in rows)
+                    if len(names) != len(rows):
+                        raise NetworkMetadataStorageCorrupt()
+                    columns[table] = names
+                self._insert_columns = MappingProxyType(columns)
+                self._insert_columns_connection = self.connection
+                self._insert_columns_path = self.config.db_path
             page_size = self.connection.execute("PRAGMA page_size").fetchone()[0]
             cap = self.config.max_db_bytes // page_size
             if self.connection.execute("PRAGMA page_count").fetchone()[0] > cap:
@@ -75,9 +95,14 @@ class NetworkMetadataRepository:
         except (sqlite3.Error, OSError):
             self.close()
             raise NetworkMetadataStorageUnavailable() from None
+        except (NetworkMetadataStorageUnavailable, NetworkMetadataValidationError):
+            if self.config.io_hotpath_v1_enabled:
+                self.close()
+            raise
         return self
 
     def close(self):
+        self._insert_columns = self._insert_columns_connection = self._insert_columns_path = None
         if self.connection is not None:
             self.connection.close()
             self.connection = None
@@ -104,7 +129,14 @@ class NetworkMetadataRepository:
     def _insert(self, table, values):
         if table not in TABLE_DDL:
             raise NetworkMetadataValidationError()
-        columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")}
+        if self.config.io_hotpath_v1_enabled:
+            if (self._insert_columns is None or self.connection is None or
+                    self._insert_columns_connection is not self.connection or
+                    self._insert_columns_path != self.config.db_path):
+                raise NetworkMetadataStorageUnavailable()
+            columns = self._insert_columns[table]
+        else:
+            columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")}
         if not set(values) <= columns:
             raise NetworkMetadataValidationError()
         names = ",".join(values)
@@ -252,6 +284,52 @@ class NetworkMetadataRepository:
             return "normalizer_determinism_conflict"
         return "duplicate_noop"
 
+    def identity_range_empty(self, generation_id, first_start, last_start):
+        """One exact generation probe; no cached/preflight transactional authority."""
+        canonical_uuid(generation_id, 4)
+        integer(first_start)
+        integer(last_start, first_start)
+        if self.connection is None:
+            raise NetworkMetadataStorageUnavailable()
+        try:
+            row = self.connection.execute(
+                "SELECT 1 FROM network_metadata_source_records WHERE source_generation_id=? "
+                "AND record_start_byte_offset BETWEEN ? AND ? LIMIT 1",
+                (generation_id, first_start, last_start)).fetchone()
+        except sqlite3.Error:
+            raise NetworkMetadataStorageUnavailable() from None
+        if row is None:
+            return True
+        if not isinstance(row, (sqlite3.Row, tuple)) or len(row) != 1 or type(row[0]) is not int or row[0] != 1:
+            raise NetworkMetadataStorageUnavailable()
+        return False
+
+    def _accumulate_fault(self, groups, generation_id, category, now, offset):
+        if type(category) is not str or category not in FAULT_CATEGORIES:
+            raise NetworkMetadataValidationError()
+        clock = ni_timestamp(now, canonical=True)
+        epoch = ni_format_utc(clock.replace(minute=clock.minute - clock.minute % 5, second=0, microsecond=0))
+        key = (LOGICAL_SOURCE_ID, generation_id or "none", category, epoch)
+        if key not in groups:
+            groups[key] = [generation_id, 1, now, now, offset, offset]
+        else:
+            group = groups[key]
+            group[1] += 1
+            group[3], group[5] = now, offset
+
+    def _flush_fault_groups(self, groups):
+        for key in sorted(groups):
+            generation_id, count, first_seen, last_seen, first_offset, last_offset = groups[key]
+            integer(count, 1, self.config.batch_max_records)
+            result = self.connection.execute("""INSERT INTO network_metadata_ingest_fault_aggregates
+                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(logical_source_id,source_generation_key,fault_category,aggregation_epoch_start_utc)
+                DO UPDATE SET count=count+excluded.count,last_seen_utc=excluded.last_seen_utc,last_relevant_offset=excluded.last_relevant_offset
+                WHERE typeof(count)='integer' AND count<=? - excluded.count""",
+                (key[0], key[1], generation_id, key[2], key[3], count,
+                 first_seen, last_seen, first_offset, last_offset, INT64_MAX))
+            if result.rowcount != 1:
+                raise NetworkMetadataStorageUnavailable()
+
     def _crash_point(self, label):
         """Private no-op injection boundary. Never configured in production."""
 
@@ -283,6 +361,8 @@ class NetworkMetadataRepository:
         faults = 0
         previous_health = controller.last_snapshot
         with self.transaction() as now:
+            all_new = self.config.io_hotpath_v1_enabled and self.identity_range_empty(
+                generation.source_generation_id, outcomes[0].start, outcomes[-1].start)
             candidate = controller.copy()
             plan = []
             sensitive_cutoff = ni_timestamp(now, canonical=True) - timedelta(days=14)
@@ -290,7 +370,7 @@ class NetworkMetadataRepository:
             # Phase A is read-only in SQLite: freeze identity dispositions and
             # final prefix health before retention or first-ingest writes.
             for outcome in outcomes:
-                disposition = self.identity_outcome(generation.source_generation_id, outcome)
+                disposition = "new" if all_new else self.identity_outcome(generation.source_generation_id, outcome)
                 if disposition in CONFLICT_CATEGORIES:
                     # Observe trustworthy source time, not its ordinary fault/filter category.
                     candidate.observe_output_time(outcome.output_event_at)
@@ -311,12 +391,16 @@ class NetworkMetadataRepository:
             batch_health_id = candidate.ensure(self, generation, now)
             # Phase B uses only the frozen prefix. Existing provenance is never
             # rewritten; every first-ingest observation owns the same final ref.
+            fault_groups = {} if self.config.io_hotpath_v1_enabled else None
             for outcome, disposition in plan:
                 if disposition != "new":
                     from .retention import RetentionPolicy
                     RetentionPolicy(self).expire_touched_identity(generation.source_generation_id, outcome.start, now)
                 if disposition in CONFLICT_CATEGORIES:
-                    self._fault(generation.source_generation_id, disposition, now, outcome.start)
+                    if self.config.io_hotpath_v1_enabled:
+                        self._accumulate_fault(fault_groups, generation.source_generation_id, disposition, now, outcome.start)
+                    else:
+                        self._fault(generation.source_generation_id, disposition, now, outcome.start)
                     faults += 1
                     break
                 if disposition == "duplicate_noop":
@@ -328,8 +412,13 @@ class NetworkMetadataRepository:
                     self._crash_point("after_observation_insert_before_commit")
                     committed += 1
                 else:
-                    self._fault(generation.source_generation_id, outcome.category, now, outcome.start)
+                    if self.config.io_hotpath_v1_enabled:
+                        self._accumulate_fault(fault_groups, generation.source_generation_id, outcome.category, now, outcome.start)
+                    else:
+                        self._fault(generation.source_generation_id, outcome.category, now, outcome.start)
                     faults += 1
+            if self.config.io_hotpath_v1_enabled:
+                self._flush_fault_groups(fault_groups)
             self._crash_point("before_checkpoint_update")
             anchor = anchor_provider(cursor)
             self.connection.execute("UPDATE network_metadata_checkpoint SET committed_byte_offset=?,continuity_anchor_start_offset=?,continuity_anchor_length=?,continuity_anchor_sha256=?,updated_at_utc=? WHERE logical_source_id=?",

@@ -2,6 +2,56 @@ import pytest
 from datetime import timedelta
 from app.network_metadata.models import NetworkMetadataStorageUnavailable
 from . import store, outcome, seed_blocked
+from .test_repository import _a_store, _a_outcomes, _a_rows
+
+
+@pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",
+    "before_fault_flush", "after_fault_flush", "before_checkpoint_update",
+    "after_checkpoint_update_before_commit", "after_commit"])
+def test_io_hotpath_fault_flush_observation_health_checkpoint_atomicity(tmp_path, monkeypatch, point):
+    from . import record
+    from .test_service import service_for
+    with _a_store(tmp_path, True, source=record() + b"\n{\n[]\n") as state:
+        items = _a_outcomes(state, [record(), b"{", b"[]"])
+        before = _a_rows(state.repo)
+        old_snapshot = state.health.last_snapshot
+        flush = state.repo._flush_fault_groups
+        def crash(label):
+            if label == point:
+                raise RuntimeError("disposable crash injection")
+        def fault_flush(groups):
+            crash("before_fault_flush")
+            flush(groups)
+            crash("after_fault_flush")
+        monkeypatch.setattr(state.repo, "_flush_fault_groups", fault_flush)
+        monkeypatch.setattr(state.repo, "_crash_point", crash)
+        with pytest.raises(RuntimeError):
+            state.repo.ingest_batch(items, state.run, state.health, state.anchor)
+        assert not state.repo.connection.in_transaction
+        state.repo.recover()
+        durable = point == "after_commit"
+        assert state.repo.load_active()[1].committed_byte_offset == (items[-1].end if durable else 0)
+        if not durable:
+            assert _a_rows(state.repo) == before
+            assert state.health.last_snapshot == old_snapshot
+        monkeypatch.setattr(state.repo, "_flush_fault_groups", flush)
+        monkeypatch.setattr(state.repo, "_crash_point", lambda _: None)
+        if not durable:
+            state.repo.ingest_batch(items, state.run, state.health, state.anchor)
+        assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
+        assert state.repo.connection.execute("SELECT sum(count) FROM network_metadata_ingest_fault_aggregates").fetchone()[0] == 2
+        assert state.repo.latest_health()["health_id"] == state.health.last_snapshot.health_id
+        assert state.repo.connection.execute("SELECT source_health_ref FROM network_metadata_observations").fetchone()[0] == state.health.last_snapshot.health_id
+        assert state.repo.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        # Restart uses the durable byte checkpoint, not an artificial fault rewind.
+        restarted = service_for(state)
+        try:
+            restarted.startup()
+            assert not restarted.poll_once()
+            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
+            assert state.repo.connection.execute("SELECT sum(count) FROM network_metadata_ingest_fault_aggregates").fetchone()[0] == 2
+        finally:
+            restarted.close()
 
 
 @pytest.mark.parametrize("category", ["source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"])

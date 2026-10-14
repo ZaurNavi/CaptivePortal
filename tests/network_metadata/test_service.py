@@ -12,6 +12,167 @@ from app.network_metadata.models import NetworkMetadataStorageUnavailable
 from app.network_metadata.telemetry import NetworkMetadataTelemetry
 from app.network_metadata.validation import ni_format_utc
 from . import configuration, Clock, Capture, IDENTITY, BOOT, store, seed_blocked, record, source_event, binding_input
+from .test_repository import _a_store, _a_outcomes, _a_rows, _a_sql
+
+
+@pytest.mark.parametrize("count", [1, 2, 256])
+def test_io_hotpath_exact_two_probes_and_all_family_equivalence(tmp_path, monkeypatch, count):
+    import uuid
+    from app.network_metadata import service as module
+    raw = [record(source_event(("dns", "tls", "quic")[index % 3])) for index in range(count)]
+    source = b"\n".join(raw) + b"\n"
+    rows, sql_metrics, results = [], [], []
+    normalize = module.normalize_record
+    for enabled in (False, True):
+        ids = iter(uuid.UUID(f"00000000-0000-4000-8000-{n:012d}") for n in range(1, 100))
+        monkeypatch.setattr(uuid, "uuid4", lambda: next(ids))
+        with _a_store(tmp_path / str(enabled), enabled, source=source) as state:
+            service = service_for(state)
+            try:
+                service.startup()
+                sql, normalized = [], []
+                def normalizer(data, **kwargs):
+                    normalized.append(kwargs["start"])
+                    return normalize(data, **kwargs)
+                monkeypatch.setattr(module, "normalize_record", normalizer)
+                state.repo.connection.set_trace_callback(sql.append)
+                assert service.poll_once()
+                state.repo.connection.set_trace_callback(None)
+                assert len(normalized) == count
+                assert state.repo.load_active()[1].committed_byte_offset == len(source)
+                assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == count
+                assert state.repo.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+                metric = _a_sql(sql)
+                assert metric["range_probes"] == (2 if enabled else 0)
+                assert metric["identities"] == (0 if enabled else 2 * count)
+                assert (metric["insert_pragmas"] == 0) == enabled
+                rows.append(_a_rows(state.repo))
+                results.append((dict(service.health.__dict__), state.events))
+                sql_metrics.append(metric)
+            finally:
+                service.close()
+    assert rows[0] == rows[1]
+    assert results[0] == results[1]
+    print("NI01_A_ALL_NEW_SQL", {"N": count, "off": sql_metrics[0], "on": sql_metrics[1]})
+
+
+@pytest.mark.parametrize("category", ["duplicate_noop", "source_record_identity_conflict",
+    "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
+def test_io_hotpath_transaction_reprobe_does_not_trust_preflight(tmp_path, monkeypatch, category):
+    with _a_store(tmp_path, True, source=(record() + b"\n") * 2) as state:
+        service = service_for(state)
+        try:
+            service.startup()
+            first = _a_outcomes(state, [record()])[0]
+            original, phases = state.repo.identity_range_empty, []
+            def probe(generation, low, high):
+                phases.append(state.repo.connection.in_transaction)
+                empty = original(generation, low, high)
+                if len(phases) == 1:
+                    assert empty and not phases[0]
+                    # Fault injection on this disposable SAME connection, not a second writer.
+                    with state.repo.transaction() as now:
+                        state.repo._observation(first, state.repo.load_active()[0], service.run_id,
+                            service.health.last_snapshot.health_id, now)
+                        if category != "duplicate_noop":
+                            change = {
+                                "source_record_identity_conflict": "source_record_sha256='" + "f" * 64 + "'",
+                                "normalizer_determinism_conflict": "semantic_payload_sha256='" + "f" * 64 + "'",
+                                "replay_identity_evidence_expired": "digest_state='expired',source_record_sha256=NULL,semantic_payload_sha256=NULL",
+                            }[category]
+                            state.repo.connection.execute("UPDATE network_metadata_source_records SET " + change)
+                return empty
+            monkeypatch.setattr(state.repo, "identity_range_empty", probe)
+            assert service.poll_once()
+            assert phases == [False, True]
+            generation, checkpoint = state.repo.load_active()
+            if category == "duplicate_noop":
+                assert generation.processing_state == "runnable"
+                assert checkpoint.committed_byte_offset == 2 * first.end
+                assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 2
+                assert any(event == "duplicate_noop" and fields["count"] == 1 for event, fields in state.events)
+            else:
+                assert generation.blocked_reason_code == category
+                assert checkpoint.committed_byte_offset == 0
+                assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
+                assert state.repo.connection.execute("SELECT count FROM network_metadata_ingest_fault_aggregates").fetchone()[0] == 1
+        finally:
+            service.close()
+
+
+def test_io_hotpath_preflight_sql_failure_pauses_storage_without_cursor_gap(tmp_path):
+    import sqlite3
+    with _a_store(tmp_path, True) as state:
+        service = service_for(state)
+        try:
+            service.startup()
+            before = _a_rows(state.repo)
+            state.repo.connection.set_authorizer(lambda action, table, *_: sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_READ and table == "network_metadata_source_records" else sqlite3.SQLITE_OK)
+            assert not service.poll_once()
+            # Python 3.10 cannot disable the callback with None (it denies SQL).
+            state.repo.connection.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
+            assert service.storage_failed
+            assert _a_rows(state.repo) == before
+            assert service.poll_once()
+            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
+        finally:
+            service.close()
+
+
+def test_io_hotpath_partial_then_oversized_record_preserves_source_guards(tmp_path):
+    with _a_store(tmp_path, True, source=b"{") as state:
+        service = service_for(state)
+        try:
+            service.startup()
+            sql = []
+            state.repo.connection.set_trace_callback(sql.append)
+            assert not service.poll_once()
+            assert _a_sql(sql)["range_probes"] == 0
+            assert state.repo.load_active()[1].committed_byte_offset == 0
+            # Replace only uncommitted tail; source lifecycle still owns continuity.
+            oversized = b"x" * (state.config.max_record_bytes + 1)
+            (tmp_path / "source.jsonl").write_bytes(oversized + b"\n" + record() + b"\n")
+            service.reader.reset(0)
+            sql.clear()
+            assert service.poll_once()
+            assert _a_sql(sql)["range_probes"] == 2 and _a_sql(sql)["identities"] == 0
+            assert state.repo.load_active()[1].committed_byte_offset == len(oversized) + 1
+            assert state.repo.connection.execute("SELECT fault_category,count FROM network_metadata_ingest_fault_aggregates").fetchone()[:] == ("record_too_large", 1)
+            assert service.poll_once()
+            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_observations").fetchone()[0] == 1
+        finally:
+            service.close()
+
+
+@pytest.mark.parametrize("change,reason", [("truncate", "observed_truncation"),
+    ("rewrite", "continuity_anchor_mismatch"), ("rotate", "source_rotated_live")])
+def test_io_hotpath_generation_guards_precede_range_optimization(tmp_path, change, reason):
+    with _a_store(tmp_path, True) as state:
+        service = service_for(state)
+        try:
+            service.startup()
+            assert service.poll_once()
+            service.poll_once()
+            old = state.repo.load_active()[0].source_generation_id
+            path = tmp_path / "source.jsonl"
+            if change == "truncate":
+                path.write_bytes(b"")
+            elif change == "rewrite":
+                path.write_bytes(b"!" + record()[1:] + b"\n")
+            else:
+                path.rename(tmp_path / "historical-eve")
+                path.write_bytes(record(source_event("tls")) + b"\n")
+            for _ in range(3):
+                service.poll_once()
+            current, checkpoint = state.repo.load_active()
+            assert current.source_generation_id != old
+            assert current.processing_state == "runnable"
+            assert state.repo.connection.execute("SELECT close_reason FROM network_metadata_source_generations WHERE source_generation_id=?", (old,)).fetchone()[0] == reason
+            assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_source_records WHERE source_generation_id=?", (old,)).fetchone()[0] == 1
+            assert checkpoint.committed_byte_offset == path.stat().st_size
+        finally:
+            service.close()
 
 
 def service_for(state, **kwargs):
