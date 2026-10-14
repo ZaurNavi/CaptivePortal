@@ -34,6 +34,41 @@ Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 
 The application does not automatically load `.env.example`. Production values come from process environment/approved secret handling.
 
+## Core/CAPPORT deployment-owned startup configuration
+
+These five optional keys remain outside writable Admin Settings and SettingsStore.
+Absent keys preserve the old typed defaults. Explicit empty/invalid values fail
+startup with a key-specific generic error, never a fallback, even if CAPPORT is
+disabled. Parsing performs no interface, socket, Omada or network I/O.
+
+| Key | Default when absent | Explicit grammar / runtime type |
+| --- | --- | --- |
+| `HOST` | `127.0.0.1` | Exact `127.0.0.1` or canonical dotted RFC1918 IPv4; string. No wildcard, DNS, IPv6, public/link-local or loopback alias. |
+| `PORT` | `8088` | Canonical ASCII decimal `1024..65535`, no padding/sign/whitespace; integer. |
+| `CAPPORT_SITE_ID` | `6a64f17630da7c70d232187a` | Exactly 24 lowercase hex characters; unchanged string, verified by operator against the selected Omada Site. |
+| `CAPPORT_PUBLIC_BASE_URL` | `https://captivportal-navi.duckdns.org` | HTTPS ASCII DNS origin, optional canonical port `1..65535` and one final `/`; hostname lowercased and final slash removed. No IP literal/userinfo/path/query/fragment/escapes/control bytes. |
+| `CAPPORT_ALLOWED_CLIENT_NETWORKS` | `("192.168.1.0/24", "192.168.8.0/22")` | CSV of 1..16 unique exact canonical IPv4/IPv6 CIDRs without spaces, host bits or `/0`; tuple of strings. CAPPORT derives strict typed networks for its unchanged source-IP check. |
+
+`https://PORTAL.example:8443/` canonicalizes to `https://portal.example:8443`.
+Site IDs and CIDRs are not trimmed, casefolded, repaired or widened. The typed
+CAPPORT entrypoint also accepts a single CIDR string (not a CSV string) for
+historical direct-call compatibility. Only process environment supplies overrides;
+no dotenv loader, hot reload, new flag or Admin mutation is introduced. Activation
+requires a separately authorized restart.
+
+Independent Captiv-Prod examples `172.18.0.1:18089` and
+`https://captivprod-navi.duckdns.org` are not defaults or deployability proof.
+The existing VM/stores are untouched; this task introduces no data migration.
+SysAdmin must separately verify D01 interface/port/TLS/guest routing, D02 NPM-only
+default-deny isolation and forwarded-header sanitization, D03 actual Omada Site
+and OpenAPI permissions. One-hop ProxyFix is unchanged; unit tests cannot prove
+firewall/proxy isolation. `/.well-known/captive-portal` is not a new Flask route.
+
+Portal Fingerprint's independently pinned old Site/scope/evidence endpoint remains
+a separate compatibility HOLD for a new deployment. Sensor core-readiness defaults
+also remain independently configured; this task does not make Fingerprint/NI ready.
+See [CAPPORT](modules/capport.md) and [deployment](deployment.md).
+
 ## Device Fingerprint Evidence (default disabled)
 
 `DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false` is the repository default. The

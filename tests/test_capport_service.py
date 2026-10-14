@@ -46,7 +46,7 @@ class FakeClock:
 def settings(**overrides):
     values = {
         "host": "127.0.0.1",
-        "capport_site_id": "site-1",
+        "capport_site_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
         "capport_public_base_url": "https://portal.example",
         "capport_api_path": "/capport/api",
         "capport_login_path": "/capport/login",
@@ -149,7 +149,7 @@ def test_unauthorized_client_is_captive():
     assert state.client_found
     assert state.captive
     controller.get_client.assert_called_once_with(
-        "site-1",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
         "AA:BB:CC:DD:EE:FF",
     )
 
@@ -170,9 +170,9 @@ def test_list_ssid_survives_resolution_without_extra_controller_call():
     state = service_for(controller).resolve("192.168.1.10")
 
     assert state.client.ssid == "Zefer_Parki"
-    controller.get_clients.assert_called_once_with("site-1")
+    controller.get_clients.assert_called_once_with("aaaaaaaaaaaaaaaaaaaaaaaa")
     controller.get_client.assert_called_once_with(
-        "site-1",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
         "AA:BB:CC:DD:EE:FF",
     )
 
@@ -305,7 +305,7 @@ def test_detail_minus_41011_uses_exact_authorized_list_fallback():
         (
             "warning",
             {
-                "site_id": "site-1",
+                "site_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
                 "detail_error_code": -41011,
                 "auth_status": 2,
                 "active": True,
@@ -361,7 +361,7 @@ def test_detail_minus_41011_rejects_mismatched_list_identity():
         identity.fallback_by_ip["192.168.1.10"],
         client_mac="AA:BB:CC:DD:EE:00",
     )
-    service._identity_cache["site-1"] = identity
+    service._identity_cache["aaaaaaaaaaaaaaaaaaaaaaaa"] = identity
 
     state = service.resolve("192.168.1.10")
 
@@ -399,7 +399,7 @@ def test_detail_minus_41011_rejects_duplicate_ip_fallback():
     assert state.captive
     assert state.reason == "DETAIL_LOOKUP_FALLBACK_REJECTED"
     controller.get_client.assert_called_once_with(
-        "site-1",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
         "AA:BB:CC:DD:EE:01",
     )
 
@@ -548,8 +548,8 @@ def test_force_refresh_rebinds_cached_ip_to_current_mac():
     assert new_state.captive
     assert controller.get_clients.call_count == 2
     assert controller.get_client.call_args_list == [
-        call("site-1", "AA:BB:CC:DD:EE:01"),
-        call("site-1", "AA:BB:CC:DD:EE:02"),
+        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:01"),
+        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:02"),
     ]
 
 
@@ -621,10 +621,10 @@ def test_slow_old_mac_detail_is_discarded_after_identity_refresh():
     assert refreshed_result.captive
     assert next_result.captive
     assert controller.get_client.call_args_list.count(
-        call("site-1", "AA:BB:CC:DD:EE:01")
+        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:01")
     ) == 1
     assert controller.get_client.call_args_list.count(
-        call("site-1", "AA:BB:CC:DD:EE:02")
+        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:02")
     ) == 1
 
 
@@ -701,10 +701,10 @@ def test_slow_old_mac_fallback_is_not_saved_after_identity_change():
     assert refreshed_result.captive
     assert cached_result.captive
     assert controller.get_client.call_args_list.count(
-        call("site-1", "AA:BB:CC:DD:EE:01")
+        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:01")
     ) == 1
     assert controller.get_client.call_args_list.count(
-        call("site-1", "AA:BB:CC:DD:EE:02")
+        call("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:02")
     ) == 1
 
     fallback_events = [
@@ -864,7 +864,7 @@ def test_sequential_different_ips_share_identity_snapshot():
 
     assert first.client_found
     assert second.client_found
-    controller.get_clients.assert_called_once_with("site-1")
+    controller.get_clients.assert_called_once_with("aaaaaaaaaaaaaaaaaaaaaaaa")
     assert controller.get_client.call_count == 2
 
 
@@ -904,7 +904,7 @@ def test_parallel_different_ips_share_list_and_detail_in_parallel():
             )
         )
 
-    controller.get_clients.assert_called_once_with("site-1")
+    controller.get_clients.assert_called_once_with("aaaaaaaaaaaaaaaaaaaaaaaa")
     assert controller.get_client.call_count == 3
     assert all(state.client_found for state in states)
     assert all(state.captive is False for state in states)
@@ -954,9 +954,30 @@ def test_parallel_successful_requests_use_single_refresh():
         {"capport_allowed_client_networks": ("bad-network",)},
         {"capport_client_cache_ttl_seconds": 0},
         {"capport_failure_cache_ttl_seconds": 0},
-        {"host": "0.0.0.0"},
+        {"capport_site_id": "A" * 24},
     ],
 )
 def test_invalid_configuration_fails_at_startup(override):
     with pytest.raises(ValueError):
         CapportConfig.from_settings(settings(**override))
+
+
+def test_private_bind_custom_scope_and_site_lookup():
+    custom = CapportConfig.from_settings(settings(
+        host="172.18.0.1", capport_site_id="b" * 24,
+        capport_public_base_url="https://captivprod-navi.duckdns.org/",
+        capport_allowed_client_networks=("10.20.0.0/24", "2001:db8::/64"),
+    ))
+    controller = controller_with()
+    controller.get_clients.return_value.data["clients"][0]["client_ip"] = "10.20.0.7"
+    service = CapportService(controller, custom, CapturingTelemetry())
+    denied = service.resolve("192.168.1.10")
+    assert denied.allowed is False
+    controller.get_clients.assert_not_called()
+    accepted = service.resolve("10.20.0.7")
+    assert accepted.allowed and accepted.client_found
+    controller.get_clients.assert_called_once_with("b" * 24)
+    controller.get_client.assert_called_once_with("b" * 24, "AA:BB:CC:DD:EE:FF")
+    assert service.is_client_allowed("2001:db8::1")
+    assert not service.is_client_allowed("2001:db9::1")
+    assert custom.login_url == "https://captivprod-navi.duckdns.org/capport/login"

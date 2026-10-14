@@ -46,7 +46,7 @@ def config():
     return CapportConfig.from_settings(
         {
             "host": "127.0.0.1",
-            "capport_site_id": "site-1",
+            "capport_site_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
             "capport_public_base_url": "https://portal.example",
             "capport_api_path": "/capport/api",
             "capport_login_path": "/capport/login",
@@ -58,6 +58,35 @@ def config():
             "capport_failure_cache_ttl_seconds": 2,
         }
     )
+
+
+def test_custom_origin_and_canonical_site_use_existing_capport_api():
+    custom = CapportConfig.from_settings(dict(
+        host="172.18.0.1", capport_site_id="b" * 24,
+        capport_public_base_url="https://captivprod-navi.duckdns.org:8443/",
+        capport_api_path="/capport/api", capport_login_path="/capport/login",
+        capport_allowed_client_networks=("10.20.0.0/24",),
+        capport_client_cache_ttl_seconds=2, capport_failure_cache_ttl_seconds=2,
+    ))
+    controller = Mock()
+    controller.get_clients.return_value = Result.ok(data={"clients": [{
+        "client_ip": "10.20.0.7", "client_mac": "AA:BB:CC:DD:EE:FF",
+    }]})
+    controller.get_client.return_value = Result.ok(data={"authStatus": 0, "active": True})
+    service = CapportService(controller, custom, NoopTelemetry())
+    app = Flask(__name__)
+    app.register_blueprint(create_capport_blueprint(
+        service=service, portal_entry_handler=Mock(), config=custom, telemetry=NoopTelemetry(),
+        portal_template_presentation=PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({})),
+    ))
+    response = app.test_client().get("/capport/api", environ_base={"REMOTE_ADDR": "10.20.0.7"})
+    assert response.status_code == 200
+    assert response.content_type == CAPPORT_MEDIA_TYPE
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert response.get_json()["user-portal-url"] == "https://captivprod-navi.duckdns.org:8443/capport/login"
+    assert b"captivportal-navi.duckdns.org" not in response.data
+    controller.get_clients.assert_called_once_with("b" * 24)
+    controller.get_client.assert_called_once_with("b" * 24, "AA:BB:CC:DD:EE:FF")
 
 
 def state(
@@ -72,7 +101,7 @@ def state(
     client = None
     if found:
         client = CapportClient(
-            site_id="site-1",
+            site_id="aaaaaaaaaaaaaaaaaaaaaaaa",
             client_ip="192.168.1.10",
             client_mac="AA:BB:CC:DD:EE:FF",
             auth_status=auth_status,
@@ -178,7 +207,7 @@ def test_capport_real_session_submission_and_reuse_are_probe_invariant(tmp_path)
         client = app.test_client()
         first = client.get("/capport/login", **kwargs)
         second = client.get("/capport/login", headers={"Sec-CH-UA-Model": '"Pixel 8"'}, **kwargs)
-        session = manager.get_by_client("site-1", "AA:BB:CC:DD:EE:FF")
+        session = manager.get_by_client("aaaaaaaaaaaaaaaaaaaaaaaa", "AA:BB:CC:DD:EE:FF")
         assert session is not None
         assert len(executor.submissions) == 1
         assert service.resolve_for_login.call_count == 2
@@ -224,7 +253,7 @@ def test_capport_fingerprint_extraction_requires_resolved_client_and_is_containe
     assert client.get("/capport/login", headers={"User-Agent": "Firefox/120"}, environ_base={"REMOTE_ADDR": "192.168.1.10"}).status_code == 200
     extractor.assert_called_once()
     handler.open_portal.assert_called_once_with(
-        PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"),
+        PortalClientContext(site_id="aaaaaaaaaaaaaaaaaaaaaaaa", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"),
         portal_evidence_candidate=candidate,
     )
 
@@ -235,7 +264,7 @@ def test_capport_extractor_exception_preserves_existing_login():
     app, _ = app_for(service, handler, extractor=Mock(side_effect=RuntimeError("secret")), portal_telemetry=Mock())
     response = app.test_client().get("/capport/login", environ_base={"REMOTE_ADDR": "192.168.1.10"})
     assert response.status_code == 200
-    handler.open_portal.assert_called_once_with(PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"))
+    handler.open_portal.assert_called_once_with(PortalClientContext(site_id="aaaaaaaaaaaaaaaaaaaaaaaa", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"))
 
 
 def javascript_constant(page, name):
@@ -470,7 +499,7 @@ def test_login_found_client_calls_shared_entry_handler():
     assert response.status_code == 200
     handler.open_portal.assert_called_once_with(
         PortalClientContext(
-            site_id="site-1",
+            site_id="aaaaaaaaaaaaaaaaaaaaaaaa",
             client_mac="AA:BB:CC:DD:EE:FF",
             client_ip="192.168.1.10",
             ssid="Zefer_Parki",
@@ -577,7 +606,7 @@ def test_login_uses_new_mac_after_identity_snapshot_expires():
     assert login_response.status_code == 200
     handler.open_portal.assert_called_once_with(
         PortalClientContext(
-            site_id="site-1",
+            site_id="aaaaaaaaaaaaaaaaaaaaaaaa",
             client_mac="AA:BB:CC:DD:EE:02",
             client_ip="192.168.1.10",
         )
@@ -916,7 +945,7 @@ def test_json_found_client_returns_authoritative_entry_result_once():
     }
     handler.prepare_portal.assert_called_once_with(
         PortalClientContext(
-            site_id="site-1",
+            site_id="aaaaaaaaaaaaaaaaaaaaaaaa",
             client_mac="AA:BB:CC:DD:EE:FF",
             client_ip="192.168.1.10",
         )
