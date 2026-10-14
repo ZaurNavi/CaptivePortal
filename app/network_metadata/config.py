@@ -89,8 +89,10 @@ def network_metadata_config_from_env(environ=None):
             raise NetworkMetadataConfigError()
         aggregation = boolean("NETWORK_METADATA_TELEMETRY_AGGREGATION_ENABLED")
         hotpath = boolean("NETWORK_METADATA_IO_HOTPATH_V1_ENABLED")
+        indexed_retention = boolean("NETWORK_METADATA_RETENTION_INDEXED_V1_ENABLED")
         config = replace(config, ingest_coalesce_enabled=coalesce, ingest_coalesce_max_ms=delay,
-                         telemetry_aggregation_enabled=aggregation, io_hotpath_v1_enabled=hotpath)
+                         telemetry_aggregation_enabled=aggregation, io_hotpath_v1_enabled=hotpath,
+                         retention_indexed_v1_enabled=indexed_retention)
         binding_value = asdict(binding)
         binding_value["ipv4_cidrs"] = list(binding.ipv4_cidrs)
         configuration = {"capture_scope_binding": binding_value, "db_path": db,
@@ -105,6 +107,8 @@ def network_metadata_config_from_env(environ=None):
             configuration["telemetry_aggregation_enabled"] = True
         if hotpath:
             configuration["io_hotpath_v1_enabled"] = True
+        if indexed_retention:
+            configuration["retention_indexed_v1_enabled"] = True
         return replace(config, configuration_digest=semantic_digest(configuration))
     except NetworkMetadataValidationError:
         raise NetworkMetadataConfigError() from None

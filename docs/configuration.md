@@ -738,3 +738,26 @@ This opt-in reduces measured SQL statement amplification only. Physical IOPS
 or host-load improvement is not established by statement counts. Publication
 does not authorize production activation; independent Tech Lead release and
 performance checks plus Owner authorization remain required.
+
+### NI-01 indexed retention — PERF-IO-NI01-B
+
+`NETWORK_METADATA_RETENTION_INDEXED_V1_ENABLED` is an independent startup
+boolean, **default OFF**. Enabled NI-01 accepts only literal lowercase `true`
+or `false`; disabled NI-01 ignores this field. OFF omits the field from the
+canonical configuration digest, preserving the existing digest with either
+A setting. ON adds `retention_indexed_v1_enabled=true` to run lineage. It does
+not change `NETWORK_METADATA_IO_HOTPATH_V1_ENABLED` or require A to be enabled.
+
+B changes only sensitive/core selection: two existing time-index range queries
+return at most 5000 rows each, deduplicated by full observation identity and
+ordered by `(min(event_at, ingested_at), observation_id)` for at most 5000
+deletion IDs. Strict 14/30-day eligibility, the global 20-batch budget,
+transactions, FK cascades, replay/checkpoints, schema and WAL/FULL remain unchanged.
+Other retention classes and touched-identity retention retain their legacy path.
+
+The returned-row bound is **not a physical read/page traversal bound**: an
+already-expired sensitive prefix can require scanning many entries in both
+time indexes. B activation remains HOLD until independent Tech Lead adversarial
+performance acceptance and Owner approval. An indexed EXPLAIN plan or correctness
+PASS alone does not establish an IOPS benefit. There is no Admin toggle or hot
+reload; production activation/restart and rollback require separate authorization.

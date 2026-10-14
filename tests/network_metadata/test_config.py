@@ -124,3 +124,42 @@ def test_io_hotpath_default_off_preserves_frozen_digest(tmp_path, coalesce, aggr
     assert on.configuration_digest != off.configuration_digest
     with pytest.raises(FrozenInstanceError):
         on.io_hotpath_v1_enabled = False
+
+
+@pytest.mark.parametrize("value", ["TRUE", "False", "1", "", " true", "false ", True, 1, None, []])
+def test_b_retention_strict_flag_disabled_ignores_it(tmp_path, value):
+    with pytest.raises(NetworkMetadataConfigError):
+        configuration(tmp_path, NETWORK_METADATA_RETENTION_INDEXED_V1_ENABLED=value)
+    assert network_metadata_config_from_env({"NETWORK_METADATA_ENABLED": "false",
+        "NETWORK_METADATA_RETENTION_INDEXED_V1_ENABLED": value}) == NetworkMetadataConfig()
+
+
+@pytest.mark.parametrize("a,b", [(False, False), (True, False), (False, True), (True, True)])
+def test_b_independent_flags_frozen_digest(tmp_path, a, b):
+    from dataclasses import asdict, FrozenInstanceError
+    from app.network_metadata.models import LOGICAL_SOURCE_ID, NORMALIZER_VERSION, SOURCE_CONTRACT_VERSION
+    variables = {"NETWORK_METADATA_IO_HOTPATH_V1_ENABLED": str(a).lower()}
+    default = configuration(tmp_path, **variables)
+    off = configuration(tmp_path, **variables, NETWORK_METADATA_RETENTION_INDEXED_V1_ENABLED="false")
+    candidate = configuration(tmp_path, **variables,
+        NETWORK_METADATA_RETENTION_INDEXED_V1_ENABLED=str(b).lower())
+    binding = asdict(candidate.capture_scope_binding)
+    binding["ipv4_cidrs"] = list(candidate.capture_scope_binding.ipv4_cidrs)
+    frozen = dict(capture_scope_binding=binding, db_path=candidate.db_path,
+        logical_source_id=LOGICAL_SOURCE_ID, max_db_bytes=candidate.max_db_bytes,
+        max_record_bytes=candidate.max_record_bytes, batch_max_records=candidate.batch_max_records,
+        batch_max_bytes=candidate.batch_max_bytes, normalizer_version=NORMALIZER_VERSION,
+        poll_interval_seconds=candidate.poll_interval_seconds, source_contract_version=SOURCE_CONTRACT_VERSION,
+        source_path=candidate.source_path)
+    if a:
+        frozen["io_hotpath_v1_enabled"] = True
+    assert default == off
+    assert off.configuration_digest == semantic_digest(frozen)
+    if b:
+        frozen["retention_indexed_v1_enabled"] = True
+        assert candidate.configuration_digest != off.configuration_digest
+    assert candidate.configuration_digest == semantic_digest(frozen)
+    assert candidate.io_hotpath_v1_enabled is a
+    assert candidate.retention_indexed_v1_enabled is b
+    with pytest.raises(FrozenInstanceError):
+        candidate.retention_indexed_v1_enabled = not b

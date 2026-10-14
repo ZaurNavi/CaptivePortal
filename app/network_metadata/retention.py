@@ -1,7 +1,9 @@
 """Bounded NI retention, never an active-generation or capacity override."""
 from datetime import timedelta
-from .models import RETENTION_MAX_BATCHES_PER_PASS
-from .validation import ni_format_utc, ni_timestamp
+import sqlite3
+from .models import (RETENTION_MAX_BATCHES_PER_PASS, NetworkMetadataStorageCorrupt,
+                     NetworkMetadataStorageUnavailable, NetworkMetadataValidationError)
+from .validation import canonical_uuid, ni_format_utc, ni_timestamp
 
 
 class RetentionPolicy:
@@ -51,6 +53,30 @@ class RetentionPolicy:
         if kind in {"sensitive", "core"}:
             age = cutoff[14 if kind == "sensitive" else 30]
             extra = " AND sensitive_endpoint_presence_state!='expired'" if kind == "sensitive" else ""
+            if self.repository.config.retention_indexed_v1_enabled:
+                # LIMIT bounds returned rows, not scanned entries in an expired prefix.
+                candidates = {}
+                try:
+                    threshold = ni_timestamp(age, canonical=True)
+                    for field in ("event_at", "ingested_at"):
+                        rows = conn.execute(
+                            "SELECT observation_id,event_at,ingested_at FROM network_metadata_observations "
+                            f"WHERE {field}<?" + extra + f" ORDER BY {field},observation_id LIMIT 5000", (age,))
+                        for identity, event_at, ingested_at in rows:
+                            canonical_uuid(identity, 5)
+                            event = ni_timestamp(event_at, canonical=True)
+                            ingested = ni_timestamp(ingested_at, canonical=True)
+                            if (event if field == "event_at" else ingested) >= threshold:
+                                raise NetworkMetadataStorageCorrupt()
+                            timestamps = (event, ingested)
+                            if identity in candidates and candidates[identity] != timestamps:
+                                raise NetworkMetadataStorageCorrupt()
+                            candidates[identity] = timestamps
+                    return sorted(candidates, key=lambda identity: (min(candidates[identity]), identity))[:5000]
+                except NetworkMetadataValidationError:
+                    raise NetworkMetadataStorageCorrupt() from None
+                except sqlite3.Error:
+                    raise NetworkMetadataStorageUnavailable() from None
             return [row[0] for row in conn.execute(
                 "SELECT observation_id FROM network_metadata_observations WHERE (event_at<? OR ingested_at<?)" + extra +
                 " ORDER BY observation_id LIMIT 5000", (age, age))]

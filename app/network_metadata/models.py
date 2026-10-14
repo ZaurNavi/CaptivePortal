@@ -124,6 +124,7 @@ class NetworkMetadataConfig:
     ingest_coalesce_max_ms: int = 0
     telemetry_aggregation_enabled: bool = False
     io_hotpath_v1_enabled: bool = False
+    retention_indexed_v1_enabled: bool = False
 
     @property
     def writer_lock_path(self):
