@@ -1,5 +1,26 @@
 # NI-02B External Peer V2 — implementation boundary
 
+<!-- NI-V1-CURRENT-DISPOSITION:BEGIN -->
+## Current disposition
+
+**Historical / superseded as a current-state authority.**
+
+This document is retained for implementation, migration, rollback, backfill and
+decision provenance. Network Intelligence V1 is now **FUNCTIONALLY COMPLETE /
+PRODUCTION DEPLOYED / CLOSED** through NI-05. NI-06 Transport Health was
+**CANCELLED BY OWNER**.
+
+Current production contract:
+[Network Intelligence V1](modules/network-intelligence.md)
+
+Current visual architecture:
+[Network Intelligence Visual Architecture Atlas](network-intelligence/architecture-atlas.md)
+
+Statements below that describe publication as pending, NI-05/NI-06 as HOLD, or
+the implementation as not yet production are historical stage facts and are not
+the current project status.
+<!-- NI-V1-CURRENT-DISPOSITION:END -->
+
 Baseline: `f324c1e157b71802acda14a797c0e0f6747b6276` / tree
 `cbe9ac1d3efed53a3d66b60915b9f1c21e7caa5c`.
 

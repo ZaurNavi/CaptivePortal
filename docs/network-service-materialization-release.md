@@ -1,5 +1,26 @@
 # NI-04 materialization: release and rollback plan
 
+<!-- NI-V1-CURRENT-DISPOSITION:BEGIN -->
+## Current disposition
+
+**Historical / superseded as a current-state authority.**
+
+This document is retained for implementation, migration, rollback, backfill and
+decision provenance. Network Intelligence V1 is now **FUNCTIONALLY COMPLETE /
+PRODUCTION DEPLOYED / CLOSED** through NI-05. NI-06 Transport Health was
+**CANCELLED BY OWNER**.
+
+Current production contract:
+[Network Intelligence V1](modules/network-intelligence.md)
+
+Current visual architecture:
+[Network Intelligence Visual Architecture Atlas](network-intelligence/architecture-atlas.md)
+
+Statements below that describe publication as pending, NI-05/NI-06 as HOLD, or
+the implementation as not yet production are historical stage facts and are not
+the current project status.
+<!-- NI-V1-CURRENT-DISPOSITION:END -->
+
 This is an operator plan, **not** authorization to execute it. Coder has performed
 only isolated Lab development and targeted tests. Full Project/Central gates,
 independent QA, production-class capacity, browser acceptance and production

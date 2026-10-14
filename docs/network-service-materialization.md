@@ -1,8 +1,29 @@
 # NI-04 Background Materialized Service Intelligence
 
+<!-- NI-V1-CURRENT-DISPOSITION:BEGIN -->
+## Current disposition
+
+**Historical / superseded as a current-state authority.**
+
+This document is retained for implementation, migration, rollback, backfill and
+decision provenance. Network Intelligence V1 is now **FUNCTIONALLY COMPLETE /
+PRODUCTION DEPLOYED / CLOSED** through NI-05. NI-06 Transport Health was
+**CANCELLED BY OWNER**.
+
+Current production contract:
+[Network Intelligence V1](modules/network-intelligence.md)
+
+Current visual architecture:
+[Network Intelligence Visual Architecture Atlas](network-intelligence/architecture-atlas.md)
+
+Statements below that describe publication as pending, NI-05/NI-06 as HOLD, or
+the implementation as not yet production are historical stage facts and are not
+the current project status.
+<!-- NI-V1-CURRENT-DISPOSITION:END -->
+
 Authority: Architecture Contract v1 + v1.1 Addendum and Implementation TASK v1.
 Production rollout, migration, mode changes, merge and deployment require separate Owner authorization.
-NI-05 and NI-06 remain HOLD.
+Historical stage statement: NI-05 and NI-06 were HOLD at this implementation checkpoint; current disposition is NI-05 Production and NI-06 CANCELLED BY OWNER.
 
 ## Baseline and verification ownership
 

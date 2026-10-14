@@ -1,10 +1,51 @@
 # Deployment
 
 Status: current contract; production details remain host-verified
-Updated: 2026-10-04
-Current repository implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
-Confirmed production deployed HEAD: `7c7c0919c3e546f499b5252ea9479d32c8f494d7`
-Confirmed production tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+Updated: 2026-10-14
+
+<!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
+## Network Intelligence V1 production processes
+
+Network Intelligence uses independently supervised auxiliary services.
+
+```text
+fingerprint-suricata.service
+        ↓ DTI EVE
+network-metadata.service
+        ↓ source metadata SQLite
+network-metadata-projection.service
+        ↓ recognition feed / projection
+network-service-recognition.service
+        ↓ materialized Service Intelligence SQLite
+
+fingerprint-sensor.service
+        ↓ trusted DHCP temporal attribution
+network-metadata-projection.service
+
+captive-portal.service
+        ← NI-03 projection read
+        ← NI-04 materialized read
+```
+
+Current production service entrypoints:
+- network-metadata.service → python3 -m app.network_metadata.cli run
+- network-metadata-projection.service → python3 -m app.network_metadata_projection.cli run
+- network-service-recognition.service → python3 -m app.network_service_recognition.cli run
+- fingerprint-sensor.service → python -m app.device_fingerprint_sensor.cli run
+- fingerprint-suricata.service → Suricata AF_PACKET on enp8s0
+- captive-portal.service → run.py
+
+Ordering is not a hard guest-auth dependency. A NI worker can be unavailable or
+lagging without making Omada/CAPPORT authorization unavailable.
+
+Current stores are migrated/validated by their owning services; historical
+NI-02B/NI-04 release/backfill documents are retained for provenance and rollback
+reasoning but the current runtime contract is
+[modules/network-intelligence.md](modules/network-intelligence.md).
+<!-- NETWORK-INTELLIGENCE-V1:END -->
+Current repository implementation baseline: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
+Confirmed production deployed HEAD: `27087766d3f2e104a44da3f36aa6e72a082b12de`
+Confirmed production tree: `3fe941f1962e6df72d102ba36da60bf25f3bd70a`
 
 ## Repository vs production
 
