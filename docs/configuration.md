@@ -1,8 +1,34 @@
 # Configuration map
 
 Status: current repository contract
-Updated: 2026-10-04
-Baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Updated: 2026-10-14
+
+<!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
+## Network Intelligence V1
+
+Repository defaults are deployment defaults, not proof of current production feature state.
+
+| Setting | Repository default | Meaning |
+|---|---|---|
+| NETWORK_METADATA_ENABLED | false | NI-01 auxiliary ingestion gate |
+| NETWORK_METADATA_SOURCE_PATH | /run/fingerprint-suricata/dti-ni-v1.eve.json | Suricata NI EVE source |
+| NETWORK_METADATA_DB_PATH | /opt/CaptivePortal/data/network_metadata.sqlite3 | NI-01 source store |
+| NETWORK_ATTRIBUTION_ENABLED | false | NI-02A attribution writer/read gate |
+| NETWORK_ATTRIBUTION_DB_PATH | /opt/CaptivePortal/data/network_attribution.sqlite3 | NI-02A store |
+| NETWORK_ATTRIBUTION_MAX_DB_BYTES | 536870912 | default attribution DB budget |
+| NETWORK_METADATA_PROJECTION_ENABLED | false | NI-02B worker gate |
+| NETWORK_METADATA_PROJECTION_DB_PATH | /opt/CaptivePortal/data/network_metadata_projection.sqlite3 | NI-02B derived store |
+| WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED | false | NI-03 Device Card surface |
+| WEB_ADMIN_DEVICE_SERVICE_INTELLIGENCE_ENABLED | false | Service Intelligence Device Card surface |
+| NETWORK_SERVICE_MATERIALIZATION_MODE | off | NI-04 off / shadow / serve |
+| NETWORK_SERVICE_MATERIALIZATION_DB_PATH | /opt/CaptivePortal/data/network_service_intelligence.sqlite3 | NI-04 materialized store |
+| NETWORK_SERVICE_MATERIALIZATION_MAX_DB_BYTES | 536870912 | NI-04 default budget; admitted range 128 MiB..2 GiB |
+
+Current production state must be host-verified independently of these repository
+defaults. Network Intelligence settings are not automatically Admin Settings
+writable controls.
+<!-- NETWORK-INTELLIGENCE-V1:END -->
+Baseline: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
 
 Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
 

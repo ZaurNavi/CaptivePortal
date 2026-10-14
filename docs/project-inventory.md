@@ -1,10 +1,10 @@
 # Инвентаризация CaptivPortal
 
 Status: current runtime snapshot
-Updated: 2026-10-04
+Updated: 2026-10-14
 Branch: `main`
-Runtime commit: `7c7c0919c3e546f499b5252ea9479d32c8f494d7`
-Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+Runtime commit: `27087766d3f2e104a44da3f36aa6e72a082b12de`
+Runtime tree: `3fe941f1962e6df72d102ba36da60bf25f3bd70a`
 Commit source: merge PR #178 / Task-06 Device Fingerprint presentation, 2026-10-04
 
 Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
@@ -42,6 +42,43 @@ Current product read is Site-scoped and production-only. Home uses a bounded
 batch (maximum 250 input MACs) and Device Card consumes the same authoritative
 classification result.
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+
+<!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
+## Network Intelligence V1 — current production subsystem
+
+Current verified production baseline:
+- HEAD 27087766d3f2e104a44da3f36aa6e72a082b12de
+- tree 3fe941f1962e6df72d102ba36da60bf25f3bd70a
+
+Current independently supervised services:
+| Service | Role | Current closure evidence |
+|---|---|---|
+| captive-portal.service | Admin/API read composition | active, NRestarts=0 |
+| fingerprint-sensor.service | Fingerprint sensor + NI-02A trusted DHCP authority writer | active, NRestarts=0 |
+| fingerprint-suricata.service | Suricata AF_PACKET metadata source | active, NRestarts=0 |
+| network-metadata.service | NI-01 ingestion | active, NRestarts=0 |
+| network-metadata-projection.service | NI-02B projection | active, NRestarts=0 |
+| network-service-recognition.service | NI-04 materialization | active, NRestarts=0 |
+
+Current NI stores:
+| Store | Writer | Main readers |
+|---|---|---|
+| /opt/CaptivePortal/data/network_metadata.sqlite3 | NI-01 | NI-02B, NI-04 exact evidence |
+| /var/lib/captive-portal/fingerprint-sensor/network_attribution.sqlite3 | fingerprint-sensor attribution recorder | NI-02B |
+| /opt/CaptivePortal/data/network_metadata_projection.sqlite3 | NI-02B | NI-03, NI-04 delivery/read boundaries |
+| /opt/CaptivePortal/data/network_service_intelligence.sqlite3 | NI-04 worker | materialized Service Intelligence Admin read |
+| visitor_registry.sqlite3 | Visitor Registry | NI-02B Registry adapter |
+
+Attribution is not a separate systemd service; its trusted DHCP authority writer is
+integrated with fingerprint-sensor. Network Intelligence auxiliary workers are not
+threads inside the main Flask process.
+
+Host-verified non-secret feature state on 2026-10-14:
+NETWORK_METADATA_ENABLED=true; NETWORK_METADATA_PROJECTION_ENABLED=true;
+NETWORK_ATTRIBUTION_ENABLED=true; WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED=true;
+WEB_ADMIN_DEVICE_SERVICE_INTELLIGENCE_ENABLED=true;
+NETWORK_SERVICE_MATERIALIZATION_MODE=serve.
+<!-- NETWORK-INTELLIGENCE-V1:END -->
 
 ## 1. Composition roots
 
@@ -598,7 +635,7 @@ Core/Omada, Portal/CAPPORT, telemetry, counters, Snapshot, Registry, Webhook, Cl
 
 Repository feature defaults are not production proof.
 
-## 16. Single-process and thread model
+## 16. Main-process local state and auxiliary-process model
 
 Process-local state includes:
 - Auth sessions/locks/retry ownership;
@@ -619,7 +656,9 @@ Background execution categories:
 - Public Traffic worker;
 - Flask request threads.
 
-Multi-process WSGI/horizontal HA is unsupported without an ADR for shared state and worker leadership.
+The main captive-portal application remains one process. Explicitly authorized auxiliary services (Fingerprint sensor/Suricata, NI-01, NI-02B and NI-04 materialization) are separately supervised processes and are not Flask threads.
+
+Multi-process WSGI/horizontal HA for the main application remains unsupported without an ADR for shared state and worker leadership.
 
 ## 17. Fail-open / fail-closed
 
@@ -730,7 +769,7 @@ Repository alone does not prove:
 
 ## 21. Known limitations/debt
 
-- single-process topology;
+- main-application process-local state / no horizontal HA contract;
 - `VERIFY_SSL=false` repository default;
 - no GitHub Actions release CI;
 - production enabled-state must be host-verified;

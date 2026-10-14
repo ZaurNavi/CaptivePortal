@@ -1,11 +1,29 @@
 # Индекс модулей
 
 Status: current
-Updated: 2026-10-04
-Runtime implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
-Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+Updated: 2026-10-14
+Runtime implementation baseline: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
+Runtime tree: `3fe941f1962e6df72d102ba36da60bf25f3bd70a`
 
 `Repository status` describes code/defaults, not production enabled-state.
+
+<!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
+## Network Intelligence V1 current routing
+
+| Layer | Current status | Owner | Persistence / output |
+|---|---|---|---|
+| NI-00 Capture research | completed | infrastructure/research evidence | accepted topology/capture evidence |
+| NI-01 Metadata ingestion | production | app/network_metadata | network_metadata.sqlite3 |
+| NI-02A temporal attribution | production | app/network_attribution + fingerprint-sensor writer integration | network_attribution.sqlite3 |
+| NI-02B Device-relative projection | production | app/network_metadata_projection | network_metadata_projection.sqlite3 Core V2 |
+| NI-03 Protocol Intelligence | production | app/network_protocol_intelligence | bounded read model / Admin endpoint |
+| NI-04 Service Recognition | production | app/network_service_recognition | admitted recognition semantics |
+| NI-04 background materialization | production | network-service-recognition.service | network_service_intelligence.sqlite3 |
+| NI-05 Organization Context | production | Admin presentation over existing Recent Services | no new persistence / no new request |
+| NI-06 Transport Health | **CANCELLED BY OWNER** | none | not a V1 production stage |
+
+Canonical contract: [modules/network-intelligence.md](modules/network-intelligence.md).
+<!-- NETWORK-INTELLIGENCE-V1:END -->
 
 | Module | Repository status | Code | Current contract | Persistence | Omada |
 |---|---|---|---|---|---|
@@ -79,8 +97,8 @@ Canonical detailed contract: `modules/device-fingerprint.md`.
 Owner-provided production checkpoint 2026-10-04:
 
 ```text
-HEAD: 7c7c0919c3e546f499b5252ea9479d32c8f494d7
-tree: dbf3e3804931d637ef1ec569128746ebce5c141a
+HEAD: 27087766d3f2e104a44da3f36aa6e72a082b12de
+tree: 3fe941f1962e6df72d102ba36da60bf25f3bd70a
 
 TRAFFIC-00: DONE
 TRAFFIC-01 Current: production active

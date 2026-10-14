@@ -1,4 +1,4 @@
-# CaptivPortal Core Platform
+﻿# CaptivPortal Core Platform
 
 The repository contains a production-active passive/advisory Device Fingerprint
 subsystem. TASK-DEVICE-FINGERPRINT-01 remains its Evidence Foundation layer and
@@ -9,7 +9,7 @@ read-only Admin presentation. See
 
 [Русская версия](README_RU.md)
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://www.python.org/)
 [![Omada](https://img.shields.io/badge/Omada-5.14.31-1f8ceb.svg)]()
 [![Status](https://img.shields.io/badge/status-production%20platform-blue.svg)]()
@@ -32,10 +32,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 
 | Item | Current project position |
 |---|---|
-| Repository implementation checkpoint | `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7` |
-| Repository tree | `dbf3e3804931d637ef1ec569128746ebce5c141a` |
-| Production deployed HEAD | `7c7c0919c3e546f499b5252ea9479d32c8f494d7` |
-| Production tree | `dbf3e3804931d637ef1ec569128746ebce5c141a` |
+| Repository implementation checkpoint | `main@27087766d3f2e104a44da3f36aa6e72a082b12de` |
+| Repository tree | `3fe941f1962e6df72d102ba36da60bf25f3bd70a` |
+| Production deployed HEAD | `27087766d3f2e104a44da3f36aa6e72a082b12de` |
+| Production tree | `3fe941f1962e6df72d102ba36da60bf25f3bd70a` |
 | Current Network Throughput | **Production active** |
 | Network Traffic History | **Production active** |
 | Period Statistics | **Production active** |
@@ -65,7 +65,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults, 
 | Device Type + SNR presentation | **TASK-WEB-DEVICE-TYPE-PRESENTATION-01 — CLOSED / PRODUCTION ACCEPTANCE PASS** |
 | Analytics / Admin Web | Implemented |
 | Multi-Site / Tenant / RBAC | Future evolution |
-| Current topology | Single application process; HA/multi-process requires ADR |
+| Current topology | One main captive-portal process plus explicitly authorized auxiliary services; horizontal HA/multi-instance main app requires ADR |
 
 > Repository defaults, production enabled-state and dated acceptance evidence are different facts.
 
@@ -197,6 +197,268 @@ authorization, persistence, Visit Lifecycle, analytics, Traffic, Admin Web, Home
 observability and the complete sixteen-diagram Device Fingerprint atlas.
 <!-- README-LANDING-VISUAL-ATLAS:END -->
 
+<!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
+## Network Intelligence V1 — Production Architecture
+
+**NETWORK INTELLIGENCE V1 = FUNCTIONALLY COMPLETE / PRODUCTION DEPLOYED / CLOSED.**
+
+Network Intelligence turns passive, bounded network metadata into Device-scoped protocol and recognized-service context. It is intentionally separate from Device Fingerprint: the two can share capture infrastructure while keeping different evidence semantics, persistence and product ownership.
+
+| Stage | Current status |
+|---|---|
+| NI-00 — Capability / Capture Research | Completed |
+| NI-01 — Network Metadata Ingestion | Production |
+| NI-02 / NI-02B — Device Attribution / Materialized Projection | Production |
+| NI-03 — Protocol Intelligence | Production |
+| NI-04 — Service Recognition / Materialization | Production |
+| NI-05 — Organization Context | Production |
+| NI-06 — Transport Health | **CANCELLED BY OWNER** |
+
+### What Network Intelligence answers
+
+| Product question | Current V1 answer |
+|---|---|
+| Which supported protocol families were seen recently? | Recent DNS / TLS / QUIC protocol evidence |
+| Which admitted services were recognized? | Bounded Recent Services from confirmed evidence |
+| Which organizations are represented? | Organization Context derived from confirmed Recent Services |
+| Which categories do the recognized services belong to? | Service Categories from the admitted taxonomy |
+| When was the last supported observation? | Last Protocol / Service Observation |
+| Can an empty result be trusted? | Explicit source / attribution / recognition / materialization coverage |
+| Does it expose raw browsing history? | No — product-safe summaries only |
+
+### NI-VIS-01 — Full end-to-end path
+
+```mermaid
+flowchart LR
+    C[Guest Device] --> AP[EAP / Wi-Fi]
+    AP --> SW[Catalyst RSPAN]
+    SW --> NIC[VM enp8s0]
+    NIC --> FP[fingerprint-sensor<br/>Device Fingerprint path]
+    NIC --> SUR[Suricata]
+    SUR --> EVE[DTI DNS / TLS / QUIC EVE]
+
+    EVE --> N1[network-metadata.service<br/>NI-01]
+    N1 --> NM[(network_metadata.sqlite3)]
+    FP --> NA[(network_attribution.sqlite3<br/>trusted DHCP authority)]
+
+    NM --> N2[network-metadata-projection.service<br/>NI-02B]
+    NA --> N2
+    REG[(Visitor Registry)] --> N2
+    N2 --> NP[(network_metadata_projection.sqlite3)]
+
+    NP --> P[NI-03 Protocol Intelligence]
+    NP --> FEED[NI-04 recognition feed]
+    FEED --> N4[network-service-recognition.service]
+    NM --> N4
+    N4 --> NS[(network_service_intelligence.sqlite3)]
+
+    P --> CARD[Admin Device Card]
+    NS --> CARD
+    CARD --> OUT[Protocols / Services / Organizations / Categories / Coverage]
+```
+
+### NI-VIS-02 — Shared capture, separate semantic owners
+
+```mermaid
+flowchart TB
+    NET[Mirrored VLAN10 + VLAN20<br/>production RSPAN RX-only] --> RSPAN[RSPAN VLAN999]
+    RSPAN --> VM[Ubuntu capture interface enp8s0<br/>pre-NAT]
+    VM --> RAW[Fingerprint raw AF_PACKET]
+    VM --> SUR[Suricata AF_PACKET]
+    RAW --> DF[Device Fingerprint]
+    SUR --> FPE[Fingerprint TLS/QUIC path]
+    SUR --> NIM[Network Intelligence metadata]
+    FPE --> DF
+    NIM --> NI[Network Intelligence]
+
+    DF --> Q1[What kind of Device?]
+    NI --> Q2[What supported network activity was observed?]
+```
+
+Sharing a capture source does not merge classification responsibility. Network Intelligence still enforces capture source, network scope, Site and temporal Device attribution.
+
+### NI-VIS-03 — NI-01 durable ingestion
+
+```mermaid
+flowchart TD
+    EVE[Suricata DTI EVE file] --> GEN[Source generation + continuity anchor]
+    GEN --> READ[Bounded batch]
+    READ --> NORM[Normalize DNS / TLS / QUIC]
+    NORM --> TX[One durable SQLite transaction]
+    TX --> OBS[(Normalized observations)]
+    TX --> CP[Committed source checkpoint]
+    CP -->|restart / replay| GEN
+
+    BAD[Checkpoint beyond unconfirmed processing]:::forbidden
+    TX -. forbidden .-> BAD
+    classDef forbidden fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+```
+
+The scan cursor is disposable; the repository checkpoint is the durable progress authority. Event time and ingest time remain separate.
+
+### NI-VIS-04 — Event-time attribution to a Device
+
+```mermaid
+flowchart TD
+    O[NI-01 observation<br/>Site + IP + event_at] --> C{Trusted coverage at event time?}
+    DHCP[NI-02A DHCP authority facts] --> C
+    C -->|no| U[unavailable]
+    C -->|yes| B{Exact temporal binding}
+    B -->|one| MAC[Site + MAC resolved]
+    B -->|none| N[unattributed]
+    B -->|multiple| A[ambiguous]
+
+    MAC --> EDGE[NI-02B device-relative edge]
+    EDGE --> REG{Visitor Registry}
+    REG -->|exact MAC record| DEV[authoritative Device]
+    REG -->|not yet| P[pending / late binding]
+    REG -->|unavailable| R[registry unavailable]
+
+    IP[IP-only permanent identity]:::forbidden
+    O -. forbidden .-> IP
+    classDef forbidden fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+```
+
+No heuristic match is presented as authoritative identity.
+
+### NI-VIS-07 — Background Service Intelligence materialization
+
+```mermaid
+flowchart LR
+    EDGE[Committed eligible NI-02B edge] --> FEED[(Atomic recognition feed)]
+    FEED --> W[NI-04 background worker]
+    SRC[(Exact NI-01 evidence)] --> W
+    ART[Admitted v2 taxonomy + manifest + ruleset] --> W
+    W --> EVAL[Reusable evaluator]
+    EVAL --> MAT[(network_service_intelligence.sqlite3)]
+    BIND[Authoritative binding changes] --> REPLAY[Targeted replay]
+    REPLAY --> W
+    BACK[Bounded 24h backfill] --> W
+    MAT --> READ[Materialized read]
+    READ --> CARD[Device Card]
+
+    CARD -. forbidden query-time recognition .-> EVAL
+```
+
+**Compute when evidence arrives → persist confirmed result → read the materialized result.**
+
+### NI-VIS-10 — Service / Organization / Category
+
+```mermaid
+flowchart TB
+    Y[Service: YouTube] --> G[Organization: Google]
+    Y --> V[Category: Video Streaming]
+    GM[Service: Gmail] --> G
+    GM --> P[Category: Productivity & Collaboration]
+
+    W[Service: WhatsApp] --> M[Organization: Meta]
+    W --> MSG[Category: Messaging]
+    I[Service: Instagram] --> M
+    I --> SOC[Category: Social]
+
+    IP[Arbitrary remote IP]:::forbidden
+    IP -. does not define .-> G
+    IP -. does not define .-> Y
+    classDef forbidden fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+```
+
+These are independent taxonomy dimensions. NI-05 Organization Context groups already confirmed recent Service rows; it does not infer organizations from arbitrary IP addresses.
+
+### NI-VIS-11 — What the Device Card reads
+
+```mermaid
+flowchart LR
+    V3[One Service Intelligence V3 response] --> RS[Recent Services<br/>60 min / max 12]
+    V3 --> ORG[Organizations<br/>same Recent Services<br/>no second request]
+    V3 --> CAT[Service Categories<br/>max 10]
+    V3 --> LAST[Last Service Observation<br/>24 h]
+    V3 --> Q[Freshness + Coverage + Materialization]
+
+    P[Separate Protocol Intelligence response] --> RP[Recent Protocols<br/>60 min]
+    P --> LP[Last Protocol Observation<br/>24 h]
+
+    RS --> CARD[Device Card]
+    ORG --> CARD
+    CAT --> CARD
+    LAST --> CARD
+    Q --> CARD
+    RP --> CARD
+    LP --> CARD
+
+    RAW[Raw DNS / SNI / peer IP history]:::forbidden
+    RAW -. not exposed .-> CARD
+    classDef forbidden fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+```
+
+A missing supported Service is not proof that the Device was inactive. The UI carries coverage/freshness so empty, pending, stale, limited and unavailable remain distinct.
+
+### NI-VIS-12 — Performance boundary
+
+```mermaid
+flowchart TB
+    subgraph Background["Background work"]
+      F[NI-02B feed] --> W[NI-04 worker]
+      S[(NI-01 exact evidence)] --> W
+      W --> M[(Materialized NI-04 SQLite)]
+    end
+
+    subgraph Request["Device Card request"]
+      O[Open card] --> A[Admin auth + Site/Device gateway]
+      A --> R[Light materialized read]
+      M --> R
+      R --> UI[Product-safe response]
+    end
+
+    O -. forbidden .-> P[Projection 24h bulk scan]
+    O -. forbidden .-> N[NI-01 history reread]
+    O -. forbidden .-> X[Recognition / backfill]
+    classDef forbidden fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    class P,N,X forbidden;
+```
+
+The read path stays light because recognition and recovery are background work.
+
+### Current admitted recognition boundary
+
+The current local runtime bundle is version 2:
+- **55 active taxonomy Services**;
+- **41 Organizations**;
+- **10 Service Categories**;
+- **53 active rules**, all current rules being exact-SNI Service rules.
+
+This describes the admitted runtime bundle, not every candidate in the research catalog.
+
+### Truth and privacy rules
+
+```text
+missing / unknown / stale / insufficient / unavailable != 0
+no supported Service result != proof of no network activity
+IP ownership alone != Service identity
+late ingest != fresh event
+```
+
+Raw DNS/SNI/peer-IP history is internal sensitive metadata and is not exposed as Device Card browsing history. Current product output is bounded semantic context.
+
+### Functional closure and remaining performance work
+
+```mermaid
+flowchart LR
+    N0[NI-00<br/>Completed] --> N1[NI-01<br/>Production]
+    N1 --> N2[NI-02 / 02B<br/>Production]
+    N2 --> N3[NI-03<br/>Production]
+    N3 --> N4[NI-04<br/>Production]
+    N4 --> N5[NI-05<br/>Production]
+    N5 --> C[V1 CLOSED<br/>Production deployed]
+    N5 -. owner decision .-> N6[NI-06<br/>CANCELLED]
+    C --> PERF[Separate Performance & Optimization<br/>I/O / queues / SQLite / NI-01 latency]
+```
+
+A 2026-10-14 investigation observed NI-01 lag of roughly 8–9 minutes during disk/I/O pressure. That dated measurement is not a permanent SLA or proof of the current instantaneous lag, and it does not reopen V1 functional scope.
+
+Full current contract: [docs/modules/network-intelligence.md](docs/modules/network-intelligence.md)
+All sixteen NI diagrams: [docs/network-intelligence/architecture-atlas.md](docs/network-intelligence/architecture-atlas.md)
+<!-- NETWORK-INTELLIGENCE-V1:END -->
+
 ## Where the project is now
 
 Traffic is production-active through `TASK-TRAFFIC-09 — Consolidated Traffic Evidence`.
@@ -294,8 +556,8 @@ subsystem. The landing README intentionally carries the complete visual atlas so
 a reader can understand the subsystem without opening a second document.
 
 ```text
-runtime / production implementation checkpoint = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
-runtime / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
+runtime / production implementation checkpoint = 27087766d3f2e104a44da3f36aa6e72a082b12de
+runtime / production tree = 3fe941f1962e6df72d102ba36da60bf25f3bd70a
 TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
 TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
 TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
@@ -793,49 +1055,34 @@ flowchart TD
     CP --> ADMIN[Admin read consumers]
 ```
 
-#### DF-16 — Current Device Fingerprint vs future Traffic Enrichment
+#### DF-16 — Device Fingerprint vs production Network Intelligence
 
-- **Purpose:** prevent two initiatives from being conflated.
-- **Inputs:** current classification data vs future traffic/activity intelligence.
-- **Outputs:** richer future Device Card without changing what “fingerprint” means.
-- **Persistence boundary:** future initiative requires its own approved architecture.
-- **Failure behavior:** future work cannot silently expand current fingerprint semantics.
-- **Authoritative owner/module:** current Device Fingerprint docs; future Architect/roadmap for enrichment.
+- **Purpose:** keep two production subsystems semantically separate.
+- **Inputs:** Device Fingerprint identity/classification evidence vs Network Intelligence protocol/service evidence.
+- **Outputs:** one richer Device Card without changing what fingerprint or Network Intelligence mean.
+- **Persistence boundary:** each subsystem retains its own accepted stores, workers and read contracts.
+- **Failure behavior:** Network Intelligence failure cannot expand or invalidate Device Fingerprint semantics; both remain advisory to guest authorization.
+- **Authoritative owner/module:** Device Fingerprint current contract and Network Intelligence current contract.
 
 ```mermaid
 flowchart TD
-    DF["CURRENT — Device Fingerprint"] --> ID["identity / classification data"]
-    TE["FUTURE — Device Traffic Enrichment"] --> TI["traffic / activity / protocol / quality / behavior / anomaly data"]
-    ID --> CARD[Richer Device Card]
-    TI --> CARD
+    DF["CURRENT — Device Fingerprint"] --> ID["Device identity / classification"]
+    NI["CURRENT — Network Intelligence V1"] --> INTEL["Protocols / recognized Services / Organizations / Categories"]
+    ID --> CARD[Device Card]
+    INTEL --> CARD
+    DF -. separate semantic owner .-> NI
 ```
 
-### Current vs future Device Traffic Intelligence
+### Device Fingerprint and Network Intelligence are separate production programs
 
-Device Traffic Enrichment / Device Intelligence is a **separate program**. The
-accepted v0.3 architecture does not change Device Fingerprint semantics.
+Device Fingerprint remains the authority for its admitted identity/classification
+dimensions. Network Intelligence V1 is separately **FUNCTIONALLY COMPLETE /
+PRODUCTION DEPLOYED / CLOSED** through NI-05. NI-06 Transport Health is
+**CANCELLED BY OWNER**.
 
-Current program state:
-
-```text
-DTI architecture = FINAL / TECH LEAD ACCEPTED
-TASK-DTI-00 = APPROVED FOR SYSADMIN RESEARCH
-TASK-DTI-00 mode = RESEARCH / LAB / INVENTORY
-Implementation = NO
-Coder action = HOLD
-Production feature activation = NO
-Production configuration change = NO
-```
-
-DTI-00 proves the real SPAN/capture path before any implementation: topology,
-direction, L2 identity, VLAN/Site binding, pre/post-NAT placement, host capture
-path, drops/completeness evidence, resource baseline and coexistence with the
-accepted Fingerprint sensor. It does not implement DTI.
-
-The exact engineering contract remains in
-[`docs/modules/device-fingerprint.md`](docs/modules/device-fingerprint.md); the
-README now mirrors its complete visual architecture instead of hiding that
-architecture behind the link.
+Network Intelligence does not retroactively become Device Fingerprint behavior.
+Its current contract is [docs/modules/network-intelligence.md](docs/modules/network-intelligence.md)
+and its full atlas is [docs/network-intelligence/architecture-atlas.md](docs/network-intelligence/architecture-atlas.md).
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
 
 ## Admin Web local asset library — historical production provenance
@@ -1229,7 +1476,7 @@ flowchart TD
 
 The shutdown order is intentionally controlled so that workers stop accepting work, queues drain where required, and storage-owning components close cleanly.
 
-### Single-process assumption
+### Main-process local-state assumption
 
 Current process-local state includes:
 
@@ -1826,7 +2073,7 @@ TASK-DEVICE-FINGERPRINT-05-PERF-01 CLOSED
 TASK-DEVICE-FINGERPRINT-06         PRODUCTION PASS / ADMIN VISIBLE
 ```
 
-`Device Traffic Enrichment / Device Intelligence (DTI)` is a separate architecture/roadmap program. Its v0.3 architecture is **FINAL / TECH LEAD ACCEPTED** and roadmap registration is authorized. `TASK-DTI-00` is now **APPROVED FOR SYSADMIN RESEARCH** in `RESEARCH / LAB / INVENTORY` mode. Implementation remains **NO**, Coder remains **HOLD**, and production feature activation/configuration remain **NO**.
+Network Intelligence / DTI is a separate production capability from Device Fingerprint. Network Intelligence V1 is **FUNCTIONALLY COMPLETE / PRODUCTION DEPLOYED / CLOSED** through NI-05; NI-06 Transport Health is **CANCELLED BY OWNER**. Performance & Optimization is a separate workstream.
 
 ## Real second Site as a trigger
 
@@ -2092,7 +2339,7 @@ A FINAL TASK is not current runtime merely because it is approved.
 
 | Debt / limitation | Why it matters |
 |---|---|
-| Single-process topology | Multi-process/HA requires shared-state and worker-leadership design |
+| Main application process-local state | Horizontal HA/multi-instance main app requires shared-state and worker-leadership design |
 | `VERIFY_SSL=false` repository default | Security hardening debt; production truth must be host-verified |
 | No GitHub Actions release CI | Full release gate is still procedural/manual |
 | Production enabled-state not derivable from Git | Runtime flags must be verified on the host |
@@ -2135,4 +2382,4 @@ Deployment and activation are separate Owner-controlled operations.
 
 ## License
 
-See [LICENSE](LICENSE).
+License: MIT.

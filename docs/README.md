@@ -1,9 +1,26 @@
 # CaptivPortal knowledge base
 
 Status: current
-Updated: 2026-10-04
-Current-state implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
-Current implementation tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+Updated: 2026-10-14
+
+<!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
+## Network Intelligence V1 — current production entry point
+
+Network Intelligence V1 is **FUNCTIONALLY COMPLETE / PRODUCTION DEPLOYED / CLOSED**.
+NI-00 is completed; NI-01 through NI-05 are production; NI-06 Transport Health is
+**CANCELLED BY OWNER**.
+
+Start with:
+- [Network Intelligence V1 current contract](modules/network-intelligence.md)
+- [Network Intelligence Visual Architecture Atlas](network-intelligence/architecture-atlas.md)
+- [Admin Web current contract](modules/admin-web.md)
+- [Device Fingerprint boundary](modules/device-fingerprint.md)
+
+Historical NI-02B/NI-04 implementation, migration, release and backfill documents
+remain in the repository for provenance, but they are not the current-state authority.
+<!-- NETWORK-INTELLIGENCE-V1:END -->
+Current-state implementation baseline: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
+Current implementation tree: `3fe941f1962e6df72d102ba36da60bf25f3bd70a`
 
 Эта страница — навигация. Она не дублирует архитектуру.
 
@@ -186,8 +203,8 @@ Device Fingerprint is now a production-active passive/advisory classification
 capability, not only an evidence foundation.
 
 ```text
-repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
-repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
+repository / production HEAD = 27087766d3f2e104a44da3f36aa6e72a082b12de
+repository / production tree = 3fe941f1962e6df72d102ba36da60bf25f3bd70a
 PR #178 = MERGED
 TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
 TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED

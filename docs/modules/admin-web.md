@@ -1,8 +1,37 @@
 # Admin Web
 
 Status: current module contract
-Updated: 2026-10-04
-Baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+Updated: 2026-10-14
+
+<!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
+## Network Intelligence V1 — Device Card
+
+Network Intelligence adds two independent authenticated Device-read surfaces.
+
+| Surface | Endpoint | Current semantics |
+|---|---|---|
+| Protocol Intelligence | GET /admin/api/v1/sites/<site_id>/devices/<device_id>/protocol-intelligence | DNS/TLS/QUIC; Recent Protocols 60m; Last Protocol Observation 24h |
+| Service Intelligence | GET /admin/api/v1/sites/<site_id>/devices/<device_id>/service-intelligence | Recent Services 60m; Categories; Last Service Observation 24h; coverage/materialization |
+| Organization Context | no new endpoint | groups already-confirmed bounded Recent Services; same 60m window |
+
+All use the existing authenticated Site + admin.read.device boundary.
+
+In materialization serve mode, Service Intelligence publishes
+admin.device.service-intelligence.v3 / schema v3 and reads only the dedicated
+materialized NI-04 SQLite after the normal Admin Device gateway. It does not scan
+NI-01 or NI-02B or run recognition/backfill when the card opens.
+
+Current presentation bounds:
+- Recent Services <=12;
+- Service Categories <=10;
+- Organizations are derived from those same recent rows, so there is no second DB/API read;
+- raw DNS/SNI/peer-IP history is not exposed;
+- empty/no-supported-result is always qualified by coverage/freshness;
+- no supported Service result is not a claim of no network activity.
+
+Full contract: [network-intelligence.md](network-intelligence.md).
+<!-- NETWORK-INTELLIGENCE-V1:END -->
+Baseline: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
 
 ## Boundary
 
@@ -230,8 +259,8 @@ Device Fingerprint is now a production-active passive/advisory classification
 capability, not only an evidence foundation.
 
 ```text
-repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
-repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
+repository / production HEAD = 27087766d3f2e104a44da3f36aa6e72a082b12de
+repository / production tree = 3fe941f1962e6df72d102ba36da60bf25f3bd70a
 PR #178 = MERGED
 TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
 TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED

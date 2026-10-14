@@ -1,9 +1,9 @@
 # Архитектура CaptivPortal
 
 Status: current
-Updated: 2026-10-04
-Runtime implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
-Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+Updated: 2026-10-14
+Runtime implementation baseline: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
+Runtime tree: `3fe941f1962e6df72d102ba36da60bf25f3bd70a`
 
 ## Controlled auxiliary composition roots
 
@@ -40,6 +40,43 @@ presented as Controller Platform.
 Full subsystem architecture, runtime-profile/admission model and 16 focused
 Mermaid diagrams: `modules/device-fingerprint.md`.
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+
+<!-- NETWORK-INTELLIGENCE-V1:BEGIN -->
+## Network Intelligence V1 — production architecture
+
+Network Intelligence V1 is a separate production subsystem with independent
+acquisition, attribution, projection, protocol, recognition/materialization and
+presentation boundaries.
+
+```mermaid
+flowchart LR
+    SUR[Suricata] --> N1[NI-01 network metadata]
+    N1 --> NM[(network_metadata.sqlite3)]
+    DHCP[Trusted DHCP attribution] --> N2[NI-02B projection]
+    NM --> N2
+    REG[Visitor Registry] --> N2
+    N2 --> NP[(network_metadata_projection.sqlite3)]
+    NP --> P[NI-03 Protocol Intelligence]
+    NP --> F[NI-04 feed]
+    F --> W[NI-04 materializer]
+    NM --> W
+    W --> NS[(network_service_intelligence.sqlite3)]
+    P --> ADMIN[Admin Device Card]
+    NS --> ADMIN
+```
+
+Permanent boundaries:
+- NI-01 normalized metadata is source evidence; NI-02B is Device-relative derived projection.
+- temporal attribution requires admitted source coverage and exact event-time authority;
+- Protocol Intelligence and Service Intelligence are separate semantic products;
+- Service recognition uses the admitted runtime bundle, not the research catalog as authority;
+- serve-mode Service Intelligence reads materialized NI-04 state, not query-time history/rematching;
+- Network Intelligence failure is fail-soft relative to Guest Authorization/CAPPORT;
+- Device Fingerprint and Network Intelligence remain separate semantic owners.
+
+Current contract: [modules/network-intelligence.md](modules/network-intelligence.md)
+Full diagrams: [network-intelligence/architecture-atlas.md](network-intelligence/architecture-atlas.md).
+<!-- NETWORK-INTELLIGENCE-V1:END -->
 
 ## 1. Mental model
 
@@ -717,7 +754,7 @@ Fail-open means explicit `disabled`, `unavailable` or `degraded`, never invented
 
 ## 12. Process/thread model
 
-Supported: one application process.
+Main captive-portal application remains one process; explicitly authorized auxiliary services (Device Fingerprint and Network Intelligence workers) run separately. Horizontal HA/multi-instance main application requires a separate ADR and shared-state/leadership design.
 
 Process-local:
 - AuthSessionManager;

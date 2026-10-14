@@ -1,9 +1,9 @@
-# Device Fingerprint
+﻿# Device Fingerprint
 
 Status: **current production capability**
-Updated: 2026-10-04
-Repository / production checkpoint: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
-Repository / production tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+Updated: 2026-10-14
+Repository / production checkpoint: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
+Repository / production tree: `3fe941f1962e6df72d102ba36da60bf25f3bd70a`
 
 Device Fingerprint is CaptivPortal's passive, deterministic, Site-scoped device
 classification subsystem. It turns bounded normalized evidence into one
@@ -29,8 +29,8 @@ TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
 TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
 TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
 
-production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
-production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
+production HEAD = 27087766d3f2e104a44da3f36aa6e72a082b12de
+production tree = 3fe941f1962e6df72d102ba36da60bf25f3bd70a
 
 captive-portal.service = active
 fingerprint-classification.service = active
@@ -1028,29 +1028,28 @@ MAC → one universal global identity
 The current product/read boundary is Site + observed MAC. This boundary must be
 preserved for future Multi-Site evolution.
 
-## 34. DF-16 — Current Device Fingerprint vs future Traffic Enrichment
+## 34. DF-16 — Current Device Fingerprint vs production Network Intelligence
 
-**Purpose:** prevent two initiatives from being conflated.
-**Inputs:** current classification data vs future traffic/activity intelligence.
-**Outputs:** richer future Device Card without changing what “fingerprint” means.
-**Persistence boundary:** future initiative requires its own approved architecture.
-**Failure behavior:** future work cannot silently expand current fingerprint semantics.
-**Authoritative owner/module:** current Device Fingerprint docs; future Architect/roadmap for enrichment.
+**Purpose:** keep two current production subsystems semantically separate.
+**Inputs:** Fingerprint identity/classification evidence vs Network Intelligence protocol/service context.
+**Outputs:** one richer Device Card without changing either subsystem's meaning.
+**Persistence boundary:** separate accepted stores, workers and read contracts.
+**Failure behavior:** NI failure does not expand/invalidate Fingerprint semantics and neither subsystem blocks guest authorization.
+**Authoritative owner/module:** this Device Fingerprint contract plus network-intelligence.md.
 
 ```mermaid
 flowchart TD
     DF["CURRENT — Device Fingerprint"] --> ID["identity / classification data"]
-    TE["FUTURE — Device Traffic Enrichment"] --> TI["traffic / activity / protocol / quality / behavior / anomaly data"]
+    NI["CURRENT — Network Intelligence V1"] --> INTEL["protocol / service / organization / category context"]
     ID --> CARD[Richer Device Card]
-    TI --> CARD
+    INTEL --> CARD
+    DF -. separate semantic owner .-> NI
 ```
 
-Device Traffic Enrichment / Device Intelligence is a separate accepted
-architecture/roadmap program. Its v0.3 architecture is FINAL / TECH LEAD ACCEPTED
-and roadmap registration is authorized, but implementation is not authorized,
-Coder remains HOLD, and production is unchanged. TASK-DTI-00 is the next
-executable RESEARCH / LAB / INVENTORY step. DTI must not be described as already
-implemented Device Fingerprint behavior.
+Network Intelligence V1 is **FUNCTIONALLY COMPLETE / PRODUCTION DEPLOYED / CLOSED**
+through NI-05. NI-06 Transport Health is **CANCELLED BY OWNER**. This does not
+retroactively change Device Fingerprint semantics. Current NI authority:
+[network-intelligence.md](network-intelligence.md).
 
 ## 35. Historical architecture and provenance
 
