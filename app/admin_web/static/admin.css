@@ -409,6 +409,31 @@ input[type="radio"] { width: auto; min-height: 0; }
   #device-service-intelligence .service-info-card { grid-column: 1 / -1; }
 }
 
+#device-service-intelligence .organization-context-card { background: var(--surface); }
+#device-service-intelligence .section-heading > button { flex: 0 0 auto; white-space: nowrap; }
+#device-service-intelligence .organization-groups,
+#device-service-intelligence .organization-services { list-style: none; margin: 0; padding: 0; }
+#device-service-intelligence .organization-group + .organization-group { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+#device-service-intelligence .organization-heading { display: flex; gap: .75rem; align-items: center; }
+#device-service-intelligence .organization-identity { min-width: 0; }
+#device-service-intelligence .organization-identity h4 { margin: 0 0 .2rem; color: var(--ink); font-size: .95rem; line-height: 1.4; overflow-wrap: anywhere; }
+#device-service-intelligence .organization-count { display: block; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+#device-service-intelligence .organization-icon { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); color: var(--ink); }
+#device-service-intelligence .organization-icon img { display: block; object-fit: contain; }
+#device-service-intelligence .organization-icon [hidden] { display: none; }
+#device-service-intelligence .organization-icon--services { width: 28px; height: 28px; border-radius: 8px; background: var(--surface); }
+#device-service-intelligence .organization-services { margin: .65rem 0 0 52px; display: grid; gap: .6rem; }
+#device-service-intelligence .organization-service { display: flex; align-items: flex-start; gap: .6rem; min-width: 0; }
+#device-service-intelligence .organization-service-details { min-width: 0; }
+#device-service-intelligence .organization-service-name { display: block; font-size: .85rem; font-weight: 600; line-height: 1.45; color: var(--ink); overflow-wrap: anywhere; }
+#device-service-intelligence .organization-service time { display: block; margin-top: .15rem; font-size: .72rem; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+#device-service-intelligence .organization-scope-note { padding-top: .75rem; border-top: 1px solid var(--line); color: var(--muted); line-height: 1.6; }
+#device-service-intelligence .organization-empty { color: var(--muted); line-height: 1.6; }
+@media (max-width: 375px) {
+  #device-service-intelligence { padding: .85rem; }
+  #device-service-intelligence .organization-services { margin-left: 0; }
+}
+
 /* NI-03 presentation only; other cards and grids retain their styles. */
 #device-protocol-intelligence { min-width: 0; margin-top: 1.25rem; padding: 1.25rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow-wrap: anywhere; }
 #device-protocol-intelligence .section-heading { margin: 0 0 .85rem; }

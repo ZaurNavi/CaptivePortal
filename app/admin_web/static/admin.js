@@ -6782,12 +6782,15 @@
       if (event < lower || row[key] >= v.evaluated_at_utc) throw new Error("shape");
       return event;
     }
-    const seen = new Set(), categoryLatest = new Map(); let previous = null;
+    const seen = new Set(), categoryLatest = new Map(), organizationNames = new Map(); let previous = null;
     for (const row of v.recent_services) {
       service(row, "last_observed_at", at - 3600000000);
       if (seen.has(row.service_id) || previous && (previous.last_observed_at < row.last_observed_at ||
         previous.last_observed_at === row.last_observed_at && previous.service_id >= row.service_id)) throw new Error("shape");
       seen.add(row.service_id); previous = row;
+      if (organizationNames.has(row.organization_id) &&
+        organizationNames.get(row.organization_id) !== row.organization_display_name) throw new Error("shape");
+      organizationNames.set(row.organization_id, row.organization_display_name);
       if (!categoryLatest.has(row.service_category_id)) categoryLatest.set(row.service_category_id, row);
     }
     const categorySeen = new Set(); previous = null;
@@ -6824,6 +6827,80 @@
     for (const line of lines) { const p = document.createElement("p"); p.textContent = line; node.appendChild(p); }
     content.appendChild(node);
   }
+  // Grounded in admin_web_v1's existing /admin/static Flask route. Neither
+  // filenames nor URLs are derived from response labels or canonical IDs.
+  const organizationIcons = Object.freeze({"org.google": "generic.svg", "org.meta": "generic.svg"});
+  const serviceIcons = Object.freeze({
+    "service.youtube": "generic.svg", "service.instagram": "instagram.svg", "service.whatsapp": "whatsapp.svg",
+  });
+  function icon(kind, id) {
+    const names = kind === "organizations" ? organizationIcons : serviceIcons;
+    const filename = Object.hasOwn(names, id) ? names[id] : "generic.svg";
+    const base = `/admin/static/icons/${kind}/`;
+    const tile = document.createElement("span"); tile.className = `organization-icon organization-icon--${kind}`;
+    tile.setAttribute("aria-hidden", "true");
+    const image = document.createElement("img");
+    image.setAttribute("alt", ""); image.setAttribute("aria-hidden", "true");
+    image.setAttribute("width", kind === "organizations" ? "24" : "20");
+    image.setAttribute("height", kind === "organizations" ? "24" : "20");
+    image.src = base + filename;
+    const fallback = document.createElement("span"); fallback.textContent = "◇"; fallback.hidden = true;
+    let generic = filename === "generic.svg";
+    image.addEventListener("error", () => {
+      if (!generic) { generic = true; image.src = base + "generic.svg"; }
+      else { image.hidden = true; fallback.hidden = false; }
+    });
+    tile.appendChild(image); tile.appendChild(fallback);
+    return tile;
+  }
+  function organizationCard(rows) {
+    const node = document.createElement("div"); node.className = "service-info-card organization-context-card";
+    const title = document.createElement("h3"); title.textContent = "Organizations · last 60 minutes"; node.appendChild(title);
+    if (!rows.length) {
+      const empty = document.createElement("p"); empty.className = "organization-empty";
+      empty.textContent = "No confirmed organizations from recent recognized services. This does not mean the device had no network activity.";
+      node.appendChild(empty);
+    } else {
+      // The validated DTO caps this projection at 12 services / 12 groups.
+      const groups = new Map();
+      for (const row of rows) {
+        if (!groups.has(row.organization_id)) groups.set(row.organization_id, {
+          id: row.organization_id, name: row.organization_display_name, latest: row.last_observed_at, services: [],
+        });
+        groups.get(row.organization_id).services.push(row);
+      }
+      const ordered = Array.from(groups.values()).sort((a, b) => a.latest === b.latest ?
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : a.latest > b.latest ? -1 : 1);
+      const list = document.createElement("ul"); list.className = "organization-groups";
+      for (const group of ordered) {
+        const item = document.createElement("li"); item.className = "organization-group";
+        const header = document.createElement("div"); header.className = "organization-heading";
+        header.appendChild(icon("organizations", group.id));
+        const identity = document.createElement("div"); identity.className = "organization-identity";
+        const name = document.createElement("h4"); name.textContent = group.name; identity.appendChild(name);
+        const count = document.createElement("span"); count.className = "organization-count";
+        count.textContent = `${group.services.length} recognized service${group.services.length === 1 ? "" : "s"} shown`;
+        identity.appendChild(count); header.appendChild(identity); item.appendChild(header);
+        const members = document.createElement("ul"); members.className = "organization-services";
+        for (const row of group.services) {
+          const member = document.createElement("li"); member.className = "organization-service";
+          member.appendChild(icon("services", row.service_id));
+          const details = document.createElement("div"); details.className = "organization-service-details";
+          const label = document.createElement("span"); label.className = "organization-service-name";
+          label.textContent = row.display_name; details.appendChild(label);
+          const time = document.createElement("time");
+          time.setAttribute("datetime", row.last_observed_at); time.setAttribute("title", row.last_observed_at);
+          time.textContent = row.last_observed_at.slice(0, 19).replace("T", " ") + " UTC";
+          details.appendChild(time); member.appendChild(details); members.appendChild(member);
+        }
+        item.appendChild(members); list.appendChild(item);
+      }
+      node.appendChild(list);
+    }
+    const note = document.createElement("p"); note.className = "organization-scope-note";
+    note.textContent = "Organizations are based only on recognized services shown in this 60-minute result.";
+    node.appendChild(note); content.appendChild(node);
+  }
   function coverageMessage(v) {
     const c = v.coverage, positive = v.last_service_observation !== null;
     if (materialized && (v.materialization.state !== "current" || v.materialization.window_coverage_state !== "complete")) return positive ?
@@ -6840,6 +6917,7 @@
     content.replaceChildren();
     card("Recent Services · last 60 minutes", v.recent_services.length ? v.recent_services.map((row) =>
       `${row.display_name} · ${row.organization_display_name} · ${row.last_observed_at}`) : ["No supported recent result. This is not an activity measurement."]);
+    organizationCard(v.recent_services);
     card("Service Categories", v.service_categories.length ? v.service_categories.map((row) => `${row.display_name} · ${row.last_observed_at}`) : ["No supported category result."]);
     card("Last Service Observation · last 24 hours", v.last_service_observation ?
       [`${v.last_service_observation.display_name} · ${v.last_service_observation.observed_at}`] : ["No supported observation available."]);
