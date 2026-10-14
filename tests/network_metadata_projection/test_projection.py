@@ -165,12 +165,12 @@ def test_crash_checkpoint_atomicity(state, point, committed):
     assert len(edges(state)) == 2
 
 
-@pytest.mark.parametrize("kind", ["invalid", "outside_scope", "source_identity"])
+@pytest.mark.parametrize("kind", ["invalid", "unadmitted_scope", "source_identity"])
 def test_conflict_no_checkpoint_and_upstream_unmodified(state, kind):
     if kind == "invalid":
         state.attribution.states["10.73.0.7"] = "invalid"
-    elif kind == "outside_scope":
-        state.source.records = [replace(state.source.records[0], src_ip="10.74.0.7")]
+    elif kind == "unadmitted_scope":
+        state.source.records = [replace(state.source.records[0], capture_scope_binding_digest="f" * 64)]
     else:
         state.source.records = [replace(state.source.records[0], source_event_identity="bad")]
     state.service.poll()

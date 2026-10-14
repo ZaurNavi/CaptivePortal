@@ -1,4 +1,4 @@
-"""Exact Core V1 with an optional, separately versioned Service extension."""
+"""Exact fresh Core V2 with an optional, separately versioned Service extension."""
 import sqlite3
 from functools import lru_cache
 from .models import ALGORITHM, ATTRIBUTION_STATES, RUNTIME_STATES, ProjectionUnavailable
@@ -7,10 +7,22 @@ from app.network_metadata.validation import ni_timestamp
 
 STATES = ",".join("'" + item + "'" for item in sorted(ATTRIBUTION_STATES))
 SNAPSHOT_STATES = ",".join("'" + item + "'" for item in sorted(ATTRIBUTION_STATES - {"invalid"}))
-VERSION = "projection_contract_version INTEGER NOT NULL CHECK(projection_contract_version=1), projection_algorithm_version TEXT NOT NULL CHECK(projection_algorithm_version='" + ALGORITHM + "')"
+VERSION = "projection_contract_version INTEGER NOT NULL CHECK(projection_contract_version=2), projection_algorithm_version TEXT NOT NULL CHECK(projection_algorithm_version='" + ALGORITHM + "')"
 TABLES = {
-"network_metadata_projection_schema": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), schema_version INTEGER NOT NULL CHECK(schema_version=1), " + VERSION + ", created_at_utc TEXT NOT NULL",
-"projection_runs": "projection_run_id TEXT PRIMARY KEY, started_at_utc TEXT NOT NULL, repository_head TEXT NOT NULL, repository_tree TEXT NOT NULL, " + VERSION + ", configuration_digest TEXT NOT NULL",
+"network_metadata_projection_schema": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), schema_version INTEGER NOT NULL CHECK(schema_version=2), " + VERSION + ", created_at_utc TEXT NOT NULL",
+"projection_scope_admission": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), admission_digest TEXT NOT NULL UNIQUE, admission_json TEXT NOT NULL",
+"projection_runs": "projection_run_id TEXT PRIMARY KEY, started_at_utc TEXT NOT NULL, repository_head TEXT NOT NULL, repository_tree TEXT NOT NULL, " + VERSION + ", configuration_digest TEXT NOT NULL, scope_admission_digest TEXT NOT NULL REFERENCES projection_scope_admission(admission_digest)",
+"projection_source_reset_epoch": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), reset_epoch_id TEXT NOT NULL UNIQUE, reset_at_utc TEXT NOT NULL, admission_digest TEXT NOT NULL REFERENCES projection_scope_admission(admission_digest), source_snapshot_digest TEXT NOT NULL, floor_count INTEGER NOT NULL CHECK(floor_count>=0)",
+"projection_source_reset_floors": """source_generation_id TEXT PRIMARY KEY,
+reset_epoch_id TEXT NOT NULL REFERENCES projection_source_reset_epoch(reset_epoch_id), reset_at_utc TEXT NOT NULL,
+site_id TEXT NOT NULL, capture_source_id TEXT NOT NULL, network_scope_id TEXT NOT NULL,
+capture_scope_binding_digest TEXT NOT NULL, binding_valid_from_utc TEXT NOT NULL,
+generation_start_offset INTEGER NOT NULL CHECK(generation_start_offset>=0),
+committed_byte_offset INTEGER NOT NULL CHECK(committed_byte_offset>=generation_start_offset),
+last_retained_record_start_byte_offset INTEGER, last_retained_observation_id TEXT,
+CHECK((last_retained_record_start_byte_offset IS NULL AND last_retained_observation_id IS NULL) OR
+(last_retained_record_start_byte_offset IS NOT NULL AND last_retained_observation_id IS NOT NULL AND
+last_retained_record_start_byte_offset>=generation_start_offset AND last_retained_record_start_byte_offset<committed_byte_offset))""",
 "device_network_metadata_edges": """edge_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version=1),
 site_id TEXT NOT NULL, client_mac TEXT NOT NULL, event_at TEXT NOT NULL, source_ingested_at TEXT NOT NULL, projected_at TEXT NOT NULL,
 device_endpoint_role TEXT NOT NULL CHECK(device_endpoint_role IN ('src','dst')), device_ip TEXT NOT NULL,
@@ -75,9 +87,12 @@ def create_schema(connection, now):
     for table in ("device_network_metadata_edges", "projection_registry_binding_events"):
         connection.execute(f"CREATE TRIGGER immutable_{table} BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT,'immutable_projection_fact'); END")
         connection.execute(f"CREATE TRIGGER retained_{table} BEFORE DELETE ON {table} WHEN projection_retention_delete_authorized()!=1 BEGIN SELECT RAISE(ABORT,'projection_retention_required'); END")
-    connection.execute("INSERT INTO network_metadata_projection_schema VALUES(1,1,1,?,?)", (ALGORITHM, now))
+    for table in ("projection_scope_admission", "projection_source_reset_epoch", "projection_source_reset_floors"):
+        for operation in ("UPDATE", "DELETE"):
+            connection.execute(f"CREATE TRIGGER immutable_{table}_{operation.lower()} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'immutable_reset_boundary'); END")
+    connection.execute("INSERT INTO network_metadata_projection_schema VALUES(1,2,2,?,?)", (ALGORITHM, now))
     connection.execute("INSERT INTO projection_runtime_state(singleton_id,runtime_state,pending_attribution_count,updated_at_utc) VALUES(1,'initializing',0,?)", (now,))
-    connection.execute("PRAGMA user_version=1")
+    connection.execute("PRAGMA user_version=2")
 
 
 def signature(connection):
@@ -96,19 +111,35 @@ def _expected_signatures():
     return core, extension
 
 
-def validate_core_schema_v1(connection):
+def validate_core_schema_v2(connection):
     expected, _ = _expected_signatures()
     names = {row[1] for row in expected}
     actual = tuple(row for row in signature(connection) if row[1] in names)
     rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
     runtime = connection.execute("SELECT * FROM projection_runtime_state").fetchall()
-    if (actual != expected or connection.execute("PRAGMA user_version").fetchone()[0] != 1
-            or len(rows) != 1 or tuple(rows[0])[:4] != (1, 1, 1, ALGORITHM)
+    if (actual != expected or connection.execute("PRAGMA user_version").fetchone()[0] != 2
+            or len(rows) != 1 or tuple(rows[0])[:4] != (1, 2, 2, ALGORITHM)
             or len(runtime) != 1 or runtime[0][0] != 1
             or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
             or connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"):
         raise ValueError
     ni_timestamp(rows[0][4], canonical=True)
+    from .config import ScopeAdmission
+    admission_rows = connection.execute("SELECT admission_digest,admission_json FROM projection_scope_admission").fetchall()
+    if len(admission_rows) > 1:
+        raise ValueError
+    if admission_rows:
+        admitted = ScopeAdmission(admission_rows[0][1])
+        if admitted.digest != admission_rows[0][0] or admitted.canonical != admission_rows[0][1]:
+            raise ValueError
+    epoch = connection.execute("SELECT * FROM projection_source_reset_epoch").fetchall()
+    if len(epoch) > 1 or (epoch and not admission_rows):
+        raise ValueError
+    if epoch:
+        from .validation import validate_reset_floors
+        validate_reset_floors(connection, admitted)
+    elif connection.execute("SELECT 1 FROM projection_source_reset_floors LIMIT 1").fetchone():
+        raise ValueError
 
 
 def validate_service_recognition_extension_v1(connection):
@@ -126,7 +157,7 @@ def validate_service_recognition_extension_v1(connection):
 
 def validate_schema(connection, *, integrity=False):
     try:
-        validate_core_schema_v1(connection)
+        validate_core_schema_v2(connection)
         present = validate_service_recognition_extension_v1(connection)
         core, extension = _expected_signatures()
         if signature(connection) != tuple(sorted(core + (extension if present else ()))):

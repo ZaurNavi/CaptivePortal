@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from dataclasses import replace
 import uuid
+import json
 
 from app.network_metadata.config import make_capture_scope_binding
 from app.network_metadata.canonical import source_event_identity, observation_uuid
@@ -32,15 +33,27 @@ class Clock:
 
 
 def source_record(offset=0, **changes):
-    binding = make_capture_scope_binding(dict(schema_version=1, capture_source_id="synthetic-sensor",
-        site_id=SITE, network_scope_id="synthetic-scope", ipv4_cidrs=["10.73.0.0/16"],
-        valid_from_utc="2026-01-01T00:00:00.000000Z"))
+    binding = make_capture_scope_binding(dict(schema_version=1,
+        capture_source_id=changes.get("capture_source_id", "synthetic-sensor"),
+        site_id=changes.get("site_id", SITE), network_scope_id=changes.get("network_scope_id", "synthetic-scope"),
+        ipv4_cidrs=list(changes.get("capture_scope_ipv4_cidrs", ("10.73.0.0/16",))),
+        valid_from_utc=changes.get("binding_valid_from_utc", "2026-01-01T00:00:00.000000Z")))
     identity = source_event_identity(GENERATION, offset)
     value = NetworkMetadataProjectionSourceRecordV1(observation_uuid("dns", identity), identity, "dns", GENERATION,
-        offset, SITE, binding.capture_source_id, binding.network_scope_id, "within_intended_scope", binding.binding_digest,
+        offset, binding.site_id, binding.capture_source_id, binding.network_scope_id, "within_intended_scope", binding.binding_digest,
         binding.ipv4_cidrs, "2026-10-09T12:00:00.123456Z", ni_format_utc(T0), "observed_retained",
-        "10.73.0.7", "10.73.0.8", 65535, 65535, "UDP")
+        "10.73.0.7", "10.73.0.8", 65535, 65535, "UDP", binding.valid_from_utc)
     return replace(value, **changes)
+
+
+def scope_admission(records=None):
+    scopes = {}
+    for record in records or [source_record()]:
+        scopes[record.capture_scope_binding_digest] = dict(site_id=record.site_id,
+            capture_source_id=record.capture_source_id, network_scope_id=record.network_scope_id,
+            capture_scope_binding_digest=record.capture_scope_binding_digest,
+            ipv4_cidrs=list(record.capture_scope_ipv4_cidrs), binding_valid_from_utc=record.binding_valid_from_utc)
+    return json.dumps(dict(schema_version=1, placement_kind="verified_pre_nat_guest_ipv4", scopes=list(scopes.values())))
 
 
 class Source:
@@ -56,6 +69,10 @@ class Source:
         records = [value for value in self.records if value.source_generation_id == generation]
         return SimpleNamespace(source_generation_id=generation, generation_start_offset=0,
             committed_byte_offset=max((value.record_start_byte_offset for value in records), default=0) + 1)
+    def validate_generation_admission(self, generation, *, admission):
+        for record in self.records:
+            if record.source_generation_id == generation:
+                admission.binding_for(record)
     def read_projection_batch(self, generation, after, limit):
         return tuple(sorted((record for record in self.records if record.source_generation_id == generation
             and (after is None or record.record_start_byte_offset > after)), key=lambda value: value.record_start_byte_offset)[:limit])
@@ -101,7 +118,8 @@ class Registry:
 
 def stack(tmp_path, records=None):
     clock = Clock()
-    config = ProjectionConfig(True, str(tmp_path / "projection.sqlite3"), max_db_bytes=67108864)
+    config = ProjectionConfig(True, str(tmp_path / "projection.sqlite3"), max_db_bytes=67108864,
+                              scope_admission_json=scope_admission(records))
     repository = ProjectionRepository(config, clock=clock).initialize()
     source, attribution, registry = Source(records or [source_record()]), Attribution(), Registry()
     service = NetworkMetadataProjectionService(config, repository, source, attribution, registry, IDENTITY)

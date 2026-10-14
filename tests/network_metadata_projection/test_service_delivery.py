@@ -107,7 +107,7 @@ def test_G2_default_off_and_explicit_startup_install(state):
     state.repo = ProjectionRepository(state.config, clock=state.clock,
                                      install_service_recognition_extension=True).initialize()
     assert state.repo.service_recognition_extension_present is True
-    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_G2_feed_exact_provenance_readonly_and_monotonic(state):
@@ -275,8 +275,9 @@ def test_G2_coverage_only_and_bounded_replay_share_exact_identity(state):
     before = tuple(state.repo.connection.iterdump())
     coverage = api.read_recognition_device_coverage(SITE, DEVICE, MAC, first, last, deadline=QueryDeadline.after(5))
     assert coverage.identity_binding_state == "authoritative"
-    assert coverage.projection_safe_reason == "pending_attribution"
-    assert coverage.device_linked_pending_count == 1
+    assert coverage.projection_safe_reason is None
+    assert coverage.device_linked_pending_count == 0
+    assert [call[1] for call in state.attribution.calls] == ["10.73.0.7"]
     assert not hasattr(coverage, "facts")
     page = api.read_candidate_page(SITE, first, last, client_mac=MAC, limit=1, deadline=QueryDeadline.after(5))
     assert len(page) == 1 and page[0].identity.device_id == DEVICE

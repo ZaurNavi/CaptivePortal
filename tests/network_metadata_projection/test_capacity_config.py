@@ -11,7 +11,7 @@ from app.network_metadata_projection.models import (PROJECTION_TRANSACTION_HEADR
 from app.network_metadata_projection.config import projection_config_from_env
 from app.network_metadata_projection.repository import ProjectionRepository
 from app.network_metadata_projection.cli import main
-from .support import stack, source_record, SITE, MAC, IDENTITY
+from .support import stack, source_record, SITE, MAC, IDENTITY, scope_admission
 
 
 def test_default_off_no_db_lock_upstream_or_identity(tmp_path, monkeypatch):
@@ -41,6 +41,7 @@ def test_closed_capacity_config(value):
 def test_processing_config_accepts_only_frozen_value(tmp_path, name):
     default = getattr(ProjectionConfig(), name)
     env = {"NETWORK_METADATA_PROJECTION_ENABLED": "true",
+        "NETWORK_METADATA_PROJECTION_SCOPE_ADMISSION_JSON": scope_admission(),
         "NETWORK_METADATA_PROJECTION_DB_PATH": str(tmp_path / "projection.sqlite3"),
         "NETWORK_METADATA_DB_PATH": str(tmp_path / "source.sqlite3"),
         "VISITOR_REGISTRY_DB_PATH": str(tmp_path / "registry.sqlite3"),
@@ -58,6 +59,7 @@ def test_processing_config_accepts_only_frozen_value(tmp_path, name):
 @pytest.mark.parametrize("capacity", [67108864, 17179869184, 68719476736])
 def test_admitted_capacity_range_preserved(tmp_path, capacity):
     env = {"NETWORK_METADATA_PROJECTION_ENABLED": "true",
+        "NETWORK_METADATA_PROJECTION_SCOPE_ADMISSION_JSON": scope_admission(),
         "NETWORK_METADATA_PROJECTION_DB_PATH": str(tmp_path / "projection.sqlite3"),
         "NETWORK_METADATA_DB_PATH": str(tmp_path / "source.sqlite3"),
         "VISITOR_REGISTRY_DB_PATH": str(tmp_path / "registry.sqlite3"),
@@ -65,7 +67,7 @@ def test_admitted_capacity_range_preserved(tmp_path, capacity):
     assert projection_config_from_env(env).max_db_bytes == capacity
 
 
-@pytest.mark.parametrize("damage", ["CREATE TABLE foreign_table(value)", "PRAGMA user_version=2", "DROP TABLE projection_pending_attribution"])
+@pytest.mark.parametrize("damage", ["CREATE TABLE foreign_table(value)", "PRAGMA user_version=1", "DROP TABLE projection_pending_attribution"])
 def test_foreign_schema_preserved_and_writer_lock(tmp_path, damage):
     value = stack(tmp_path)
     try:
@@ -157,7 +159,7 @@ def test_maximum_256_observation_transaction_growth_under_fixed_headroom(tmp_pat
         dst = f"254.254.{100 + index // 78}.{101 + index % 78 * 2}"
         records.append(source_record(9223372036854775550 + index, src_ip=src, dst_ip=dst,
                                     capture_source_id="x" * 64, network_scope_id="y" * 64,
-                                    capture_scope_ipv4_cidrs=("0.0.0.0/0",)))
+                                    capture_scope_ipv4_cidrs=("254.254.0.0/16",)))
     value = stack(tmp_path, records)
     try:
         for index, record in enumerate(records):

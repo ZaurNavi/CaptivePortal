@@ -29,7 +29,7 @@ def main(argv=None):
         raise ValueError("invalid_lab_configuration")
     sys.path.insert(0, str(root))
     from tests.network_metadata_projection.support import (
-        source_record, Clock, Source, Attribution, Registry, IDENTITY, MAC, OTHER_MAC, GENERATION)
+        source_record, Clock, Source, Attribution, Registry, IDENTITY, MAC, OTHER_MAC, GENERATION, scope_admission)
     from app.network_metadata_projection.repository import ProjectionRepository
     from app.network_metadata_projection.models import ProjectionConfig, RegistryEvaluation
     from app.network_metadata_projection.service import NetworkMetadataProjectionService
@@ -40,7 +40,8 @@ def main(argv=None):
     tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
     commits, elapsed, projected = [], 0.0, 0
     with tempfile.TemporaryDirectory(prefix="ni04mat-g2-load-", dir=args.lab_temp) as disposable:
-        config = ProjectionConfig(True, str(Path(disposable) / "projection.sqlite3"), max_db_bytes=536870912)
+        config = ProjectionConfig(True, str(Path(disposable) / "projection.sqlite3"), max_db_bytes=536870912,
+                                  scope_admission_json=scope_admission())
         clock = Clock()
         repo = ProjectionRepository(config, clock=clock).initialize()
         try:

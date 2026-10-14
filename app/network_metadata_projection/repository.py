@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.network_metadata.validation import digest, ni_timestamp
-from .config import configuration_digest
+from .config import configuration_digest, ScopeAdmission
 from .models import (ALGORITHM, PROJECTION_TRANSACTION_HEADROOM_BYTES, ProjectionUnavailable,
                      ProjectionCapacity, ProjectionConflict, RUNTIME_STATES)
 from .schema import TABLES, create_schema, validate_schema
@@ -18,10 +18,14 @@ from .service_extension import append_candidate, maintain_authoritative_change
 
 class ProjectionRepository:
     def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None,
-                 monotonic=time.monotonic, install_service_recognition_extension=False):
+                 monotonic=time.monotonic, install_service_recognition_extension=False, reset_bootstrap=None):
         if type(install_service_recognition_extension) is not bool:
             raise ProjectionUnavailable()
         self._install_service_recognition_extension = install_service_recognition_extension
+        if reset_bootstrap is not None and (type(reset_bootstrap) is not dict or set(reset_bootstrap) != {
+                "floors", "reset_epoch_id", "reset_at_utc"}):
+            raise ProjectionUnavailable("invalid_reset_bootstrap")
+        self._reset_bootstrap = reset_bootstrap
         self.config, self.clock, self.crash_point = config, clock, crash_point
         self.connection = self._writer_fd = None
         self._retention_authorized = False
@@ -85,6 +89,17 @@ class ProjectionRepository:
             if objects == 0 and self.connection.execute("PRAGMA user_version").fetchone()[0] == 0:
                 with self.transaction():
                     create_schema(self.connection, timestamp(self.clock()))
+                    if self.config.scope_admission_json is not None:
+                        self._pin_scope_admission()
+                    if self._reset_bootstrap is not None:
+                        self.crash_point("reset_core_created")
+                        self._insert_reset_floors(**self._reset_bootstrap)
+                        self.crash_point("reset_floors_installed")
+            elif self._reset_bootstrap is not None:
+                raise ProjectionUnavailable("reset_requires_fresh_store")
+            if self.config.scope_admission_json is not None:
+                with self.transaction():
+                    self._pin_scope_admission()
             self.service_recognition_extension_present = (
                 validate_schema(self.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1")
             row = self.connection.execute("SELECT runtime_state,safe_reason FROM projection_runtime_state").fetchone()
@@ -93,9 +108,21 @@ class ProjectionRepository:
                 from .service_extension import install_service_recognition_extension
                 install_service_recognition_extension(self)
             return self
-        except (sqlite3.Error, OSError, ProjectionUnavailable):
+        except (sqlite3.Error, OSError, ProjectionUnavailable, ProjectionConflict):
             self.close()
             raise ProjectionUnavailable() from None
+        except BaseException:
+            self.close()
+            raise
+
+    def _pin_scope_admission(self):
+        admission = ScopeAdmission(self.config.scope_admission_json)
+        old = self.connection.execute("SELECT admission_digest,admission_json FROM projection_scope_admission").fetchone()
+        if old is None:
+            self.insert("projection_scope_admission", dict(singleton_id=1,
+                admission_digest=admission.digest, admission_json=admission.canonical))
+        elif tuple(old) != (admission.digest, admission.canonical):
+            raise ProjectionConflict("scope_admission_untrusted")
 
     def maintain_capacity(self, *, post_commit=False, retention_ran=False):
         """Legacy PASSIVE cadence or opt-in conditional soft maintenance.
@@ -189,18 +216,49 @@ class ProjectionRepository:
         digest(identity.artifact_sha, 40)
         digest(identity.artifact_tree, 40)
         run_id = str(uuid.uuid4())
+        admission = ScopeAdmission(self.config.scope_admission_json)
+        stored = self.connection.execute("SELECT admission_digest FROM projection_scope_admission").fetchone()
+        if stored is None or stored[0] != admission.digest:
+            raise ProjectionConflict("scope_admission_untrusted")
         with self.transaction():
             if self.config.idle_write_reduction_enabled and self.live_state != "blocked_conflict":
                 self.runtime("initializing")
             self.insert("projection_runs", dict(projection_run_id=run_id, started_at_utc=timestamp(self.clock()),
                 repository_head=identity.artifact_sha, repository_tree=identity.artifact_tree,
-                projection_contract_version=1, projection_algorithm_version=ALGORITHM,
-                configuration_digest=configuration_digest(self.config)))
+                projection_contract_version=2, projection_algorithm_version=ALGORITHM,
+                configuration_digest=configuration_digest(self.config), scope_admission_digest=admission.digest))
         self.active_run_id = run_id
         return run_id
 
     def checkpoint(self, generation):
         return self.connection.execute("SELECT * FROM projection_source_checkpoints WHERE source_generation_id=?", (generation,)).fetchone()
+
+    def reset_floor(self, generation):
+        return self.connection.execute("SELECT * FROM projection_source_reset_floors WHERE source_generation_id=?", (generation,)).fetchone()
+
+    def install_reset_floors(self, floors, *, reset_epoch_id, reset_at_utc):
+        with self.transaction():
+            self._insert_reset_floors(floors, reset_epoch_id=reset_epoch_id, reset_at_utc=reset_at_utc)
+
+    def _insert_reset_floors(self, floors, *, reset_epoch_id, reset_at_utc):
+        import hashlib
+        from app.network_metadata.canonical import ni01_canonical_json
+        from app.network_metadata.validation import canonical_uuid
+        from .validation import validate_reset_floors
+        canonical_uuid(reset_epoch_id, 4)
+        ni_timestamp(reset_at_utc, canonical=True)
+        admission = ScopeAdmission(self.config.scope_admission_json)
+        ordered = sorted(floors, key=lambda item: item["source_generation_id"])
+        if not self.connection.in_transaction or any(self.connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() for table in (
+                "projection_runs", "device_network_metadata_edges", "projection_source_checkpoints",
+                "projection_pending_attribution", "projection_source_reset_epoch")):
+            raise ProjectionUnavailable("reset_requires_fresh_store")
+        self.insert("projection_source_reset_epoch", dict(singleton_id=1, reset_epoch_id=reset_epoch_id,
+            reset_at_utc=reset_at_utc, admission_digest=admission.digest,
+            source_snapshot_digest=hashlib.sha256(ni01_canonical_json(ordered)).hexdigest(), floor_count=len(ordered)))
+        for floor in ordered:
+            self.insert("projection_source_reset_floors", dict(floor, reset_epoch_id=reset_epoch_id, reset_at_utc=reset_at_utc))
+        validate_reset_floors(self.connection, admission)
 
     def existing_edges(self, observation):
         return {row["device_endpoint_role"]: dict(row) for row in self.connection.execute(
@@ -332,7 +390,15 @@ class ProjectionRepository:
             if checkpoint is not None:
                 last = next(iter(dispositions[-1]))
                 old = self.checkpoint(last.source_generation_id)
-                if (old is not None and (checkpoint is None or old["last_record_start_byte_offset"] != checkpoint["after"])) or (old is None and checkpoint["after"] is not None):
+                floor = self.reset_floor(last.source_generation_id)
+                boundaries = [value for value in (
+                    None if old is None else old["last_record_start_byte_offset"],
+                    None if floor is None else floor["last_retained_record_start_byte_offset"]) if value is not None]
+                expected_after = max(boundaries) if boundaries else None
+                if (checkpoint["after"] != expected_after or any(
+                        source.source_generation_id != last.source_generation_id
+                        or (expected_after is not None and source.record_start_byte_offset <= expected_after)
+                        for source, _, _ in dispositions)):
                     raise ProjectionConflict("checkpoint_source_conflict")
                 self.connection.execute("INSERT INTO projection_source_checkpoints VALUES(?,?,?,?,?) ON CONFLICT(source_generation_id) DO UPDATE SET "
                     "last_record_start_byte_offset=excluded.last_record_start_byte_offset,last_observation_id=excluded.last_observation_id,"

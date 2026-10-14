@@ -27,6 +27,18 @@ def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
         # Wave-1 idle-source guard in the shared projection reader.
         accepted = subprocess.check_output(["git", "show", "5c7b4c46afa5a57d55fe044c4326da3a10b9e145:" + name], cwd=ROOT)
         current = ROOT.joinpath(name).read_bytes().replace(b"\r\n", b"\n")
+        accepted = accepted.replace(b"\r\n", b"\n")
+        if name == "app/network_metadata_projection/read_service.py":
+            # Architecture Exception V1 explicitly authorizes only internal
+            # Core/projection V2 admission. All other shared-reader bytes and
+            # every NI-03/UI source above remain frozen.
+            for before, after in (
+                (b"schema_version=None, projection_contract_version=1,", b"schema_version=None, projection_contract_version=2,"),
+                (b"defaults.update(store_state=\"available\", schema_version=1, db_bytes=total)",
+                 b"defaults.update(store_state=\"available\", schema_version=2, db_bytes=total)"),
+            ):
+                assert accepted.count(before) == current.count(after) == 1
+                accepted = accepted.replace(before, after, 1)
         assert current == accepted.replace(b"\r\n", b"\n")
 
 
