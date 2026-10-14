@@ -5,7 +5,108 @@ This module stores default values for the application.
 """
 
 import os
+import re
+import ipaddress
+from urllib.parse import urlsplit
 from app.portal_presentation import PORTAL_SETTING_DEFAULTS
+
+
+def _parse_bind_host(value: str) -> str:
+    try:
+        if not isinstance(value, str):
+            raise ValueError
+        address = ipaddress.IPv4Address(value)
+        if str(address) != value or (value != "127.0.0.1" and not any(
+            address in ipaddress.IPv4Network(cidr)
+            for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        )):
+            raise ValueError
+        return value
+    except ValueError:
+        raise ValueError("HOST must be canonical loopback or RFC1918 IPv4") from None
+
+
+def _parse_bind_port(value: str) -> int:
+    if (not isinstance(value, str) or not 1 <= len(value) <= 5
+            or re.fullmatch(r"[1-9][0-9]*", value) is None
+            or not 1024 <= int(value) <= 65535):
+        raise ValueError("PORT must be canonical decimal in 1024..65535")
+    return int(value)
+
+
+def _validate_capport_site_id(value: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{24}", value) is None:
+        raise ValueError("CAPPORT_SITE_ID must be canonical lowercase hex")
+    return value
+
+
+def _normalize_capport_public_base_url(value: str) -> str:
+    message = "CAPPORT_PUBLIC_BASE_URL must be a canonical HTTPS DNS origin"
+    if (not isinstance(value, str) or not value.isascii() or not value.startswith("https://")
+            or any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
+            or any(char in value for char in "%\\@?#[]")):
+        raise ValueError(message)
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme != "https" or not parsed.netloc or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment
+                or parsed.path not in ("", "/")):
+            raise ValueError
+        authority = parsed.netloc.split(":")
+        if len(authority) not in (1, 2):
+            raise ValueError
+        host = authority[0]
+        if not 1 <= len(host) <= 253 or any(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) is None
+            for label in host.split(".")
+        ):
+            raise ValueError
+        last_label = host.rsplit(".", 1)[-1]
+        if re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)", last_label) is not None:
+            raise ValueError
+        if re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", host) is not None:
+            raise ValueError
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            pass
+        else:
+            raise ValueError
+        port = ""
+        if len(authority) == 2:
+            raw_port = authority[1]
+            if (not 1 <= len(raw_port) <= 5 or re.fullmatch(r"[1-9][0-9]*", raw_port) is None
+                    or not 1 <= int(raw_port) <= 65535):
+                raise ValueError
+            port = ":" + raw_port
+        return "https://" + host.lower() + port
+    except ValueError:
+        raise ValueError(message) from None
+
+
+def _validate_capport_allowed_network_values(values: tuple[str, ...]) -> tuple[str, ...]:
+    message = "CAPPORT_ALLOWED_CLIENT_NETWORKS must contain 1..16 unique canonical CIDRs"
+    if not isinstance(values, tuple) or not 1 <= len(values) <= 16:
+        raise ValueError(message)
+    seen = set()
+    for value in values:
+        try:
+            if (not isinstance(value, str) or "/" not in value
+                    or any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)):
+                raise ValueError
+            network = ipaddress.ip_network(value, strict=True)
+            if str(network) != value or network.prefixlen == 0 or network in seen:
+                raise ValueError
+            seen.add(network)
+        except ValueError:
+            raise ValueError(message) from None
+    return values
+
+
+def _parse_capport_allowed_networks_csv(value: str) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        raise ValueError("CAPPORT_ALLOWED_CLIENT_NETWORKS must be canonical CIDR CSV")
+    return _validate_capport_allowed_network_values(tuple(value.split(",")))
 
 # GLOBAL guest-facing presentation; explicit environment bytes are validated later.
 PORTAL_UI_TITLE_AZ = os.getenv("PORTAL_UI_TITLE_AZ", PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_AZ"])
@@ -26,6 +127,10 @@ PORTAL_SUPPORT_FACEBOOK_URL = os.getenv("PORTAL_SUPPORT_FACEBOOK_URL", PORTAL_SE
 # Server settings
 HOST = "127.0.0.1"
 PORT = 8088
+if "HOST" in os.environ:
+    HOST = _parse_bind_host(os.environ["HOST"])
+if "PORT" in os.environ:
+    PORT = _parse_bind_port(os.environ["PORT"])
 
 # Debug mode
 DEBUG = False
@@ -745,6 +850,12 @@ CAPPORT_ALLOWED_CLIENT_NETWORKS = (
     "192.168.1.0/24",
     "192.168.8.0/22",
 )
+if "CAPPORT_SITE_ID" in os.environ:
+    CAPPORT_SITE_ID = _validate_capport_site_id(os.environ["CAPPORT_SITE_ID"])
+if "CAPPORT_PUBLIC_BASE_URL" in os.environ:
+    CAPPORT_PUBLIC_BASE_URL = _normalize_capport_public_base_url(os.environ["CAPPORT_PUBLIC_BASE_URL"])
+if "CAPPORT_ALLOWED_CLIENT_NETWORKS" in os.environ:
+    CAPPORT_ALLOWED_CLIENT_NETWORKS = _parse_capport_allowed_networks_csv(os.environ["CAPPORT_ALLOWED_CLIENT_NETWORKS"])
 CAPPORT_CLIENT_CACHE_TTL_SECONDS = 2
 CAPPORT_FAILURE_CACHE_TTL_SECONDS = 2
 

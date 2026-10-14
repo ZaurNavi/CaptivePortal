@@ -320,3 +320,18 @@ def test_forwarded_scheme_host_and_port_are_applied():
 
     assert payload["scheme"] == "https"
     assert payload["host"] == "captivportal-navi.duckdns.org"
+
+
+def test_one_hop_uses_rightmost_forwarded_values_not_spoofed_left_prefix():
+    app = create_test_app()
+    response = app.test_client().get("/_proxy_state", headers={
+        "X-Forwarded-For": "203.0.113.99, 192.168.8.10",
+        "X-Forwarded-Proto": "http, https",
+        "X-Forwarded-Host": "spoof.example, portal.example",
+        "X-Forwarded-Port": "80, 8443",
+    }, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    assert response.get_json() == {
+        "remote_addr": "192.168.8.10", "scheme": "https", "host": "portal.example:8443",
+    }
+    assert app.wsgi_app.x_for == app.wsgi_app.x_proto == app.wsgi_app.x_host == app.wsgi_app.x_port == 1
+    # A Flask trust-model test, not proof of ingress sanitization or firewall isolation.

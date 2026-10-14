@@ -3,7 +3,8 @@
 import ipaddress
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from app.config import (_validate_capport_site_id, _normalize_capport_public_base_url,
+                        _validate_capport_allowed_network_values)
 
 
 @dataclass(frozen=True)
@@ -48,10 +49,8 @@ class CapportConfig:
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "CapportConfig":
-        site_id = str(settings.get("capport_site_id", "")).strip()
-        base_url = str(
-            settings.get("capport_public_base_url", "")
-        ).rstrip("/")
+        site_id = _validate_capport_site_id(settings.get("capport_site_id", ""))
+        base_url = _normalize_capport_public_base_url(settings.get("capport_public_base_url", ""))
         api_path = str(settings.get("capport_api_path", ""))
         login_path = str(settings.get("capport_login_path", ""))
         raw_networks = settings.get(
@@ -81,17 +80,6 @@ class CapportConfig:
                 "CAPPORT failure cache TTL must be a number"
             ) from exc
 
-        if not site_id:
-            raise ValueError("CAPPORT_SITE_ID must not be empty")
-
-        parsed_url = urlsplit(base_url)
-        if (
-            parsed_url.scheme.lower() != "https"
-            or not parsed_url.netloc
-        ):
-            raise ValueError(
-                "CAPPORT_PUBLIC_BASE_URL must use https://"
-            )
         if not api_path.startswith("/"):
             raise ValueError("CAPPORT_API_PATH must start with /")
         if not login_path.startswith("/"):
@@ -104,26 +92,10 @@ class CapportConfig:
             raise ValueError(
                 "CAPPORT_FAILURE_CACHE_TTL_SECONDS must be positive"
             )
-        if settings.get("host") != "127.0.0.1":
-            raise ValueError(
-                "CAPPORT requires HOST == 127.0.0.1"
-            )
-
         if isinstance(raw_networks, str):
             raw_networks = (raw_networks,)
-        try:
-            networks = tuple(
-                ipaddress.ip_network(str(value), strict=False)
-                for value in raw_networks
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "Invalid CAPPORT allowed client network"
-            ) from exc
-        if not networks:
-            raise ValueError(
-                "CAPPORT_ALLOWED_CLIENT_NETWORKS must not be empty"
-            )
+        raw_networks = _validate_capport_allowed_network_values(raw_networks)
+        networks = tuple(ipaddress.ip_network(value, strict=True) for value in raw_networks)
 
         return cls(
             site_id=site_id,

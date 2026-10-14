@@ -1,5 +1,11 @@
 # Deployment
 
+Core/CAPPORT optional deployment-owned bind/Site/origin/guest-scope inputs are
+documented in [configuration](configuration.md#corecapport-deployment-owned-startup-configuration).
+Code acceptance is separate from Captiv-Prod SysAdmin D01 interface/TLS/routing,
+D02 NPM-only isolation/header sanitization and D03 actual Omada permissions.
+These target gates are not claimed passed; no old-VM reconfiguration or data migration.
+
 Status: current contract; production details remain host-verified
 Updated: 2026-10-14
 
