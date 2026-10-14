@@ -748,16 +748,31 @@ canonical configuration digest, preserving the existing digest with either
 A setting. ON adds `retention_indexed_v1_enabled=true` to run lineage. It does
 not change `NETWORK_METADATA_IO_HOTPATH_V1_ENABLED` or require A to be enabled.
 
-B changes only sensitive/core selection: two existing time-index range queries
-return at most 5000 rows each, deduplicated by full observation identity and
-ordered by `(min(event_at, ingested_at), observation_id)` for at most 5000
-deletion IDs. Strict 14/30-day eligibility, the global 20-batch budget,
+B changes only sensitive/core selection. Core retains R2's two existing
+time-index range queries (5000 rows each) and global-oldest ordering.
+Sensitive uses R3's two streamed raw time-index lookaheads (5000 rows each),
+without a state filter. Every visited ID, timestamp and presence state is
+validated. Cursors close on EOF, error or early exit and before another opens.
+If neither lookahead sees an expired row, full identities are deduplicated,
+contradictory tuples rejected, and at most 5000 IDs are ordered by
+`(min(event_at, ingested_at), observation_id)`.
+
+Only the first **validated expired row** triggers one unchanged legacy
+sensitive SELECT, after closing the lookahead and discarding its candidates.
+Fallback uses strict OR eligibility and `state!='expired'`, returns at most
+5000 canonical IDs in legacy `observation_id` order, not global-oldest order.
+Errors/interruption/corruption never trigger fallback or fake empty success.
+Unvisited fallback timestamps are not claimed to undergo global validation.
+Strict 14/30-day eligibility, the global 20-batch budget,
 transactions, FK cascades, replay/checkpoints, schema and WAL/FULL remain unchanged.
 Other retention classes and touched-identity retention retain their legacy path.
 
-The returned-row bound is **not a physical read/page traversal bound**: an
-already-expired sensitive prefix can require scanning many entries in both
-time indexes. B activation remains HOLD until independent Tech Lead adversarial
+The lookahead bound is **not a bound on the entire fallback's physical reads**.
+R3 avoids R2's state-filtered time-index expired-prefix amplification but adds
+lookahead cost to a potentially expensive legacy scan; it does not guarantee
+total B I/O at or below legacy for every workload. Evidence must include the
+complete fallback cost, not just early-exit probes. B activation remains HOLD
+until independent Tech Lead adversarial
 performance acceptance and Owner approval. An indexed EXPLAIN plan or correctness
 PASS alone does not establish an IOPS benefit. There is no Admin toggle or hot
 reload; production activation/restart and rollback require separate authorization.

@@ -53,6 +53,51 @@ class RetentionPolicy:
         if kind in {"sensitive", "core"}:
             age = cutoff[14 if kind == "sensitive" else 30]
             extra = " AND sensitive_endpoint_presence_state!='expired'" if kind == "sensitive" else ""
+            if kind == "sensitive" and self.repository.config.retention_indexed_v1_enabled:
+                candidates = {}
+                fallback = False
+                try:
+                    threshold = ni_timestamp(age, canonical=True)
+                    for field in ("event_at", "ingested_at"):
+                        cursor = conn.execute(
+                            "SELECT observation_id,event_at,ingested_at,sensitive_endpoint_presence_state "
+                            "FROM network_metadata_observations "
+                            f"WHERE {field}<? ORDER BY {field},observation_id LIMIT 5000", (age,))
+                        try:
+                            for identity, event_at, ingested_at, state in cursor:
+                                canonical_uuid(identity, 5)
+                                event = ni_timestamp(event_at, canonical=True)
+                                ingested = ni_timestamp(ingested_at, canonical=True)
+                                if (event if field == "event_at" else ingested) >= threshold:
+                                    raise NetworkMetadataStorageCorrupt()
+                                if type(state) is not str or state not in {"observed_retained", "not_observed", "expired"}:
+                                    raise NetworkMetadataStorageCorrupt()
+                                value = (event, ingested, state)
+                                if identity in candidates and candidates[identity] != value:
+                                    raise NetworkMetadataStorageCorrupt()
+                                if state == "expired":
+                                    fallback = True
+                                    break
+                                candidates[identity] = value
+                        finally:
+                            cursor.close()
+                        if fallback:
+                            candidates.clear()
+                            break
+                    if fallback:
+                        # Only a validated expired row authorizes this one legacy query.
+                        cursor = conn.execute(
+                            "SELECT observation_id FROM network_metadata_observations WHERE (event_at<? OR ingested_at<?)" + extra +
+                            " ORDER BY observation_id LIMIT 5000", (age, age))
+                        try:
+                            return [canonical_uuid(row[0], 5) for row in cursor]
+                        finally:
+                            cursor.close()
+                    return sorted(candidates, key=lambda identity: (min(candidates[identity][:2]), identity))[:5000]
+                except NetworkMetadataValidationError:
+                    raise NetworkMetadataStorageCorrupt() from None
+                except sqlite3.Error:
+                    raise NetworkMetadataStorageUnavailable() from None
             if self.repository.config.retention_indexed_v1_enabled:
                 # LIMIT bounds returned rows, not scanned entries in an expired prefix.
                 candidates = {}

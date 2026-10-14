@@ -305,6 +305,19 @@ def _b_expected(rows, kind, cutoffs):
     return [row[0] for row in sorted(eligible, key=lambda row: (min(row[1:3]), row[0]))]
 
 
+def _b_r3_expected(rows, kind, cutoffs):
+    expected = _b_expected(rows, kind, cutoffs)
+    fallback = False
+    if kind == "sensitive":
+        for field in (1, 2):
+            prefix = sorted((row for row in rows if row[field] < cutoffs[14]),
+                key=lambda row: (row[field], row[0]))[:5000]
+            if any(row[3] == "expired" for row in prefix):
+                fallback = True
+                break
+    return (sorted(expected) if fallback else expected)[:5000], fallback
+
+
 @pytest.mark.parametrize("kind", ["sensitive", "core"])
 @pytest.mark.parametrize("count", [0, 1, 5000, 5001, 20000])
 def test_b_top_k_and_eventual_completeness_vs_legacy(tmp_path, kind, count):
@@ -320,6 +333,7 @@ def test_b_top_k_and_eventual_completeness_vs_legacy(tmp_path, kind, count):
         rows = _b_seed(state, times())
         policy, cutoffs = RetentionPolicy(state.repo), _b_cutoffs(state)
         expected = _b_expected(rows, kind, cutoffs)
+        remaining = rows[:]
         seen = []
         while True:
             sql = []
@@ -327,18 +341,26 @@ def test_b_top_k_and_eventual_completeness_vs_legacy(tmp_path, kind, count):
             selected = policy._select(kind, cutoffs)
             state.repo.connection.set_trace_callback(None)
             selects = [s for s in sql if s.startswith("SELECT")]
-            assert len(selects) == 2 and all("LIMIT 5000" in s for s in selects)
+            wanted, fallback = _b_r3_expected(remaining, kind, cutoffs)
+            assert len(selects) in ((2, 3) if fallback else (2,))
+            assert all("LIMIT 5000" in s for s in selects)
+            if fallback:
+                assert sum("SELECT observation_id FROM" in s for s in selects) == 1
             branch_rows = [state.repo.connection.execute(s).fetchall() for s in selects]
             assert all(len(part) <= 5000 for part in branch_rows)
-            assert sum(map(len, branch_rows)) <= 10000
-            assert selected == expected[len(seen):len(seen) + 5000]
+            assert sum(len(part) for s, part in zip(selects, branch_rows)
+                if "SELECT observation_id FROM" not in s) <= 10000
+            assert selected == wanted
             if not selected:
                 break
             assert len(selected) <= 5000 and len(set(selected)) == len(selected)
             seen.extend(selected)
             with state.repo.transaction():
                 policy._delete(kind, selected)
-        assert seen == expected and len(seen) == count
+            chosen = set(selected)
+            remaining = [(row[0], row[1], row[2], "expired") if row[0] in chosen else row
+                for row in remaining] if kind == "sensitive" else [row for row in remaining if row[0] not in chosen]
+        assert set(seen) == set(expected) and len(seen) == count
         assert state.repo.connection.execute("PRAGMA foreign_key_check").fetchall() == []
     # Same synthetic eligibility under the literal legacy SQL, not same order.
     with _b_store(tmp_path / "legacy", b=False) as legacy:
@@ -364,7 +386,9 @@ def test_b_strict_boundaries_mixed_presence_and_future(tmp_path, kind):
                 times.extend([(timestamp, future, presence), (future, timestamp, presence),
                     (timestamp, timestamp, presence)])
         rows = _b_seed(state, times)
-        assert RetentionPolicy(state.repo)._select(kind, _b_cutoffs(state)) == _b_expected(rows, kind, _b_cutoffs(state))
+        wanted, fallback = _b_r3_expected(rows, kind, _b_cutoffs(state))
+        assert fallback is (kind == "sensitive")
+        assert RetentionPolicy(state.repo)._select(kind, _b_cutoffs(state)) == wanted
 
 
 @pytest.mark.parametrize("field", ["event_at", "ingested_at"])
@@ -413,7 +437,7 @@ def test_b_selection_integrity_errors_never_mean_empty(failure):
     repo = SimpleNamespace(config=NetworkMetadataConfig(retention_indexed_v1_enabled=True), connection=Connection())
     expected = NetworkMetadataStorageUnavailable if failure in {"sqlite_error", "interrupt"} else NetworkMetadataStorageCorrupt
     with pytest.raises(expected):
-        RetentionPolicy(repo)._select("sensitive", {14: "2026-09-01T00:00:00.000000Z"})
+        RetentionPolicy(repo)._select("core", {30: "2026-09-01T00:00:00.000000Z"})
 
 
 @pytest.mark.parametrize("a,b", [(False, False), (True, False), (False, True), (True, True)])
@@ -546,13 +570,18 @@ def test_b_explain_actual_queries_and_expired_heavy_prefix(tmp_path, kind, recor
                 elapsed = time.perf_counter() - start
                 state.repo.connection.set_progress_handler(None, 0)
                 state.repo.connection.set_trace_callback(None)
-            assert selected == _b_expected(rows, kind, cutoffs)[:5000]
+            wanted, fallback = _b_r3_expected(rows, kind, cutoffs)
+            assert selected == wanted
             assert len(sql) == 2
             plans = []
             for query, field in zip(sql, ("event", "ingested")):
                 plan = [row[3] for row in state.repo.connection.execute("EXPLAIN QUERY PLAN " + query)]
-                assert any("SEARCH" in detail and "idx_nm_observations_" + field in detail for detail in plan)
-                assert not any("SCAN" in detail or "TEMP B-TREE" in detail for detail in plan)
+                if fallback and "SELECT observation_id FROM" in query:
+                    assert any("SCAN" in detail and "sqlite_autoindex_network_metadata_observations_1" in detail for detail in plan)
+                else:
+                    assert any("SEARCH" in detail and "idx_nm_observations_" + field in detail for detail in plan)
+                    assert not any("SCAN" in detail or "TEMP B-TREE" in detail for detail in plan)
+                assert not (fallback and "SELECT observation_id,event_at" in query and "!='expired'" in query)
                 assert len(state.repo.connection.execute(query).fetchall()) == 5000
                 plans.append(plan)
             extra = " AND sensitive_endpoint_presence_state!='expired'" if kind == "sensitive" else ""
@@ -563,9 +592,7 @@ def test_b_explain_actual_queries_and_expired_heavy_prefix(tmp_path, kind, recor
             measurements.append(dict(kind=kind, expired_prefix_rows=prefix, eligible_tail_rows=5001,
                 returned_unique=len(selected), sql_vm_steps_lower_bound=steps[0], elapsed_seconds=elapsed,
                 main_db_bytes=state.repo.footprint()["main"], plans=plans, legacy_plan=legacy_plan))
-    if kind == "sensitive":
-        assert measurements[1]["sql_vm_steps_lower_bound"] > measurements[0]["sql_vm_steps_lower_bound"] * 5
-    report = dict(measurements=measurements, status="B_ACTIVATION_HOLD_EXPIRED_PREFIX",
+    report = dict(measurements=measurements, status="B_ACTIVATION_HOLD_INDEPENDENT_REVIEW",
         limitation="VM steps/one local latency sample are not physical page reads or independent performance acceptance")
     record_property("b_expired_prefix_evidence", json.dumps(report, sort_keys=True))
     print("B_EXPIRED_PREFIX=" + json.dumps(report, sort_keys=True))
@@ -590,3 +617,312 @@ def test_b_off_sql_and_other_classes_remain_literal_legacy(tmp_path):
                 state.repo.connection.set_trace_callback(None)
                 traces.append((commands, result))
             assert traces[0] == traces[1]
+
+
+class _R3MeasuredConnection:
+    """Observe real cursor consumption and complete SQL VM cost, not disk IOPS."""
+    def __init__(self, connection):
+        self.connection = connection
+        self.calls = []
+        self.active = []
+
+    def execute(self, sql, parameters):
+        stats = dict(sql=sql, parameters=list(parameters), visited=0, vm_steps_lower_bound=0,
+            closed=False, elapsed_seconds=0.0)
+        self.calls.append(stats)
+        def progress():
+            stats["vm_steps_lower_bound"] += 100
+            return 0
+        self.connection.set_progress_handler(progress, 100)
+        start = time.perf_counter()
+        real = self.connection.execute(sql, parameters)
+        owner = self
+        class Cursor:
+            def __iter__(self):
+                return self
+            def __next__(self):
+                try:
+                    row = next(real)
+                except StopIteration:
+                    stats["elapsed_seconds"] = time.perf_counter() - start
+                    owner.connection.set_progress_handler(None, 0)
+                    raise
+                stats["visited"] += 1
+                return row
+            def close(self):
+                real.close()
+                owner.connection.set_progress_handler(None, 0)
+                stats["closed"] = True
+                if not stats["elapsed_seconds"]:
+                    stats["elapsed_seconds"] = time.perf_counter() - start
+        cursor = Cursor()
+        self.active.append(cursor)
+        return cursor
+
+    def close_all(self):
+        for cursor, stats in zip(self.active, self.calls):
+            if not stats["closed"]:
+                cursor.close()
+
+
+def _r3_select(state, *, kind="sensitive", policy_type=RetentionPolicy, b=True):
+    real, config = state.repo.connection, state.repo.config
+    measured = _R3MeasuredConnection(real)
+    state.repo.connection = measured
+    state.repo.config = replace(config, retention_indexed_v1_enabled=b)
+    try:
+        started = time.perf_counter()
+        selected = policy_type(state.repo)._select(kind, _b_cutoffs(state))
+        elapsed = time.perf_counter() - started
+        # Capture lifecycle before instrumentation cleans up untouched legacy/R2 cursors.
+        closed = [call["closed"] for call in measured.calls]
+    finally:
+        measured.close_all()
+        state.repo.connection, state.repo.config = real, config
+    return selected, measured.calls, elapsed, closed
+
+
+@pytest.mark.parametrize("branch", ["event_at", "ingested_at"])
+@pytest.mark.parametrize("position", [0, 2499, 4999])
+def test_b_r3_lazy_single_fallback_positions(tmp_path, branch, position):
+    with _b_store(tmp_path) as state:
+        def times():
+            for i in range(5000):
+                old = ni_format_utc(state.clock() - timedelta(days=15, microseconds=5000 - i))
+                future = ni_format_utc(state.clock() + timedelta(days=1))
+                pair = (old, future) if branch == "event_at" else (future, old)
+                yield pair + ("expired" if i == position else "not_observed" if i % 2 else "observed_retained",)
+        rows = _b_seed(state, times())
+        selected, calls, _, closed = _r3_select(state)
+        legacy, _, _, _ = _r3_select(state, b=False)
+        assert selected == legacy == sorted(_b_expected(rows, "sensitive", _b_cutoffs(state)))
+        assert all(closed)
+        raw = [call for call in calls if "SELECT observation_id,event_at" in call["sql"]]
+        assert len(raw) == (1 if branch == "event_at" else 2)
+        assert raw[-1]["visited"] == position + 1
+        if branch == "ingested_at":
+            assert raw[0]["visited"] == 0
+        assert len(calls) == len(raw) + 1
+        assert calls[-1]["sql"] == (
+            "SELECT observation_id FROM network_metadata_observations WHERE (event_at<? OR ingested_at<?)"
+            " AND sensitive_endpoint_presence_state!='expired' ORDER BY observation_id LIMIT 5000")
+        assert calls[-1]["parameters"] == [_b_cutoffs(state)[14]] * 2
+        assert all("!='expired'" not in call["sql"] for call in raw)
+
+
+def test_b_r3_expired_after_cap_not_seen_and_both_raw_index_plans(tmp_path):
+    with _b_store(tmp_path) as state:
+        times = [(ni_format_utc(state.clock() - timedelta(days=15, microseconds=5001 - i)),) * 2 +
+            ("expired" if i == 5000 else "not_observed",) for i in range(5001)]
+        rows = _b_seed(state, times)
+        selected, calls, _, closed = _r3_select(state)
+        assert selected == _b_expected(rows, "sensitive", _b_cutoffs(state))[:5000]
+        assert len(calls) == 2 and all(closed)
+        assert [call["visited"] for call in calls] == [5000, 5000]
+        for call, field in zip(calls, ("event", "ingested")):
+            plans = [row[3] for row in state.repo.connection.execute(
+                "EXPLAIN QUERY PLAN " + call["sql"], call["parameters"])]
+            assert any("SEARCH" in plan and "idx_nm_observations_" + field in plan for plan in plans)
+            assert not any("SCAN" in plan or "TEMP B-TREE" in plan for plan in plans)
+
+
+@pytest.mark.parametrize("fault", ["id", "version", "event", "ingested", "ineligible",
+    "state", "null", "bool", "duplicate_time", "duplicate_state"])
+@pytest.mark.parametrize("branch", [0, 1])
+def test_b_r3_corruption_closes_cursor_no_fallback(fault, branch):
+    import uuid
+    identity = observation_uuid("dns", "r3-negative")
+    old = "2026-08-01T00:00:00.000000Z"
+    valid = (identity, old, old, "observed_retained")
+    invalid = list(valid)
+    invalid[3] = "expired"  # Validation must precede accepting this trigger.
+    if fault == "id":
+        invalid[0] = identity.upper()
+    elif fault == "version":
+        invalid[0] = str(uuid.uuid4())
+    elif fault == "event":
+        invalid[1] = "2026-08-01T00:00:00Z"
+    elif fault == "ingested":
+        invalid[2] = "2026-08-01T00:00:00.000Z"
+    elif fault == "ineligible":
+        invalid[1 + branch] = "2026-12-01T00:00:00.000000Z"
+    elif fault in {"state", "null", "bool"}:
+        invalid[3] = {"state": "other", "null": None, "bool": True}[fault]
+    elif fault == "duplicate_time":
+        invalid[1] = "2026-08-02T00:00:00.000000Z"
+    class Cursor:
+        def __init__(self, rows):
+            self.rows, self.visited, self.closed = iter(rows), 0, False
+        def __iter__(self):
+            return self
+        def __next__(self):
+            self.visited += 1
+            return next(self.rows)
+        def close(self):
+            self.closed = True
+    class Connection:
+        def __init__(self):
+            self.cursors, self.sql = [], []
+        def execute(self, sql, _):
+            assert all(cursor.closed for cursor in self.cursors)
+            self.sql.append(sql)
+            assert "SELECT observation_id FROM" not in sql, "corruption must not fallback"
+            index = len(self.sql) - 1
+            if fault.startswith("duplicate"):
+                data = [valid, tuple(invalid)] if branch == 0 else [valid] if index == 0 else [tuple(invalid)]
+            else:
+                data = [tuple(invalid)] if index == branch else []
+            cursor = Cursor(data)
+            self.cursors.append(cursor)
+            return cursor
+    connection = Connection()
+    repo = SimpleNamespace(connection=connection, config=SimpleNamespace(retention_indexed_v1_enabled=True))
+    with pytest.raises(NetworkMetadataStorageCorrupt):
+        RetentionPolicy(repo)._select("sensitive", {14: "2026-09-01T00:00:00.000000Z"})
+    assert all(cursor.closed for cursor in connection.cursors)
+    assert len(connection.sql) <= 2
+
+
+@pytest.mark.parametrize("where", ["event", "ingested", "fallback"])
+@pytest.mark.parametrize("phase", ["execute", "iterate", "interrupt", "close"])
+def test_b_r3_sqlite_errors_close_without_retry_or_fallback(where, phase):
+    identity, old = observation_uuid("dns", "r3-sqlite"), "2026-08-01T00:00:00.000000Z"
+    class Cursor:
+        def __init__(self, data, fail):
+            self.data, self.fail, self.closed = iter(data), fail, False
+        def __iter__(self):
+            return self
+        def __next__(self):
+            if self.fail and phase in {"iterate", "interrupt"}:
+                raise sqlite3.OperationalError("interrupted" if phase == "interrupt" else "disposable failure")
+            return next(self.data)
+        def close(self):
+            self.closed = True
+            if self.fail and phase == "close":
+                raise sqlite3.OperationalError("disposable close failure")
+    class Connection:
+        def __init__(self):
+            self.cursors, self.queries = [], []
+        def execute(self, sql, _):
+            assert all(cursor.closed for cursor in self.cursors)
+            label = "fallback" if "SELECT observation_id FROM" in sql else "event" if "WHERE event_at" in sql else "ingested"
+            self.queries.append(label)
+            fail = label == where
+            if fail and phase == "execute":
+                raise sqlite3.OperationalError("disposable open failure")
+            data = [(identity, old, old, "expired")] if where == "fallback" and label == "event" else []
+            cursor = Cursor(data, fail)
+            self.cursors.append(cursor)
+            return cursor
+    connection = Connection()
+    repo = SimpleNamespace(connection=connection, config=SimpleNamespace(retention_indexed_v1_enabled=True))
+    with pytest.raises(NetworkMetadataStorageUnavailable):
+        RetentionPolicy(repo)._select("sensitive", {14: "2026-09-01T00:00:00.000000Z"})
+    assert all(cursor.closed for cursor in connection.cursors)
+    assert connection.queries == (["event"] if where == "event" else ["event", "ingested"] if where == "ingested" else ["event", "fallback"])
+
+
+def test_b_r3_fallback_invalid_id_is_corruption_and_cursor_closed():
+    identity, old = observation_uuid("dns", "r3-legacy-invalid"), "2026-08-01T00:00:00.000000Z"
+    cursors = []
+    class Cursor:
+        def __init__(self, data):
+            self.data, self.closed = iter(data), False
+        def __iter__(self):
+            return self
+        def __next__(self):
+            return next(self.data)
+        def close(self):
+            self.closed = True
+    class Connection:
+        def execute(self, sql, _):
+            assert all(cursor.closed for cursor in cursors)
+            cursor = Cursor([(identity, old, old, "expired")] if not cursors else [(identity.upper(),)])
+            cursors.append(cursor)
+            return cursor
+    repo = SimpleNamespace(connection=Connection(), config=SimpleNamespace(retention_indexed_v1_enabled=True))
+    with pytest.raises(NetworkMetadataStorageCorrupt):
+        RetentionPolicy(repo)._select("sensitive", {14: "2026-09-01T00:00:00.000000Z"})
+    assert len(cursors) == 2 and all(cursor.closed for cursor in cursors)
+
+
+@pytest.mark.parametrize("distribution", ["all_eligible", "interleaved", "expired_prefix"])
+def test_b_r3_complete_legacy_fallback_cost_comparison(tmp_path, distribution, record_property):
+    import subprocess
+    previous = "166a1546c96cdfc09b624b614b6b0080c425a3d3"
+    source = subprocess.check_output(["git", "show", previous + ":app/network_metadata/retention.py"])
+    namespace = {"__name__": "app.network_metadata._r2_evidence", "__package__": "app.network_metadata"}
+    exec(compile(source, previous + "/retention.py", "exec"), namespace)
+    r2 = namespace["RetentionPolicy"]
+    with _b_store(tmp_path) as state:
+        def times():
+            if distribution == "expired_prefix":
+                for i in range(100000):
+                    old = ni_format_utc(state.clock() - timedelta(days=60, microseconds=100000 - i))
+                    yield old, old, "expired"
+                count = 5001
+            else:
+                count = 20000
+            for i in range(count):
+                old = ni_format_utc(state.clock() - timedelta(days=31, microseconds=count - i))
+                yield old, old, "expired" if distribution == "interleaved" and i % 2 == 0 else "observed_retained"
+        rows = _b_seed(state, times())
+        state.repo.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        records = []
+        # Fresh SQLite connection, then immediate same-connection warm repetition.
+        # Identical immutable DB; deterministic three rounds. No OS cache flush claims.
+        orders = [("legacy", "r2", "r3"), ("r3", "legacy", "r2"), ("r2", "r3", "legacy")]
+        for round_index, order in enumerate(orders):
+            for mode in order:
+                # Reopen connection via existing recovery; OS cache may remain warm.
+                state.repo.recover()
+                for cache in ("fresh_connection", "warm_connection"):
+                    selected, calls, elapsed, closed = _r3_select(state,
+                        policy_type=r2 if mode == "r2" else RetentionPolicy, b=mode != "legacy")
+                    expected = _b_expected(rows, "sensitive", _b_cutoffs(state))
+                    if mode == "legacy" or (mode == "r3" and distribution != "all_eligible"):
+                        assert selected == sorted(expected)[:5000]
+                    else:
+                        assert selected == expected[:5000]
+                    fallback = [call for call in calls if "SELECT observation_id FROM" in call["sql"]]
+                    if mode == "r3":
+                        assert all(closed)
+                        assert len(fallback) == (0 if distribution == "all_eligible" else 1)
+                        assert [call["visited"] for call in calls if "SELECT observation_id,event_at" in call["sql"]] == ([5000, 5000] if distribution == "all_eligible" else [1])
+                    for call in calls:
+                        call["plan"] = [row[3] for row in state.repo.connection.execute(
+                            "EXPLAIN QUERY PLAN " + call["sql"], call["parameters"])]
+                    records.append(dict(mode=mode, cache=cache, round=round_index, order=list(order), elapsed_seconds=elapsed,
+                        sql_vm_steps_lower_bound=sum(call["vm_steps_lower_bound"] for call in calls), calls=calls))
+        import statistics
+        summary = {mode: dict(median_seconds=statistics.median(row["elapsed_seconds"] for row in records if row["mode"] == mode),
+            vm_steps=[row["sql_vm_steps_lower_bound"] for row in records if row["mode"] == mode]) for mode in ("legacy", "r2", "r3")}
+        report = dict(distribution=distribution, r2_source_commit=previous, measurements=records, summary=summary,
+            method="3 ordered rounds, fresh SQLite connection then immediate same-connection warm repetition; shared file-backed V1 DB, OS cache not flushed and cold-disk performance NOT established; SQL progress every 100 VM steps; no physical I/O claim")
+        print("R3_COMPLETE_COST=" + json.dumps(report, sort_keys=True))
+        record_property("r3_complete_cost", json.dumps(report, sort_keys=True))
+        # Stable finite cleanup includes the entire repeated legacy fallback, with real writes.
+        started, pass_measurements, checkpoint = time.perf_counter(), [], state.repo.load_active()
+        policy = RetentionPolicy(state.repo)
+        seen = []
+        while True:
+            selected, calls, elapsed, closed = _r3_select(state)
+            assert all(closed)
+            pass_measurements.append(dict(selected=len(selected), elapsed_seconds=elapsed,
+                sql_vm_steps_lower_bound=sum(call["vm_steps_lower_bound"] for call in calls), calls=calls))
+            if not selected:
+                break
+            wanted, _ = _b_r3_expected(rows, "sensitive", _b_cutoffs(state))
+            assert selected == wanted and len(selected) <= 5000
+            seen.extend(selected)
+            with state.repo.transaction():
+                policy._delete("sensitive", selected)
+            chosen = set(selected)
+            rows = [(row[0], row[1], row[2], "expired") if row[0] in chosen else row for row in rows]
+        assert len(seen) == len(set(seen)) == len(expected)
+        assert set(seen) == set(expected)
+        assert state.repo.load_active() == checkpoint
+        assert state.repo.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        print("R3_STABLE_CATCHUP=" + json.dumps(dict(distribution=distribution, eligible=len(expected),
+            batches=(len(expected) + 4999) // 5000, elapsed_seconds=time.perf_counter() - started,
+            selections=pass_measurements, total_selection_vm_steps=sum(row["sql_vm_steps_lower_bound"] for row in pass_measurements))))
