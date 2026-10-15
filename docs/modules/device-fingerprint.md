@@ -16,6 +16,20 @@ The system is advisory. Fingerprint data never authorizes a guest, never changes
 CAPPORT admission, never blocks a client, and never performs a destructive Omada
 action.
 
+### Independent producer deployment inputs (DEPLOY-CONFIG-02)
+
+Sensor/optional Portal Producer accept startup-only deployment claims under their
+own namespaces; see [configuration](../configuration.md#sensorportal-producer-deployment-configuration).
+This does not modify the receiver, F-B1 binding/clock/emitter authority, classifier,
+API or storage. New receiver registration/token/guest scope/peer TLS trust and
+downstream source admission remain separate gates; parser success or HTTP 200 is
+not classification authorization. Legacy defaults and disabled behavior remain.
+Never change identity/scope against a nonempty Sensor spool: use a new empty spool
+or obtain an explicit lineage/cutover disposition; no automatic relabel/reset.
+Sensor NIC override does not rewrite Suricata, EVE/NI sources or deployment units.
+Core readiness is bounded TCP-connect only and needs a separately proven trusted
+host-Sensor path; NPM accepting HTTPS alone does not prove Core readiness.
+
 > `TASK-DEVICE-FINGERPRINT-01` is the **Evidence Foundation layer**. Its historical
 > statement that the foundation itself does not classify devices or link identities
 > remains correct. It is not a description of the whole current Device Fingerprint

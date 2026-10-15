@@ -17,12 +17,12 @@ from app.device_fingerprint_sensor.runtime import SensorRuntime
 from app.device_fingerprint_sensor.telemetry import SensorTelemetry
 
 
-def make_tree(tmp_path, *, operstate="up", ipv4="0", ipv6="0"):
+def make_tree(tmp_path, *, operstate="up", ipv4="0", ipv6="0", interface="enp8s0"):
     sys_root = tmp_path / "sys"; proc_root = tmp_path / "proc"
-    net = sys_root / "class/net/enp8s0"; net.mkdir(parents=True)
+    net = sys_root / "class/net" / interface; net.mkdir(parents=True)
     (net / "operstate").write_text(operstate)
     for family, value in (("ipv4", ipv4), ("ipv6", ipv6)):
-        path = proc_root / f"sys/net/{family}/conf/enp8s0"; path.mkdir(parents=True)
+        path = proc_root / f"sys/net/{family}/conf/{interface}"; path.mkdir(parents=True)
         (path / "forwarding").write_text(value)
     (proc_root / "100").mkdir(parents=True); (proc_root / "100/cmdline").write_bytes(b"/usr/bin/python\0")
     return sys_root, proc_root
@@ -129,7 +129,8 @@ def test_repository_bpf_artifact_is_exact_frozen_expression():
     assert (root / "deploy/device-fingerprint/raw-capture.bpf").read_text(encoding="ascii").strip() == RAW_CAPTURE_FILTER
 
 
-def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(monkeypatch):
+@pytest.mark.parametrize("interface", ["enp8s0", "enp1s0"])
+def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(monkeypatch, interface):
     from app.device_fingerprint_sensor import capture as module
     calls = []
     class Socket:
@@ -139,13 +140,13 @@ def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(m
         def close(self): calls.append("close")
     monkeypatch.setattr(module, "attach_frozen_filter", lambda _socket: calls.append("filter"))
     monkeypatch.setattr(module.socket, "AF_PACKET", 17, raising=False)
-    raw = module.RawCapture("enp8s0", socket_factory=lambda *args: (calls.append(("socket", args)) or Socket()))
+    raw = module.RawCapture(interface, socket_factory=lambda *args: (calls.append(("socket", args)) or Socket()))
     raw.open()
     assert calls[0] == (
         "socket",
         (module.socket.AF_PACKET, module.socket.SOCK_RAW, module.socket.htons(0x0003)),
     )
-    assert ("bind", ("enp8s0", 0)) in calls
+    assert ("bind", (interface, 0)) in calls
     assert calls.index("filter") < next(index for index, item in enumerate(calls) if isinstance(item, tuple) and item[0] == "bind")
 
 
