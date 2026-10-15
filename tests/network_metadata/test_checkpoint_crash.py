@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import pytest
 from datetime import timedelta
 from app.network_metadata.models import NetworkMetadataStorageUnavailable
@@ -8,6 +9,7 @@ from .test_repository import _a_store, _a_outcomes, _a_rows
 @pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",
     "before_fault_flush", "after_fault_flush", "before_checkpoint_update",
     "after_checkpoint_update_before_commit", "after_commit"])
+@requires_posix_io
 def test_io_hotpath_fault_flush_observation_health_checkpoint_atomicity(tmp_path, monkeypatch, point):
     from . import record
     from .test_service import service_for
@@ -56,6 +58,7 @@ def test_io_hotpath_fault_flush_observation_health_checkpoint_atomicity(tmp_path
 
 @pytest.mark.parametrize("category", ["source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
 @pytest.mark.parametrize("has_prefix", [False, True])
+@requires_posix_io
 def test_final_conflict_health_owns_new_prefix_and_stops_evaluation(tmp_path, monkeypatch, category, has_prefix):
     from . import record, source_event
     from app.network_metadata.validation import ni_format_utc
@@ -120,6 +123,7 @@ def test_final_conflict_health_owns_new_prefix_and_stops_evaluation(tmp_path, mo
 
 @pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",
     "before_checkpoint_update", "after_checkpoint_update_before_commit", "after_commit"])
+@requires_posix_io
 def test_all_five_crash_boundaries(tmp_path, point):
     with store(tmp_path) as state:
         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
@@ -141,6 +145,7 @@ def test_all_five_crash_boundaries(tmp_path, point):
 
 @pytest.mark.parametrize("point", ["before_observation_insert", "after_observation_insert_before_commit",
     "before_checkpoint_update", "after_checkpoint_update_before_commit", "after_commit"])
+@requires_posix_io
 def test_final_partial_health_rolls_back_or_commits_with_entire_batch(tmp_path, point):
     from . import record
     with store(tmp_path, source=record() + b"\n{\n") as state:
@@ -187,6 +192,7 @@ def test_final_partial_health_rolls_back_or_commits_with_entire_batch(tmp_path, 
         assert state.repo.connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+@requires_posix_io
 def test_block_establishment_rollback_has_no_successful_claim(tmp_path):
     with store(tmp_path) as state:
         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
@@ -208,6 +214,7 @@ def test_block_establishment_rollback_has_no_successful_claim(tmp_path):
         assert "source_record_identity_conflict" not in state.health.local_reasons
 
 
+@requires_posix_io
 def test_expired_event_aggregate_checkpoint_and_health_commit_atomically(tmp_path):
     from datetime import timedelta
     from app.network_metadata.validation import ni_format_utc

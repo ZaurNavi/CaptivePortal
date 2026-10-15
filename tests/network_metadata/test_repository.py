@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import os
 import sqlite3
 from dataclasses import replace
@@ -86,6 +87,7 @@ def _a_sql(sql):
 @pytest.mark.parametrize("category", ["duplicate_noop", "source_record_identity_conflict",
     "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
 @pytest.mark.parametrize("index", [0, 1, 2])
+@requires_posix_io
 def test_io_hotpath_overlap_first_conflict_matches_off(tmp_path, monkeypatch, category, index):
     import uuid
     snapshots = []
@@ -130,6 +132,7 @@ def test_io_hotpath_overlap_first_conflict_matches_off(tmp_path, monkeypatch, ca
     assert snapshots[0] == snapshots[1]
 
 
+@requires_posix_io
 def test_io_hotpath_range_gap_and_generation_isolation(tmp_path, monkeypatch):
     with _a_store(tmp_path, True, source=(record() + b"\n") * 2) as state:
         items = _a_outcomes(state, [record()] * 2)
@@ -248,7 +251,8 @@ def test_io_hotpath_failed_initialize_never_adopts_cache(tmp_path, monkeypatch, 
     assert repo.connection is repo._insert_columns is repo._insert_columns_connection is None
 
 
-@pytest.mark.parametrize("count", [0, 1, 10, 256])
+@pytest.mark.parametrize("count", [0, pytest.param(1, marks=requires_posix_io),
+    pytest.param(10, marks=requires_posix_io), pytest.param(256, marks=requires_posix_io)])
 @pytest.mark.parametrize("many", [False, True])
 def test_io_hotpath_fault_sql_grouping_and_complete_equivalence(tmp_path, monkeypatch, count, many):
     import uuid
@@ -350,6 +354,7 @@ def test_io_hotpath_external_ddl_sql_failure_is_not_schema_bypass(tmp_path):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@requires_posix_io
 def test_io_hotpath_mixed_fault_duplicate_conflict_freezes_only_reached_prefix(tmp_path, enabled):
     from . import source_event
     data = [record(), b"{", b"{", record(source_event("tls")), record(source_event("quic")), record()]
@@ -384,6 +389,7 @@ def test_io_hotpath_mixed_fault_duplicate_conflict_freezes_only_reached_prefix(t
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("age", [15, 31])
+@requires_posix_io
 def test_io_hotpath_retention_expiry_semantics_are_preserved(tmp_path, enabled, age):
     from datetime import timedelta
     from app.network_metadata.validation import ni_format_utc
@@ -409,6 +415,7 @@ def test_io_hotpath_retention_expiry_semantics_are_preserved(tmp_path, enabled, 
 @pytest.mark.parametrize("category", ["invalid_utf8", "invalid_json", "duplicate_json_member", "non_object_json",
     "schema_invalid", "unexpected_family", "pre_binding_event", "outside_intended_scope",
     "unsupported_address_family_for_scope", "record_too_large", "same_raw_non_normalized", "expired_non_normalized"])
+@requires_posix_io
 def test_all_complete_replay_outcomes_obey_source_identity_precedence(tmp_path, category):
     from . import source_event
     from app.network_metadata.models import RecordOutcome
@@ -505,6 +512,7 @@ def test_binding_same_digest_mismatch_rejected_without_repair(tmp_path, column, 
         assert not state.repo.connection.in_transaction
 
 
+@requires_posix_io
 def test_exact_schema_pragmas_spine_and_provenance(tmp_path):
     with store(tmp_path) as state:
         conn = state.repo.connection
@@ -522,6 +530,7 @@ def test_exact_schema_pragmas_spine_and_provenance(tmp_path):
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+@requires_posix_io
 def test_second_posix_writer_rejected(tmp_path):
     path = str(tmp_path / "db.writer.lock")
     with WriterLock(path):
@@ -541,6 +550,7 @@ def test_schema_drift_fails_without_recreate(tmp_path, damage):
             state.repo.initialize()
 
 
+@requires_posix_io
 def test_duplicate_noop_preserves_all_fields(tmp_path):
     with store(tmp_path) as state:
         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
@@ -557,6 +567,7 @@ def test_duplicate_noop_preserves_all_fields(tmp_path):
 
 
 @pytest.mark.parametrize("category", ["source_record_identity_conflict", "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
+@requires_posix_io
 def test_conflicts_are_durable_and_atomic(tmp_path, category):
     with store(tmp_path) as state:
         generation, checkpoint = seed_blocked(state, category)
@@ -582,6 +593,7 @@ def test_generation_schema_rejects_invalid_block_state(tmp_path, update):
             state.repo.connection.execute("UPDATE network_metadata_source_generations SET " + update)
 
 
+@requires_posix_io
 def test_blocked_cannot_be_closed_in_schema_or_model(tmp_path):
     with store(tmp_path) as state:
         generation, _ = seed_blocked(state)
@@ -597,6 +609,7 @@ def test_blocked_cannot_be_closed_in_schema_or_model(tmp_path):
     "UPDATE network_metadata_checkpoint SET committed_byte_offset=1,continuity_anchor_length=1,continuity_anchor_sha256='" + "0" * 64 + "'",
     "UPDATE network_metadata_checkpoint SET source_generation_id='aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'",
     "DELETE FROM network_metadata_checkpoint"])
+@requires_posix_io
 def test_blocked_startup_consistency_corruption(tmp_path, damage):
     with store(tmp_path) as state:
         seed_blocked(state)
@@ -614,6 +627,7 @@ def test_batch_order_rejected(tmp_path):
             state.repo.ingest_batch([item], state.run, state.health, state.anchor)
 
 
+@requires_posix_io
 def test_fault_aggregation_processing_clock_bucket(tmp_path):
     from app.network_metadata.models import RecordOutcome
     from app.network_metadata.canonical import sha256
@@ -657,6 +671,7 @@ def test_schema_rejects_noncanonical_block_timestamp(tmp_path, timestamp):
             state.repo.connection.execute("UPDATE network_metadata_source_generations SET processing_state='blocked',blocked_reason_code='source_record_identity_conflict',blocked_at_utc=?,blocked_record_start_byte_offset=0", (timestamp,))
 
 
+@requires_posix_io
 def test_bounded_wal_maintenance_with_held_reader(tmp_path, monkeypatch):
     with store(tmp_path) as state:
         reader = sqlite3.connect(state.config.db_path, isolation_level=None)

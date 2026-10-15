@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import pytest
 from app.network_metadata.read_service import NetworkMetadataReadService
 from app.network_metadata.models import NetworkMetadataValidationError
@@ -7,6 +8,7 @@ from . import store, outcome, record, source_event, SITE
 START, END = "2026-10-07T00:00:00.000000Z", "2026-10-08T00:00:00.000000Z"
 
 
+@requires_posix_io
 def test_keyset_order_site_isolation_and_privacy(tmp_path):
     data = record()
     with store(tmp_path, source=(data + b"\n") * 3) as state:
@@ -43,6 +45,7 @@ def test_read_window(tmp_path, start, end):
 
 
 @pytest.mark.parametrize("family", ["tls", "quic"])
+@requires_posix_io
 def test_family_projection_no_sni(tmp_path, family):
     data = record(source_event(family))
     with store(tmp_path, source=data + b"\n") as state:

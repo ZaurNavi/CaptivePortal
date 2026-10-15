@@ -6,6 +6,7 @@ import socket
 import sqlite3
 import threading
 import time
+from tempfile import TemporaryDirectory
 from copy import deepcopy
 from pathlib import Path
 
@@ -1403,17 +1404,21 @@ def test_fifo_source_candidate_does_not_block_and_is_ignored(tmp_path):
     reason="Unix socket only",
 )
 def test_unix_socket_source_candidate_is_ignored(tmp_path):
-    config, _, repository, reader, _ = make_stack(tmp_path)
-    source_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        source_socket.bind(config.source_log_path)
-        result = reader.scan()
-    finally:
-        source_socket.close()
+    # AF_UNIX's pathname limit is independent of pytest's --basetemp length.
+    with TemporaryDirectory(prefix="vr-", dir="/tmp") as short_root:
+        socket_path = str(Path(short_root) / "source.sock")
+        assert len(os.fsencode(socket_path)) < 100
+        config, _, repository, reader, _ = make_stack(
+            tmp_path, visitor_snapshot_log_file=socket_path,
+        )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as source_socket:
+            source_socket.bind(config.source_log_path)
+            result = reader.scan()
 
-    assert result.complete
-    assert result.reason is None
-    assert repository.get_reader_states() == {}
+        assert result.complete
+        assert result.reason is None
+        assert repository.get_reader_states() == {}
+    assert not Path(short_root).exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX device only")

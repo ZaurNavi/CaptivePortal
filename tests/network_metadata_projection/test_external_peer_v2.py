@@ -1,4 +1,5 @@
 """Owner T01–T11 / V2 regression fixtures: entirely disposable, no live reset."""
+from tests.network_metadata import requires_posix_io
 import hashlib
 import json
 import shutil
@@ -186,6 +187,7 @@ def seed_source(source, *, data=None, start=0, generation=None):
     return item
 
 
+@requires_posix_io
 def test_V2_08_consistent_read_only_tail_not_raw_length_and_empty_generation(tmp_path):
     with store(tmp_path) as source:
         reader = NetworkMetadataProjectionSourceReadService(source.config.db_path)
@@ -212,6 +214,7 @@ def staged(source, tmp_path, suffix="stage"):
     return manifest, keep
 
 
+@requires_posix_io
 def test_T06_T07_V2_08_09_reset_append_restart_no_pre_reset_replay(tmp_path):
     data = record(source_event(dest_ip="203.0.113.93"))
     with store(tmp_path, source=(data+b"\n")*3) as source:
@@ -352,6 +355,7 @@ def test_T11_V2_14_closed_counter_and_no_raw_endpoint_logs(tmp_path, caplog):
         value.repo.close()
 
 
+@requires_posix_io
 def test_V2_08_single_snapshot_concurrent_append_preserves_new_tail(tmp_path, monkeypatch):
     data = record()
     with store(tmp_path, source=(data+b"\n")*2) as source:
@@ -373,6 +377,7 @@ def test_V2_08_single_snapshot_concurrent_append_preserves_new_tail(tmp_path, mo
 
 
 @pytest.mark.parametrize("point,committed", [("before_commit", False), ("after_commit", True)])
+@requires_posix_io
 def test_V2_09_10_post_floor_crash_and_real_restart(tmp_path, point, committed):
     data = record(source_event(dest_ip="203.0.113.93"))
     with store(tmp_path, source=(data+b"\n")*2) as source:
@@ -413,6 +418,7 @@ def test_V2_09_10_post_floor_crash_and_real_restart(tmp_path, point, committed):
             repo.close()
 
 
+@requires_posix_io
 def test_V2_09_empty_and_new_generation_natural_beginning_retention(tmp_path):
     from app.network_metadata.retention import RetentionPolicy
     data = record()
@@ -517,6 +523,7 @@ def test_V2_manifest_external_hash_and_corruption_fail_closed(tmp_path):
             verify(manifest_path=str(path), admission_json=admitted_source(source), expected_manifest_sha256=frozen)
 
 
+@requires_posix_io
 def test_T09_V2_13_fresh_pair_publishes_only_post_floor_ni03_ni04(tmp_path):
     from tests.network_service_recognition.support import AT, bundle
     from tests.network_service_recognition.test_summary import EVENT
@@ -601,14 +608,18 @@ def test_bootstrap_verify_exact_operator_inventory(tmp_path):
             verify(manifest_path=str(path), admission_json=admitted_source(source), expected_inventory=other)
 
 
-def test_synthetic_scope_fixture_canonical_identity_and_disabled_boundary():
+def test_synthetic_scope_fixture_canonical_identity_and_disabled_boundary(tmp_path):
     path = Path(__file__).parent / "fixtures" / "external_peer_scope_synthetic.json"
     fixture = ScopeAdmission(path.read_text())
     assert fixture.canonical == ScopeAdmission(scope_admission()).canonical
     assert projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "false",
         "NETWORK_METADATA_PROJECTION_SCOPE_ADMISSION_JSON": "not-json"}) == ProjectionConfig()
     with pytest.raises(ProjectionConflict, match="scope_admission_untrusted"):
-        projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "true"})
+        projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "true",
+            "NETWORK_METADATA_PROJECTION_DB_PATH": str(tmp_path / "projection.sqlite3"),
+            "NETWORK_METADATA_DB_PATH": str(tmp_path / "metadata.sqlite3"),
+            "VISITOR_REGISTRY_DB_PATH": str(tmp_path / "registry.sqlite3")})
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_runtime_start_requires_discard_epoch_no_implicit_replay(tmp_path):

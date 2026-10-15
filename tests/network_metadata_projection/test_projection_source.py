@@ -1,3 +1,4 @@
+from tests.network_metadata import requires_posix_io
 from dataclasses import asdict
 
 import pytest
@@ -16,6 +17,7 @@ def seed(state, count=1):
     return NetworkMetadataProjectionSourceReadService(state.config.db_path)
 
 
+@requires_posix_io
 def test_exact_source_record_batch_offset_zero_and_retention(tmp_path):
     with store(tmp_path, source=(record() + b"\n") * 3) as state:
         reader = seed(state, 3)
@@ -52,6 +54,7 @@ def test_exact_source_record_batch_offset_zero_and_retention(tmp_path):
     "UPDATE network_metadata_source_health SET capture_source_id='different-source'",
     "UPDATE network_metadata_ingest_runs SET normalizer_version='different-version'",
 ])
+@requires_posix_io
 def test_untrusted_source_fails_without_mutation(tmp_path, damage):
     with store(tmp_path) as state:
         reader = seed(state)
@@ -66,6 +69,7 @@ def test_untrusted_source_fails_without_mutation(tmp_path, damage):
 
 @pytest.mark.parametrize("method", ["list_source_generations", "read_projection_batch",
     "get_projection_source_record", "get_source_progress"])
+@requires_posix_io
 def test_source_connections_read_only_and_no_raw_payload_tables(tmp_path, monkeypatch, method, record_property):
     import sqlite3
     with store(tmp_path) as state:
@@ -95,6 +99,7 @@ def test_source_connections_read_only_and_no_raw_payload_tables(tmp_path, monkey
         assert not any("from network_metadata_dns" in value or "from network_metadata_source_records" in value for value in selects)
 
 
+@requires_posix_io
 def test_not_observed_does_not_reconstruct_endpoints(tmp_path):
     with store(tmp_path) as state:
         reader = seed(state)
@@ -106,6 +111,7 @@ def test_not_observed_does_not_reconstruct_endpoints(tmp_path):
         assert result.src_ip is result.dst_ip is None
 
 
+@requires_posix_io
 def test_source_generation_order_is_opened_time_then_identity(tmp_path):
     from tests.network_metadata import BOOT
     with store(tmp_path) as state:

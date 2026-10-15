@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import replace
 
 import pytest
@@ -246,14 +245,30 @@ def test_non_overlapping_run_once(config, repo):
         worker._cycle_lock.release()
 
 
-def test_background_schedule_is_fixed_delay_not_overlap(config, repo):
-    call_finished = []
+def test_background_schedule_is_fixed_delay_not_overlap(config, repo, monkeypatch):
+    entered = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    delayed = [threading.Event(), threading.Event()]
+    advance_delay = threading.Event()
+    call_started, call_finished, waits = [], [], []
+    clock = [0.0]
+    active = [0]
 
     class TimedProvider(Provider):
         def list_observation_clients(self, *args):
-            time.sleep(0.03)
-            call_finished.append(time.monotonic())
-            return page("clients", [], 0)
+            index = len(call_started)
+            assert index < 2, "unexpected late/duplicate provider call"
+            assert active[0] == 0, "overlapping provider calls"
+            active[0] += 1
+            call_started.append(clock[0])
+            entered[index].set()
+            try:
+                assert release[index].wait(5), "provider coordination timeout"
+                clock[0] += 0.03
+                call_finished.append(clock[0])
+                return page("clients", [], 0)
+            finally:
+                active[0] -= 1
 
     _, telemetry = worker_telemetry()
     worker = CurrentClientWorker(
@@ -265,9 +280,48 @@ def test_background_schedule_is_fixed_delay_not_overlap(config, repo):
             client_interval_seconds=0.04,
         ),
         telemetry=telemetry,
+        monotonic=lambda: clock[0],
     )
-    assert worker.start()
-    time.sleep(0.13)
-    assert worker.stop(1.0)
-    assert len(call_finished) == 2
-    assert call_finished[1] - call_finished[0] >= 0.04
+    real_wait = worker.stop_event.wait
+
+    def controlled_wait(seconds):
+        if seconds == 0:  # The unchanged configured initial delay.
+            return real_wait(0)
+        index = len(waits)
+        assert index < 2
+        assert seconds == 0.04 and seconds > 0
+        assert active[0] == 0 and len(call_finished) == index + 1
+        waits.append(seconds)
+        delayed[index].set()
+        if index == 0:
+            assert advance_delay.wait(5), "delay coordination timeout"
+            clock[0] += seconds
+            return real_wait(0)
+        return real_wait(5)  # stop() must interrupt the second completed-cycle delay.
+
+    monkeypatch.setattr(worker.stop_event, "wait", controlled_wait)
+    try:
+        assert worker.start()
+        assert entered[0].wait(5)
+        assert worker.run_once() == ()  # Actual cycle lock prevents re-entry.
+        assert call_finished == []
+        release[0].set()
+        assert delayed[0].wait(5)
+        assert len(call_started) == len(call_finished) == 1
+        assert not entered[1].is_set()  # No next cycle before positive delay.
+        advance_delay.set()
+        assert entered[1].wait(5)
+        assert call_started[1] - call_finished[0] == pytest.approx(0.04)
+        assert worker.run_once() == ()
+        release[1].set()
+        assert delayed[1].wait(5)
+        assert worker.stop(5)
+    finally:
+        for gate in release:
+            gate.set()
+        advance_delay.set()
+        assert worker.stop(5)
+    assert len(call_started) == len(call_finished) == 2
+    assert waits == [0.04, 0.04] and active[0] == 0
+    assert worker._thread is None and not worker.running
+    assert worker.last_error is None
