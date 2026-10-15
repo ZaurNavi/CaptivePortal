@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import os
 import threading
+import time
 
 from .models import (IntegrationError, IdentityResolution, MAX_ATTEMPTS, RETRY_DELAYS,
                      plus, utc_now)
@@ -11,6 +12,7 @@ from .submitter import emit
 RETRYABLE = frozenset({"retryable_sqlite_busy", "snapshot_timeout", "snapshot_memory_pressure",
                       "knowledge_bundle_unavailable", "activation_lineage_unavailable",
                       "persistence_unavailable", "profile_changed_during_job", "integration_unavailable"})
+READY_HEARTBEAT_MAX_INTERVAL_SECONDS = 60
 
 
 @contextmanager
@@ -50,9 +52,14 @@ class IntegrationWorker:
         self.clock, self.stop_event = clock, threading.Event()
 
     def run_once(self):
+        activity, _owned_completed = self._run_cycle()
+        return activity
+
+    def _run_cycle(self):
+        """Return activity and owned completion for this invocation only."""
         with consumer_lock(self.repository.path) as acquired:
             if not acquired:
-                return False
+                return False, False
             claimed = self.repository.claim(self.clock())
             if claimed is not None:
                 job, recovery_only = claimed
@@ -96,14 +103,24 @@ class IntegrationWorker:
                     emit("fingerprint.integration_identity_conflict" if resolution.state == "CONFLICT"
                          else "fingerprint.integration_identity_resolved", integration_id=identity_job.integration_id,
                          device_id=resolution.device_id, visit_id=resolution.visit_id, reason_code=resolution.reason)
-            return claimed is not None or identity_job is not None
+            return claimed is not None or identity_job is not None, True
 
     def run(self):
+        last_ready_at = None
         while not self.stop_event.is_set():
             try:
-                self.run_once()
-                emit("fingerprint.integration_worker_health", reason_code="ready")
+                _activity, owned_completed = self._run_cycle()
+                if not owned_completed:
+                    last_ready_at = None
+                    emit("fingerprint.integration_worker_health", reason_code="consumer_lock_unavailable")
+                else:
+                    now = time.monotonic()
+                    # A backwards clock reading cannot make a heartbeat due.
+                    if last_ready_at is None or now - last_ready_at >= READY_HEARTBEAT_MAX_INTERVAL_SECONDS:
+                        emit("fingerprint.integration_worker_health", reason_code="ready")
+                        last_ready_at = now
             except Exception:
+                last_ready_at = None
                 emit("fingerprint.integration_worker_health", reason_code="integration_unavailable")
             self.stop_event.wait(1)
 
