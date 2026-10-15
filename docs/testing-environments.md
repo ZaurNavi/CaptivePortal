@@ -162,6 +162,30 @@ be rediscovered or recreated from scratch by every new specialist.
 
 ## 4. Linux Lab purpose
 
+### Windows/POSIX coverage pairing
+
+Native NI-01 `os.pread` / `os.O_NONBLOCK`, POSIX writer locking and open-file
+replacement tests are individually routed by the built-in skipif contract
+`requires_posix_io` in `tests/network_metadata/__init__.py`. Windows still
+collects these exact test IDs and reports the reason
+`Linux/POSIX Network Metadata I/O contract`; their assertions must execute and
+PASS under native Linux. No fake Windows syscall implementations, broad module
+skip, fixture skip or deselection may substitute for that coverage. Portable
+configuration/validation/disabled/error-path cases remain Windows tests.
+
+For `TASK-TEST-GATE-PLATFORM-COMPAT-01`, the independent gate report must pair
+every Windows-routed ID with Linux execution, preserve all six strict V7
+historical cases, and record Python/SQLite/pytest versions and exact tree.
+The Current State scheduling check uses bounded event coordination rather than
+a wall-clock callback-count guess. The Registry AF_UNIX check creates a real
+socket under a private short `/tmp` directory even with a long pytest basetemp.
+Analytics checks retain non-duplication/index/semantic protection without
+requiring one version's cheap-CTE materialization text.
+
+These test-only changes do not authorize production changes or official runner
+edits. Clean Windows/Linux full runs and any new versioned runner admission
+remain Owner/Tech Lead responsibilities; Coder performs focused checks only.
+
 The dedicated WSL/Linux Lab is the default environment for:
 
 - Linux pre-production acceptance;

@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import pytest
 from dataclasses import replace
 from datetime import timedelta
@@ -11,6 +12,7 @@ from . import store, record, source_event, outcome, seed_blocked, SITE
 @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
 @pytest.mark.parametrize("age", [timedelta(days=14) - timedelta(microseconds=1), timedelta(days=14),
     timedelta(days=14, microseconds=1), timedelta(days=30), timedelta(days=30, microseconds=1)])
+@requires_posix_io
 def test_late_first_ingest_exact_retention_boundaries(tmp_path, family, age):
     with store(tmp_path) as state:
         event = source_event(family, timestamp=ni_format_utc(state.clock() - age))
@@ -62,6 +64,7 @@ def test_late_first_ingest_exact_retention_boundaries(tmp_path, family, age):
 
 
 @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
+@requires_posix_io
 def test_late_never_observed_sensitive_stays_not_observed(tmp_path, family):
     with store(tmp_path) as state:
         event = source_event(family, timestamp=ni_format_utc(state.clock() - timedelta(days=15)))
@@ -82,6 +85,7 @@ def test_late_never_observed_sensitive_stays_not_observed(tmp_path, family):
 @pytest.mark.parametrize("age", [15, 31])
 @pytest.mark.parametrize("disposition", ["duplicate_noop", "source_record_identity_conflict",
     "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
+@requires_posix_io
 def test_touched_identity_retention_preserves_proven_disposition(tmp_path, age, disposition):
     with store(tmp_path) as state:
         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
@@ -119,6 +123,7 @@ def test_touched_identity_retention_preserves_proven_disposition(tmp_path, age, 
 
 
 @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
+@requires_posix_io
 def test_sensitive_then_core_retention(tmp_path, family):
     data = record(source_event(family))
     with store(tmp_path, source=data + b"\n") as state:
@@ -141,6 +146,7 @@ def test_sensitive_then_core_retention(tmp_path, family):
         assert state.repo.load_active()[1].committed_byte_offset == item.end
 
 
+@requires_posix_io
 def test_not_observed_does_not_turn_expired(tmp_path):
     event = source_event("tls")
     event["tls"]["sni"] = None
@@ -153,6 +159,7 @@ def test_not_observed_does_not_turn_expired(tmp_path):
         assert state.repo.connection.execute("SELECT sni_presence_state FROM network_metadata_tls").fetchone()[0] == "not_observed"
 
 
+@requires_posix_io
 def test_block_survives_46_day_diagnostic_expiry_and_restart(tmp_path):
     with store(tmp_path) as state:
         generation, checkpoint = seed_blocked(state)

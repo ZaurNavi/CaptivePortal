@@ -4,6 +4,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+import pytest
 from app.network_metadata.config import network_metadata_config_from_env
 from app.network_metadata.health import HealthController
 from app.network_metadata.normalizer import normalize_record
@@ -15,6 +16,11 @@ BOOT = "ad5cc69d-8385-4130-ad42-eb167a040269"
 GENERATION = "9412aebe-6e13-463b-9a93-d2e5c8475766"
 IDENTITY = SimpleNamespace(artifact_sha="a" * 40, artifact_tree="b" * 40,
                           process_started_at="2026-10-07T12:00:00.000Z")
+
+# Applied explicitly to individual tests/parameters, never to the shared store.
+requires_posix_io = pytest.mark.skipif(
+    os.name != "posix", reason="Linux/POSIX Network Metadata I/O contract",
+)
 
 
 class Clock:

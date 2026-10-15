@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import json
 import time
 from app.network_metadata.retention import RetentionPolicy
@@ -24,6 +25,7 @@ def test_io_hotpath_capacity_guard_precedes_transactional_probe(tmp_path, monkey
         assert not state.repo.connection.in_transaction
 
 
+@requires_posix_io
 def test_3000_temporary_observation_capacity(tmp_path):
     data = [record(source_event(family)) for family in ("dns", "tls", "quic") for _ in range(1000)]
     source = b"\n".join(data) + b"\n"

@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import io
 import json
 import logging
@@ -30,6 +31,7 @@ def test_source_unavailable_is_health_reason_not_record_fault():
     assert json.loads(output.getvalue()) == {"event": "health_transition", "reason_code": "source_unavailable"}
 
 
+@requires_posix_io
 def test_transient_fault_digest_never_retained_or_logged(tmp_path):
     with store(tmp_path, source=b"{\n") as state:
         output = io.StringIO()
@@ -45,6 +47,7 @@ def test_transient_fault_digest_never_retained_or_logged(tmp_path):
         assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_source_records").fetchone()[0] == 0
 
 
+@requires_posix_io
 def test_diagnostic_tables_and_fault_errors_exclude_sensitive_values(tmp_path):
     with store(tmp_path) as state:
         item = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)

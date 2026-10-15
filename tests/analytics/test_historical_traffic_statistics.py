@@ -10,13 +10,57 @@ from app.analytics.historical_traffic import (
     HistoricalTrafficReadService,
     HistoricalTrafficSourceUnavailable,
 )
-from app.analytics.source_gateway import QueryDeadline
+from app.analytics.source_gateway import (
+    QueryDeadline, _HISTORICAL_COMBINED_SQL, _HISTORICAL_PEAK_COMBINED_SQL,
+)
 
 
 UTC = timezone.utc
 SITE = "site-a"
 START = "2026-01-01T11:55:00.000Z"
 END = "2026-01-01T12:00:00.000Z"
+
+
+def _validation_program(stack, *, include_peak_load=False):
+    """Compile the unchanged production query, not a test-owned SQL rewrite."""
+    parameters = (SITE, START, END, START, END, SITE, START, START, END, SITE,
+                  60000, 60000, START, END, START, END, START, START, 300, START, END, 180, 180)
+    sql = _HISTORICAL_PEAK_COMBINED_SQL if include_peak_load else _HISTORICAL_COMBINED_SQL
+    with stack.gateway._connection("observations", QueryDeadline.after(10)) as connection:
+        program = tuple(tuple(row) for row in connection.execute("EXPLAIN " + sql, parameters))
+        roots = dict(connection.execute("SELECT name,rootpage FROM sqlite_master WHERE rootpage>0"))
+    return program, roots
+
+
+def _assert_single_expensive_validation(plan, program, roots):
+    """One physical requested-range validation producer, regardless of CTE inlining.
+
+    validated_cycles/ranged only project the already aggregated rows. SQLite
+    may inline those projections, but must not duplicate the expensive raw AP
+    join/aggregate or abandon its indexes. Materialized consumers may scan the
+    shared temporary rows more than once (e.g. both peak UNION output arms).
+    """
+    text = "\n".join(plan)
+    assert text.count("MATERIALIZE candidate_cycles") == 1
+    assert text.count("MATERIALIZE cycle_aggregates") == 1
+    assert text.count("idx_cycles_site_kind_started") == 2  # Two disjoint range arms.
+    assert text.count("sqlite_autoindex_ap_observations_1") == 1
+    reads = []
+    for name in ("ap_observations", "sqlite_autoindex_ap_observations_1"):
+        opened = [op for op in program if op[1] == "OpenRead" and op[3] == roots[name] and op[4] == 0]
+        assert len(opened) == 1, f"duplicated/missing raw AP validation source: {name}"
+        reads.extend(opened)
+    first, last = min(op[0] for op in reads), max(op[0] for op in reads)
+    guards = [op for op in program if op[1] == "Once" and op[0] < first and op[3] > last]
+    assert guards, "raw AP validation is not guarded by a once-only producer"
+    guard = max(guards, key=lambda op: op[0])
+    body = [op for op in program if guard[0] < op[0] < guard[3]]
+    assert any(op[1] == "AggStep" for op in body)
+    assert any(op[1] == "AggFinal" for op in body)
+    # An outer Once alone is insufficient if another consumer can enter its
+    # aggregate subroutine after the guard. All external calls must hit it.
+    assert not any(op[1] == "Gosub" and not guard[0] <= op[0] <= guard[3]
+                   and guard[0] < op[3] < guard[3] for op in program)
 
 
 def _row(cycle_id, observed, *, wired=(1.0, 2.0), lan=(3.0, 4.0), site=SITE):
@@ -365,12 +409,48 @@ def test_combined_projection_materializes_one_expensive_validation_path(
     assert "sqlite_autoindex_ap_observations_1" in text
     assert text.count("MATERIALIZE candidate_cycles") == 1
     assert text.count("MATERIALIZE cycle_aggregates") == 1
-    assert text.count("MATERIALIZE validated_cycles") == 1
-    assert text.count("MATERIALIZE ranged") == 1
+    _assert_single_expensive_validation(plan, *_validation_program(analytics_stack))
     assert text.count("MATERIALIZE bucket_selection") == 1
     assert text.count(
         "SEARCH a USING INDEX sqlite_autoindex_ap_observations_1"
     ) == 1
+    # Compare actual compiled source work with two separate projections, not
+    # timing or the spelling of a cheap intermediate CTE.
+    separate_source_reads = 0
+    for explain in (analytics_stack.gateway.explain_historical_traffic,
+                    analytics_stack.gateway.explain_historical_traffic_statistics):
+        separate = explain(site_id=SITE, from_utc=START, to_utc=END, evaluated_at_utc=END,
+            bucket_seconds=300, gap_threshold_seconds=180, max_site_sample_source_skew_seconds=60,
+            deadline=QueryDeadline.after(10))
+        separate_source_reads += "\n".join(separate).count("sqlite_autoindex_ap_observations_1")
+    assert separate_source_reads >= 2
+    assert text.count("sqlite_autoindex_ap_observations_1") < separate_source_reads
+
+
+@pytest.mark.parametrize("damage", ["duplicate_aggregate", "duplicate_raw_table",
+                                   "duplicate_raw_index", "missing_once", "bypass_once", "missing_index"])
+def test_expensive_validation_oracle_rejects_regressed_plan(analytics_stack, damage):
+    plan = list(analytics_stack.gateway.explain_historical_traffic_combined(
+        site_id=SITE, from_utc=START, to_utc=END, evaluated_at_utc=END,
+        bucket_seconds=300, gap_threshold_seconds=180, max_site_sample_source_skew_seconds=60,
+        deadline=QueryDeadline.after(10)))
+    program, roots = _validation_program(analytics_stack)
+    _assert_single_expensive_validation(plan, program, roots)
+    if damage == "duplicate_aggregate":
+        plan.append("MATERIALIZE cycle_aggregates")
+    elif damage in {"duplicate_raw_table", "duplicate_raw_index"}:
+        name = "ap_observations" if damage == "duplicate_raw_table" else "sqlite_autoindex_ap_observations_1"
+        extra = next(op for op in program if op[1] == "OpenRead" and op[3] == roots[name] and op[4] == 0)
+        program += (extra,)
+    elif damage == "missing_once":
+        program = tuple(op for op in program if op[1] != "Once")
+    elif damage == "bypass_once":
+        first = next(op[0] for op in program if op[1] == "OpenRead" and op[3] == roots["ap_observations"])
+        program += ((max(op[0] for op in program) + 1, "Gosub", 1, first, 0, None, 0, None),)
+    else:
+        plan = [line for line in plan if "sqlite_autoindex_ap_observations_1" not in line]
+    with pytest.raises(AssertionError):
+        _assert_single_expensive_validation(plan, program, roots)
 
 
 def test_statistics_share_query_only_snapshot_without_source_mutation(analytics_stack):

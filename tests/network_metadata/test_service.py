@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import os
 import json
 import io
@@ -16,6 +17,7 @@ from .test_repository import _a_store, _a_outcomes, _a_rows, _a_sql
 
 
 @pytest.mark.parametrize("count", [1, 2, 256])
+@requires_posix_io
 def test_io_hotpath_exact_two_probes_and_all_family_equivalence(tmp_path, monkeypatch, count):
     import uuid
     from app.network_metadata import service as module
@@ -58,6 +60,7 @@ def test_io_hotpath_exact_two_probes_and_all_family_equivalence(tmp_path, monkey
 
 @pytest.mark.parametrize("category", ["duplicate_noop", "source_record_identity_conflict",
     "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
+@requires_posix_io
 def test_io_hotpath_transaction_reprobe_does_not_trust_preflight(tmp_path, monkeypatch, category):
     with _a_store(tmp_path, True, source=(record() + b"\n") * 2) as state:
         service = service_for(state)
@@ -100,6 +103,7 @@ def test_io_hotpath_transaction_reprobe_does_not_trust_preflight(tmp_path, monke
             service.close()
 
 
+@requires_posix_io
 def test_io_hotpath_preflight_sql_failure_pauses_storage_without_cursor_gap(tmp_path):
     import sqlite3
     with _a_store(tmp_path, True) as state:
@@ -120,6 +124,7 @@ def test_io_hotpath_preflight_sql_failure_pauses_storage_without_cursor_gap(tmp_
             service.close()
 
 
+@requires_posix_io
 def test_io_hotpath_partial_then_oversized_record_preserves_source_guards(tmp_path):
     with _a_store(tmp_path, True, source=b"{") as state:
         service = service_for(state)
@@ -147,6 +152,7 @@ def test_io_hotpath_partial_then_oversized_record_preserves_source_guards(tmp_pa
 
 @pytest.mark.parametrize("change,reason", [("truncate", "observed_truncation"),
     ("rewrite", "continuity_anchor_mismatch"), ("rotate", "source_rotated_live")])
+@requires_posix_io
 def test_io_hotpath_generation_guards_precede_range_optimization(tmp_path, change, reason):
     with _a_store(tmp_path, True) as state:
         service = service_for(state)
@@ -181,6 +187,7 @@ def service_for(state, **kwargs):
 
 
 @pytest.mark.parametrize("change", ["restart", "replacement", "boot", "binding", "missing", "retention"])
+@requires_posix_io
 def test_blocked_restart_never_opens_source_or_resolves(tmp_path, change):
     with store(tmp_path) as state:
         generation, checkpoint = seed_blocked(state)
@@ -213,6 +220,7 @@ def test_blocked_restart_never_opens_source_or_resolves(tmp_path, change):
         service.close()
 
 
+@requires_posix_io
 def test_source_absent_alive_then_append(tmp_path):
     clock, cfg = Clock(), configuration(tmp_path)
     repo = NetworkMetadataRepository(cfg, clock=clock)
@@ -234,6 +242,7 @@ def test_source_absent_alive_then_append(tmp_path):
         repo.close()
 
 
+@requires_posix_io
 def test_live_rotation_drains_tail_without_raw_persistence(tmp_path):
     with store(tmp_path, source=record() + b"\nunterminated-secret") as state:
         service = service_for(state)
@@ -252,6 +261,7 @@ def test_live_rotation_drains_tail_without_raw_persistence(tmp_path):
         service.close()
 
 
+@requires_posix_io
 def test_binding_cutover_has_no_rewind(tmp_path):
     with store(tmp_path) as state:
         service = service_for(state)
@@ -273,6 +283,7 @@ def test_binding_cutover_has_no_rewind(tmp_path):
 
 
 @pytest.mark.parametrize("source_state", ["valid", "absent", "nonregular", "stat", "open"])
+@requires_posix_io
 def test_reboot_closes_old_generation_before_source_inspection(tmp_path, monkeypatch, source_state):
     with store(tmp_path) as state:
         original = service_for(state)
@@ -334,6 +345,7 @@ def test_reboot_closes_old_generation_before_source_inspection(tmp_path, monkeyp
             restarted.close()
 
 
+@requires_posix_io
 def test_source_disappears_and_same_inode_returns(tmp_path):
     with store(tmp_path) as state:
         service = service_for(state)
@@ -353,6 +365,7 @@ def test_source_disappears_and_same_inode_returns(tmp_path):
         service.close()
 
 
+@requires_posix_io
 def test_runtime_storage_rollback_then_recovery(tmp_path):
     with store(tmp_path) as state:
         service = service_for(state)
@@ -371,6 +384,7 @@ def test_runtime_storage_rollback_then_recovery(tmp_path):
 @pytest.mark.parametrize("change,reason", [("replacement", "source_replaced_while_reader_down"),
     ("truncation", "observed_truncation"), ("anchor", "continuity_anchor_mismatch"),
     ("boot", "host_reboot_source_lost")])
+@requires_posix_io
 def test_runnable_restart_source_transitions(tmp_path, change, reason):
     with store(tmp_path) as state:
         original = service_for(state)
@@ -401,6 +415,7 @@ def test_runnable_restart_source_transitions(tmp_path, change, reason):
         restarted.close()
 
 
+@requires_posix_io
 def test_oversized_tail_closes_once_without_oversized_fault(tmp_path):
     with store(tmp_path, source=b"x" * 2000000) as state:
         state.config = replace(state.config, max_record_bytes=4096)
@@ -419,6 +434,7 @@ def test_oversized_tail_closes_once_without_oversized_fault(tmp_path):
         service.close()
 
 
+@requires_posix_io
 def test_oversized_terminated_dedicated_checkpoint(tmp_path):
     with store(tmp_path, source=b"x" * 5000 + b"\n" + record() + b"\n") as state:
         state.config = replace(state.config, max_record_bytes=4096)
@@ -432,7 +448,8 @@ def test_oversized_terminated_dedicated_checkpoint(tmp_path):
         service.close()
 
 
-@pytest.mark.parametrize("failure", ["nonregular", "open", "stat", "fstat", "read"])
+@pytest.mark.parametrize("failure", [pytest.param("nonregular", marks=requires_posix_io), "open", "stat",
+    pytest.param("fstat", marks=requires_posix_io), pytest.param("read", marks=requires_posix_io)])
 def test_source_unavailable_preserves_checkpoint_and_safe_health(tmp_path, monkeypatch, failure):
     with store(tmp_path) as state:
         output = io.StringIO()
@@ -488,6 +505,7 @@ def test_source_unavailable_preserves_checkpoint_and_safe_health(tmp_path, monke
 
 
 @pytest.mark.parametrize("restart", [False, True])
+@requires_posix_io
 def test_pending_reboot_gap_survives_absence_and_restart(tmp_path, restart):
     with store(tmp_path) as state:
         (tmp_path / "source.jsonl").unlink()
@@ -514,6 +532,7 @@ def test_pending_reboot_gap_survives_absence_and_restart(tmp_path, restart):
             service.close()
 
 
+@requires_posix_io
 def test_first_source_and_clean_live_rotation_have_no_gap(tmp_path):
     clock, cfg = Clock(), configuration(tmp_path)
     repo = NetworkMetadataRepository(cfg, clock=clock)
@@ -538,6 +557,7 @@ def test_first_source_and_clean_live_rotation_have_no_gap(tmp_path):
 
 
 @pytest.mark.parametrize("new_fault", [False, True])
+@requires_posix_io
 def test_partial_restart_preserved_until_clean_heartbeat(tmp_path, new_fault):
     with store(tmp_path, source=b"{\n") as state:
         service = service_for(state)
@@ -564,6 +584,7 @@ def test_partial_restart_preserved_until_clean_heartbeat(tmp_path, new_fault):
             service.close()
 
 
+@requires_posix_io
 def test_continuity_gap_partial_preserved_on_same_generation_restart(tmp_path):
     with store(tmp_path) as state:
         service = NetworkMetadataService(state.config, state.repo, IDENTITY, Capture(),
@@ -584,6 +605,7 @@ def test_continuity_gap_partial_preserved_on_same_generation_restart(tmp_path):
             restarted.close()
 
 
+@requires_posix_io
 def test_100_timestamp_only_batches_then_exact_heartbeat(tmp_path):
     with store(tmp_path, source=b"") as state:
         service = service_for(state)
@@ -608,6 +630,7 @@ def test_100_timestamp_only_batches_then_exact_heartbeat(tmp_path):
 
 
 @pytest.mark.parametrize("boundary", ["resume", "cutover", "ingest_anchor"])
+@requires_posix_io
 def test_source_anchor_failure_is_not_sqlite_failure(tmp_path, monkeypatch, boundary):
     with store(tmp_path) as state:
         service = service_for(state)
@@ -647,6 +670,7 @@ def test_source_anchor_failure_is_not_sqlite_failure(tmp_path, monkeypatch, boun
 
 
 @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
+@requires_posix_io
 def test_source_failure_keeps_heartbeat_and_due_retention(tmp_path, monkeypatch, family):
     with store(tmp_path, source=record(source_event(family)) + b"\n") as state:
         service = service_for(state)
@@ -687,6 +711,7 @@ def test_source_failure_keeps_heartbeat_and_due_retention(tmp_path, monkeypatch,
             service.close()
 
 
+@requires_posix_io
 def test_real_sqlite_transaction_failure_remains_storage_failure(tmp_path):
     with store(tmp_path) as state:
         service = service_for(state)
@@ -712,6 +737,7 @@ def test_real_sqlite_transaction_failure_remains_storage_failure(tmp_path):
     ("running_anchor", "continuity_anchor_mismatch", True),
     ("down_replacement", "source_replaced_while_reader_down", True),
     ("down_truncation", "observed_truncation", True)])
+@requires_posix_io
 def test_terminal_discontinuity_closes_before_failed_open_and_recovers(tmp_path, change, reason, gap, restart):
     tail = b"unfinished-tail" if change == "live_rotation" else b""
     with store(tmp_path, source=record() + b"\n" + tail) as state:
@@ -788,6 +814,7 @@ def test_terminal_discontinuity_closes_before_failed_open_and_recovers(tmp_path,
             service.close()
 
 
+@requires_posix_io
 def test_same_identity_open_failure_before_anchor_preserves_authority(tmp_path):
     with store(tmp_path) as state:
         service = service_for(state)
@@ -814,6 +841,7 @@ def test_same_identity_open_failure_before_anchor_preserves_authority(tmp_path):
 
 
 @pytest.mark.parametrize("rollback", [False, True])
+@requires_posix_io
 def test_reader_down_anchor_mismatch_one_open_one_atomic_transition(tmp_path, monkeypatch, rollback):
     with store(tmp_path) as state:
         service = service_for(state)
@@ -874,6 +902,7 @@ def test_reader_down_anchor_mismatch_one_open_one_atomic_transition(tmp_path, mo
             service.close()
 
 
+@requires_posix_io
 def test_close_transaction_failure_retains_owned_old_reader(tmp_path):
     with store(tmp_path) as state:
         service = service_for(state)
@@ -899,6 +928,7 @@ def test_close_transaction_failure_retains_owned_old_reader(tmp_path):
 
 
 @pytest.mark.parametrize("return_as", ["same", "different", "truncated", "anchor"])
+@requires_posix_io
 def test_absent_path_pauses_unread_records_then_full_reappearance_decision(tmp_path, monkeypatch, return_as):
     unread = record() + b"\n" + record(source_event("tls")) + b"\n"
     with store(tmp_path, source=unread) as state:
@@ -977,6 +1007,7 @@ def test_absent_path_pauses_unread_records_then_full_reappearance_decision(tmp_p
 
 
 @pytest.mark.parametrize("family", ["dns", "tls", "quic"])
+@requires_posix_io
 def test_canonical_absence_keeps_heartbeat_retention_and_wal(tmp_path, monkeypatch, family):
     with store(tmp_path, source=record(source_event(family)) + b"\n") as state:
         service = service_for(state)

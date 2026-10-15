@@ -113,6 +113,52 @@ A successful full gate on an unchanged exact artifact must not be duplicated mer
 
 ## Official Windows Central Lab
 
+### Explicit Windows / POSIX test routing
+
+`TASK-TEST-GATE-PLATFORM-COMPAT-01` introduces individually declared
+`requires_posix_io` test/parameter marks from `tests/network_metadata/__init__.py`.
+This is the built-in `pytest.mark.skipif(os.name != "posix", ...)`, with the
+exact reason `Linux/POSIX Network Metadata I/O contract`; it is not a collection
+filter or a production compatibility shim. The shared `store` fixture does not
+skip tests. No module/directory-wide skip or global deselection is used.
+
+Only tests actually requiring native NI-01 positional/nonblocking reads,
+POSIX writer locks or open-file replacement semantics carry this mark.
+Pure parsing, configuration, normalization, disabled mode and portable error
+paths remain active on Windows. Mixed parametrizations retain their portable
+members (zero-record batches, source-open/stat failures). The explicitly
+approved projection source/reset I/O cases use the same individual contract;
+the untrusted-scope fixture instead uses distinct native temporary DB paths
+and runs on both platforms.
+
+Every Windows platform skip must appear by exact collected node ID and reason
+in acceptance evidence and have a corresponding **executed Linux PASS**.
+Collection alone is not Linux execution evidence. Owner/Tech Lead compare the
+complete per-platform inventories, outcomes and source identity on the exact
+candidate; no full acceptance is inferred from a focused sample. The six
+historical strict V7 cases below are not part of this POSIX routing.
+
+The Linux stability checks use coordinated fixed-delay scheduling, a real
+AF_UNIX socket in a private short disposable `/tmp` directory, and a query-plan
+oracle for one indexed/materialized expensive AP validation producer. SQLite
+may inline cheap `validated_cycles`/`ranged` projections; tests also inspect
+the actual production query's VDBE raw-table/index opens and once-only guard,
+with deliberate negative oracle cases. No SQL or runtime dependency is changed
+to force an EXPLAIN string. Semantic equivalence, source integrity and index
+assertions remain strict.
+
+This test-contract candidate still requires independent full Windows and Linux
+acceptance. Full gates require zero failures/errors, individually justified
+platform skips, preserved Linux coverage and the unchanged strict historical
+cases. Historical baseline exceptions elsewhere in this document are evidence
+of their named past runs, not automatic allowances for a new candidate.
+
+The machine-local V7 worktree/path allowlist is a separate Owner/Tech Lead
+action. Coder must not edit `lab-test-v7-strict.cmd`, weaken its four stages,
+or call a modified runner by its previous version/checksum. Owner/Tech Lead
+must review/version/hash any runner change and verify clean exact-artifact
+admission before executing the official gate.
+
 ### Canonical directories
 
 ```text

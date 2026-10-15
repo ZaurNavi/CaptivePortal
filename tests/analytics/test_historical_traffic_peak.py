@@ -445,6 +445,7 @@ def test_rolling_hour_rejects_any_nonaccepted_interval_inside_window(break_resul
 
 
 def test_peak_projection_reuses_one_materialized_requested_range_validation(analytics_stack):
+    from .test_historical_traffic_statistics import _assert_single_expensive_validation, _validation_program
     plan = analytics_stack.gateway.explain_historical_traffic_combined(
         site_id=SITE,
         from_utc="2026-01-01T11:55:00.000Z",
@@ -459,13 +460,14 @@ def test_peak_projection_reuses_one_materialized_requested_range_validation(anal
     text = "\n".join(plan)
     assert text.count("MATERIALIZE candidate_cycles") == 1
     assert text.count("MATERIALIZE cycle_aggregates") == 1
-    assert text.count("MATERIALIZE validated_cycles") == 1
-    assert text.count("MATERIALIZE ranged") == 1
+    _assert_single_expensive_validation(plan, *_validation_program(analytics_stack, include_peak_load=True))
     assert text.count("MATERIALIZE bucket_selection") == 1
     assert "idx_cycles_site_kind_started" in text
     assert "sqlite_autoindex_ap_observations_1" in text
-    assert "MATERIALIZE statistics_classified" in text
-    assert text.count("SCAN statistics_ordered") == 1
+    # The peak UNION may re-read materialized ordered rows; only one producer
+    # of their window/order computation is allowed, not one scan per query.
+    assert sum(text.count(kind + " statistics_ordered")
+               for kind in ("MATERIALIZE", "CO-ROUTINE")) == 1
 
 
 def test_peak_projection_returns_ordered_typed_rows_without_text_payload(

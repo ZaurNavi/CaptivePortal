@@ -1,3 +1,4 @@
+from . import requires_posix_io
 from datetime import timedelta
 from types import SimpleNamespace
 import pytest
@@ -55,6 +56,7 @@ def test_capture_constructor_failure_is_unknown(tmp_path, monkeypatch):
     assert adapter.evaluate(configuration(tmp_path).capture_scope_binding, Clock()()) == ("unknown", ("capture_health_read_unavailable",))
 
 
+@requires_posix_io
 def test_health_not_per_observation_and_heartbeat(tmp_path):
     data = record()
     with store(tmp_path, source=(data + b"\n") * 2) as state:
@@ -70,6 +72,7 @@ def test_health_not_per_observation_and_heartbeat(tmp_path):
         assert row["committed_byte_offset"] == second.end
 
 
+@requires_posix_io
 def test_fault_transition_source_order_and_clean_interval_recovery(tmp_path):
     with store(tmp_path, source=b"x\n" + record() + b"\n") as state:
         from app.network_metadata.models import RecordOutcome
@@ -85,6 +88,7 @@ def test_fault_transition_source_order_and_clean_interval_recovery(tmp_path):
         assert state.health.ingest == "usable"
 
 
+@requires_posix_io
 def test_newer_then_older_commits_never_regress_health_after_reload(tmp_path):
     with store(tmp_path) as state:
         newer = ni_format_utc(state.clock() + timedelta(seconds=1))
@@ -111,6 +115,7 @@ def test_newer_then_older_commits_never_regress_health_after_reload(tmp_path):
 
 @pytest.mark.parametrize("disposition", ["duplicate_noop", "source_record_identity_conflict",
     "normalizer_determinism_conflict", "replay_identity_evidence_expired"])
+@requires_posix_io
 def test_replay_output_and_ingest_separation_after_reload(tmp_path, disposition):
     with store(tmp_path) as state:
         original_data = record(source_event(timestamp=ni_format_utc(state.clock() - timedelta(days=1))))
@@ -174,6 +179,7 @@ def test_untrustworthy_timestamp_does_not_update_health(tmp_path, data):
     assert health.last_output is health.last_ingested is None
 
 
+@requires_posix_io
 def test_expired_filter_advances_output_without_ingested_time(tmp_path):
     with store(tmp_path) as state:
         def item_at(age, start):
@@ -242,6 +248,7 @@ def test_source_recovery_clears_only_source_availability_reasons(reason, prior_f
 
 @pytest.mark.parametrize("category", ["invalid_json", "schema_invalid"])
 @pytest.mark.parametrize("fault_first", [False, True])
+@requires_posix_io
 def test_all_new_observations_reference_final_partial_batch_health(tmp_path, monkeypatch, category, fault_first):
     with store(tmp_path) as state:
         valid_at = ni_format_utc(state.clock() + timedelta(seconds=1))
@@ -295,6 +302,7 @@ def test_all_new_observations_reference_final_partial_batch_health(tmp_path, mon
 
 
 @pytest.mark.parametrize("size", [2, 100])
+@requires_posix_io
 def test_clean_batch_reuses_health_ref_but_advances_in_memory_watermarks(tmp_path, monkeypatch, size):
     with store(tmp_path) as state:
         items, parts, offset = [], [], 0
@@ -330,6 +338,7 @@ def test_clean_batch_reuses_health_ref_but_advances_in_memory_watermarks(tmp_pat
         assert state.repo.connection.execute("SELECT count(*) FROM network_metadata_source_health").fetchone()[0] == count + 1
 
 
+@requires_posix_io
 def test_replayed_observation_keeps_original_health_and_all_first_ingest_provenance(tmp_path):
     with store(tmp_path, source=record() + b"\n{\n") as state:
         first = outcome(state.config.capture_scope_binding, generation=state.generation.source_generation_id)
@@ -356,6 +365,7 @@ def test_replayed_observation_keeps_original_health_and_all_first_ingest_provena
 
 
 @pytest.mark.parametrize("category", ["invalid_json", "schema_invalid", "record_too_large"])
+@requires_posix_io
 def test_fault_only_batch_persists_one_final_transition_snapshot(tmp_path, category):
     from app.network_metadata.canonical import sha256
     with store(tmp_path, source=b"x\n") as state:

@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import pytest
 from app.network_metadata import cli
 from . import configuration, IDENTITY
@@ -26,6 +27,7 @@ def test_identity_failure_safe(tmp_path, monkeypatch, capsys):
     assert "secret-payload" not in capsys.readouterr().err
 
 
+@requires_posix_io
 def test_enabled_clean_stop_and_signal_binding(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "network_metadata_config_from_env", lambda: configuration(tmp_path))
     monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_: IDENTITY)
@@ -48,6 +50,7 @@ def test_enabled_clean_stop_and_signal_binding(tmp_path, monkeypatch):
     assert calls == ["stop", "stop"]
 
 
+@requires_posix_io
 def test_writer_lock_failure_safe(tmp_path, monkeypatch, capsys):
     from app.network_metadata.repository import WriterLock
     cfg = configuration(tmp_path)

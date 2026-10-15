@@ -1,3 +1,4 @@
+from . import requires_posix_io
 import os
 import hashlib
 from dataclasses import replace
@@ -6,6 +7,7 @@ from app.network_metadata.source import BinarySourceReader, continuity_anchor, d
 from . import store, record, configuration, BOOT
 
 
+@requires_posix_io
 def test_reader_append_partial_and_crlf(tmp_path):
     path = tmp_path / "reader"
     path.write_bytes(b'{}\r\n{"partial":')
@@ -25,6 +27,7 @@ def test_reader_append_partial_and_crlf(tmp_path):
         os.close(fd)
 
 
+@requires_posix_io
 def test_oversize_discard_and_final_tail_bounded(tmp_path):
     path = tmp_path / "reader"
     path.write_bytes(b"x" * 12000 + b"\n" + b"x" * 13000)
@@ -43,6 +46,7 @@ def test_oversize_discard_and_final_tail_bounded(tmp_path):
         os.close(fd)
 
 
+@requires_posix_io
 def test_prefix_before_oversize_dedicated_batch(tmp_path):
     path = tmp_path / "reader"
     path.write_bytes(b"{}\n" + b"x" * 5000 + b"\n")
@@ -69,6 +73,7 @@ def test_exact_decision_order(tmp_path):
         assert continuity_anchor(state.fd, 0) == (0, 0, None)
 
 
+@requires_posix_io
 def test_reader_restart_checkpoint_and_anchor(tmp_path):
     with store(tmp_path) as state:
         reader = BinarySourceReader(state.fd, max_record_bytes=4096)
@@ -79,6 +84,7 @@ def test_reader_restart_checkpoint_and_anchor(tmp_path):
         assert restarted.read_batch(256, 1048576) == []
 
 
+@requires_posix_io
 def test_discard_hash_streams_across_bounded_polls_without_retaining_tail(tmp_path):
     path = tmp_path / "stream-hash"
     data = b"x" * 2000000 + b"\r"
