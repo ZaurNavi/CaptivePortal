@@ -71,6 +71,75 @@ See [CAPPORT](modules/capport.md) and [deployment](deployment.md).
 
 ## Device Fingerprint Evidence (default disabled)
 
+## Sensor/Portal producer deployment configuration
+
+DEPLOY-CONFIG-02 affects only startup parsers and the Sensor's fixed-name
+preflight guard. These values are not main `app.settings`/Admin Settings,
+registration, source binding or live identity switching. Existing enable flags
+remain default **false**; absent overrides reproduce the entire typed config.
+Changing process environment requires a separately authorized restart.
+
+| Sensor suffix (`DEVICE_FINGERPRINT_SENSOR_`) | Exact legacy default |
+| --- | --- |
+| INTERFACE | `enp8s0` |
+| PRODUCER_ID / CAPTURE_SOURCE_ID | `sensor-zefer-01` / `zefer-span-01` |
+| SITE_ID / GUEST_CIDRS | `6a64f17630da7c70d232187a` / `192.168.8.0/22` |
+| DHCP_SERVER_AUTHORITY / DHCP_OPTION54_AUTHORITY | `192.168.10.1` / `192.168.10.1` |
+| EVIDENCE_BASE_URL | `https://192.168.0.202:9443/api/internal/device-fingerprint/v1` |
+| CA_CERT_PATH | `/etc/captive-portal/device-fingerprint/sensor-ca.crt` |
+| SPOOL_PATH | `/var/lib/captive-portal/fingerprint-sensor/spool.sqlite3` |
+| EVE_SOCKET_PATH | `/run/captive-portal/fingerprint-sensor/suricata-eve.sock` |
+| CORE_READY_HOST / CORE_READY_PORT | `127.0.0.1` / integer `8088` |
+
+Sensor interface must be a 1..15-byte ASCII Linux name with alphanumeric first
+character and only letters/digits/underscore/dot/hyphen, not `lo`/`any`/wildcard/path.
+Preflight remains interface-relative: UP, no master/L3/default routes/forwarding,
+DHCP disabled and no active DHCP client/NetworkManager profile. All runtime checks
+and frozen BPF/selected-interface AF_PACKET binding remain; parser checks no NIC.
+Readiness host is canonical private IPv4 or exact `127.0.0.1`, port canonical
+ASCII decimal `1024..65535`. DHCP authorities are independently configured
+canonical IPv4 unicast, not implicitly forced equal or RFC1918-only; actual DHCP
+evidence and directed-broadcast/topology facts require separate operational proof.
+
+| Portal suffix (`DEVICE_FINGERPRINT_PORTAL_`) | Exact legacy default |
+| --- | --- |
+| PRODUCER_ID / CAPTURE_SOURCE_ID | `portal-zefer-01` / `zefer-portal-http-01` |
+| SITE_ID / GUEST_CIDRS / ALLOWED_SSIDS | `6a64f17630da7c70d232187a` / `192.168.8.0/22` / `Zefer_Parki` |
+| EVIDENCE_BASE_URL | `https://192.168.0.202:9443/api/internal/device-fingerprint/v1` |
+| CA_CERT_PATH / CREDENTIAL_PATH | `/etc/captive-portal/device-fingerprint/portal-ca.crt` / `/etc/captive-portal/device-fingerprint/portal.bearer` |
+
+Both parsers require exact lowercase machine IDs and 24-hex Site, 1..16 canonical
+nonoverlapping IPv4 CIDRs with no host bits/duplicates/empty members or `/0`.
+Evidence URL: HTTPS valid ASCII DNS or canonical private IPv4/exact loopback,
+optional canonical port `1..65535`, exact `/api/internal/device-fingerprint/v1`
+path. Reject numeric IP aliases, controls/whitespace, userinfo, escapes, query,
+fragment and other paths. Only one final slash may normalize. Portal SSIDs are
+1..16 distinct case-sensitive exact strings of 1..32 UTF-8 bytes, no blank/control
+or wildcard member. Missing SSID stays optional; no guest authorization change.
+Portal queue/batch/age/coalescer/timeouts/cooldowns remain strictly pinned.
+Disabled Portal ignores bad overrides; disabled Sensor ignores deployment strings
+but retains original Wave-2 boolean validation. Sensor budgets/tuning stay unchanged.
+
+Synthetic examples (not admitted producer identities or operational recommendations):
+Sensor `enp1s0`, `172.18.0.1:18089`, `lab-sensor-02` / `lab-span-02`, Site
+`aaaaaaaaaaaaaaaaaaaaaaaa`, scope `10.20.0.0/24`; Portal `lab-portal-02` /
+`lab-portal-http-02`, same synthetic Site, SSID `Guest WiFi`, endpoint
+`https://evidence.example:9443/api/internal/device-fingerprint/v1`.
+No bearer is configured inline: Sensor uses only systemd LoadCredential
+`CREDENTIALS_DIRECTORY/device-fingerprint-bearer`; Portal uses an absolute
+protected external file. CA trust, SAN/expiry, receiver peer policy and the exact
+registered producer/token/Site/source/kinds/guest scope are independent gates.
+
+Do not relabel/replay/purge an old Sensor spool under new identity/scope. New
+installation needs its own empty spool; changes to a nonempty spool are operational
+HOLD pending lineage/cutover. Parser never opens a spool or auto-registers a source.
+Receiver acceptance is not F-B1/source-health/clock/classification admission.
+Core readiness is raw TCP only, not HTTP health; SysAdmin must prove trusted local
+Sensor-to-Core path and negative Guest/WAN reachability. NIC override does not
+change Suricata/NI/systemd/NPM. No current production activation is authorized.
+
+### Evidence service configuration (unchanged)
+
 `DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false` is the repository default. The
 module uses only `DEVICE_FINGERPRINT_*`: DB/lock paths, bind address/port,
 direct-TLS certificate/key paths, API management CIDRs, external producer JSON,

@@ -28,4 +28,24 @@ def test_readiness_timeout_fails_before_runtime(monkeypatch):
     monkeypatch.setattr(cli, "sensor_config_from_env", lambda: config)
     monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_: identity)
     monkeypatch.setattr(cli, "wait_for_core", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(cli, "SensorRuntime", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not capture")))
     assert cli.main(["run"]) == 1
+
+
+def test_T06_custom_readiness_is_tcp_only_and_bounded():
+    calls, now = [], [0.0]
+    def connect(address, timeout):
+        calls.append((address, timeout))
+        raise OSError("synthetic unreachable")
+    def sleep(value):
+        now[0] += value
+    assert cli.wait_for_core("172.18.0.1", 18089, connect_timeout=1, poll_interval=2, max_wait=5,
+        monotonic=lambda: now[0], sleep=sleep, connector=connect) is False
+    assert now[0] == 5 and len(calls) == 4
+    assert all(call == (("172.18.0.1", 18089), 1) for call in calls)
+    closed = []
+    class TcpOnly:
+        def close(self): closed.append(True)
+    assert cli.wait_for_core("172.18.0.1", 18089, connect_timeout=1, poll_interval=2, max_wait=5,
+        monotonic=lambda: 0.0, connector=lambda *_args, **_kwargs: TcpOnly())
+    assert closed == [True]  # No send/recv/HTTP method exists on the synthetic socket.

@@ -21,10 +21,6 @@ def test_frozen_defaults_are_sensor_only():
 
 
 @pytest.mark.parametrize("values", [
-    {"DEVICE_FINGERPRINT_SENSOR_INTERFACE": "enp1s0"},
-    {"DEVICE_FINGERPRINT_SENSOR_PRODUCER_ID": "sensor-zefer-02"},
-    {"DEVICE_FINGERPRINT_SENSOR_CAPTURE_SOURCE_ID": "zefer-span-02"},
-    {"DEVICE_FINGERPRINT_SENSOR_SITE_ID": "aaaaaaaaaaaaaaaaaaaaaaaa"},
     {"DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS": "192.168.8.1/22"},
     {"DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL": "http://192.168.0.202"},
     {"DEVICE_FINGERPRINT_SENSOR_RAW_DEDUP_HORIZON_MS": "nan"},
@@ -32,6 +28,13 @@ def test_frozen_defaults_are_sensor_only():
 def test_invalid_sensor_configuration_fails_closed(values):
     with pytest.raises(SensorConfigError):
         sensor_config_from_env(enabled(**values))
+
+
+@pytest.mark.parametrize("key,value", [("INTERFACE", "enp1s0"), ("PRODUCER_ID", "sensor-zefer-02"),
+    ("CAPTURE_SOURCE_ID", "zefer-span-02"), ("SITE_ID", "aaaaaaaaaaaaaaaaaaaaaaaa")])
+def test_former_authority_pins_are_valid_deployment_claims(key, value):
+    config = sensor_config_from_env(enabled(**{"DEVICE_FINGERPRINT_SENSOR_" + key: value}))
+    assert getattr(config, key.lower()) == value
 
 
 def test_sensor_package_does_not_import_main_settings():

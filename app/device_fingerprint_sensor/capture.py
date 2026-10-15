@@ -37,13 +37,15 @@ class InterfacePreflight:
             raise SensorPreflightError("capture_interface_unavailable") from exc
 
     def _validate(self) -> None:
-        if self.interface != "enp8s0":
-            self._fail()
         net = self.sys_root / "class" / "net" / self.interface
         if not net.exists() or self._read(net / "operstate") != "up":
             self._fail()
         if (net / "master").exists() or (net / "master").is_symlink():
             self._fail()
+        for kind in ("bridge", "bonding"):
+            path = net / kind
+            if path.exists() or path.is_symlink():
+                self._fail()
         addresses = self._json(["ip", "-j", "address", "show", "dev", self.interface])
         if len(addresses) != 1 or any(item.get("family") in {"inet", "inet6"} for item in addresses[0].get("addr_info", [])):
             self._fail()

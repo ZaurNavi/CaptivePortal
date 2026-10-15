@@ -44,29 +44,23 @@ def sensor_config_from_env(env: Mapping[str, str] | None = None) -> SensorConfig
 def _build(enabled: bool, env: Mapping[str, str]) -> SensorConfig:
     def value(name: str, default: str) -> str:
         raw = env.get("DEVICE_FINGERPRINT_SENSOR_" + name, default)
-        if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+        if (not isinstance(raw, str) or not raw or raw != raw.strip()
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in raw)):
             raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} is invalid")
-        return raw.strip()
+        return raw
 
     interface = value("INTERFACE", INTERFACE)
-    if interface != INTERFACE:
-        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_INTERFACE must be enp8s0")
+    if interface in {"lo", "any"} or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,14}", interface) is None:
+        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_INTERFACE is invalid")
     producer = value("PRODUCER_ID", PRODUCER_ID)
     capture = value("CAPTURE_SOURCE_ID", CAPTURE_SOURCE_ID)
     site = value("SITE_ID", SITE_ID)
     if _MACHINE.fullmatch(producer) is None or _MACHINE.fullmatch(capture) is None or _SITE.fullmatch(site) is None:
         raise SensorConfigError("Sensor identity is invalid")
-    if producer != PRODUCER_ID or capture != CAPTURE_SOURCE_ID or site != SITE_ID:
-        raise SensorConfigError("Sensor identity authority is fixed")
     cidrs = _cidrs(value("GUEST_CIDRS", GUEST_CIDRS))
     server = _ipv4(value("DHCP_SERVER_AUTHORITY", DHCP_SERVER_AUTHORITY))
     option54 = _ipv4(value("DHCP_OPTION54_AUTHORITY", DHCP_OPTION54_AUTHORITY))
-    if cidrs != (ipaddress.ip_network(GUEST_CIDRS),) or server != DHCP_SERVER_AUTHORITY or option54 != DHCP_OPTION54_AUTHORITY:
-        raise SensorConfigError("Sensor guest scope authority is invalid")
-    base_url = value("EVIDENCE_BASE_URL", EVIDENCE_BASE_URL).rstrip("/")
-    parsed = urlsplit(base_url)
-    if parsed.scheme != "https" or parsed.query or parsed.fragment or not parsed.netloc or base_url != EVIDENCE_BASE_URL:
-        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL is invalid")
+    base_url = _evidence_url(value("EVIDENCE_BASE_URL", EVIDENCE_BASE_URL))
     ca = _absolute(value("CA_CERT_PATH", CA_CERT_PATH), "CA_CERT_PATH")
     spool = _absolute(value("SPOOL_PATH", SPOOL_PATH), "SPOOL_PATH")
     socket_path = _absolute(value("EVE_SOCKET_PATH", EVE_SOCKET_PATH), "EVE_SOCKET_PATH")
@@ -88,8 +82,8 @@ def _build(enabled: bool, env: Mapping[str, str]) -> SensorConfig:
         http_timeout_seconds=float(_integer(env, "HTTP_TIMEOUT_SECONDS", 5, 1, 60)),
         raw_dedup_max_entries=_integer(env, "RAW_DEDUP_MAX_ENTRIES", 65536, 1, 65536),
         raw_dedup_horizon_ms=_exact_decimal(env, "RAW_DEDUP_HORIZON_MS", 0.25),
-        core_ready_host=_exact(value("CORE_READY_HOST", "127.0.0.1"), "127.0.0.1", "CORE_READY_HOST"),
-        core_ready_port=_exact_integer(env, "CORE_READY_PORT", 8088),
+        core_ready_host=_private_ipv4(value("CORE_READY_HOST", "127.0.0.1")),
+        core_ready_port=_port(value("CORE_READY_PORT", "8088"), minimum=1024),
         core_ready_connect_timeout_seconds=float(_integer(env, "CORE_READY_CONNECT_TIMEOUT_SECONDS", 1, 1, 10)),
         core_ready_poll_interval_seconds=float(_integer(env, "CORE_READY_POLL_INTERVAL_SECONDS", 10, 1, 60)),
         core_ready_max_wait_seconds=float(_integer(env, "CORE_READY_MAX_WAIT_SECONDS", 1800, 1, 1800)),
@@ -131,22 +125,72 @@ def _decimal(env: Mapping[str, str], name: str, default: float, minimum: float, 
 
 def _cidrs(raw: str) -> tuple[object, ...]:
     try:
-        result = tuple(ipaddress.ip_network(item.strip(), strict=True) for item in raw.split(","))
-    except ValueError as exc:
-        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid") from exc
-    if not result or any(network.version != 4 for network in result):
-        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid")
+        items = raw.split(",")
+        if not 1 <= len(items) <= 16:
+            raise ValueError
+        result = tuple(ipaddress.IPv4Network(item, strict=True) for item in items)
+        if any("/" not in item or str(network) != item or network.prefixlen == 0
+               for item, network in zip(items, result)):
+            raise ValueError
+        if any(first.overlaps(second) for index, first in enumerate(result) for second in result[index + 1:]):
+            raise ValueError
+    except ValueError:
+        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid") from None
     return result
 
 
 def _ipv4(raw: str) -> str:
     try:
-        parsed = ipaddress.ip_address(raw)
-    except ValueError as exc:
-        raise SensorConfigError("DHCP authority is invalid") from exc
-    if parsed.version != 4:
-        raise SensorConfigError("DHCP authority is invalid")
+        parsed = ipaddress.IPv4Address(raw)
+        if str(parsed) != raw or parsed.is_unspecified or parsed.is_multicast or parsed.is_reserved:
+            raise ValueError
+    except ValueError:
+        raise SensorConfigError("IPv4 authority is invalid") from None
     return str(parsed)
+
+
+def _private_ipv4(raw: str) -> str:
+    parsed = ipaddress.IPv4Address(_ipv4(raw))
+    if raw != "127.0.0.1" and not any(parsed in ipaddress.IPv4Network(cidr)
+            for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
+        raise SensorConfigError("Private IPv4 endpoint is invalid")
+    return raw
+
+
+def _port(raw: str, *, minimum: int = 1) -> int:
+    if not 1 <= len(raw) <= 5 or re.fullmatch(r"[1-9][0-9]*", raw) is None or not minimum <= int(raw) <= 65535:
+        raise SensorConfigError("Endpoint port is invalid")
+    return int(raw)
+
+
+def _evidence_url(raw: str) -> str:
+    try:
+        if (not raw.isascii() or not raw.startswith("https://")
+                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw)
+                or any(char in raw for char in "%\\@?#[]")):
+            raise ValueError
+        parsed = urlsplit(raw)
+        prefix = "/api/internal/device-fingerprint/v1"
+        if parsed.scheme != "https" or parsed.path not in (prefix, prefix + "/") or not parsed.netloc:
+            raise ValueError
+        authority = parsed.netloc.split(":")
+        if len(authority) not in (1, 2):
+            raise ValueError
+        host = authority[0]
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            if (not 1 <= len(host) <= 253 or any(re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) is None for label in host.split("."))
+                    or re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)", host.rsplit(".", 1)[-1]) is not None):
+                raise ValueError
+        else:
+            _private_ipv4(host)
+        if len(authority) == 2:
+            _port(authority[1])
+        return raw[:-1] if parsed.path.endswith("/") else raw
+    except (ValueError, SensorConfigError):
+        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL is invalid") from None
 
 
 def _absolute(raw: str, name: str) -> str:
