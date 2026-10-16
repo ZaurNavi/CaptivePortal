@@ -38,6 +38,9 @@ def provider():
     instance._client_id = "client-id"
     instance._client_secret = "client-secret"
     instance._verify_ssl = False
+    # Snapshot/parser unit fake; strict transport has separate real TLS fixtures.
+    instance._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
+        url, verify=instance._verify_ssl, **kwargs)
     return instance
 
 

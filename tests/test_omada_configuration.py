@@ -1,4 +1,5 @@
 import importlib
+import ssl
 from unittest.mock import patch
 
 import pytest
@@ -17,15 +18,27 @@ OMADA_ENVIRONMENT_NAMES = (
     "OMADA_CLIENT_SECRET",
 )
 TEST_SECRET = "unit-test-client-secret"
+_POLICY_PATH = ""
+
+
+@pytest.fixture(autouse=True)
+def configuration_only_tls_boundary(tmp_path, monkeypatch):
+    # These tests validate pure startup mapping, not filesystem/certificate
+    # admission, which is exercised by test_omada_strict_tls with real fixtures.
+    monkeypatch.setitem(globals(), "_POLICY_PATH", str(tmp_path / "approved.pem"))
+    monkeypatch.setattr("app.controllers.omada._omada_ssl_context",
+                        lambda policy: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
 
 
 def valid_settings(**overrides):
     settings = {
-        "omada_url": "https://controller.invalid:8043",
+        "omada_url": "https://Omada:8043",
         "omada_id": "unit-test-omada-id",
         "client_id": "unit-test-client-id",
         "client_secret": TEST_SECRET,
-        "verify_ssl": False,
+        "verify_ssl": True,
+        "omada_tls_trust_anchor_path": _POLICY_PATH,
+        "omada_tls_trust_anchor_sha256": "0" * 64,
     }
     settings.update(overrides)
     return settings
@@ -159,6 +172,10 @@ def test_missing_values_are_reported_before_url_syntax_validation():
         "https://controller.invalid:not-a-port",
         "https://controller.invalid:65536",
         "https://controller.invalid//",
+        "http://Omada:8043",
+        "https://192.168.0.222:8043",
+        "https://localhost:8043",
+        "https://controller.invalid:8043",
     ],
 )
 def test_invalid_base_url_is_rejected_without_disclosure_or_network(
@@ -174,14 +191,14 @@ def test_invalid_base_url_is_rejected_without_disclosure_or_network(
 @pytest.mark.parametrize(
     ("omada_url", "normalized_url"),
     [
-        ("http://controller.invalid", "http://controller.invalid"),
+        ("https://Omada:8043", "https://Omada:8043"),
         (
-            "https://controller.invalid:8043",
-            "https://controller.invalid:8043",
+            "https://omada:8043",
+            "https://Omada:8043",
         ),
         (
-            "https://controller.invalid:8043/",
-            "https://controller.invalid:8043",
+            "https://OMADA:8043/",
+            "https://Omada:8043",
         ),
     ],
 )

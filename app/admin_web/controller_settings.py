@@ -88,6 +88,12 @@ class ControllerConfigurationReadService:
         fields["tls_certificate_verification"] = value("TLS certificate verification", "boolean",
             snapshot.tls_certificate_verification, snapshot.tls_certificate_verification_source)
         fields["tls_certificate_verification"].update(editable=False, read_only_reason="deployment_controlled")
+        fields["tls_certificate_verification"].update(
+            verification_mode=snapshot.tls_verification_mode,
+            trust_policy=snapshot.tls_trust_policy,
+            trust_anchor_source=snapshot.tls_trust_anchor_source,
+            certificate_status=snapshot.tls_certificate_status,
+        )
         return {
             "api_version": "admin.settings.controller.v3",
             "request_id": request_id,

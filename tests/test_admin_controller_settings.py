@@ -1,6 +1,7 @@
 import ast
 import json
 import logging
+import ssl
 import uuid
 from dataclasses import FrozenInstanceError, asdict
 from pathlib import Path
@@ -23,6 +24,7 @@ from app.settings_control.models import SettingsError
 from app.settings_control.features import AdminFeaturePlanV1
 from app.settings_control.models import ResolvedSettingsSnapshot
 from tests.admin_web.conftest import enabled_settings, login
+from tests.settings_control import CONTROLLER_BASE
 
 
 SECRET = "AS02_SENTINEL_NEVER_DISCLOSE_z9X7!"
@@ -32,12 +34,27 @@ PAGE = "/admin/settings/controller"
 
 def settings(**overrides):
     values = enabled_settings(web_admin_settings_enabled="true")
-    values.update(omada_url=" https://controller.invalid:8043/ ", omada_id=" installation ",
-                  client_id=" application ", client_secret=" " + SECRET + " ", verify_ssl=False,
+    values.update(CONTROLLER_BASE)
+    values.update(omada_url=" https://Omada:8043/ ", omada_id=" installation ",
+                  client_id=" application ", client_secret=" " + SECRET + " ", verify_ssl=True,
                   portal_counter_enabled=False, portal_counter_api_enabled=False,
                   public_traffic_enabled=False, auth_telemetry_enabled=False, capport_enabled=False)
     values.update(overrides)
     return values
+
+
+@pytest.fixture
+def configuration_only_certificate_admission(monkeypatch):
+    # These two provider-composition tests do not exercise file/certificate I/O.
+    # Real admission and TLS failure tests remain in test_omada_strict_tls.
+    def admit(policy):
+        assert policy.canonical_https_origin == "https://Omada:8043"
+        assert policy.verification_mode == "strict"
+        assert policy.trust_anchor_path == CONTROLLER_BASE["omada_tls_trust_anchor_path"]
+        assert policy.trust_anchor_sha256 == CONTROLLER_BASE["omada_tls_trust_anchor_sha256"]
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    monkeypatch.setattr("app.controllers.omada._omada_ssl_context", admit)
+    monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **k: pytest.fail("network"))
 
 
 def snapshot():
@@ -74,10 +91,10 @@ def get(client, path=API):
     return client.get(path, base_url="https://localhost")
 
 
-def test_config_normalization_immutability_and_injected_provider(monkeypatch, caplog):
+def test_config_normalization_immutability_and_injected_provider(monkeypatch, caplog, configuration_only_certificate_admission):
     mapping = settings()
     config = build_omada_runtime_config(mapping)
-    assert config.controller_url == "https://controller.invalid:8043"
+    assert config.controller_url == "https://Omada:8043"
     assert config.controller_id == "installation" and config.client_id == "application"
     assert config.client_secret == SECRET
     with pytest.raises(FrozenInstanceError):
@@ -87,7 +104,9 @@ def test_config_normalization_immutability_and_injected_provider(monkeypatch, ca
     with caplog.at_level(logging.DEBUG):
         provider = create_controller(config)
     assert provider._client_secret == SECRET and provider._omada_url == config.controller_url
-    assert provider._verify_ssl is False
+    assert provider._verify_ssl is True
+    assert provider._transport._context.check_hostname is True
+    assert provider._transport._context.verify_mode == ssl.CERT_REQUIRED
     for value in (repr(config), str(config), repr(provider), str(provider), caplog.text):
         assert SECRET not in value
     import app.controllers.omada as omada
@@ -108,10 +127,19 @@ def test_public_projection_provenance_membership_and_secret_absence():
     assert explicit.controller_id_source == "repository_default"
     assert explicit.client_secret_source == "environment"
     assert explicit.tls_certificate_verification_source == "repository_default"
+    assert explicit.tls_certificate_verification is True
+    assert explicit.tls_verification_mode == "strict"
+    assert explicit.tls_trust_policy == "independently_approved_self_signed_leaf"
+    assert explicit.tls_trust_anchor_source == "repository_default"
+    assert explicit.tls_certificate_status == "verification_required_on_every_connection"
+    trust_explicit = public_omada_snapshot(config, frozenset({
+        "OMADA_TLS_TRUST_ANCHOR_PATH", "OMADA_TLS_TRUST_ANCHOR_SHA256"}))
+    assert trust_explicit.tls_trust_anchor_source == "environment"
     assert SECRET not in json.dumps(asdict(explicit)) + repr(explicit) + str(explicit)
     assert set(asdict(explicit)) == {"controller_url", "controller_url_source", "controller_id",
         "controller_id_source", "client_id", "client_id_source", "client_secret_presence",
-        "client_secret_source", "tls_certificate_verification", "tls_certificate_verification_source", "effective_generation"}
+        "client_secret_source", "tls_certificate_verification", "tls_certificate_verification_source", "effective_generation",
+        "tls_verification_mode", "tls_trust_policy", "tls_trust_anchor_source", "tls_certificate_status"}
     with pytest.raises(FrozenInstanceError):
         explicit.controller_url = "changed"
     with pytest.raises(ValueError):
@@ -133,7 +161,7 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
     assert model["configuration_state"] == "configured"
     expected_effective = {
         "controller_url": {"display_label": "Controller URL", "value_type": "url",
-            "effective_value": "https://controller.invalid:8043", "effective_source": "environment"},
+            "effective_value": "https://Omada:8043", "effective_source": "environment"},
         "controller_id": {"display_label": "Controller ID", "value_type": "string",
             "effective_value": "installation", "effective_source": "environment"},
         "client_id": {"display_label": "Client / Application ID", "value_type": "string",
@@ -141,7 +169,10 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
         "client_secret": {"display_label": "Client Secret", "value_type": "secret_write_only",
             "effective_presence": "configured", "effective_source": "environment"},
         "tls_certificate_verification": {"display_label": "TLS certificate verification", "value_type": "boolean",
-            "effective_value": False, "effective_source": "repository_default"}}
+            "effective_value": True, "effective_source": "repository_default",
+            "verification_mode": "strict", "trust_policy": "independently_approved_self_signed_leaf",
+            "trust_anchor_source": "repository_default", "certificate_status": "verification_required_on_every_connection",
+            "editable": False, "read_only_reason": "deployment_controlled"}}
     assert set(model["fields"]) == set(expected_effective)
     for name, expected in expected_effective.items():
         assert {key: model["fields"][name][key] for key in expected} == expected
@@ -272,7 +303,7 @@ def test_global_policy_and_no_site_resolution(monkeypatch):
     assert get(client).status_code == get(client, PAGE).status_code == 200
 
 
-def test_read_failure_is_sanitized_and_provider_still_usable(monkeypatch, caplog):
+def test_read_failure_is_sanitized_and_provider_still_usable(monkeypatch, caplog, configuration_only_certificate_admission):
     provider = create_controller(build_omada_runtime_config(settings()))
     _, client, runtime = controller_app()
     def fail(*args):

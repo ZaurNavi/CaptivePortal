@@ -4,10 +4,16 @@ from app.models import Result
 
 class Provider:
     def __init__(self):
-        self._omada_url = "https://controller.example"
+        self._omada_url = "https://Omada:8043"
         self._omada_id = "controller-id"
-        self._verify_ssl = False
+        self._verify_ssl = True
         self.invalidated = []
+
+    def _request(self, method, url, **kwargs):
+        # Synthetic transport seam only; keep the existing mocked response and
+        # execute the real reconnect parsing/token-cache behavior below.
+        assert method == "POST"
+        return subject.requests.post(url, **kwargs)
 
     def _get_token(self):
         return Result.ok(data={"token": "secret-token"})
@@ -51,6 +57,11 @@ def test_reconnect_uses_hyphen_mac_and_returns_safe_contract(monkeypatch):
     assert captured["url"].endswith(
         "/sites/site-1/clients/AA-BB-CC-DD-EE-FF/reconnect"
     )
+    assert captured == {
+        "url": "https://Omada:8043/openapi/v1/controller-id/sites/site-1/clients/AA-BB-CC-DD-EE-FF/reconnect",
+        "headers": {"Authorization": "AccessToken=secret-token"},
+        "timeout": (5.0, 5.0),
+    }
     assert "secret-token" not in repr(result.to_dict())
 
 

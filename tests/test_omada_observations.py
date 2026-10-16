@@ -34,6 +34,10 @@ class FakeProvider:
         token = self.tokens[min(len(self.token_calls) - 1, len(self.tokens) - 1)]
         return Result.ok(data={"token": token})
 
+    def _request(self, method, url, **kwargs):
+        # Existing parser mocks remain below the now-shared transport boundary.
+        return getattr(subject.requests, method.lower())(url, verify=self._verify_ssl, **kwargs)
+
     def _invalidate_cached_token(self, token):
         self.invalidated.append(token)
 

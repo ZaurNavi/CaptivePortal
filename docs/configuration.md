@@ -187,14 +187,66 @@ is never stored there. See `docs/modules/device-fingerprint-portal.md`.
 | `HOST` | `127.0.0.1` | application bind |
 | `PORT` | `8088` | application port |
 | `DEBUG` | `false` | no reloader in `run.py` |
-| `VERIFY_SSL` | `false` | open security debt |
-| `OMADA_URL` | required external | no secret literal |
+| `VERIFY_SSL` | `true` | mandatory Omada strict policy; no writable/unsafe toggle |
+| `OMADA_URL` | `https://Omada:8043` required externally | only the approved HTTPS origin; case-normalized |
+| `OMADA_TLS_TRUST_ANCHOR_PATH` | empty / required externally | absolute root-owned public PEM outside Git; no controller private key |
+| `OMADA_TLS_TRUST_ANCHOR_SHA256` | empty / required externally | approved DER SHA256 from independent Owner/SysAdmin export, not network TOFU |
 | `OMADA_ID` | required external | controller id |
 | `OMADA_CLIENT_ID` | required external | OpenAPI client |
 | `OMADA_CLIENT_SECRET` | required secret | never commit/log |
 | `OMADA_WEBHOOK_SITE_ID_MAP_JSON` | `{}` in example | Site-name → Site-id normalization context |
 
 Provider construction fails closed when required core Omada configuration is missing/invalid.
+
+### QIO-01B — Option B only (activation remains HOLD)
+
+The accepted startup settings mapping supplies one immutable strict Omada TLS
+policy. No request rereads the environment, accepts a certificate from a network
+handshake, changes DNS/SNI/Host, or falls back to HTTP/disabled verification.
+`OMADA_URL` must have scheme HTTPS, host `Omada`, explicit port 8043, no credentials,
+query, fragment or non-root path. A trailing root slash/case is normalized to
+`https://Omada:8043`. IP/localhost/other-controller aliases are rejected.
+
+At provider construction the public PEM must be one parseable, valid, self-signed
+certificate with DNS SAN Omada and server-auth EKU, with the independently approved
+DER fingerprint. It must be a regular single-link non-symlink file, owned by root,
+not group/other-writable, readable by the application, and outside the repository.
+Linux permission attestation is mandatory; an unsupported non-POSIX deployment
+fails closed rather than pretending POSIX mode bits attest a Windows ACL.
+Pure Settings semantic validation remains file/network-I/O-free; actual file
+admission is the provider's separate preflight before any Omada operation.
+
+The provider-local SSLContext contains only that admitted public leaf; it does
+not load certifi/system roots. Chain, reference hostname and validity are checked
+on each fresh connection. All twelve token/API request sites, including pending
+sessions and observations, use the same transport. Sessions are operation-local
+(as with the prior top-level Requests calls), without long-lived pooled trust.
+Environment proxies, netrc, REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE are not consulted
+for Omada; explicit proxy/verify/Host/redirect overrides are rejected. Other
+Requests clients are unchanged. No redirect (even same-origin) is followed.
+
+TLS/policy/redirect failures are sanitized, non-authoritative failures. In
+particular, get_sites raises ControllerError on failed authority (including token,
+TLS, DNS/timeout, HTTP/API failure or invalid site-list shape) instead of returning
+authoritative `[]`; a valid empty API result still returns `[]`. This assigned
+legacy boundary is the only success/error parsing change. Existing API paths,
+methods, payloads, timeouts, cache concurrency and other response parsing and
+non-TLS timeout/network classifications remain.
+Other Result-based methods return failure, never a successful empty snapshot.
+
+The first TLS failure and every reason transition/recovery is logged without
+URL, token, secret or PEM. Identical failures are aggregated for a monotonic
+60-second heartbeat with repeated counts and previous reason; individual failed
+operation results are never suppressed. Runtime tls_health describes only the
+last connection state, not authorization readiness or all-system health.
+Admin's existing read-only TLS field additionally exposes strict verification
+mode, approved-leaf policy/source and "verification required on every connection";
+it discloses neither PEM/path nor secrets, and adds no mutation control.
+
+Admission of the real leaf/name/IP, independent full/security/staging/performance
+acceptance, and production activation are Tech Lead/Owner gates, not implied by
+the lab code. Quiet logs are not proof of physical HDD savings. See the QIO-01B
+section in deployment.md for the single-path installation/rotation/rollback plan.
 
 ## Feature groups
 
@@ -713,13 +765,15 @@ by using the same canonical builder on its already-resolved local mapping;
 an injected controller is never rebuilt.
 
 `OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID` and `OMADA_CLIENT_SECRET` remain required.
-Existing trim/base-URL normalization and OAuth/request semantics are unchanged.
+Trim and OAuth/request semantics are retained; QIO-01B now restricts the runtime
+origin to `https://Omada:8043` and requires an explicit admitted strict TLS policy.
 The selected writable value is normalized by the same canonical Omada owner:
 persisted override > explicit startup environment > repository default.
 The immutable effective snapshot retains the adopted generation and each
 writable value's `persisted_override`, `environment` or `repository_default`
 provenance. No environment reread occurs in an Admin request.
-`VERIFY_SSL=false` remains a repository constant.
+`VERIFY_SSL=true` is now a mandatory repository constant; QIO-01B permits no
+disabled-verification compatibility fallback.
 Client Secret is represented only by presence/source, never its value or any
 derived length/hash/mask. `OMADA_CLIENT_SECRET` and `VERIFY_SSL` have no ordinary
 writable definition. Only the three non-secret Controller strings enter ordinary overrides/audit paths.

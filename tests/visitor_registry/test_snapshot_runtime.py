@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import run as runtime
+from tests.settings_control import CONTROLLER_BASE
 
 
 class FakeApp:
@@ -130,6 +131,11 @@ def _prepare_main(
     registry_start_error=None,
     registry_create_error=None,
 ):
+    # Composition-only fakes below do not attest a loaded Git artifact. Keep
+    # that independent security contract in tests/test_artifact_identity.py;
+    # this test must also run in the authorized uncommitted Coder worktree.
+    monkeypatch.setattr(runtime, "capture_loaded_artifact_identity", lambda _service:
+        SimpleNamespace(json_line=lambda: "synthetic Snapshot composition identity"))
     events = []
     controller = object()
     collector = FakeCollector(
@@ -164,16 +170,20 @@ def _prepare_main(
         runtime,
         "get_settings",
         lambda: {
+            **CONTROLLER_BASE,
             "host": "127.0.0.1",
             "port": 8088,
             "debug": False,
-            "omada_url": "https://controller.invalid", "omada_id": "installation",
-            "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
+            "client_secret": "fixture-secret",
         },
     )
 
     def create_controller(runtime_config):
-        assert runtime_config.controller_url == "https://controller.invalid"
+        assert runtime_config.controller_url == "https://Omada:8043"
+        assert runtime_config.verify_ssl is True
+        assert runtime_config.tls_policy.verification_mode == "strict"
+        assert runtime_config.tls_policy.trust_anchor_path == CONTROLLER_BASE["omada_tls_trust_anchor_path"]
+        assert runtime_config.tls_policy.trust_anchor_sha256 == CONTROLLER_BASE["omada_tls_trust_anchor_sha256"]
         events.append("create_controller")
         return controller
 
@@ -239,11 +249,11 @@ def test_main_wires_one_provider_and_starts_collector_after_composition(
         "app_controller": controller,
         "app_collector": collector,
         "registry_settings": {
+            **CONTROLLER_BASE,
             "host": "127.0.0.1",
             "port": 8088,
             "debug": False,
-            "omada_url": "https://controller.invalid", "omada_id": "installation",
-            "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
+            "client_secret": "fixture-secret",
         },
     }
     assert collector.start_calls == 1

@@ -1,12 +1,18 @@
 """Synthetic disposable Settings V1 test helpers; no production access."""
 import json
 import logging
+from pathlib import Path
+import tempfile
 import uuid
 from app.admin_web.models import AdminPrincipal
 from app.settings_control.bootstrap import bootstrap_settings_control
 
-CONTROLLER_BASE = {"omada_url": "https://controller.invalid", "omada_id": "installation",
-                   "client_id": "application", "client_secret": "synthetic-secret", "verify_ssl": False}
+# Pure Settings validation does not open the anchor. Actual certificate admission
+# and verified connections are covered by the isolated Omada TLS fixtures.
+CONTROLLER_BASE = {"omada_url": "https://Omada:8043", "omada_id": "installation",
+                   "client_id": "application", "client_secret": "synthetic-secret", "verify_ssl": True,
+                   "omada_tls_trust_anchor_path": str(Path(tempfile.gettempdir()) / "qio01b-synthetic-anchor.pem"),
+                   "omada_tls_trust_anchor_sha256": "a" * 64}
 
 
 def stack(tmp_path, **values):

@@ -18,6 +18,10 @@ class FakeProvider:
     def _get_token(self):
         return self.token_result
 
+    def _request(self, method, url, **kwargs):
+        # Parser-only fake; strict transport is independently exercised over TLS.
+        return getattr(subject.requests, method.lower())(url, verify=self._verify_ssl, **kwargs)
+
 
 class FakeResponse:
     def __init__(self, payload=None, *, status_code=200, json_error=None):

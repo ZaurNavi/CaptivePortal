@@ -128,14 +128,13 @@ def _request_page(
         f"/sites/{site_id}/clients"
     )
     try:
-        response = requests.get(
+        response = provider._request("GET",
             url,
             headers={
                 "Authorization": f"AccessToken={token}",
                 "Accept": "application/json",
             },
             params={"page": page, "pageSize": page_size},
-            verify=provider._verify_ssl,
             timeout=(timeout, timeout),
         )
     except requests.exceptions.Timeout:
@@ -417,14 +416,13 @@ def _request_observation_result(
     allow_missing_result: bool = False,
 ) -> Result:
     try:
-        response = requests.get(
+        response = provider._request("GET",
             url,
             headers={
                 "Authorization": f"AccessToken={token}",
                 "Accept": "application/json",
             },
             params=params,
-            verify=provider._verify_ssl,
             timeout=(timeout, timeout),
         )
     except requests.exceptions.Timeout:
