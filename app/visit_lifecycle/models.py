@@ -95,6 +95,7 @@ class VisitLifecycleConfig:
     shutdown_timeout_seconds: float
     max_offline_clock_skew_seconds: float
     max_reported_duration_drift_seconds: float
+    reader_scan_telemetry_compact_enabled: bool = False
 
 
 @dataclass(frozen=True)
