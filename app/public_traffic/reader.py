@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -222,6 +223,21 @@ class PublicTrafficReader:
                 stream,
                 final_offset,
             )
+            stable_retired_eof = None
+            if (
+                state is not None
+                and state.retired_completed
+                and not source.is_active
+                and final_offset == final_size
+            ):
+                # Called only after BEGIN IMMEDIATE and an exact current-row
+                # comparison. Keep the scan descriptor open until it returns.
+                def stable_retired_eof():
+                    return _verify_stable_retired_eof(
+                        source, stream, opened_stat, final_offset,
+                        source_checkpoint,
+                    )
+
             self.repository.observe_source(
                 source_identity=source.identity,
                 source_path=str(source.path),
@@ -232,6 +248,7 @@ class PublicTrafficReader:
                     not source.is_active and final_offset == final_size
                 ),
                 now_utc=self.service.now_iso(),
+                stable_retired_eof=stable_retired_eof,
             )
             return True
 
@@ -370,6 +387,52 @@ class PublicTrafficReader:
 
 def _source_identity(stat_result: os.stat_result) -> str:
     return f"{stat_result.st_dev}:{stat_result.st_ino}"
+
+
+def _verify_stable_retired_eof(
+    source: SourceFile, stream, opened_stat, offset: int, checkpoint: str,
+) -> bool:
+    """Bounded proof under the DB writer lock, not a filesystem lock.
+
+    A change after the final check is reconciled on the next scan. As in the
+    existing checkpoint contract, same-size middle-only rewrites outside the
+    prefix/tail windows cannot be detected across scans.
+    """
+    def signature(value):
+        return (
+            value.st_dev, value.st_ino, value.st_mode, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns,
+        )
+
+    try:
+        expected = signature(opened_stat)
+        if (
+            not stat.S_ISREG(opened_stat.st_mode)
+            or _source_identity(opened_stat) != source.identity
+            or opened_stat.st_size != offset
+            or stream.tell() != offset
+            or signature(os.fstat(stream.fileno())) != expected
+            or signature(source.path.stat()) != expected
+        ):
+            return False
+        # Do not reuse BufferedReader's cached bytes to prove file freshness.
+        # Duplicate the already-open regular file, rather than reopen a path
+        # that could race to a special file and block under the writer lock.
+        # The bounded checkpoint restores the shared descriptor position.
+        with os.fdopen(os.dup(stream.fileno()), "rb", buffering=0) as proof:
+            if signature(os.fstat(proof.fileno())) != expected:
+                return False
+            if not hmac.compare_digest(
+                _source_checkpoint(proof, offset), checkpoint,
+            ):
+                return False
+            return (
+                signature(os.fstat(proof.fileno())) == expected
+                and signature(os.fstat(stream.fileno())) == expected
+                and signature(source.path.stat()) == expected
+            )
+    except (OSError, ValueError):
+        return False
 
 
 def _source_checkpoint(stream, offset: int) -> str:
