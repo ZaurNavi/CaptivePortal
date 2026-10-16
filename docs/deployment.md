@@ -1092,6 +1092,92 @@ starts the sensor before separately starting its bound Suricata service.
 Before checkout mutation, active fingerprint services must be stopped.
 Activation and enable-at-boot require separate Owner authorization.
 
+### SSR-01B local recovery and maintenance (installation NOT authorized)
+
+The SSR-01B repository candidate adds a **soft** Sensor `Wants=Suricata`.
+Suricata retains its local `After+BindsTo+PartOf=Sensor` relationship. Sensor
+start/restart/recovery can enqueue Suricata without making Sensor or Core depend
+on successful Suricata startup. A Suricata-only crash must not restart Sensor.
+These templates are not an instruction to change installed units or drop-ins;
+Owner/SysAdmin installation, restart, activation and rollback need separate GO.
+
+Suricata's unprivileged preflight performs a non-sending AF_UNIX/SOCK_DGRAM
+`connect()` against the protected Sensor EVE endpoint. It polls at most every
+250 ms for **30 s**, closes every probe socket, and fails closed with a generic
+diagnostic. A stale socket inode is not readiness. The existing capture-interface,
+readable-config, pinned-version and `suricata -T` preflights remain unchanged.
+`connect()` proves a bound kernel endpoint at that instant, not PID identity,
+EVE consumption, downstream durability or TLS/QUIC usability. The protected parent
+must remain Sensor-owned, group `fingerprint-eve`, mode `0750`, with socket `0660`;
+the Suricata group may connect but must not be able to bind/replace endpoints.
+Effective deployed ownership/permissions require independent attestation.
+
+Candidate budgets are socket wait 30 s, other preflight/start allowance 20 s,
+safety headroom 30 s, `TimeoutStartSec=90`, `RestartSec=30`,
+`StartLimitBurst=5`, `StartLimitIntervalSec=750`, `StartLimitAction=none`.
+The admitted budget is `30+20+30=80 < 90`; the entire preflight/start chain must
+fit it in independent exact-candidate testing. The conservative failure envelope
+is 570 s through the fifth failed attempt and 600 s through the denied sixth
+job, inside the 750 s window. This is a **total-start window**, not a failure-only
+counter, independent per-episode quota, lifetime quota or automatic timer.
+Successful starts count too: cold start plus three deliberate Sensor restarts
+consume four starts; one Suricata-only automatic recovery consumes the fifth.
+Further legitimate starts in that same window can be denied. Arbitrarily many
+manual restarts are not promised. A mixed history leaves fewer attempts for
+failure recovery; do not silently reset the counter during normal operation.
+Missing socket has at most five 30 s probes with 30 s restart
+delays before rate-limit failure. No automatic `reset-failed` is added. A late
+socket or automatic Sensor restart does not promise recovery of a saturated
+Suricata. Operator diagnosis and explicit controlled resume are required.
+
+Two root-controlled **volatile** maintenance inhibits are checked at start:
+
+- `/run/ssr01b-fingerprint-pair-maintenance.hold`: blocks both services.
+- `/run/ssr01b-fingerprint-suricata-maintenance.hold`: blocks only Suricata.
+
+The following are operator procedures **only after separate authorization**,
+not commands performed by this repository implementation:
+
+```sh
+# Pair maintenance: create inhibit FIRST, then stop the pair.
+sudo install -o root -g root -m 0600 /dev/null /run/ssr01b-fingerprint-pair-maintenance.hold
+sudo systemctl stop fingerprint-suricata.service fingerprint-sensor.service
+
+# Alternatively, Suricata-only maintenance leaves Sensor running.
+sudo install -o root -g root -m 0600 /dev/null /run/ssr01b-fingerprint-suricata-maintenance.hold
+sudo systemctl stop fingerprint-suricata.service
+```
+
+`ConditionPathExists` skips a future job; creating a hold does **not** stop an
+active service. Existing NI-01 `Wants=Suricata` and subsequent Sensor restarts must
+respect both holds. A bare stop is not a sustained maintenance inhibit. Holds are
+not cleared automatically; `/run` is volatile, so **reboot/power loss removes
+the inhibits**. Do not rely on this procedure for persistent maintenance.
+
+For authorized resume, diagnose `systemctl status`/unit-scoped journal first:
+distinguish condition-skipped jobs from socket/preflight failure and
+rate-limit denial (`Start request repeated too quickly` in the journal; systemd
+249 may retain the original `exit-code`/`timeout` Result instead of reporting
+`start-limit-hit`). Remove **only the intended hold**, retaining any independent
+hold. After resolving the fault, explicitly `reset-failed
+fingerprint-suricata.service` and start Sensor for a stopped pair, or Suricata
+alone for Suricata-only maintenance. Do not reset other units or bypass a hold.
+Verify actual EVE heartbeat/stats and raw versus TLS/QUIC source health separately;
+neither `active`, a successful probe nor zero queue proves `usable`. Retain real
+capture outage/gap evidence; receiver death immediately after connect remains a
+possible TOCTOU and does not justify synthetic readiness frames.
+
+For any later separately authorized rollout, retain hashes/copies of effective
+installed units and all drop-ins before changing them. Rollback restores those
+exact artifacts and the preceding approved code under the same maintenance
+procedure, followed by authorized daemon-reload/controlled start and independent
+health checks. Never wipe/restore/reseed spool, SQLite or source history to undo
+a unit change; do not lose recorded capture gaps. Unexpected Core/NI/Evidence
+restart, uncontrolled reattach, false health or budget overrun is HOLD/rollback.
+Cold/slow physical-HDD adequacy, real Sensor/Suricata 8.0.6 EVE integration and
+official release acceptance remain independent pre-publication gates, not claims
+made by the mock-unit focused tests.
+
 ## Settings Stage 4 deployment prerequisites (separate authorization required)
 
 The application never provisions or repairs key/DB permissions and never invokes

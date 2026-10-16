@@ -47,7 +47,9 @@ def test_suricata_has_separate_writable_runtime_directory_without_run_workaround
     assert "BindPaths=" not in service
     assert "ExecStart=/usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers" in service
     assert "ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0" in service
-    assert "until test -S /run/captive-portal/fingerprint-sensor/suricata-eve.sock" in service
+    assert "probe.connect(\"/run/captive-portal/fingerprint-sensor/suricata-eve.sock\")" in service
+    assert "socket.SOCK_DGRAM" in service
+    assert "until test -S" not in service
     assert "AmbientCapabilities=CAP_NET_RAW" in service
     assert "CapabilityBoundingSet=CAP_NET_RAW" in service
     assert "User=suricata" in service
