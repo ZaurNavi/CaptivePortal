@@ -13,7 +13,7 @@ DLT_EN10MB = 1
 SO_ATTACH_FILTER = 26
 RAW_CAPTURE_FILTER = (
     "(udp and (port 67 or port 68)) or "
-    "(src net 192.168.8.0/22 and tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn)"
+    "(src net 10.50.0.0/19 and tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn)"
 )
 DEPLOYED_FILTER_PATH = Path("/etc/captive-portal/device-fingerprint/raw-capture.bpf")
 
