@@ -62,6 +62,10 @@ def visit_config_from_settings(
         )
     return VisitLifecycleConfig(
         enabled=True,
+        reader_scan_telemetry_compact_enabled=_strict_bool(
+            settings.get("visit_lifecycle_reader_scan_telemetry_compact_enabled", False),
+            "VISIT_LIFECYCLE_READER_SCAN_TELEMETRY_COMPACT_ENABLED",
+        ),
         db_path=_absolute_path(
             settings.get("visit_lifecycle_db_path", DEFAULT_DB_PATH),
             "VISIT_LIFECYCLE_DB_PATH",

@@ -41,6 +41,7 @@ from .telemetry import VisitTelemetry
 CHECKPOINT_WINDOW_BYTES = 2_048
 READ_CHUNK_BYTES = 64 * 1_024
 CHECKPOINT_DOMAIN = b"visit-webhook-reader-v1\0"
+QUIET_SCAN_HEARTBEAT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class VisitLifecycleWebhookReader:
         self._deferral_degraded = False
         self._last_successful_scan_at: float | None = None
         self._last_durable_progress_at: float | None = None
+        self._reset_scan_reports()
 
     @property
     def running(self) -> bool:
@@ -111,6 +113,7 @@ class VisitLifecycleWebhookReader:
             if self.running:
                 return False
             self._stop_event.clear()
+            self._reset_scan_reports()
             self._thread = threading.Thread(
                 target=self._run,
                 name="visit_webhook_reader",
@@ -138,6 +141,8 @@ class VisitLifecycleWebhookReader:
         )
         processed = 0
         complete = True
+        self._scan_source_changed = False
+        pending_committed = False
         sources: list[_OpenedSource] = []
         try:
             sources = self._discover_sources()
@@ -157,7 +162,9 @@ class VisitLifecycleWebhookReader:
             self._reconcile_missing(discovered, budget)
 
             def pending_progress(count: int) -> None:
+                nonlocal pending_committed
                 if count > 0:
+                    pending_committed = True
                     self._last_durable_progress_at = self._monotonic()
                     self._reset_deferral_episode()
 
@@ -172,11 +179,13 @@ class VisitLifecycleWebhookReader:
                 or self._monotonic() >= budget.deadline
             ):
                 complete = False
-            self.telemetry.emit(
-                "visit.reader_scan_completed",
-                processed_line_count=processed,
-                scan_complete=complete,
-                duration_ms=int((self._monotonic() - started) * 1000),
+            finished = self._monotonic()
+            self._report_completed_scan(
+                processed=processed,
+                complete=complete,
+                pending_committed=pending_committed,
+                finished=finished,
+                duration_ms=int((finished - started) * 1000),
             )
             if self._health_callback is not None:
                 self._health_callback(True)
@@ -186,6 +195,7 @@ class VisitLifecycleWebhookReader:
             self._reset_deferral_episode()
             return complete
         except Exception as exc:
+            self._scan_report_recovery_needed = True
             if (
                 self._stop_event.is_set()
                 and isinstance(exc, VisitStorageError)
@@ -234,6 +244,63 @@ class VisitLifecycleWebhookReader:
             if self._stop_event.wait(self.config.scan_interval_seconds):
                 return
 
+    def _reset_scan_reports(self) -> None:
+        self._last_completed_report_at: float | None = None
+        self._suppressed_empty_scans = 0
+        self._scan_report_recovery_needed = False
+        self._scan_report_active = False
+        self._scan_source_changed = False
+
+    def _report_completed_scan(
+        self, *, processed: int, complete: bool, pending_committed: bool,
+        finished: float, duration_ms: int,
+    ) -> None:
+        fields = dict(processed_line_count=processed, scan_complete=complete, duration_ms=duration_ms)
+        if not self.config.reader_scan_telemetry_compact_enabled:
+            # Preserve legacy frequency, fields, level and emitter behavior.
+            self.telemetry.emit("visit.reader_scan_completed", **fields)
+            return
+        if not complete:
+            reason = "incomplete"
+        elif processed > 0:
+            reason = "activity"
+        elif pending_committed:
+            reason = "progress"
+        elif self._scan_source_changed:
+            reason = "source_change"
+        elif self._scan_report_recovery_needed:
+            reason = "recovery"
+        elif self._last_completed_report_at is None:
+            reason = "initial"
+        elif self._scan_report_active:
+            reason = "idle_transition"
+        else:
+            delta = finished - self._last_completed_report_at
+            scan_delta = (finished - self._last_successful_scan_at
+                          if self._last_successful_scan_at is not None else 0.0)
+            if (not math.isfinite(delta) or delta < 0
+                    or not math.isfinite(scan_delta) or scan_delta < 0
+                    or delta >= QUIET_SCAN_HEARTBEAT_SECONDS):
+                # A broken/regressing clock must not cause unbounded silence.
+                reason = "heartbeat"
+            else:
+                self._suppressed_empty_scans += 1
+                return
+        fields.update(reader_report_schema_version=2, report_reason=reason,
+                      suppressed_empty_scans=self._suppressed_empty_scans,
+                      scans_represented=self._suppressed_empty_scans + 1)
+        # Best effort only: reset on attempt, not a claim of Loki delivery.
+        self._suppressed_empty_scans = 0
+        self._last_completed_report_at = finished
+        self._scan_report_recovery_needed = not complete
+        self._scan_report_active = complete and (processed > 0 or pending_committed)
+        try:
+            self.telemetry.emit("visit.reader_scan_completed", **fields)
+        except Exception:
+            # VisitTelemetry is fail-open; preserve scan/health even if an
+            # unavailable injected sink violates that interface contract.
+            pass
+
     def _discover_sources(self) -> list[_OpenedSource]:
         candidates = [
             (Path(f"{self.config.webhook_source}.{index}"), False)
@@ -249,6 +316,8 @@ class VisitLifecycleWebhookReader:
                 except FileNotFoundError:
                     continue
                 if opened is None:
+                    # Non-regular/otherwise rejected input is not proven idle.
+                    self._scan_source_changed = True
                     continue
                 stream, opened_stat = opened
                 source = _OpenedSource(
@@ -304,6 +373,7 @@ class VisitLifecycleWebhookReader:
                 deadline=budget.deadline,
                 cancel_event=self._stop_event,
             )
+            self._scan_source_changed = True
             self.telemetry.emit(
                 "visit.reader_source_restarted",
                 "warning",
@@ -400,6 +470,15 @@ class VisitLifecycleWebhookReader:
                 deadline=budget.deadline,
                 cancel_event=self._stop_event,
             )
+            # Compare only existing local state/checkpoint data. In particular,
+            # the routine updated_at refresh is not a logical source change.
+            if (state is None or state.source_path != str(source.path)
+                    or state.source_offset != final_offset
+                    or state.last_observed_size != final_size
+                    or state.retired_completed != (not source.is_active)
+                    or state.missing_warning_emitted
+                    or not _checkpoint_matches(state, checkpoint)):
+                self._scan_source_changed = True
             return processed, True
         return processed, False
 
@@ -417,6 +496,7 @@ class VisitLifecycleWebhookReader:
                     deadline=budget.deadline,
                     cancel_event=self._stop_event,
                 )
+                self._scan_source_changed = True
             elif not state.missing_warning_emitted:
                 self.telemetry.emit(
                     "visit.reader_source_missing",
@@ -430,6 +510,7 @@ class VisitLifecycleWebhookReader:
                     deadline=budget.deadline,
                     cancel_event=self._stop_event,
                 )
+                self._scan_source_changed = True
 
     def _is_expected_foreground_deferral(self, exc: Exception) -> bool:
         if not isinstance(exc, VisitStorageError):

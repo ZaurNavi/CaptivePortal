@@ -53,3 +53,24 @@ def test_enabled_runtime_builds_finalization_reader_without_starting_thread(
     assert runtime.webhook_reader.running is False
     runtime.stop_accepting()
     assert runtime.close() is True
+
+
+def test_compact_enabled_disabled_runtime_still_creates_no_database(tmp_path):
+    db_path = tmp_path / "never.sqlite3"
+    runtime = create_visit_lifecycle({"visit_lifecycle_enabled": False,
+        "visit_lifecycle_reader_scan_telemetry_compact_enabled": True,
+        "visit_lifecycle_db_path": str(db_path)}, logger=logging.getLogger("test.runtime"))
+    assert runtime.state == "disabled"
+    assert not db_path.exists()
+
+
+def test_compact_flag_is_forwarded_to_existing_reader_without_starting(visit_config):
+    runtime = create_visit_lifecycle({"visit_lifecycle_enabled": True,
+        "visit_lifecycle_db_path": visit_config.db_path,
+        "visit_lifecycle_webhook_source": visit_config.webhook_source,
+        "visit_lifecycle_reader_scan_telemetry_compact_enabled": "true"},
+        logger=logging.getLogger("test.runtime"))
+    assert runtime.webhook_reader.config.reader_scan_telemetry_compact_enabled is True
+    assert runtime.webhook_reader.running is False
+    runtime.stop_accepting()
+    assert runtime.close() is True

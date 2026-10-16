@@ -34,6 +34,7 @@ from app.config import (
     VISITOR_REGISTRY_SHUTDOWN_TIMEOUT_SECONDS,
     VISITOR_REGISTRY_MAX_LINE_BYTES,
     VISIT_LIFECYCLE_ENABLED, VISIT_LIFECYCLE_DB_PATH,
+    VISIT_LIFECYCLE_READER_SCAN_TELEMETRY_COMPACT_ENABLED,
     VISIT_LIFECYCLE_WEBHOOK_SOURCE,
     VISIT_LIFECYCLE_SCAN_INTERVAL_SECONDS,
     VISIT_LIFECYCLE_RECONCILE_INTERVAL_SECONDS,
@@ -319,6 +320,9 @@ def get_settings() -> dict:
             VISITOR_REGISTRY_MAX_LINE_BYTES
         ),
         "visit_lifecycle_enabled": VISIT_LIFECYCLE_ENABLED,
+        "visit_lifecycle_reader_scan_telemetry_compact_enabled": (
+            VISIT_LIFECYCLE_READER_SCAN_TELEMETRY_COMPACT_ENABLED
+        ),
         "visit_lifecycle_db_path": VISIT_LIFECYCLE_DB_PATH,
         "visit_lifecycle_webhook_source": (
             VISIT_LIFECYCLE_WEBHOOK_SOURCE

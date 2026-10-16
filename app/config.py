@@ -247,6 +247,10 @@ VISITOR_REGISTRY_MAX_LINE_BYTES = os.getenv(
 VISIT_LIFECYCLE_ENABLED = os.getenv(
     "VISIT_LIFECYCLE_ENABLED", "false"
 )
+# Startup-only; validated by the existing Visit strict boolean parser.
+VISIT_LIFECYCLE_READER_SCAN_TELEMETRY_COMPACT_ENABLED = os.getenv(
+    "VISIT_LIFECYCLE_READER_SCAN_TELEMETRY_COMPACT_ENABLED", "false"
+)
 VISIT_LIFECYCLE_DB_PATH = os.getenv(
     "VISIT_LIFECYCLE_DB_PATH",
     "/opt/CaptivePortal/data/visits.sqlite3",
