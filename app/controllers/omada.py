@@ -5,16 +5,230 @@ Omada Controller Provider.
 import copy
 import ipaddress
 import math
+import os
+from pathlib import Path
+import re
+import ssl
+import stat
 import threading
 import time
+from datetime import datetime, timezone
+from urllib.parse import unquote, urlsplit
 import requests
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID
 from typing import Any, Optional
 
 from app.common.mac import format_mac_colon, format_mac_hyphen
 from app.controllers.base import ControllerInterface
-from app.controllers.omada_config import OmadaControllerRuntimeConfig
+from app.controllers.omada_config import OmadaControllerRuntimeConfig, OmadaTlsPolicy
+from app.exceptions import ConfigurationError, ControllerError
 from app.logger import logger
 from app.models import Result
+
+
+class OmadaTransportError(requests.exceptions.SSLError):
+    """Sanitized non-authoritative failure; never includes a request or credentials."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__("Omada strict transport unavailable: " + reason)
+
+
+def _omada_ssl_context(policy):
+    """Admit one independently approved public leaf, not a network/TOFU certificate."""
+    path = Path(policy.trust_anchor_path)
+    repository = Path(__file__).resolve().parents[2]
+    try:
+        if path.resolve().is_relative_to(repository):
+            raise ConfigurationError("Omada TLS: trust_bundle_unapproved")
+        if os.name != "posix":
+            # A root-owned deployment file cannot be attested through POSIX mode
+            # bits on Windows. Nonproduction Windows fixtures may inject admission.
+            raise ConfigurationError("Omada TLS: trust_permissions_unattested")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                    or info.st_mode & 0o022 or not 0 < info.st_size <= 65536):
+                raise ConfigurationError("Omada TLS: trust_bundle_unapproved")
+            pem = handle.read(65537)
+    except (OSError, RuntimeError):
+        raise ConfigurationError("Omada TLS: trust_bundle_missing_or_unreadable") from None
+    try:
+        if (len(pem) > 65536 or pem.count(b"-----BEGIN CERTIFICATE-----") != 1
+                or not re.fullmatch(rb"\s*-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----\s*", pem)):
+            raise ValueError()
+        cert = x509.load_pem_x509_certificate(pem)
+        if cert.fingerprint(hashes.SHA256()).hex() != policy.trust_anchor_sha256:
+            raise ConfigurationError("Omada TLS: trust_bundle_unapproved")
+        now = datetime.now(timezone.utc)
+        before = (cert.not_valid_before_utc if hasattr(cert, "not_valid_before_utc")
+                  else cert.not_valid_before.replace(tzinfo=timezone.utc))
+        after = (cert.not_valid_after_utc if hasattr(cert, "not_valid_after_utc")
+                 else cert.not_valid_after.replace(tzinfo=timezone.utc))
+        if now < before:
+            raise ConfigurationError("Omada TLS: certificate_not_yet_valid")
+        if now >= after:
+            raise ConfigurationError("Omada TLS: certificate_expired")
+        names = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        if not any(name.lower() == "omada" for name in names.get_values_for_type(x509.DNSName)):
+            raise ConfigurationError("Omada TLS: name_mismatch")
+        if ExtendedKeyUsageOID.SERVER_AUTH not in cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value:
+            raise ConfigurationError("Omada TLS: certificate_purpose_invalid")
+        if cert.subject != cert.issuer:
+            raise ConfigurationError("Omada TLS: trust_bundle_unapproved")
+        try:
+            if cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+                raise ConfigurationError("Omada TLS: trust_bundle_not_leaf")
+        except x509.ExtensionNotFound:
+            pass  # no CA capability is asserted; native TLS verification remains mandatory
+        key = cert.public_key()
+        if isinstance(key, rsa.RSAPublicKey):
+            key.verify(cert.signature, cert.tbs_certificate_bytes, padding.PKCS1v15(), cert.signature_hash_algorithm)
+        elif isinstance(key, ec.EllipticCurvePublicKey):
+            key.verify(cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(cert.signature_hash_algorithm))
+        else:
+            raise ValueError()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=pem.decode("ascii"))
+        if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
+            raise ConfigurationError("Omada TLS: tls_policy_invalid")
+        return context
+    except ConfigurationError:
+        raise
+    except Exception:
+        raise ConfigurationError("Omada TLS: trust_bundle_invalid") from None
+
+
+class _OmadaTlsAdapter(requests.adapters.HTTPAdapter):
+    """Provider-local strict context, without Requests adding certifi/system roots."""
+
+    def __init__(self, context):
+        self._context = context
+        super().__init__(max_retries=0)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+        return super().init_poolmanager(connections, maxsize, block=block,
+                                        ssl_context=self._context, **kwargs)
+
+    def cert_verify(self, conn, url, verify, cert):
+        if verify is not True or cert is not None:
+            raise OmadaTransportError("tls_policy_invalid")
+        conn.cert_reqs = "CERT_REQUIRED"
+        conn.ca_certs = None
+        conn.ca_cert_dir = None
+        conn.ca_cert_data = None
+
+    def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        # Requests >=2.32 otherwise substitutes its preloaded default CA context.
+        if verify is not True or cert is not None:
+            raise OmadaTransportError("tls_policy_invalid")
+        parsed = urlsplit(request.url)
+        return ({"scheme": parsed.scheme, "host": parsed.hostname, "port": parsed.port},
+                {"ssl_context": self._context, "cert_reqs": "CERT_REQUIRED"})
+
+    def proxy_manager_for(self, *args, **kwargs):
+        raise OmadaTransportError("proxy_not_admitted")
+
+
+class _OmadaVerifiedTransport:
+    """One TLS policy for every Omada call; no shared/global Requests mutations."""
+
+    def __init__(self, policy):
+        if not isinstance(policy, OmadaTlsPolicy):
+            raise ConfigurationError("Missing Omada strict TLS policy")
+        self._context = _omada_ssl_context(policy)
+        self._lock = threading.Lock()
+        self._reason = None
+        self._last_log = 0.0
+        self._repeated = 0
+        self._last_state = "unproven"
+
+    def _state(self, reason):
+        with self._lock:
+            now = time.monotonic()
+            if (self._last_state == "unproven" or reason != self._reason
+                    or (reason is not None and now - self._last_log >= 60)):
+                repeated = self._repeated
+                if reason is None:
+                    logger.info("omada.tls_state state=verified previous=%s repeated_failures=%d", self._reason, repeated)
+                else:
+                    logger.warning("omada.tls_state state=unavailable reason=%s previous=%s repeated_failures=%d", reason, self._reason, repeated)
+                self._reason, self._last_log, self._repeated = reason, now, 0
+            elif reason is not None:
+                self._repeated += 1
+            self._last_state = "unavailable" if reason else "verified_last_connection"
+
+    @property
+    def health(self):
+        with self._lock:
+            return {"verification_mode": "strict", "failure_reason": self._reason,
+                    "state": self._last_state,
+                    "repeated_failures": self._repeated}
+
+    @staticmethod
+    def _ssl_reason(error):
+        # Only classify locally. Never return/log the raw exception, URL or request.
+        text = str(error).lower()
+        for markers, reason in (
+            (("expired",), "certificate_expired"),
+            (("not yet valid",), "certificate_not_yet_valid"),
+            (("hostname", "doesn't match", "ip address mismatch"), "name_mismatch"),
+            (("unsuitable certificate purpose",), "certificate_purpose_invalid"),
+            (("self-signed", "unable to get local issuer", "unknown ca"), "certificate_unknown"),
+        ):
+            if any(marker in text for marker in markers):
+                return reason
+        return "tls_handshake"
+
+    def request(self, method, url, **kwargs):
+        try:
+            parsed = urlsplit(url)
+            decoded = unquote(parsed.path)
+            if (parsed.scheme != "https" or parsed.hostname is None or parsed.hostname.lower() != "omada"
+                    or parsed.port != 8043 or parsed.netloc.lower() != "omada:8043"
+                    or parsed.username is not None or parsed.password is not None or parsed.fragment
+                    or "\\" in url or any(ord(char) <= 32 for char in url)
+                    or decoded != parsed.path or any(part in {".", ".."} for part in decoded.split("/"))
+                    or not (parsed.path == "/openapi/authorize/token" or parsed.path.startswith("/openapi/v1/"))):
+                raise OmadaTransportError("origin_not_admitted")
+            if set(kwargs) - {"headers", "params", "json", "timeout"}:
+                raise OmadaTransportError("tls_policy_override_not_admitted")
+            if any(key.lower() in {"host", "proxy-authorization"} for key in kwargs.get("headers", {})):
+                raise OmadaTransportError("origin_not_admitted")
+            # Match existing top-level requests lifecycle: a fresh session/connection
+            # per operation. No indefinite pooled certificate/expiry attestation.
+            with requests.Session() as session:
+                session.trust_env = False  # excludes proxy, netrc and env CA overrides
+                session.mount("https://", _OmadaTlsAdapter(self._context))
+                response = session.request(method, url, verify=True, allow_redirects=False, **kwargs)
+                if 300 <= response.status_code < 400:
+                    response.close()
+                    raise OmadaTransportError("redirect_not_admitted")
+            self._state(None)
+            return response
+        except OmadaTransportError as error:
+            self._state(error.reason)
+            raise
+        except requests.exceptions.SSLError as error:
+            reason = self._ssl_reason(error)
+            self._state(reason)
+            raise OmadaTransportError(reason) from None
+        except requests.exceptions.ProxyError:
+            self._state("proxy_not_admitted")
+            raise OmadaTransportError("proxy_not_admitted") from None
+        except requests.exceptions.Timeout:
+            self._state("timeout")
+            raise
+        except requests.exceptions.ConnectionError:
+            self._state("network_error")
+            raise
+        except (ValueError, TypeError):
+            self._state("origin_not_admitted")
+            raise OmadaTransportError("origin_not_admitted") from None
 
 
 class OmadaProvider(ControllerInterface):
@@ -31,12 +245,27 @@ class OmadaProvider(ControllerInterface):
         self._client_id = runtime_config.client_id
         self._client_secret = runtime_config.client_secret
         self._verify_ssl = runtime_config.verify_ssl
+        try:
+            self._transport = _OmadaVerifiedTransport(runtime_config.tls_policy)
+        except ConfigurationError:
+            logger.error("omada.tls_preflight state=unavailable")
+            raise
         self._token_condition = threading.Condition(
             threading.RLock()
         )
         self._cached_token = None
         self._cached_token_expires_at = 0.0
         self._token_refreshing = False
+
+    def _request(self, method, url, **kwargs):
+        transport = getattr(self, "_transport", None)
+        if not isinstance(transport, _OmadaVerifiedTransport):
+            raise OmadaTransportError("tls_policy_missing")
+        return transport.request(method, url, **kwargs)
+
+    @property
+    def tls_health(self):
+        return self._transport.health
 
     def _request_token_uncached(self) -> Result:
         url = f"{self._omada_url}/openapi/authorize/token?grant_type=client_credentials"
@@ -47,12 +276,14 @@ class OmadaProvider(ControllerInterface):
         }
 
         try:
-            response = requests.post(
+            response = self._request("POST",
                 url,
                 json=payload,
-                verify=self._verify_ssl,
                 timeout=(5, 10),
             )
+        except OmadaTransportError as exc:
+            return Result.fail(error="OMADA_TLS_UNAVAILABLE", message=str(exc), data={
+                "http_status": 0, "error_code": 0, "failure_category": exc.reason, "retryable": False})
         except requests.exceptions.Timeout as exc:
             return Result.fail(
                 error="HTTP_ERROR",
@@ -252,30 +483,33 @@ class OmadaProvider(ControllerInterface):
             self._token_condition.notify_all()
 
     def connect(self) -> None:
-        logger.info("Omada provider ready (shared token cache)")
+        logger.info("Omada provider configured (strict TLS; shared token cache)")
 
     def get_sites(self) -> list[dict[str, Any]]:
         token_result = self._get_token()
         if not token_result.success:
-            return []
+            raise ControllerError("Omada authority unavailable")
 
         token = token_result.data.get("token")
         url = f"{self._omada_url}/openapi/v1/{self._omada_id}/sites?page=1&pageSize=100"
         headers = {"Authorization": f"AccessToken={token}"}
 
         try:
-            response = requests.get(
+            response = self._request("GET",
                 url,
                 headers=headers,
-                verify=self._verify_ssl,
                 timeout=(5, 10),
             )
             data = response.json()
-            if data.get("errorCode") == 0:
-                return data.get("result", {}).get("data", [])
-            return []
+            if (not 200 <= response.status_code < 300 or not isinstance(data, dict)
+                    or not self._is_success_error_code(data.get("errorCode")) or not isinstance(data.get("result"), dict)
+                    or not isinstance(data["result"].get("data"), list)
+                    or any(not isinstance(row, dict) for row in data["result"]["data"])):
+                raise ControllerError("Omada authority unavailable")
+            return data["result"]["data"]
         except Exception:
-            return []
+            # Public success remains a list; failed authority is never a zero-site fact.
+            raise ControllerError("Omada authority unavailable") from None
 
     def get_clients(self, site_id: str) -> Result:
         """
@@ -307,14 +541,13 @@ class OmadaProvider(ControllerInterface):
 
         for page in range(1, self.CLIENT_MAX_PAGES + 1):
             try:
-                response = requests.get(
+                response = self._request("GET",
                     url,
                     headers=headers,
                     params={
                         "page": page,
                         "pageSize": self.CLIENT_PAGE_SIZE,
                     },
-                    verify=self._verify_ssl,
                     timeout=(5, 10),
                 )
                 last_http_status = response.status_code
@@ -636,10 +869,9 @@ class OmadaProvider(ControllerInterface):
         headers = {"Authorization": f"AccessToken={token}"}
 
         try:
-            response = requests.post(
+            response = self._request("POST",
                 url,
                 headers=headers,
-                verify=self._verify_ssl,
                 timeout=(5, 10),
             )
             data = response.json()
@@ -691,10 +923,9 @@ class OmadaProvider(ControllerInterface):
         headers = {"Authorization": f"AccessToken={token}"}
 
         try:
-            response = requests.post(
+            response = self._request("POST",
                 url,
                 headers=headers,
-                verify=self._verify_ssl,
                 timeout=(5, 10),
             )
             data = response.json()
@@ -752,10 +983,9 @@ class OmadaProvider(ControllerInterface):
         headers = {"Authorization": f"AccessToken={token}"}
 
         try:
-            response = requests.get(
+            response = self._request("GET",
                 url,
                 headers=headers,
-                verify=self._verify_ssl,
                 timeout=(5, 10),
             )
             data = response.json()
@@ -901,10 +1131,9 @@ class OmadaProvider(ControllerInterface):
             "Accept": "application/json",
         }
         try:
-            response = requests.get(
+            response = self._request("GET",
                 url,
                 headers=headers,
-                verify=self._verify_ssl,
                 timeout=(request_timeout, request_timeout),
             )
         except requests.exceptions.Timeout as exc:

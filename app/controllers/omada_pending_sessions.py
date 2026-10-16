@@ -175,11 +175,10 @@ def list_active_clients(
         f"/sites/{site_id.strip()}/clients"
     )
     try:
-        response = requests.get(
+        response = self._request("GET",
             url,
             headers={"Authorization": f"AccessToken={token}"},
             params={"page": page, "pageSize": page_size},
-            verify=self._verify_ssl,
             timeout=(timeout, timeout),
         )
     except requests.exceptions.Timeout as exc:
@@ -284,10 +283,9 @@ def get_pending_client_state(
         f"/sites/{site_id.strip()}/clients/{endpoint_mac}"
     )
     try:
-        response = requests.get(
+        response = self._request("GET",
             url,
             headers={"Authorization": f"AccessToken={token}"},
-            verify=self._verify_ssl,
             timeout=(timeout, timeout),
         )
     except requests.exceptions.Timeout as exc:
@@ -369,10 +367,9 @@ def reconnect_client(
         f"/sites/{site_id.strip()}/clients/{endpoint_mac}/reconnect"
     )
     try:
-        response = requests.post(
+        response = self._request("POST",
             url,
             headers={"Authorization": f"AccessToken={token}"},
-            verify=self._verify_ssl,
             timeout=(timeout, timeout),
         )
     except requests.exceptions.Timeout as exc:

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import run as process_runtime
+from tests.settings_control import CONTROLLER_BASE
 
 from app.observations.runtime import (
     DisabledObservationFoundation,
@@ -237,6 +238,9 @@ def test_integrity_timeout_marks_runtime_degraded(tmp_path):
 
 
 def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
+    # This test asserts provider wiring/order, not clean-artifact admission.
+    monkeypatch.setattr(process_runtime, "capture_loaded_artifact_identity", lambda _service:
+        SimpleNamespace(json_line=lambda: "synthetic Observation composition identity"))
     events = []
     provider = object()
     auth_telemetry = object()
@@ -262,9 +266,9 @@ def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
     monkeypatch.setattr(process_runtime.atexit, "register", lambda callback: None)
     monkeypatch.setattr(process_runtime.signal, "signal", lambda *args: None)
     monkeypatch.setattr(process_runtime, "get_settings", lambda: {
+        **CONTROLLER_BASE,
         "host": "127.0.0.1", "port": 8088, "debug": False,
-        "omada_url": "https://controller.invalid", "omada_id": "installation",
-        "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
+        "client_secret": "fixture-secret",
     })
     monkeypatch.setattr(process_runtime, "create_controller", lambda runtime_config: provider)
     monkeypatch.setattr(process_runtime, "create_visitor_snapshot_collector", lambda **kwargs: snapshot)

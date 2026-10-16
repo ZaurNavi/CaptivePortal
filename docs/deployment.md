@@ -1018,6 +1018,71 @@ Never delete audit/history to make rollback appear clean.
 systemd, reverse proxy, Alloy, Loki and Grafana require their own
 deploy/infrastructure authorization.
 
+### QIO-01B — approved existing Omada leaf, one path only (NOT deployment GO)
+
+QIO-01B is repository/Lab-only until independent acceptance and separate Owner GO.
+Do not change the controller certificate, restart Omada, modify EAP/Cisco/network
+DNS, install trust globally, or activate this candidate as part of coding.
+No other PKI option or disabled-verification fallback is supplied.
+
+For a later separately authorized installation, Owner/SysAdmin must first export
+the existing **public** certificate independently from Omada and confirm its
+DER SHA256, SAN Omada, server-auth EKU, self-signature, validity and name/IP
+ownership. The observed network fingerprint is only comparison evidence, not
+independent approval. No private key or live credential belongs in Git, logs,
+handoff or this runbook. Do not download-and-trust the network peer (TOFU).
+
+Under that separate GO, provision only the approved public PEM at a root-owned,
+application-readable, non-app-writable regular single-link file outside Git,
+for example `/etc/captiveportal/omada-controller-trust.pem` (`root:root 0644` in a
+protected directory). No symlink, extra bundle/chain or private key is accepted.
+Supply these **deployment** settings; they are not writable Admin settings:
+
+```text
+OMADA_URL=https://Omada:8043
+OMADA_TLS_TRUST_ANCHOR_PATH=/etc/captiveportal/omada-controller-trust.pem
+OMADA_TLS_TRUST_ANCHOR_SHA256=<independently-approved DER SHA256, 64 hex characters>
+```
+
+SysAdmin may separately manage local `/etc/hosts` mapping `192.168.0.222 Omada`
+on the CaptivPortal host only after Owner approval. Coder does not perform this.
+Read-only preflight then checks `getent ahostsv4 Omada`, IP ownership, file
+ownership/mode/readability, independent fingerprint, dates/SAN/EKU, exact HTTPS
+origin, and absence of any intended proxy route. Do not programmatically fake
+SNI/Host for an IP URL. Omada transport deliberately ignores environment proxy,
+netrc and global CA settings; other integrations retain their own policy.
+
+After RV-1/2/3 and independent Windows/Linux/TLS/lifecycle/security gates, use an
+explicitly authorized controlled **captive-portal.service** restart window:
+OmadaProvider belongs to the main process, not the QIO-01A auxiliary worker.
+The immutable adopted snapshot and approved leaf are loaded at startup; each
+operation creates a fresh verified TLS connection. Check real non-mutating
+Requests/OpenAPI, authentication/authorization health and failure audit under
+the separate staging/prod permissions, not a TLS-only socket or HTTP 400 proof.
+Observe warning/error rates, Auth latency, journald producer/cgroup I/O and
+physical-host IOPS/await before claiming performance benefit.
+
+Expiry/rotation monitoring is external operations responsibility. Inventory the
+independently confirmed expiry (current reported leaf expires 2028-10-27 UTC),
+approve alert lead times before rollout, and obtain/validate a replacement public
+leaf independently. This implementation admits one approved leaf per startup,
+not an unattended dual-trust window. Coordinate a separately approved maintenance
+window for controller rotation and application trust-policy adoption; operations
+may be unavailable during that window. A changed PEM is not hot-adopted by a
+running provider. A changed peer (even same name/key) is not implicitly approved.
+Unexpected certificate/expiry/handshake failure is unavailable + visible audit,
+never automatic trust refresh or fabricated empty clients. Already-authorized
+Omada sessions may persist; TLS failure cannot promise immediate remote revoke.
+
+Rollback retains the prior independently approved **strict** origin/anchor/digest
+and effective settings evidence. Restore it only if that previous certificate
+is still valid and matches the actual controller; otherwise hold Omada-dependent
+operations until a new strict policy is approved. Use the separate controlled
+app restart/adoption procedure; never fall back to VERIFY_SSL=false, HTTP,
+warning suppression, global CA/proxy changes, or weaken hostname verification.
+No deployment, certificate/name change, production request or service restart
+is performed by this implementation TASK.
+
 ## Device Fingerprint Task-02 artifacts
 
 Repository templates live under `deploy/device-fingerprint/`. Deployment keeps

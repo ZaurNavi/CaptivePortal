@@ -8,10 +8,12 @@ from contextlib import closing
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import run as run_module
+from tests.settings_control import CONTROLLER_BASE
 
 from app.portal_counter import (
     PortalCounterRepository,
@@ -1038,13 +1040,16 @@ def test_worker_start_failure_does_not_prevent_flask_start(
 
     app = FakeApp()
     settings = {
+        **CONTROLLER_BASE,
         "host": "127.0.0.1",
         "port": 8088,
         "debug": False,
-        "omada_url": "https://controller.invalid", "omada_id": "installation",
-        "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
+        "client_secret": "fixture-secret",
     }
     with (
+        # Composition-only startup: no loaded-artifact attestation is claimed.
+        patch.object(run_module, "capture_loaded_artifact_identity", return_value=SimpleNamespace(
+            json_line=lambda: "synthetic Public Traffic composition identity")),
         patch.object(run_module, "create_app", return_value=app),
         patch.object(
             run_module,

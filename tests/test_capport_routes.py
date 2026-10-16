@@ -5,6 +5,7 @@ from urllib.parse import parse_qsl, urlsplit
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 from flask import Flask
 
 from app.capport.models import (
@@ -328,6 +329,9 @@ def test_ip_mac_only_list_plus_get_client_returns_not_captive_api():
     omada._omada_url = "https://controller.example"
     omada._omada_id = "controller-id"
     omada._verify_ssl = True
+    # Preserve this existing mock's purpose, not a runtime TLS-policy fallback.
+    omada._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
+        url, verify=omada._verify_ssl, **kwargs)
     omada._get_token = Mock(
         return_value=Result.ok(data={"token": "test-token"})
     )

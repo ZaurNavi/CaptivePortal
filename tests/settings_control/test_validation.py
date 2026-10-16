@@ -74,3 +74,26 @@ def test_invalid_resolved_secret_preserves_controller_prerequisite_validation():
         SettingsValidationService().validate(snapshot,
             secret_resolution=OmadaClientSecretResolution("", "environment", 0))
     assert error.value.details == ({"key": None, "reason": "controller_prerequisite_invalid"},)
+
+
+@pytest.mark.parametrize("values", [
+    {"omada_url": "http://Omada:8043"},
+    {"omada_url": "https://controller.invalid:8043"},
+    {"omada_url": "https://192.168.0.222:8043"},
+    {"verify_ssl": False},
+    {"omada_tls_trust_anchor_path": ""},
+    {"omada_tls_trust_anchor_path": "relative.pem"},
+    {"omada_tls_trust_anchor_sha256": ""},
+    {"omada_tls_trust_anchor_sha256": "not-a-digest"},
+])
+def test_strict_tls_prerequisites_fail_closed_without_io(values, monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Settings semantic validation must not admit a certificate or send requests")
+    monkeypatch.setattr("app.controllers.omada._omada_ssl_context", forbidden)
+    monkeypatch.setattr("requests.sessions.Session.request", forbidden)
+    with pytest.raises(SettingsError) as error:
+        snapshot, resolution = snapshot_with_secret_resolution(**values)
+        SettingsValidationService().validate(snapshot, secret_resolution=resolution)
+    assert (error.value.code, error.value.status) == ("validation_failed", 422)
+    assert all(set(detail) == {"key", "reason"} for detail in error.value.details)
+    assert "synthetic-secret" not in str(error.value) + repr(error.value.details)

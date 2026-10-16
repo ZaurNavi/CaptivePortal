@@ -2,8 +2,27 @@ import pytest
 from types import SimpleNamespace
 import run as runtime
 from app.settings_control.models import SettingsError
-from tests.visitor_registry.test_snapshot_runtime import _prepare_main
-from . import stack
+from tests.visitor_registry.test_snapshot_runtime import _prepare_main as _prepare_snapshot_main
+from . import CONTROLLER_BASE, stack
+
+
+def _prepare_main(monkeypatch):
+    prepared = _prepare_snapshot_main(monkeypatch)
+    events, controller, *_ = prepared
+
+    def create_controller(config):
+        # Keep this Settings composition stub local: the imported Snapshot
+        # helper still asserts its older, unrelated Controller fixture URL.
+        assert config.controller_url == "https://Omada:8043"
+        assert config.verify_ssl is True
+        assert config.tls_policy.verification_mode == "strict"
+        assert config.tls_policy.trust_anchor_path == CONTROLLER_BASE["omada_tls_trust_anchor_path"]
+        assert config.tls_policy.trust_anchor_sha256 == CONTROLLER_BASE["omada_tls_trust_anchor_sha256"]
+        events.append("create_controller")
+        return controller
+
+    monkeypatch.setattr(runtime, "create_controller", create_controller)
+    return prepared
 
 
 def feature_composition(boot, monkeypatch):
@@ -21,8 +40,8 @@ def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch,
     from tests.admin_web.conftest import enabled_settings
     admin_settings = enabled_settings() if failure == "configuration" else {}
     boot = stack(tmp_path, **admin_settings, host="127.0.0.1", port=8088, debug=False,
-                 omada_url="https://controller.invalid", omada_id="installation",
-                 client_id="application", client_secret="fixture-secret", verify_ssl=False)
+                 omada_url="https://Omada:8043", omada_id="installation",
+                 client_id="application", client_secret="fixture-secret", verify_ssl=True)
     # Use the real activation service and snapshot, with a disposable disabled Admin.
     monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_kwargs: boot)
     original = boot.activation_service.repository.activation

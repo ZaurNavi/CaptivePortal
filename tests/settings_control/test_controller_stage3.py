@@ -26,7 +26,7 @@ PRINCIPAL = AdminPrincipal("operator")
 
 def write(boot, changes=None, *, generation=0, key=None, domain="controller"):
     return boot.admin_context.mutation_service.mutate(json.dumps({"changes": changes or [
-        {"key": "OMADA_URL", "operation": "set", "value": " https://new.invalid:8043/ "}]}),
+        {"key": "OMADA_URL", "operation": "set", "value": " https://Omada:8043/ "}]}),
         principal=PRINCIPAL, source_ip="127.0.0.1", request_id=str(uuid.uuid4()),
         idempotency_key=key or str(uuid.uuid4()), expected_generation=generation, domain=domain)
 
@@ -147,7 +147,7 @@ def test_typed_coexistence_atomic_ownership_noop_clear_and_replay(tmp_path):
     assert first.status == 201 and first.body["changed_keys"] == ["OMADA_URL"]
     assert set(first.body) == {"api_version", "request_id", "scope", "resource", "changed", "changed_keys",
         "configured_generation", "effective_generation", "activation_state", "restart_required"}
-    assert "https://new.invalid" not in json.dumps(first.body)
+    assert "https://Omada:8043" not in json.dumps(first.body)
     noop = write(boot, generation=1)
     assert noop.status == 200 and noop.body["changed"] is False and noop.body["changed_keys"] == []
     mutation(boot, generation=1, key=key)  # Same UUID, different domain is independent.
@@ -155,7 +155,7 @@ def test_typed_coexistence_atomic_ownership_noop_clear_and_replay(tmp_path):
     with pytest.raises(SettingsError, match="idempotency_conflict"):
         write(boot, key=key, changes=[{"key": "OMADA_ID", "operation": "set", "value": "new"}])
     repository = boot.admin_context.read_service.repository
-    assert repository.configured() == (2, {"OMADA_URL": "https://new.invalid:8043", "WEB_ADMIN_DEVICE_PAGE_SIZE": 120})
+    assert repository.configured() == (2, {"OMADA_URL": "https://Omada:8043", "WEB_ADMIN_DEVICE_PAGE_SIZE": 120})
     cleared = write(boot, generation=2, changes=[{"key": "OMADA_URL", "operation": "clear_override"}])
     assert cleared.status == 201 and repository.configured() == (3, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 120})
     with repository.transaction() as db:
@@ -172,9 +172,9 @@ def test_explicit_same_environment_scalar_is_ownership_change(tmp_path):
 
 def test_shadowed_invalid_lower_value_and_clear_are_fail_closed(tmp_path):
     boot = stack(tmp_path)
-    write(boot, changes=[{"key": "OMADA_URL", "operation": "set", "value": "https://new.invalid"}])
+    write(boot, changes=[{"key": "OMADA_URL", "operation": "set", "value": "https://Omada:8043"}])
     masked = stack(tmp_path, omada_url="invalid-base")
-    assert masked.runtime_settings["omada_url"] == "https://new.invalid"
+    assert masked.runtime_settings["omada_url"] == "https://Omada:8043"
     before = masked.admin_context.read_service.repository.configured()
     with pytest.raises(SettingsError, match="validation_failed"):
         write(masked, generation=1, changes=[{"key": "OMADA_URL", "operation": "clear_override"}])
@@ -235,19 +235,20 @@ def test_controller_set_requires_string(value):
         parse_changes(json.dumps({"changes": [{"key": "OMADA_ID", "operation": "set", "value": value}]}), domain="controller")
 
 
-@pytest.mark.parametrize("value", ["", " ", "https://a.invalid:0", "https://a.invalid/path", "https://user@a.invalid", "https://a.invalid?x", "https://a.invalid#x", "https://a.invalid:bad", "https://a .invalid"])
+@pytest.mark.parametrize("value", ["", " ", "https://a.invalid:0", "https://a.invalid/path", "https://user@a.invalid", "https://a.invalid?x", "https://a.invalid#x", "https://a.invalid:bad", "https://a .invalid",
+    "http://Omada:8043", "https://controller.invalid:8043", "https://192.168.0.222:8043",
+    "https://Omada", "https://Omada:443", "https://Omada:8043/path"])
 def test_canonical_validation_rejects_invalid_urls_without_echo(value):
     with pytest.raises(SettingsError, match="validation_failed") as error:
         parse_changes(json.dumps({"changes": [{"key": "OMADA_URL", "operation": "set", "value": value}]}), domain="controller")
     assert all(set(detail) == {"key", "reason"} for detail in error.value.details)
 
 
-@pytest.mark.parametrize("scheme", ["http", "https"])
-def test_one_validator_canonicalizes_runtime_and_settings(scheme):
-    value = f" {scheme}://a.invalid:8043/ "
+@pytest.mark.parametrize("value", [" https://Omada:8043/ ", "https://omada:8043"])
+def test_one_validator_canonicalizes_runtime_and_settings(value):
     change = parse_changes(json.dumps({"changes": [{"key": "OMADA_URL", "operation": "set", "value": value}]}), domain="controller")[0]
     runtime = build_omada_runtime_config({**CONTROLLER_BASE, "omada_url": value})
-    assert change.value == runtime.controller_url == value.strip()[:-1]
+    assert change.value == runtime.controller_url == "https://Omada:8043"
 
 
 def test_secret_prerequisite_failure_is_safe_and_atomic(tmp_path):
@@ -290,6 +291,25 @@ def test_replay_skips_candidate_validation(tmp_path, monkeypatch):
     original = write(boot, key=key)
     monkeypatch.setattr(boot.admin_context.mutation_service.validation, "validate", lambda _: pytest.fail("replay validation"))
     assert write(boot, key=key).body == original.body
+
+
+@pytest.mark.parametrize("url", ["https://controller.invalid:8043", "http://Omada:8043", "https://192.168.0.222:8043"])
+def test_invalid_persisted_controller_url_is_not_rewritten_or_adopted(tmp_path, url):
+    boot = stack(tmp_path)
+    adopt(boot)
+    repository = boot.admin_context.read_service.repository
+    # Model a pre-QIO store. Current writes must reject these values, while an
+    # existing untrusted override must fail startup rather than be canonicalized.
+    with sqlite3.connect(repository.db_path) as db:
+        db.execute("INSERT INTO settings_generations VALUES(1,0,'global','2026-10-07T00:00:00.000Z','platform_operator','operator','request')")
+        db.execute("INSERT INTO settings_overrides VALUES(1,'OMADA_URL','string',NULL,?)", (url,))
+    before = repository.configured()
+    with pytest.raises(SettingsError, match="settings_store_unavailable") as error:
+        stack(tmp_path)
+    assert (error.value.code, error.value.status) == ("settings_store_unavailable", 503)
+    assert repository.configured() == before == (1, {"OMADA_URL": url})
+    with repository.transaction() as db:
+        assert repository.effective(db) == 0
 
 
 def test_corrupt_migration_shape_fails_without_recreation(tmp_path):

@@ -2,6 +2,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+import requests
 
 from app.controllers.omada import OmadaProvider
 from app.models import Result
@@ -24,6 +25,9 @@ def provider():
     instance._omada_url = "https://controller.example"
     instance._omada_id = "controller-id"
     instance._verify_ssl = True
+    # Parser-only unit boundary. Real verified transport has isolated TLS coverage.
+    instance._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
+        url, verify=instance._verify_ssl, **kwargs)
     instance._get_token = Mock(
         return_value=Result.ok(data={"token": "test-token"})
     )
@@ -314,6 +318,8 @@ def test_token_login_converts_transport_failure():
     omada._client_id = "client-id"
     omada._client_secret = "client-secret"
     omada._verify_ssl = True
+    omada._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
+        url, verify=omada._verify_ssl, **kwargs)
 
     with patch(
         "app.controllers.omada.requests.post",

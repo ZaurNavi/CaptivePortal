@@ -215,6 +215,7 @@ from app.config import (
     OMADA_WEBHOOK_LOG_FILE, OMADA_WEBHOOK_NORMALIZED_LOG_FILE,
     OMADA_WEBHOOK_SITE_ID_MAP_JSON,
     OMADA_URL, OMADA_ID, CLIENT_ID, CLIENT_SECRET,
+    OMADA_TLS_TRUST_ANCHOR_PATH, OMADA_TLS_TRUST_ANCHOR_SHA256,
     # pending session cleaner constants
     PENDING_SESSION_CLEANER_ENABLED,
     PENDING_SESSION_CLEANER_SSIDS,
@@ -730,6 +731,8 @@ def get_settings() -> dict:
             OMADA_WEBHOOK_SITE_ID_MAP_JSON
         ),
         "omada_url": OMADA_URL,
+        "omada_tls_trust_anchor_path": OMADA_TLS_TRUST_ANCHOR_PATH,
+        "omada_tls_trust_anchor_sha256": OMADA_TLS_TRUST_ANCHOR_SHA256,
         "omada_id": OMADA_ID,
         "portal_ui_title_az": PORTAL_UI_TITLE_AZ,
         "portal_ui_title_ru": PORTAL_UI_TITLE_RU,

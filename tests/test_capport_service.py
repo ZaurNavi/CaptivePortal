@@ -4,6 +4,7 @@ from threading import Barrier, Event
 from unittest.mock import Mock, call, patch
 
 import pytest
+import requests
 
 from app.auth_telemetry import events
 from app.capport.models import CapportConfig
@@ -191,6 +192,9 @@ def test_list_with_only_ip_mac_uses_authoritative_get_client_state():
     omada._omada_url = "https://controller.example"
     omada._omada_id = "controller-id"
     omada._verify_ssl = True
+    # Preserve this parser/integration mock below the Omada transport boundary.
+    omada._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
+        url, verify=omada._verify_ssl, **kwargs)
     omada._get_token = Mock(
         return_value=Result.ok(data={"token": "test-token"})
     )

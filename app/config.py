@@ -136,7 +136,7 @@ if "PORT" in os.environ:
 DEBUG = False
 
 # SSL verification
-VERIFY_SSL = False
+VERIFY_SSL = True
 
 # Logging level
 LOG_LEVEL = "INFO"
@@ -899,6 +899,9 @@ OMADA_WEBHOOK_SITE_ID_MAP_JSON = os.getenv(
 
 # Omada OpenAPI settings
 OMADA_URL = os.getenv("OMADA_URL", "").strip()
+# QIO-01B Option B: deployment-approved public leaf; no network/TOFU admission.
+OMADA_TLS_TRUST_ANCHOR_PATH = os.getenv("OMADA_TLS_TRUST_ANCHOR_PATH", "").strip()
+OMADA_TLS_TRUST_ANCHOR_SHA256 = os.getenv("OMADA_TLS_TRUST_ANCHOR_SHA256", "").strip()
 OMADA_ID = os.getenv("OMADA_ID", "").strip()
 CLIENT_ID = os.getenv("OMADA_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.getenv("OMADA_CLIENT_SECRET", "").strip()

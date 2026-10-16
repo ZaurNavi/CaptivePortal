@@ -1,6 +1,8 @@
 """Canonical startup Omada configuration and its separate public projection."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
+import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
@@ -14,8 +16,32 @@ _REQUIRED = (
     ("OMADA_CLIENT_SECRET", "client_secret", "client_secret"),
 )
 
+CANONICAL_HTTPS_ORIGIN = "https://Omada:8043"
+
+
+@dataclass(frozen=True, slots=True)
+class OmadaTlsPolicy:
+    """Pure startup policy from adopted settings; certificate I/O belongs to transport."""
+    canonical_https_origin: str
+    trust_anchor_path: str = field(repr=False)
+    trust_anchor_sha256: str = field(repr=False)
+    verification_mode: str = "strict"
+
+    def __post_init__(self):
+        if not _valid_base_url(self.canonical_https_origin) or self.verification_mode != "strict":
+            raise ConfigurationError("Invalid Omada strict TLS origin/policy")
+        if not isinstance(self.trust_anchor_path, str) or not Path(self.trust_anchor_path).is_absolute():
+            raise ConfigurationError("Invalid configuration: OMADA_TLS_TRUST_ANCHOR_PATH")
+        if not isinstance(self.trust_anchor_sha256, str) or not re.fullmatch(
+                r"[0-9a-fA-F]{64}", self.trust_anchor_sha256):
+            raise ConfigurationError("Invalid configuration: OMADA_TLS_TRUST_ANCHOR_SHA256")
+        object.__setattr__(self, "canonical_https_origin", CANONICAL_HTTPS_ORIGIN)
+        object.__setattr__(self, "trust_anchor_sha256", self.trust_anchor_sha256.lower())
+
 
 def _valid_base_url(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
     if any(character.isspace() for character in value) or "?" in value or "#" in value:
         return False
     try:
@@ -24,14 +50,15 @@ def _valid_base_url(value: str) -> bool:
     except ValueError:
         return False
     return (
-        parsed.scheme in {"http", "https"}
+        parsed.scheme == "https"
         and bool(parsed.netloc)
-        and parsed.hostname is not None
+        and parsed.hostname is not None and parsed.hostname.lower() == "omada"
+        and parsed.netloc.lower() == "omada:8043"
         and parsed.username is None
         and parsed.password is None
         and parsed.path in {"", "/"}
         and not parsed.netloc.endswith(":")
-        and port != 0
+        and port == 8043
     )
 
 
@@ -43,7 +70,7 @@ def normalize_controller_setting(key: str, value: Any) -> str:
     if key == "OMADA_URL":
         if not _valid_base_url(value):
             raise ConfigurationError("Invalid configuration: OMADA_URL")
-        return value[:-1] if value.endswith("/") else value
+        return CANONICAL_HTTPS_ORIGIN
     return value
 
 
@@ -54,6 +81,7 @@ class OmadaControllerRuntimeConfig:
     client_id: str
     client_secret: str = field(repr=False)
     verify_ssl: bool
+    tls_policy: OmadaTlsPolicy | None = field(default=None, repr=False)
 
     def __post_init__(self):
         missing = [external for external, _, attribute in _REQUIRED
@@ -64,14 +92,29 @@ class OmadaControllerRuntimeConfig:
         for _, _, attribute in _REQUIRED:
             key = next(key for key, _, name in _REQUIRED if name == attribute)
             object.__setattr__(self, attribute, normalize_controller_setting(key, getattr(self, attribute)))
+        if self.verify_ssl is not True or not isinstance(self.tls_policy, OmadaTlsPolicy):
+            raise ConfigurationError("Missing or invalid Omada strict TLS policy")
+        if self.controller_url != self.tls_policy.canonical_https_origin:
+            raise ConfigurationError("Invalid Omada strict TLS origin/policy")
 
 
 def build_omada_runtime_config(settings: Mapping[str, Any], secret_resolution=None) -> OmadaControllerRuntimeConfig:
     """Resolve only from the caller's already-adopted mapping, with no I/O."""
+    required = {attribute: secret_resolution.value if attribute == "client_secret" and secret_resolution is not None
+                else settings.get(internal) for _, internal, attribute in _REQUIRED}
+    missing = [external for external, _, attribute in _REQUIRED
+               if not isinstance(required[attribute], str) or not required[attribute].strip()]
+    if missing:
+        raise ConfigurationError("Missing required configuration: " + ", ".join(missing))
+    origin = normalize_controller_setting("OMADA_URL", required["controller_url"])
     return OmadaControllerRuntimeConfig(
-        **{attribute: secret_resolution.value if attribute == "client_secret" and secret_resolution is not None
-           else settings.get(internal) for _, internal, attribute in _REQUIRED},
+        **required,
         verify_ssl=settings["verify_ssl"],
+        tls_policy=OmadaTlsPolicy(
+            canonical_https_origin=origin,
+            trust_anchor_path=settings.get("omada_tls_trust_anchor_path", ""),
+            trust_anchor_sha256=settings.get("omada_tls_trust_anchor_sha256", ""),
+        ),
     )
 
 
@@ -88,6 +131,10 @@ class OmadaControllerPublicConfigSnapshot:
     tls_certificate_verification: bool
     tls_certificate_verification_source: str
     effective_generation: int | None = None
+    tls_verification_mode: str = "unavailable"
+    tls_trust_policy: str = "unavailable"
+    tls_trust_anchor_source: str = "repository_default"
+    tls_certificate_status: str = "unavailable"
 
 
 def public_omada_snapshot(
@@ -116,4 +163,11 @@ def public_omada_snapshot(
         # VERIFY_SSL is a repository constant, not an environment binding.
         tls_certificate_verification_source="repository_default",
         effective_generation=settings_snapshot.generation_id if settings_snapshot is not None else None,
+        tls_verification_mode=runtime_config.tls_policy.verification_mode,
+        tls_trust_policy="independently_approved_self_signed_leaf",
+        tls_trust_anchor_source=("environment" if {
+            "OMADA_TLS_TRUST_ANCHOR_PATH", "OMADA_TLS_TRUST_ANCHOR_SHA256"
+        }.issubset(explicit_environment_names) else "repository_default"),
+        # A configuration projection is not a current peer/health attestation.
+        tls_certificate_status="verification_required_on_every_connection",
     )
