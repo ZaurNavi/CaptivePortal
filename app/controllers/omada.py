@@ -134,6 +134,12 @@ class _OmadaTlsAdapter(requests.adapters.HTTPAdapter):
         raise OmadaTransportError("proxy_not_admitted")
 
 
+_OMADA_V2_AP_READ_PATH = re.compile(
+    r"/openapi/v2/[0-9a-fA-F]{32}/sites/[0-9a-f]{24}/aps/"
+    r"(?:[0-9A-F]{2}-){5}[0-9A-F]{2}/(?:override|rf-scan-result)"
+)
+
+
 class _OmadaVerifiedTransport:
     """One TLS policy for every Omada call; no shared/global Requests mutations."""
 
@@ -188,12 +194,22 @@ class _OmadaVerifiedTransport:
         try:
             parsed = urlsplit(url)
             decoded = unquote(parsed.path)
+            # v2 admits exactly two documented AP read-only endpoints.
+            # Do not widen the existing v1, host, TLS, or redirect boundaries.
+            v2_ap_read_admitted = (
+                method == "GET"
+                and not parsed.query
+                and not kwargs.get("params")
+                and _OMADA_V2_AP_READ_PATH.fullmatch(parsed.path) is not None
+            )
             if (parsed.scheme != "https" or parsed.hostname is None or parsed.hostname.lower() != "omada"
                     or parsed.port != 8043 or parsed.netloc.lower() != "omada:8043"
                     or parsed.username is not None or parsed.password is not None or parsed.fragment
                     or "\\" in url or any(ord(char) <= 32 for char in url)
                     or decoded != parsed.path or any(part in {".", ".."} for part in decoded.split("/"))
-                    or not (parsed.path == "/openapi/authorize/token" or parsed.path.startswith("/openapi/v1/"))):
+                    or not (parsed.path == "/openapi/authorize/token"
+                            or parsed.path.startswith("/openapi/v1/")
+                            or v2_ap_read_admitted)):
                 raise OmadaTransportError("origin_not_admitted")
             if set(kwargs) - {"headers", "params", "json", "timeout"}:
                 raise OmadaTransportError("tls_policy_override_not_admitted")
