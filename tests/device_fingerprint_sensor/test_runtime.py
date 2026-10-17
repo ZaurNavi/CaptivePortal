@@ -267,3 +267,53 @@ def test_suricata_service_checks_capture_interface_without_mutating_it():
     service = (root / "deploy/device-fingerprint/fingerprint-suricata.service").read_text(encoding="ascii")
     assert "ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0" in service
     assert "ip link" not in service and "ip addr" not in service
+
+
+@pytest.mark.parametrize("gate", [False, True])
+def test_QIO05_T06_existing_evidence_list_is_durable_before_health_barrier(tmp_path, gate):
+    import sqlite3
+    from tests.device_fingerprint_sensor.test_spool import Clock, _qio05_spool, event
+
+    config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true",
+        "DEVICE_FINGERPRINT_SENSOR_IO_STALE_PURGE_GATE_ENABLED": str(gate).lower()})
+    clock = Clock()
+    spool = _qio05_spool(tmp_path, gate=gate)
+    runtime = SensorRuntime(config, telemetry=SensorTelemetry(Log()), now=clock,
+        monotonic=lambda: 0.0, preflight=Preflight(), capture=Capture(), eve=Eve(),
+        spool=spool, producer=Producer())
+    try:
+        assert runtime._ingress is None and not config.io_ingress_coalesce_enabled
+        assert runtime._attribution is None and runtime.threads == []
+        assert runtime._submit([event(1), event(2)]) == 2
+        with sqlite3.connect(str(spool.path)) as reader:
+            assert reader.execute("SELECT event_id FROM sensor_spool ORDER BY sequence").fetchall() == [(event(1).event_id,), (event(2).event_id,)]
+        health = runtime.health.all("available", None)
+        assert len(health) == 4 and runtime._submit_health(health) == 4
+        with sqlite3.connect(str(spool.path)) as reader:
+            assert reader.execute("SELECT endpoint FROM sensor_spool ORDER BY sequence").fetchall() == [("evidence",)] * 2 + [("source_health",)] * 4
+        trace = []
+        spool.connection.set_trace_callback(trace.append)
+        empty = runtime.health.all("available", None)
+        assert empty == [] and runtime._submit_health(empty) == 0 and trace == []
+        assert runtime.threads == [] and runtime._ingress is None
+    finally:
+        spool.close()
+
+
+def test_QIO05_T06_failed_evidence_submission_has_no_durable_success_or_health(tmp_path):
+    import sqlite3
+    from tests.device_fingerprint_sensor.test_spool import Clock, _qio05_spool, event
+    from app.device_fingerprint_sensor.models import SensorSpoolError
+
+    config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
+    spool = _qio05_spool(tmp_path, gate=False)
+    runtime = SensorRuntime(config, telemetry=SensorTelemetry(Log()), now=Clock(),
+        preflight=Preflight(), capture=Capture(), eve=Eve(), spool=spool, producer=Producer())
+    try:
+        spool.connection.execute("CREATE TRIGGER qio05_abort BEFORE INSERT ON sensor_spool WHEN NEW.event_id='%s' BEGIN SELECT RAISE(ABORT,'synthetic fault'); END" % event(2).event_id)
+        with pytest.raises(SensorSpoolError): runtime._submit([event(1), event(2)])
+        with sqlite3.connect(str(spool.path)) as reader:
+            assert reader.execute("SELECT COUNT(*) FROM sensor_spool").fetchone()[0] == 0
+        assert runtime.state == "initializing" and runtime._ingress is None and runtime.threads == []
+    finally:
+        spool.close()
