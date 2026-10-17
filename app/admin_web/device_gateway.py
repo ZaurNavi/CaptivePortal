@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,9 @@ _REGISTRY_ALIAS = "registry_db"
 _VISIT_ALIAS = "visit_db"
 _CURRENT_ALIAS = "current_state_db"
 _PROGRESS_OPCODE_INTERVAL = 10_000
+_SQLITE_BUSY_WAIT_SECONDS = 0.1
+_SQLITE_BUSY_RETRY_INTERVAL_SECONDS = 0.005
+_SQLITE_BUSY_MAX_RETRIES = 20
 _MAC_PATTERN = re.compile(r"[0-9A-F]{2}(?::[0-9A-F]{2}){5}")
 _SCOPE_HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 
@@ -26,9 +30,77 @@ _SCOPE_HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 class AdminDeviceSourceError(RuntimeError):
     """A source could not provide the requested read-only projection."""
 
+    diagnostic_reason = "source_unavailable"
+
+
+class AdminDeviceSQLiteBusy(AdminDeviceSourceError):
+    """A bounded read could not obtain its SQLite lock."""
+
+    diagnostic_reason = "sqlite_busy"
+
 
 class AdminDeviceIntegrityError(AdminDeviceSourceError):
     """Persisted sources disagree about a canonical device identity."""
+
+    diagnostic_reason = "integrity_failure"
+
+
+def _sqlite_is_busy(error: BaseException) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if type(code) is int:
+        return code & 255 in (5, 6)
+    # Python 3.10 has no result codes. Do not retry arbitrary text containing "locked".
+    message = str(error).lower()
+    return isinstance(error, sqlite3.OperationalError) and (
+        message in {"database is locked", "database table is locked"}
+        or message.startswith("database table is locked: "))
+
+
+def _device_source_error(error: BaseException) -> AdminDeviceSourceError:
+    code = getattr(error, "sqlite_errorcode", None)
+    primary = code & 255 if type(code) is int else None
+    if _sqlite_is_busy(error):
+        return AdminDeviceSQLiteBusy("device source unavailable")
+    if primary in (11, 26):
+        return AdminDeviceIntegrityError("device source unavailable")
+    return AdminDeviceSourceError("device source unavailable")
+
+
+class _DeviceQueryConnection(sqlite3.Connection):
+    """Immediate native failure, with finite retries shared by all statements."""
+
+    def __init__(self, *args, deadline: QueryDeadline, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._deadline = deadline
+        self._busy_expires_at = min(deadline.expires_at, deadline.monotonic() + _SQLITE_BUSY_WAIT_SECONDS)
+        self._busy_retries_remaining = _SQLITE_BUSY_MAX_RETRIES
+        super().execute("PRAGMA busy_timeout=0").close()
+
+    def _execute_once(self, sql, parameters):
+        return super().execute(sql, parameters)
+
+    def execute(self, sql, parameters=()):
+        while True:
+            self._deadline.require_remaining()
+            try:
+                result = self._execute_once(sql, parameters)
+            except sqlite3.Error as exc:
+                self._deadline.require_remaining()
+                remaining = min(self._busy_expires_at, self._deadline.expires_at) - self._deadline.monotonic()
+                if not _sqlite_is_busy(exc) or remaining <= 0 or self._busy_retries_remaining == 0:
+                    raise
+                time.sleep(min(_SQLITE_BUSY_RETRY_INTERVAL_SECONDS, remaining))
+                self._deadline.require_remaining()
+                if self._deadline.monotonic() >= self._busy_expires_at:
+                    raise
+                self._busy_retries_remaining -= 1
+                continue
+            try:
+                self._deadline.require_remaining()
+            except AnalyticsQueryDeadlineExceeded:
+                result.close()
+                raise
+            return result
 
 
 class AdminDeviceContextExpired(AdminDeviceSourceError):
@@ -414,10 +486,11 @@ class AdminDeviceReadGateway:
         try:
             row = connection.execute(sql, {"site_id": site_id, "today_start_utc": today_start_utc,
                                            "evaluated_at_utc": evaluated_at_utc, "mac_glob": mac_glob}).fetchone()
+            deadline.require_remaining()
         except sqlite3.Error as exc:
             if deadline.expired() or "interrupt" in str(exc).lower():
                 raise AnalyticsQueryDeadlineExceeded("Admin device query deadline exceeded") from None
-            raise AdminDeviceSourceError("device source unavailable") from None
+            raise _device_source_error(exc) from None
         finally:
             connection.set_progress_handler(None, 0)
             try:
@@ -580,6 +653,7 @@ class AdminDeviceReadGateway:
                     "row_limit": limit + 1,
                 },
             ).fetchall()
+            deadline.require_remaining()
         except AdminDeviceContextExpired:
             raise
         except sqlite3.Error as exc:
@@ -587,7 +661,7 @@ class AdminDeviceReadGateway:
                 raise AnalyticsQueryDeadlineExceeded(
                     "Admin device query deadline exceeded"
                 ) from None
-            raise AdminDeviceSourceError("device source unavailable") from None
+            raise _device_source_error(exc) from None
         finally:
             connection.set_progress_handler(None, 0)
             try:
@@ -639,12 +713,13 @@ class AdminDeviceReadGateway:
                     "row_limit": limit + 1,
                 },
             ).fetchall()
+            deadline.require_remaining()
         except sqlite3.Error as exc:
             if deadline.expired() or "interrupt" in str(exc).lower():
                 raise AnalyticsQueryDeadlineExceeded(
                     "Admin device query deadline exceeded"
                 ) from None
-            raise AdminDeviceSourceError("device source unavailable") from None
+            raise _device_source_error(exc) from None
         finally:
             connection.set_progress_handler(None, 0)
             try:
@@ -674,8 +749,8 @@ class AdminDeviceReadGateway:
                 },
             ).fetchall()
             return tuple(str(row[3]) for row in rows)
-        except sqlite3.Error:
-            raise AdminDeviceSourceError("device source unavailable") from None
+        except sqlite3.Error as exc:
+            raise _device_source_error(exc) from None
         finally:
             connection.set_progress_handler(None, 0)
             try:
@@ -691,6 +766,7 @@ class AdminDeviceReadGateway:
                 uri=True,
                 isolation_level=None,
                 timeout=0.0,
+                factory=lambda *args, **kwargs: _DeviceQueryConnection(*args, deadline=deadline, **kwargs),
             )
             connection.row_factory = sqlite3.Row
             connection.execute(
@@ -708,23 +784,32 @@ class AdminDeviceReadGateway:
                     f"PRAGMA {_REGISTRY_ALIAS}.user_version"
                 ).fetchone()[0]
             ) != 1:
-                raise AdminDeviceSourceError("device source unavailable")
+                raise AdminDeviceIntegrityError("device source unavailable")
             if int(
                 connection.execute(
                     f"PRAGMA {_VISIT_ALIAS}.user_version"
                 ).fetchone()[0]
             ) != 2:
-                raise AdminDeviceSourceError("device source unavailable")
+                raise AdminDeviceIntegrityError("device source unavailable")
             connection.set_progress_handler(
                 lambda: 1 if deadline.expired() else 0,
                 _PROGRESS_OPCODE_INTERVAL,
             )
             return connection
-        except (OSError, sqlite3.Error, AdminDeviceSourceError):
+        except AnalyticsQueryDeadlineExceeded:
             if "connection" in locals():
                 connection.set_progress_handler(None, 0)
                 connection.close()
-            raise AdminDeviceSourceError("device source unavailable") from None
+            raise
+        except (OSError, sqlite3.Error, AdminDeviceSourceError) as exc:
+            if "connection" in locals():
+                connection.set_progress_handler(None, 0)
+                connection.close()
+            if isinstance(exc, AdminDeviceSourceError):
+                raise
+            if isinstance(exc, sqlite3.Error) and deadline.expired():
+                raise AnalyticsQueryDeadlineExceeded("Admin device query deadline exceeded") from None
+            raise _device_source_error(exc) from None
 
     def _open_context(self, deadline: QueryDeadline) -> sqlite3.Connection:
         deadline.require_remaining()
@@ -736,6 +821,7 @@ class AdminDeviceReadGateway:
                 uri=True,
                 isolation_level=None,
                 timeout=0.0,
+                factory=lambda *args, **kwargs: _DeviceQueryConnection(*args, deadline=deadline, **kwargs),
             )
             connection.row_factory = sqlite3.Row
             connection.execute(
@@ -764,17 +850,26 @@ class AdminDeviceReadGateway:
                     ).fetchone()[0]
                 )
                 if actual != expected:
-                    raise AdminDeviceSourceError("device source unavailable")
+                    raise AdminDeviceIntegrityError("device source unavailable")
             connection.set_progress_handler(
                 lambda: 1 if deadline.expired() else 0,
                 _PROGRESS_OPCODE_INTERVAL,
             )
             return connection
-        except (OSError, sqlite3.Error, AdminDeviceSourceError):
+        except AnalyticsQueryDeadlineExceeded:
             if "connection" in locals():
                 connection.set_progress_handler(None, 0)
                 connection.close()
-            raise AdminDeviceSourceError("device source unavailable") from None
+            raise
+        except (OSError, sqlite3.Error, AdminDeviceSourceError) as exc:
+            if "connection" in locals():
+                connection.set_progress_handler(None, 0)
+                connection.close()
+            if isinstance(exc, AdminDeviceSourceError):
+                raise
+            if isinstance(exc, sqlite3.Error) and deadline.expired():
+                raise AnalyticsQueryDeadlineExceeded("Admin device query deadline exceeded") from None
+            raise _device_source_error(exc) from None
 
     @staticmethod
     def _read_uri(path: Path) -> str:
