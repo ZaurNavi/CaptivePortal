@@ -1516,7 +1516,7 @@ class AdminQueryService:
                     "latest_snapshot": device.latest_snapshot,
                     "recent_visits": list(visits),
                     "latest_client_observation": observation,
-                    "fingerprint": self._fingerprint.get(site_id, device.canonical_mac).as_dict(),
+                    "fingerprint": self._fingerprint.get_detail(site_id, device.canonical_mac).as_dict(),
                 }
             )
 
