@@ -158,6 +158,7 @@ class AdminQueryBusy(AdminQueryError):
 
 class AdminQueryUnavailable(AdminQueryError):
     code = "source_unavailable"
+    diagnostic_reason = "source_unavailable"
 
 
 class AdminRecognitionUnavailable(AdminQueryUnavailable):
@@ -166,6 +167,8 @@ class AdminRecognitionUnavailable(AdminQueryUnavailable):
 
 class AdminQueryIntegrityUnavailable(AdminQueryUnavailable):
     """A returned source/product projection contradicted its safe contract."""
+
+    diagnostic_reason = "integrity_failure"
 
 
 class AdminQueryDeadline(AdminQueryError):
@@ -1888,9 +1891,12 @@ class AdminQueryService:
         except AnalyticsQueryValidationError as exc:
             raise AdminQueryValidationError() from exc
         except AdminDeviceIntegrityError as exc:
-            raise AdminQueryUnavailable() from exc
+            raise AdminQueryIntegrityUnavailable() from exc
         except (AdminDeviceSourceError, AdminReadSourceError) as exc:
-            raise AdminQueryUnavailable() from exc
+            error = AdminQueryUnavailable()
+            if getattr(exc, "diagnostic_reason", None) == "sqlite_busy":
+                error.diagnostic_reason = "sqlite_busy"
+            raise error from exc
 
     @property
     def _slots(self):

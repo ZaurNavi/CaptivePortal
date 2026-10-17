@@ -138,6 +138,19 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
                 "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
             )
+        operation = _device_query_operation()
+        if operation is not None and response.status_code in (429, 503):
+            reason = getattr(g, "admin_device_source_reason", None) or getattr(
+                g, "admin_device_error_code", "source_unavailable")
+            if reason not in {"sqlite_busy", "query_deadline", "source_unavailable",
+                              "integrity_failure", "concurrency_limit"}:
+                reason = "source_unavailable"
+            try:
+                _event(logger, "admin.device_query_unavailable", operation=operation,
+                       reason=reason, status_code=response.status_code,
+                       duration_ms=min(3_600_000, max(0, int((time.monotonic() - g.admin_started_at) * 1000))))
+            except Exception:
+                pass  # Diagnostics must not change availability or response contracts.
         return response
 
     def authenticated(view: Callable[..., Response]):
@@ -995,7 +1008,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return result
         except AdminQueryDeadline:
             return _error("query_deadline", 503)
-        except AdminQueryUnavailable:
+        except AdminQueryUnavailable as exc:
+            g.admin_device_source_reason = exc.diagnostic_reason
             return _error("source_unavailable", 503)
         except AdminQueryError:
             return _error("internal_error", 500)
@@ -1040,7 +1054,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return response
         except AdminQueryDeadline:
             return _error("query_deadline", 503)
-        except AdminQueryUnavailable:
+        except AdminQueryUnavailable as exc:
+            g.admin_device_source_reason = exc.diagnostic_reason
             return _error("source_unavailable", 503)
         except Exception:
             # Never emit exception bodies/tracebacks that can contain Device data.
@@ -2386,7 +2401,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return result
         except AdminQueryDeadline:
             return _error("query_deadline", 503)
-        except AdminQueryUnavailable:
+        except AdminQueryUnavailable as exc:
+            g.admin_device_source_reason = exc.diagnostic_reason
             return _error("source_unavailable", 503)
         except AdminQueryError:
             return _error("internal_error", 500)
@@ -2455,6 +2471,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
 
 
 def _error(code: str, status_code: int) -> Response:
+    if status_code in (429, 503):
+        g.admin_device_error_code = code
     if _is_api_path(request.path):
         return jsonify(
             {
@@ -2599,6 +2617,18 @@ def _login_url(next_value: str | None) -> str:
     from urllib.parse import quote
 
     return "/admin/login?next=" + quote(next_value, safe="/")
+
+
+def _device_query_operation() -> str | None:
+    # Match the static Flask rule, never a user path, Site/device ID or query string.
+    rule = request.url_rule.rule if request.url_rule is not None else None
+    return {
+        "/admin/api/v1/sites/<site_id>/devices": "list",
+        "/admin/api/v1/sites/<site_id>/devices/inventory-summary": "inventory_summary",
+        "/admin/api/v1/sites/<site_id>/devices/<device_id>": "detail",
+        "/admin/api/v1/sites/<site_id>/devices/<device_id>/current": "current_context",
+        "/admin/api/v1/sites/<site_id>/devices/<device_id>/protocol-intelligence": "protocol_intelligence",
+    }.get(rule)
 
 
 def _event(logger: logging.Logger, event: str, **fields: Any) -> None:
