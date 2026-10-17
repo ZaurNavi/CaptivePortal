@@ -156,8 +156,8 @@
   }
 
   const FINGERPRINT_DIMENSIONS = [
-    ["Type", "device_class_result"], ["Fingerprint Platform", "platform_result"],
-    ["Manufacturer", "manufacturer_result"], ["Model Family", "model_result"],
+    ["Type", "device_class_result", "device_class"], ["Fingerprint Platform", "platform_result", "platform_family"],
+    ["Manufacturer", "manufacturer_result", "manufacturer_family"], ["Model Family", "model_result", "model_family"],
   ];
 
   function fingerprintSummaryEntries(fingerprint) {
@@ -171,28 +171,55 @@
       })];
   }
 
-  function fingerprintDetailEntries(dimension) {
+  function fingerprintDetailEntries(dimension, diagnostics, dimensionName) {
     if (!dimension) return [];
-    return [["Canonical value", dimension.canonical_value_id], ["Status", dimension.status],
+    const references = dimension.knowledge_references || [];
+    const provenances = new Set(references.map(reference => JSON.stringify([
+      reference.knowledge_provenance_id, reference.knowledge_provenance_digest])));
+    const entries = [["Canonical value", dimension.canonical_value_id], ["Status", dimension.status],
       ["Support level", dimension.support_level],
-      ["Supporting sources", (dimension.supporting_origin_groups || []).join(", ")],
-      ["Contradicting sources", (dimension.contradicting_origin_groups || []).join(", ")],
-      ["Not-evaluable sources", (dimension.not_evaluable_origin_groups || []).join(", ")],
+      ["Supporting origin groups", (dimension.supporting_origin_groups || []).join(", ")],
+      ["Contradicting origin groups", (dimension.contradicting_origin_groups || []).join(", ")],
+      ["Not-evaluable origin groups", (dimension.not_evaluable_origin_groups || []).join(", ")],
       ["Out-of-scope references", (dimension.out_of_scope_taxon_references || []).join(", ")],
-      ["Explanation codes", (dimension.explanation_codes || []).join(", ")],
-      ["Knowledge references", (dimension.knowledge_references || []).map((reference) =>
+      ["Aggregate explanation codes (all origins, not selected-value provenance)", (dimension.explanation_codes || []).join(", ")],
+      ["Knowledge references", references.map((reference) =>
         `${reference.canonical_knowledge_record_id} · ${reference.rule_or_source_record_identity} · ${reference.knowledge_provenance_id} · ${reference.knowledge_provenance_digest} · ${reference.knowledge_bundle_id} · ${reference.knowledge_bundle_digest}`).join("; ")]];
+    entries.push(["Knowledge provenance grouping", `${references.length} record references · ${provenances.size} provenance groups; not a count of independent sources`]);
+    if (!diagnostics || diagnostics.state !== "available" || !Array.isArray(diagnostics.origins)) {
+      entries.push(["Origin diagnostics", "Unavailable. Aggregate codes cannot identify which knowledge source supported the selected value."]);
+      return entries;
+    }
+    const labels = {dhcp: "DHCP / K1", mac_registry: "MAC registry / K4"};
+    const supporting = [], other = [];
+    diagnostics.origins.forEach(origin => {
+      const row = (origin.dimensions || []).find(item => item.dimension_name === dimensionName);
+      if (!row) return;
+      const description = `${labels[origin.origin_group] || origin.origin_group} — ${row.internal_state}`
+        + `${row.selected_canonical_value_id ? ` (${row.selected_canonical_value_id})` : ""}; `
+        + `origin-wide diagnostics: ${(origin.explanation_codes || []).join(", ") || "none"}; `
+        + `dimension diagnostics: ${(row.explanation_codes || []).join(", ") || "none"}; `
+        + `assessment: ${origin.assessment.artifact_id} · ${origin.assessment.content_sha256}`;
+      const selected = dimension.status === "resolved" && row.internal_state === "resolved"
+        && row.selected_canonical_value_id === dimension.canonical_value_id
+        && (dimension.supporting_origin_groups || []).includes(origin.origin_group);
+      (selected ? supporting : other).push(description);
+    });
+    entries.push(["Retained selected-value support", supporting.join("; ") || "No selected-value origin detail available."]);
+    entries.push(["Other-origin diagnostics (not selected-value support)", other.join("; ") || "None"]);
+    return entries;
   }
 
   function fingerprintCard(fingerprint) {
     const value = card("Fingerprint Information", fingerprintSummaryEntries(fingerprint));
     value.className += " fingerprint-card";
-    value.append(node("p", "live-detail", "Advisory fingerprint. Values come from a persisted production classification."));
+    value.append(node("p", "live-detail", "Advisory fingerprint. Classified at is the last retained production classification, not a live assessment. No live freshness or producer-health check is performed."));
     if (fingerprint && FINGERPRINT_DIMENSIONS.some(([, field]) => fingerprint[field])) {
       const details = node("details", "fingerprint-details");
       details.append(node("summary", null, "Fingerprint details"));
-      FINGERPRINT_DIMENSIONS.forEach(([label, field]) => {
-        if (fingerprint[field]) details.append(node("h3", null, label), definitionList(fingerprintDetailEntries(fingerprint[field])));
+      details.append(node("p", "live-detail", "Selected-value support and other-origin diagnostics are separate. An aggregate expiry code is not proof that the selected claim used expired knowledge."));
+      FINGERPRINT_DIMENSIONS.forEach(([label, field, dimensionName]) => {
+        if (fingerprint[field]) details.append(node("h3", null, label), definitionList(fingerprintDetailEntries(fingerprint[field], fingerprint.origin_diagnostics, dimensionName)));
       });
       value.append(details);
     }

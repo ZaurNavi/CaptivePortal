@@ -84,13 +84,66 @@ def test_real_node_service_intelligence_coordinator():
     assert "NI04_FRONTEND_PASS" in result.stdout
 
 
+def _mask_fingerprint_span(prefix):
+    start = b"  const FINGERPRINT_DIMENSIONS = ["
+    end = b"  function parseVisitFilters("
+    assert prefix.count(start) == prefix.count(end) == 1
+    left, right = prefix.index(start), prefix.index(end)
+    assert left < right
+    return prefix[:left] + b"/* approved Fingerprint detail span */\n" + prefix[right:]
+
+
+def _assert_legacy_prefix_unchanged(candidate, baseline):
+    # Preserve the existing cross-platform line-ending policy, but mask only
+    # the one approved Fingerprint span; all other prefix bytes stay protected.
+    assert _mask_fingerprint_span(candidate).replace(b"\r\n", b"\n") == (
+        _mask_fingerprint_span(baseline).replace(b"\r\n", b"\n"))
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_prefix_guard_rejects_changes_outside_fingerprint_span(side):
+    prefix = (ROOT / "app/admin_web/static/admin.js").read_bytes().split(
+        b"/* NI-04: independent bounded Service Intelligence coordinator. */")[0].rstrip()
+    offset = 0 if side == "before" else len(prefix) - 1
+    assert offset < prefix.index(b"  const FINGERPRINT_DIMENSIONS = [") or offset >= prefix.index(b"  function parseVisitFilters(")
+    changed = prefix[:offset] + bytes([prefix[offset] ^ 1]) + prefix[offset + 1:]
+    with pytest.raises(AssertionError):
+        _assert_legacy_prefix_unchanged(changed, prefix)
+
+
+def test_prefix_guard_accepts_only_the_approved_fingerprint_span():
+    start, end = b"  const FINGERPRINT_DIMENSIONS = [", b"  function parseVisitFilters("
+    prefix = b"protected-before\n" + start + b"old details\n" + end + b"protected-after"
+    changed = b"protected-before\n" + start + b"new details\n" + end + b"protected-after"
+    _assert_legacy_prefix_unchanged(changed, prefix)
+    assert _mask_fingerprint_span(prefix) == (
+        b"protected-before\n/* approved Fingerprint detail span */\n" + end + b"protected-after")
+
+
+@pytest.mark.parametrize("malformed", ["missing_start", "missing_end", "duplicate_start", "duplicate_end", "reversed"])
+def test_prefix_guard_requires_unique_ordered_fingerprint_boundaries(malformed):
+    start, end = b"  const FINGERPRINT_DIMENSIONS = [", b"  function parseVisitFilters("
+    prefix = start + b"details\n" + end
+    changed = {
+        "missing_start": end,
+        "missing_end": start,
+        "duplicate_start": start + prefix,
+        "duplicate_end": prefix + end,
+        "reversed": end + start,
+    }[malformed]
+    with pytest.raises(AssertionError):
+        _assert_legacy_prefix_unchanged(changed, prefix)
+    with pytest.raises(AssertionError):
+        _assert_legacy_prefix_unchanged(prefix, changed)
+
+
 def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
     import hashlib
     import subprocess
     source = (ROOT / "app/admin_web/static/admin.js").read_bytes()
     prefix = source.split(b"/* NI-04: independent bounded Service Intelligence coordinator. */")[0].rstrip()
     original = subprocess.check_output(["git", "show", "22cdde5d4168de02d142c840028a4d66167e47f7:app/admin_web/static/admin.js"], cwd=ROOT).rstrip()
-    assert prefix.replace(b"\r\n", b"\n") == original.replace(b"\r\n", b"\n")
+    _assert_legacy_prefix_unchanged(prefix, original)
     for name in ("app/admin_web/static/device_protocol_intelligence.js", "app/network_protocol_intelligence/read_service.py",
                  "app/network_protocol_intelligence/models.py", "app/network_metadata_projection/read_service.py"):
         # Recovery freezes the current accepted baseline, including the admitted

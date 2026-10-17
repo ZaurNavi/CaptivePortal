@@ -195,6 +195,75 @@ class DeviceFingerprintClassificationReadService:
 
         return self._read(select)
 
+    def get_origin_assessments(
+        self, site_id: str, observed_mac: str, classification_id: str, *,
+        expected_result: ArtifactRef,
+    ) -> tuple[ArtifactContent, ...]:
+        """Optional detail-only lookup; never reconstruct claims or assess freshness.
+
+        Three SELECTs in one readonly snapshot, at most eight diagnostic artifacts
+        (six origins plus the two scope-link artifacts), <=1 MiB per artifact.
+        An unavailable diagnostic closure does not invalidate the caller's result.
+        """
+        site, mac, identity = validate_site_id(site_id), validate_mac(observed_mac), _uuid_v4(classification_id)
+        if not isinstance(expected_result, ArtifactRef):
+            raise DeviceFingerprintValidationError("Invalid diagnostic result reference")
+
+        def select(connection: sqlite3.Connection) -> tuple[ArtifactContent, ...]:
+            row = connection.execute(
+                "SELECT * FROM classifications WHERE classification_id=? AND site_id=? "
+                "AND observed_mac=? AND execution_context='PRODUCTION'", (identity, site, mac),
+            ).fetchone()
+            if row is None:
+                raise ClassificationPersistenceError("persistence_unavailable")
+            record = self._record(connection, row)
+            expected_result.resolve(record.result, "ClassificationResult")
+            payload = record.result.semantic_payload
+
+            def reference(value: object, kind: str) -> ArtifactRef:
+                item = ArtifactRef.from_dict(value)
+                return _reference(item.artifact_id, item.content_sha256, kind)
+
+            origins = payload["origin_assessments"]
+            if not isinstance(origins, list) or len(origins) != 6:
+                raise DeviceFingerprintValidationError("Invalid diagnostic origin set")
+            origin_refs = tuple(reference(value, "OriginAssessment") for value in origins)
+            snapshot = _reference(record.core.snapshot_record_id, record.core.snapshot_record_digest, "SnapshotRecord")
+            content = reference(payload["evidence_snapshot_content"], "EvidenceSnapshotContent")
+            source = reference(payload["source_evaluability"], "SourceEvaluability")
+            references = (*origin_refs, snapshot, content)
+            if len({item.artifact_id for item in references}) != 8:
+                raise DeviceFingerprintValidationError("Duplicate diagnostic artifact")
+            rows = connection.execute(
+                "SELECT artifact_id, artifact_type, content_sha256, semantic_payload_json FROM artifacts "
+                "WHERE artifact_id IN (" + ','.join('?' for _ in references) + ") "
+                "AND length(CAST(semantic_payload_json AS BLOB))<=?",
+                (*[item.artifact_id for item in references], 1024 * 1024),
+            ).fetchall()
+            artifacts = {item["artifact_id"]: ArtifactContent(
+                item["artifact_type"], 1, item["semantic_payload_json"], item["content_sha256"], item["artifact_id"])
+                for item in rows}
+            for item in references:
+                item.resolve(artifacts[item.artifact_id], item.artifact_id.split(':', 1)[0])
+            if artifacts[snapshot.artifact_id].semantic_payload["evidence_snapshot_content"] != content.as_dict():
+                raise DeviceFingerprintValidationError("Diagnostic snapshot reference mismatch")
+            scope = artifacts[content.artifact_id].semantic_payload
+            if scope["site_id"] != site or scope["observed_mac"] != mac:
+                raise DeviceFingerprintValidationError("Diagnostic scope mismatch")
+            found = set()
+            for item in origin_refs:
+                origin = artifacts[item.artifact_id].semantic_payload
+                if (origin["evidence_snapshot_content"] != content.as_dict()
+                        or origin["source_evaluability"] != source.as_dict()
+                        or origin["origin_group"] in found):
+                    raise DeviceFingerprintValidationError("Diagnostic origin lineage mismatch")
+                found.add(origin["origin_group"])
+            if found != {"dhcp", "portal", "tcp", "tls", "quic", "mac_registry"}:
+                raise DeviceFingerprintValidationError("Invalid diagnostic origins")
+            return tuple(artifacts[item.artifact_id] for item in origin_refs)
+
+        return self._read(select)
+
     def list_history(
         self, site_id: str, observed_mac: str, from_utc: str, to_utc: str, *,
         limit: int = 100, cursor: ClassificationHistoryCursor | None = None,
