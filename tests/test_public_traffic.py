@@ -105,6 +105,15 @@ def offline(
     return {
         "event": "omada.client_offline",
         "normalized_event_id": event_id,
+        "client_mac": "02:11:22:33:44:55",
+        "site_id": "synthetic-site",
+        "site_resolution_status": "resolved",
+        "raw_text": (
+            '[client:Lab:02:11:22:33:44:55] (IP: 192.0.2.1) '
+            f'went offline from SSID "{ssid or ""}" '
+            'on [ap:Lab:02:AA:BB:CC:DD:01] '
+            f'(1m connected, {traffic}B).'
+        ),
         "ssid": ssid,
         "reported_traffic_bytes_estimate": traffic,
         "parse_status": parse_status,
@@ -128,6 +137,62 @@ def append_lines(path, records, *, newline=True):
             stream.write(encoded)
             if newline or index < len(records) - 1:
                 stream.write(b"\n")
+
+
+@pytest.mark.parametrize("mutation", ["missing-raw", "not-text", "display-only", "failed-connect",
+    "conflicting-verb", "wrong-client", "wrong-ap", "wrong-ssid", "wrong-traffic",
+    "site-unresolved", "missing-site"])
+def test_context230_traffic_rejects_plausible_false_or_mismatched_offline(tmp_path, mutation):
+    _, _, service, _, _, _ = stack(tmp_path)
+    record = offline("forged:0", traffic=1234)
+    if mutation == "missing-raw":
+        record.pop("raw_text")
+    elif mutation == "not-text":
+        record["raw_text"] = ["went offline"]
+    elif mutation in {"display-only", "failed-connect"}:
+        clause = "failed to connect to" if mutation == "failed-connect" else 'associated from SSID "Zefer_Parki" on'
+        record["raw_text"] = (f'[client:Guest went offline:02:11:22:33:44:55] {clause} '
+            '[ap:Lab:02:AA:BB:CC:DD:01] with SSID "Zefer_Parki" '
+            'on channel 6 because the password was wrong.(1m connected, 1234B).')
+        if mutation == "failed-connect":
+            record["raw_text"] = record["raw_text"].replace(
+                "(1m connected, 1234B).", "(1 time in the last minute)")
+    elif mutation == "conflicting-verb":
+        record["raw_text"] += " went online"
+    else:
+        key, value = {
+            "wrong-client": ("client_mac", "02:11:22:33:44:99"),
+            "wrong-ap": ("ap_mac", "02:AA:BB:CC:DD:99"),
+            "wrong-ssid": ("ssid", "Different"),
+            "wrong-traffic": ("reported_traffic_bytes_estimate", 9876),
+            "site-unresolved": ("site_resolution_status", "site_unresolved"),
+            "missing-site": ("site_id", None),
+        }[mutation]
+        record[key] = value
+    assert service.classify_record(record).target is False
+
+
+def test_context230_traffic_legacy_replay_preserves_dedup_and_checkpoint(tmp_path):
+    selected, repository, service, reader, worker, _ = stack(tmp_path)
+    valid = offline("legacy:valid", traffic=1234, parse_status="partial")
+    false_offline = offline("legacy:false", traffic=1234)
+    false_offline["raw_text"] = (
+        '[client:Guest went offline:02:11:22:33:44:55] '
+        'associated from SSID "Zefer_Parki" on [ap:Lab:02:AA:BB:CC:DD:01] '
+        '(1m connected, 1234B).'
+    )
+    missing = offline("legacy:missing", traffic=1234)
+    missing.pop("raw_text")
+    append_lines(selected.source_log_path, [false_offline, valid, missing, valid])
+    complete_backfill(worker)
+    snapshot = service.get_snapshot()
+    assert snapshot.total_bytes == 1234
+    assert snapshot.completed_sessions_total == 1
+    assert len(table_rows(repository.db_path, "processed_events")) == 1
+    state = next(iter(repository.get_reader_states().values()))
+    assert state.source_offset == Path(selected.source_log_path).stat().st_size
+    assert reader.scan()
+    assert service.get_snapshot().total_bytes == 1234
 
 
 def table_rows(db_path, table):

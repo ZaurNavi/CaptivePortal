@@ -493,14 +493,14 @@ def test_QA_RM_01_genuine_connection_with_matching_legacy_phrase(verb, subject):
 
 
 @pytest.mark.parametrize("subject", ["client_name", "ap_name"])
-def test_QA_RM_01_issue_230_legacy_ambiguity_is_unchanged_not_fixed_here(subject):
-    # Authoritative v1.2 clarification: preserve this known incorrect baseline
-    # result; the opposite-phrase legacy matcher repair belongs to Issue #230.
+def test_context_230_repairs_legacy_ambiguity_without_rejecting_genuine_offline(subject):
+    # Issue #230 now repairs the separately tracked baseline defect; all R3
+    # roaming grammar/fail-closed assertions above remain unchanged.
     event = normalized([legacy_connection("offline", **{subject: "Guest went online"})])[0]
-    assert event["event"] == "omada.client_online"
-    assert event["parse_status"] == "partial"
+    assert event["event"] == "omada.client_offline"
+    assert event["parse_status"] == "parsed"
     assert event["parse_reason"] is None
-    assert event["parse_warnings"] == ["SSID_MISSING", "CHANNEL_MISSING"]
+    assert event["parse_warnings"] == []
     assert event["client_mac"] == CLIENT and event["ap_mac"] == DESTINATION
 
 
@@ -529,10 +529,11 @@ def test_QA_RM_01_quoted_ssid_with_ap_marker_is_not_an_announcement(verb):
     ssid = "is roaming from [ap:Lab]"
     event = normalized([legacy_connection(verb, ssid=ssid)])[0]
     assert event["event"] == f"omada.client_{verb}"
-    # Preserve the baseline parser's AP warning for a bracket inside an
-    # offline SSID; the roaming guard must not introduce an unclassified event.
-    assert event["parse_status"] == ("parsed" if verb == "online" else "partial")
-    assert event["parse_warnings"] == ([] if verb == "online" else ["INVALID_AP_MAC"])
+    # #230 R2: the opaque SSID must not masquerade as an AP during DTO
+    # extraction either. Roaming announcement/grammar semantics stay intact.
+    assert event["parse_status"] == "parsed"
+    assert event["parse_warnings"] == []
+    assert event["ap_mac"] == DESTINATION
     assert event["ssid"] == ssid
 
 
