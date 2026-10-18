@@ -74,8 +74,13 @@ class AdminWebRuntime:
     controller_settings_read_service: Any | None = None
     portal_settings_state: str = "disabled"
     portal_settings_read_service: Any | None = None
+    operations_feature_enabled: bool = False
+    operations_state: str = "disabled"
+    operations_service: Any | None = None
 
     def clear(self) -> None:
+        if self.operations_service is not None:
+            self.operations_service.close()
         if self.session_store is not None:
             self.session_store.clear()
         if self.preauth_store is not None:
@@ -540,6 +545,20 @@ def create_admin_web_runtime(
         portal_settings_read_service=settings_control.read_service if settings_feature_enabled and settings_control
                                      and settings_control.store_state == "available" else None,
     )
+    # Operations is independent of Analytics/Site query readiness. No source
+    # acquisition occurs here beyond the one privileged startup binding read.
+    from .config import operations_enabled_from_settings
+    try:
+        runtime.operations_feature_enabled = operations_enabled_from_settings(settings)
+        if runtime.operations_feature_enabled:
+            runtime.operations_state = "unavailable"
+            from .operations_inventory import load_inventory
+            from .operations_service import AdminOperationsReadService
+            runtime.operations_service = AdminOperationsReadService(load_inventory())
+            runtime.operations_state = "active"
+    except Exception:
+        runtime.operations_state = "unavailable"
+        logger.error("admin.operations_startup_unavailable")
     from .routes import create_admin_web_blueprint
 
     runtime.blueprint = create_admin_web_blueprint(runtime, logger=logger)

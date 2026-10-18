@@ -351,6 +351,31 @@ Requires external bearer token when enabled, plus network/Site allowlists, concu
 
 ### Admin Web
 
+`WEB_ADMIN_DB_SERVICES_ENABLED=false` is an independent exact lowercase `true|false`
+startup flag, default OFF. It is not writable through Settings or Features. An
+operator must explicitly grant `admin.read.operations` in
+`WEB_ADMIN_GLOBAL_CAPABILITIES`; default grants are unchanged. The GLOBAL page is
+`/admin/db-services`, with one read endpoint `/admin/api/v1/operations/db-services`.
+Activation additionally requires the root-owned, non-group/world-writable file
+`/etc/captiveportal/admin-db-services-v1.json` and protected ancestors. Its closed
+schema is `admin.db-services.bindings.v1` with exactly nine `services` entries
+(`id,intent`) and seventeen `databases` entries (`id,path,intent`). Service intents
+are `run|disabled|maintenance|unknown`; database intents are
+`expected|optional_disabled|unknown`. No extra keys, duplicates, selectors, secrets
+or implicit path defaults are accepted. Database paths have a direct parent in
+`/opt/CaptivePortal/data` or `/var/lib/captive-portal/fingerprint-sensor`.
+The manifest is read once at composition. Missing/invalid bindings disable only
+Operations, not Auth or other Admin pages. This repository change does not create
+the operator file, grant the permission, or activate the flag.
+
+The same snapshot includes `admin.operations.topology.v1`: 31 code-owned nodes
+and 45 structural relations, with no extra flag, capability or acquisition.
+R1 edges are not live-flow evidence (`flow_evidence=not_instrumented`); there is
+no active-flow animation. Operational Data Flow appears between the four Summary
+tiles and the detailed Services/Databases inventories. It adds no SQLite opens,
+systemd commands, filesystem sampling or network calls. Future live-flow R2
+telemetry requires a separate architecture decision.
+
 Prefix: `WEB_ADMIN_*`
 
 Repository default: disabled.

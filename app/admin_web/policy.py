@@ -55,7 +55,7 @@ class AdminAccessPolicy:
         return (
             isinstance(principal, AdminPrincipal)
             and principal.principal_type == "platform_operator"
-            and capability in GLOBAL_SETTINGS_CAPABILITIES
+            and capability in GLOBAL_CAPABILITIES
             and capability in principal.global_capabilities
         )
 

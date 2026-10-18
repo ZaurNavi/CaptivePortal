@@ -30,6 +30,14 @@ class AdminWebConfigError(ValueError):
     """Enabled Admin Web configuration is invalid and must fail closed."""
 
 
+def operations_enabled_from_settings(settings: Mapping[str, Any]) -> bool:
+    """Independent startup flag: invalid Operations config cannot disable Auth."""
+    value = settings.get("web_admin_db_services_enabled", "false")
+    if type(value) is not str or value not in {"true", "false"}:
+        raise AdminWebConfigError("WEB_ADMIN_DB_SERVICES_ENABLED is invalid")
+    return value == "true"
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class AdminWebConfig:
     enabled: bool

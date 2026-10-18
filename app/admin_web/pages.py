@@ -23,6 +23,7 @@ OBSERVATIONS = AdminPage(
     "observations", "Observations", "admin/observations.html"
 )
 TRAFFIC = AdminPage("traffic", "Traffic", "admin/traffic.html")
+DB_SERVICES = AdminPage("db_services", "Databases & Services", "admin/db_services.html")
 
 
 def render_admin_page(
