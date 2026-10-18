@@ -238,3 +238,47 @@ class DeviceFingerprintPresentationService:
     def get_detail(self, site_id: str, mac: str) -> FingerprintPresentation:
         canonical = validate_mac(mac)
         return self._get_many(site_id, (canonical,), include_diagnostics=True)[canonical]
+
+
+# Display-only allowlists. Schema validation remains exclusively in the existing
+# evidence registry; these are not alternative evidence validators or classifiers.
+_OBSERVED_FIELDS = {
+    "portal_headers/1": "platform_family mobile_boolean browser_runtime_family webview_or_captive_context model_family os_major platform_source mobile_source runtime_source context_source model_source os_major_source ua_present sec_ch_ua_present sec_ch_ua_platform_present sec_ch_ua_mobile_present",
+    "portal_headers/2": "model_family os_major form_factor_mobile form_factor_tablet form_factor_desktop model_source os_major_source form_factors_source",
+    "dhcp/1": "message_type parameter_request_list option_order vendor_class client_identifier_kind maximum_message_size rapid_commit_requested capport_requested ipv6_only_preferred_requested hostname_present",
+    "tcp_syn/1": "ip_version observed_ttl tcp_window mss window_scale sack_permitted timestamps_present tcp_option_order",
+    "tcp_syn/2": "ip_version observed_ttl ip_option_length_bytes ip_id_zero ip_df ip_reserved_flag ip_ecn_bits tcp_header_length_bytes tcp_window tcp_sequence_zero tcp_ack_number_nonzero tcp_ack_first_octet_lsb_set tcp_urg_pointer_nonzero tcp_fin tcp_rst tcp_push tcp_urg tcp_ns tcp_ece tcp_cwr tcp_payload_present tcp_option_records",
+    "tls_client/1": "ja4 ja4_a ja4_b ja4_c tls_version_family client_alpns ech_extension_present grease_extension_present",
+    "quic_client/1": "ja4 ja4_a ja4_b ja4_c quic_version ech_extension_present grease_extension_present",
+}
+
+
+class ObservedDeviceHintsPresentationService:
+    """Optional bounded observations, never a canonical Fingerprint fallback."""
+
+    def __init__(self, reader) -> None:
+        self._reader = reader
+
+    @staticmethod
+    def unavailable() -> dict[str, Any]:
+        return {"state": "unavailable", "coverage": "bounded_latest_256", "trust": "observed_unverified",
+                "reported_model": None, "reported_os": None, "sources": []}
+
+    def get(self, site_id, mac, *, site_first_seen_at, as_of_utc, deadline) -> dict[str, Any]:
+        from app.device_fingerprint.validation import canonical_json
+        try:
+            if self._reader is None:
+                return self.unavailable()
+            result = self._reader.latest_observed_hints(
+                site_id, mac, site_first_seen_at=site_first_seen_at, as_of_utc=as_of_utc, deadline=deadline)
+            for group in result["sources"]:
+                allowed = _OBSERVED_FIELDS.get(group["schema"], "").split()
+                group["fields"] = {key: group["fields"][key] for key in allowed if key in group["fields"]}
+            # Five exact schema-bounded groups (including all 40 TCP options)
+            # fit below this response cap, independent of retained history size.
+            if len(canonical_json(result).encode("utf-8")) > 65_536:
+                return self.unavailable()
+            deadline.require_remaining()
+            return result
+        except Exception:
+            return self.unavailable()
