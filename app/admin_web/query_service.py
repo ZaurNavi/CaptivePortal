@@ -281,10 +281,13 @@ class AdminQueryService:
         inventory_timezone_name: str | None = None,
         protocol_intelligence_service: Any | None = None,
         service_intelligence_service: Any | None = None,
+        observed_device_hints_service: Any | None = None,
     ):
         self._config = config
         self._protocol_intelligence = protocol_intelligence_service
         self._service_intelligence = service_intelligence_service
+        from .device_fingerprint_presentation import ObservedDeviceHintsPresentationService
+        self._observed_device_hints = observed_device_hints_service or ObservedDeviceHintsPresentationService(None)
         self._policy = policy
         self._devices = device_gateway
         self._reads = read_gateway
@@ -1519,7 +1522,10 @@ class AdminQueryService:
                     "latest_snapshot": device.latest_snapshot,
                     "recent_visits": list(visits),
                     "latest_client_observation": observation,
-                    "fingerprint": self._fingerprint.get(site_id, device.canonical_mac).as_dict(),
+                    "fingerprint": self._fingerprint.get_detail(site_id, device.canonical_mac).as_dict(),
+                    "observed_device_hints": self._observed_device_hints.get(
+                        site_id, device.canonical_mac, site_first_seen_at=device.site_first_seen_at,
+                        as_of_utc=format_utc(datetime.now(timezone.utc)), deadline=deadline),
                 }
             )
 

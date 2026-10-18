@@ -8,10 +8,25 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from .models import DeviceFingerprintStorageCorrupt, DeviceFingerprintValidationError
+from .models import DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageUnavailable, DeviceFingerprintValidationError
+from .config import BUSY_TIMEOUT_MS
+from .payload_integrity import verify_persisted_payload
+from .schema_registry import build_production_schema_registry
 from .repository import DeviceFingerprintRepository, open_read_only
 from .schema import MAX_INGEST_SEQUENCE
-from .validation import parse_utc, validate_mac, validate_machine_id, validate_site_id, validate_source_kind, validate_uuid
+from .validation import format_utc, parse_utc, validate_mac, validate_machine_id, validate_site_id, validate_source_kind, validate_uuid
+
+OBSERVED_SOURCE_KINDS = ("portal_headers", "dhcp", "tcp_syn", "tls_client", "quic_client")
+# The existing ingestion contract permits at most 65,536 payload bytes.
+OBSERVED_MAX_PAYLOAD_BYTES = 65_536
+OBSERVED_CANDIDATE_LIMIT = 256
+_OBSERVED_REGISTRY = build_production_schema_registry()
+_OBSERVED_SQL = """SELECT source_kind,feature_schema_version,observed_at,quality_state,
+    CASE WHEN length(CAST(payload_json AS BLOB))<=65536 THEN payload_json ELSE NULL END AS payload_json,
+    payload_sha256
+    FROM device_fingerprint_evidence
+    WHERE site_id=? AND observed_mac=? AND observed_at>=? AND observed_at<?
+    ORDER BY observed_at DESC,evidence_id DESC LIMIT 256"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +193,106 @@ class DeviceFingerprintReadService:
     def __init__(self, db_path: str, *, retention_days: int) -> None:
         self.db_path = db_path
         self.retention_days = retention_days
+
+    def latest_observed_hints(self, site_id: str, observed_mac: str, *,
+                              site_first_seen_at: str, as_of_utc: str,
+                              deadline: Any) -> dict[str, Any]:
+        """One bounded recent universe, independent of canonical classification.
+
+        The interval is [max(retention cutoff, Site first seen), as_of).
+        Missing groups describe this universe only, never device capabilities.
+        No SQL, parsing or older-record fallback occurs per source group.
+        """
+        site, mac = validate_site_id(site_id), validate_mac(observed_mac)
+        end, first = parse_utc(as_of_utc), parse_utc(site_first_seen_at)
+        if type(self.retention_days) is not int or not 1 <= self.retention_days <= 90:
+            raise DeviceFingerprintValidationError("Invalid evidence retention")
+        start = max(first, end - timedelta(days=self.retention_days))
+        groups: dict[str, dict[str, Any]] = {}
+        model = os = None
+        portal_blocked = False
+
+        def remaining_for_sql() -> None:
+            deadline.require_remaining()
+            # Do not enter the unchanged native busy handler without its full
+            # configured budget. In particular, optional reads never extend a
+            # nearly exhausted core Admin request just to wait for SQLite.
+            if deadline.expires_at - deadline.monotonic() <= BUSY_TIMEOUT_MS / 1000:
+                raise DeviceFingerprintStorageUnavailable("Optional evidence read budget exhausted")
+
+        remaining_for_sql()
+        connection = open_read_only(self.db_path)
+        cursor = None
+        try:
+            remaining_for_sql()
+            connection.set_progress_handler(lambda: int(deadline.expired()), 1000)
+            cursor = connection.execute(_OBSERVED_SQL, (site, mac, format_utc(start), as_of_utc))
+            for row in cursor:
+                deadline.require_remaining()
+                kind = row["source_kind"]
+                if kind not in OBSERVED_SOURCE_KINDS:
+                    raise DeviceFingerprintStorageCorrupt("Invalid observed source")
+                latest = kind not in groups
+                need_portal = kind == "portal_headers" and not portal_blocked and (model is None or os is None)
+                if not latest and not need_portal:
+                    continue
+                group = {"source_kind": kind, "schema": None, "state": "unavailable",
+                         "observed_at_utc": None, "quality_state": None,
+                         "origin_category": "client_reported" if kind in {"portal_headers", "dhcp"} else "network_observed",
+                         "fields": {}}
+                try:
+                    version = row["feature_schema_version"]
+                    if type(version) is not int or not 1 <= version <= 2_147_483_647:
+                        raise DeviceFingerprintValidationError("Invalid observed schema")
+                    parse_utc(row["observed_at"])
+                    if row["quality_state"] not in {"valid", "partial", "degraded"}:
+                        raise DeviceFingerprintValidationError("Invalid observed quality")
+                    group.update(schema=f"{kind}/{version}", observed_at_utc=row["observed_at"],
+                                 quality_state=row["quality_state"])
+                    text = row["payload_json"]
+                    if not isinstance(text, str) or len(text.encode("utf-8")) > OBSERVED_MAX_PAYLOAD_BYTES:
+                        raise DeviceFingerprintValidationError("Oversized observed payload")
+                    verified = verify_persisted_payload(kind, version, text, row["payload_sha256"], _OBSERVED_REGISTRY)
+                    if not verified.schema_supported:
+                        group["state"] = "unsupported"
+                    else:
+                        group.update(state="observed", fields=dict(verified.materialized_payload))
+                except (ValueError, TypeError, RecursionError, DeviceFingerprintValidationError):
+                    pass  # Safe per-source state; never include exception/payload.
+                deadline.require_remaining()
+                if latest:
+                    groups[kind] = group
+                if kind == "portal_headers":
+                    if group["state"] != "observed":
+                        # A corrupt/unsupported candidate blocks the remaining
+                        # Portal field search, rather than silently going older.
+                        portal_blocked = True
+                        model = os = None
+                        groups[kind] = group
+                        continue
+                    fields = group["fields"]
+                    metadata = {key: group[key] for key in ("schema", "observed_at_utc", "quality_state")}
+                    if model is None and fields.get("model_family") is not None:
+                        model = dict(metadata, value=fields["model_family"], source=fields["model_source"])
+                    if os is None and fields.get("os_major") is not None:
+                        os = dict(metadata, os_major=fields["os_major"], source=fields["os_major_source"],
+                                  platform_family=fields.get("platform_family"))
+            deadline.require_remaining()
+        finally:
+            try:
+                if cursor is not None:
+                    cursor.close()
+            finally:
+                connection.close()
+        sources = [groups.get(kind, {"source_kind": kind, "schema": None,
+                    "state": "not_observed_in_bounded_window", "observed_at_utc": None,
+                    "quality_state": None, "fields": {},
+                    "origin_category": "client_reported" if kind in {"portal_headers", "dhcp"} else "network_observed"})
+                   for kind in OBSERVED_SOURCE_KINDS]
+        state = "observed" if any(group["state"] == "observed" for group in sources) else (
+            "unavailable" if groups else "no_evidence")
+        return {"state": state, "coverage": "bounded_latest_256", "trust": "observed_unverified",
+                "reported_model": model, "reported_os": os, "sources": sources}
 
     def open_snapshot_read(self) -> DeviceFingerprintSnapshotReadSession:
         connection = open_read_only(self.db_path)

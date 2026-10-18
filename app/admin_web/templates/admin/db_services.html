@@ -1,0 +1,17 @@
+{% extends "admin/base.html" %}
+{% block subtitle %}<p class="muted">Read-only operational inventory and structural data flow of CaptivPortal services and data stores.</p>{% endblock %}
+{% block page_body %}
+  <div class="ops-status" role="status" aria-live="polite"><strong id="ops-status-title">Loading</strong><span id="ops-updated">Waiting for the first operational snapshot</span></div>
+  <p id="ops-warning" class="ops-warning" role="status" hidden>Some operational data is unavailable.</p>
+  <section aria-labelledby="ops-summary-heading"><h2 id="ops-summary-heading">Summary</h2><div id="ops-summary" class="ops-summary"></div></section>
+  <section class="ops-section ops-flow" aria-labelledby="ops-flow-heading">
+    <div class="ops-section-heading"><h2 id="ops-flow-heading">Operational Data Flow</h2><span class="ops-mode-pill">Structural only</span></div>
+    <p class="ops-flow-disclaimer">Arrows show known structural relationships, not current data movement. Node statuses come from the current operational snapshot.</p>
+    <div class="ops-flow-legend" aria-label="Topology legend"><span>Source</span><span>Service</span><span>Database</span><span>Consumer</span><span class="ops-legend-feed">Feed</span><span class="ops-legend-write">Write</span><span class="ops-legend-read">Read</span><span>Flow activity is not instrumented in R1.</span></div>
+    <div id="ops-topology-board" class="ops-topology-board"></div>
+    <p id="ops-flow-context" class="ops-flow-context" aria-live="polite">Select a node to inspect its structural relationships.</p>
+    <ul id="ops-flow-relations" class="ops-sr-only" aria-label="Structural relationships"></ul>
+  </section>
+  <section class="ops-section" aria-labelledby="ops-services-heading"><div class="ops-section-heading"><h2 id="ops-services-heading">Services</h2><span>Process state is not application health</span></div><div id="ops-services" class="ops-rows"></div></section>
+  <section class="ops-section" aria-labelledby="ops-databases-heading"><div class="ops-section-heading"><h2 id="ops-databases-heading">Databases</h2><span>File presence is not verified integrity</span></div><div id="ops-databases" class="ops-rows"></div></section>
+{% endblock %}
