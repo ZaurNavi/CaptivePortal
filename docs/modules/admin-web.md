@@ -316,6 +316,56 @@ Detailed architecture and all engineering diagrams:
 `docs/modules/device-fingerprint.md`.
 <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
 
+## DB & Services — global read-only inventory
+
+DB-SERVICES-01 uses the immutable nine-service/seventeen-store catalog joined to
+privileged operator bindings, never discovery. One on-demand daemon thread caches
+snapshots for at least 30 seconds, coalescing concurrent readers without queued
+jobs. The browser refreshes every 15 seconds only while visible; requests wait at
+most 250 ms for a first sample. Stale evidence older than 90 seconds loses positive
+state. Closing Admin cancels without joining a stuck sampler. A blocked kernel
+metadata syscall may outlive the two-second sample target; no replacement worker
+is created. Bounded pipe acquisition caps systemd stdout/stderr at 16 KiB/1 KiB
+with a 0.75-second timeout. Sampling uses only one batched read command and up to
+51 file metadata candidates. No source database is opened, written or locked.
+
+The page has independent global authorization (`admin.read.operations`) and no
+Site context or analytics readiness dependency. File presence is
+`present_unverified`, not health; running is process state, not application health.
+R1 observes no schema/integrity and publishes `schema_observed_version=null`,
+`health_evidence=none`, `application_health=unknown`. Physical footprint means file
+lengths (main + WAL + SHM), not allocated disk blocks or disk capacity. Missing or
+unsafe components produce unknown totals; inode collisions are not double-counted.
+Partial trustworthy siblings survive individual failures. The response limit is
+48,000 UTF-8 bytes with at most 32 safe partial-failure entries. No absolute paths,
+raw systemd output, file exceptions, environment or credentials reach the browser.
+There is no maintenance-attestation ingestion, control operation, scheduler,
+daemon, new persistent store or writable Settings integration. Activation and
+rollback (flag OFF + controlled restart) remain separate Owner decisions.
+
+### Operational Data Flow (R1)
+
+The default-OFF Operations page is ordered Summary → Operational Data Flow →
+Services → Databases. The same authorized global snapshot returns one `topology`
+field (`admin.operations.topology.v1`, `mode=structural_only`): 4 source, 9 service,
+17 database and 1 Admin read-boundary nodes, joined by 45 explicit source-verified
+relations. It is not inferred from writer/reader metadata, file presence or
+systemd state. All edges say `flow_evidence=not_instrumented`; no runtime edge
+status, timestamp, current-movement claim or active-flow animation exists.
+
+Four subsystem lanes share one responsive board. Neutral SVG arrow styles
+distinguish Feed / Write / Read; a parallel semantic relation list exposes the
+same 45 relationships. Nodes take states only from exact catalog references in
+the same snapshot; sources and consumer have no invented health. Keyboard/button
+activation links service/database nodes to their focused inventory rows.
+Connectors recalculate after render and debounced resize, not a polling loop.
+
+The existing read-only sampler, 30-second cache and visible 15-second browser
+refresh are unchanged. Topology adds zero SQLite opens, lstat/systemd/network
+acquisitions, workers or persistent writes; no second permission or endpoint is
+introduced. `admin.read.operations` remains an explicit, non-default global grant.
+R2 live-flow telemetry is deferred and needs separate architecture approval.
+
 ## Admin Web local asset library — historical production provenance
 
 ```text

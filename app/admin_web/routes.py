@@ -29,6 +29,7 @@ from .config import USERNAME_PATTERN
 from .models import AdminPrincipal
 from .pages import (
     DEVICE,
+    DB_SERVICES,
     DEVICES,
     HOME,
     OBSERVATIONS,
@@ -98,6 +99,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         if source_ip is None or not _source_allowed(source_ip, config.allowed_networks):
             return _error("source_network_forbidden", 403)
         g.admin_source_ip = source_ip
+        if request.path in ("/admin/db-services", "/admin/api/v1/operations/db-services") and request.method not in ("GET", "HEAD"):
+            # Leave unsupported methods to Flask's standard 405/OPTIONS, not
+            # the legacy form-POST validator. Neither path has a mutation.
+            return None
         if len(request.query_string) > config.max_query_string_bytes:
             return _error("invalid_request", 400)
         if (
@@ -188,6 +193,54 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             return _error("controller_settings_forbidden" if capability.endswith(".controller")
                           else "settings_forbidden", 403)
         return None
+
+    @blueprint.context_processor
+    def operations_navigation():
+        principal = getattr(g, "admin_principal", None)
+        return {"operations_nav_enabled": bool(getattr(runtime, "operations_feature_enabled", False))
+                and policy.authorize_global(principal, "admin.read.operations")}
+
+    def operations_error(code, status):
+        return jsonify({"api_version": "admin.operations.db-services.v1", "request_id": g.admin_request_id,
+                        "error": {"code": code, "details": []}}), status
+
+    def operations_gate():
+        if not getattr(runtime, "operations_feature_enabled", False):
+            return operations_error("feature_disabled", 404)
+        if not policy.authorize_global(g.admin_principal, "admin.read.operations"):
+            return operations_error("operations_forbidden", 403)
+        if request.query_string or (request.content_length or 0) > 0 or request.stream.read(1):
+            return operations_error("invalid_request", 400)
+        return None
+
+    @blueprint.get("/admin/db-services")
+    @authenticated
+    def db_services_page():
+        rejected = operations_gate()
+        if rejected is not None:
+            return rejected
+        return render_template(DB_SERVICES.template, page=DB_SERVICES,
+            username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token)
+
+    @blueprint.get("/admin/api/v1/operations/db-services")
+    @authenticated
+    def db_services_snapshot():
+        rejected = operations_gate()
+        if rejected is not None:
+            return rejected
+        from .operations_service import OperationsError, RESPONSE_LIMIT
+        try:
+            if runtime.operations_state != "active" or runtime.operations_service is None:
+                return operations_error("operations_unavailable", 503)
+            model = runtime.operations_service.read(g.admin_request_id)
+            payload = json.dumps(model, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            if len(payload) > RESPONSE_LIMIT:
+                return operations_error("operations_unavailable", 503)
+            return Response(payload, content_type="application/json; charset=utf-8")
+        except OperationsError as exc:
+            return operations_error(exc.code if exc.code == "snapshot_pending" else "operations_unavailable", 503)
+        except Exception:
+            return operations_error("operations_unavailable", 503)
 
     @blueprint.get("/admin/settings")
     @authenticated
@@ -2455,6 +2508,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
 
 
 def _error(code: str, status_code: int) -> Response:
+    if request.path == "/admin/api/v1/operations/db-services":
+        return jsonify({"api_version": "admin.operations.db-services.v1",
+                        "request_id": getattr(g, "admin_request_id", str(uuid.uuid4())),
+                        "error": {"code": code, "details": []}}), status_code
     if _is_api_path(request.path):
         return jsonify(
             {
