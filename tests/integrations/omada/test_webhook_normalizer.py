@@ -13,6 +13,7 @@ from app.integrations.omada.webhook_normalizer import (
     EVENT_HANDLERS,
     normalize_mac,
     normalize_webhook,
+    offline_event_proof,
 )
 from app.integrations.omada.webhook_site_mapping import (
     load_webhook_site_id_mapping,
@@ -172,6 +173,324 @@ def raw_record(text=ONLINE, **payload_overrides):
         "raw_body": "must-not-be-copied",
         "headers": {"Authorization": "***REDACTED***"},
     }
+
+
+def context230_text(kind="offline", *, client="Lab", ap="Lab-AP", ssid="Lab"):
+    header = f"[client:{client}:02:11:22:33:44:55] (IP: 192.0.2.1) "
+    endpoint = f"[ap:{ap}:02:AA:BB:CC:DD:01]"
+    if kind == "online":
+        return f'{header}went online on {endpoint} with SSID "{ssid}" on channel 6.'
+    if kind == "offline":
+        return f'{header}went offline from SSID "{ssid}" on {endpoint} (31m connected, 92.28MB).'
+    if kind == "unauthorized":
+        return f"[client:{client}:02:11:22:33:44:55] was unauthorized by Main Administrator lab-admin."
+    reason = ("the password was wrong" if kind == "password" else
+              "the user was blocked by MAC block/MAC Filter/Lock To AP")
+    return f'{header}failed to connect to {endpoint} with SSID "{ssid}" on channel 6 because {reason}.(1 time in the last minute)'
+
+
+def context230_events(texts):
+    return normalize_webhook({
+        "webhook_id": "synthetic-230", "received_at": RECEIVED_AT,
+        "source_ip": "192.0.2.1", "payload_sha256": "a" * 64,
+        "parsed_payload": {"Site": "Lab", "Controller": "Lab",
+                           "timestamp": CONTROLLER_TIMESTAMP_MS, "text": texts},
+    }, site_id_mapping=load_webhook_site_id_mapping('{"Lab":"synthetic-site"}'))
+
+
+@pytest.mark.parametrize("phrase", ["went online", "went offline", "is roaming from",
+                                    "was unauthorized by Main Administrator"])
+@pytest.mark.parametrize("subject", ["client", "ap", "ssid"])
+@pytest.mark.parametrize("kind", ["online", "offline", "password", "blocked"])
+def test_context230_display_values_do_not_choose_the_event(kind, subject, phrase):
+    text = context230_text(kind, **{subject: "Guest " + phrase})
+    event = context230_events([text])[0]
+    expected = "connection_failed" if kind in {"password", "blocked"} else kind
+    assert event["event"] == "omada.client_" + expected
+    assert event["parse_status"] == "parsed"
+    assert event["client_mac"] == "02:11:22:33:44:55"
+    assert event["raw_text"] == text
+    from app.visit_lifecycle.webhook_reader import _offline_evidence
+    evidence = _offline_evidence(event)
+    assert (evidence is not None and evidence.invalid_reason is None) == (kind == "offline")
+    if expected == "connection_failed":
+        assert event["failure_reason"] == ("WRONG_PASSWORD" if kind == "password" else "ACCESS_POLICY_BLOCKED")
+        assert event["occurrence_count"] == 1
+
+
+@pytest.mark.parametrize("name", ["went online", "went offline", "is roaming from",
+                                  "was unauthorized by Main Administrator"])
+def test_context230_genuine_unauthorized_has_post_client_verb(name):
+    event = context230_events([context230_text("unauthorized", client=name)])[0]
+    assert event["event"] == "omada.client_unauthorized"
+    assert event["action"] == "unauthorize"
+    assert event["action_source"] == "omada_controller"
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing-client-open", "missing-client-close", "nested-client", "missing-ap-open",
+    "missing-ap-close", "nested-ap", "unquoted-ssid", "missing-quote", "extra-quote",
+    "conflicting-online", "duplicate-offline", "invalid-client", "empty-client",
+    "prefix", "suffix", "no-event-verb", "naked-verb", "ap-only-clause", "quoted-body",
+])
+def test_context230_malformed_or_conflicting_offline_is_never_business_evidence(mutation):
+    text = context230_text(client="Guest went online")
+    changes = {
+        "missing-client-open": ("[client:", "client:"),
+        "missing-client-close": ("] (IP:", " (IP:"),
+        "nested-client": ("[client:", "[client:["),
+        "missing-ap-open": ("[ap:", "ap:"),
+        "missing-ap-close": ("] (31m", " (31m"),
+        "nested-ap": ("[ap:", "[ap:["),
+        "unquoted-ssid": ('SSID "Lab"', "SSID Lab"),
+        "missing-quote": ('SSID "Lab"', 'SSID "Lab'),
+        "extra-quote": ('SSID "Lab"', 'SSID "La"b"'),
+        "invalid-client": ("02:11:22:33:44:55", "not-a-mac"),
+        "empty-client": ("Guest went online:02:11:22:33:44:55", ""),
+        "no-event-verb": ("went offline", "associated"),
+        "naked-verb": ('went offline from SSID "Lab" on [ap:Lab-AP:02:AA:BB:CC:DD:01] (31m connected, 92.28MB).', "went offline"),
+        "ap-only-clause": ('went offline from SSID "Lab"', "went offline"),
+    }
+    if mutation in changes:
+        text = text.replace(*changes[mutation], 1)
+    elif mutation == "prefix":
+        text = "unexpected " + text
+    elif mutation == "suffix":
+        text += " unexpected"
+    elif mutation == "quoted-body":
+        text = '"' + text + '"'
+    else:
+        text += " went online" if mutation == "conflicting-online" else " went offline"
+    event = context230_events([text])[0]
+    assert event["event"] == "omada.webhook_unclassified"
+    assert event["parse_reason"] == "UNKNOWN_TEXT_FORMAT"
+    assert offline_event_proof(text) is None
+
+
+@pytest.mark.parametrize("kind", ["online", "offline", "password", "blocked"])
+def test_context230_spacing_case_variants_keep_full_dto(kind):
+    import re
+    text = context230_text(kind)
+    expected = context230_events([text])[0]
+    variant = re.sub(r"\s+", "\n  ", text.upper())
+    actual = context230_events([variant])[0]
+    assert actual["event"] == expected["event"]
+    assert actual["parse_status"] == expected["parse_status"]
+    assert actual["client_mac"] == expected["client_mac"]
+    assert actual.get("reported_traffic_bytes_estimate") == expected.get("reported_traffic_bytes_estimate")
+
+
+@pytest.mark.parametrize("mutation,warning", [
+    ("no-ip", "CLIENT_IP_MISSING"), ("bad-ip", "INVALID_CLIENT_IP"),
+    ("no-ap", "AP_MAC_MISSING"), ("bad-duration", "DURATION_INVALID"),
+    ("bad-traffic", "TRAFFIC_INVALID"),
+])
+def test_context230_partial_requires_a_proven_offline_clause(mutation, warning):
+    text = context230_text()
+    before, after = {
+        "no-ip": ("(IP: 192.0.2.1) ", ""),
+        "bad-ip": ("192.0.2.1", "invalid"),
+        "no-ap": (" on [ap:Lab-AP:02:AA:BB:CC:DD:01]", ""),
+        "bad-duration": ("31m connected", "invalid connected"),
+        "bad-traffic": ("92.28MB", "invalid"),
+    }[mutation]
+    text = text.replace(before, after)
+    event = context230_events([text])[0]
+    assert event["event"] == "omada.client_offline"
+    assert event["parse_status"] == "partial"
+    assert warning in event["parse_warnings"]
+    assert offline_event_proof(text)["client_mac"] == event["client_mac"]
+
+
+def test_context230_mixed_batch_is_deterministic_without_cross_item_inference():
+    import copy
+    texts = [context230_text(client="Guest went online"), context230_text("online"),
+             context230_text("password", ssid="Guest went offline"),
+             "[client:Lab:02:11:22:33:44:55]", "went offline",
+             context230_text().replace("went offline", "associated")]
+    before = copy.deepcopy(texts)
+    events = context230_events(texts)
+    assert texts == before
+    assert events == context230_events(texts)
+    assert [event["event"] for event in events] == ["omada.client_offline", "omada.client_online",
+        "omada.client_connection_failed", *("omada.webhook_unclassified" for _ in range(3))]
+    assert [event["normalized_event_id"] for event in events] == [f"synthetic-230:{i}" for i in range(len(texts))]
+    assert {event["schema_version"] for event in events} == {1}
+    assert {event["site_id"] for event in events} == {"synthetic-site"}
+    assert {event["controller_timestamp_ms"] for event in events} == {CONTROLLER_TIMESTAMP_MS}
+    assert [event["text_index"] for event in events] == list(range(len(texts)))
+
+
+@pytest.mark.parametrize("phrase", ["went online", "went offline", "is roaming from",
+                                    "was unauthorized by Main Administrator"])
+@pytest.mark.parametrize("subject", ["client", "ap", "ssid"])
+def test_context230_display_phrase_without_a_controller_clause_is_unclassified(phrase, subject):
+    # Replace the real clause, not a potentially identical display phrase.
+    text = context230_text(**{subject: "Guest " + phrase}).replace(
+        "] (IP: 192.0.2.1) went offline", "] (IP: 192.0.2.1) associated", 1)
+    event = context230_events([text])[0]
+    assert event["event"] == "omada.webhook_unclassified"
+    assert offline_event_proof(text) is None
+
+
+@pytest.mark.parametrize("tail", [" " * 20000 + "unexpected", " (" + " " * 20000 + "invalid)",
+                                  " (" + "word " * 4000 + "connected) extra", " (1m connected))"])
+def test_context230_long_malformed_tail_fails_without_permissive_fallback(tail):
+    text = context230_text().split(" (31m connected", 1)[0] + tail
+    assert context230_events([text])[0]["event"] == "omada.webhook_unclassified"
+    assert offline_event_proof(text) is None
+
+
+def test_context230_offline_proof_reads_positional_fields_not_embedded_parser_phrases():
+    text = context230_text(client='Guest from SSID "Fake" (IP: 192.0.2.99)',
+                           ssid="is roaming from [ap:Lab]")
+    proof = offline_event_proof(text)
+    assert proof["client_mac"] == "02:11:22:33:44:55"
+    assert proof["ap_mac"] == "02:AA:BB:CC:DD:01"
+    assert proof["client_ip"] == "192.0.2.1"
+    assert proof["ssid"] == "is roaming from [ap:Lab]"
+    assert proof["reported_connected_seconds"] == 1860
+    assert proof["reported_traffic_bytes_estimate"] == 96_762_593
+
+
+CONTEXT230_R2_VALUES = (
+    'Guest from SSID "Wrong"', 'User with SSID "Wrong"',
+    "Guest (30m connected, 99MB)", "Guest (IP: 203.0.113.12)",
+    "User on channel 48", "User was unauthorized by Main Administrator Bob.",
+)
+
+
+def context230_r2_text(kind="offline", **names):
+    names.setdefault("ssid", "Zefer_Parki")
+    return context230_text(kind, **names).replace("192.0.2.1)", "192.0.2.2)").replace(
+        "31m connected, 92.28MB", "5m connected, 2MB")
+
+
+def context230_assert_valid_offline_consumers(event):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from zoneinfo import ZoneInfo
+    from app.public_traffic.service import PublicTrafficService
+    from app.visit_lifecycle.webhook_reader import _offline_evidence
+    evidence = _offline_evidence(event)
+    assert evidence is not None and evidence.invalid_reason is None
+    assert evidence.client_mac == "02:11:22:33:44:55"
+    assert evidence.client_ip == event["client_ip"]
+    assert evidence.ssid == event["ssid"]
+    assert evidence.reported_connected_seconds == event["reported_connected_seconds"]
+    assert evidence.reported_traffic_total_bytes == event["reported_traffic_bytes_estimate"]
+    repository = Mock()
+    service = PublicTrafficService(config=SimpleNamespace(ssid="Zefer_Parki", frontend_refresh_seconds=60),
+                                   repository=repository, logger=Mock())
+    service.timezone = ZoneInfo("UTC")
+    classified = service.classify_record(event)
+    assert classified.target is True
+    assert classified.event.skip_reason is None
+    assert classified.event.ssid == event["ssid"]
+    assert classified.event.traffic_bytes == event["reported_traffic_bytes_estimate"]
+    assert repository.mock_calls == []
+
+
+@pytest.mark.parametrize("kind", ["offline", "online", "password", "blocked"])
+@pytest.mark.parametrize("subject", ["client", "ap", "ssid"])
+@pytest.mark.parametrize("fragment", CONTEXT230_R2_VALUES,
+    ids=["from-ssid", "with-ssid", "report", "ip", "channel", "administrator"])
+def test_context230_R2_dto_fields_are_not_taken_from_opaque_display_values(kind, subject, fragment):
+    text = context230_r2_text(kind, **{subject: fragment})
+    event = context230_events([text])[0]
+    if subject == "ssid" and '"' in fragment:
+        # A quoted field containing unescaped nested quotes is not a valid
+        # controller clause, unlike quotes inside an opaque named-MAC block.
+        assert event["event"] == "omada.webhook_unclassified"
+        return
+    expected = "connection_failed" if kind in {"password", "blocked"} else kind
+    assert event["event"] == "omada.client_" + expected
+    assert event["parse_status"] == "parsed"
+    assert event["parse_warnings"] == []
+    assert event["client_mac"] == "02:11:22:33:44:55"
+    assert event["ap_mac"] == "02:AA:BB:CC:DD:01"
+    assert event["client_name"] == (fragment if subject == "client" else "Lab")
+    assert event["ap_name"] == (fragment if subject == "ap" else "Lab-AP")
+    assert event["ssid"] == (fragment if subject == "ssid" else "Zefer_Parki")
+    assert event["channel"] == (None if kind == "offline" else 6)
+    assert event["raw_text"] == text
+    if kind in {"online", "offline"}:
+        assert event["client_ip"] == "192.0.2.2"
+    else:
+        assert "client_ip" not in event
+        assert event["failure_reason"] == ("WRONG_PASSWORD" if kind == "password" else "ACCESS_POLICY_BLOCKED")
+        assert event["controller_reason_raw"] == ("password was wrong" if kind == "password" else "MAC block/MAC Filter/Lock To AP")
+        assert event["occurrence_count"] == 1
+        assert event["occurrence_window_seconds"] == 60
+    if kind == "offline":
+        assert event["reported_connected_raw"] == "5m"
+        assert event["reported_connected_seconds"] == 300
+        assert event["reported_traffic_raw"] == "2MB"
+        assert event["reported_traffic_value"] == 2
+        assert event["reported_traffic_unit"] == "MB"
+        assert event["reported_traffic_bytes_estimate"] == 2097152
+        assert offline_event_proof(text)["ssid"] == event["ssid"]
+        context230_assert_valid_offline_consumers(event)
+
+
+@pytest.mark.parametrize("fragment", CONTEXT230_R2_VALUES,
+    ids=["from-ssid", "with-ssid", "report", "ip", "channel", "administrator"])
+def test_context230_R2_administrator_is_the_actual_post_client_value(fragment):
+    text = context230_r2_text("unauthorized", client=fragment).replace("lab-admin.", "Alice.")
+    event = context230_events([text])[0]
+    assert event["event"] == "omada.client_unauthorized"
+    assert event["parse_status"] == "parsed"
+    assert event["parse_warnings"] == []
+    assert event["administrator"] == "Alice"
+    assert event["client_mac"] == "02:11:22:33:44:55"
+    assert event["action"] == "unauthorize" and event["action_source"] == "omada_controller"
+
+
+@pytest.mark.parametrize("missing", ["ip", "report", "ap", "channel", "administrator"])
+def test_context230_R2_display_data_cannot_fill_absent_optional_controller_fields(missing):
+    if missing == "ip":
+        text = context230_r2_text(client="Guest (IP: 203.0.113.12)").replace("(IP: 192.0.2.2) ", "")
+    elif missing == "report":
+        text = context230_r2_text(client="Guest (30m connected, 99MB)").replace(" (5m connected, 2MB).", "")
+    elif missing == "ap":
+        text = context230_r2_text(ssid="is roaming from [ap:Lab]").replace(" on [ap:Lab-AP:02:AA:BB:CC:DD:01]", "")
+    elif missing == "channel":
+        text = context230_r2_text("online", ap="User on channel 48").replace(" on channel 6.", "")
+    else:
+        text = context230_r2_text("unauthorized", client="User was unauthorized by Main Administrator Bob.").replace(" lab-admin.", "")
+    event = context230_events([text])[0]
+    assert event["event"] != "omada.webhook_unclassified"
+    if missing == "report":
+        assert event["reported_connected_seconds"] is None
+        assert event["reported_traffic_bytes_estimate"] is None
+        assert event["parse_status"] == "parsed"
+    else:
+        field, warning = {"ip": ("client_ip", "CLIENT_IP_MISSING"), "ap": ("ap_mac", "AP_MAC_MISSING"),
+            "channel": ("channel", "CHANNEL_MISSING"), "administrator": ("administrator", "ADMINISTRATOR_MISSING")}[missing]
+        assert event[field] is None
+        assert event["parse_status"] == "partial"
+        assert event["parse_warnings"] == [warning]
+
+
+def test_context230_R2_invalid_actual_ip_is_not_used_as_a_channel_or_replaced_by_a_name():
+    text = context230_r2_text("online", client="Guest (IP: 203.0.113.12)").replace(
+        "(IP: 192.0.2.2)", "(IP: on channel 48)")
+    event = context230_events([text])[0]
+    assert event["event"] == "omada.client_online"
+    assert event["client_ip"] is None
+    assert event["channel"] == 6
+    assert event["parse_warnings"] == ["INVALID_CLIENT_IP"]
+
+
+def test_context230_R2_rejects_old_contaminated_offline_values_instead_of_weakening_guards():
+    text = context230_r2_text(client='Guest from SSID "Wrong" (30m connected, 99MB) (IP: 203.0.113.12)')
+    event = context230_events([text])[0]
+    context230_assert_valid_offline_consumers(event)
+    from app.visit_lifecycle.webhook_reader import _offline_evidence
+    for key, value in {"ssid": "Wrong", "client_ip": "203.0.113.12", "reported_connected_seconds": 1800,
+                       "reported_traffic_bytes_estimate": 103809024}.items():
+        contaminated = dict(event, **{key: value})
+        assert _offline_evidence(contaminated).invalid_reason == "invalid_offline_provenance"
 
 
 def single(record):
@@ -1289,7 +1608,7 @@ def test_registry_fixtures_have_one_unambiguous_handler(
     assert matches == [event_name]
 
 
-def test_registry_order_defines_overlapping_pattern_priority():
+def test_context_230_conflicting_event_clauses_are_not_resolved_by_priority():
     raw_text = (
         "[client:12-4E-9B-DE-22-A7]\n"
         "went online\n"
@@ -1303,12 +1622,10 @@ def test_registry_order_defines_overlapping_pattern_priority():
     ]
     event = single(raw_record(raw_text))
 
-    assert matches == [
-        "omada.client_unauthorized",
-        "omada.client_online",
-    ]
-    assert event["event"] == "omada.client_unauthorized"
-    assert event["parse_status"] == "parsed"
+    assert matches == []
+    assert event["event"] == "omada.webhook_unclassified"
+    assert event["parse_status"] == "unclassified"
+    assert event["parse_reason"] == "UNKNOWN_TEXT_FORMAT"
 
 
 def test_event_handler_registry_is_ordered_and_unique():

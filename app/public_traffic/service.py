@@ -8,6 +8,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from app.integrations.omada.webhook_normalizer import (
+    offline_event_proof,
+    offline_record_matches_proof,
+)
+
 from .models import (
     INT64_MAX,
     ClassifiedRecord,
@@ -75,6 +80,15 @@ class PublicTrafficService:
                 warning_code="missing_normalized_event_id",
             )
         event_id = raw_event_id.strip()
+        proof = offline_event_proof(record.get("raw_text"))
+        if (
+            proof is None
+            or not offline_record_matches_proof(record, proof)
+            or record.get("site_resolution_status") != "resolved"
+            or not isinstance(record.get("site_id"), str)
+            or not record["site_id"].strip()
+        ):
+            return ClassifiedRecord(target=False)
 
         raw_ssid = record.get("ssid")
         ssid = (
