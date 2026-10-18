@@ -35,6 +35,25 @@ Baseline: `main@27087766d3f2e104a44da3f36aa6e72a082b12de`
 
 ## Boundary
 
+Device Detail optionally adds `result.observed_device_hints`, independently of
+the unchanged canonical `result.fingerprint`. One read-only indexed query reads
+at most 256 retained rows for the authorized Site/canonical MAC in
+`[max(retention cutoff, site_first_seen_at), pinned UTC as-of)`. The five exact
+schema-validated groups are Portal, DHCP, TCP SYN, TLS and QUIC. Latest corrupt
+or unsupported observations are not replaced with older records; missing
+groups describe only the bounded window. Portal model/OS retain separate
+provenance; the OS platform can come only from the same record as its major.
+The reader admits at most 65,536 bytes per payload, at most 256 validations,
+five groups and a 65,536-byte DTO; TCP v2 retains all admitted 40 option records.
+Optional failures preserve the Device Card. No list enrichment, new endpoint,
+polling, capture, classifier, database mutation or live-service claim is added.
+The collapsed details reuse existing wrapping styles and safe text nodes.
+The unchanged `mode=ro` helper may let SQLite create its native empty `-wal`
+and coordination `-shm` files. This does not authorize application writes,
+new database/schema creation, new transaction frames, manual checkpoints,
+sidecar handling, durability changes or `immutable=1`. Main database bytes
+and existing committed WAL data remain unchanged by the optional reader.
+
 Admin authentication is separate from guest Portal authentication.
 
 Current UI pages:

@@ -137,13 +137,90 @@ def test_prefix_guard_requires_unique_ordered_fingerprint_boundaries(malformed):
         _assert_legacy_prefix_unchanged(prefix, changed)
 
 
+def _without_rich_hints_insertions(candidate):
+    """TL-approved exception: remove only two additive, exact line spans."""
+    begin = b"  // DF-RICH-HINTS-01:BEGIN\n"
+    end = b"  // DF-RICH-HINTS-01:END\n\n"
+    call = b"    content.append(observedDeviceHintsCard(result.observed_device_hints));\n"
+    assert candidate.count(b"// DF-RICH-HINTS-01:BEGIN") == candidate.count(begin) == 1
+    assert candidate.count(b"// DF-RICH-HINTS-01:END") == candidate.count(end) == 1
+    assert candidate.count(b"content.append(observedDeviceHintsCard(result.observed_device_hints));") == candidate.count(call) == 1
+    start, stop, call_start = candidate.index(begin), candidate.index(end), candidate.index(call)
+    assert start < stop and stop + len(end) < call_start
+    assert start == 0 or candidate[start - 1:start] == b"\n"
+    assert candidate[call_start - 1:call_start] == b"\n"
+    # Includes exactly the inserted newlines; no old JS span is masked.
+    return candidate[:start] + candidate[stop + len(end):call_start] + candidate[call_start + len(call):]
+
+
+def _rich_hints_base_prefixes():
+    source = (ROOT / "app/admin_web/static/admin.js").read_bytes()
+    prefix = source.split(b"/* NI-04: independent bounded Service Intelligence coordinator. */")[0].rstrip()
+    # Additional exact guard against the repinned base that admitted PR #222.
+    # The original historical commit/PR222 span guard below is not replaced.
+    original = subprocess.check_output(["git", "show", "ae1f99491318e32e247ea5d5877d53650cc8d78e:app/admin_web/static/admin.js"], cwd=ROOT).split(
+        b"/* NI-04: independent bounded Service Intelligence coordinator. */")[0].rstrip()
+    # Preserve the existing CRLF-only checkout policy, without new normalization.
+    return prefix.replace(b"\r\n", b"\n"), original.replace(b"\r\n", b"\n")
+
+
+@pytest.mark.parametrize("old,new", [
+    (b'  const resolved = {', b'  const resolved = { /* canary */'),
+    (b'  function fingerprintCard(fingerprint)', b'  function fingerprintCard(changed)'),
+    (b'card("Fingerprint Information",', b'card("Changed canonical Fingerprint",'),
+    (b'  function parseVisitFilters(', b'  function changedVisitFilters('),
+    (b'content.append(fingerprintCard(result.fingerprint));', b'content.append(fingerprintCard(null));'),
+    (b'card("Latest Site snapshot",', b'card("Changed Site snapshot",'),
+])
+def test_rich_hints_exception_rejects_every_external_canary_including_canonical_fingerprint(old, new):
+    prefix, original = _rich_hints_base_prefixes()
+    assert prefix.count(old) == 1
+    assert _without_rich_hints_insertions(prefix) == original
+    with pytest.raises(AssertionError):
+        assert _without_rich_hints_insertions(prefix.replace(old, new, 1)) == original
+
+
+@pytest.mark.parametrize("case", ["missing_begin", "duplicate_begin", "missing_end", "duplicate_end",
+                                  "end_newlines", "wrong_call_indent", "missing_call", "duplicate_call",
+                                  "reversed", "call_before_block"])
+def test_rich_hints_exception_rejects_nonexact_or_nonunique_boundaries(case):
+    prefix, _ = _rich_hints_base_prefixes()
+    begin = b"  // DF-RICH-HINTS-01:BEGIN\n"
+    end = b"  // DF-RICH-HINTS-01:END\n\n"
+    call = b"    content.append(observedDeviceHintsCard(result.observed_device_hints));\n"
+    changes = {
+        "missing_begin": (begin, b""), "duplicate_begin": (begin, begin * 2),
+        "missing_end": (end, b""), "duplicate_end": (end, end * 2),
+        "end_newlines": (end, end[:-1]), "wrong_call_indent": (call, call[1:]),
+        "missing_call": (call, b""), "duplicate_call": (call, call * 2),
+    }
+    if case == "reversed":
+        changed = prefix.replace(begin, b"TEMP_ANCHOR\n", 1).replace(end, begin, 1).replace(b"TEMP_ANCHOR\n", end, 1)
+    elif case == "call_before_block":
+        changed = prefix.replace(call, b"", 1).replace(begin, call + begin, 1)
+    else:
+        old, new = changes[case]
+        changed = prefix.replace(old, new, 1)
+    with pytest.raises(AssertionError):
+        _without_rich_hints_insertions(changed)
+
+
+def test_rich_hints_exception_is_limited_to_the_approved_additions():
+    prefix, original = _rich_hints_base_prefixes()
+    assert _without_rich_hints_insertions(prefix) == original
+    changed_addition = prefix.replace(b'card("Observed Device Hints /', b'card("Allowed addition canary /', 1)
+    assert changed_addition != prefix
+    assert _without_rich_hints_insertions(changed_addition) == original
+
+
 def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
     import hashlib
     import subprocess
-    source = (ROOT / "app/admin_web/static/admin.js").read_bytes()
-    prefix = source.split(b"/* NI-04: independent bounded Service Intelligence coordinator. */")[0].rstrip()
+    prefix, admitted = _rich_hints_base_prefixes()
+    without_additions = _without_rich_hints_insertions(prefix)
+    assert without_additions == admitted
     original = subprocess.check_output(["git", "show", "22cdde5d4168de02d142c840028a4d66167e47f7:app/admin_web/static/admin.js"], cwd=ROOT).rstrip()
-    _assert_legacy_prefix_unchanged(prefix, original)
+    _assert_legacy_prefix_unchanged(without_additions, original)
     for name in ("app/admin_web/static/device_protocol_intelligence.js", "app/network_protocol_intelligence/read_service.py",
                  "app/network_protocol_intelligence/models.py", "app/network_metadata_projection/read_service.py"):
         # Recovery freezes the current accepted baseline, including the admitted
