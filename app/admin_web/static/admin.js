@@ -156,8 +156,8 @@
   }
 
   const FINGERPRINT_DIMENSIONS = [
-    ["Type", "device_class_result"], ["Fingerprint Platform", "platform_result"],
-    ["Manufacturer", "manufacturer_result"], ["Model Family", "model_result"],
+    ["Type", "device_class_result", "device_class"], ["Fingerprint Platform", "platform_result", "platform_family"],
+    ["Manufacturer", "manufacturer_result", "manufacturer_family"], ["Model Family", "model_result", "model_family"],
   ];
 
   function fingerprintSummaryEntries(fingerprint) {
@@ -171,33 +171,117 @@
       })];
   }
 
-  function fingerprintDetailEntries(dimension) {
+  function fingerprintDetailEntries(dimension, diagnostics, dimensionName) {
     if (!dimension) return [];
-    return [["Canonical value", dimension.canonical_value_id], ["Status", dimension.status],
+    const references = dimension.knowledge_references || [];
+    const provenances = new Set(references.map(reference => JSON.stringify([
+      reference.knowledge_provenance_id, reference.knowledge_provenance_digest])));
+    const entries = [["Canonical value", dimension.canonical_value_id], ["Status", dimension.status],
       ["Support level", dimension.support_level],
-      ["Supporting sources", (dimension.supporting_origin_groups || []).join(", ")],
-      ["Contradicting sources", (dimension.contradicting_origin_groups || []).join(", ")],
-      ["Not-evaluable sources", (dimension.not_evaluable_origin_groups || []).join(", ")],
+      ["Supporting origin groups", (dimension.supporting_origin_groups || []).join(", ")],
+      ["Contradicting origin groups", (dimension.contradicting_origin_groups || []).join(", ")],
+      ["Not-evaluable origin groups", (dimension.not_evaluable_origin_groups || []).join(", ")],
       ["Out-of-scope references", (dimension.out_of_scope_taxon_references || []).join(", ")],
-      ["Explanation codes", (dimension.explanation_codes || []).join(", ")],
-      ["Knowledge references", (dimension.knowledge_references || []).map((reference) =>
+      ["Aggregate explanation codes (all origins, not selected-value provenance)", (dimension.explanation_codes || []).join(", ")],
+      ["Knowledge references", references.map((reference) =>
         `${reference.canonical_knowledge_record_id} · ${reference.rule_or_source_record_identity} · ${reference.knowledge_provenance_id} · ${reference.knowledge_provenance_digest} · ${reference.knowledge_bundle_id} · ${reference.knowledge_bundle_digest}`).join("; ")]];
+    entries.push(["Knowledge provenance grouping", `${references.length} record references · ${provenances.size} provenance groups; not a count of independent sources`]);
+    if (!diagnostics || diagnostics.state !== "available" || !Array.isArray(diagnostics.origins)) {
+      entries.push(["Origin diagnostics", "Unavailable. Aggregate codes cannot identify which knowledge source supported the selected value."]);
+      return entries;
+    }
+    const labels = {dhcp: "DHCP / K1", mac_registry: "MAC registry / K4"};
+    const supporting = [], other = [];
+    diagnostics.origins.forEach(origin => {
+      const row = (origin.dimensions || []).find(item => item.dimension_name === dimensionName);
+      if (!row) return;
+      const description = `${labels[origin.origin_group] || origin.origin_group} — ${row.internal_state}`
+        + `${row.selected_canonical_value_id ? ` (${row.selected_canonical_value_id})` : ""}; `
+        + `origin-wide diagnostics: ${(origin.explanation_codes || []).join(", ") || "none"}; `
+        + `dimension diagnostics: ${(row.explanation_codes || []).join(", ") || "none"}; `
+        + `assessment: ${origin.assessment.artifact_id} · ${origin.assessment.content_sha256}`;
+      const selected = dimension.status === "resolved" && row.internal_state === "resolved"
+        && row.selected_canonical_value_id === dimension.canonical_value_id
+        && (dimension.supporting_origin_groups || []).includes(origin.origin_group);
+      (selected ? supporting : other).push(description);
+    });
+    entries.push(["Retained selected-value support", supporting.join("; ") || "No selected-value origin detail available."]);
+    entries.push(["Other-origin diagnostics (not selected-value support)", other.join("; ") || "None"]);
+    return entries;
   }
 
   function fingerprintCard(fingerprint) {
     const value = card("Fingerprint Information", fingerprintSummaryEntries(fingerprint));
     value.className += " fingerprint-card";
-    value.append(node("p", "live-detail", "Advisory fingerprint. Values come from a persisted production classification."));
+    value.append(node("p", "live-detail", "Advisory fingerprint. Classified at is the last retained production classification, not a live assessment. No live freshness or producer-health check is performed."));
     if (fingerprint && FINGERPRINT_DIMENSIONS.some(([, field]) => fingerprint[field])) {
       const details = node("details", "fingerprint-details");
       details.append(node("summary", null, "Fingerprint details"));
-      FINGERPRINT_DIMENSIONS.forEach(([label, field]) => {
-        if (fingerprint[field]) details.append(node("h3", null, label), definitionList(fingerprintDetailEntries(fingerprint[field])));
+      details.append(node("p", "live-detail", "Selected-value support and other-origin diagnostics are separate. An aggregate expiry code is not proof that the selected claim used expired knowledge."));
+      FINGERPRINT_DIMENSIONS.forEach(([label, field, dimensionName]) => {
+        if (fingerprint[field]) details.append(node("h3", null, label), definitionList(fingerprintDetailEntries(fingerprint[field], fingerprint.origin_diagnostics, dimensionName)));
       });
       value.append(details);
     }
     return value;
   }
+
+  // DF-RICH-HINTS-01:BEGIN
+  function observedDeviceHintsCard(hints) {
+    const value = hints || {state: "unavailable"};
+    const model = value.reported_model;
+    const os = value.reported_os;
+    const platforms = {android: "Android", ios: "iOS", macos: "macOS", chromeos: "ChromeOS", windows: "Windows", linux: "Linux"};
+    const reportedOS = os ? (os.platform_family && platforms[os.platform_family]
+      ? `${platforms[os.platform_family]} ${os.os_major}`
+      : `OS major: ${os.os_major} (reported, platform not provided)`) : null;
+    const provenance = (field) => field
+      ? `${field.source} · ${field.schema} · ${field.observed_at_utc} UTC · ${field.quality_state}` : null;
+    const result = card("Observed Device Hints / Наблюдаемые сведения", [
+      ["State", value.state === "observed" ? "Observed / unverified"
+        : (value.state === "no_evidence" ? "No evidence in bounded window" : "Unavailable")],
+      ["Reported model", model ? model.value : null], ["Model source / observed at", provenance(model)],
+      ["Reported OS / major", reportedOS], ["OS source / observed at", provenance(os)],
+    ]);
+    result.className += " fingerprint-card";
+    result.append(node("p", "live-detail", "Observed / unverified — device-reported or network-observed, not confirmed identity."));
+    result.append(node("p", "live-detail", "Latest up to 256 retained evidence records for this Site/device; earlier history not searched. Observation timestamps are historical, not a live service status."));
+    const details = node("details", "fingerprint-details");
+    details.append(node("summary", null, "All observed details"));
+    const names = {portal_headers: "Portal / Browser", dhcp: "DHCP", tcp_syn: "TCP SYN", tls_client: "TLS Client", quic_client: "QUIC Client"};
+    const label = (key) => key.replaceAll("_", " ").replace(/\b(ip|tcp|tls|quic|os|mss|ua|ja4|dhcp)\b/g, (word) => word.toUpperCase())
+      .replace(/^./, (first) => first.toUpperCase());
+    const fieldValue = (field) => Array.isArray(field) ? (field.length ? field.map(display).join(", ") : "—") : display(field);
+    const groups = Array.isArray(value.sources) ? value.sources.slice(0, 5) : [];
+    groups.forEach((group) => {
+      const section = node("section");
+      section.append(node("h3", null, names[group.source_kind] || "Observed source"));
+      const state = {observed: "Observed / unverified", not_observed_in_bounded_window: "Not observed in bounded window",
+        unsupported: "Unsupported schema", unavailable: "Unavailable"}[group.state] || "Unavailable";
+      section.append(definitionList([["State", state], ["Source kind", group.source_kind], ["Schema", group.schema],
+        ["Observed at (UTC)", group.observed_at_utc], ["Quality", group.quality_state],
+        ["Origin", group.origin_category === "client_reported" ? "Client reported"
+          : (group.origin_category === "network_observed" ? "Network observed" : null)]]));
+      if (group.state === "observed" && group.fields && typeof group.fields === "object") {
+        const entries = Object.entries(group.fields).filter(([key]) => key !== "tcp_option_records");
+        section.append(definitionList(entries.map(([key, field]) => [label(key), fieldValue(field)])));
+        if (Array.isArray(group.fields.tcp_option_records)) {
+          const options = node("details", "fingerprint-details");
+          const records = group.fields.tcp_option_records.slice(0, 40);
+          options.append(node("summary", null, `TCP option records (${records.length})`));
+          records.forEach((record, index) => {
+            options.append(node("h4", null, `Option ${index + 1}`),
+              definitionList(Object.entries(record).map(([key, field]) => [label(key), fieldValue(field)])));
+          });
+          section.append(options);
+        }
+      }
+      details.append(section);
+    });
+    result.append(details);
+    return result;
+  }
+  // DF-RICH-HINTS-01:END
 
   function parseVisitFilters(fromValue, toValue, statusValue) {
     const hasFrom = typeof fromValue === "string" && fromValue !== "";
@@ -612,6 +696,7 @@
     const identity = result.identity;
     content.append(card("Identity", deviceIdentityEntries(identity)));
     content.append(fingerprintCard(result.fingerprint));
+    content.append(observedDeviceHintsCard(result.observed_device_hints));
     content.append(card("Latest Site snapshot", deviceDetailEntries(result.latest_snapshot, identity.device_type_key)));
     content.append(card("Latest client observation", deviceDetailEntries(result.latest_client_observation)));
     const visits = Array.isArray(result.recent_visits) ? result.recent_visits : [];
