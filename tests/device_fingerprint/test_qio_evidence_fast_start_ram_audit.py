@@ -727,3 +727,145 @@ def test_R2_E_ongoing_counter_reset_is_unreliable_and_not_quiet(tmp_path):
     assert code == 3 and record["status"] == "incomplete"
     assert record["category_code"] == "resource_deferred"
     repo.close()
+
+
+@pytest.fixture
+def lab_ram_cgroup(tmp_path, monkeypatch):
+    """Disposable proc/sys facsimile; never inspect or change host containment."""
+    import resource
+    from types import SimpleNamespace
+    base = tmp_path / "kernel"
+    def write(path, text):
+        target = base / path.lstrip("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="ascii")
+    write("/proc/meminfo", "MemTotal: 16777216 kB\nMemAvailable: 12582912 kB\n")
+    write("/proc/self/status", "VmSize: 262144 kB\nVmHWM: 131072 kB\n")
+    write("/proc/vmstat", "pswpin 0\npswpout 0\npgscan_direct 0\npgsteal_direct 0\n")
+    mount = "29 23 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec - cgroup2 cgroup rw\n"
+    write("/proc/self/mountinfo", mount)
+    write("/proc/self/cgroup", "0::/lab/audit\n")
+    def limit(group, maximum, current):
+        write("/sys/fs/cgroup/" + group + "/memory.max", str(maximum) + "\n")
+        write("/sys/fs/cgroup/" + group + "/memory.current", str(current) + "\n")
+    limit("lab", 12*audit.GIB, 2*audit.GIB)
+    limit("lab/audit", 10*audit.GIB, audit.GIB)
+    soft = [resource.RLIM_INFINITY]
+    monkeypatch.setattr(resource, "getrlimit", lambda kind:(soft[0], resource.RLIM_INFINITY))
+    monkeypatch.setattr(audit, "Path", lambda path:base / str(path).lstrip("/"))
+    clock = [0.0]
+    monkeypatch.setattr(audit.time, "sleep", lambda seconds:clock.__setitem__(0,clock[0]+seconds))
+    monkeypatch.setattr(audit.time, "monotonic", lambda:clock[0])
+    return SimpleNamespace(base=base, write=write, limit=limit, soft=soft, mount=mount,
+        root=base/"sys/fs/cgroup", leaf=base/"sys/fs/cgroup/lab/audit")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux cgroup2 synthetic resource contract")
+@pytest.mark.parametrize("bounded", ["leaf", "ancestor", "both"])
+def test_LAB_RAM_01_verified_root_without_memory_files_and_bounded_descendant(lab_ram_cgroup, bounded):
+    fixture = lab_ram_cgroup
+    if bounded == "leaf": fixture.limit("lab", "max", 2*audit.GIB)
+    if bounded == "ancestor": fixture.limit("lab/audit", "max", audit.GIB)
+    expected = (10 if bounded == "ancestor" else 9)*audit.GIB
+    assert not (fixture.root/"memory.max").exists()
+    assert not (fixture.root/"memory.current").exists()
+    result = audit.resource_facts()
+    assert result["containment"] is True and result["cgroup_headroom"] == expected
+    assert result["swap_active"] is False and result["peak_rss_bytes"] == 128*1024**2
+    assert result["observation_interval_seconds"] == .25
+    admission = audit.memory_admission(2*audit.GIB, result)
+    assert admission["headroom"] == expected
+    assert admission["required_available"] == (9*2*audit.GIB+3)//4 + (15*16*audit.GIB+99)//100
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux cgroup2 synthetic resource contract")
+@pytest.mark.parametrize("membership", ["/lab/audit", "/"])
+def test_LAB_RAM_01_unlimited_hierarchy_never_invents_containment(lab_ram_cgroup, membership):
+    fixture = lab_ram_cgroup
+    fixture.write("/proc/self/cgroup", "0::" + membership + "\n")
+    fixture.limit("lab", "max", 0)
+    fixture.limit("lab/audit", "max", 0)
+    result = audit._resource_snapshot()
+    assert result["containment"] is False
+    assert result["cgroup_headroom"] is None and result["address_headroom"] is None
+    with pytest.raises(audit.AuditStop, match="resource_deferred"): audit.resource_facts()
+    with pytest.raises(audit.AuditStop, match="resource_deferred"):
+        audit.memory_admission(1, dict(result, swap_active=False))
+    fixture.soft[0] = 8*audit.GIB
+    result = audit.resource_facts()
+    assert result["containment"] is True and result["cgroup_headroom"] is None
+    assert result["address_headroom"] == 8*audit.GIB - 256*1024**2
+    assert audit.memory_admission(audit.GIB, result)["headroom"] == result["address_headroom"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux cgroup2 synthetic resource contract")
+@pytest.mark.parametrize("kind", ["ancestor", "leaf", "both", "exhausted", "zero", "address", "available"])
+def test_LAB_RAM_01_all_effective_limits_conservatively_bound_admission(lab_ram_cgroup, kind):
+    fixture = lab_ram_cgroup
+    expected = audit.GIB
+    if kind in {"ancestor", "both"}: fixture.limit("lab", 4*audit.GIB, 3*audit.GIB)
+    if kind in {"leaf", "both"}: fixture.limit("lab/audit", 3*audit.GIB, 2*audit.GIB)
+    if kind == "exhausted": fixture.limit("lab/audit", 1, 2); expected = 0
+    if kind == "zero": fixture.limit("lab/audit", 0, 0); expected = 0
+    if kind == "address": fixture.soft[0] = audit.GIB + 256*1024**2
+    if kind == "available":
+        fixture.write("/proc/meminfo", "MemTotal: 16777216 kB\nMemAvailable: 1048576 kB\n")
+    result = audit.resource_facts()
+    assert result["containment"] is True
+    assert min(result["mem_available"], result["cgroup_headroom"],
+        result["address_headroom"] if result["address_headroom"] is not None else audit.MAX_INT) == expected
+    with pytest.raises(audit.AuditStop, match="resource_deferred"):
+        audit.memory_admission(audit.GIB, result)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux cgroup2 synthetic resource contract")
+@pytest.mark.parametrize("group", ["lab", "lab/audit"])
+@pytest.mark.parametrize("name", ["memory.max", "memory.current"])
+@pytest.mark.parametrize("bad", ["missing", "garbage", "-1", "9223372036854775808", "1_000", "01", "", "long", "symlink", "dangling", "directory", "fifo"])
+def test_LAB_RAM_01_nonroot_resource_files_fail_closed(lab_ram_cgroup, group, name, bad):
+    fixture = lab_ram_cgroup
+    fixture.soft[0] = 8*audit.GIB  # A valid address cap cannot excuse corrupt cgroup facts.
+    target = fixture.root/group/name
+    if bad in {"missing", "symlink", "dangling", "directory", "fifo"}:
+        target.unlink()
+        if bad in {"symlink", "dangling"}:
+            destination = fixture.leaf/"absent" if bad == "dangling" else fixture.root/"lab/memory.current"
+            target.symlink_to(destination)
+        if bad == "directory": target.mkdir()
+        if bad == "fifo": os.mkfifo(target)
+    else: target.write_text("1"+"\n"*128+"garbage" if bad == "long" else bad, encoding="ascii")
+    with pytest.raises(audit.AuditStop, match="resource_deferred"): audit.resource_facts()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux cgroup2 synthetic resource contract")
+@pytest.mark.parametrize("bad", ["no-mount", "v1", "subtree-root", "duplicate-mount", "nested-mount", "bad-mount",
+    "relative", "escape", "dot", "double-slash", "trailing-slash", "backslash", "duplicate-membership", "no-membership",
+    "absent-group", "group-symlink", "root-symlink", "root-max", "root-current", "counter-missing", "counter-malformed"])
+def test_LAB_RAM_01_unverified_root_paths_and_counters_defer(lab_ram_cgroup, bad):
+    fixture = lab_ram_cgroup
+    mounts = {"no-mount":"", "v1":fixture.mount.replace("cgroup2", "cgroup"),
+        "subtree-root":fixture.mount.replace("0:26 / ", "0:26 /hidden "),
+        "duplicate-mount":fixture.mount*2, "nested-mount":fixture.mount + fixture.mount.replace("/sys/fs/cgroup ", "/sys/fs/cgroup/lab "),
+        "bad-mount":"not mountinfo\n"}
+    memberships = {"relative":"lab/audit", "escape":"/lab/../audit", "dot":"/lab/./audit", "double-slash":"//lab/audit",
+        "trailing-slash":"/lab/audit/", "backslash":"/lab\\audit", "absent-group":"/not-present"}
+    if bad in mounts: fixture.write("/proc/self/mountinfo", mounts[bad])
+    if bad in memberships: fixture.write("/proc/self/cgroup", "0::"+memberships[bad]+"\n")
+    if bad == "duplicate-membership": fixture.write("/proc/self/cgroup", "0::/lab/audit\n0::/lab\n")
+    if bad == "no-membership": fixture.write("/proc/self/cgroup", "1:memory:/lab/audit\n")
+    if bad in {"group-symlink", "root-symlink"}:
+        target = fixture.leaf if bad == "group-symlink" else fixture.root
+        saved = target.with_name(target.name+"-saved")
+        target.rename(saved); target.symlink_to(saved, target_is_directory=True)
+    if bad == "root-max": fixture.write("/sys/fs/cgroup/memory.max", "max\n")
+    if bad == "root-current": fixture.write("/sys/fs/cgroup/memory.current", "0\n")
+    if bad == "counter-missing": fixture.write("/proc/vmstat", "pswpin 0\npswpout 0\npgscan_direct 0\n")
+    if bad == "counter-malformed": fixture.write("/proc/vmstat", "pswpin invalid\npswpout 0\npgscan_direct 0\npgsteal_direct 0\n")
+    with pytest.raises(audit.AuditStop, match="resource_deferred"): audit.resource_facts()
+
+
+@pytest.mark.parametrize("changes", [dict(containment=False), dict(cgroup_headroom=0), dict(address_headroom=0),
+    dict(mem_available=1), dict(swap_active=True), dict(cgroup_headroom=True), dict(address_headroom=-1)])
+def test_LAB_RAM_01_portable_memory_admission_negative_canaries(changes):
+    with pytest.raises(audit.AuditStop, match="resource_deferred"):
+        audit.memory_admission(audit.GIB, facts(**changes))

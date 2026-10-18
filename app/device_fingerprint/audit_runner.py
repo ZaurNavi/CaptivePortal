@@ -94,6 +94,69 @@ def resource_facts():
     except Exception: raise AuditStop("resource_deferred") from None
 
 
+def _cgroup_memory_headroom():
+    """Only the verified full cgroup2 mount root is implicitly unlimited."""
+    root = Path("/sys/fs/cgroup")
+    mounts = []
+    for line in Path("/proc/self/mountinfo").read_text(encoding="ascii").splitlines():
+        before, separator, after = line.partition(" - ")
+        fields, filesystem = before.split(), after.split()
+        if not separator or len(fields) < 6 or len(filesystem) != 3:
+            raise AuditStop("resource_deferred")
+        if fields[4] == "/sys/fs/cgroup":
+            mounts.append((fields[3], filesystem[0]))
+        elif fields[4].startswith("/sys/fs/cgroup/"):
+            # A nested/bind mount could hide a relevant ancestor or its files.
+            raise AuditStop("resource_deferred")
+    if mounts != [("/", "cgroup2")]:
+        raise AuditStop("resource_deferred")
+    memberships = Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines()
+    paths = [line[3:] for line in memberships if line.startswith("0::")]
+    if len(paths) != 1:
+        raise AuditStop("resource_deferred")
+    membership = paths[0]
+    parts = membership.split("/")[1:]
+    if (not membership.startswith("/") or "\\" in membership
+            or any(ord(char) < 32 or ord(char) == 127 for char in membership)
+            or membership != "/" and any(part in {"", ".", ".."} for part in parts)):
+        raise AuditStop("resource_deferred")
+    group = root.joinpath(*parts) if membership != "/" else root
+    for directory in (group, *group.parents):
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise AuditStop("resource_deferred")
+    # A namespace/delegated root exposing memory files is not the unlimited
+    # hierarchy root qualified here. Never silently discard its effective cap.
+    for name in ("memory.max", "memory.current"):
+        path = root / name
+        if path.exists() or path.is_symlink():
+            raise AuditStop("resource_deferred")
+    def read_counter(directory, name):
+        descriptor = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "r", encoding="ascii") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise AuditStop("resource_deferred")
+            raw = handle.read(129)
+            if len(raw) > 128:
+                raise AuditStop("resource_deferred")
+            value = raw.strip()
+        if name == "memory.max" and value == "max":
+            return None
+        number = checked(int(value))
+        if str(number) != value:
+            raise AuditStop("resource_deferred")
+        return number
+    headroom = None
+    directory = group
+    while directory != root:
+        maximum = read_counter(directory, "memory.max")
+        current = read_counter(directory, "memory.current")
+        if maximum is not None:
+            room = max(0, maximum - current)
+            headroom = room if headroom is None else min(headroom, room)
+        directory = directory.parent
+    return headroom
+
+
 def _resource_snapshot():
     """Fail closed outside qualified Linux containment; never changes OS limits."""
     if os.name != "posix" or not Path("/proc/self/status").is_file():
@@ -113,19 +176,7 @@ def _resource_snapshot():
         if name in {"pswpin", "pswpout"}: swaps[name] = checked(int(value))
         if name in {"pgscan_direct", "pgsteal_direct"}: reclaim[name] = checked(int(value))
     if len(swaps) != 2 or len(reclaim) != 2: raise AuditStop("resource_deferred")
-    memberships = Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines()
-    paths = [line[3:] for line in memberships if line.startswith("0::")]
-    if len(paths) != 1 or ".." in Path(paths[0]).parts: raise AuditStop("resource_deferred")
-    group = Path("/sys/fs/cgroup") / paths[0].lstrip("/")
-    # Include every hierarchical limit, not only the leaf cgroup.
-    headroom = None
-    for directory in (group, *group.parents):
-        if directory == Path("/sys/fs"): break
-        maximum = (directory / "memory.max").read_text(encoding="ascii").strip()
-        current = checked(int((directory / "memory.current").read_text(encoding="ascii")))
-        if maximum != "max":
-            room = max(0, checked(int(maximum)) - current)
-            headroom = room if headroom is None else min(headroom, room)
+    headroom = _cgroup_memory_headroom()
     soft, _hard = resource.getrlimit(resource.RLIMIT_AS)
     address = max(0, soft - process["VmSize"]) if 0 < soft < MAX_INT else None
     def pressure(name):
