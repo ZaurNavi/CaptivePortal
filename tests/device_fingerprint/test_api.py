@@ -2,7 +2,10 @@ import json
 import http.client
 import ipaddress
 import logging
+import sqlite3
 import threading
+import uuid
+from contextlib import closing
 
 import pytest
 
@@ -15,6 +18,7 @@ from app.device_fingerprint.models import (
     DeviceFingerprintValidationError,
 )
 from app.device_fingerprint.repository import DeviceFingerprintRepository
+from app.device_fingerprint.schema import SCHEMA_SQL
 from app.device_fingerprint.schema_registry import EvidenceSchemaRegistry
 from app.device_fingerprint.service import DeviceFingerprintRuntime
 from app.device_fingerprint.telemetry import DeviceFingerprintTelemetry
@@ -57,6 +61,13 @@ def application(tmp_path, *, validator=None, **config_overrides):
     registry.freeze()
     telemetry = DeviceFingerprintTelemetry(logger(), runtime_fields=Identity().safe_fields())
     runtime = DeviceFingerprintRuntime(cfg, repo, registry, artifact_identity=Identity(), telemetry=telemetry, now=lambda: NOW)
+    # Explicit disposable v2 fixture; normal runtime startup never bootstraps storage.
+    with closing(sqlite3.connect(cfg.db_path)) as setup, setup:
+        setup.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
+        setup.execute(
+            "INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)",
+            (str(uuid.uuid4()),),
+        )
     runtime.initialize(); runtime.mark_ready()
     return create_device_fingerprint_app(runtime, logger=logger()), runtime
 

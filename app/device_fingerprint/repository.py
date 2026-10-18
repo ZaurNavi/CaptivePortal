@@ -64,39 +64,40 @@ class DeviceFingerprintRepository:
         self._access_lock = threading.RLock()
 
     def initialize(self) -> None:
-        path = _prepare_local_file_target(
+        path = _existing_file_target(
             Path(self.db_path),
             error_type=DeviceFingerprintStorageUnavailable,
             label="repository",
         )
         try:
-            connection = sqlite3.connect(
-                self.db_path,
-                timeout=BUSY_TIMEOUT_MS / 1000,
-                isolation_level=None,
-                check_same_thread=False,
-            )
+            identity = path.lstat()
+            try:
+                connection = sqlite3.connect(
+                    path.as_uri() + "?mode=rw",
+                    uri=True,
+                    timeout=BUSY_TIMEOUT_MS / 1000,
+                    isolation_level=None,
+                    check_same_thread=False,
+                )
+            except sqlite3.OperationalError as exc:
+                # Python 3.10 does not expose SQLite result codes. This is
+                # create-disabled open refusal, not authority to recreate it.
+                if str(exc).lower() == "unable to open database file":
+                    raise DeviceFingerprintStorageUnavailable("Fingerprint repository is unavailable") from exc
+                raise
             connection.row_factory = sqlite3.Row
-            self._configure_writer(connection)
+            # Existing-store-only LAB contract: a missing path is never
+            # first-install authority. Check identity before any writer PRAGMA.
+            _existing_file_target(path, error_type=DeviceFingerprintStorageUnavailable,
+                                  label="repository")
+            opened_identity = path.lstat()
+            if (identity.st_dev, identity.st_ino) != (opened_identity.st_dev, opened_identity.st_ino):
+                raise DeviceFingerprintStorageUnavailable("Fingerprint repository changed during open")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            tables = self._application_tables(connection)
-            if version > SCHEMA_VERSION or (version == 0 and tables):
-                raise DeviceFingerprintStorageCorrupt("Fingerprint schema is incompatible")
             if version == 1:
                 raise DeviceFingerprintMigrationRequired("Fingerprint repository migration is required")
-            if version == 0:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
-                    _create_v2_schema(connection)
-                    connection.execute(
-                        f"INSERT INTO {STORAGE_STATE_TABLE} VALUES (1,?,0)",
-                        (str(uuid.uuid4()),),
-                    )
-                    connection.execute("COMMIT")
-                except BaseException:
-                    connection.execute("ROLLBACK")
-                    raise
-            self._validate_connection(connection)
+            self._validate_startup_connection(connection)
+            self._configure_writer(connection)
             enforce_storage_cap(connection, self.max_db_bytes)
             if _IS_POSIX:
                 _enforce_posix_mode(
@@ -134,8 +135,8 @@ class DeviceFingerprintRepository:
     def validate_runtime_health(self) -> None:
         """Check bounded metadata, never scan live evidence while serializing ingest.
 
-        Full integrity/sequence validation belongs to initialize() before writes
-        are admitted, and to the existing offline migration/recovery lifecycle.
+        Historical integrity is deliberately not a readiness claim. Full
+        validation belongs to explicit offline recovery/independent audit.
         SQLite corruption errors from normal operations still fail closed.
         """
         try:
@@ -321,6 +322,11 @@ class DeviceFingerprintRepository:
             raise DeviceFingerprintStorageCorrupt("Fingerprint ingest sequence state is invalid")
 
     @classmethod
+    def _validate_startup_connection(cls, connection: sqlite3.Connection) -> None:
+        """Operational readiness only; no historical integrity attestation."""
+        cls._validate_runtime_connection(connection)
+
+    @classmethod
     def _validate_runtime_connection(cls, connection: sqlite3.Connection) -> None:
         if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
             raise DeviceFingerprintStorageCorrupt("Fingerprint schema version is incompatible")
@@ -489,6 +495,23 @@ def enforce_storage_cap(connection: sqlite3.Connection, max_db_bytes: int) -> No
     effective = int(connection.execute(f"PRAGMA max_page_count={max_pages}").fetchone()[0])
     if effective > max_pages or page_count > effective:
         raise DeviceFingerprintStorageLimit("Fingerprint repository storage limit reached")
+
+
+def _existing_file_target(path: Path, *, error_type: type[Exception], label: str) -> Path:
+    """Create-disabled admission. Provisioning is a separate operator task.
+
+    SQLite's pathname API cannot eliminate all privileged replacement races;
+    protected deployment ancestry remains an operator trust requirement.
+    """
+    try:
+        if not path.is_absolute() or not path.parent.is_dir():
+            raise error_type(f"Fingerprint {label} target is unavailable")
+        _reject_symlink_components(path, error_type=error_type, label=label)
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise error_type(f"Fingerprint {label} target is unsafe")
+        return path
+    except OSError as exc:
+        raise error_type(f"Fingerprint {label} target is unavailable") from exc
 
 
 def _prepare_local_file_target(path: Path, *, error_type: type[Exception], label: str) -> Path:
