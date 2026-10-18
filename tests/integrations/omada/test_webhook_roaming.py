@@ -395,3 +395,245 @@ def test_disposable_backfill_preserves_raw_and_per_delivery_replay_identity(tmp_
     ]
     assert events[1]["parse_warnings"] == ["SOURCE_CHANNEL_MISSING"]
     assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+
+
+# QA-RM-01: a malformed roaming announcement must never become business
+# evidence because a display name contains a legacy classifier phrase.
+NEAR_MISS_MUTATIONS = (
+    "unquoted-ssid", "missing-ssid-open", "missing-ssid-close", "empty-ssid",
+    "missing-ssid", "suffix", "prefix", "extra-ap", "extra-channel",
+    "misplaced-block", "missing-client-open", "missing-client-close",
+    "missing-client-colon", "missing-source-open", "missing-source-close",
+    "missing-source-colon", "missing-destination-close", "invalid-client",
+    "invalid-source", "invalid-destination", "wrong-direction",
+)
+
+
+def near_miss(text, mutation):
+    replacements = {
+        "unquoted-ssid": ('"Zefer_Parki"', "Zefer_Parki"),
+        "missing-ssid-open": ('"Zefer_Parki"', 'Zefer_Parki"'),
+        "missing-ssid-close": ('"Zefer_Parki"', '"Zefer_Parki'),
+        "empty-ssid": ('"Zefer_Parki"', '""'),
+        "missing-ssid": ('with SSID "Zefer_Parki"', ""),
+        "extra-ap": ("[Channel 11]", f"[ap:extra:{SOURCE}][Channel 11]"),
+        "extra-channel": ("[Channel 11]", "[Channel 11][Channel 6]"),
+        "misplaced-block": (" is roaming from ", " [Channel 11] is roaming from "),
+        "missing-client-open": ("[client:", "client:"),
+        "missing-client-close": ("] is roaming from", " is roaming from"),
+        "missing-client-colon": ("[client:", "[client "),
+        "missing-source-open": ("[ap:", "ap:"),
+        "missing-source-close": ("][Channel 11]", "[Channel 11]"),
+        "missing-source-colon": ("[ap:", "[ap "),
+        "missing-destination-close": ("][channel 6]", "[channel 6]"),
+        "invalid-client": (CLIENT, "bad-mac"),
+        "invalid-source": (SOURCE, "bad-mac"),
+        "invalid-destination": (DESTINATION, "bad-mac"),
+        "wrong-direction": (" to ", " from "),
+    }
+    if mutation == "suffix":
+        return text + " unexpected suffix"
+    if mutation == "prefix":
+        return "unexpected prefix " + text
+    old, new = replacements[mutation]
+    assert old in text
+    return text.replace(old, new, 1)
+
+
+@pytest.mark.parametrize("phrase", ["went offline", "went online"])
+@pytest.mark.parametrize("subject", ["client", "source", "destination"])
+@pytest.mark.parametrize("mutation", NEAR_MISS_MUTATIONS)
+def test_QA_RM_01_roaming_near_misses_cannot_escape_through_display_names(
+    phrase, subject, mutation,
+):
+    mac = {"client": CLIENT, "source": SOURCE, "destination": DESTINATION}[subject]
+    text = near_miss(roaming(**{subject: f"Guest {phrase}:{mac}"}), mutation)
+    event = normalized([text])[0]
+    assert event["event"] == "omada.webhook_unclassified"
+    assert event["parse_status"] == "unclassified"
+    assert event["parse_reason"] == "UNKNOWN_TEXT_FORMAT"
+    assert event["parse_warnings"] == []
+    assert event["site_id"] == "synthetic-site"
+    assert event["site_resolution_status"] == "resolved"
+    assert event["text_index"] == 0 and event["text_count"] == 1
+    assert event["controller_timestamp_ms"] == TIME_MS
+    assert event["normalized_event_id"] == "synthetic-delivery:0"
+    assert not (set(event) & ROAMING_KEYS)
+    assert _offline_evidence(event) is None
+    service = PublicTrafficService(config=Mock(), repository=Mock(), logger=Mock())
+    assert service.classify_record(event).target is False
+    assert service.repository.mock_calls == [] and service.logger.mock_calls == []
+
+
+def legacy_connection(verb, *, client_name="Lab-phone", ap_name="Lab-AP", ssid="Welcome"):
+    client = f"[client:{client_name}:{CLIENT}] (IP: 192.0.2.10)"
+    ap = f"[ap:{ap_name}:{DESTINATION}]"
+    if verb == "online":
+        return f'{client} went online on {ap} with SSID "{ssid}" on channel 6.'
+    return f'{client} went offline from SSID "{ssid}" on {ap} (1m connected, 1MB).'
+
+
+@pytest.mark.parametrize("verb", ["online", "offline"])
+@pytest.mark.parametrize("subject", ["client_name", "ap_name", "ssid"])
+@pytest.mark.parametrize("name", ["roaming", "Guest is roaming from", "Guest roaming support"])
+def test_QA_RM_01_genuine_connection_is_not_rejected_for_roaming_words(verb, subject, name):
+    event = normalized([legacy_connection(verb, **{subject: name})])[0]
+    assert event["event"] == f"omada.client_{verb}"
+    assert event["parse_status"] == "parsed"
+    assert event["parse_reason"] is None
+    assert event["client_mac"] == CLIENT and event["ap_mac"] == DESTINATION
+
+
+@pytest.mark.parametrize("verb", ["online", "offline"])
+@pytest.mark.parametrize("subject", ["client_name", "ap_name"])
+def test_QA_RM_01_genuine_connection_with_matching_legacy_phrase(verb, subject):
+    event = normalized([legacy_connection(verb, **{subject: f"Guest went {verb}"})])[0]
+    assert event["event"] == f"omada.client_{verb}"
+    assert event["parse_status"] == "parsed"
+
+
+@pytest.mark.parametrize("subject", ["client_name", "ap_name"])
+def test_QA_RM_01_issue_230_legacy_ambiguity_is_unchanged_not_fixed_here(subject):
+    # Authoritative v1.2 clarification: preserve this known incorrect baseline
+    # result; the opposite-phrase legacy matcher repair belongs to Issue #230.
+    event = normalized([legacy_connection("offline", **{subject: "Guest went online"})])[0]
+    assert event["event"] == "omada.client_online"
+    assert event["parse_status"] == "partial"
+    assert event["parse_reason"] is None
+    assert event["parse_warnings"] == ["SSID_MISSING", "CHANNEL_MISSING"]
+    assert event["client_mac"] == CLIENT and event["ap_mac"] == DESTINATION
+
+
+def test_QA_RM_01_mixed_batch_keeps_one_envelope_time_and_no_false_offline():
+    invalid = near_miss(roaming(client=f"Guest went offline:{CLIENT}"), "unquoted-ssid")
+    texts = [roaming(), invalid, legacy_connection("offline"), "unknown text"]
+    record = envelope(texts)
+    before = copy.deepcopy(record)
+    events = normalize_webhook(record, site_id_mapping=MAPPING)
+    assert record == before
+    assert [event["event"] for event in events] == [
+        "omada.client_roaming", "omada.webhook_unclassified",
+        "omada.client_offline", "omada.webhook_unclassified",
+    ]
+    assert [event["text_index"] for event in events] == list(range(4))
+    assert [event["normalized_event_id"] for event in events] == [f"synthetic-delivery:{i}" for i in range(4)]
+    assert {event["controller_timestamp_ms"] for event in events} == {TIME_MS}
+    assert {event["controller_timestamp"] for event in events} == {"2026-07-28T11:34:28.934Z"}
+    assert {event["site_id"] for event in events} == {"synthetic-site"}
+    assert _offline_evidence(events[0]) is None and _offline_evidence(events[1]) is None
+    assert _offline_evidence(events[2]) is not None
+
+
+@pytest.mark.parametrize("verb", ["online", "offline"])
+def test_QA_RM_01_quoted_ssid_with_ap_marker_is_not_an_announcement(verb):
+    ssid = "is roaming from [ap:Lab]"
+    event = normalized([legacy_connection(verb, ssid=ssid)])[0]
+    assert event["event"] == f"omada.client_{verb}"
+    # Preserve the baseline parser's AP warning for a bracket inside an
+    # offline SSID; the roaming guard must not introduce an unclassified event.
+    assert event["parse_status"] == ("parsed" if verb == "online" else "partial")
+    assert event["parse_warnings"] == ([] if verb == "online" else ["INVALID_AP_MAC"])
+    assert event["ssid"] == ssid
+
+
+@pytest.mark.parametrize("text,event_name", [
+    (f"[client:Guest is roaming from:{CLIENT}] was unauthorized by Main Administrator Lab.",
+     "omada.client_unauthorized"),
+    (f'[client:Guest roaming:{CLIENT}]\'s authentication on SSID "is roaming from" expired.',
+     "omada.client_authentication_expired"),
+    (f'[client:Guest is roaming from:{CLIENT}] failed to connect to [ap:Lab:{DESTINATION}] '
+     'with SSID "Welcome" on channel 6 because the password was wrong.',
+     "omada.client_connection_failed"),
+])
+def test_QA_RM_01_other_legacy_handlers_keep_roaming_words_in_names(text, event_name):
+    event = normalized([text])[0]
+    assert event["event"] == event_name
+    assert event["parse_reason"] is None
+
+
+def damaged_roaming_blocks(phrase, subject, damage):
+    names = {"client": "Guest", "source": "AP-2", "destination": "AP-1"}
+    names[subject] += " " + phrase
+    blocks = []
+    for role, mac, mode in zip(("client", "source", "destination"),
+                              (CLIENT, SOURCE, DESTINATION), damage):
+        label = "client" if role == "client" else "ap"
+        body = f"{label}:{names[role]}:{mac}"
+        blocks.append({"no-open": body + "]", "no-close": "[" + body,
+                       "prose": body.replace(label + ":", label + " ", 1)}[mode])
+    return (f"{blocks[0]} is roaming from {blocks[1]}[Channel 11] to "
+            f'{blocks[2]}[channel 6] with SSID "Zefer_Parki"')
+
+
+@pytest.mark.parametrize("phrase", ["went offline", "went online"])
+@pytest.mark.parametrize("damage", [
+    ("no-open", "no-open", "no-open"),
+    ("no-close", "no-open", "no-open"),
+    ("prose", "prose", "prose"),
+])
+def test_QA_RM_01_R3_exact_combined_damage_reproducers(phrase, damage):
+    text = damaged_roaming_blocks(phrase, "client", damage)
+    event = normalized([text])[0]
+    assert event["event"] == "omada.webhook_unclassified"
+    assert event["parse_status"] == "unclassified"
+    assert event["parse_reason"] == "UNKNOWN_TEXT_FORMAT"
+    assert not (set(event) & ROAMING_KEYS)
+
+
+@pytest.mark.parametrize("phrase", ["went offline", "went online"])
+@pytest.mark.parametrize("subject", ["client", "source", "destination"])
+@pytest.mark.parametrize("client_damage", ["no-open", "no-close", "prose"])
+@pytest.mark.parametrize("source_damage", ["no-open", "no-close", "prose"])
+@pytest.mark.parametrize("destination_damage", ["no-open", "no-close", "prose"])
+def test_QA_RM_01_R3_joint_client_and_ap_damage_is_never_business_evidence(
+    phrase, subject, client_damage, source_damage, destination_damage,
+):
+    event = normalized([damaged_roaming_blocks(
+        phrase, subject, (client_damage, source_damage, destination_damage),
+    )])[0]
+    assert event["event"] == "omada.webhook_unclassified"
+    assert event["parse_status"] == "unclassified"
+    assert event["parse_reason"] == "UNKNOWN_TEXT_FORMAT"
+    assert event["site_id"] == "synthetic-site"
+    assert event["site_resolution_status"] == "resolved"
+    assert event["text_index"] == 0 and event["text_count"] == 1
+    assert event["controller_timestamp_ms"] == TIME_MS
+    assert event["normalized_event_id"] == "synthetic-delivery:0"
+    assert not (set(event) & ROAMING_KEYS)
+    assert _offline_evidence(event) is None
+    service = PublicTrafficService(config=Mock(), repository=Mock(), logger=Mock())
+    assert service.classify_record(event).target is False
+    assert service.repository.mock_calls == [] and service.logger.mock_calls == []
+
+
+@pytest.mark.parametrize("verb", ["online", "offline"])
+@pytest.mark.parametrize("subject", ["client_name", "ap_name", "ssid"])
+@pytest.mark.parametrize("name", ["client:Guest is roaming from", "ap:Guest is roaming from",
+                                  f"Guest {CLIENT} is roaming from ap:Lab"])
+def test_QA_RM_01_R3_role_like_names_are_not_event_announcements(verb, subject, name):
+    event = normalized([legacy_connection(verb, **{subject: name})])[0]
+    assert event["event"] == f"omada.client_{verb}"
+    assert event["parse_status"] == "parsed"
+    assert event["client_mac"] == CLIENT and event["ap_mac"] == DESTINATION
+
+
+def test_QA_RM_01_R3_mixed_combined_damage_keeps_order_and_consumer_isolation():
+    texts = [roaming(), damaged_roaming_blocks("went offline", "client", ("no-open",) * 3),
+             damaged_roaming_blocks("went online", "client", ("prose",) * 3),
+             legacy_connection("offline"), legacy_connection("online"), "unknown"]
+    record = envelope(texts)
+    before = copy.deepcopy(record)
+    events = normalize_webhook(record, site_id_mapping=MAPPING)
+    assert record == before
+    assert [event["event"] for event in events] == [
+        "omada.client_roaming", "omada.webhook_unclassified", "omada.webhook_unclassified",
+        "omada.client_offline", "omada.client_online", "omada.webhook_unclassified",
+    ]
+    assert [event["text_index"] for event in events] == list(range(6))
+    assert [event["normalized_event_id"] for event in events] == [f"synthetic-delivery:{i}" for i in range(6)]
+    assert {event["text_count"] for event in events} == {6}
+    assert {event["site_id"] for event in events} == {"synthetic-site"}
+    assert {event["controller_timestamp_ms"] for event in events} == {TIME_MS}
+    assert {event["controller_timestamp"] for event in events} == {"2026-07-28T11:34:28.934Z"}
+    assert all(_offline_evidence(events[index]) is None for index in (0, 1, 2, 4, 5))
+    assert _offline_evidence(events[3]) is not None

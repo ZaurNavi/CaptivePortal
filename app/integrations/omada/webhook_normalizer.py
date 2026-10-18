@@ -51,6 +51,16 @@ IP_RE = re.compile(
 )
 ONLINE_RE = re.compile(r"\bwent\s+online\b", re.IGNORECASE)
 OFFLINE_RE = re.compile(r"\bwent\s+offline\b", re.IGNORECASE)
+ROAMING_ANNOUNCEMENT_RE = re.compile(
+    r"\bis\s+roaming\s+from\b", re.IGNORECASE,
+)
+QUOTED_VALUE_RE = re.compile(r'"[^"\r\n]*"')
+BRACKETED_BLOCK_RE = re.compile(r"\[[^\[\]]*\]")
+AP_MARKER_RE = re.compile(r"\[ap\b", re.IGNORECASE)
+LOOSE_CLIENT_PREFIX_RE = re.compile(r"\A\[?client(?=[:\s])", re.IGNORECASE)
+ROAMING_FROM_AP_RE = re.compile(
+    r"\bis\s+roaming\s+from\s+\[?ap(?=[:\s-])", re.IGNORECASE,
+)
 ROAMING_RE = re.compile(
     r"\A\s*\[client:(?P<client>[^\[\]\r\n]*)\]"
     r"\s+is\s+roaming\s+from\s+"
@@ -310,10 +320,10 @@ def _normalize_text_item(
     text_index: int,
     text_count: int,
 ) -> dict[str, Any]:
-    # A malformed roaming identity must not fall through to a broad legacy
-    # matcher because an optional display name contains e.g. "went offline".
+    # Reject roaming-shaped grammar errors as well as invalid identities,
+    # before display names can select a business-consumed legacy event.
     if (
-        ROAMING_RE.fullmatch(raw_text) is not None
+        _is_roaming_announcement(raw_text)
         and not _matches_roaming(raw_text)
     ):
         return _diagnostic_event(
@@ -361,6 +371,46 @@ def _normalize_text_item(
     )
     event.update(fields)
     return event
+
+
+def _is_roaming_announcement(raw_text: str) -> bool:
+    """Recognize the event-level verb without accepting the full grammar.
+
+    Complete bracket/quoted blocks hide names/SSIDs, not event verbs. If the
+    client block is damaged, inspect the prefix before the first AP marker.
+    If all opening markers are damaged, require a leading client field and
+    a roaming-from-AP clause, preserving genuine top-level legacy events.
+    Each scan is bounded by the ingress text size, with no nested repeats.
+    """
+    without_quotes = QUOTED_VALUE_RE.sub(" ", raw_text)
+    outside_blocks = BRACKETED_BLOCK_RE.sub(" ", without_quotes).lstrip()
+    if ROAMING_ANNOUNCEMENT_RE.match(outside_blocks) is not None:
+        return True
+    if (
+        LOOSE_CLIENT_PREFIX_RE.match(without_quotes.lstrip()) is not None
+        and ROAMING_FROM_AP_RE.search(without_quotes) is not None
+    ):
+        # A missing client terminator can make an AP's closing bracket look
+        # like the client terminator. Inspect the unmasked structure too.
+        # Conversely, a complete real legacy header must keep its name/SSID
+        # text, even when the name imitates an entire roaming clause.
+        client_text = without_quotes.lstrip()
+        client = CLIENT_BLOCK_RE.match(client_text)
+        if client is not None:
+            tail = client_text[client.end():].lstrip()
+            ip = IP_RE.match(tail)
+            if ip is not None:
+                tail = tail[ip.end():].lstrip()
+            if any(pattern.match(tail) is not None for pattern in (
+                ONLINE_RE, OFFLINE_RE, UNAUTHORIZED_RE, FAILED_TO_CONNECT_RE,
+            )) or AUTHENTICATION_EXPIRED_RE.fullmatch(raw_text) is not None:
+                return False
+        return True
+    first_ap = AP_MARKER_RE.search(without_quotes)
+    if first_ap is None:
+        return False
+    prefix = BRACKETED_BLOCK_RE.sub(" ", without_quotes[:first_ap.start()])
+    return ROAMING_ANNOUNCEMENT_RE.search(prefix) is not None
 
 
 def _roaming_match(raw_text: str) -> re.Match[str] | None:
