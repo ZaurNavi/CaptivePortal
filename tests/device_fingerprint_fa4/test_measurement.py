@@ -2,6 +2,9 @@
 
 import hashlib
 import json
+import sqlite3
+import uuid
+from contextlib import closing
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -14,6 +17,7 @@ from app.device_fingerprint.models import (
     ValidatedSourceHealth,
 )
 from app.device_fingerprint.repository import DeviceFingerprintRepository
+from app.device_fingerprint.schema import SCHEMA_SQL
 from app.device_fingerprint.schema_registry import build_production_schema_registry
 from app.device_fingerprint.service import DeviceFingerprintService
 from app.device_fingerprint.validation import (
@@ -43,6 +47,9 @@ TREE = "5b4aa2d52bda2d57ce62ccd606d259afc463fc96"
 def _fixture(tmp_path, count=5):
     cfg = config(tmp_path)
     repo = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
+    with closing(sqlite3.connect(cfg.db_path)) as setup, setup:
+        setup.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
+        setup.execute("INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)", (str(uuid.uuid4()),))
     repo.initialize()
     svc = DeviceFingerprintService(cfg, repo, build_production_schema_registry(), now=lambda: FIXED_NOW)
     for number in range(count):

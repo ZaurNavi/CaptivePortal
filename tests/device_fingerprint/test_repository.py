@@ -1,6 +1,7 @@
 import sqlite3
 import stat
 import threading
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -15,7 +16,7 @@ from app.device_fingerprint.repository import (
     writer_lock,
 )
 from app.device_fingerprint.schema import (
-    EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS,
+    EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS, SCHEMA_SQL,
 )
 from app.device_fingerprint.service import DeviceFingerprintService
 from app.device_fingerprint.schema_registry import EvidenceSchemaRegistry
@@ -23,8 +24,16 @@ from app.device_fingerprint.validation import format_utc
 from tests.device_fingerprint import NOW, config, evidence_event, health_event, producer
 
 
+def provision(path):
+    """Explicit disposable test provisioning, never ordinary runtime bootstrap."""
+    with sqlite3.connect(path) as connection:
+        connection.executescript(SCHEMA_SQL)
+        connection.execute("INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)", (str(uuid.uuid4()),))
+
+
 def initialized(tmp_path):
     cfg = config(tmp_path)
+    provision(cfg.db_path)
     repo = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
     repo.initialize()
     return cfg, repo
@@ -112,7 +121,7 @@ def test_extra_column_is_strict_schema_error(tmp_path):
         DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()
 
 
-def test_startup_rejects_failed_full_quick_check_before_publishing_connection(tmp_path, monkeypatch):
+def test_explicit_legacy_deep_validator_rejects_failed_full_quick_check(tmp_path, monkeypatch):
     from types import SimpleNamespace
     import app.device_fingerprint.repository as module
 
@@ -129,11 +138,14 @@ def test_startup_rejects_failed_full_quick_check_before_publishing_connection(tm
     monkeypatch.setattr(module.sqlite3, "connect", lambda *args, **kwargs: real_connect(
         *args, factory=CorruptQuickCheck, **kwargs))
     cfg = config(tmp_path)
+    provision(cfg.db_path)
     repo = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
+    repo.initialize()
+    assert checks == []  # Fast readiness deliberately does not claim T3.
     with pytest.raises(DeviceFingerprintStorageCorrupt, match="repository is corrupt"):
-        repo.initialize()
+        repo._validate_connection(repo.connection)
     assert checks == ["PRAGMA quick_check"]
-    assert repo._connection is None
+    repo.close()
 
 
 def test_runtime_health_neither_checks_full_integrity_nor_reads_evidence_tables(tmp_path):
@@ -333,6 +345,7 @@ def test_missing_parent_may_be_created_only_inside_approved_root(tmp_path, monke
 def test_posix_database_mode_failure_fails_closed(tmp_path, monkeypatch):
     import app.device_fingerprint.repository as module
     cfg = config(tmp_path)
+    provision(cfg.db_path)
     monkeypatch.setattr(module, "_IS_POSIX", True)
     monkeypatch.setattr(module.os, "chmod", lambda *_args: (_ for _ in ()).throw(OSError("denied")))
     with pytest.raises(DeviceFingerprintStorageUnavailable):

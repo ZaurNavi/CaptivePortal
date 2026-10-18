@@ -1,11 +1,15 @@
 import threading
 import os
+import sqlite3
+import uuid
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
 
 import app.device_fingerprint.service as module
 from app.device_fingerprint.repository import DeviceFingerprintRepository
+from app.device_fingerprint.schema import SCHEMA_SQL
 from app.device_fingerprint.schema_registry import EvidenceSchemaRegistry
 from app.device_fingerprint.service import DeviceFingerprintRuntime, DeviceFingerprintService
 from app.device_fingerprint.telemetry import DeviceFingerprintTelemetry
@@ -17,6 +21,9 @@ def runtime(tmp_path, **kwargs):
     repo = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
     registry = EvidenceSchemaRegistry(); registry.register("dhcp", 1, lambda value: dict(value)); registry.freeze()
     value = DeviceFingerprintRuntime(cfg, repo, registry, artifact_identity=Identity(), telemetry=DeviceFingerprintTelemetry(logger()), now=lambda: NOW, **kwargs)
+    with closing(sqlite3.connect(cfg.db_path)) as setup, setup:
+        setup.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
+        setup.execute("INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)", (str(uuid.uuid4()),))
     value.initialize(); value.mark_ready()
     return value
 
@@ -32,6 +39,9 @@ def test_initializing_transitions_to_ready_only_when_explicitly_marked(tmp_path)
     assert (value.state, value.accepting_writes, value.maintenance_thread) == (
         "initializing", False, None
     )
+    with closing(sqlite3.connect(cfg.db_path)) as setup, setup:
+        setup.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
+        setup.execute("INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)", (str(uuid.uuid4()),))
     value.initialize()
     assert value.state == "initializing"
     value.mark_ready()
@@ -343,6 +353,9 @@ def test_storage_limit_recovery_ignores_physical_file_size_and_relatches_on_full
 def test_registry_is_composed_only_once_and_must_be_frozen(tmp_path):
     cfg = config(tmp_path); repo = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
     value = DeviceFingerprintRuntime(cfg, repo, None, artifact_identity=Identity(), telemetry=DeviceFingerprintTelemetry(logger()), now=lambda: NOW)
+    with closing(sqlite3.connect(cfg.db_path)) as setup, setup:
+        setup.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
+        setup.execute("INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)", (str(uuid.uuid4()),))
     value.initialize(); registry = EvidenceSchemaRegistry()
     with pytest.raises(RuntimeError): value.configure_registry(registry)
     registry.freeze(); value.configure_registry(registry)

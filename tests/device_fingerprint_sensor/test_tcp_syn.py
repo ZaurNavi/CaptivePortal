@@ -1,12 +1,16 @@
 import ipaddress
 import json
 import struct
+import sqlite3
+import uuid
+from contextlib import closing
 
 import pytest
 
 from app.device_fingerprint.models import DeviceFingerprintValidationError
 from app.device_fingerprint.network_schemas import validate_tcp_syn_v2
 from app.device_fingerprint.repository import DeviceFingerprintRepository
+from app.device_fingerprint.schema import SCHEMA_SQL
 from app.device_fingerprint.schema_registry import build_production_schema_registry
 from app.device_fingerprint.service import DeviceFingerprintService
 from app.device_fingerprint.validation import canonical_json, canonical_sha256, format_utc
@@ -438,6 +442,9 @@ def test_non_guest_ack_fragment_and_header_truncation_emit_nothing():
 def test_tcp_v2_sensor_to_task01_production_registry_and_persisted_canonical_row(tmp_path):
     cfg = task01_config(tmp_path)
     repository = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
+    with closing(sqlite3.connect(cfg.db_path)) as setup, setup:
+        setup.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
+        setup.execute("INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)", (str(uuid.uuid4()),))
     repository.initialize()
     registry = build_production_schema_registry()
     svc = DeviceFingerprintService(cfg, repository, registry, now=lambda: NOW)

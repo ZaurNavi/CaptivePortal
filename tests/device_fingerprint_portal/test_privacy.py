@@ -1,9 +1,13 @@
 import ipaddress
+import sqlite3
+import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.device_fingerprint.models import DeviceFingerprintProducer
 from app.device_fingerprint.repository import DeviceFingerprintRepository
+from app.device_fingerprint.schema import SCHEMA_SQL
 from app.device_fingerprint.schema_registry import build_production_schema_registry
 from app.device_fingerprint.service import DeviceFingerprintService
 from app.device_fingerprint_portal.extractor import extract_portal_evidence_candidate
@@ -44,6 +48,9 @@ def test_only_normalized_p1_payload_reaches_task01_storage(tmp_path):
 
     cfg = core_config(tmp_path)
     repository = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
+    with closing(sqlite3.connect(cfg.db_path)) as setup, setup:
+        setup.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
+        setup.execute("INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)", (str(uuid.uuid4()),))
     repository.initialize()
     producer = DeviceFingerprintProducer(
         "portal-zefer-01", "A" * 32, "zefer-portal-http-01", SITE_ID,
