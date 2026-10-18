@@ -51,6 +51,16 @@ IP_RE = re.compile(
 )
 ONLINE_RE = re.compile(r"\bwent\s+online\b", re.IGNORECASE)
 OFFLINE_RE = re.compile(r"\bwent\s+offline\b", re.IGNORECASE)
+ROAMING_RE = re.compile(
+    r"\A\s*\[client:(?P<client>[^\[\]\r\n]*)\]"
+    r"\s+is\s+roaming\s+from\s+"
+    r"\[ap:(?P<source_ap>[^\[\]\r\n]*)\]"
+    r"(?:\s*\[channel(?P<source_channel>(?:[ \t]+[^\[\]\r\n]*)?)\])?"
+    r"\s+to\s+\[ap:(?P<destination_ap>[^\[\]\r\n]*)\]"
+    r"(?:\s*\[channel(?P<destination_channel>(?:[ \t]+[^\[\]\r\n]*)?)\])?"
+    r'\s+with\s+SSID\s+"(?P<ssid>[^"\r\n]*)"\s*\Z',
+    re.IGNORECASE,
+)
 UNAUTHORIZED_RE = re.compile(
     r"\bwas\s+unauthorized\s+by\s+Main\s+Administrator\b",
     re.IGNORECASE,
@@ -300,6 +310,20 @@ def _normalize_text_item(
     text_index: int,
     text_count: int,
 ) -> dict[str, Any]:
+    # A malformed roaming identity must not fall through to a broad legacy
+    # matcher because an optional display name contains e.g. "went offline".
+    if (
+        ROAMING_RE.fullmatch(raw_text) is not None
+        and not _matches_roaming(raw_text)
+    ):
+        return _diagnostic_event(
+            raw_record,
+            site_resolution=site_resolution,
+            reason="UNKNOWN_TEXT_FORMAT",
+            text_index=text_index,
+            text_count=text_count,
+            raw_text=raw_text,
+        )
     handler = next(
         (
             candidate
@@ -337,6 +361,61 @@ def _normalize_text_item(
     )
     event.update(fields)
     return event
+
+
+def _roaming_match(raw_text: str) -> re.Match[str] | None:
+    """Reject invalid required identities before handler dispatch."""
+    match = ROAMING_RE.fullmatch(raw_text)
+    if match is None or not match.group("ssid").strip():
+        return None
+    for subject in ("client", "source_ap", "destination_ap"):
+        fields = _parse_named_mac(match.group(subject), subject=subject)
+        if fields[f"{subject}_mac"] is None:
+            return None
+    return match
+
+
+def _matches_roaming(raw_text: str) -> bool:
+    return _roaming_match(raw_text) is not None
+
+
+def _parse_roaming(raw_text: str) -> tuple[dict[str, Any], list[str]]:
+    match = _roaming_match(raw_text)
+    if match is None:
+        raise ValueError("not a valid roaming event")
+
+    fields: dict[str, Any] = {"ssid": match.group("ssid")}
+    warnings: list[str] = []
+    for subject in ("client", "source_ap", "destination_ap"):
+        named = _parse_named_mac(match.group(subject), subject=subject)
+        if not named[f"{subject}_name"]:
+            # Empty names and MAC fallbacks are not invented display names.
+            named[f"{subject}_name"] = None
+            named[f"{subject}_name_raw"] = (
+                named[f"{subject}_name_raw"] or None
+            )
+            named[f"{subject}_name_available"] = False
+            warnings.append(f"{subject.upper()}_NAME_MISSING")
+        fields.update(named)
+
+    for subject in ("source", "destination"):
+        field = f"{subject}_channel"
+        raw_channel = match.group(field)
+        fields[field] = None
+        if raw_channel is None:
+            warnings.append(f"{subject.upper()}_CHANNEL_MISSING")
+            continue
+        value = raw_channel.strip()
+        if re.fullmatch(r"[0-9]+", value) is not None:
+            try:
+                channel = int(value)
+            except ValueError:
+                channel = 0
+            if channel > 0:
+                fields[field] = channel
+                continue
+        warnings.append(f"{subject.upper()}_CHANNEL_INVALID")
+    return fields, warnings
 
 
 def _parse_online(raw_text: str) -> tuple[dict[str, Any], list[str]]:
@@ -514,6 +593,11 @@ def _is_technical_occurrence_tail(raw_tail: str) -> bool:
 # adding a future Omada event requires only its parser, matcher, and
 # one local registry entry; the central dispatch remains unchanged.
 EVENT_HANDLERS: tuple[EventHandler, ...] = (
+    EventHandler(
+        "omada.client_roaming",
+        _matches_roaming,
+        _parse_roaming,
+    ),
     EventHandler(
         "omada.client_unauthorized",
         _regex_matcher(UNAUTHORIZED_RE),

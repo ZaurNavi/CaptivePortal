@@ -1318,6 +1318,7 @@ def test_event_handler_registry_is_ordered_and_unique():
 
     assert isinstance(EVENT_HANDLERS, tuple)
     assert event_names == (
+        "omada.client_roaming",
         "omada.client_unauthorized",
         "omada.client_authentication_expired",
         "omada.client_online",
