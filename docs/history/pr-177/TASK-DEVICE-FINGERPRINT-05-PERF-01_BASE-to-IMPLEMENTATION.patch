@@ -1,0 +1,719 @@
+diff --git a/app/device_fingerprint/fusion.py b/app/device_fingerprint/fusion.py
+index 1a00de3135f33c44263b71f740dc25f41389f59e..a55e6229ef7e0138999625efad73f24bd6bd56cd 100644
+--- a/app/device_fingerprint/fusion.py
++++ b/app/device_fingerprint/fusion.py
+@@ -14,9 +14,12 @@ from .classification_policy import (
+     make_classification_policy, validate_classification_policy_dependencies,
+ )
+ from .evidence_adapter_contracts import DIMENSIONS
+-from .knowledge_bundle import KnowledgeBundleCandidate, validate_knowledge_bundle_dependencies
++from .knowledge_bundle import (
++    KnowledgeBundleCandidate, _ValidatedKnowledgeBundle,
++    _validate_knowledge_bundle_once, _require_validated_knowledge,
++)
+ from .models import DeviceFingerprintValidationError
+-from .origin_assessment import ORIGINS, make_origin_assessment
++from .origin_assessment import ORIGINS, _make_origin_assessment_prevalidated
+ from .validation import validate_mac
+ 
+ _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+@@ -127,10 +130,29 @@ class FusionInputs:
+ 
+ class DeviceFingerprintFusionCore:
+     def __init__(self, inputs: FusionInputs) -> None:
++        if not isinstance(inputs, FusionInputs):
++            _fail("Invalid fusion inputs")
++        try:
++            validated_knowledge = _validate_knowledge_bundle_once(inputs.knowledge_bundle, inputs.knowledge)
++            self._initialize(inputs, validated_knowledge)
++        except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
++            raise DeviceFingerprintValidationError("Malformed fusion input") from exc
++
++    @classmethod
++    def _from_validated(cls, inputs: FusionInputs,
++                        validated_knowledge: _ValidatedKnowledgeBundle) -> DeviceFingerprintFusionCore:
++        core = cls.__new__(cls)
++        core._initialize(inputs, validated_knowledge)
++        return core
++
++    def _initialize(self, inputs: FusionInputs,
++                    validated_knowledge: _ValidatedKnowledgeBundle) -> None:
+         if not isinstance(inputs, FusionInputs):
+             _fail("Invalid fusion inputs")
+         self._inputs = inputs
++        self._validated_knowledge = validated_knowledge
+         try:
++            _require_validated_knowledge(validated_knowledge, inputs.knowledge_bundle, inputs.knowledge)
+             self._validate()
+         except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
+             raise DeviceFingerprintValidationError("Malformed fusion input") from exc
+@@ -147,7 +169,7 @@ class DeviceFingerprintFusionCore:
+             value.classification_policy, classification_taxonomy=value.classification_taxonomy,
+             alias_mapping=value.alias_mapping,
+             evidence_adapter_contract_set=value.evidence_adapter_contract_set)
+-        validate_knowledge_bundle_dependencies(value.knowledge_bundle, value.knowledge)
++        _require_validated_knowledge(self._validated_knowledge, value.knowledge_bundle, value.knowledge)
+         bundle = value.knowledge_bundle.semantic_payload
+         if bundle["classification_taxonomy"] != _ref(value.classification_taxonomy, "ClassificationTaxonomy") or (
+                 bundle["alias_mapping"] != _ref(value.alias_mapping, "AliasMapping")):
+@@ -163,11 +185,12 @@ class DeviceFingerprintFusionCore:
+         for assessment in value.origin_assessments:
+             _ref(assessment, "OriginAssessment")
+             payload = assessment.semantic_payload
+-            rebuilt = make_origin_assessment(
++            rebuilt = _make_origin_assessment_prevalidated(
+                 payload, evidence_snapshot_content=value.evidence_snapshot_content,
+                 source_evaluability=value.source_evaluability,
+                 evidence_adapter_contract_set=value.evidence_adapter_contract_set,
+-                knowledge_bundle=value.knowledge_bundle, knowledge=value.knowledge)
++                knowledge_bundle=value.knowledge_bundle, knowledge=value.knowledge,
++                validated_knowledge=self._validated_knowledge)
+             if rebuilt != assessment:
+                 _fail("Noncanonical OriginAssessment")
+             origin = payload["origin_group"]
+@@ -347,3 +370,10 @@ class DeviceFingerprintFusionCore:
+ def fuse_classification(inputs: FusionInputs) -> ArtifactContent:
+     """Build the same deterministic artifact as DeviceFingerprintFusionCore.fuse."""
+     return DeviceFingerprintFusionCore(inputs).fuse()
++
++
++def _fuse_classification_prevalidated(
++    inputs: FusionInputs,
++    validated_knowledge: _ValidatedKnowledgeBundle,
++) -> ArtifactContent:
++    return DeviceFingerprintFusionCore._from_validated(inputs, validated_knowledge).fuse()
+diff --git a/app/device_fingerprint/k4_ieee_import.py b/app/device_fingerprint/k4_ieee_import.py
+index 5444299c0363d5b6998ee426db2a2ef1746c0865..759f80098cb5d5273f2f03353963ceab0956f672 100644
+--- a/app/device_fingerprint/k4_ieee_import.py
++++ b/app/device_fingerprint/k4_ieee_import.py
+@@ -149,6 +149,14 @@ def match_k4_records(
+     payload = record_set.semantic_payload
+     if make_canonical_k4_record_set(payload).artifact_id != record_set.artifact_id:
+         _fail("Invalid K4 record-set identity")
++    return _match_k4_records_prevalidated(record_set, observed_mac)
++
++
++def _match_k4_records_prevalidated(
++    record_set: ArtifactContent, observed_mac: str,
++) -> tuple[dict[str, Any], ...]:
++    """Lookup the K4 dependency of an already validated request-local bundle."""
++    payload = record_set.semantic_payload
+     if not is_ieee_assignment_lookup_eligible(observed_mac):
+         return ()
+     hexadecimal = observed_mac.replace(":", "")
+diff --git a/app/device_fingerprint/knowledge_artifacts.py b/app/device_fingerprint/knowledge_artifacts.py
+index fdff8eff7b05e3866fb2f140947fd4d3722feff1..12a707c72d50c8b8d071ba25d645e67e861065b4 100644
+--- a/app/device_fingerprint/knowledge_artifacts.py
++++ b/app/device_fingerprint/knowledge_artifacts.py
+@@ -657,6 +657,15 @@ def match_k1_records(
+     rematerialized = make_canonical_k1_record_set(payload)
+     if rematerialized.artifact_id != record_set.artifact_id:
+         _fail("Invalid K1 record-set identity")
++    return _match_k1_records_prevalidated(record_set, dhcp_evidence)
++
++
++def _match_k1_records_prevalidated(
++    record_set: ArtifactContent,
++    dhcp_evidence: dict[str, Any],
++) -> tuple[dict[str, Any], ...]:
++    """Match the K1 dependency of an already validated request-local bundle."""
++    payload = record_set.semantic_payload
+     observed = _validated_dhcp_evidence(dhcp_evidence)
+     matches = []
+     for record in payload["records"]:
+diff --git a/app/device_fingerprint/knowledge_bundle.py b/app/device_fingerprint/knowledge_bundle.py
+index 25de478225369264f467e4b91150d47832a8a59c..9c4c22a1e8129eaffb5fcce36cac2e6cacc6a3c6 100644
+--- a/app/device_fingerprint/knowledge_bundle.py
++++ b/app/device_fingerprint/knowledge_bundle.py
+@@ -100,6 +100,30 @@ class KnowledgeBundleCandidate:
+     k4_freshness_policy: ArtifactContent
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class _ValidatedKnowledgeBundle:
++    bundle: ArtifactContent
++    candidate: KnowledgeBundleCandidate
++
++
++def _validate_knowledge_bundle_once(
++    bundle: ArtifactContent,
++    candidate: KnowledgeBundleCandidate,
++) -> _ValidatedKnowledgeBundle:
++    validate_knowledge_bundle_dependencies(bundle, candidate)
++    return _ValidatedKnowledgeBundle(bundle, candidate)
++
++
++def _require_validated_knowledge(
++    proof: _ValidatedKnowledgeBundle,
++    bundle: ArtifactContent,
++    candidate: KnowledgeBundleCandidate,
++) -> None:
++    if (not isinstance(proof, _ValidatedKnowledgeBundle)
++            or proof.bundle is not bundle or proof.candidate is not candidate):
++        _fail("Invalid request-scoped KnowledgeBundle validation proof")
++
++
+ def _distinct_refs(refs: list[dict[str, str]]) -> list[dict[str, str]]:
+     return list({ref["artifact_id"]: ref for ref in refs}.values())
+ 
+diff --git a/app/device_fingerprint/origin_assessment.py b/app/device_fingerprint/origin_assessment.py
+index 5b5c4471494fa5751082fb3b6f90578bb826c8b7..f1d62037446e1b031f3f5eb8bb89fc12e6b640a0 100644
+--- a/app/device_fingerprint/origin_assessment.py
++++ b/app/device_fingerprint/origin_assessment.py
+@@ -15,9 +15,12 @@ from .evidence_adapter_contracts import (
+     DIMENSIONS, make_evidence_adapter_contract_set, task01_contract_claim_eligible,
+ )
+ from .fe5_external_knowledge import evaluate_external_knowledge_freshness
+-from .k4_ieee_import import match_k4_records
+-from .knowledge_artifacts import match_k1_records
+-from .knowledge_bundle import KnowledgeBundleCandidate, validate_knowledge_bundle_dependencies
++from .k4_ieee_import import _match_k4_records_prevalidated
++from .knowledge_artifacts import _match_k1_records_prevalidated
++from .knowledge_bundle import (
++    KnowledgeBundleCandidate, _ValidatedKnowledgeBundle,
++    _validate_knowledge_bundle_once, _require_validated_knowledge,
++)
+ from .models import DeviceFingerprintValidationError
+ from .p0f_semantics import adapt_tcp_syn_v2, match_request, parse_request_signature
+ from .snapshot_service import EvidenceSnapshotMaterialization
+@@ -270,7 +273,7 @@ def _make_origin_assessment(
+     payload: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
+     source_evaluability: ArtifactContent,
+     evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
+-    knowledge: KnowledgeBundleCandidate,
++    knowledge: KnowledgeBundleCandidate, validated_knowledge: _ValidatedKnowledgeBundle,
+ ) -> ArtifactContent:
+     """Validate C.3.30/§101 exact closed schemas and canonical total order."""
+     row = dict(_shape(payload, _TOP, "OriginAssessment"))
+@@ -297,7 +300,8 @@ def _make_origin_assessment(
+     row["explanation_codes"] = _strings(row["explanation_codes"], "explanation code")
+     _validate_reference_lineage(row, evidence_snapshot_content=evidence_snapshot_content,
+                                 evidence_adapter_contract_set=evidence_adapter_contract_set,
+-                                knowledge_bundle=knowledge_bundle, knowledge=knowledge)
++                                knowledge_bundle=knowledge_bundle, knowledge=knowledge,
++                                validated_knowledge=validated_knowledge)
+     return make_artifact_content("OriginAssessment", row)
+ 
+ 
+@@ -309,11 +313,31 @@ def make_origin_assessment(
+ ) -> ArtifactContent:
+     """Construct a closed R14 assessment with typed malformed-input failures."""
+     try:
++        validated_knowledge = _validate_knowledge_bundle_once(knowledge_bundle, knowledge)
++        return _make_origin_assessment_prevalidated(
++            payload, evidence_snapshot_content=evidence_snapshot_content,
++            source_evaluability=source_evaluability,
++            evidence_adapter_contract_set=evidence_adapter_contract_set,
++            knowledge_bundle=knowledge_bundle, knowledge=knowledge,
++            validated_knowledge=validated_knowledge)
++    except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
++        raise DeviceFingerprintValidationError("Malformed OriginAssessment") from exc
++
++
++def _make_origin_assessment_prevalidated(
++    payload: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
++    source_evaluability: ArtifactContent,
++    evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
++    knowledge: KnowledgeBundleCandidate, validated_knowledge: _ValidatedKnowledgeBundle,
++) -> ArtifactContent:
++    try:
++        _require_validated_knowledge(validated_knowledge, knowledge_bundle, knowledge)
+         return _make_origin_assessment(
+             payload, evidence_snapshot_content=evidence_snapshot_content,
+             source_evaluability=source_evaluability,
+             evidence_adapter_contract_set=evidence_adapter_contract_set,
+-            knowledge_bundle=knowledge_bundle, knowledge=knowledge)
++            knowledge_bundle=knowledge_bundle, knowledge=knowledge,
++            validated_knowledge=validated_knowledge)
+     except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
+         raise DeviceFingerprintValidationError("Malformed OriginAssessment") from exc
+ 
+@@ -321,13 +345,12 @@ def make_origin_assessment(
+ def _validate_reference_lineage(
+     assessment: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
+     evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
+-    knowledge: KnowledgeBundleCandidate,
++    knowledge: KnowledgeBundleCandidate, validated_knowledge: _ValidatedKnowledgeBundle,
+ ) -> None:
+     if (make_evidence_adapter_contract_set(evidence_adapter_contract_set.semantic_payload)
+             != evidence_adapter_contract_set):
+         _fail("Noncanonical adapter contract set")
+-    if not validate_knowledge_bundle_dependencies(knowledge_bundle, knowledge):
+-        _fail("Unresolved KnowledgeBundle")
++    _require_validated_knowledge(validated_knowledge, knowledge_bundle, knowledge)
+     descriptor_by_id = {row["evidence_id"]: row for row in
+                         evidence_snapshot_content.semantic_payload["evidence_descriptors"]}
+     allowed_slot = {"dhcp": "k1", "portal": "k3", "tcp": "k2b",
+@@ -546,7 +569,25 @@ class DeviceFingerprintOriginAssessmentBuilder:
+     def __init__(self, inputs: OriginAssessmentInputs) -> None:
+         if not isinstance(inputs, OriginAssessmentInputs):
+             _fail("Invalid OriginAssessment inputs")
++        validated_knowledge = _validate_knowledge_bundle_once(inputs.knowledge_bundle, inputs.knowledge)
++        self._initialize(inputs, validated_knowledge)
++
++    @classmethod
++    def _from_validated(
++        cls, inputs: OriginAssessmentInputs,
++        validated_knowledge: _ValidatedKnowledgeBundle,
++    ) -> DeviceFingerprintOriginAssessmentBuilder:
++        builder = cls.__new__(cls)
++        builder._initialize(inputs, validated_knowledge)
++        return builder
++
++    def _initialize(self, inputs: OriginAssessmentInputs,
++                    validated_knowledge: _ValidatedKnowledgeBundle) -> None:
++        if not isinstance(inputs, OriginAssessmentInputs):
++            _fail("Invalid OriginAssessment inputs")
++        _require_validated_knowledge(validated_knowledge, inputs.knowledge_bundle, inputs.knowledge)
+         self._inputs = inputs
++        self._validated_knowledge = validated_knowledge
+         snapshot = inputs.evidence_snapshot_content
+         source = inputs.source_evaluability
+         if snapshot.artifact_type != "EvidenceSnapshotContent" or source.artifact_type != "SourceEvaluability":
+@@ -560,8 +601,6 @@ class DeviceFingerprintOriginAssessmentBuilder:
+         if (make_evidence_adapter_contract_set(inputs.evidence_adapter_contract_set.semantic_payload)
+                 != inputs.evidence_adapter_contract_set):
+             _fail("Noncanonical adapter contract set")
+-        if not validate_knowledge_bundle_dependencies(inputs.knowledge_bundle, inputs.knowledge):
+-            _fail("Invalid KnowledgeBundle closure")
+         parse_utc(inputs.knowledge_evaluation_at_utc)
+         descriptors = {row["evidence_id"]: row for row in snap["evidence_descriptors"]}
+         materialized: dict[str, Mapping[str, Any]] = {}
+@@ -656,6 +695,7 @@ class DeviceFingerprintOriginAssessmentBuilder:
+         if origin not in ORIGINS:
+             _fail("Unknown origin")
+         inputs = self._inputs
++        _require_validated_knowledge(self._validated_knowledge, inputs.knowledge_bundle, inputs.knowledge)
+         candidates: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
+             dimension: [] for dimension in DIMENSIONS}
+         broad: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
+@@ -673,7 +713,7 @@ class DeviceFingerprintOriginAssessmentBuilder:
+                 explanations.append(freshness["required_explanation_code"])
+             if freshness["claim_eligible"]:
+                 mac = inputs.evidence_snapshot_content.semantic_payload["observed_mac"].lower()
+-                matched = match_k4_records(inputs.knowledge.k4_record_set, mac)
++                matched = _match_k4_records_prevalidated(inputs.knowledge.k4_record_set, mac)
+                 if not matched:
+                     explanations.append("no_ieee_assignment_claim")
+                 for record in matched:
+@@ -748,7 +788,7 @@ class DeviceFingerprintOriginAssessmentBuilder:
+                 if not eligible_dimensions:
+                     continue
+                 if origin == "dhcp":
+-                    records = match_k1_records(inputs.knowledge.k1_record_set, dict(payload))
++                    records = _match_k1_records_prevalidated(inputs.knowledge.k1_record_set, dict(payload))
+                     if not records:
+                         explanations.append("k1_empty_candidate_set")
+                     for record in records:
+@@ -885,11 +925,12 @@ class DeviceFingerprintOriginAssessmentBuilder:
+             "knowledge_refs": _knowledge_set(_unique(knowledge_refs)),
+             "explanation_codes": _strings(list(set(explanations)), "explanation"),
+         }
+-        return make_origin_assessment(payload, evidence_snapshot_content=inputs.evidence_snapshot_content,
++        return _make_origin_assessment_prevalidated(payload, evidence_snapshot_content=inputs.evidence_snapshot_content,
+                                       source_evaluability=inputs.source_evaluability,
+                                       evidence_adapter_contract_set=inputs.evidence_adapter_contract_set,
+                                       knowledge_bundle=inputs.knowledge_bundle,
+-                                      knowledge=inputs.knowledge)
++                                      knowledge=inputs.knowledge,
++                                      validated_knowledge=self._validated_knowledge)
+ 
+     def build_all(self) -> tuple[ArtifactContent, ...]:
+         return tuple(self.build(origin) for origin in ORIGINS)
+diff --git a/app/device_fingerprint/request_assembly.py b/app/device_fingerprint/request_assembly.py
+index 4343fed13329556121fb828a8702b05c2b3e830c..0e0845df93f2c5a96744b60d000b606be2dab1b2 100644
+--- a/app/device_fingerprint/request_assembly.py
++++ b/app/device_fingerprint/request_assembly.py
+@@ -13,9 +13,10 @@ from .control_plane_store import (
+     ControlPlaneOperationError, DeviceFingerprintControlPlaneStore, PinnedRuntimeProfile,
+ )
+ from .fe5_external_knowledge import evaluate_external_knowledge_freshness
+-from .fusion import FusionInputs, fuse_classification
++from .fusion import FusionInputs, _fuse_classification_prevalidated
+ from .knowledge_bundle import (
+-    KnowledgeBundleCandidate, make_knowledge_bundle, validate_knowledge_bundle_dependencies,
++    KnowledgeBundleCandidate, make_knowledge_bundle,
++    _ValidatedKnowledgeBundle, _validate_knowledge_bundle_once,
+ )
+ from .models import DeviceFingerprintValidationError
+ from .origin_assessment import DeviceFingerprintOriginAssessmentBuilder, OriginAssessmentInputs
+@@ -97,6 +98,13 @@ class DeviceFingerprintRequestAssembly:
+     def reconstruct_knowledge_bundle(
+         bundle: ArtifactContent, resolver: Callable[[ArtifactRef], ArtifactContent],
+     ) -> KnowledgeBundleCandidate:
++        candidate, _proof = DeviceFingerprintRequestAssembly._reconstruct_validated_knowledge_bundle(bundle, resolver)
++        return candidate
++
++    @staticmethod
++    def _reconstruct_validated_knowledge_bundle(
++        bundle: ArtifactContent, resolver: Callable[[ArtifactRef], ArtifactContent],
++    ) -> tuple[KnowledgeBundleCandidate, _ValidatedKnowledgeBundle]:
+         """Follow record-set provenance, never positional inventory assignment."""
+         def dependency(value: dict[str, str], kind: str) -> ArtifactContent:
+             reference = ArtifactRef.from_dict(value)
+@@ -144,8 +152,8 @@ class DeviceFingerprintRequestAssembly:
+                 k4_record_set=records["k4"], k4_provenance=external["k4"][0],
+                 k4_governance=external["k4"][1], k4_freshness_policy=external["k4"][2],
+             )
+-            validate_knowledge_bundle_dependencies(bundle, candidate)
+-            return candidate
++            validated_knowledge = _validate_knowledge_bundle_once(bundle, candidate)
++            return candidate, validated_knowledge
+         except RequestAssemblyError:
+             raise
+         except (ControlPlaneOperationError, DeviceFingerprintValidationError,
+@@ -196,7 +204,7 @@ class DeviceFingerprintRequestAssembly:
+             except (ControlPlaneOperationError, DeviceFingerprintValidationError,
+                     sqlite3.Error, KeyError, TypeError, AttributeError) as exc:
+                 raise RequestAssemblyError(_knowledge_load_reason(exc)) from exc
+-            knowledge = self.reconstruct_knowledge_bundle(bundle, self._resolve)
++            knowledge, validated_knowledge = self._reconstruct_validated_knowledge_bundle(bundle, self._resolve)
+             policy = self._dependency(p["classification_policy"], "ClassificationPolicy")
+             adapters = self._dependency(p["evidence_adapter_contract_set"], "EvidenceAdapterContractSet")
+             classifier = self._dependency(p["classifier_artifact_manifest"], "ClassifierArtifactManifest")
+@@ -228,13 +236,13 @@ class DeviceFingerprintRequestAssembly:
+                 name: ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
+                 for name, content in contents.items()
+             } | {"knowledge_evaluation_at_utc": knowledge_time}, **contents)
+-            origins = DeviceFingerprintOriginAssessmentBuilder(OriginAssessmentInputs(
++            origins = DeviceFingerprintOriginAssessmentBuilder._from_validated(OriginAssessmentInputs(
+                 snapshot.evidence_snapshot_content, snapshot.materialization,
+-                evaluability, adapters, bundle, knowledge, knowledge_time)).build_all()
+-            result = fuse_classification(FusionInputs(
++                evaluability, adapters, bundle, knowledge, knowledge_time), validated_knowledge).build_all()
++            result = _fuse_classification_prevalidated(FusionInputs(
+                 request.content_sha256, policy, knowledge.classification_taxonomy,
+                 knowledge.alias_mapping, adapters, bundle, knowledge, classifier,
+-                snapshot.evidence_snapshot_content, evaluability, origins))
++                snapshot.evidence_snapshot_content, evaluability, origins), validated_knowledge)
+             if result.semantic_payload["classification_request_digest"] != request.content_sha256:
+                 raise RequestAssemblyError("classifier_internal_error")
+             return RequestAssemblyResult(
+diff --git a/tests/device_fingerprint_fe1/test_knowledge_artifacts.py b/tests/device_fingerprint_fe1/test_knowledge_artifacts.py
+index c630c7d80966b248cb40d1a3dd9dd327c652fbfe..42b2f031d290fec09d97b1b48f751a7a960db7e7 100644
+--- a/tests/device_fingerprint_fe1/test_knowledge_artifacts.py
++++ b/tests/device_fingerprint_fe1/test_knowledge_artifacts.py
+@@ -2,7 +2,7 @@ from copy import deepcopy
+ 
+ import pytest
+ 
+-from app.device_fingerprint.artifact_content import ArtifactRef
++from app.device_fingerprint.artifact_content import ArtifactRef, make_artifact_content
+ from app.device_fingerprint.knowledge_artifacts import (
+     make_canonical_k1_record_set,
+     make_external_knowledge_provenance_manifest,
+@@ -14,6 +14,23 @@ from app.device_fingerprint.models import DeviceFingerprintValidationError
+ from research.device_fingerprint_fe1.fixtures import build_k1_fixture_definitions
+ 
+ 
++@pytest.mark.parametrize("malformed", [False, True])
++def test_public_k1_matcher_rejects_noncanonical_or_malformed_record_set(malformed):
++    fixture = build_k1_fixture_definitions()["all_any"]
++    payload = fixture["record_set"].semantic_payload
++    if malformed:
++        payload["extra"] = "not admitted"
++    else:
++        second = deepcopy(payload["records"][0])
++        second["canonical_record_id"] += "-second"
++        payload["records"].append(second)
++        payload = make_canonical_k1_record_set(payload).semantic_payload
++        payload["records"].reverse()
++    record_set = make_artifact_content("CanonicalKnowledgeRecordSet", payload)
++    with pytest.raises(DeviceFingerprintValidationError):
++        match_k1_records(record_set, fixture["evidence"])
++
++
+ def _reference(artifact_type: str, digit: str) -> dict[str, str]:
+     digest = digit * 64
+     return ArtifactRef(
+diff --git a/tests/device_fingerprint_fe4/test_k4_ieee_import.py b/tests/device_fingerprint_fe4/test_k4_ieee_import.py
+index b9db038c596a72f7d694c8d33b17d3122927d1f3..4326c67077cf16f82df5eec5e0c0a41a5b226899 100644
+--- a/tests/device_fingerprint_fe4/test_k4_ieee_import.py
++++ b/tests/device_fingerprint_fe4/test_k4_ieee_import.py
+@@ -5,7 +5,7 @@ import io
+ 
+ import pytest
+ 
+-from app.device_fingerprint.artifact_content import ArtifactRef, canonical_artifact_json
++from app.device_fingerprint.artifact_content import ArtifactRef, canonical_artifact_json, make_artifact_content
+ from app.device_fingerprint.k4_ieee_import import (
+     build_ieee_k4_source_governance_candidate,
+     compute_ieee_k4_source_bundle_sha256,
+@@ -81,6 +81,19 @@ def test_k4_record_validation_fails_closed(mutation):
+         make_canonical_k4_record_set(_set_with(record))
+ 
+ 
++@pytest.mark.parametrize("malformed", [False, True])
++def test_public_k4_matcher_rejects_noncanonical_or_malformed_record_set(malformed):
++    payload = _import(l=(("MA-L", "001122", "Org A", "Address"),
++                         ("MA-L", "001133", "Org B", "Address"))).semantic_payload
++    if malformed:
++        payload["extra"] = "not admitted"
++    else:
++        payload["records"].reverse()
++    record_set = make_artifact_content("CanonicalKnowledgeRecordSet", payload)
++    with pytest.raises(DeviceFingerprintValidationError):
++        match_k4_records(record_set, "00:11:22:33:44:55")
++
++
+ def test_k4_slot_and_future_explicit_mapping_validation():
+     record = _record()
+     payload = _set_with(record)
+diff --git a/tests/device_fingerprint_fe7/test_knowledge_bundle.py b/tests/device_fingerprint_fe7/test_knowledge_bundle.py
+index edd6724db73076be9a21f128682cc02868260174..0a52ca985af2d9582c5cd73745ee90feae9acb95 100644
+--- a/tests/device_fingerprint_fe7/test_knowledge_bundle.py
++++ b/tests/device_fingerprint_fe7/test_knowledge_bundle.py
+@@ -28,6 +28,7 @@ from app.device_fingerprint.knowledge_artifacts import (
+ from app.device_fingerprint.knowledge_bundle import (
+     KnowledgeBundleCandidate, build_initial_knowledge_bundle_v1,
+     make_knowledge_bundle, validate_knowledge_bundle_dependencies,
++    _require_validated_knowledge, _validate_knowledge_bundle_once,
+ )
+ from app.device_fingerprint.models import DeviceFingerprintValidationError
+ from app.device_fingerprint.taxonomy_artifacts import (
+@@ -153,6 +154,34 @@ def _rebuilt_record_set(value: KnowledgeBundleCandidate, slot: str,
+                              f"{slot}_record_set": builder(payload)})
+ 
+ 
++def test_request_local_proof_requires_exact_objects_and_cannot_validate_a_bad_pair():
++    value = candidate()
++    bundle = build_initial_knowledge_bundle_v1(value)
++    proof = _validate_knowledge_bundle_once(bundle, value)
++    _require_validated_knowledge(proof, bundle, value)
++    assert proof.bundle is bundle and proof.candidate is value
++    assert not hasattr(proof, "artifact_id") and not hasattr(proof, "__dict__")
++    from dataclasses import FrozenInstanceError
++    with pytest.raises(FrozenInstanceError):
++        proof.bundle = bundle
++    equal_bundle = make_artifact_content("KnowledgeBundle", bundle.semantic_payload)
++    equal_candidate = replace(value)
++    assert equal_bundle == bundle and equal_bundle is not bundle
++    assert equal_candidate == value and equal_candidate is not value
++    for wrong_proof, wrong_bundle, wrong_candidate in (
++        (None, bundle, value), (object(), bundle, value),
++        (proof, equal_bundle, value), (proof, bundle, equal_candidate),
++    ):
++        with pytest.raises(DeviceFingerprintValidationError,
++                           match="Invalid request-scoped KnowledgeBundle validation proof"):
++            _require_validated_knowledge(wrong_proof, wrong_bundle, wrong_candidate)
++    bad = replace(value, k1_record_set=value.k4_record_set)
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_knowledge_bundle_dependencies(bundle, bad)
++    with pytest.raises(DeviceFingerprintValidationError):
++        _validate_knowledge_bundle_once(bundle, bad)
++
++
+ def test_exact_schema_rejects_missing_extra_wrong_type_ja4_and_nonpositive_version():
+     payload = build_initial_knowledge_bundle_v1(candidate()).semantic_payload
+     assert set(payload) == {
+diff --git a/tests/device_fingerprint_task04_04d_request/test_request_assembly.py b/tests/device_fingerprint_task04_04d_request/test_request_assembly.py
+index 8bd9af07337b16fb956cb59128c3d83e8a13c24e..4c94638b6d88aea46286667c07f3f32ebf38f3db 100644
+--- a/tests/device_fingerprint_task04_04d_request/test_request_assembly.py
++++ b/tests/device_fingerprint_task04_04d_request/test_request_assembly.py
+@@ -99,6 +99,100 @@ def candidate_run(service, profile):
+     return service.assemble_pre_acceptance_candidate(profile, SITE, MAC, START, END)
+ 
+ 
++# Captured on exact base 97bd1cf924024a38cc3229bfd726a25fe6754b07 before repair.
++@pytest.mark.parametrize("with_dhcp,request_sha,origin_shas,result_sha", [
++    (False, "11cddc6cc4a59a284102d05624923cd6d29bd37399257e2f3bc8a8779b8bff93", {
++        "dhcp": "86e15793c6f0bd4a8f9d184380804636f4ebb87bc545e95e7baa2a6d660e52d3",
++        "mac_registry": "ebecdce07f8997b9b7508ae427b6c74493f4cee86bf21956e80ac8d7b86ca3e5",
++        "portal": "4ad88b312d57df263a79f9d72d62acdb15f58942db7e2a592225d0a554c16e98",
++        "quic": "058f57e4ef5b0323119d28c09bd77f3f7ee44865b9a78429b92a72b749c3c75c",
++        "tcp": "d6b4217ef4878f8943f40cc841d4afa0506119374dfd75e390ca24926c59050a",
++        "tls": "a0f5b388f7360bd93001696a195e58435af33016a0fc140e72546ade153cfd4d",
++    }, "f2250e57ea2cf270c335d2acf4041be465aaedf5416f934be0d13ff7f720b5cb"),
++    (True, "33a7b48dab2b796a0c6b47fabe11964cef3f3ac49b166639d1c6c0823a5b2667", {
++        "dhcp": "1390bd7a0c43844eeb8c5e3209c782c1125ae569977567f305a3ba194fb15f2d",
++        "mac_registry": "0e4f8b2c64efabda9f449efb7f580f8444a27452c6f156d23338eefe977da687",
++        "portal": "d10c4aa382df2319bfb68dc660597d54f06a7fa0b7240c5690a0d062584a6480",
++        "quic": "4accc3c443b627ba228540ec059ba12c3bfde7795faceec942badef7e52e2041",
++        "tcp": "ccdd612e62744fa66f4fd20cdf93e61b46393c49e9c38fea514821d5c9ac7f11",
++        "tls": "16969f498a089885728c131e57af5688e5a6331f368a4eeb0d9ef7efcce65c36",
++    }, "2678b1d02b68515660f1bc89c5145bc8513260f3be668b8a5ae4fd2e654ac942"),
++])
++def test_request_semantic_ids_equal_pre_repair_base(with_dhcp, request_sha, origin_shas, result_sha):
++    _, _, service, profile = prepared(evidence_rows=[_dhcp_row()] if with_dhcp else ())
++    result = candidate_run(service, profile)
++    assert result.classification_request_manifest.artifact_id == (
++        "ClassificationRequestManifest:v1:sha256:" + request_sha)
++    ordered = sorted(result.origin_assessments, key=lambda item: item.semantic_payload["origin_group"])
++    assert [(item.semantic_payload["origin_group"], item.artifact_id) for item in ordered] == [
++        (origin, "OriginAssessment:v1:sha256:" + sha) for origin, sha in origin_shas.items()]
++    assert result.classification_result.artifact_id == "ClassificationResult:v1:sha256:" + result_sha
++
++
++def test_request_validates_knowledge_once_uses_private_matchers_and_drops_proof(monkeypatch):
++    from dataclasses import fields
++    import app.device_fingerprint.knowledge_bundle as module
++    import app.device_fingerprint.knowledge_artifacts as k1
++    import app.device_fingerprint.k4_ieee_import as k4
++    import app.device_fingerprint.origin_assessment as origin
++    import app.device_fingerprint.request_assembly as assembly
++    hook_calls = []
++    _, _, service, profile = prepared(
++        evidence_rows=[_dhcp_row()], hook=lambda *args: hook_calls.append(args) or True)
++    calls, proofs, matches = [], [], []
++    original = module.validate_knowledge_bundle_dependencies
++    factory = assembly._validate_knowledge_bundle_once
++    k1_match = origin._match_k1_records_prevalidated
++    k4_match = origin._match_k4_records_prevalidated
++
++    def counted(bundle, candidate):
++        calls.append((bundle, candidate))
++        return original(bundle, candidate)
++
++    def capture_proof(bundle, candidate):
++        proof = factory(bundle, candidate)
++        proofs.append(proof)
++        return proof
++
++    def private_k1(*args):
++        matches.append("K1")
++        return k1_match(*args)
++
++    def private_k4(*args):
++        matches.append("K4")
++        return k4_match(*args)
++
++    def forbidden(*_args, **_kwargs):
++        pytest.fail("Validated request called a public full-validation matcher")
++
++    monkeypatch.setattr(module, "validate_knowledge_bundle_dependencies", counted)
++    monkeypatch.setattr(assembly, "_validate_knowledge_bundle_once", capture_proof)
++    monkeypatch.setattr(k1, "match_k1_records", forbidden)
++    monkeypatch.setattr(k4, "match_k4_records", forbidden)
++    monkeypatch.setattr(origin, "_match_k1_records_prevalidated", private_k1)
++    monkeypatch.setattr(origin, "_match_k4_records_prevalidated", private_k4)
++    for request_index in range(2):
++        result = candidate_run(service, profile)
++        assert len(calls) == len(proofs) == request_index + 1
++        assert matches.count("K1") == matches.count("K4") == request_index + 1
++        assert len(hook_calls[-1]) == 7
++        assert hook_calls[-1] == (
++            result.classification_runtime_profile, result.foundation_runtime_profile,
++            result.knowledge_bundle, result.knowledge_candidate, result.classification_policy,
++            result.evidence_adapter_contract_set, result.classifier_artifact_manifest)
++        assert all(not isinstance(getattr(result, field.name), module._ValidatedKnowledgeBundle)
++                   for field in fields(result))
++        for artifact in (result.classification_request_manifest, *result.origin_assessments,
++                         result.classification_result):
++            assert b"_ValidatedKnowledgeBundle" not in artifact.semantic_payload_json
++            assert b"validated_knowledge" not in artifact.semantic_payload_json
++    assert proofs[0] is not proofs[1] and proofs[0].candidate is not proofs[1].candidate
++    with pytest.raises(DeviceFingerprintValidationError,
++                       match="Invalid request-scoped KnowledgeBundle validation proof"):
++        module._require_validated_knowledge(proofs[0], proofs[1].bundle, proofs[1].candidate)
++
++
++
+ def test_request_exact_seven_fields_digest_and_no_runtime_lineage():
+     _, _, service, profile = prepared()
+     result = candidate_run(service, profile)
+diff --git a/tests/device_fingerprint_task04_t03/test_origin_assessment.py b/tests/device_fingerprint_task04_t03/test_origin_assessment.py
+index 4850f2cc1cb1c437f5691bc5be214757447b4193..76bf726eed914abf6b605759d3493ea12390ca9f 100644
+--- a/tests/device_fingerprint_task04_t03/test_origin_assessment.py
++++ b/tests/device_fingerprint_task04_t03/test_origin_assessment.py
+@@ -113,6 +113,45 @@ def _candidate(value="android", strength="supporting", evidence_id="one"):
+     }
+ 
+ 
++@pytest.mark.parametrize("malformed", [False, True])
++def test_public_origin_entry_points_reject_invalid_knowledge_closure(malformed):
++    inputs = _inputs(evidence_rows=[_dhcp_row()])
++    artifact = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp")
++    if malformed:
++        bad = replace(inputs, knowledge_bundle=make_artifact_content("KnowledgeBundle", {"extra": True}))
++    else:
++        bad = replace(inputs, knowledge=replace(inputs.knowledge, k1_record_set=inputs.knowledge.k4_record_set))
++    with pytest.raises(DeviceFingerprintValidationError):
++        DeviceFingerprintOriginAssessmentBuilder(bad)
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_origin_assessment(
++            artifact.semantic_payload, evidence_snapshot_content=bad.evidence_snapshot_content,
++            source_evaluability=bad.source_evaluability,
++            evidence_adapter_contract_set=bad.evidence_adapter_contract_set,
++            knowledge_bundle=bad.knowledge_bundle, knowledge=bad.knowledge)
++
++
++def test_public_origin_builder_and_constructor_validate_knowledge_once(monkeypatch):
++    import app.device_fingerprint.knowledge_bundle as module
++    inputs = _inputs(evidence_rows=[_dhcp_row()])
++    calls = []
++    original = module.validate_knowledge_bundle_dependencies
++    def counted(bundle, candidate):
++        calls.append((bundle, candidate))
++        return original(bundle, candidate)
++    monkeypatch.setattr(module, "validate_knowledge_bundle_dependencies", counted)
++    builder = DeviceFingerprintOriginAssessmentBuilder(inputs)
++    first = builder.build_all()
++    assert builder.build_all() == first
++    assert len(calls) == 1
++    rebuilt = make_origin_assessment(
++        first[0].semantic_payload, evidence_snapshot_content=inputs.evidence_snapshot_content,
++        source_evaluability=inputs.source_evaluability,
++        evidence_adapter_contract_set=inputs.evidence_adapter_contract_set,
++        knowledge_bundle=inputs.knowledge_bundle, knowledge=inputs.knowledge)
++    assert rebuilt == first[0] and len(calls) == 2
++
++
+ def test_six_origin_artifacts_have_exact_four_dimensions_and_stable_identity():
+     inputs = _inputs()
+     builder = DeviceFingerprintOriginAssessmentBuilder(inputs)
+@@ -688,7 +727,7 @@ def test_adapter_incompatibility_is_audit_only_before_k1_matcher(change, monkeyp
+     inputs = _with_descriptor(_inputs(evidence_rows=[_dhcp_row()]), **change)
+     def forbidden(*_args, **_kwargs):
+         pytest.fail("K1 matcher ran for an incompatible row")
+-    monkeypatch.setattr(module, "match_k1_records", forbidden)
++    monkeypatch.setattr(module, "_match_k1_records_prevalidated", forbidden)
+     output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
+     assert "unsupported_evidence_contract" in output["explanation_codes"]
+     assert len(output["evidence_refs"]) == 1
+@@ -704,7 +743,7 @@ def test_degraded_compatible_evidence_does_not_run_k1_matcher(monkeypatch):
+     inputs = _inputs(evidence_rows=[_dhcp_row(quality_state="degraded")])
+     def forbidden(*_args, **_kwargs):
+         pytest.fail("K1 matcher ran for a degraded row")
+-    monkeypatch.setattr(module, "match_k1_records", forbidden)
++    monkeypatch.setattr(module, "_match_k1_records_prevalidated", forbidden)
+     output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
+     assert "degraded_evidence_no_claim" in output["explanation_codes"]
+     assert len(output["evidence_refs"]) == 1
+diff --git a/tests/device_fingerprint_task04_t04/test_fusion.py b/tests/device_fingerprint_task04_t04/test_fusion.py
+index 793d5019a5ebc1dc3e621ad0605cf60c8968046a..10ea7e6973c0bb05ccfdc7b83cbb411d5867a427 100644
+--- a/tests/device_fingerprint_task04_t04/test_fusion.py
++++ b/tests/device_fingerprint_task04_t04/test_fusion.py
+@@ -101,6 +101,33 @@ def _platform(inputs: FusionInputs) -> dict:
+     return fuse_classification(inputs).semantic_payload["platform_result"]
+ 
+ 
++@pytest.mark.parametrize("malformed", [False, True])
++def test_public_fusion_entry_points_reject_invalid_knowledge_closure(baseline, malformed):
++    if malformed:
++        bad = replace(baseline, knowledge_bundle=make_artifact_content("KnowledgeBundle", {"extra": True}))
++    else:
++        bad = replace(baseline, knowledge=replace(baseline.knowledge, k1_record_set=baseline.knowledge.k4_record_set))
++    with pytest.raises(DeviceFingerprintValidationError):
++        fuse_classification(bad)
++    with pytest.raises(DeviceFingerprintValidationError):
++        DeviceFingerprintFusionCore(bad)
++
++
++def test_public_fusion_validates_knowledge_once_including_six_origin_rebuilds(baseline, monkeypatch):
++    import app.device_fingerprint.knowledge_bundle as module
++    calls = []
++    original = module.validate_knowledge_bundle_dependencies
++    def counted(bundle, candidate):
++        calls.append((bundle, candidate))
++        return original(bundle, candidate)
++    monkeypatch.setattr(module, "validate_knowledge_bundle_dependencies", counted)
++    first = fuse_classification(baseline)
++    assert len(calls) == 1
++    core = DeviceFingerprintFusionCore(baseline)
++    assert core.fuse() == first and core.fuse() == first
++    assert len(calls) == 2
++
++
+ def test_exact_six_origins_permutation_and_stable_result(baseline):
+     first = fuse_classification(baseline)
+     reverse = fuse_classification(replace(baseline, origin_assessments=tuple(reversed(baseline.origin_assessments))))
