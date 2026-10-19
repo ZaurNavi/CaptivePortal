@@ -226,7 +226,9 @@ def parse_inventory(raw: bytes) -> Inventory:
                         raise InventoryUnavailable()
                     path = PurePosixPath(value)
                     if (not path.is_absolute() or path.as_posix() != value or ".." in path.parts
-                            or str(path.parent) not in APPROVED_ROOTS
+                            or (str(path.parent) not in APPROVED_ROOTS and not (
+                                identity == "fingerprint_evidence"
+                                and str(path.parent) == "/opt/CaptivePortal/data/evidence"))
                             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", path.name) is None
                             or value in paths.values()):
                         raise InventoryUnavailable()

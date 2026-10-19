@@ -135,3 +135,109 @@ def test_loader_bounded_nofollow_regular_root_owned_file_once(monkeypatch, case)
 def test_duplicate_nested_key_is_rejected():
     raw = json.dumps(manifest()).replace('"intent": "run"', '"intent": "run", "intent": "disabled"', 1)
     with pytest.raises(inventory.InventoryUnavailable): inventory.parse_inventory(raw.encode())
+
+
+def nested_manifest():
+    value = manifest()
+    next(row for row in value['databases'] if row['id'] == 'fingerprint_evidence')['path'] = '/opt/CaptivePortal/data/evidence/evidence.sqlite3'
+    return value
+
+
+def test_evidence_only_parent_exception_and_legacy_catalog_unchanged():
+    assert inventory.APPROVED_ROOTS == ('/opt/CaptivePortal/data', '/var/lib/captive-portal/fingerprint-sensor')
+    store = next(item for item in inventory.STORES if item.id == 'fingerprint_evidence')
+    assert store.filename == 'device_fingerprint_evidence.sqlite3'
+    assert resolved().paths[store.id] == '/opt/CaptivePortal/data/' + store.filename
+    bound = resolved(**nested_manifest())
+    assert bound.paths[store.id] == '/opt/CaptivePortal/data/evidence/evidence.sqlite3'
+    assert len(bound.paths) == 17 and len(bound.service_intents) == 9
+
+
+@pytest.mark.parametrize('identity', [item.id for item in inventory.STORES if item.id != 'fingerprint_evidence'])
+def test_all_other_sixteen_store_ids_denied_in_evidence_parent(identity):
+    value = manifest()
+    next(row for row in value['databases'] if row['id'] == identity)['path'] = '/opt/CaptivePortal/data/evidence/other.sqlite3'
+    with pytest.raises(inventory.InventoryUnavailable): resolved(**value)
+
+
+@pytest.mark.parametrize('path', [
+    '/opt/CaptivePortal/data/evidence/sub/evidence.sqlite3',
+    '/opt/CaptivePortal/data/evidence-other/evidence.sqlite3',
+    '/opt/CaptivePortal/data/other/evidence.sqlite3',
+    '/var/lib/captive-portal/fingerprint-sensor/evidence/evidence.sqlite3',
+    'data/evidence/evidence.sqlite3', '/opt/CaptivePortal/data/evidence/../evidence.sqlite3',
+    '/opt/CaptivePortal/data/evidence/./evidence.sqlite3', '/opt/CaptivePortal/data//evidence/evidence.sqlite3',
+    '//opt/CaptivePortal/data/evidence/evidence.sqlite3', '/opt/CaptivePortal/data/evidence/a\n.sqlite3',
+    '/opt/CaptivePortal/data/evidence/a\0.sqlite3', '/opt/CaptivePortal/data/evidence/.hidden',
+    '/opt/CaptivePortal/data/evidence/*.sqlite3', '/opt/CaptivePortal/data/evidence/evidence.sqlite3;injected',
+])
+def test_evidence_exception_remains_exact_canonical_direct_parent(path):
+    value = nested_manifest()
+    next(row for row in value['databases'] if row['id'] == 'fingerprint_evidence')['path'] = path
+    with pytest.raises(inventory.InventoryUnavailable): resolved(**value)
+
+
+@pytest.mark.parametrize('mutation', ['duplicate-path', 'unknown-id', 'extra-entry'])
+def test_nested_exception_does_not_relax_closed_manifest_or_collision(mutation):
+    value = nested_manifest()
+    if mutation == 'duplicate-path':
+        value['databases'][1]['path'] = value['databases'][0]['path']
+    elif mutation == 'unknown-id':
+        next(row for row in value['databases'] if row['id'] == 'fingerprint_evidence')['id'] = 'other_evidence'
+    else: value['databases'].append(copy.deepcopy(value['databases'][0]))
+    with pytest.raises(inventory.InventoryUnavailable): resolved(**value)
+
+
+@pytest.mark.parametrize('kind', ['regular', 'symlink', 'directory', 'fifo'])
+def test_downstream_snapshot_uses_manifest_selected_path_and_keeps_partial_evidence(kind):
+    from datetime import datetime, timezone
+    from app.admin_web.operations_service import AdminOperationsReadService
+    bound = resolved(**nested_manifest())
+    selected = bound.paths['fingerprint_evidence']
+    calls = []
+    def sample(path):
+        calls.append(path)
+        if path != selected: raise FileNotFoundError()
+        modes = dict(regular=stat.S_IFREG, symlink=stat.S_IFLNK, directory=stat.S_IFDIR, fifo=stat.S_IFIFO)
+        return SimpleNamespace(st_mode=modes[kind] | 0o640, st_size=8192, st_ino=123, st_dev=1)
+    reader = AdminOperationsReadService(bound, acquire=lambda _: '', lstat=sample,
+        monotonic=lambda: 0.0, now=lambda: datetime(2026, 10, 19, tzinfo=timezone.utc))
+    try: snapshot = reader._collect(0.0)
+    finally: reader.close()
+    row = next(item for item in snapshot['databases'] if item['id'] == 'fingerprint_evidence')
+    assert row['filename'] == 'evidence.sqlite3' and selected in calls
+    assert '/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3' not in calls
+    assert row['operational_state'] == ('present_unverified' if kind == 'regular' else 'unavailable')
+    assert row['health_evidence'] == 'none'
+    if kind != 'regular':
+        assert row['reason_code'] == ('symlink_file' if kind == 'symlink' else 'nonregular_file')
+        assert snapshot['snapshot_state'] == 'partial'
+
+
+@pytest.mark.parametrize('fault', ['valid', 'symlink', 'nonregular', 'owner', 'mode', 'parent-mode', 'oversize'])
+def test_native_disposable_root_manifest_nofollow_and_trust_unchanged(monkeypatch, fault):
+    import os
+    import shutil
+    import sys
+    import tempfile
+    from pathlib import Path
+    if sys.platform != 'linux' or os.geteuid() != 0:
+        pytest.skip('Linux root-only disposable manifest no-follow/trust check; independent root rerun')
+    folder = Path(tempfile.mkdtemp(prefix='issue245-partb-', dir='/run'))
+    path = folder / 'bindings.json'
+    try:
+        path.write_bytes(json.dumps(nested_manifest()).encode()); path.chmod(0o640)
+        if fault == 'symlink':
+            path.rename(folder / 'real'); path.symlink_to(folder / 'real')
+        elif fault == 'nonregular': path.unlink(); os.mkfifo(path)
+        elif fault == 'owner': os.chown(path, 65002, -1)
+        elif fault == 'mode': path.chmod(0o666)
+        elif fault == 'parent-mode': folder.chmod(0o722)
+        elif fault == 'oversize': path.write_bytes(b' ' * (inventory.MANIFEST_MAX_BYTES + 1))
+        monkeypatch.setattr(inventory, 'MANIFEST_PATH', str(path))
+        # Only final legacy-root existence probes are substituted; never access installed paths.
+        monkeypatch.setattr(inventory, 'Path', lambda value: folder if str(value) in inventory.APPROVED_ROOTS else Path(value))
+        if fault == 'valid': assert inventory.load_inventory().paths['fingerprint_evidence'].endswith('/evidence/evidence.sqlite3')
+        else:
+            with pytest.raises(inventory.InventoryUnavailable): inventory.load_inventory()
+    finally: shutil.rmtree(folder)
