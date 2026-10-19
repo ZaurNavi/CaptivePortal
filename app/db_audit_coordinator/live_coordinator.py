@@ -73,6 +73,7 @@ def fill_document(fd,value, *, seal=True):
 
 class LiveCoordinator(Coordinator):
     store_type=OperationalStateStore
+    diagnostic_stage='serve'
 
     def qualify(self,profile):profile.installed()
 
@@ -151,11 +152,14 @@ class LiveCoordinator(Coordinator):
                     auth_hash=hashlib.sha256(nonce.encode()).hexdigest(),auth_device=pipe.st_dev,auth_inode=pipe.st_ino,
                     resource_envelope=dict(fixture_only=False,memory_limit_bytes=policy.memory_max_bytes,
                         timeout_seconds=policy.attempt_seconds))
+                self.diagnostic_stage='claim_publish'
                 self._commit(current)  # MUST precede create/spawn/release.
+                self.diagnostic_stage='post_claim_leaf_attestation'
                 self._leaf=create_leaf(self.profile.delegated,
                     (self.profile.delegated_device,self.profile.delegated_inode),job,policy.memory_max_bytes,
                     worker_gid=self.profile.worker_gid)
                 claim=memory_document(None);profile_fd=memory_document(asdict(self.profile))
+                self.diagnostic_stage='child_spawn'
                 child=subprocess.Popen(self.command(ar),cwd=self.profile.release_root,
                     env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'},
                     stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
@@ -166,8 +170,10 @@ class LiveCoordinator(Coordinator):
                 self._watch(child)
                 self._pidfd=os.pidfd_open(child.pid,0);self._start=start_ticks(child.pid)
                 self._leaf.write('cgroup.procs',str(child.pid))
+                self.diagnostic_stage='child_containment'
                 self._leaf.contained(child.pid,policy.memory_max_bytes,self._start)
                 job.update(state='running',worker_pid=child.pid,reason_code='running',updated_at=c.utc())
+                self.diagnostic_stage='running_publish'
                 self._commit(current)
                 # Copy only the exact queue just read back after durable commit.
                 fill_document(claim,self.store.read())
@@ -177,8 +183,10 @@ class LiveCoordinator(Coordinator):
                     leaf=self._leaf.relative,leaf_device=self._leaf.identity[0],leaf_inode=self._leaf.identity[1],
                     gate_device=self.gate_spec.device,gate_inode=self.gate_spec.inode,started_ns=started)
                 raw=c.encode(payload,4096)
+                self.diagnostic_stage='child_release'
                 require(os.write(aw,raw)==len(raw))
                 self._deadline=started/1e9+policy.attempt_seconds
+                self.diagnostic_stage='serve'
                 return True
             except Exception:
                 self.orphan_hold=True
