@@ -58,10 +58,15 @@ def setup(tmp_path, rows=1, page_size=4096):
 
 
 def auditor(tmp_path, source=None, **changes):
+    from app.db_audit_coordinator.fingerprint_adapter import fixture_authority
     directory = tmp_path / "audit"
     directory.mkdir(mode=0o700, exist_ok=True)
-    return audit.EvidenceAuditor(source or tmp_path / "fingerprint.sqlite3",
-        status=audit.StatusStore(directory / "fingerprint_evidence.json"), resources=facts, **changes)
+    marker = tmp_path / ".fingerprint-audit-fixture-only"
+    marker.write_bytes(b"DISPOSABLE_UNIT_AUDIT_ONLY_V1\n"); marker.chmod(0o600)
+    source = source or tmp_path / "fingerprint.sqlite3"
+    status = audit.StatusStore(directory / "fingerprint_evidence.json")
+    return audit.EvidenceAuditor(source, status=status, resources=facts,
+        authorization=fixture_authority(tmp_path, source, status.path), **changes)
 
 
 def record_evidence(tmp_path, value):
@@ -333,6 +338,7 @@ import sys,time,json,faulthandler
 faulthandler.dump_traceback_later(5)
 from pathlib import Path
 from app.device_fingerprint.audit_runner import EvidenceAuditor,StatusStore
+from app.db_audit_coordinator.fingerprint_adapter import fixture_authority
 def facts(): return json.loads(sys.argv[4])
 Path(sys.argv[5]).write_text("child_imports_complete",encoding="ascii")
 class Store(StatusStore):
@@ -341,7 +347,8 @@ class Store(StatusStore):
   if value["last_attempt"].get("stage")==sys.argv[3]:
    print("BLOCKED_AT_STAGE",flush=True)
    time.sleep(30)
-EvidenceAuditor(Path(sys.argv[1]),status=Store(Path(sys.argv[2])),resources=facts).run()
+EvidenceAuditor(Path(sys.argv[1]),status=Store(Path(sys.argv[2])),resources=facts,
+ authorization=fixture_authority(Path(sys.argv[1]).parent,Path(sys.argv[1]),Path(sys.argv[2]))).run()
 '''
     ready = tmp_path/"child-ready.txt"
     child = subprocess.Popen([sys.executable,"-c",code,str(subject.source),str(subject.store.path),stage,json.dumps(facts()),str(ready)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -459,7 +466,9 @@ def test_F21_F25_no_disk_snapshot_even_with_unusable_scratch(tmp_path, monkeypat
     result, code = subject.run()
     assert code == 0 and result["status"] == "passed"
     assert not (tmp_path/"nonexistent-scratch").exists()
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["audit","fingerprint.sqlite3","fingerprint.sqlite3-shm","fingerprint.sqlite3-wal"]
+    # The sole new file is the explicit tiny unit-authorization marker, never
+    # a disk snapshot. Keep the exact closed inventory / no-scratch assertion.
+    assert sorted(path.name for path in tmp_path.iterdir()) == [".fingerprint-audit-fixture-only","audit","fingerprint.sqlite3","fingerprint.sqlite3-shm","fingerprint.sqlite3-wal"]
     repo.close()
 
 
@@ -483,7 +492,7 @@ def test_F26_F27_cleanup_fault_prevents_success_and_status_writes_are_milestone_
 
 @pytest.mark.parametrize("argv", [["run","--store-id","network_metadata"],["run","--store-id","fingerprint_evidence","--db-path","/arbitrary"],["run","--store-id","fingerprint_evidence","--sql","SELECT 1"]])
 def test_F08_cli_rejects_arbitrary_targets_without_configuration_read(argv, monkeypatch):
-    monkeypatch.setattr(audit_cli, "EvidenceAuditor", lambda *args, **kwargs: pytest.fail("must not construct auditor"))
+    monkeypatch.setattr(audit, "EvidenceAuditor", lambda *args, **kwargs: pytest.fail("must not construct auditor"))
     with pytest.raises(SystemExit) as error: audit_cli.main(argv)
     assert error.value.code == 2
 
@@ -555,24 +564,23 @@ def test_F21_F27_untrusted_status_refuses_and_does_not_promote_success(tmp_path,
     assert code == 5 and result["category_code"] == "report_unavailable"
 
 
-def test_F08_manual_cli_stopped_configuration_and_cooperative_signal(tmp_path, monkeypatch, capsys):
+def test_F08_manual_cli_submit_only_no_configuration_or_worker_signal_mutation(tmp_path, monkeypatch, capsys):
     from types import SimpleNamespace
-    monkeypatch.setitem(sys.modules,"app.settings",SimpleNamespace(get_settings=lambda:{"device_fingerprint_evidence_enabled":"false","device_fingerprint_db_path":str(tmp_path/"fingerprint.sqlite3")}))
+    monkeypatch.setitem(sys.modules,"app.settings",SimpleNamespace(get_settings=lambda:pytest.fail("submit wrapper must not read DB configuration")))
     from app.artifact_identity import LoadedArtifactIdentity
     monkeypatch.setattr(audit_cli,"capture_loaded_artifact_identity",lambda _name: LoadedArtifactIdentity(
         "a"*40, "b"*40, "fingerprint-evidence-manual-audit", "2026-10-18T00:00:00.000Z"))
-    def construct(source, **kwargs):
-        assert source == str(tmp_path/"fingerprint.sqlite3")
-        def run():
-            assert not kwargs["canceled"]()
-            signal.getsignal(signal.SIGTERM)(signal.SIGTERM,None)
-            assert kwargs["canceled"]()
-            return dict(status="incomplete",category_code="canceled"),4
-        return SimpleNamespace(run=run)
-    monkeypatch.setattr(audit_cli,"EvidenceAuditor",construct)
-    assert audit_cli.main(["run","--store-id","fingerprint_evidence"]) == 4
+    def submit(value):
+        assert value["op"] == "submit" and value["store_id"] == "fingerprint_evidence" and value["origin"] == "manual"
+        assert str(uuid.UUID(value["idempotency_key"])) == value["idempotency_key"]
+        return dict(store_id=audit.STORE_ID,status="queued",job_id="11111111-1111-4111-8111-111111111111")
+    monkeypatch.setattr(audit,"EvidenceAuditor",lambda *a,**k:pytest.fail("submit wrapper cannot execute an auditor"))
+    monkeypatch.setattr(audit_cli,"submit_request",submit)
+    before = signal.getsignal(signal.SIGTERM)
+    assert audit_cli.main(["run","--store-id","fingerprint_evidence"]) == 0
+    assert signal.getsignal(signal.SIGTERM) is before
     text = capsys.readouterr().out
-    assert "canceled" in text and str(tmp_path) not in text
+    assert '"status": "queued"' in text and str(tmp_path) not in text
 
 
 def test_F28_F29_F30_scope_and_no_automatic_audit_import():
@@ -612,7 +620,7 @@ def test_R2_C_child_exit_observer_retries_only_bounded_windows_sharing(mode):
 def test_R2_D_cli_trusts_only_verified_clean_head_tree_without_filesystem_mutation(monkeypatch, capsys, status):
     from types import SimpleNamespace
     import app.artifact_identity as artifact
-    calls, constructed = [], []
+    calls, submitted = [], []
     def git(_root, *arguments):
         calls.append(arguments)
         return {("rev-parse", "--verify", "HEAD"):"a"*40,
@@ -620,23 +628,22 @@ def test_R2_D_cli_trusts_only_verified_clean_head_tree_without_filesystem_mutati
             ("status", "--porcelain=v1", "--untracked-files=normal"):status}[arguments]
     monkeypatch.setattr(artifact, "_git", git)
     def settings():
-        assert not status, "dirty identity must refuse before configuration or DB access"
-        return {"device_fingerprint_evidence_enabled":"false", "device_fingerprint_db_path":"/synthetic-unused.sqlite3"}
+        pytest.fail("submit-only wrapper must never load source configuration")
     monkeypatch.setitem(sys.modules, "app.settings", SimpleNamespace(get_settings=settings))
-    def construct(_source, **kwargs):
-        constructed.append(kwargs)
-        return SimpleNamespace(run=lambda:(dict(status="passed", category_code="snapshot_passed"), 0))
-    monkeypatch.setattr(audit_cli, "EvidenceAuditor", construct)
+    def submit(value):
+        submitted.append(value)
+        return dict(store_id=audit.STORE_ID,status="queued",job_id="11111111-1111-4111-8111-111111111111")
+    monkeypatch.setattr(audit_cli, "submit_request", submit)
     code = audit_cli.main(["run", "--store-id", audit.STORE_ID])
     record = json.loads(capsys.readouterr().out)
     assert calls == [("rev-parse", "--verify", "HEAD"), ("rev-parse", "--verify", "HEAD^{tree}"),
         ("status", "--porcelain=v1", "--untracked-files=normal")]
     if status:
         assert code == 5 and record["category_code"] == "artifact_identity_unavailable"
-        assert constructed == [] and status.strip() not in json.dumps(record)
+        assert submitted == [] and status.strip() not in json.dumps(record)
     else:
-        assert code == 0 and record["status"] == "passed"
-        assert constructed[0]["source_commit"] == "a"*40
+        assert code == 0 and record["status"] == "queued"
+        assert len(submitted) == 1 and set(submitted[0]) == {"op","store_id","idempotency_key","origin"}
 
 
 @pytest.mark.parametrize("kind", ["quiet", "swap-in", "swap-out", "reclaim-scan", "reclaim-steal",

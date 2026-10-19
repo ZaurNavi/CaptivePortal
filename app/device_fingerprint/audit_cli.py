@@ -1,43 +1,40 @@
-"""Explicit manual RAM audit; no timer, HTTP entrypoint or startup import."""
+"""Manual submit-only wrapper; never opens a store or falls back to an audit."""
 from __future__ import annotations
 
 import argparse
 import json
-import signal
-import threading
+import uuid
 
 from app.artifact_identity import ArtifactIdentityError, capture_loaded_artifact_identity
 
-from .audit_runner import EvidenceAuditor, STORE_ID
-from .config import device_fingerprint_config_from_settings
+from app.db_audit_coordinator import contracts as c
+from app.db_audit_coordinator.protocol import submit_request
+from .audit_runner import STORE_ID
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Manual Fingerprint Evidence RAM snapshot audit")
+    parser = argparse.ArgumentParser(description="Submit Fingerprint Evidence audit to the private coordinator")
     parser.add_argument("command", choices=["run"])
     parser.add_argument("--store-id", required=True, choices=[STORE_ID])
-    parser.parse_args(argv)
-    canceled = threading.Event()
-    previous = {}
+    parser.add_argument("--idempotency-key", default=None)
+    args = parser.parse_args(argv)
     try:
+        key = c.identifier(args.idempotency_key) if args.idempotency_key is not None else str(uuid.uuid4())
         try:
-            identity = capture_loaded_artifact_identity("fingerprint-evidence-manual-audit")
+            capture_loaded_artifact_identity("fingerprint-evidence-audit-submit")
         except ArtifactIdentityError:
-            print(json.dumps({"store_id":STORE_ID, "status":"incomplete", "category_code":"artifact_identity_unavailable"}))
+            print(json.dumps(dict(store_id=STORE_ID, status="coordinator_unavailable", category_code="artifact_identity_unavailable")))
             return 5
-        from app.settings import get_settings
-        config = device_fingerprint_config_from_settings(get_settings())
-        for kind in (signal.SIGINT, signal.SIGTERM):
-            previous[kind] = signal.signal(kind, lambda _kind, _frame: canceled.set())
-        record, code = EvidenceAuditor(config.db_path, canceled=canceled.is_set, source_commit=identity.artifact_sha).run()
-        # Full operator record is protected on disk, never print source data.
-        print(json.dumps({"store_id":STORE_ID, "status":record["status"], "category_code":record["category_code"]}))
-        return code
+        result = submit_request(dict(op="submit", store_id=STORE_ID, idempotency_key=key, origin="manual"))
+        print(json.dumps(result))
+        return 0
+    except c.CoordinatorError as error:
+        code = error.code if error.code in {"store_busy", "queue_full", "invalid_request"} else "coordinator_unavailable"
+        print(json.dumps(dict(store_id=STORE_ID, status=code, category_code=code)))
+        return 2 if code != "coordinator_unavailable" else 5
     except Exception:
-        print(json.dumps({"store_id":STORE_ID, "status":"incomplete", "category_code":"configuration_unavailable"}))
+        print(json.dumps(dict(store_id=STORE_ID, status="coordinator_unavailable", category_code="coordinator_unavailable")))
         return 5
-    finally:
-        for kind, handler in previous.items(): signal.signal(kind, handler)
 
 
 if __name__ == "__main__":

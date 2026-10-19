@@ -370,13 +370,22 @@ def validate_snapshot(connection, guard, domain_started=lambda: None):
 class EvidenceAuditor:
     """Dependencies are injectable for disposable focused fixtures, not CLI paths."""
     def __init__(self, source, *, status=None, resources=resource_facts, connect=sqlite3.connect,
-                 monotonic=time.monotonic, now=utc, canceled=lambda: False, source_commit=None):
+                 monotonic=time.monotonic, now=utc, canceled=lambda: False, source_commit=None, authorization=None):
         self.source = Path(source)
         self.store = status or StatusStore()
         self.resources, self.connect, self.clock = resources, connect, monotonic
         self.now, self.canceled, self.source_commit = now, canceled, source_commit
+        self.authorization, self._active_context = authorization, None
 
     def run(self):
+        # No status/source/geometry/per-store-lock IO before trusted authority.
+        if self.authorization is None:
+            return dict(status="incomplete", category_code="unauthorized"), 6
+        try:
+            from app.db_audit_coordinator.fingerprint_adapter import authorize_auditor
+            self._active_context = authorize_auditor(self.authorization, self.source, self.store.path)
+        except Exception:
+            return dict(status="incomplete", category_code="unauthorized"), 6
         try:
             protected_parent(self.store.path)
             lock_path = self.store.path.with_suffix(".audit.lock")
@@ -391,8 +400,13 @@ class EvidenceAuditor:
             return dict(status="incomplete", category_code="already_running"), 2
         except Exception:
             return dict(status="incomplete", category_code="report_unavailable"), 5
+        finally:
+            self._active_context = None
 
     def _locked_run(self):
+        context = self._active_context
+        if context is None:
+            return dict(status="incomplete", category_code="unauthorized"), 6
         prior = self.store.read()
         recovered = None
         if prior["last_attempt"].get("status") == "running":
@@ -400,7 +414,7 @@ class EvidenceAuditor:
             recovered = {key:prior["last_attempt"].get(key) for key in ("run_id", "status", "category_code", "finished_at_utc")}
             self.store.write(prior)
         started = self.clock()
-        record = dict(store_id=STORE_ID, run_id=str(uuid.uuid4()), trigger="manual", status="running", stage="preflight",
+        record = dict(store_id=STORE_ID, run_id=context.get("run_id") or str(uuid.uuid4()), trigger="manual", status="running", stage="preflight",
             created_at_utc=self.now(), started_at_utc=self.now(), finished_at_utc=None, snapshot_at_utc=None,
             source_path_identity=None, database_generation_id=None, snapshot_last_ingest_sequence=None,
             sqlite_version=sqlite3.sqlite_version, audit_contract_version=CONTRACT, source_commit=self.source_commit,
@@ -411,6 +425,10 @@ class EvidenceAuditor:
             clock_confidence="host_utc_unattested_monotonic_duration", lock_owner=dict(pid=os.getpid()),
             snapshot_time_semantics="backup_completion_observation_not_start_time", directory_fsync=os.name == "posix")
         record["previous_attempt_recovery"] = recovered
+        if "job_id" in context:
+            record["coordinator_identity"] = {key:context[key] for key in (
+                "job_id", "run_id", "attempt_id", "claim_epoch", "source_generation", "validator_version")}
+            record["coordinator_identity"]["schema_version"] = 2
         document = dict(audit_contract_version=CONTRACT, last_attempt=record, last_verified_success=prior["last_verified_success"])
         self.store.write(document)
         source = destination = None
@@ -444,6 +462,7 @@ class EvidenceAuditor:
             if code in {5,6}: raise AuditStop("sqlite_busy")
             if code not in {0,101}: raise AuditStop("backup_incomplete")
             required_image = checked(total * record["source_page_size"])
+            if required_image > context["max_image_bytes"]: raise AuditStop("resource_deferred")
             grew = required_image > image[0]
             image[0] = max(image[0], required_image)
             guard(grew)
@@ -453,6 +472,9 @@ class EvidenceAuditor:
         exit_code = 4
         try:
             identity = _identity(self.source)
+            if "source_device" in context and (identity["device"], identity["inode"]) != (context["source_device"], context["source_inode"]):
+                raise AuditStop("source_changed")
+            if identity["bytes"] > context["max_image_bytes"]: raise AuditStop("resource_deferred")
             _sidecars(self.source)
             record["source_path_identity"] = dict(path=str(self.source), **identity)
             source = self.connect(self.source.as_uri() + "?mode=ro", uri=True, timeout=.5, isolation_level=None)
@@ -465,6 +487,7 @@ class EvidenceAuditor:
             count = checked(source.execute("PRAGMA page_count").fetchone()[0])
             if type(size) is not int or size not in {512,1024,2048,4096,8192,16384,32768,65536}: raise AuditStop("page_size")
             image[0] = max(checked(count * size), identity["bytes"])
+            if image[0] > context["max_image_bytes"]: raise AuditStop("resource_deferred")
             record.update(stage="memory_admission", source_page_count=count, source_page_size=size)
             sides = _sidecars(self.source)
             record["snapshot_wal_state"] = dict(source_sidecar_lengths=sides, native_ro_sidecars_possible=True)
@@ -491,6 +514,8 @@ class EvidenceAuditor:
             DeviceFingerprintRepository._validate_runtime_connection(destination)
             watermark = DeviceFingerprintRepository.read_ingest_watermark(destination)
             record.update(database_generation_id=watermark["database_generation_id"], snapshot_last_ingest_sequence=watermark["max_committed_ingest_sequence"], stage="integrity")
+            if "source_generation" in context and watermark["database_generation_id"] != context["source_generation"]:
+                raise AuditStop("source_changed")
             self.store.write(document)
             def domain_started():
                 record["stage"] = "domain"; self.store.write(document)

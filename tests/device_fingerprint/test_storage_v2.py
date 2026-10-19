@@ -533,6 +533,7 @@ def test_corrupt_generation_or_sequence_fails_closed(tmp_path, monkeypatch, corr
         with pytest.raises(DeviceFingerprintStorageCorrupt):
             DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()
         return
+    from app.db_audit_coordinator.fingerprint_adapter import fixture_authority
     from app.device_fingerprint.audit_runner import EvidenceAuditor, StatusStore
     # Fast admission is bounded metadata checking, not a full-history attestation.
     monkeypatch.setattr(DeviceFingerprintRepository, "_validate_connection",
@@ -548,9 +549,14 @@ def test_corrupt_generation_or_sequence_fails_closed(tmp_path, monkeypatch, corr
         swap_active=False, swap_counters=dict(pswpin=0, pswpout=0),
         reclaim_counters=dict(pgscan_direct=0, pgsteal_direct=0), peak_rss_bytes=128*1024**2,
         memory_psi=None, io_psi=None)
+    marker = tmp_path / ".fingerprint-audit-fixture-only"
+    marker.write_bytes(b"DISPOSABLE_UNIT_AUDIT_ONLY_V1\n")
+    marker.chmod(0o600)
+    status = StatusStore(directory / "fingerprint_evidence.json")
+    authorization = fixture_authority(tmp_path, cfg.db_path, status.path)
     before = Path(cfg.db_path).read_bytes()
     record, code = EvidenceAuditor(cfg.db_path,
-        status=StatusStore(directory / "fingerprint_evidence.json"), resources=lambda: resources).run()
+        status=status, resources=lambda: resources, authorization=authorization).run()
     assert code != 0 and record["status"] == "failed"
     assert record["category_code"] == "integrity_suspect"
     assert record["status"] != "passed"
