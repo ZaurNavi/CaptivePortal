@@ -1,0 +1,2630 @@
+diff --git a/docs/research/device-fingerprint-03a.md b/docs/research/device-fingerprint-03a.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2f7813b2b893949c26d065c00174504316ff54f
+--- /dev/null
++++ b/docs/research/device-fingerprint-03a.md
+@@ -0,0 +1,42 @@
++# Device Fingerprint 03A research matrix
++
++`TASK-DEVICE-FINGERPRINT-03A` provides lab-only tooling for a controlled,
++manually labeled evidence matrix. It is a dataset-format and export foundation,
++not a classifier, production feature, or production collection service.
++
++## Boundaries
++
++- Production code, schemas, APIs, retention, authorization, and deployment are
++  unchanged.
++- The dependency direction is `research/device_fingerprint_03a` toward approved
++  `app.device_fingerprint` read and validation helpers only.
++- The exporter uses read-only/query-only SQLite access and revalidates every
++  payload against the frozen production schema registry.
++- Only `dhcp/1`, `tcp_syn/1`, `tls_client/1`, `quic_client/1`, and
++  `portal_headers/1` are accepted.
++- Samples use exact half-open `[window_start_utc, window_end_utc)` windows of at
++  most 600 seconds.
++- Source-health records remain point events. Silence is not converted into an
++  unavailable interval.
++
++## Privacy and ground truth
++
++Ground truth is manually established from controlled devices before fingerprint
++interpretation. Physical grouping uses a random lab UUID. Cross-MAC binding is
++manual and exists only in the private staging ledger. No fingerprint similarity
++is used for identity or labeling.
++
++Sealed matrices exclude MAC, IP, raw User-Agent, raw Client Hints, SNI, DNS
++history, cookies, credentials, person identity, and personal device identifiers.
++The private binding ledger is not checksummed into or copied to the sealed
++matrix.
++
++## Lifecycle
++
++The exporter produces an unsealed package. Explicit manual Owner verification
++is required before the sealing operation writes the canonical timestamp and the
++sole checksum authority. Actual matrices live outside Git and expire 180 days
++after sealing unless Owner and Tech Lead explicitly extend retention.
++
++Physical calibration, collection, production-host access, deployment, and any
++future classifier work require separate authorization.
+diff --git a/research/device_fingerprint_03a/README.md b/research/device_fingerprint_03a/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f0d6d65b7bfdf80811f4914764cd24a8a1efb2a7
+--- /dev/null
++++ b/research/device_fingerprint_03a/README.md
+@@ -0,0 +1,29 @@
++# Task-03A lab matrix tooling
++
++This namespace contains operator-invoked, lab-only tooling for the
++Multi-Platform Labeled Evidence Matrix. It is not imported by production
++runtime code and does not implement classification or feature engineering.
++
++The exporter reads the Task-01 SQLite database through its canonical read-only
++boundary. A separately authorized environment record and a private staging
++binding ledger are required. The ledger is never copied into the matrix.
++
++The sealed dataset contains exactly:
++
++- `manifest.json`
++- `devices.jsonl`
++- `device_states.jsonl`
++- `samples.jsonl`
++- `evidence.jsonl`
++- `source_health.jsonl`
++- `checksums.sha256`
++
++Actual matrices and binding ledgers remain outside Git. Sealed matrices retain
++normalized P1 evidence and provenance but exclude MAC, IP, raw headers, raw
++packets, and person identity. The matrix retention is 180 days. A private
++binding ledger has a maximum 30-day retention and should be deleted immediately
++after successful sealing and verification.
++
++Run the CLI as `python -m research.device_fingerprint_03a.cli`. Physical
++calibration or collection requires the separate Owner-controlled
++pre-collection environment gate.
+diff --git a/research/device_fingerprint_03a/cli.py b/research/device_fingerprint_03a/cli.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b84226b48bfed5f51637218be104a49babe2235
+--- /dev/null
++++ b/research/device_fingerprint_03a/cli.py
+@@ -0,0 +1,130 @@
++"""Operator-invoked CLI for Task-03A lab matrix tooling."""
++
++from __future__ import annotations
++
++import argparse
++import sys
++from pathlib import Path
++from typing import Sequence
++
++from .exporter import export_unsealed_matrix, seal_matrix, validate_staging_directory
++from .format import MatrixFormatError, canonical_json_text
++from .validator import validate_matrix
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(prog="device-fingerprint-03a")
++    commands = parser.add_subparsers(dest="command", required=True)
++
++    staging = commands.add_parser("validate-staging")
++    staging.add_argument("--staging-dir", required=True)
++
++    export = commands.add_parser("export")
++    export.add_argument("--db-path", required=True)
++    export.add_argument("--staging-dir", required=True)
++    export.add_argument("--output-dir", required=True)
++    export.add_argument("--environment-record", required=True)
++    export.add_argument("--matrix-id", required=True)
++    export.add_argument("--repository-head", required=True)
++    export.add_argument("--repository-tree", required=True)
++    export.add_argument("--collection-procedure-version", required=True)
++    export.add_argument("--ground-truth-policy-version", required=True)
++    export.add_argument("--task01-retention-days", required=True, type=int)
++    export.add_argument("--invalid-reason", action="append", default=[])
++    export.add_argument("--limitation", action="append", default=[])
++    export.add_argument("--supersedes-matrix-id")
++
++    seal = commands.add_parser("seal")
++    seal.add_argument("--matrix-dir", required=True)
++    seal.add_argument("--sealed-at", required=True)
++    seal.add_argument("--owner-verified", action="store_true", required=True)
++    seal.add_argument("--calibration", action="store_true")
++
++    validate = commands.add_parser("validate")
++    validate.add_argument("--matrix-dir", required=True)
++    validate.add_argument("--calibration", action="store_true")
++
++    summary = commands.add_parser("summary")
++    summary.add_argument("--matrix-dir", required=True)
++    summary.add_argument("--calibration", action="store_true")
++    return parser
++
++
++def main(argv: Sequence[str] | None = None) -> int:
++    parser = build_parser()
++    arguments = parser.parse_args(argv)
++    try:
++        if arguments.command == "validate-staging":
++            result = validate_staging_directory(_absolute(arguments.staging_dir, "staging directory"))
++        elif arguments.command == "export":
++            result = export_unsealed_matrix(
++                db_path=str(_absolute(arguments.db_path, "Task-01 database")),
++                staging_dir=_absolute(arguments.staging_dir, "staging directory"),
++                output_dir=_absolute(arguments.output_dir, "output directory", must_exist=False),
++                authorized_environment_record=_absolute(arguments.environment_record, "environment record"),
++                matrix_id=arguments.matrix_id,
++                repository_head=arguments.repository_head,
++                repository_tree=arguments.repository_tree,
++                collection_procedure_version=arguments.collection_procedure_version,
++                ground_truth_policy_version=arguments.ground_truth_policy_version,
++                task01_retention_days=arguments.task01_retention_days,
++                invalid_sample_reason_counts=_reason_counts(arguments.invalid_reason),
++                known_coverage_limitations=arguments.limitation,
++                supersedes_matrix_id=arguments.supersedes_matrix_id,
++            )
++            result = {
++                "matrix_id": result.matrix_id,
++                "device_count": result.device_count,
++                "sealed_sample_count": result.sample_count,
++                "evidence_count": result.evidence_count,
++                "source_health_count": result.source_health_count,
++                "status": "unsealed",
++            }
++        elif arguments.command == "seal":
++            result = seal_matrix(
++                _absolute(arguments.matrix_dir, "matrix directory"),
++                sealed_at=arguments.sealed_at,
++                owner_verified=arguments.owner_verified,
++                require_v1_coverage=not arguments.calibration,
++            )
++        else:
++            result = validate_matrix(
++                _absolute(arguments.matrix_dir, "matrix directory"),
++                require_v1_coverage=not arguments.calibration,
++            )
++        print(canonical_json_text(result))
++        return 0
++    except (MatrixFormatError, OSError, ValueError) as exc:
++        del exc
++        print(canonical_json_text({"status": "invalid_matrix"}), file=sys.stderr)
++        return 2
++
++
++def _absolute(value: str, label: str, *, must_exist: bool = True) -> Path:
++    path = Path(value)
++    if not path.is_absolute():
++        raise MatrixFormatError(f"{label} must be absolute")
++    if must_exist:
++        try:
++            return path.resolve(strict=True)
++        except OSError as exc:
++            raise MatrixFormatError(f"{label} is unavailable") from exc
++    return path.resolve(strict=False)
++
++
++def _reason_counts(values: list[str]) -> dict[str, int]:
++    result: dict[str, int] = {}
++    for value in values:
++        key, separator, raw_count = value.partition("=")
++        if not separator or key in result:
++            raise MatrixFormatError("Invalid-sample reason argument is invalid")
++        try:
++            count = int(raw_count)
++        except ValueError as exc:
++            raise MatrixFormatError("Invalid-sample reason argument is invalid") from exc
++        result[key] = count
++    return result
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/research/device_fingerprint_03a/exporter.py b/research/device_fingerprint_03a/exporter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c4f70bca827f051ee45cbfdc9759ab784d04e0f
+--- /dev/null
++++ b/research/device_fingerprint_03a/exporter.py
+@@ -0,0 +1,418 @@
++"""Read-only Task-01 evidence export and explicit Task-03A sealing."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import uuid
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Mapping
++
++from app.device_fingerprint.read_service import DeviceFingerprintReadService
++from app.device_fingerprint.repository import open_read_only
++from app.device_fingerprint.validation import canonical_json, canonical_sha256
++
++from .format import (
++    MATRIX_FORMAT_VERSION,
++    MATRIX_REVISION,
++    PRODUCTION_SCHEMA_REGISTRY,
++    SITE_ID,
++    SOURCE_CAPTURE_IDS,
++    SOURCE_KINDS,
++    MatrixFormatError,
++    read_canonical_json,
++    read_canonical_jsonl,
++    validate_binding,
++    validate_device,
++    validate_device_state,
++    validate_evidence,
++    validate_manifest,
++    validate_sample,
++    validate_source_health,
++    write_canonical_json,
++    write_canonical_jsonl,
++    write_checksums,
++)
++
++_MAX_SOURCE_HEALTH_POINTS_PER_SCOPE = 10_000
++
++
++@dataclass(frozen=True, slots=True)
++class ExportResult:
++    matrix_id: str
++    device_count: int
++    sample_count: int
++    evidence_count: int
++    source_health_count: int
++
++
++def validate_staging_directory(staging_dir: str | Path) -> dict[str, int]:
++    """Validate sealed-ready ground truth and its private binding ledger."""
++
++    staging = Path(staging_dir).resolve(strict=True)
++    if not staging.is_dir() or staging.is_symlink():
++        raise MatrixFormatError("Staging directory is invalid")
++    devices = [validate_device(row) for row in read_canonical_jsonl(staging / "devices.jsonl")]
++    states = [validate_device_state(row) for row in read_canonical_jsonl(staging / "device_states.jsonl")]
++    samples = [validate_sample(row) for row in read_canonical_jsonl(staging / "samples.jsonl")]
++    bindings = [validate_binding(row) for row in read_canonical_jsonl(staging / "collection_bindings.jsonl")]
++    _validate_staging_relationships(devices, states, samples, bindings)
++    return {
++        "device_count": len(devices),
++        "device_state_count": len(states),
++        "sealed_sample_count": len(samples),
++        "binding_count": len(bindings),
++    }
++
++
++def export_unsealed_matrix(
++    *,
++    db_path: str,
++    staging_dir: str | Path,
++    output_dir: str | Path,
++    authorized_environment_record: str | Path,
++    matrix_id: str,
++    repository_head: str,
++    repository_tree: str,
++    collection_procedure_version: str,
++    ground_truth_policy_version: str,
++    task01_retention_days: int,
++    invalid_sample_reason_counts: Mapping[str, int] | None = None,
++    known_coverage_limitations: list[str] | None = None,
++    supersedes_matrix_id: str | None = None,
++) -> ExportResult:
++    """Export a deterministic unsealed package without mutating Task-01."""
++
++    database = _absolute_existing_file(db_path, "Task-01 database")
++    _absolute_existing_file(authorized_environment_record, "environment authorization record")
++    staging = Path(staging_dir).resolve(strict=True)
++    output = Path(output_dir).resolve(strict=False)
++    _prepare_empty_output(output)
++
++    devices = sorted(
++        (validate_device(row) for row in read_canonical_jsonl(staging / "devices.jsonl")),
++        key=lambda row: row["lab_device_id"],
++    )
++    states = sorted(
++        (validate_device_state(row) for row in read_canonical_jsonl(staging / "device_states.jsonl")),
++        key=lambda row: (row["lab_device_id"], row["state_verified_at"], row["ground_truth_state_id"]),
++    )
++    samples = sorted(
++        (validate_sample(row) for row in read_canonical_jsonl(staging / "samples.jsonl")),
++        key=lambda row: row["sample_id"],
++    )
++    bindings = [validate_binding(row) for row in read_canonical_jsonl(staging / "collection_bindings.jsonl")]
++    _validate_staging_relationships(devices, states, samples, bindings)
++
++    before = _durable_database_fingerprint(database)
++    evidence_service = DeviceFingerprintReadService(
++        str(database),
++        retention_days=task01_retention_days,
++    )
++    exported_evidence: list[dict[str, Any]] = []
++    exported_health: list[dict[str, Any]] = []
++    assigned_evidence: set[str] = set()
++    bindings_by_sample = {row["sample_id"]: row for row in bindings}
++    for sample in samples:
++        binding = bindings_by_sample[sample["sample_id"]]
++        evidence = _read_sample_evidence(evidence_service, sample, binding["observed_mac"])
++        for row in evidence:
++            if row["evidence_id"] in assigned_evidence:
++                raise MatrixFormatError("Evidence is assigned to more than one sample")
++            assigned_evidence.add(row["evidence_id"])
++            exported_evidence.append(_deidentify_evidence(row, sample))
++        exported_health.extend(_read_sample_source_health(database, sample))
++    after = _durable_database_fingerprint(database)
++    if before != after:
++        raise MatrixFormatError("Task-01 database changed during read-only export")
++
++    exported_evidence.sort(key=lambda row: (row["sample_id"], row["observed_at"], row["evidence_id"]))
++    exported_health.sort(key=lambda row: (
++        row["sample_id"], row["capture_source_id"], row["source_kind"],
++        row["observed_at"], row["source_health_id"],
++    ))
++    write_canonical_jsonl(output / "devices.jsonl", devices)
++    write_canonical_jsonl(output / "device_states.jsonl", states)
++    write_canonical_jsonl(output / "samples.jsonl", samples)
++    write_canonical_jsonl(output / "evidence.jsonl", exported_evidence)
++    write_canonical_jsonl(output / "source_health.jsonl", exported_health)
++
++    reasons = dict(invalid_sample_reason_counts or {})
++    manifest = validate_manifest({
++        "matrix_format_version": MATRIX_FORMAT_VERSION,
++        "matrix_id": matrix_id,
++        "matrix_revision": MATRIX_REVISION,
++        "sealed_at": None,
++        "repository_head": repository_head,
++        "repository_tree": repository_tree,
++        "site_id": SITE_ID,
++        "collection_procedure_version": collection_procedure_version,
++        "ground_truth_policy_version": ground_truth_policy_version,
++        "production_schema_registry": [list(item) for item in PRODUCTION_SCHEMA_REGISTRY],
++        "task01_retention_days": task01_retention_days,
++        "device_count": len(devices),
++        "sealed_sample_count": len(samples),
++        "evidence_count": len(exported_evidence),
++        "source_health_count": len(exported_health),
++        "invalid_sample_count": sum(reasons.values()),
++        "invalid_sample_reason_counts": reasons,
++        "known_coverage_limitations": sorted(known_coverage_limitations or []),
++        "supersedes_matrix_id": supersedes_matrix_id,
++    }, sealed=False)
++    write_canonical_json(output / "manifest.json", manifest)
++    return ExportResult(matrix_id, len(devices), len(samples), len(exported_evidence), len(exported_health))
++
++
++def seal_matrix(
++    matrix_dir: str | Path,
++    *,
++    sealed_at: str,
++    owner_verified: bool,
++    require_v1_coverage: bool = True,
++) -> dict[str, Any]:
++    """Seal only after explicit manual Owner verification."""
++
++    if owner_verified is not True:
++        raise MatrixFormatError("Manual Owner verification is required")
++    directory = Path(matrix_dir).resolve(strict=True)
++    manifest = validate_manifest(read_canonical_json(directory / "manifest.json"), sealed=False)
++    manifest["sealed_at"] = sealed_at
++    validate_manifest(manifest)
++    write_canonical_json(directory / "manifest.json", manifest)
++    from .validator import validate_matrix
++    try:
++        report = validate_matrix(
++            directory,
++            verify_checksums=False,
++            require_v1_coverage=require_v1_coverage,
++        )
++        write_checksums(directory)
++        validate_matrix(directory, verify_checksums=True, require_v1_coverage=require_v1_coverage)
++    except Exception:
++        # A failed seal must not leave a checksum authority behind.
++        checksum_path = directory / "checksums.sha256"
++        if checksum_path.exists() and checksum_path.is_file() and not checksum_path.is_symlink():
++            checksum_path.unlink()
++        manifest["sealed_at"] = None
++        write_canonical_json(directory / "manifest.json", manifest)
++        raise
++    return report
++
++
++def _read_sample_evidence(
++    service: DeviceFingerprintReadService,
++    sample: Mapping[str, Any],
++    observed_mac: str,
++) -> list[dict[str, Any]]:
++    result: list[dict[str, Any]] = []
++    cursor = None
++    while True:
++        page = service.list_evidence(
++            sample["site_id"],
++            observed_mac,
++            sample["window_start_utc"],
++            sample["window_end_utc"],
++            limit=500,
++            cursor=cursor,
++        )
++        result.extend(page["items"])
++        cursor = page["next_cursor"]
++        if cursor is None:
++            return result
++
++
++def _deidentify_evidence(row: Mapping[str, Any], sample: Mapping[str, Any]) -> dict[str, Any]:
++    try:
++        payload = json.loads(row["payload_json"])
++    except (TypeError, json.JSONDecodeError) as exc:
++        raise MatrixFormatError("Stored evidence payload is invalid") from exc
++    try:
++        canonical_payload = canonical_json(payload)
++    except Exception as exc:
++        raise MatrixFormatError("Stored evidence payload is invalid") from exc
++    if canonical_payload != row["payload_json"] or canonical_sha256(canonical_payload) != row["payload_sha256"]:
++        raise MatrixFormatError("Stored evidence payload digest is invalid")
++    sealed = {
++        "evidence_id": row["evidence_id"],
++        "source_event_id": row["source_event_id"],
++        "producer_id": row["producer_id"],
++        "source_kind": row["source_kind"],
++        "source_subtype": row["source_subtype"],
++        "extractor_name": row["extractor_name"],
++        "extractor_version": row["extractor_version"],
++        "feature_schema_version": row["feature_schema_version"],
++        "rule_version": row["rule_version"],
++        "site_id": row["site_id"],
++        "capture_source_id": row["capture_source_id"],
++        "observed_at": row["observed_at"],
++        "quality_state": row["quality_state"],
++        "privacy_class": row["privacy_class"],
++        "payload": payload,
++        "payload_sha256": row["payload_sha256"],
++        "ingested_at": row["ingested_at"],
++        "sample_id": sample["sample_id"],
++        "lab_device_id": sample["lab_device_id"],
++    }
++    return validate_evidence(sealed)
++
++
++def _read_sample_source_health(database: Path, sample: Mapping[str, Any]) -> list[dict[str, Any]]:
++    connection = open_read_only(str(database))
++    try:
++        if connection.execute("PRAGMA query_only").fetchone()[0] != 1:
++            raise MatrixFormatError("Task-01 read boundary is not query-only")
++        result: list[dict[str, Any]] = []
++        for kind in SOURCE_KINDS:
++            capture = SOURCE_CAPTURE_IDS[kind]
++            rows: dict[tuple[str, str], tuple[dict[str, Any], set[str]]] = {}
++            before = connection.execute(
++                "SELECT * FROM device_fingerprint_source_health_events "
++                "WHERE site_id=? AND capture_source_id=? AND source_kind=? AND observed_at<=? "
++                "ORDER BY observed_at DESC,source_health_id DESC LIMIT 1",
++                (sample["site_id"], capture, kind, sample["window_start_utc"]),
++            ).fetchone()
++            if before is not None:
++                _health_role(rows, dict(before), "latest_before_start")
++            during = connection.execute(
++                "SELECT * FROM device_fingerprint_source_health_events "
++                "WHERE site_id=? AND capture_source_id=? AND source_kind=? "
++                "AND observed_at>=? AND observed_at<? "
++                "ORDER BY observed_at,source_health_id LIMIT ?",
++                (
++                    sample["site_id"], capture, kind, sample["window_start_utc"],
++                    sample["window_end_utc"], _MAX_SOURCE_HEALTH_POINTS_PER_SCOPE + 1,
++                ),
++            ).fetchall()
++            if len(during) > _MAX_SOURCE_HEALTH_POINTS_PER_SCOPE:
++                raise MatrixFormatError("Source-health sample scope is too large")
++            for row in during:
++                _health_role(rows, dict(row), "during_window")
++            at_end = connection.execute(
++                "SELECT * FROM device_fingerprint_source_health_events "
++                "WHERE site_id=? AND capture_source_id=? AND source_kind=? AND observed_at<=? "
++                "ORDER BY observed_at DESC,source_health_id DESC LIMIT 1",
++                (sample["site_id"], capture, kind, sample["window_end_utc"]),
++            ).fetchone()
++            if at_end is not None:
++                _health_role(rows, dict(at_end), "latest_at_end")
++            for row, roles in rows.values():
++                sealed = {
++                    "matrix_format_version": MATRIX_FORMAT_VERSION,
++                    "sample_id": sample["sample_id"],
++                    "lab_device_id": sample["lab_device_id"],
++                    "source_health_id": row["source_health_id"],
++                    "source_health_event_id": row["source_health_event_id"],
++                    "producer_id": row["producer_id"],
++                    "site_id": row["site_id"],
++                    "capture_source_id": row["capture_source_id"],
++                    "source_kind": row["source_kind"],
++                    "status": row["status"],
++                    "reason_code": row["reason_code"],
++                    "observed_at": row["observed_at"],
++                    "ingested_at": row["ingested_at"],
++                    "point_roles": [role for role in ("latest_before_start", "during_window", "latest_at_end") if role in roles],
++                }
++                result.append(validate_source_health(sealed))
++        return result
++    finally:
++        connection.close()
++
++
++def _health_role(
++    rows: dict[tuple[str, str], tuple[dict[str, Any], set[str]]],
++    row: dict[str, Any],
++    role: str,
++) -> None:
++    identity = (row["producer_id"], row["source_health_event_id"])
++    current = rows.get(identity)
++    if current is None:
++        current = (row, set())
++        rows[identity] = current
++    elif current[0] != row:
++        raise MatrixFormatError("Source-health identity is inconsistent")
++    current[1].add(role)
++
++
++def _validate_staging_relationships(
++    devices: list[dict[str, Any]],
++    states: list[dict[str, Any]],
++    samples: list[dict[str, Any]],
++    bindings: list[dict[str, Any]],
++) -> None:
++    device_map = _unique(devices, "lab_device_id", "device")
++    state_map = _unique(states, "ground_truth_state_id", "device state")
++    sample_map = _unique(samples, "sample_id", "sample")
++    binding_map = _unique(bindings, "sample_id", "binding")
++    if set(binding_map) != set(sample_map):
++        raise MatrixFormatError("Every sample requires exactly one private binding")
++    for state in states:
++        if state["lab_device_id"] not in device_map:
++            raise MatrixFormatError("Device state references an unknown device")
++    for sample in samples:
++        state = state_map.get(sample["ground_truth_state_id"])
++        if sample["lab_device_id"] not in device_map or state is None:
++            raise MatrixFormatError("Sample references unknown ground truth")
++        if state["lab_device_id"] != sample["lab_device_id"]:
++            raise MatrixFormatError("Sample state belongs to another device")
++        if binding_map[sample["sample_id"]]["lab_device_id"] != sample["lab_device_id"]:
++            raise MatrixFormatError("Private binding belongs to another device")
++    for index, left in enumerate(samples):
++        for right in samples[index + 1:]:
++            left_binding = binding_map[left["sample_id"]]
++            right_binding = binding_map[right["sample_id"]]
++            if (
++                left["lab_device_id"] != right["lab_device_id"]
++                and left_binding["observed_mac"] == right_binding["observed_mac"]
++                and left["window_start_utc"] < right["window_end_utc"]
++                and right["window_start_utc"] < left["window_end_utc"]
++            ):
++                raise MatrixFormatError("Private bindings collide across devices")
++
++
++def _unique(rows: list[dict[str, Any]], key: str, label: str) -> dict[str, dict[str, Any]]:
++    result: dict[str, dict[str, Any]] = {}
++    for row in rows:
++        identity = row[key]
++        if identity in result:
++            raise MatrixFormatError(f"Duplicate {label} identity")
++        result[identity] = row
++    return result
++
++
++def _prepare_empty_output(output: Path) -> None:
++    try:
++        if output.exists():
++            if not output.is_dir() or output.is_symlink() or any(output.iterdir()):
++                raise MatrixFormatError("Output directory must be empty and safe")
++        else:
++            output.mkdir(parents=True)
++    except MatrixFormatError:
++        raise
++    except OSError as exc:
++        raise MatrixFormatError("Output directory is unavailable") from exc
++
++
++def _absolute_existing_file(value: str | Path, label: str) -> Path:
++    path = Path(value)
++    if not path.is_absolute():
++        raise MatrixFormatError(f"{label} must be an absolute path")
++    if path.is_symlink():
++        raise MatrixFormatError(f"{label} is unsafe")
++    try:
++        resolved = path.resolve(strict=True)
++    except OSError as exc:
++        raise MatrixFormatError(f"{label} is unavailable") from exc
++    if not resolved.is_file() or resolved.is_symlink():
++        raise MatrixFormatError(f"{label} is unsafe")
++    return resolved
++
++
++def _durable_database_fingerprint(database: Path) -> tuple[tuple[int, str], tuple[int, str]]:
++    main = database.read_bytes()
++    wal_path = Path(str(database) + "-wal")
++    wal = wal_path.read_bytes() if wal_path.exists() else b""
++    return (
++        (len(main), hashlib.sha256(main).hexdigest()),
++        (len(wal), hashlib.sha256(wal).hexdigest()),
++    )
+diff --git a/research/device_fingerprint_03a/format.py b/research/device_fingerprint_03a/format.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1e2fefe566567f2853c02b62d1874ba220dc706
+--- /dev/null
++++ b/research/device_fingerprint_03a/format.py
+@@ -0,0 +1,566 @@
++"""Canonical Task-03A matrix formats and deterministic file helpers."""
++
++from __future__ import annotations
++
++import hashlib
++import ipaddress
++import json
++import re
++import uuid
++from collections.abc import Iterable, Mapping, Sequence
++from pathlib import Path
++from typing import Any, Callable
++
++from app.device_fingerprint.schema_registry import build_production_schema_registry
++from app.device_fingerprint.validation import (
++    canonical_json as evidence_canonical_json,
++    canonical_sha256,
++    parse_utc,
++    validate_health_status,
++    validate_machine_id,
++    validate_quality,
++    validate_reason_code,
++    validate_site_id,
++    validate_source_kind,
++    validate_uuid,
++    validate_version,
++)
++
++MATRIX_FORMAT_VERSION = 1
++MATRIX_REVISION = 1
++MATRIX_RETENTION_DAYS = 180
++BINDING_RETENTION_DAYS = 30
++SITE_ID = "6a64f17630da7c70d232187a"
++
++PRODUCTION_SCHEMA_REGISTRY = (
++    ("dhcp", 1),
++    ("portal_headers", 1),
++    ("quic_client", 1),
++    ("tcp_syn", 1),
++    ("tls_client", 1),
++)
++SOURCE_KINDS = tuple(item[0] for item in PRODUCTION_SCHEMA_REGISTRY)
++SOURCE_CAPTURE_IDS = {
++    "dhcp": "zefer-span-01",
++    "tcp_syn": "zefer-span-01",
++    "tls_client": "zefer-span-01",
++    "quic_client": "zefer-span-01",
++    "portal_headers": "zefer-portal-http-01",
++}
++
++SEALED_DATA_FILES = (
++    "manifest.json",
++    "devices.jsonl",
++    "device_states.jsonl",
++    "samples.jsonl",
++    "evidence.jsonl",
++    "source_health.jsonl",
++    "checksums.sha256",
++)
++CHECKSUM_FILES = tuple(sorted(name for name in SEALED_DATA_FILES if name != "checksums.sha256"))
++
++DEVICE_CLASSES = frozenset({"smartphone", "tablet", "laptop"})
++OS_FAMILIES = frozenset({"android", "ios", "ipados", "windows", "macos", "chromeos", "linux"})
++CONTROL_BASES = frozenset({"owner_controlled", "explicitly_authorized"})
++VERIFICATION_METHODS = frozenset({
++    "device_settings",
++    "device_about_page",
++    "physical_manufacturer_label",
++    "owner_purchase_record",
++})
++NETWORK_STATES = frozenset({"fresh_attach", "same_attachment_revisit"})
++RUNTIME_CONTEXTS = frozenset({"captive_webview", "captive_helper", "normal_browser"})
++BROWSER_FAMILIES = frozenset({
++    "android_webview", "chrome", "edge", "firefox", "safari",
++    "chromium_other", "captive_helper", "other",
++})
++MAC_MODES = frozenset({"global", "randomized_stable", "randomized_rotated", "unknown"})
++PORTAL_ENTRY_MODES = frozenset({"omada_external_portal", "capport_login"})
++POINT_ROLES = ("latest_before_start", "during_window", "latest_at_end")
++INVALID_REASONS = frozenset({
++    "binding_uncertain", "context_changed", "window_too_long", "evidence_missing",
++    "ground_truth_unverified", "source_schema_error", "privacy_violation", "operator_abort",
++})
++COVERAGE_LIMITATIONS = frozenset({
++    "no_chromeos", "no_linux", "quic_sparse", "captive_context_unavailable",
++    "browser_diversity_limited", "device_count_minimum_only",
++})
++
++DEVICE_REQUIRED = frozenset({
++    "matrix_format_version", "lab_device_id", "device_class_gt", "manufacturer_gt",
++    "model_gt", "collection_authorized", "control_basis_gt",
++    "ground_truth_verified_at", "ground_truth_verification_methods",
++})
++DEVICE_OPTIONAL = frozenset({"hardware_variant_gt"})
++STATE_REQUIRED = frozenset({
++    "matrix_format_version", "ground_truth_state_id", "lab_device_id", "os_family_gt",
++    "os_version_gt", "os_major_gt", "state_verified_at", "state_verification_methods",
++})
++STATE_OPTIONAL = frozenset({"os_build_gt"})
++SAMPLE_REQUIRED = frozenset({
++    "matrix_format_version", "sample_id", "collection_run_id", "lab_device_id",
++    "ground_truth_state_id", "site_id", "window_start_utc", "window_end_utc",
++    "network_epoch_id", "network_state_gt", "runtime_context_gt", "browser_family_gt",
++    "browser_version_major_gt", "mac_mode_gt", "portal_entry_mode_gt",
++    "context_supported_gt", "sample_status", "sealed_at",
++})
++BINDING_REQUIRED = frozenset({"sample_id", "lab_device_id", "observed_mac"})
++BINDING_OPTIONAL = frozenset({"observed_ip"})
++EVIDENCE_REQUIRED = frozenset({
++    "evidence_id", "source_event_id", "producer_id", "source_kind", "source_subtype",
++    "extractor_name", "extractor_version", "feature_schema_version", "rule_version",
++    "site_id", "capture_source_id", "observed_at", "quality_state", "privacy_class",
++    "payload", "payload_sha256", "ingested_at", "sample_id", "lab_device_id",
++})
++SOURCE_HEALTH_REQUIRED = frozenset({
++    "matrix_format_version", "sample_id", "lab_device_id", "source_health_id",
++    "source_health_event_id", "producer_id", "site_id", "capture_source_id",
++    "source_kind", "status", "reason_code", "observed_at", "ingested_at", "point_roles",
++})
++MANIFEST_REQUIRED = frozenset({
++    "matrix_format_version", "matrix_id", "matrix_revision", "sealed_at",
++    "repository_head", "repository_tree", "site_id", "collection_procedure_version",
++    "ground_truth_policy_version", "production_schema_registry", "task01_retention_days",
++    "device_count", "sealed_sample_count", "evidence_count", "source_health_count",
++    "invalid_sample_count", "invalid_sample_reason_counts", "known_coverage_limitations",
++    "supersedes_matrix_id",
++})
++
++_HEX40 = re.compile(r"[0-9a-f]{40}")
++_HEX64 = re.compile(r"[0-9a-f]{64}")
++_MAC = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f])")
++_IPV4_CANDIDATE = re.compile(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])")
++_IPV6_CANDIDATE = re.compile(r"(?<![0-9A-Fa-f:])[0-9A-Fa-f:]{2,}(?![0-9A-Fa-f:])")
++_RAW_MARKERS = ("mozilla/", "user-agent", "sec-ch-ua", "bearer ", "authorization:")
++_PRIVATE_KEYS = frozenset({
++    "observed_mac", "observed_ip", "raw_user_agent", "raw_client_hints", "sni",
++    "server_name", "dns_history", "cookie", "authorization", "credential", "owner_name",
++    "person_name", "imei", "serial_number", "sim_iccid", "personal_hostname",
++})
++
++
++class MatrixFormatError(ValueError):
++    """A sanitized strict-format or sealed-matrix validation failure."""
++
++
++def canonical_json_text(value: Any) -> str:
++    try:
++        return json.dumps(
++            value,
++            ensure_ascii=True,
++            allow_nan=False,
++            sort_keys=True,
++            separators=(",", ":"),
++        )
++    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
++        raise MatrixFormatError("Matrix JSON is invalid") from exc
++
++
++def canonical_json_line(value: Any) -> bytes:
++    return (canonical_json_text(value) + "\n").encode("utf-8")
++
++
++def write_canonical_json(path: Path, value: Mapping[str, Any]) -> None:
++    _write_bytes(path, canonical_json_line(dict(value)))
++
++
++def write_canonical_jsonl(path: Path, values: Iterable[Mapping[str, Any]]) -> None:
++    _write_bytes(path, b"".join(canonical_json_line(dict(value)) for value in values))
++
++
++def read_canonical_json(path: Path) -> dict[str, Any]:
++    raw = _read_bytes(path)
++    value = _load_one(raw)
++    if not isinstance(value, dict) or canonical_json_line(value) != raw:
++        raise MatrixFormatError("JSON file is not canonical")
++    return value
++
++
++def read_canonical_jsonl(path: Path) -> list[dict[str, Any]]:
++    raw = _read_bytes(path)
++    if not raw:
++        return []
++    if not raw.endswith(b"\n") or b"\r" in raw:
++        raise MatrixFormatError("JSONL framing is invalid")
++    result: list[dict[str, Any]] = []
++    for line in raw.splitlines(keepends=True):
++        value = _load_one(line)
++        if not isinstance(value, dict) or canonical_json_line(value) != line:
++            raise MatrixFormatError("JSONL row is not canonical")
++        result.append(value)
++    return result
++
++
++def validate_device(value: Mapping[str, Any]) -> dict[str, Any]:
++    row = _row(value, DEVICE_REQUIRED, DEVICE_OPTIONAL, "device")
++    _version_one(row)
++    _uuid4(row["lab_device_id"], "lab_device_id")
++    _enum(row["device_class_gt"], DEVICE_CLASSES, "device_class_gt")
++    _ascii(row["manufacturer_gt"], 1, 64, "manufacturer_gt")
++    _ascii(row["model_gt"], 1, 96, "model_gt")
++    if "hardware_variant_gt" in row:
++        _ascii(row["hardware_variant_gt"], 1, 96, "hardware_variant_gt")
++    if row["collection_authorized"] is not True:
++        raise MatrixFormatError("Device collection is not authorized")
++    _enum(row["control_basis_gt"], CONTROL_BASES, "control_basis_gt")
++    _timestamp(row["ground_truth_verified_at"], "ground_truth_verified_at")
++    _verification_methods(row["ground_truth_verification_methods"], os_state=False)
++    _privacy_scan(row)
++    return row
++
++
++def validate_device_state(value: Mapping[str, Any]) -> dict[str, Any]:
++    row = _row(value, STATE_REQUIRED, STATE_OPTIONAL, "device state")
++    _version_one(row)
++    _uuid4(row["ground_truth_state_id"], "ground_truth_state_id")
++    _uuid4(row["lab_device_id"], "lab_device_id")
++    _enum(row["os_family_gt"], OS_FAMILIES, "os_family_gt")
++    version = _ascii(row["os_version_gt"], 1, 64, "os_version_gt")
++    major = _integer(row["os_major_gt"], 1, 99, "os_major_gt")
++    if re.search(rf"(?<![0-9]){major}(?![0-9])", version) is None:
++        raise MatrixFormatError("OS major does not agree with OS version")
++    _timestamp(row["state_verified_at"], "state_verified_at")
++    _verification_methods(row["state_verification_methods"], os_state=True)
++    if "os_build_gt" in row:
++        _ascii(row["os_build_gt"], 1, 64, "os_build_gt")
++    _privacy_scan(row)
++    return row
++
++
++def validate_sample(value: Mapping[str, Any]) -> dict[str, Any]:
++    row = _row(value, SAMPLE_REQUIRED, (), "sample")
++    _version_one(row)
++    for field in ("sample_id", "collection_run_id", "lab_device_id", "ground_truth_state_id", "network_epoch_id"):
++        _uuid4(row[field], field)
++    if _call(validate_site_id, row["site_id"]) != SITE_ID:
++        raise MatrixFormatError("Sample Site is invalid")
++    start = _timestamp(row["window_start_utc"], "window_start_utc")
++    end = _timestamp(row["window_end_utc"], "window_end_utc")
++    seconds = (end - start).total_seconds()
++    if not 0 < seconds <= 600:
++        raise MatrixFormatError("Sample window is invalid")
++    _enum(row["network_state_gt"], NETWORK_STATES, "network_state_gt")
++    _enum(row["runtime_context_gt"], RUNTIME_CONTEXTS, "runtime_context_gt")
++    _enum(row["browser_family_gt"], BROWSER_FAMILIES, "browser_family_gt")
++    if row["browser_version_major_gt"] is not None:
++        _integer(row["browser_version_major_gt"], 1, 999, "browser_version_major_gt")
++    _enum(row["mac_mode_gt"], MAC_MODES, "mac_mode_gt")
++    _enum(row["portal_entry_mode_gt"], PORTAL_ENTRY_MODES, "portal_entry_mode_gt")
++    if type(row["context_supported_gt"]) is not bool:
++        raise MatrixFormatError("context_supported_gt is invalid")
++    if row["sample_status"] != "sealed":
++        raise MatrixFormatError("Only sealed samples are allowed")
++    _timestamp(row["sealed_at"], "sealed_at")
++    _privacy_scan(row)
++    return row
++
++
++def validate_binding(value: Mapping[str, Any]) -> dict[str, Any]:
++    row = _row(value, BINDING_REQUIRED, BINDING_OPTIONAL, "binding")
++    _uuid4(row["sample_id"], "sample_id")
++    _uuid4(row["lab_device_id"], "lab_device_id")
++    try:
++        from app.device_fingerprint.validation import validate_ip, validate_mac
++        row["observed_mac"] = _call(validate_mac, row["observed_mac"])
++        if "observed_ip" in row:
++            row["observed_ip"] = _call(validate_ip, row["observed_ip"])
++    except MatrixFormatError:
++        raise
++    return row
++
++
++def validate_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
++    row = _row(value, EVIDENCE_REQUIRED, (), "evidence")
++    for field in ("evidence_id", "source_event_id", "sample_id", "lab_device_id"):
++        _uuid(row[field], field)
++    _call(validate_machine_id, row["producer_id"])
++    kind = _call(validate_source_kind, row["source_kind"])
++    version = _integer(row["feature_schema_version"], 1, 2_147_483_647, "feature_schema_version")
++    if (kind, version) not in PRODUCTION_SCHEMA_REGISTRY:
++        raise MatrixFormatError("Evidence schema is unsupported")
++    if row["source_subtype"] is not None:
++        _call(validate_machine_id, row["source_subtype"])
++    _call(validate_machine_id, row["extractor_name"])
++    _call(validate_version, row["extractor_version"])
++    if row["rule_version"] is not None:
++        _call(validate_version, row["rule_version"])
++    if _call(validate_site_id, row["site_id"]) != SITE_ID:
++        raise MatrixFormatError("Evidence Site is invalid")
++    if _call(validate_machine_id, row["capture_source_id"]) != SOURCE_CAPTURE_IDS[kind]:
++        raise MatrixFormatError("Evidence capture source is invalid")
++    _timestamp(row["observed_at"], "observed_at")
++    _call(validate_quality, row["quality_state"])
++    if row["privacy_class"] != "P1":
++        raise MatrixFormatError("Evidence privacy class is invalid")
++    if not isinstance(row["payload"], dict):
++        raise MatrixFormatError("Evidence payload is invalid")
++    registry = build_production_schema_registry()
++    try:
++        normalized = dict(registry.validate(kind, version, row["payload"]))
++        payload_json = evidence_canonical_json(normalized)
++    except Exception as exc:
++        raise MatrixFormatError("Evidence payload is invalid") from exc
++    if normalized != row["payload"] or canonical_sha256(payload_json) != row["payload_sha256"]:
++        raise MatrixFormatError("Evidence payload digest is invalid")
++    _timestamp(row["ingested_at"], "ingested_at")
++    _privacy_scan(row)
++    return row
++
++
++def validate_source_health(value: Mapping[str, Any]) -> dict[str, Any]:
++    row = _row(value, SOURCE_HEALTH_REQUIRED, (), "source health")
++    _version_one(row)
++    for field in ("sample_id", "lab_device_id", "source_health_id", "source_health_event_id"):
++        _uuid(row[field], field)
++    _call(validate_machine_id, row["producer_id"])
++    if _call(validate_site_id, row["site_id"]) != SITE_ID:
++        raise MatrixFormatError("Source-health Site is invalid")
++    kind = _call(validate_source_kind, row["source_kind"])
++    if kind not in SOURCE_KINDS or row["capture_source_id"] != SOURCE_CAPTURE_IDS[kind]:
++        raise MatrixFormatError("Source-health scope is invalid")
++    _call(validate_machine_id, row["capture_source_id"])
++    _call(validate_health_status, row["status"])
++    _call(validate_reason_code, row["reason_code"])
++    _timestamp(row["observed_at"], "observed_at")
++    _timestamp(row["ingested_at"], "ingested_at")
++    roles = row["point_roles"]
++    if (
++        not isinstance(roles, list)
++        or not roles
++        or len(set(roles)) != len(roles)
++        or any(role not in POINT_ROLES for role in roles)
++        or roles != [role for role in POINT_ROLES if role in roles]
++    ):
++        raise MatrixFormatError("Source-health point roles are invalid")
++    _privacy_scan(row)
++    return row
++
++
++def validate_manifest(value: Mapping[str, Any], *, sealed: bool = True) -> dict[str, Any]:
++    row = _row(value, MANIFEST_REQUIRED, (), "manifest")
++    _version_one(row)
++    if row["matrix_revision"] != MATRIX_REVISION:
++        raise MatrixFormatError("Matrix revision is invalid")
++    _uuid4(row["matrix_id"], "matrix_id")
++    if sealed:
++        _timestamp(row["sealed_at"], "sealed_at")
++    elif row["sealed_at"] is not None:
++        raise MatrixFormatError("Unsealed manifest has a sealing timestamp")
++    if not isinstance(row["repository_head"], str) or _HEX40.fullmatch(row["repository_head"]) is None:
++        raise MatrixFormatError("Repository HEAD is invalid")
++    if not isinstance(row["repository_tree"], str) or _HEX40.fullmatch(row["repository_tree"]) is None:
++        raise MatrixFormatError("Repository tree is invalid")
++    if _call(validate_site_id, row["site_id"]) != SITE_ID:
++        raise MatrixFormatError("Manifest Site is invalid")
++    _call(validate_version, row["collection_procedure_version"])
++    _call(validate_version, row["ground_truth_policy_version"])
++    if row["production_schema_registry"] != [list(item) for item in PRODUCTION_SCHEMA_REGISTRY]:
++        raise MatrixFormatError("Production schema registry is invalid")
++    for field in (
++        "task01_retention_days", "device_count", "sealed_sample_count", "evidence_count",
++        "source_health_count", "invalid_sample_count",
++    ):
++        _integer(row[field], 0 if field != "task01_retention_days" else 1, 1_000_000_000, field)
++    reasons = row["invalid_sample_reason_counts"]
++    if not isinstance(reasons, dict) or any(key not in INVALID_REASONS for key in reasons):
++        raise MatrixFormatError("Invalid-sample reasons are invalid")
++    for key, count in reasons.items():
++        _integer(count, 0, 1_000_000_000, key)
++    if sum(reasons.values()) != row["invalid_sample_count"]:
++        raise MatrixFormatError("Invalid-sample counts do not reconcile")
++    limitations = row["known_coverage_limitations"]
++    if (
++        not isinstance(limitations, list)
++        or limitations != sorted(set(limitations))
++        or any(value not in COVERAGE_LIMITATIONS for value in limitations)
++    ):
++        raise MatrixFormatError("Coverage limitations are invalid")
++    if row["supersedes_matrix_id"] is not None:
++        _uuid4(row["supersedes_matrix_id"], "supersedes_matrix_id")
++        if row["supersedes_matrix_id"] == row["matrix_id"]:
++            raise MatrixFormatError("Matrix cannot supersede itself")
++    _privacy_scan(row)
++    return row
++
++
++def sha256_file(path: Path) -> str:
++    digest = hashlib.sha256()
++    try:
++        if path.is_symlink() or not path.is_file():
++            raise MatrixFormatError("Matrix file target is unsafe")
++        with path.open("rb") as handle:
++            for block in iter(lambda: handle.read(1024 * 1024), b""):
++                digest.update(block)
++    except OSError as exc:
++        raise MatrixFormatError("Matrix file is unavailable") from exc
++    return digest.hexdigest()
++
++
++def checksum_text(directory: Path) -> str:
++    return "".join(f"{sha256_file(directory / name)}  {name}\n" for name in CHECKSUM_FILES)
++
++
++def validate_checksums(directory: Path) -> None:
++    path = directory / "checksums.sha256"
++    try:
++        if path.is_symlink() or not path.is_file():
++            raise MatrixFormatError("Checksum file target is unsafe")
++        raw = path.read_bytes()
++    except OSError as exc:
++        raise MatrixFormatError("Checksum file is unavailable") from exc
++    try:
++        text = raw.decode("ascii")
++    except UnicodeError as exc:
++        raise MatrixFormatError("Checksum file is invalid") from exc
++    expected = checksum_text(directory)
++    if text != expected:
++        raise MatrixFormatError("Checksum file does not match matrix files")
++
++
++def write_checksums(directory: Path) -> None:
++    _write_bytes(directory / "checksums.sha256", checksum_text(directory).encode("ascii"))
++
++
++def _row(value: Mapping[str, Any], required: frozenset[str], optional: Iterable[str], label: str) -> dict[str, Any]:
++    optional_fields = frozenset(optional)
++    if (
++        not isinstance(value, dict)
++        or not required <= set(value)
++        or not set(value) <= required | optional_fields
++    ):
++        raise MatrixFormatError(f"{label.capitalize()} fields are invalid")
++    return dict(value)
++
++
++def _version_one(row: Mapping[str, Any]) -> None:
++    if row.get("matrix_format_version") != MATRIX_FORMAT_VERSION:
++        raise MatrixFormatError("Matrix format version is invalid")
++
++
++def _call(function: Callable[..., Any], *args: Any) -> Any:
++    try:
++        return function(*args)
++    except Exception as exc:
++        raise MatrixFormatError("Canonical value is invalid") from exc
++
++
++def _uuid(value: Any, label: str) -> str:
++    del label
++    return _call(validate_uuid, value)
++
++
++def _uuid4(value: Any, label: str) -> str:
++    canonical = _uuid(value, label)
++    if uuid.UUID(canonical).version != 4:
++        raise MatrixFormatError(f"{label} must be UUID4")
++    return canonical
++
++
++def _timestamp(value: Any, label: str):
++    del label
++    return _call(parse_utc, value)
++
++
++def _enum(value: Any, allowed: frozenset[str], label: str) -> str:
++    if not isinstance(value, str) or value not in allowed:
++        raise MatrixFormatError(f"{label} is invalid")
++    return value
++
++
++def _ascii(value: Any, minimum: int, maximum: int, label: str) -> str:
++    if (
++        not isinstance(value, str)
++        or not minimum <= len(value) <= maximum
++        or not value.isprintable()
++    ):
++        raise MatrixFormatError(f"{label} is invalid")
++    return value
++
++
++def _integer(value: Any, minimum: int, maximum: int, label: str) -> int:
++    if type(value) is not int or not minimum <= value <= maximum:
++        raise MatrixFormatError(f"{label} is invalid")
++    return value
++
++
++def _verification_methods(value: Any, *, os_state: bool) -> None:
++    if (
++        not isinstance(value, list)
++        or not value
++        or len(value) != len(set(value))
++        or value != sorted(value)
++        or any(method not in VERIFICATION_METHODS for method in value)
++    ):
++        raise MatrixFormatError("Verification methods are invalid")
++    if os_state and not ({"device_settings", "device_about_page"} & set(value)):
++        raise MatrixFormatError("OS state lacks an authoritative verification method")
++
++
++def _privacy_scan(value: Any) -> None:
++    if isinstance(value, Mapping):
++        for key, child in value.items():
++            if not isinstance(key, str) or key.lower() in _PRIVATE_KEYS:
++                raise MatrixFormatError("Private field is forbidden in sealed matrix")
++            _privacy_scan(child)
++        return
++    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
++        for child in value:
++            _privacy_scan(child)
++        return
++    if isinstance(value, str):
++        lowered = value.lower()
++        if _MAC.search(value) or _contains_ip(value) or any(marker in lowered for marker in _RAW_MARKERS):
++            raise MatrixFormatError("Private value is forbidden in sealed matrix")
++
++
++def _contains_ip(value: str) -> bool:
++    candidates = [match.group(0) for match in _IPV4_CANDIDATE.finditer(value)]
++    candidates.extend(match.group(0) for match in _IPV6_CANDIDATE.finditer(value))
++    for candidate in candidates:
++        try:
++            ipaddress.ip_address(candidate)
++        except ValueError:
++            continue
++        return True
++    return False
++
++
++def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
++    result: dict[str, Any] = {}
++    for key, value in pairs:
++        if key in result:
++            raise MatrixFormatError("Duplicate JSON key")
++        result[key] = value
++    return result
++
++
++def _load_one(raw: bytes) -> Any:
++    try:
++        return json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
++    except MatrixFormatError:
++        raise
++    except (UnicodeError, json.JSONDecodeError) as exc:
++        raise MatrixFormatError("Matrix JSON is invalid") from exc
++
++
++def _read_bytes(path: Path) -> bytes:
++    try:
++        if path.is_symlink() or not path.is_file():
++            raise MatrixFormatError("Matrix file target is unsafe")
++        return path.read_bytes()
++    except MatrixFormatError:
++        raise
++    except OSError as exc:
++        raise MatrixFormatError("Matrix file is unavailable") from exc
++
++
++def _write_bytes(path: Path, value: bytes) -> None:
++    try:
++        path.parent.mkdir(parents=True, exist_ok=True)
++        if path.exists() and (path.is_symlink() or not path.is_file()):
++            raise MatrixFormatError("Matrix output target is unsafe")
++        path.write_bytes(value)
++    except MatrixFormatError:
++        raise
++    except OSError as exc:
++        raise MatrixFormatError("Matrix output is unavailable") from exc
+diff --git a/research/device_fingerprint_03a/validator.py b/research/device_fingerprint_03a/validator.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..adac5d802935913b7e5f0c3720cbbb324f9d5781
+--- /dev/null
++++ b/research/device_fingerprint_03a/validator.py
+@@ -0,0 +1,288 @@
++"""Strict semantic validator and deterministic descriptive matrix report."""
++
++from __future__ import annotations
++
++from collections import Counter, defaultdict
++from pathlib import Path
++from typing import Any, Mapping
++
++from .format import (
++    CHECKSUM_FILES,
++    SEALED_DATA_FILES,
++    SOURCE_KINDS,
++    MatrixFormatError,
++    read_canonical_json,
++    read_canonical_jsonl,
++    validate_checksums,
++    validate_device,
++    validate_device_state,
++    validate_evidence,
++    validate_manifest,
++    validate_sample,
++    validate_source_health,
++)
++
++_MANDATORY_CELLS = (
++    ("smartphone", "android"),
++    ("smartphone", "ios"),
++    ("tablet", "android"),
++    ("tablet", "ipados"),
++    ("laptop", "windows"),
++    ("laptop", "macos"),
++)
++_CORE_SOURCES = frozenset({"portal_headers", "dhcp", "tcp_syn", "tls_client"})
++
++
++def validate_matrix(
++    matrix_dir: str | Path,
++    *,
++    verify_checksums: bool = True,
++    require_v1_coverage: bool = True,
++) -> dict[str, Any]:
++    requested_directory = Path(matrix_dir)
++    if requested_directory.is_symlink():
++        raise MatrixFormatError("Matrix directory is invalid")
++    directory = requested_directory.resolve(strict=True)
++    _validate_file_set(directory, verify_checksums=verify_checksums)
++    if verify_checksums:
++        validate_checksums(directory)
++
++    manifest = validate_manifest(read_canonical_json(directory / "manifest.json"))
++    devices = [validate_device(row) for row in read_canonical_jsonl(directory / "devices.jsonl")]
++    states = [validate_device_state(row) for row in read_canonical_jsonl(directory / "device_states.jsonl")]
++    samples = [validate_sample(row) for row in read_canonical_jsonl(directory / "samples.jsonl")]
++    evidence = [validate_evidence(row) for row in read_canonical_jsonl(directory / "evidence.jsonl")]
++    health = [validate_source_health(row) for row in read_canonical_jsonl(directory / "source_health.jsonl")]
++
++    if evidence != sorted(
++        evidence,
++        key=lambda row: (row["sample_id"], row["observed_at"], row["evidence_id"]),
++    ):
++        raise MatrixFormatError("Evidence ordering is invalid")
++
++    device_map = _unique(devices, "lab_device_id", "device")
++    state_map = _unique(states, "ground_truth_state_id", "device state")
++    sample_map = _unique(samples, "sample_id", "sample")
++    _validate_relationships(device_map, state_map, sample_map, evidence, health)
++    _validate_manifest_counts(manifest, devices, samples, evidence, health)
++    coverage = _coverage(manifest, device_map, state_map, samples, evidence)
++    if require_v1_coverage and not coverage["v1_coverage_pass"]:
++        raise MatrixFormatError("Mandatory V1 matrix coverage is incomplete")
++    return {
++        "status": "pass",
++        "matrix_id": manifest["matrix_id"],
++        "device_count": len(devices),
++        "sealed_sample_count": len(samples),
++        "evidence_count": len(evidence),
++        "source_health_count": len(health),
++        "coverage": coverage,
++        "sample_source_summary": source_summary(samples, evidence),
++    }
++
++
++def source_summary(
++    samples: list[Mapping[str, Any]],
++    evidence: list[Mapping[str, Any]],
++) -> list[dict[str, Any]]:
++    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
++    for row in evidence:
++        grouped[(row["sample_id"], row["source_kind"])].append(row)
++    result: list[dict[str, Any]] = []
++    for sample in sorted(samples, key=lambda row: row["sample_id"]):
++        for kind in SOURCE_KINDS:
++            rows = grouped[(sample["sample_id"], kind)]
++            quality = Counter(row["quality_state"] for row in rows)
++            observed = sorted(row["observed_at"] for row in rows)
++            result.append({
++                "sample_id": sample["sample_id"],
++                "source_kind": kind,
++                "evidence_count": len(rows),
++                "valid_count": quality["valid"],
++                "partial_count": quality["partial"],
++                "degraded_count": quality["degraded"],
++                "distinct_payload_sha256_count": len({row["payload_sha256"] for row in rows}),
++                "first_observed_at": observed[0] if observed else None,
++                "last_observed_at": observed[-1] if observed else None,
++            })
++    return result
++
++
++def _validate_file_set(directory: Path, *, verify_checksums: bool) -> None:
++    if not directory.is_dir() or directory.is_symlink():
++        raise MatrixFormatError("Matrix directory is invalid")
++    expected = set(SEALED_DATA_FILES if verify_checksums else CHECKSUM_FILES)
++    try:
++        actual = {entry.name for entry in directory.iterdir()}
++    except OSError as exc:
++        raise MatrixFormatError("Matrix directory is unavailable") from exc
++    if actual != expected:
++        raise MatrixFormatError("Matrix file set is invalid")
++
++
++def _unique(rows: list[dict[str, Any]], key: str, label: str) -> dict[str, dict[str, Any]]:
++    result: dict[str, dict[str, Any]] = {}
++    for row in rows:
++        identity = row[key]
++        if identity in result:
++            raise MatrixFormatError(f"Duplicate {label} identity")
++        result[identity] = row
++    return result
++
++
++def _validate_relationships(
++    devices: Mapping[str, Mapping[str, Any]],
++    states: Mapping[str, Mapping[str, Any]],
++    samples: Mapping[str, Mapping[str, Any]],
++    evidence: list[Mapping[str, Any]],
++    health: list[Mapping[str, Any]],
++) -> None:
++    state_families: dict[str, set[str]] = defaultdict(set)
++    for state in states.values():
++        if state["lab_device_id"] not in devices:
++            raise MatrixFormatError("Device state references an unknown device")
++        state_families[state["lab_device_id"]].add(state["os_family_gt"])
++    if any(len(families) != 1 for families in state_families.values()):
++        raise MatrixFormatError("One device has conflicting OS families")
++    for sample in samples.values():
++        state = states.get(sample["ground_truth_state_id"])
++        if sample["lab_device_id"] not in devices or state is None:
++            raise MatrixFormatError("Sample references unknown ground truth")
++        if state["lab_device_id"] != sample["lab_device_id"]:
++            raise MatrixFormatError("Sample state belongs to another device")
++
++    evidence_ids: set[str] = set()
++    for row in evidence:
++        sample = samples.get(row["sample_id"])
++        if sample is None or sample["lab_device_id"] != row["lab_device_id"]:
++            raise MatrixFormatError("Evidence sample relationship is invalid")
++        if row["evidence_id"] in evidence_ids:
++            raise MatrixFormatError("Evidence is assigned more than once")
++        evidence_ids.add(row["evidence_id"])
++        if not sample["window_start_utc"] <= row["observed_at"] < sample["window_end_utc"]:
++            raise MatrixFormatError("Evidence is outside its sample window")
++
++    health_ids: set[tuple[str, str, str]] = set()
++    latest_roles: set[tuple[str, str, str, str]] = set()
++    for row in health:
++        sample = samples.get(row["sample_id"])
++        if sample is None or sample["lab_device_id"] != row["lab_device_id"]:
++            raise MatrixFormatError("Source-health sample relationship is invalid")
++        identity = (row["sample_id"], row["producer_id"], row["source_health_event_id"])
++        if identity in health_ids:
++            raise MatrixFormatError("Source-health event is duplicated within a sample")
++        health_ids.add(identity)
++        for role in row["point_roles"]:
++            if role == "latest_before_start" and row["observed_at"] > sample["window_start_utc"]:
++                raise MatrixFormatError("Source-health start role is outside its boundary")
++            if role == "during_window" and not sample["window_start_utc"] <= row["observed_at"] < sample["window_end_utc"]:
++                raise MatrixFormatError("Source-health window role is outside its boundary")
++            if role == "latest_at_end" and row["observed_at"] > sample["window_end_utc"]:
++                raise MatrixFormatError("Source-health end role is outside its boundary")
++            if role != "during_window":
++                role_key = (row["sample_id"], row["capture_source_id"], row["source_kind"], role)
++                if role_key in latest_roles:
++                    raise MatrixFormatError("Source-health latest role is duplicated")
++                latest_roles.add(role_key)
++
++
++def _validate_manifest_counts(
++    manifest: Mapping[str, Any],
++    devices: list[Mapping[str, Any]],
++    samples: list[Mapping[str, Any]],
++    evidence: list[Mapping[str, Any]],
++    health: list[Mapping[str, Any]],
++) -> None:
++    expected = {
++        "device_count": len(devices),
++        "sealed_sample_count": len(samples),
++        "evidence_count": len(evidence),
++        "source_health_count": len(health),
++    }
++    if any(manifest[key] != count for key, count in expected.items()):
++        raise MatrixFormatError("Manifest counts do not match matrix files")
++
++
++def _coverage(
++    manifest: Mapping[str, Any],
++    devices: Mapping[str, Mapping[str, Any]],
++    states: Mapping[str, Mapping[str, Any]],
++    samples: list[Mapping[str, Any]],
++    evidence: list[Mapping[str, Any]],
++) -> dict[str, Any]:
++    samples_by_device: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
++    for sample in samples:
++        samples_by_device[sample["lab_device_id"]].append(sample)
++    family_by_device = {
++        state["lab_device_id"]: state["os_family_gt"]
++        for state in states.values()
++    }
++    cell_counts = {
++        f"{device_class}:{family}": sum(
++            1 for device_id, device in devices.items()
++            if device["device_class_gt"] == device_class and family_by_device.get(device_id) == family
++        )
++        for device_class, family in _MANDATORY_CELLS
++    }
++    repetition_pass = all(
++        len(samples_by_device[device_id]) >= 4
++        and len({sample["network_epoch_id"] for sample in samples_by_device[device_id]}) >= 2
++        for device_id in devices
++    )
++    context_pass = True
++    for device_id in devices:
++        rows = samples_by_device[device_id]
++        support_values = {row["context_supported_gt"] for row in rows}
++        if len(support_values) > 1:
++            context_pass = False
++            continue
++        contexts = {row["runtime_context_gt"] for row in rows}
++        if support_values == {True} and not (
++            "normal_browser" in contexts
++            and bool({"captive_webview", "captive_helper"} & contexts)
++        ):
++            context_pass = False
++        if support_values == {False} and bool({"captive_webview", "captive_helper"} & contexts):
++            context_pass = False
++
++    kinds_by_device: dict[str, set[str]] = defaultdict(set)
++    all_kinds: set[str] = set()
++    quic_families: set[str] = set()
++    sample_map = {sample["sample_id"]: sample for sample in samples}
++    for row in evidence:
++        if row["quality_state"] != "valid":
++            continue
++        device_id = row["lab_device_id"]
++        kinds_by_device[device_id].add(row["source_kind"])
++        all_kinds.add(row["source_kind"])
++        if row["source_kind"] == "quic_client":
++            sample = sample_map[row["sample_id"]]
++            quic_families.add(states[sample["ground_truth_state_id"]]["os_family_gt"])
++    core_sources_pass = all(_CORE_SOURCES <= kinds_by_device[device_id] for device_id in devices)
++    quic_pass = len(quic_families) >= 3 or "quic_sparse" in manifest["known_coverage_limitations"]
++    device_count_pass = len(devices) >= 12
++    sample_count_pass = len(samples) >= 48
++    cell_pass = all(count >= 2 for count in cell_counts.values())
++    all_sources_pass = set(SOURCE_KINDS) <= all_kinds
++    overall = all((
++        device_count_pass,
++        sample_count_pass,
++        cell_pass,
++        repetition_pass,
++        context_pass,
++        all_sources_pass,
++        core_sources_pass,
++        quic_pass,
++    ))
++    return {
++        "v1_coverage_pass": overall,
++        "device_count_pass": device_count_pass,
++        "sealed_sample_count_pass": sample_count_pass,
++        "mandatory_cells_pass": cell_pass,
++        "minimum_repetition_pass": repetition_pass,
++        "runtime_variation_pass": context_pass,
++        "all_source_kinds_pass": all_sources_pass,
++        "per_device_core_sources_pass": core_sources_pass,
++        "quic_coverage_pass": quic_pass,
++        "mandatory_cell_device_counts": cell_counts,
++        "quic_os_family_count": len(quic_families),
++    }
+diff --git a/tests/device_fingerprint_matrix/__init__.py b/tests/device_fingerprint_matrix/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..668dd4aa10282164c7f9fcb17ce2d15bd1b23787
+--- /dev/null
++++ b/tests/device_fingerprint_matrix/__init__.py
+@@ -0,0 +1,301 @@
++"""Synthetic-only fixtures for Task-03A matrix tooling."""
++
++from __future__ import annotations
++
++import sqlite3
++import uuid
++from pathlib import Path
++
++from app.device_fingerprint.schema import SCHEMA_SQL
++from app.device_fingerprint.validation import canonical_json, canonical_sha256
++from research.device_fingerprint_03a.format import (
++    MATRIX_FORMAT_VERSION,
++    MATRIX_REVISION,
++    PRODUCTION_SCHEMA_REGISTRY,
++    SITE_ID,
++    write_canonical_json,
++    write_canonical_jsonl,
++    write_checksums,
++)
++
++
++def uid(value: int) -> str:
++    return str(uuid.UUID(int=value, version=4))
++
++
++def device(identity: int = 1, *, device_class: str = "smartphone", manufacturer: str = "Example", model: str = "Model A"):
++    return {
++        "matrix_format_version": 1,
++        "lab_device_id": uid(identity),
++        "device_class_gt": device_class,
++        "manufacturer_gt": manufacturer,
++        "model_gt": model,
++        "collection_authorized": True,
++        "control_basis_gt": "owner_controlled",
++        "ground_truth_verified_at": "2026-09-15T10:00:00.000Z",
++        "ground_truth_verification_methods": ["device_about_page", "device_settings"],
++    }
++
++
++def device_state(identity: int = 101, *, device_id: int = 1, family: str = "android", version: str = "14"):
++    return {
++        "matrix_format_version": 1,
++        "ground_truth_state_id": uid(identity),
++        "lab_device_id": uid(device_id),
++        "os_family_gt": family,
++        "os_version_gt": version,
++        "os_major_gt": int(version.split(".", 1)[0]),
++        "state_verified_at": "2026-09-15T10:00:00.000Z",
++        "state_verification_methods": ["device_settings"],
++    }
++
++
++def sample(
++    identity: int = 201,
++    *,
++    device_id: int = 1,
++    state_id: int = 101,
++    epoch_id: int = 301,
++    start: str = "2026-09-15T12:00:00.000Z",
++    end: str = "2026-09-15T12:05:00.000Z",
++    context: str = "normal_browser",
++    supported: bool = False,
++):
++    return {
++        "matrix_format_version": 1,
++        "sample_id": uid(identity),
++        "collection_run_id": uid(401),
++        "lab_device_id": uid(device_id),
++        "ground_truth_state_id": uid(state_id),
++        "site_id": SITE_ID,
++        "window_start_utc": start,
++        "window_end_utc": end,
++        "network_epoch_id": uid(epoch_id),
++        "network_state_gt": "fresh_attach",
++        "runtime_context_gt": context,
++        "browser_family_gt": "chrome",
++        "browser_version_major_gt": 120,
++        "mac_mode_gt": "global",
++        "portal_entry_mode_gt": "capport_login",
++        "context_supported_gt": supported,
++        "sample_status": "sealed",
++        "sealed_at": "2026-09-15T12:06:00.000Z",
++    }
++
++
++def binding(sample_id: int = 201, *, device_id: int = 1, mac: str = "AA:BB:CC:DD:EE:01"):
++    return {
++        "sample_id": uid(sample_id),
++        "lab_device_id": uid(device_id),
++        "observed_mac": mac,
++        "observed_ip": "192.168.8.10",
++    }
++
++
++def payload(kind: str):
++    if kind == "dhcp":
++        return {
++            "message_type": "discover",
++            "parameter_request_list": [1, 3, 6, 114],
++            "option_order": [53, 55, 60],
++            "vendor_class": "android-dhcp",
++            "client_identifier_kind": "mac",
++            "maximum_message_size": 1500,
++            "rapid_commit_requested": False,
++            "capport_requested": True,
++            "ipv6_only_preferred_requested": False,
++            "hostname_present": False,
++        }
++    if kind == "tcp_syn":
++        return {
++            "ip_version": 4,
++            "observed_ttl": 64,
++            "tcp_window": 65535,
++            "mss": 1460,
++            "window_scale": 8,
++            "sack_permitted": True,
++            "timestamps_present": True,
++            "tcp_option_order": [2, 4, 8, 1, 3],
++        }
++    if kind == "tls_client":
++        return {
++            "ja4": "t13d0102h2_0123456789ab_abcdef012345",
++            "ja4_a": "t13d0102h2",
++            "ja4_b": "0123456789ab",
++            "ja4_c": "abcdef012345",
++            "tls_version_family": "tls1_3",
++            "client_alpns": ["h2", "http/1.1"],
++            "ech_extension_present": False,
++            "grease_extension_present": True,
++        }
++    if kind == "quic_client":
++        return {
++            "ja4": "q13d0102h3_0123456789ab_abcdef012345",
++            "ja4_a": "q13d0102h3",
++            "ja4_b": "0123456789ab",
++            "ja4_c": "abcdef012345",
++            "quic_version": "0x00000001",
++            "ech_extension_present": None,
++            "grease_extension_present": True,
++        }
++    if kind == "portal_headers":
++        return {
++            "platform_family": "android",
++            "mobile_boolean": True,
++            "browser_runtime_family": "chromium",
++            "webview_or_captive_context": None,
++            "model_family": "Model A",
++            "os_major": 14,
++            "platform_source": "user_agent",
++            "mobile_source": "user_agent",
++            "runtime_source": "user_agent",
++            "context_source": None,
++            "model_source": "user_agent",
++            "os_major_source": "user_agent",
++            "ua_present": True,
++            "sec_ch_ua_present": False,
++            "sec_ch_ua_platform_present": False,
++            "sec_ch_ua_mobile_present": False,
++        }
++    raise AssertionError(kind)
++
++
++def sealed_evidence(
++    identity: int = 501,
++    *,
++    sample_id: int = 201,
++    device_id: int = 1,
++    kind: str = "dhcp",
++    observed_at: str = "2026-09-15T12:01:00.000Z",
++):
++    normalized = payload(kind)
++    payload_json = canonical_json(normalized)
++    return {
++        "evidence_id": uid(identity),
++        "source_event_id": uid(identity + 1000),
++        "producer_id": "portal-zefer-01" if kind == "portal_headers" else "sensor-zefer-01",
++        "source_kind": kind,
++        "source_subtype": "capport_login" if kind == "portal_headers" else None,
++        "extractor_name": "portal-http-parser" if kind == "portal_headers" else f"{kind}-v1",
++        "extractor_version": "1.0.0",
++        "feature_schema_version": 1,
++        "rule_version": None,
++        "site_id": SITE_ID,
++        "capture_source_id": "zefer-portal-http-01" if kind == "portal_headers" else "zefer-span-01",
++        "observed_at": observed_at,
++        "quality_state": "valid",
++        "privacy_class": "P1",
++        "payload": normalized,
++        "payload_sha256": canonical_sha256(payload_json),
++        "ingested_at": "2026-09-15T12:01:01.000Z",
++        "sample_id": uid(sample_id),
++        "lab_device_id": uid(device_id),
++    }
++
++
++def source_health(identity: int = 601, *, sample_id: int = 201, device_id: int = 1, kind: str = "dhcp", observed_at: str = "2026-09-15T12:00:00.000Z", roles=None):
++    return {
++        "matrix_format_version": 1,
++        "sample_id": uid(sample_id),
++        "lab_device_id": uid(device_id),
++        "source_health_id": uid(identity),
++        "source_health_event_id": uid(identity + 1000),
++        "producer_id": "portal-zefer-01" if kind == "portal_headers" else "sensor-zefer-01",
++        "site_id": SITE_ID,
++        "capture_source_id": "zefer-portal-http-01" if kind == "portal_headers" else "zefer-span-01",
++        "source_kind": kind,
++        "status": "available",
++        "reason_code": None,
++        "observed_at": observed_at,
++        "ingested_at": "2026-09-15T12:00:01.000Z",
++        "point_roles": roles or ["latest_before_start", "during_window"],
++    }
++
++
++def manifest(*, devices=1, samples=1, evidence=1, health=1, matrix_id=901, limitations=None):
++    return {
++        "matrix_format_version": MATRIX_FORMAT_VERSION,
++        "matrix_id": uid(matrix_id),
++        "matrix_revision": MATRIX_REVISION,
++        "sealed_at": "2026-09-15T13:00:00.000Z",
++        "repository_head": "a" * 40,
++        "repository_tree": "b" * 40,
++        "site_id": SITE_ID,
++        "collection_procedure_version": "1.0.0",
++        "ground_truth_policy_version": "1.0.0",
++        "production_schema_registry": [list(item) for item in PRODUCTION_SCHEMA_REGISTRY],
++        "task01_retention_days": 30,
++        "device_count": devices,
++        "sealed_sample_count": samples,
++        "evidence_count": evidence,
++        "source_health_count": health,
++        "invalid_sample_count": 0,
++        "invalid_sample_reason_counts": {},
++        "known_coverage_limitations": sorted(["quic_sparse"] if limitations is None else limitations),
++        "supersedes_matrix_id": None,
++    }
++
++
++def write_staging(directory: Path, *, devices=None, states=None, samples=None, bindings=None):
++    directory.mkdir()
++    write_canonical_jsonl(directory / "devices.jsonl", [device()] if devices is None else devices)
++    write_canonical_jsonl(directory / "device_states.jsonl", [device_state()] if states is None else states)
++    write_canonical_jsonl(directory / "samples.jsonl", [sample()] if samples is None else samples)
++    write_canonical_jsonl(directory / "collection_bindings.jsonl", [binding()] if bindings is None else bindings)
++
++
++def write_matrix(directory: Path, *, devices=None, states=None, samples=None, evidence=None, health=None, manifest_row=None):
++    directory.mkdir()
++    device_rows = [device()] if devices is None else devices
++    state_rows = [device_state()] if states is None else states
++    sample_rows = [sample()] if samples is None else samples
++    evidence_rows = [sealed_evidence()] if evidence is None else evidence
++    health_rows = [source_health()] if health is None else health
++    write_canonical_json(directory / "manifest.json", manifest_row or manifest(
++        devices=len(device_rows), samples=len(sample_rows), evidence=len(evidence_rows), health=len(health_rows),
++    ))
++    write_canonical_jsonl(directory / "devices.jsonl", device_rows)
++    write_canonical_jsonl(directory / "device_states.jsonl", state_rows)
++    write_canonical_jsonl(directory / "samples.jsonl", sample_rows)
++    write_canonical_jsonl(directory / "evidence.jsonl", evidence_rows)
++    write_canonical_jsonl(directory / "source_health.jsonl", health_rows)
++    write_checksums(directory)
++
++
++def create_source_database(path: Path, evidence_rows, health_rows=()):
++    connection = sqlite3.connect(path)
++    connection.executescript(SCHEMA_SQL)
++    for row in evidence_rows:
++        normalized = row["payload"]
++        payload_json = canonical_json(normalized)
++        connection.execute(
++            "INSERT INTO device_fingerprint_evidence VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++            (
++                row["evidence_id"], row["producer_id"], row["source_event_id"], row["source_kind"],
++                row["source_subtype"], row["extractor_name"], row["extractor_version"],
++                row["feature_schema_version"], row["rule_version"], row["site_id"],
++                row["capture_source_id"], row["observed_at"], row.get("observed_mac", "AA:BB:CC:DD:EE:01"),
++                row.get("observed_ip", "192.168.8.10"), row["privacy_class"], row["quality_state"],
++                payload_json, canonical_sha256(payload_json), row["ingested_at"],
++            ),
++        )
++    for row in health_rows:
++        content = canonical_json({
++            "capture_source_id": row["capture_source_id"],
++            "observed_at": row["observed_at"],
++            "reason_code": row["reason_code"],
++            "site_id": row["site_id"],
++            "source_health_event_id": row["source_health_event_id"],
++            "source_kind": row["source_kind"],
++            "status": row["status"],
++        })
++        connection.execute(
++            "INSERT INTO device_fingerprint_source_health_events VALUES (?,?,?,?,?,?,?,?,?,?,?)",
++            (
++                row["source_health_id"], row["producer_id"], row["source_health_event_id"],
++                row["site_id"], row["capture_source_id"], row["source_kind"], row["status"],
++                row["reason_code"], row["observed_at"], canonical_sha256(content), row["ingested_at"],
++            ),
++        )
++    connection.commit()
++    connection.close()
+diff --git a/tests/device_fingerprint_matrix/test_exporter.py b/tests/device_fingerprint_matrix/test_exporter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fec046856c0e9d4909b1b54def3a48f6363c4511
+--- /dev/null
++++ b/tests/device_fingerprint_matrix/test_exporter.py
+@@ -0,0 +1,216 @@
++from __future__ import annotations
++
++import hashlib
++from pathlib import Path
++
++import pytest
++
++from research.device_fingerprint_03a.exporter import (
++    export_unsealed_matrix,
++    seal_matrix,
++    validate_staging_directory,
++)
++from research.device_fingerprint_03a.format import (
++    CHECKSUM_FILES,
++    MatrixFormatError,
++    read_canonical_json,
++    read_canonical_jsonl,
++)
++from research.device_fingerprint_03a.validator import validate_matrix
++
++from . import (
++    binding,
++    create_source_database,
++    device,
++    device_state,
++    sample,
++    sealed_evidence,
++    source_health,
++    uid,
++    write_staging,
++)
++
++
++def _sha(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def _export(tmp_path, *, evidence_rows=None, health_rows=None, samples=None, bindings=None):
++    staging = tmp_path / "staging"
++    write_staging(staging, samples=samples, bindings=bindings)
++    database = tmp_path / "fingerprint.sqlite3"
++    create_source_database(
++        database,
++        evidence_rows if evidence_rows is not None else [sealed_evidence()],
++        health_rows if health_rows is not None else [],
++    )
++    environment = tmp_path / "authorized-environment.json"
++    environment.write_text("{}\n", encoding="utf-8")
++    output = tmp_path / "matrix"
++    result = export_unsealed_matrix(
++        db_path=str(database.resolve()),
++        staging_dir=staging.resolve(),
++        output_dir=output.resolve(),
++        authorized_environment_record=environment.resolve(),
++        matrix_id=uid(901),
++        repository_head="a" * 40,
++        repository_tree="b" * 40,
++        collection_procedure_version="1.0.0",
++        ground_truth_policy_version="1.0.0",
++        task01_retention_days=30,
++        known_coverage_limitations=["quic_sparse"],
++    )
++    return database, output, result
++
++
++def test_staging_requires_exact_relationships_and_private_binding(tmp_path):
++    staging = tmp_path / "staging"
++    write_staging(staging)
++
++    assert validate_staging_directory(staging) == {
++        "device_count": 1,
++        "device_state_count": 1,
++        "sealed_sample_count": 1,
++        "binding_count": 1,
++    }
++
++
++def test_export_is_read_only_half_open_and_deidentified(tmp_path):
++    inside = sealed_evidence(observed_at="2026-09-15T12:04:59.999Z")
++    at_end = sealed_evidence(identity=502, observed_at="2026-09-15T12:05:00.000Z")
++    database, output, result = _export(tmp_path, evidence_rows=[inside, at_end])
++    del database
++    rows = read_canonical_jsonl(output / "evidence.jsonl")
++
++    assert result.evidence_count == 1
++    assert [row["evidence_id"] for row in rows] == [inside["evidence_id"]]
++    assert "observed_mac" not in rows[0]
++    assert "observed_ip" not in rows[0]
++    assert "payload_json" not in rows[0]
++    assert not (output / "collection_bindings.jsonl").exists()
++    assert set(path.name for path in output.iterdir()) == set(CHECKSUM_FILES)
++    assert read_canonical_json(output / "manifest.json")["sealed_at"] is None
++
++
++def test_export_preserves_task01_database_bytes(tmp_path):
++    staging = tmp_path / "staging"
++    write_staging(staging)
++    database = tmp_path / "fingerprint.sqlite3"
++    create_source_database(database, [sealed_evidence()])
++    environment = tmp_path / "authorization.txt"
++    environment.write_text("authorized\n", encoding="utf-8")
++    before = (database.stat().st_size, _sha(database))
++
++    export_unsealed_matrix(
++        db_path=str(database.resolve()),
++        staging_dir=staging.resolve(),
++        output_dir=(tmp_path / "matrix").resolve(),
++        authorized_environment_record=environment.resolve(),
++        matrix_id=uid(902),
++        repository_head="a" * 40,
++        repository_tree="b" * 40,
++        collection_procedure_version="1.0.0",
++        ground_truth_policy_version="1.0.0",
++        task01_retention_days=30,
++    )
++
++    assert (database.stat().st_size, _sha(database)) == before
++
++
++def test_source_health_uses_boundary_snapshots_and_deduplicated_roles(tmp_path):
++    before = source_health(identity=601, observed_at="2026-09-15T11:59:00.000Z", roles=["latest_before_start"])
++    during = source_health(identity=602, observed_at="2026-09-15T12:02:00.000Z", roles=["during_window"])
++    at_end = source_health(identity=603, observed_at="2026-09-15T12:05:00.000Z", roles=["latest_at_end"])
++    database, output, result = _export(
++        tmp_path,
++        evidence_rows=[sealed_evidence()],
++        health_rows=[before, during, at_end],
++    )
++    del database
++    rows = read_canonical_jsonl(output / "source_health.jsonl")
++    by_id = {row["source_health_id"]: row for row in rows}
++
++    assert result.source_health_count == 3
++    assert by_id[before["source_health_id"]]["point_roles"] == ["latest_before_start"]
++    assert by_id[during["source_health_id"]]["point_roles"] == ["during_window"]
++    assert by_id[at_end["source_health_id"]]["point_roles"] == ["latest_at_end"]
++
++
++def test_one_source_health_event_can_serve_all_three_point_roles(tmp_path):
++    point = source_health(observed_at="2026-09-15T12:00:00.000Z")
++    _, output, result = _export(tmp_path, health_rows=[point])
++    rows = read_canonical_jsonl(output / "source_health.jsonl")
++
++    assert result.source_health_count == 1
++    assert rows[0]["point_roles"] == ["latest_before_start", "during_window", "latest_at_end"]
++
++
++def test_export_revalidates_payload_against_production_registry(tmp_path):
++    invalid = sealed_evidence()
++    invalid["payload"] = {"message_type": "discover", "unexpected": "not allowed"}
++    with pytest.raises(MatrixFormatError):
++        _export(tmp_path, evidence_rows=[invalid])
++
++
++def test_overlapping_cross_device_binding_collision_fails_closed(tmp_path):
++    staging = tmp_path / "staging"
++    devices = [device(1), device(2)]
++    states = [device_state(101, device_id=1), device_state(102, device_id=2)]
++    samples = [
++        sample(201, device_id=1, state_id=101),
++        sample(202, device_id=2, state_id=102, start="2026-09-15T12:01:00.000Z", end="2026-09-15T12:04:00.000Z"),
++    ]
++    bindings = [binding(201, device_id=1), binding(202, device_id=2)]
++    write_staging(staging, devices=devices, states=states, samples=samples, bindings=bindings)
++
++    with pytest.raises(MatrixFormatError):
++        validate_staging_directory(staging)
++
++
++def test_same_evidence_cannot_be_assigned_to_overlapping_samples(tmp_path):
++    samples = [
++        sample(201),
++        sample(202, start="2026-09-15T12:01:00.000Z", end="2026-09-15T12:04:00.000Z"),
++    ]
++    bindings = [binding(201), binding(202)]
++    with pytest.raises(MatrixFormatError):
++        _export(tmp_path, samples=samples, bindings=bindings)
++
++
++def test_seal_requires_owner_verification_and_creates_exact_checksum_authority(tmp_path):
++    _, output, _ = _export(tmp_path)
++    with pytest.raises(MatrixFormatError):
++        seal_matrix(output, sealed_at="2026-09-15T13:00:00.000Z", owner_verified=False)
++
++    report = seal_matrix(
++        output,
++        sealed_at="2026-09-15T13:00:00.000Z",
++        owner_verified=True,
++        require_v1_coverage=False,
++    )
++
++    assert report["status"] == "pass"
++    assert read_canonical_json(output / "manifest.json")["sealed_at"] == "2026-09-15T13:00:00.000Z"
++    assert (output / "checksums.sha256").is_file()
++    assert validate_matrix(output, require_v1_coverage=False)["status"] == "pass"
++
++
++def test_export_requires_absolute_existing_environment_authorization(tmp_path):
++    staging = tmp_path / "staging"
++    write_staging(staging)
++    database = tmp_path / "fingerprint.sqlite3"
++    create_source_database(database, [sealed_evidence()])
++
++    with pytest.raises(MatrixFormatError):
++        export_unsealed_matrix(
++            db_path=str(database.resolve()),
++            staging_dir=staging.resolve(),
++            output_dir=(tmp_path / "output").resolve(),
++            authorized_environment_record=tmp_path / "missing.json",
++            matrix_id=uid(903),
++            repository_head="a" * 40,
++            repository_tree="b" * 40,
++            collection_procedure_version="1.0.0",
++            ground_truth_policy_version="1.0.0",
++            task01_retention_days=30,
++        )
+diff --git a/tests/device_fingerprint_matrix/test_format.py b/tests/device_fingerprint_matrix/test_format.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4742df5008d897f300f22b8a0b39fe20a8119054
+--- /dev/null
++++ b/tests/device_fingerprint_matrix/test_format.py
+@@ -0,0 +1,179 @@
++from __future__ import annotations
++
++import json
++
++import pytest
++
++from research.device_fingerprint_03a.format import (
++    CHECKSUM_FILES,
++    MatrixFormatError,
++    canonical_json_line,
++    canonical_json_text,
++    checksum_text,
++    read_canonical_jsonl,
++    validate_binding,
++    validate_device,
++    validate_device_state,
++    validate_evidence,
++    validate_manifest,
++    validate_sample,
++    validate_source_health,
++    write_canonical_jsonl,
++    write_checksums,
++)
++
++from . import (
++    binding,
++    device,
++    device_state,
++    manifest,
++    sample,
++    sealed_evidence,
++    source_health,
++    uid,
++    write_matrix,
++)
++
++
++@pytest.mark.parametrize("kind", ["dhcp", "tcp_syn", "tls_client", "quic_client", "portal_headers"])
++def test_exact_production_schema_payloads_are_accepted(kind):
++    assert validate_evidence(sealed_evidence(kind=kind))["source_kind"] == kind
++
++
++@pytest.mark.parametrize(
++    ("validator", "row"),
++    [
++        (validate_device, device()),
++        (validate_device_state, device_state()),
++        (validate_sample, sample()),
++        (validate_binding, binding()),
++        (validate_source_health, source_health()),
++        (validate_manifest, manifest()),
++    ],
++)
++def test_canonical_rows_validate_without_mutation(validator, row):
++    before = json.loads(json.dumps(row))
++    assert validator(row) == before
++    assert row == before
++
++
++def test_records_fail_closed_on_extra_or_missing_fields():
++    extra = device()
++    extra["nickname"] = "private alias"
++    missing = sample()
++    del missing["network_epoch_id"]
++
++    with pytest.raises(MatrixFormatError):
++        validate_device(extra)
++    with pytest.raises(MatrixFormatError):
++        validate_sample(missing)
++
++
++def test_ids_timestamps_and_sample_window_are_strict():
++    upper_uuid = device()
++    upper_uuid["lab_device_id"] = uid(0xABCDEF).upper()
++    no_milliseconds = sample()
++    no_milliseconds["window_start_utc"] = "2026-09-15T12:00:00Z"
++    too_long = sample()
++    too_long["window_end_utc"] = "2026-09-15T12:10:00.001Z"
++    unsealed = sample()
++    unsealed["sample_status"] = "collecting"
++
++    for row, validator in (
++        (upper_uuid, validate_device),
++        (no_milliseconds, validate_sample),
++        (too_long, validate_sample),
++        (unsealed, validate_sample),
++    ):
++        with pytest.raises(MatrixFormatError):
++            validator(row)
++
++
++def test_evidence_payload_must_be_canonical_current_production_schema():
++    wrong_hash = sealed_evidence()
++    wrong_hash["payload_sha256"] = "0" * 64
++    extra_payload_field = sealed_evidence()
++    extra_payload_field["payload"]["raw_packet"] = "forbidden"
++    wrong_capture = sealed_evidence()
++    wrong_capture["capture_source_id"] = "zefer-portal-http-01"
++
++    for row in (wrong_hash, extra_payload_field, wrong_capture):
++        with pytest.raises(MatrixFormatError):
++            validate_evidence(row)
++
++
++def test_canonical_json_is_sorted_compact_ascii_and_lf(tmp_path):
++    row = {"z": "caf\u00e9", "a": [2, 1]}
++    assert canonical_json_text(row) == '{"a":[2,1],"z":"caf\\u00e9"}'
++    assert canonical_json_line(row).endswith(b"\n")
++
++    path = tmp_path / "values.jsonl"
++    write_canonical_jsonl(path, [row])
++    assert path.read_bytes() == b'{"a":[2,1],"z":"caf\\u00e9"}\n'
++    assert read_canonical_jsonl(path) == [row]
++
++
++@pytest.mark.parametrize(
++    "raw",
++    [
++        b'{"a":1,"a":2}\n',
++        b'{"a": 1}\n',
++        b'{"a":1}\r\n',
++        b'{"a":1}',
++        b'{"a":NaN}\n',
++    ],
++)
++def test_noncanonical_jsonl_fails_closed(tmp_path, raw):
++    path = tmp_path / "values.jsonl"
++    path.write_bytes(raw)
++    with pytest.raises(MatrixFormatError):
++        read_canonical_jsonl(path)
++
++
++def test_checksum_manifest_is_exact_sorted_and_does_not_hash_itself(tmp_path):
++    matrix = tmp_path / "matrix"
++    write_matrix(matrix)
++    expected_lines = checksum_text(matrix).splitlines()
++
++    assert [line.split("  ", 1)[1] for line in expected_lines] == list(CHECKSUM_FILES)
++    assert all(len(line.split("  ", 1)[0]) == 64 for line in expected_lines)
++    assert "checksums.sha256" not in checksum_text(matrix)
++
++    (matrix / "checksums.sha256").write_text("bad\n", encoding="ascii")
++    with pytest.raises(MatrixFormatError):
++        from research.device_fingerprint_03a.format import validate_checksums
++        validate_checksums(matrix)
++    write_checksums(matrix)
++
++
++def test_ground_truth_rejects_person_identity_and_unverified_collection():
++    private = device(model="192.168.8.10")
++    unauthorized = device()
++    unauthorized["collection_authorized"] = False
++
++    with pytest.raises(MatrixFormatError):
++        validate_device(private)
++    with pytest.raises(MatrixFormatError):
++        validate_device(unauthorized)
++
++
++def test_printable_unicode_ground_truth_is_deterministically_escaped():
++    row = device(manufacturer="Example \u00c9", model="Model \u03a9")
++
++    assert validate_device(row) == row
++    assert "\\u00c9".lower() in canonical_json_text(row).lower()
++
++
++def test_manifest_invalid_reason_counts_are_structured_and_reconciled():
++    valid = manifest()
++    valid["invalid_sample_count"] = 3
++    valid["invalid_sample_reason_counts"] = {"binding_uncertain": 1, "operator_abort": 2}
++    assert validate_manifest(valid)["invalid_sample_count"] == 3
++
++    mismatch = dict(valid)
++    mismatch["invalid_sample_count"] = 4
++    unknown = dict(valid)
++    unknown["invalid_sample_reason_counts"] = {"free_text": 3}
++    for row in (mismatch, unknown):
++        with pytest.raises(MatrixFormatError):
++            validate_manifest(row)
+diff --git a/tests/device_fingerprint_matrix/test_privacy.py b/tests/device_fingerprint_matrix/test_privacy.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..828562b11a36c890f80f95944b43d5da0ed828f6
+--- /dev/null
++++ b/tests/device_fingerprint_matrix/test_privacy.py
+@@ -0,0 +1,130 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++from research.device_fingerprint_03a.exporter import export_unsealed_matrix, seal_matrix
++from research.device_fingerprint_03a.format import MatrixFormatError
++from research.device_fingerprint_03a.validator import validate_matrix
++
++from . import create_source_database, sealed_evidence, uid, write_matrix, write_staging
++
++
++def _export_private_canary(tmp_path):
++    mac = "AA:BB:CC:DD:EE:01"
++    ip = "192.168.8.10"
++    staging = tmp_path / "staging"
++    write_staging(staging)
++    source = sealed_evidence()
++    source["observed_mac"] = mac
++    source["observed_ip"] = ip
++    database = tmp_path / "fingerprint.sqlite3"
++    create_source_database(database, [source])
++    authorization = tmp_path / "authorized-environment.txt"
++    authorization.write_text("owner approved lab environment\n", encoding="utf-8")
++    output = tmp_path / "matrix"
++    export_unsealed_matrix(
++        db_path=str(database.resolve()),
++        staging_dir=staging.resolve(),
++        output_dir=output.resolve(),
++        authorized_environment_record=authorization.resolve(),
++        matrix_id=uid(901),
++        repository_head="a" * 40,
++        repository_tree="b" * 40,
++        collection_procedure_version="1.0.0",
++        ground_truth_policy_version="1.0.0",
++        task01_retention_days=30,
++        known_coverage_limitations=["quic_sparse"],
++    )
++    return output, mac, ip
++
++
++def test_private_binding_identifiers_never_enter_unsealed_or_sealed_matrix(tmp_path):
++    output, mac, ip = _export_private_canary(tmp_path)
++    unsealed = b"".join(path.read_bytes() for path in output.iterdir())
++    assert mac.encode() not in unsealed
++    assert ip.encode() not in unsealed
++    assert b"collection_bindings" not in unsealed
++
++    seal_matrix(
++        output,
++        sealed_at="2026-09-15T13:00:00.000Z",
++        owner_verified=True,
++        require_v1_coverage=False,
++    )
++    sealed = b"".join(path.read_bytes() for path in output.iterdir())
++    assert mac.encode() not in sealed
++    assert ip.encode() not in sealed
++    assert validate_matrix(output, require_v1_coverage=False)["status"] == "pass"
++
++
++@pytest.mark.parametrize(
++    "private_value",
++    [
++        "AA:BB:CC:DD:EE:01",
++        "192.168.8.10",
++        "controlled device at 192.168.8.10",
++        "Mozilla/5.0 synthetic raw UA",
++        "Authorization: Bearer private-token",
++    ],
++)
++def test_sealed_ground_truth_rejects_private_or_raw_values(tmp_path, private_value):
++    matrix = tmp_path / "matrix"
++    from . import device
++    write_matrix(matrix, devices=[device(model=private_value)])
++
++    with pytest.raises(MatrixFormatError, match="Private value"):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_sealed_payload_rejects_private_field_names(tmp_path):
++    matrix = tmp_path / "matrix"
++    evidence = sealed_evidence()
++    evidence["payload"]["observed_mac"] = "not-even-a-mac"
++    write_matrix(matrix, evidence=[evidence])
++
++    with pytest.raises(MatrixFormatError):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_research_namespace_is_not_imported_by_production_runtime():
++    repository = Path(__file__).resolve().parents[2]
++    production_paths = [repository / "app", repository / "run.py", repository / "deploy"]
++    matches = []
++    for root in production_paths:
++        paths = [root] if root.is_file() else [path for path in root.rglob("*") if path.is_file()]
++        for path in paths:
++            if path.suffix not in {".py", ".service", ".timer", ".sh", ".ps1", ".cmd"}:
++                continue
++            text = path.read_text(encoding="utf-8", errors="replace")
++            if "device_fingerprint_03a" in text:
++                matches.append(str(path.relative_to(repository)))
++    assert matches == []
++
++
++def test_repository_contains_no_collected_matrix_artifact():
++    repository = Path(__file__).resolve().parents[2]
++    forbidden = []
++    for root_name in ("research", "docs"):
++        forbidden.extend(
++            str(path.relative_to(repository))
++            for path in (repository / root_name).rglob("*.jsonl")
++        )
++        forbidden.extend(
++            str(path.relative_to(repository))
++            for path in (repository / root_name).rglob("checksums.sha256")
++        )
++    assert forbidden == []
++
++
++def test_validator_output_contains_no_classifier_or_training_contract(tmp_path):
++    matrix = tmp_path / "matrix"
++    write_matrix(matrix)
++    report = validate_matrix(matrix, require_v1_coverage=False)
++    rendered = repr(report).lower()
++
++    assert "classifier" not in rendered
++    assert "confidence" not in rendered
++    assert "feature_vector" not in rendered
++    assert "weight" not in rendered
+diff --git a/tests/device_fingerprint_matrix/test_validator.py b/tests/device_fingerprint_matrix/test_validator.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f176daf13abae1f51ec41a330eccce9e895a5c9d
+--- /dev/null
++++ b/tests/device_fingerprint_matrix/test_validator.py
+@@ -0,0 +1,265 @@
++from __future__ import annotations
++
++import shutil
++
++import pytest
++
++from research.device_fingerprint_03a.format import (
++    MatrixFormatError,
++    read_canonical_json,
++    read_canonical_jsonl,
++    write_canonical_json,
++    write_canonical_jsonl,
++    write_checksums,
++)
++from research.device_fingerprint_03a.validator import source_summary, validate_matrix
++
++from . import (
++    device,
++    device_state,
++    manifest,
++    sample,
++    sealed_evidence,
++    source_health,
++    write_matrix,
++)
++
++
++def test_calibration_matrix_validates_and_summary_has_every_source_cell(tmp_path):
++    matrix = tmp_path / "matrix"
++    write_matrix(matrix)
++
++    report = validate_matrix(matrix, require_v1_coverage=False)
++
++    assert report["status"] == "pass"
++    assert len(report["sample_source_summary"]) == 5
++    assert {row["source_kind"] for row in report["sample_source_summary"]} == {
++        "dhcp", "tcp_syn", "tls_client", "quic_client", "portal_headers",
++    }
++    assert sum(row["evidence_count"] for row in report["sample_source_summary"]) == 1
++    assert report["coverage"]["v1_coverage_pass"] is False
++
++
++def test_sample_window_is_half_open_for_evidence(tmp_path):
++    matrix = tmp_path / "matrix"
++    end = sealed_evidence(observed_at="2026-09-15T12:05:00.000Z")
++    write_matrix(matrix, evidence=[end])
++
++    with pytest.raises(MatrixFormatError, match="outside its sample window"):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_manifest_counts_are_exact(tmp_path):
++    matrix = tmp_path / "matrix"
++    wrong = manifest(evidence=2)
++    write_matrix(matrix, manifest_row=wrong)
++
++    with pytest.raises(MatrixFormatError, match="counts"):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_checksum_tamper_order_and_extra_files_fail_closed(tmp_path):
++    matrix = tmp_path / "matrix"
++    write_matrix(matrix)
++    original = (matrix / "checksums.sha256").read_text(encoding="ascii")
++
++    (matrix / "checksums.sha256").write_text("\n".join(reversed(original.splitlines())) + "\n", encoding="ascii")
++    with pytest.raises(MatrixFormatError):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++    write_checksums(matrix)
++    (matrix / "notes.txt").write_text("not sealed data\n", encoding="utf-8")
++    with pytest.raises(MatrixFormatError, match="file set"):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_duplicate_evidence_assignment_fails_closed(tmp_path):
++    matrix = tmp_path / "matrix"
++    second = sample(202)
++    duplicate = sealed_evidence(sample_id=202)
++    write_matrix(
++        matrix,
++        samples=[sample(), second],
++        evidence=[sealed_evidence(), duplicate],
++        manifest_row=manifest(samples=2, evidence=2),
++    )
++
++    rows = read_canonical_jsonl(matrix / "evidence.jsonl")
++    rows[1]["evidence_id"] = rows[0]["evidence_id"]
++    write_canonical_jsonl(matrix / "evidence.jsonl", rows)
++    write_checksums(matrix)
++    with pytest.raises(MatrixFormatError, match="assigned more than once"):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_evidence_order_is_canonical_and_stable(tmp_path):
++    matrix = tmp_path / "matrix"
++    later = sealed_evidence(identity=502, observed_at="2026-09-15T12:02:00.000Z")
++    earlier = sealed_evidence(identity=501, observed_at="2026-09-15T12:01:00.000Z")
++    write_matrix(matrix, evidence=[later, earlier], manifest_row=manifest(evidence=2))
++
++    with pytest.raises(MatrixFormatError, match="ordering"):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_source_health_roles_obey_sample_boundaries(tmp_path):
++    matrix = tmp_path / "matrix"
++    invalid = source_health(observed_at="2026-09-15T12:05:00.001Z", roles=["latest_at_end"])
++    write_matrix(matrix, health=[invalid])
++
++    with pytest.raises(MatrixFormatError, match="outside its boundary"):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_source_health_event_identity_is_unique_within_sample(tmp_path):
++    matrix = tmp_path / "matrix"
++    first = source_health(identity=601)
++    second = source_health(identity=602)
++    second["source_health_event_id"] = first["source_health_event_id"]
++    write_matrix(
++        matrix,
++        health=[first, second],
++        manifest_row=manifest(health=2),
++    )
++
++    with pytest.raises(MatrixFormatError, match="duplicated within a sample"):
++        validate_matrix(matrix, require_v1_coverage=False)
++
++
++def test_only_valid_evidence_counts_toward_v1_source_coverage(tmp_path):
++    matrix = tmp_path / "matrix"
++    degraded = sealed_evidence()
++    degraded["quality_state"] = "degraded"
++    write_matrix(matrix, evidence=[degraded])
++
++    report = validate_matrix(matrix, require_v1_coverage=False)
++
++    assert report["coverage"]["all_source_kinds_pass"] is False
++    assert report["coverage"]["per_device_core_sources_pass"] is False
++
++
++def test_source_summary_is_deterministic_and_descriptive_only():
++    rows = [
++        sealed_evidence(identity=502, kind="dhcp", observed_at="2026-09-15T12:02:00.000Z"),
++        sealed_evidence(identity=501, kind="dhcp", observed_at="2026-09-15T12:01:00.000Z"),
++    ]
++    rows[1]["quality_state"] = "partial"
++
++    report = source_summary([sample()], rows)
++    dhcp = next(row for row in report if row["source_kind"] == "dhcp")
++
++    assert dhcp == {
++        "sample_id": sample()["sample_id"],
++        "source_kind": "dhcp",
++        "evidence_count": 2,
++        "valid_count": 1,
++        "partial_count": 1,
++        "degraded_count": 0,
++        "distinct_payload_sha256_count": 1,
++        "first_observed_at": "2026-09-15T12:01:00.000Z",
++        "last_observed_at": "2026-09-15T12:02:00.000Z",
++    }
++    assert not ({"classification", "feature", "weight", "score"} & set(dhcp))
++
++
++def test_complete_v1_coverage_contract_passes(tmp_path):
++    matrix = tmp_path / "matrix"
++    device_rows = []
++    state_rows = []
++    sample_rows = []
++    evidence_rows = []
++    cells = [
++        ("smartphone", "android", "14"),
++        ("smartphone", "ios", "17"),
++        ("tablet", "android", "14"),
++        ("tablet", "ipados", "17"),
++        ("laptop", "windows", "11"),
++        ("laptop", "macos", "14"),
++    ]
++    next_evidence_id = 10_000
++    quic_added_for = set()
++    for device_index, (device_class, family, version) in enumerate(cells * 2, start=1):
++        state_id = 100 + device_index
++        device_rows.append(device(device_index, device_class=device_class, model=f"Model {device_index}"))
++        state_rows.append(device_state(state_id, device_id=device_index, family=family, version=version))
++        first_sample_id = None
++        for repetition in range(4):
++            sample_id = 1_000 + device_index * 10 + repetition
++            first_sample_id = first_sample_id or sample_id
++            context = "normal_browser" if repetition % 2 == 0 else "captive_webview"
++            sample_rows.append(sample(
++                sample_id,
++                device_id=device_index,
++                state_id=state_id,
++                epoch_id=2_000 + device_index * 2 + repetition % 2,
++                context=context,
++                supported=True,
++            ))
++        for kind in ("portal_headers", "dhcp", "tcp_syn", "tls_client"):
++            evidence_rows.append(sealed_evidence(
++                next_evidence_id,
++                sample_id=first_sample_id,
++                device_id=device_index,
++                kind=kind,
++            ))
++            next_evidence_id += 1
++        if family in {"android", "ios", "windows"} and family not in quic_added_for:
++            evidence_rows.append(sealed_evidence(
++                next_evidence_id,
++                sample_id=first_sample_id,
++                device_id=device_index,
++                kind="quic_client",
++            ))
++            quic_added_for.add(family)
++            next_evidence_id += 1
++
++    write_matrix(
++        matrix,
++        devices=device_rows,
++        states=state_rows,
++        samples=sample_rows,
++        evidence=evidence_rows,
++        health=[],
++        manifest_row=manifest(
++            devices=len(device_rows),
++            samples=len(sample_rows),
++            evidence=len(evidence_rows),
++            health=0,
++            limitations=[],
++        ),
++    )
++
++    report = validate_matrix(matrix)
++
++    assert report["coverage"] == {
++        "v1_coverage_pass": True,
++        "device_count_pass": True,
++        "sealed_sample_count_pass": True,
++        "mandatory_cells_pass": True,
++        "minimum_repetition_pass": True,
++        "runtime_variation_pass": True,
++        "all_source_kinds_pass": True,
++        "per_device_core_sources_pass": True,
++        "quic_coverage_pass": True,
++        "mandatory_cell_device_counts": {
++            "smartphone:android": 2,
++            "smartphone:ios": 2,
++            "tablet:android": 2,
++            "tablet:ipados": 2,
++            "laptop:windows": 2,
++            "laptop:macos": 2,
++        },
++        "quic_os_family_count": 3,
++    }
++
++
++def test_matrix_copy_remains_byte_identical_after_validation(tmp_path):
++    matrix = tmp_path / "matrix"
++    copy = tmp_path / "copy"
++    write_matrix(matrix)
++    shutil.copytree(matrix, copy)
++    before = {path.name: path.read_bytes() for path in copy.iterdir()}
++
++    validate_matrix(copy, require_v1_coverage=False)
++
++    assert {path.name: path.read_bytes() for path in copy.iterdir()} == before

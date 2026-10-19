@@ -1,0 +1,1485 @@
+diff --git a/app/device_fingerprint/snapshot_artifacts.py b/app/device_fingerprint/snapshot_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6010121de66ee03ec58a0e636976043b04425bf
+--- /dev/null
++++ b/app/device_fingerprint/snapshot_artifacts.py
+@@ -0,0 +1,356 @@
++"""Closed R14 T-01 snapshot content and successful-build audit artifacts."""
++
++from __future__ import annotations
++
++import uuid
++from typing import Any
++
++from .artifact_content import ArtifactContent, ArtifactRef, canonical_set, make_artifact_content
++from .binding_contracts import resolve_authoritative_binding
++from .foundation_admission_artifacts import make_origin_runtime_admission
++from .models import DeviceFingerprintValidationError
++from .runtime_profile_artifacts import make_foundation_runtime_profile
++from .validation import (
++    parse_utc, validate_mac, validate_quality, validate_site_id,
++    validate_source_kind, validate_health_status, validate_uuid,
++)
++
++_CONTENT_FIELDS = frozenset({
++    "snapshot_contract_version", "site_id", "observed_mac", "window_start_utc",
++    "window_end_utc", "database_generation_id", "max_committed_ingest_sequence",
++    "evidence_source_binding_timeline", "binding_clock_policy",
++    "evidence_schema_registry_contract", "origin_runtime_admission",
++    "classification_foundation_valid_from_utc", "binding_epoch_descriptors",
++    "evidence_descriptors", "source_health_descriptors",
++})
++_ORIGIN_FIELDS = frozenset({
++    "artifact_id", "content_sha256", "tcp_state", "tcp_reason_code",
++    "ttl_capture_placement_proof",
++})
++_BINDING_FIELDS = frozenset({
++    "binding_epoch_id", "site_id", "origin_group", "source_kind",
++    "capture_source_id", "producer_id", "source_health_emitter_contract",
++    "effective_from_utc", "effective_to_utc",
++})
++_EVIDENCE_FIELDS = frozenset({
++    "evidence_id", "ingest_sequence", "producer_id", "source_kind", "source_subtype",
++    "capture_source_id", "extractor_name", "extractor_version", "feature_schema_version",
++    "rule_version", "site_id", "observed_at", "ingested_at", "observed_mac",
++    "privacy_class", "quality_state", "payload_sha256", "binding_epoch_id",
++})
++_HEALTH_FIELDS = frozenset({
++    "source_health_id", "ingest_sequence", "producer_id", "source_kind",
++    "capture_source_id", "status", "reason_code", "observed_at", "ingested_at",
++    "content_sha256", "binding_epoch_id",
++})
++_RECORD_FIELDS = frozenset({
++    "evidence_snapshot_content", "foundation_runtime_profile", "snapshot_captured_at_utc",
++    "snapshot_content_policy", "snapshot_execution_policy", "verified_evidence_row_count",
++    "verified_payload_bytes", "materialized_evidence_row_count", "materialized_payload_bytes",
++    "total_semantic_input_bytes", "scope_anomaly_count", "scope_anomaly_reason_counts",
++    "build_outcome",
++})
++_SOURCE_ORIGIN = {
++    "dhcp": "dhcp", "portal_headers": "portal", "tcp_syn": "tcp",
++    "tls_client": "tls", "quic_client": "quic",
++}
++_ORIGINS = frozenset(_SOURCE_ORIGIN.values())
++_MAX_I64 = 2**63 - 1
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _shape(value: Any, fields: frozenset[str], label: str) -> dict[str, Any]:
++    if not isinstance(value, dict) or set(value) != fields:
++        _fail(f"Invalid {label} shape")
++    return value
++
++
++def _text(value: Any, label: str, *, nullable: bool = False) -> str | None:
++    if nullable and value is None:
++        return None
++    if not isinstance(value, str) or not value.strip():
++        _fail(f"Invalid {label}")
++    return value
++
++
++def _number(value: Any, label: str, *, minimum: int = 0, maximum: int = _MAX_I64) -> int:
++    if type(value) is not int or not minimum <= value <= maximum:
++        _fail(f"Invalid {label}")
++    return value
++
++
++def _uuid4(value: Any) -> str:
++    validate_uuid(value)
++    if uuid.UUID(value).version != 4:
++        _fail("Invalid UUIDv4")
++    return value
++
++
++def _digest(value: Any) -> str:
++    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
++        _fail("Invalid SHA256")
++    return value
++
++
++def _ref(value: Any, target: str, *, nullable: bool = False) -> dict[str, str] | None:
++    if nullable and value is None:
++        return None
++    reference = ArtifactRef.from_dict(value)
++    if not reference.artifact_id.startswith(f"{target}:v1:sha256:"):
++        _fail(f"Invalid {target} reference")
++    return reference.as_dict()
++
++
++def _exact_ref(value: Any, content: ArtifactContent, target: str) -> None:
++    reference = ArtifactRef.from_dict(_ref(value, target))
++    reference.resolve(content, target)
++
++
++def _binding_descriptor(value: Any) -> dict[str, Any]:
++    row = _shape(value, _BINDING_FIELDS, "binding descriptor")
++    _text(row["binding_epoch_id"], "binding epoch ID")
++    validate_site_id(row["site_id"])
++    if row["origin_group"] not in _ORIGINS:
++        _fail("Invalid binding origin")
++    validate_source_kind(row["source_kind"])
++    if _SOURCE_ORIGIN.get(row["source_kind"]) != row["origin_group"]:
++        _fail("Binding source/origin mismatch")
++    _text(row["capture_source_id"], "capture source")
++    _text(row["producer_id"], "producer")
++    _ref(row["source_health_emitter_contract"], "SourceHealthEmitterContract")
++    start = parse_utc(row["effective_from_utc"])
++    end = row["effective_to_utc"]
++    if end is not None and parse_utc(end) <= start:
++        _fail("Invalid binding interval")
++    return row
++
++
++def _evidence_descriptor(value: Any, bindings: dict[str, dict[str, Any]],
++                         site_id: str, observed_mac: str) -> dict[str, Any]:
++    row = _shape(value, _EVIDENCE_FIELDS, "evidence descriptor")
++    _uuid4(row["evidence_id"])
++    _number(row["ingest_sequence"], "evidence ingest sequence", minimum=1)
++    for field in ("producer_id", "capture_source_id", "extractor_name", "extractor_version"):
++        _text(row[field], field)
++    validate_source_kind(row["source_kind"])
++    _text(row["source_subtype"], "source subtype", nullable=True)
++    _number(row["feature_schema_version"], "schema version", minimum=1, maximum=2**31 - 1)
++    _text(row["rule_version"], "rule version", nullable=True)
++    validate_site_id(row["site_id"])
++    parse_utc(row["observed_at"])
++    parse_utc(row["ingested_at"])
++    if validate_mac(row["observed_mac"]) != row["observed_mac"]:
++        _fail("Noncanonical evidence MAC")
++    if row["privacy_class"] != "P1" or validate_quality(row["quality_state"]) != row["quality_state"]:
++        _fail("Invalid evidence privacy/quality")
++    _digest(row["payload_sha256"])
++    _text(row["binding_epoch_id"], "evidence binding epoch ID")
++    epoch = bindings.get(row["binding_epoch_id"])
++    if (epoch is None or row["site_id"] != site_id or row["observed_mac"] != observed_mac
++            or any(row[field] != epoch[field] for field in (
++                "site_id", "source_kind", "capture_source_id", "producer_id"))):
++        _fail("Evidence descriptor binding mismatch")
++    return row
++
++
++def _health_descriptor(value: Any, bindings: dict[str, dict[str, Any]],
++                       site_id: str) -> dict[str, Any]:
++    row = _shape(value, _HEALTH_FIELDS, "health descriptor")
++    _uuid4(row["source_health_id"])
++    _number(row["ingest_sequence"], "health ingest sequence", minimum=1)
++    for field in ("producer_id", "capture_source_id"):
++        _text(row[field], field)
++    validate_source_kind(row["source_kind"])
++    validate_health_status(row["status"])
++    _text(row["reason_code"], "health reason", nullable=True)
++    parse_utc(row["observed_at"])
++    parse_utc(row["ingested_at"])
++    _digest(row["content_sha256"])
++    _text(row["binding_epoch_id"], "health binding epoch ID")
++    epoch = bindings.get(row["binding_epoch_id"])
++    if (epoch is None or epoch["site_id"] != site_id
++            or any(row[field] != epoch[field] for field in (
++                "source_kind", "capture_source_id", "producer_id"))):
++        _fail("Health descriptor binding mismatch")
++    return row
++
++
++def make_evidence_snapshot_content(
++    payload: dict[str, Any], *, foundation_runtime_profile: ArtifactContent,
++    binding_timeline: ArtifactContent, binding_clock_policy: ArtifactContent,
++    schema_registry_contract: ArtifactContent, origin_runtime_admission: ArtifactContent,
++) -> ArtifactContent:
++    """Validate exact pinned semantic dependencies and canonical snapshot membership."""
++    value = _shape(payload, _CONTENT_FIELDS, "EvidenceSnapshotContent")
++    profile = make_foundation_runtime_profile(foundation_runtime_profile.semantic_payload)
++    if profile != foundation_runtime_profile:
++        _fail("Noncanonical FoundationRuntimeProfile")
++    profile_payload = profile.semantic_payload
++    _number(value["snapshot_contract_version"], "snapshot version", minimum=1, maximum=2**31 - 1)
++    if value["snapshot_contract_version"] != profile_payload["snapshot_contract_version"]:
++        _fail("Snapshot/profile version mismatch")
++    validate_site_id(value["site_id"])
++    if validate_mac(value["observed_mac"]) != value["observed_mac"]:
++        _fail("Noncanonical snapshot MAC")
++    start, end = parse_utc(value["window_start_utc"]), parse_utc(value["window_end_utc"])
++    if start >= end or start < parse_utc(value["classification_foundation_valid_from_utc"]):
++        _fail("Invalid snapshot window")
++    _uuid4(value["database_generation_id"])
++    _number(value["max_committed_ingest_sequence"], "snapshot watermark")
++    if value["classification_foundation_valid_from_utc"] != profile_payload[
++            "classification_foundation_valid_from_utc"]:
++        _fail("Snapshot valid-from/profile mismatch")
++    for field, content, kind in (
++        ("evidence_source_binding_timeline", binding_timeline, "EvidenceSourceBindingTimeline"),
++        ("binding_clock_policy", binding_clock_policy, "BindingClockPolicy"),
++        ("evidence_schema_registry_contract", schema_registry_contract, "EvidenceSchemaRegistryContract"),
++    ):
++        _exact_ref(value[field], content, kind)
++        if value[field] != profile_payload[field]:
++            _fail("Snapshot/profile dependency mismatch")
++    origin = _shape(value["origin_runtime_admission"], _ORIGIN_FIELDS, "origin descriptor")
++    if make_origin_runtime_admission(origin_runtime_admission.semantic_payload) != origin_runtime_admission:
++        _fail("Invalid OriginRuntimeAdmission")
++    _exact_ref({key: origin[key] for key in ("artifact_id", "content_sha256")},
++               origin_runtime_admission, "OriginRuntimeAdmission")
++    origin_payload = origin_runtime_admission.semantic_payload
++    if (origin["tcp_state"] != origin_payload["tcp_state"]
++            or origin["tcp_reason_code"] != origin_payload["tcp_reason_code"]
++            or origin["ttl_capture_placement_proof"] != origin_payload["ttl_capture_placement_proof"]
++            or {key: origin[key] for key in ("artifact_id", "content_sha256")} !=
++            profile_payload["origin_runtime_admission"]
++            or origin["ttl_capture_placement_proof"] != profile_payload["ttl_capture_placement_proof"]):
++        _fail("Origin/profile dependency mismatch")
++    _ref(origin["ttl_capture_placement_proof"], "TTLCapturePlacementProof", nullable=True)
++    raw_bindings = value["binding_epoch_descriptors"]
++    if not isinstance(raw_bindings, list):
++        _fail("Invalid binding descriptors")
++    bindings = [_binding_descriptor(item) for item in raw_bindings]
++    if len({item["binding_epoch_id"] for item in bindings}) != len(bindings):
++        _fail("Duplicate binding epoch ID")
++    timeline_by_id = {item["binding_epoch_id"]: item for item in
++                      binding_timeline.semantic_payload["binding_epochs"]}
++    if any(timeline_by_id.get(item["binding_epoch_id"]) != item for item in bindings):
++        _fail("Binding descriptor/timeline mismatch")
++    required = {
++        epoch["binding_epoch_id"] for epoch in timeline_by_id.values()
++        if epoch["site_id"] == value["site_id"]
++        and parse_utc(epoch["effective_from_utc"]) < end
++        and (epoch["effective_to_utc"] is None
++             or start < parse_utc(epoch["effective_to_utc"]))
++    }
++    if {item["binding_epoch_id"] for item in bindings} != required or not required:
++        _fail("Incomplete snapshot binding descriptors")
++    bindings = canonical_set(bindings, lambda item: (
++        item["effective_from_utc"], item["origin_group"], item["source_kind"],
++        item["capture_source_id"], item["producer_id"], item["binding_epoch_id"],
++    ))
++    by_id = {item["binding_epoch_id"]: item for item in bindings}
++    raw_evidence, raw_health = value["evidence_descriptors"], value["source_health_descriptors"]
++    if not isinstance(raw_evidence, list) or not isinstance(raw_health, list):
++        _fail("Invalid snapshot descriptor sequences")
++    evidence = [_evidence_descriptor(item, by_id, value["site_id"], value["observed_mac"])
++                for item in raw_evidence]
++    health = [_health_descriptor(item, by_id, value["site_id"]) for item in raw_health]
++    if (len({item["evidence_id"] for item in evidence}) != len(evidence)
++            or len({item["source_health_id"] for item in health}) != len(health)):
++        _fail("Duplicate snapshot descriptor ID")
++    for row in evidence:
++        if row["ingest_sequence"] > value["max_committed_ingest_sequence"] or not (
++                start <= parse_utc(row["observed_at"]) < end):
++            _fail("Evidence descriptor outside window/watermark")
++    for row in health:
++        if (row["ingest_sequence"] > value["max_committed_ingest_sequence"]
++                or parse_utc(row["observed_at"]) >= end):
++            _fail("Health descriptor outside watermark/end")
++    for row in (*evidence, *health):
++        origin_group = by_id[row["binding_epoch_id"]]["origin_group"]
++        authority = resolve_authoritative_binding(
++            binding_timeline, binding_clock_policy, value["site_id"],
++            origin_group, row["source_kind"], row["observed_at"])
++        epoch = authority["binding_epoch"]
++        if (authority["status"] != "AUTHORIZED" or epoch is None
++                or epoch["binding_epoch_id"] != row["binding_epoch_id"]
++                or row["producer_id"] != epoch["producer_id"]
++                or row["capture_source_id"] != epoch["capture_source_id"]):
++            _fail("Snapshot descriptor lacks exact binding authority")
++    evidence.sort(key=lambda row: (
++        by_id[row["binding_epoch_id"]]["origin_group"], row["source_kind"],
++        row["capture_source_id"], row["producer_id"], row["observed_at"],
++        row["ingest_sequence"], row["evidence_id"],
++    ))
++    health.sort(key=lambda row: (
++        by_id[row["binding_epoch_id"]]["origin_group"], row["source_kind"],
++        row["capture_source_id"], row["producer_id"], row["observed_at"],
++        row["ingest_sequence"], row["source_health_id"],
++    ))
++    return make_artifact_content("EvidenceSnapshotContent", {
++        **value, "binding_epoch_descriptors": bindings,
++        "evidence_descriptors": evidence, "source_health_descriptors": health,
++    })
++
++
++def make_snapshot_record(
++    payload: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
++    foundation_runtime_profile: ArtifactContent, snapshot_content_policy: ArtifactContent,
++    snapshot_execution_policy: ArtifactContent,
++) -> ArtifactContent:
++    """Validate exact profile/policy duplication before durable success identity."""
++    value = _shape(payload, _RECORD_FIELDS, "SnapshotRecord")
++    profile = make_foundation_runtime_profile(foundation_runtime_profile.semantic_payload)
++    if profile != foundation_runtime_profile:
++        _fail("Noncanonical FoundationRuntimeProfile")
++    _exact_ref(value["evidence_snapshot_content"], evidence_snapshot_content, "EvidenceSnapshotContent")
++    _exact_ref(value["foundation_runtime_profile"], profile, "FoundationRuntimeProfile")
++    for field, content, kind in (
++        ("snapshot_content_policy", snapshot_content_policy, "SnapshotContentPolicy"),
++        ("snapshot_execution_policy", snapshot_execution_policy, "SnapshotExecutionPolicy"),
++    ):
++        _exact_ref(value[field], content, kind)
++        if value[field] != profile.semantic_payload[field]:
++            _fail("SnapshotRecord/profile policy mismatch")
++    captured_at = parse_utc(value["snapshot_captured_at_utc"])
++    snapshot_payload = evidence_snapshot_content.semantic_payload
++    if captured_at < parse_utc(snapshot_payload["window_end_utc"]):
++        _fail("SnapshotRecord capture precedes completed window")
++    for field in (
++        "evidence_source_binding_timeline", "binding_clock_policy",
++        "evidence_schema_registry_contract", "classification_foundation_valid_from_utc",
++    ):
++        if snapshot_payload[field] != profile.semantic_payload[field]:
++            _fail("SnapshotRecord/profile semantic dependency mismatch")
++    origin_descriptor = snapshot_payload["origin_runtime_admission"]
++    if ({key: origin_descriptor[key] for key in ("artifact_id", "content_sha256")}
++            != profile.semantic_payload["origin_runtime_admission"]
++            or origin_descriptor["ttl_capture_placement_proof"] !=
++            profile.semantic_payload["ttl_capture_placement_proof"]):
++        _fail("SnapshotRecord/profile origin mismatch")
++    if value["build_outcome"] != "success":
++        _fail("Invalid SnapshotRecord outcome")
++    for field in (
++        "verified_evidence_row_count", "verified_payload_bytes", "materialized_evidence_row_count",
++        "materialized_payload_bytes", "total_semantic_input_bytes", "scope_anomaly_count",
++    ):
++        _number(value[field], field)
++    if (value["verified_evidence_row_count"] != len(
++            evidence_snapshot_content.semantic_payload["evidence_descriptors"])
++            or value["materialized_evidence_row_count"] > value["verified_evidence_row_count"]
++            or value["materialized_payload_bytes"] > value["verified_payload_bytes"]):
++        _fail("Inconsistent SnapshotRecord evidence counts")
++    reasons = value["scope_anomaly_reason_counts"]
++    if not isinstance(reasons, list):
++        _fail("Invalid scope anomaly reasons")
++    for row in reasons:
++        _shape(row, frozenset({"reason_code", "count"}), "scope anomaly reason")
++        _text(row["reason_code"], "scope anomaly reason code")
++        _number(row["count"], "scope anomaly count", minimum=1)
++    if len({row["reason_code"] for row in reasons}) != len(reasons):
++        _fail("Duplicate scope anomaly reason")
++    if sum(row["count"] for row in reasons) != value["scope_anomaly_count"]:
++        _fail("Scope anomaly count mismatch")
++    return make_artifact_content("SnapshotRecord", {
++        **value, "scope_anomaly_reason_counts": canonical_set(reasons, lambda row: row["reason_code"]),
++    })
+diff --git a/app/device_fingerprint/snapshot_service.py b/app/device_fingerprint/snapshot_service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3de40647fa730fba2b7316936e53d63309cd3933
+--- /dev/null
++++ b/app/device_fingerprint/snapshot_service.py
+@@ -0,0 +1,511 @@
++"""Single-transaction R14 T-01 snapshot execution under one supplied Foundation profile."""
++
++from __future__ import annotations
++
++import json
++import sqlite3
++import time
++from collections import Counter
++from dataclasses import dataclass
++from datetime import datetime, timezone
++from typing import Any, Callable, Mapping
++
++from .artifact_content import ArtifactContent, ArtifactRef, canonical_artifact_json
++from .binding_contracts import (
++    make_binding_clock_policy, make_evidence_source_binding_timeline,
++    resolve_authoritative_binding, validate_binding_clock_pair,
++)
++from .config import BUSY_TIMEOUT_MS
++from .foundation_admission_artifacts import make_origin_runtime_admission
++from .foundation_schema_artifacts import validate_foundation_payload
++from .health_retention_contract import make_task01_health_retention_contract
++from .models import DeviceFingerprintStorageUnavailable, DeviceFingerprintValidationError
++from .payload_integrity import verify_persisted_payload
++from .read_service import DeviceFingerprintReadService
++from .runtime_profile_artifacts import make_foundation_runtime_profile
++from .schema_registry import EvidenceSchemaRegistry, build_production_schema_registry
++from .snapshot_artifacts import make_evidence_snapshot_content, make_snapshot_record
++from .source_health_emitter_contracts import make_source_health_emitter_contract
++from .source_health_policy import make_source_health_policy
++from .ttl_capture_placement_proof import make_ttl_capture_placement_proof
++from .validation import format_utc, parse_utc, validate_mac, validate_site_id
++
++_SOURCE_ORIGIN = {
++    "dhcp": "dhcp", "portal_headers": "portal", "tcp_syn": "tcp",
++    "tls_client": "tls", "quic_client": "quic",
++}
++_EVIDENCE_FIELDS = (
++    "evidence_id", "ingest_sequence", "producer_id", "source_kind", "source_subtype",
++    "capture_source_id", "extractor_name", "extractor_version", "feature_schema_version",
++    "rule_version", "site_id", "observed_at", "ingested_at", "observed_mac",
++    "privacy_class", "quality_state", "payload_sha256",
++)
++_HEALTH_FIELDS = (
++    "source_health_id", "ingest_sequence", "producer_id", "source_kind",
++    "capture_source_id", "status", "reason_code", "observed_at", "ingested_at",
++    "content_sha256",
++)
++_CONTENT_POLICY_FIELDS = frozenset({
++    "snapshot_content_policy_version", "max_authorized_evidence_rows",
++    "max_authorized_health_rows", "max_verified_payload_bytes",
++    "max_materialized_payload_bytes", "max_total_semantic_input_bytes",
++})
++_EXECUTION_POLICY_FIELDS = frozenset({
++    "snapshot_execution_policy_version", "max_read_transaction_duration_ms",
++    "sqlite_busy_timeout_ms", "max_retry_count", "process_memory_guard_bytes",
++})
++
++
++class SnapshotBuildError(RuntimeError):
++    """Typed whole-snapshot failure; no successful artifacts escape this exception."""
++
++    def __init__(self, reason_code: str):
++        self.reason_code = reason_code
++        super().__init__(reason_code)
++
++
++@dataclass(frozen=True, slots=True)
++class MaterializedEvidenceEntry:
++    descriptor: Mapping[str, Any]
++    normalized_payload: Mapping[str, Any]
++
++
++@dataclass(frozen=True, slots=True)
++class EvidenceSnapshotMaterialization:
++    evidence_snapshot_content: ArtifactRef
++    ordered_entries: tuple[MaterializedEvidenceEntry, ...]
++
++
++@dataclass(frozen=True, slots=True)
++class SnapshotBuildResult:
++    evidence_snapshot_content: ArtifactContent
++    materialization: EvidenceSnapshotMaterialization
++    snapshot_record: ArtifactContent
++
++
++def _ref(content: ArtifactContent) -> dict[str, str]:
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++def _content_policy(content: ArtifactContent) -> dict[str, int]:
++    if not isinstance(content, ArtifactContent) or content.artifact_type != "SnapshotContentPolicy":
++        raise SnapshotBuildError("runtime_profile_incompatible")
++    payload = content.semantic_payload
++    if (set(payload) != _CONTENT_POLICY_FIELDS or payload["snapshot_content_policy_version"] != 1
++            or any(type(value) is not int or not 1 <= value <= 2**63 - 1
++                   for value in payload.values())):
++        raise SnapshotBuildError("runtime_profile_incompatible")
++    return payload
++
++
++def _is_sqlite_busy(error: BaseException) -> bool:
++    """Recognize only SQLite BUSY/LOCKED, including Task-01's open-time wrapper."""
++    current: BaseException | None = error
++    seen: set[int] = set()
++    while current is not None and id(current) not in seen:
++        seen.add(id(current))
++        if isinstance(current, sqlite3.Error):
++            code = getattr(current, "sqlite_errorcode", None)
++            if type(code) is int:
++                return (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
++            message = str(current).lower()
++            return message in (
++                "database is locked", "database is busy", "database table is locked",
++                "database schema is locked",
++            )
++        current = current.__cause__
++    return False
++
++
++def _execution_policy(content: ArtifactContent) -> dict[str, int]:
++    if not isinstance(content, ArtifactContent) or content.artifact_type != "SnapshotExecutionPolicy":
++        raise SnapshotBuildError("runtime_profile_incompatible")
++    payload = content.semantic_payload
++    if (set(payload) != _EXECUTION_POLICY_FIELDS or payload["snapshot_execution_policy_version"] != 1
++            or any(type(value) is not int or value < 0 or value > 2**63 - 1
++                   for value in payload.values())
++            or payload["max_read_transaction_duration_ms"] == 0
++            or payload["process_memory_guard_bytes"] == 0
++            or payload["sqlite_busy_timeout_ms"] != BUSY_TIMEOUT_MS):
++        raise SnapshotBuildError("runtime_profile_incompatible")
++    return payload
++
++
++class DeviceFingerprintSnapshotService:
++    """Build one completed-window snapshot without rereading active control-plane state."""
++
++    def __init__(
++        self, read_service: DeviceFingerprintReadService, *,
++        foundation_runtime_profile: ArtifactContent,
++        artifact_resolver: Callable[[ArtifactRef], ArtifactContent],
++        utc_clock: Callable[[], str] = lambda: format_utc(datetime.now(timezone.utc)),
++        monotonic_clock: Callable[[], float] = time.monotonic,
++        process_memory_guard: Callable[[int], bool] | None = None,
++        page_size: int = 500,
++    ) -> None:
++        if not callable(getattr(read_service, "open_snapshot_read", None)) or not callable(artifact_resolver):
++            raise SnapshotBuildError("runtime_profile_incompatible")
++        if type(page_size) is not int or not 1 <= page_size <= 500:
++            raise SnapshotBuildError("runtime_profile_incompatible")
++        self._read_service = read_service
++        self._profile = foundation_runtime_profile
++        self._resolve = artifact_resolver
++        self._utc_clock = utc_clock
++        self._monotonic = monotonic_clock
++        self._memory_guard = process_memory_guard
++        self._page_size = page_size
++
++    def _dependency(self, value: dict[str, str], kind: str) -> ArtifactContent:
++        try:
++            ref = ArtifactRef.from_dict(value)
++            if not ref.artifact_id.startswith(f"{kind}:v1:sha256:"):
++                raise DeviceFingerprintValidationError("Wrong Foundation dependency kind")
++            content = self._resolve(ref)
++            ref.resolve(content, kind)
++            return content
++        except (DeviceFingerprintValidationError, LookupError, KeyError, TypeError) as exc:
++            raise SnapshotBuildError("runtime_profile_incompatible") from exc
++
++    def _pinned_dependencies(self) -> dict[str, Any]:
++        try:
++            profile = make_foundation_runtime_profile(self._profile.semantic_payload)
++            if profile != self._profile:
++                raise DeviceFingerprintValidationError("Noncanonical Foundation profile")
++            payload = profile.semantic_payload
++            contents = {field: self._dependency(payload[field], kind) for field, kind in (
++                ("evidence_source_binding_timeline", "EvidenceSourceBindingTimeline"),
++                ("binding_clock_policy", "BindingClockPolicy"),
++                ("source_health_policy", "SourceHealthPolicy"),
++                ("snapshot_content_policy", "SnapshotContentPolicy"),
++                ("snapshot_execution_policy", "SnapshotExecutionPolicy"),
++                ("evidence_schema_registry_contract", "EvidenceSchemaRegistryContract"),
++                ("task01_health_retention_contract", "Task01HealthRetentionContract"),
++                ("origin_runtime_admission", "OriginRuntimeAdmission"),
++            )}
++            emitters = [self._dependency(ref, "SourceHealthEmitterContract")
++                        for ref in payload["source_health_emitter_contracts"]]
++            if len({item.artifact_id for item in emitters}) != len(emitters):
++                raise DeviceFingerprintValidationError("Duplicate Foundation emitter")
++            if (make_evidence_source_binding_timeline(
++                    contents["evidence_source_binding_timeline"].semantic_payload, emitters)
++                    != contents["evidence_source_binding_timeline"]
++                    or make_binding_clock_policy(contents["binding_clock_policy"].semantic_payload)
++                    != contents["binding_clock_policy"]):
++                raise DeviceFingerprintValidationError("Invalid binding contract")
++            validate_binding_clock_pair(contents["evidence_source_binding_timeline"],
++                                        contents["binding_clock_policy"])
++            for emitter in emitters:
++                if make_source_health_emitter_contract(emitter.semantic_payload) != emitter:
++                    raise DeviceFingerprintValidationError("Invalid emitter contract")
++            if make_source_health_policy(contents["source_health_policy"].semantic_payload, emitters) != contents[
++                    "source_health_policy"]:
++                raise DeviceFingerprintValidationError("Invalid source-health policy")
++            retention_payload = contents["task01_health_retention_contract"].semantic_payload
++            if make_task01_health_retention_contract(
++                    contents["source_health_policy"],
++                    retained_evidence_horizon_seconds=retention_payload["retained_evidence_horizon_seconds"],
++                    retained_health_horizon_seconds=retention_payload["retained_health_horizon_seconds"],
++            ) != contents["task01_health_retention_contract"]:
++                raise DeviceFingerprintValidationError("Invalid health retention")
++            if validate_foundation_payload(
++                    "EvidenceSchemaRegistryContract",
++                    contents["evidence_schema_registry_contract"].semantic_payload,
++            ) != contents["evidence_schema_registry_contract"]:
++                raise DeviceFingerprintValidationError("Invalid schema registry")
++            origin = contents["origin_runtime_admission"]
++            if make_origin_runtime_admission(origin.semantic_payload) != origin:
++                raise DeviceFingerprintValidationError("Invalid OriginRuntimeAdmission")
++            proof_ref = payload["ttl_capture_placement_proof"]
++            if origin.semantic_payload["ttl_capture_placement_proof"] != proof_ref:
++                raise DeviceFingerprintValidationError("Origin/TTL profile mismatch")
++            if proof_ref is not None:
++                proof = self._dependency(proof_ref, "TTLCapturePlacementProof")
++                if make_ttl_capture_placement_proof(proof.semantic_payload) != proof:
++                    raise DeviceFingerprintValidationError("Invalid TTL proof")
++                contents["ttl_capture_placement_proof"] = proof
++            elif origin.semantic_payload["tcp_state"] == "ENABLED":
++                raise DeviceFingerprintValidationError("Enabled TCP without TTL proof")
++            contents["content_limits"] = _content_policy(contents["snapshot_content_policy"])
++            contents["execution_limits"] = _execution_policy(contents["snapshot_execution_policy"])
++            contents["profile"] = profile
++            contents["registry"] = build_production_schema_registry()
++            return contents
++        except SnapshotBuildError:
++            raise
++        except (DeviceFingerprintValidationError, KeyError, TypeError, AttributeError) as exc:
++            raise SnapshotBuildError("runtime_profile_incompatible") from exc
++
++    @staticmethod
++    def _binding_epochs(timeline: ArtifactContent, site_id: str,
++                        start: str, end: str) -> list[dict[str, Any]]:
++        window_start, window_end = parse_utc(start), parse_utc(end)
++        selected = []
++        for epoch in timeline.semantic_payload["binding_epochs"]:
++            if epoch["site_id"] != site_id:
++                continue
++            epoch_start = parse_utc(epoch["effective_from_utc"])
++            epoch_end = (parse_utc(epoch["effective_to_utc"])
++                         if epoch["effective_to_utc"] is not None else None)
++            if epoch_start < window_end and (epoch_end is None or window_start < epoch_end):
++                selected.append(epoch)
++        if not selected:
++            raise SnapshotBuildError("binding_unavailable")
++        return selected
++
++    @staticmethod
++    def _authority(row: Mapping[str, Any], timeline: ArtifactContent,
++                   clock: ArtifactContent) -> tuple[dict[str, Any] | None, str | None]:
++        source_kind = row["source_kind"]
++        origin = _SOURCE_ORIGIN.get(source_kind)
++        if origin is None:
++            return None, "binding_scope_mismatch"
++        result = resolve_authoritative_binding(
++            timeline, clock, row["site_id"], origin, source_kind, row["observed_at"])
++        if result["status"] == "CUTOVER_AMBIGUOUS":
++            return None, "binding_cutover_ambiguous"
++        epoch = result["binding_epoch"]
++        if (result["status"] != "AUTHORIZED" or epoch is None
++                or row["producer_id"] != epoch["producer_id"]
++                or row["capture_source_id"] != epoch["capture_source_id"]):
++            return None, "binding_scope_mismatch"
++        return epoch, None
++
++    @staticmethod
++    def _check_limit(value: int, limit: int) -> None:
++        if value > limit:
++            raise SnapshotBuildError("resource_limited")
++
++    def _build_once(self, site_id: str, observed_mac: str, start: str, end: str,
++                    dependencies: dict[str, Any], captured_at: str) -> SnapshotBuildResult:
++        profile = dependencies["profile"]
++        timeline = dependencies["evidence_source_binding_timeline"]
++        clock = dependencies["binding_clock_policy"]
++        limits = dependencies["content_limits"]
++        execution = dependencies["execution_limits"]
++        elapsed_start = self._monotonic()
++
++        def operational_guard() -> None:
++            if (self._monotonic() - elapsed_start) * 1000 > execution["max_read_transaction_duration_ms"]:
++                raise SnapshotBuildError("snapshot_timeout")
++            if self._memory_guard is None:
++                raise SnapshotBuildError("snapshot_memory_guard_unavailable")
++            if self._memory_guard(execution["process_memory_guard_bytes"]) is not True:
++                raise SnapshotBuildError("snapshot_memory_pressure")
++
++        operational_guard()
++        bindings = self._binding_epochs(timeline, site_id, start, end)
++        binding_ids = {item["binding_epoch_id"] for item in bindings}
++        evidence: list[dict[str, Any]] = []
++        health: list[dict[str, Any]] = []
++        normalized_by_id: dict[str, Mapping[str, Any]] = {}
++        anomalies: Counter[str] = Counter()
++        verified_bytes = materialized_bytes = 0
++        generic_only_registry = EvidenceSchemaRegistry().freeze()
++        registry = dependencies["registry"]
++        scopes = sorted({(item["producer_id"], item["capture_source_id"], item["source_kind"])
++                         for item in bindings})
++        with self._read_service.open_snapshot_read() as session:
++            watermark = session.watermark
++            cursor = None
++            seen_cursors: set[tuple[str, str]] = set()
++            while True:
++                operational_guard()
++                page = session.list_evidence(
++                    site_id, observed_mac, start, end, limit=self._page_size, cursor=cursor)
++                for row in page["items"]:
++                    if (row["site_id"] != site_id or row["observed_mac"] != observed_mac
++                            or row["ingest_sequence"] > watermark.max_committed_ingest_sequence):
++                        anomalies["binding_scope_mismatch"] += 1
++                        continue
++                    epoch, anomaly = self._authority(row, timeline, clock)
++                    if epoch is None or epoch["binding_epoch_id"] not in binding_ids:
++                        anomalies[anomaly or "binding_scope_mismatch"] += 1
++                        continue
++                    descriptor = {field: row[field] for field in _EVIDENCE_FIELDS}
++                    descriptor["binding_epoch_id"] = epoch["binding_epoch_id"]
++                    evidence.append(descriptor)
++                    self._check_limit(len(evidence), limits["max_authorized_evidence_rows"])
++                    try:
++                        verified = verify_persisted_payload(
++                            row["source_kind"], row["feature_schema_version"],
++                            row["payload_json"], row["payload_sha256"], generic_only_registry)
++                    except DeviceFingerprintValidationError as exc:
++                        reason = ("payload_hash_mismatch" if "digest mismatch" in str(exc)
++                                  else "corrupt_payload")
++                        raise SnapshotBuildError(reason) from exc
++                    verified_bytes += verified.verified_payload_bytes
++                    self._check_limit(verified_bytes, limits["max_verified_payload_bytes"])
++                    if registry.supports(row["source_kind"], row["feature_schema_version"]):
++                        try:
++                            normalized = registry.validate(
++                                row["source_kind"], row["feature_schema_version"],
++                                json.loads(row["payload_json"]))
++                        except DeviceFingerprintValidationError as exc:
++                            raise SnapshotBuildError("schema_validation_failure") from exc
++                        normalized_by_id[row["evidence_id"]] = dict(normalized)
++                        materialized_bytes += verified.verified_payload_bytes
++                        self._check_limit(materialized_bytes, limits["max_materialized_payload_bytes"])
++                next_cursor = page["next_cursor"]
++                if next_cursor is None:
++                    break
++                if next_cursor in seen_cursors:
++                    raise SnapshotBuildError("retryable_sqlite_busy")
++                seen_cursors.add(next_cursor)
++                cursor = next_cursor
++            anchor_rows: list[tuple[dict[str, Any], str]] = []
++            for epoch in bindings:
++                operational_guard()
++                segment_start = format_utc(max(
++                    parse_utc(start), parse_utc(epoch["effective_from_utc"])))
++                anchor = session.latest_source_health(
++                    site_id, epoch["producer_id"], epoch["capture_source_id"],
++                    epoch["source_kind"], through_utc=segment_start)
++                if anchor is not None:
++                    anchor_rows.append((anchor, epoch["binding_epoch_id"]))
++            ordinary_rows: list[dict[str, Any]] = []
++            for producer, capture, source in scopes:
++                operational_guard()
++                cursor = None
++                seen_cursors = set()
++                while True:
++                    operational_guard()
++                    page = session.list_source_health(
++                        site_id, producer, capture, source, start, end,
++                        limit=self._page_size, cursor=cursor)
++                    ordinary_rows.extend(page["items"])
++                    next_cursor = page["next_cursor"]
++                    if next_cursor is None:
++                        break
++                    if next_cursor in seen_cursors:
++                        raise SnapshotBuildError("retryable_sqlite_busy")
++                    seen_cursors.add(next_cursor)
++                    cursor = next_cursor
++            seen_health_rows: dict[str, tuple[Any, ...]] = {}
++            included_health_ids: set[str] = set()
++            for row, target_epoch_id in (
++                    [(anchor, epoch_id) for anchor, epoch_id in anchor_rows]
++                    + [(row, None) for row in ordinary_rows]):
++                identity = tuple(row[field] for field in (*_HEALTH_FIELDS, "site_id"))
++                health_id = row["source_health_id"]
++                previous = seen_health_rows.setdefault(health_id, identity)
++                if previous != identity:
++                    raise SnapshotBuildError("corrupt_source_health")
++                if (row["site_id"] != site_id
++                        or row["ingest_sequence"] > watermark.max_committed_ingest_sequence):
++                    if target_epoch_id is None:
++                        anomalies["binding_scope_mismatch"] += 1
++                    continue
++                epoch, anomaly = self._authority(row, timeline, clock)
++                if (epoch is None or epoch["binding_epoch_id"] not in binding_ids
++                        or (target_epoch_id is not None
++                            and epoch["binding_epoch_id"] != target_epoch_id)):
++                    if target_epoch_id is None:
++                        anomalies[anomaly or "binding_scope_mismatch"] += 1
++                    continue
++                if health_id in included_health_ids:
++                    continue
++                included_health_ids.add(health_id)
++                descriptor = {field: row[field] for field in _HEALTH_FIELDS}
++                descriptor["binding_epoch_id"] = epoch["binding_epoch_id"]
++                health.append(descriptor)
++                self._check_limit(len(health), limits["max_authorized_health_rows"])
++            operational_guard()
++            origin = dependencies["origin_runtime_admission"]
++            origin_payload = origin.semantic_payload
++            semantic_refs = {
++                "evidence_source_binding_timeline": _ref(timeline),
++                "binding_clock_policy": _ref(clock),
++                "evidence_schema_registry_contract": _ref(
++                    dependencies["evidence_schema_registry_contract"]),
++                "origin_runtime_admission": {
++                    "artifact_id": origin.artifact_id, "content_sha256": origin.content_sha256,
++                    "tcp_state": origin_payload["tcp_state"],
++                    "tcp_reason_code": origin_payload["tcp_reason_code"],
++                    "ttl_capture_placement_proof": origin_payload["ttl_capture_placement_proof"],
++                },
++                "classification_foundation_valid_from_utc": profile.semantic_payload[
++                    "classification_foundation_valid_from_utc"],
++            }
++            content = make_evidence_snapshot_content({
++                "snapshot_contract_version": profile.semantic_payload["snapshot_contract_version"],
++                "site_id": site_id, "observed_mac": observed_mac,
++                "window_start_utc": start, "window_end_utc": end,
++                "database_generation_id": watermark.database_generation_id,
++                "max_committed_ingest_sequence": watermark.max_committed_ingest_sequence,
++                **semantic_refs,
++                "binding_epoch_descriptors": bindings,
++                "evidence_descriptors": evidence,
++                "source_health_descriptors": health,
++            }, foundation_runtime_profile=profile, binding_timeline=timeline,
++                binding_clock_policy=clock,
++                schema_registry_contract=dependencies["evidence_schema_registry_contract"],
++                origin_runtime_admission=origin)
++            content_payload = content.semantic_payload
++            ordered_evidence = content_payload["evidence_descriptors"]
++            ordered_health = content_payload["source_health_descriptors"]
++            ordered_bindings = content_payload["binding_epoch_descriptors"]
++            total_bytes = (
++                verified_bytes + materialized_bytes
++                + sum(len(canonical_artifact_json(row)) for row in ordered_evidence)
++                + sum(len(canonical_artifact_json(row)) for row in ordered_health)
++                + sum(len(canonical_artifact_json(row)) for row in ordered_bindings)
++                + len(canonical_artifact_json(semantic_refs))
++            )
++            self._check_limit(total_bytes, limits["max_total_semantic_input_bytes"])
++            entries = tuple(MaterializedEvidenceEntry(
++                descriptor=row, normalized_payload=normalized_by_id[row["evidence_id"]])
++                for row in ordered_evidence if row["evidence_id"] in normalized_by_id)
++            materialization = EvidenceSnapshotMaterialization(
++                ArtifactRef(content.artifact_id, content.content_sha256), entries)
++            record = make_snapshot_record({
++                "evidence_snapshot_content": _ref(content),
++                "foundation_runtime_profile": _ref(profile),
++                "snapshot_captured_at_utc": captured_at,
++                "snapshot_content_policy": _ref(dependencies["snapshot_content_policy"]),
++                "snapshot_execution_policy": _ref(dependencies["snapshot_execution_policy"]),
++                "verified_evidence_row_count": len(ordered_evidence),
++                "verified_payload_bytes": verified_bytes,
++                "materialized_evidence_row_count": len(entries),
++                "materialized_payload_bytes": materialized_bytes,
++                "total_semantic_input_bytes": total_bytes,
++                "scope_anomaly_count": sum(anomalies.values()),
++                "scope_anomaly_reason_counts": [
++                    {"reason_code": reason, "count": count} for reason, count in sorted(anomalies.items())],
++                "build_outcome": "success",
++            }, evidence_snapshot_content=content, foundation_runtime_profile=profile,
++                snapshot_content_policy=dependencies["snapshot_content_policy"],
++                snapshot_execution_policy=dependencies["snapshot_execution_policy"])
++            operational_guard()
++            return SnapshotBuildResult(content, materialization, record)
++
++    def build(self, site_id: str, observed_mac: str, window_start_utc: str,
++              window_end_utc: str) -> SnapshotBuildResult:
++        """One complete successful attempt uses exactly one Task-01 snapshot session."""
++        try:
++            site_id = validate_site_id(site_id)
++            mac = validate_mac(observed_mac)
++            if mac != observed_mac:
++                raise DeviceFingerprintValidationError("Noncanonical observed MAC")
++            start, end = parse_utc(window_start_utc), parse_utc(window_end_utc)
++        except DeviceFingerprintValidationError as exc:
++            raise SnapshotBuildError("invalid_window") from exc
++        dependencies = self._pinned_dependencies()
++        if start >= end or start < parse_utc(dependencies["profile"].semantic_payload[
++                "classification_foundation_valid_from_utc"]):
++            raise SnapshotBuildError("invalid_window")
++        execution = dependencies["execution_limits"]
++        for attempt in range(execution["max_retry_count"] + 1):
++            captured_at = self._utc_clock()
++            if end > parse_utc(captured_at):
++                raise SnapshotBuildError("invalid_window")
++            try:
++                return self._build_once(site_id, mac, window_start_utc, window_end_utc,
++                                        dependencies, captured_at)
++            except (sqlite3.DatabaseError, DeviceFingerprintStorageUnavailable) as exc:
++                if not _is_sqlite_busy(exc):
++                    raise SnapshotBuildError("storage_unavailable") from exc
++                if attempt == execution["max_retry_count"]:
++                    raise SnapshotBuildError("retryable_sqlite_busy") from exc
++            except DeviceFingerprintValidationError as exc:
++                raise SnapshotBuildError("runtime_profile_incompatible") from exc
++        raise SnapshotBuildError("retryable_sqlite_busy")
+diff --git a/tests/device_fingerprint_task04_t01/__init__.py b/tests/device_fingerprint_task04_t01/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f55088604a7ff6978148749e3e1cf7781f40188a
+--- /dev/null
++++ b/tests/device_fingerprint_task04_t01/__init__.py
+@@ -0,0 +1 @@
++"""Focused, disposable T-01 snapshot fixtures."""
+diff --git a/tests/device_fingerprint_task04_t01/test_snapshot_service.py b/tests/device_fingerprint_task04_t01/test_snapshot_service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..41da14169c7627a91de9ed62e4c2c80c45a38ef8
+--- /dev/null
++++ b/tests/device_fingerprint_task04_t01/test_snapshot_service.py
+@@ -0,0 +1,593 @@
++"""R14 T-01 snapshot content, read-session, integrity and limit regression proof."""
++
++from __future__ import annotations
++
++import copy
++import sqlite3
++import uuid
++from dataclasses import dataclass
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef, canonical_artifact_json, make_artifact_content
++from app.device_fingerprint.artifact_dependency_graph import extract_direct_artifact_refs
++from app.device_fingerprint.binding_contracts import make_evidence_source_binding_timeline
++from app.device_fingerprint.f_admit_foundation import prepare_initial_foundation_admission
++from app.device_fingerprint.models import (
++    DeviceFingerprintStorageUnavailable, DeviceFingerprintValidationError,
++)
++from app.device_fingerprint.read_service import IngestWatermark
++from app.device_fingerprint.read_service import DeviceFingerprintReadService
++from app.device_fingerprint.runtime_profile_artifacts import make_foundation_runtime_profile
++from app.device_fingerprint.snapshot_artifacts import (
++    make_evidence_snapshot_content, make_snapshot_record,
++)
++from app.device_fingerprint.snapshot_service import (
++    DeviceFingerprintSnapshotService, SnapshotBuildError,
++)
++from app.device_fingerprint.validation import canonical_json, canonical_sha256
++from tests.device_fingerprint import SITE
++from tests.device_fingerprint_f_admit.test_f_admit import inputs
++from tests.device_fingerprint.test_repository import initialized
++
++START = "2026-09-15T11:30:00.000Z"
++END = "2026-09-15T12:30:00.000Z"
++CAPTURED = "2026-09-15T14:00:00.000Z"
++MAC = "AA:BB:CC:DD:EE:FF"
++GENERATION = "11111111-1111-4111-8111-111111111111"
++KNOWN = {
++    "message_type": "discover", "parameter_request_list": [1, 3, 6],
++    "option_order": [53, 55], "vendor_class": "android-dhcp-13",
++    "client_identifier_kind": "mac", "maximum_message_size": 1500,
++    "rapid_commit_requested": False, "capport_requested": True,
++    "ipv6_only_preferred_requested": False, "hostname_present": True,
++}
++
++
++def aid(number):
++    return str(uuid.UUID(int=number, version=4))
++
++
++def ref(content):
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++def evidence(number=1, *, payload=None, version=1, observed_at="2026-09-15T12:10:00.000Z",
++             producer="sensor-zefer-01", capture="zefer-span-01", raw=None):
++    encoded = canonical_json(KNOWN if payload is None else payload) if raw is None else raw
++    return {
++        "evidence_id": aid(number), "source_event_id": aid(100_000 + number),
++        "ingest_sequence": number, "producer_id": producer, "source_kind": "dhcp",
++        "source_subtype": None, "capture_source_id": capture, "extractor_name": "dhcp-v1",
++        "extractor_version": "1.0.0", "feature_schema_version": version,
++        "rule_version": None, "site_id": SITE, "observed_at": observed_at,
++        "ingested_at": CAPTURED, "observed_mac": MAC, "observed_ip": "192.168.8.10",
++        "privacy_class": "P1", "quality_state": "valid", "payload_json": encoded,
++        "payload_sha256": canonical_sha256(encoded),
++    }
++
++
++def health(number=1, *, observed_at="2026-09-15T12:10:00.000Z",
++           producer="sensor-zefer-01", capture="zefer-span-01"):
++    return {
++        "source_health_id": aid(500_000 + number), "source_health_event_id": aid(600_000 + number),
++        "ingest_sequence": 10_000 + number, "producer_id": producer,
++        "source_kind": "dhcp", "capture_source_id": capture,
++        "site_id": SITE, "status": "available", "reason_code": None,
++        "observed_at": observed_at, "ingested_at": CAPTURED,
++        "content_sha256": "a" * 64,
++    }
++
++
++class FakeSession:
++    def __init__(self, read):
++        self.read = read
++        self.watermark = IngestWatermark(GENERATION, read.watermark)
++        self.evidence = copy.deepcopy(read.evidence)
++        self.health = copy.deepcopy(read.health)
++        self.closed = False
++
++    def __enter__(self):
++        self.read.opens += 1
++        return self
++
++    def __exit__(self, *_):
++        self.closed = True
++
++    @staticmethod
++    def _page(rows, cursor, limit, id_field):
++        rows = sorted(rows, key=lambda row: (row["observed_at"], row[id_field]))
++        if cursor is not None:
++            rows = [row for row in rows if (row["observed_at"], row[id_field]) > cursor]
++        selected = rows[:limit]
++        return {"items": selected, "next_cursor": (
++            (selected[-1]["observed_at"], selected[-1][id_field])
++            if len(rows) > limit else None)}
++
++    def list_evidence(self, site, mac, start, end, *, limit, cursor):
++        rows = [row for row in self.evidence if row["site_id"] == site
++                and row["observed_mac"] == mac and start <= row["observed_at"] < end
++                and row["ingest_sequence"] <= self.watermark.max_committed_ingest_sequence]
++        return self._page(rows, cursor, limit, "evidence_id")
++
++    def list_source_health(self, site, producer, capture, source, start, end, *, limit, cursor):
++        rows = [row for row in self.health if (row["site_id"], row["producer_id"],
++                row["capture_source_id"], row["source_kind"]) == (site, producer, capture, source)
++                and start <= row["observed_at"] < end
++                and row["ingest_sequence"] <= self.watermark.max_committed_ingest_sequence]
++        return self._page(rows, cursor, limit, "source_health_id")
++
++    def latest_source_health(self, site, producer, capture, source, *, through_utc):
++        self.read.health_scopes.append((producer, capture, source, through_utc))
++        rows = [row for row in self.health if (row["site_id"], row["producer_id"],
++                row["capture_source_id"], row["source_kind"]) == (site, producer, capture, source)
++                and row["observed_at"] <= through_utc
++                and row["ingest_sequence"] <= self.watermark.max_committed_ingest_sequence]
++        return max(rows, key=lambda row: (row["observed_at"], row["source_health_id"])) if rows else None
++
++
++class FakeRead:
++    def __init__(self, evidence_rows=(), health_rows=(), *, watermark=100_000):
++        self.evidence = list(evidence_rows)
++        self.health = list(health_rows)
++        self.watermark = watermark
++        self.opens = 0
++        self.health_scopes = []
++
++    def open_snapshot_read(self):
++        return FakeSession(self)
++
++
++@dataclass
++class Context:
++    profile: object
++    contents: dict
++    read: FakeRead
++    service: DeviceFingerprintSnapshotService
++
++
++def context(evidence_rows=(), health_rows=(), *, content_limits=None, execution_changes=None,
++            page_size=500, watermark=100_000):
++    value = inputs()
++    plan = prepare_initial_foundation_admission(
++        value, trusted_admission_clock=lambda: "2026-09-23T00:00:00.000Z")
++    cp = {
++        "snapshot_content_policy_version": 1,
++        "max_authorized_evidence_rows": 10_000,
++        "max_authorized_health_rows": 10_000,
++        "max_verified_payload_bytes": 10_000_000,
++        "max_materialized_payload_bytes": 10_000_000,
++        "max_total_semantic_input_bytes": 100_000_000,
++    }
++    cp.update(content_limits or {})
++    ep = {
++        "snapshot_execution_policy_version": 1,
++        "max_read_transaction_duration_ms": 240_000,
++        "sqlite_busy_timeout_ms": 500,
++        "max_retry_count": 0,
++        "process_memory_guard_bytes": 100_663_296,
++    }
++    ep.update(execution_changes or {})
++    content_policy = make_artifact_content("SnapshotContentPolicy", cp)
++    execution_policy = make_artifact_content("SnapshotExecutionPolicy", ep)
++    profile_payload = plan.foundation_runtime_profile.semantic_payload
++    profile_payload.update({
++        "classification_foundation_valid_from_utc": "2026-09-15T10:00:00.000Z",
++        "snapshot_content_policy": ref(content_policy),
++        "snapshot_execution_policy": ref(execution_policy),
++    })
++    profile = make_foundation_runtime_profile(profile_payload)
++    contents = {item.artifact_id: item for item in (
++        *value.immutable_dependencies, plan.origin_runtime_admission,
++        content_policy, execution_policy)}
++    read = FakeRead(evidence_rows, health_rows, watermark=watermark)
++    service = DeviceFingerprintSnapshotService(
++        read, foundation_runtime_profile=profile,
++        artifact_resolver=lambda artifact_ref: contents[artifact_ref.artifact_id],
++        utc_clock=lambda: CAPTURED, process_memory_guard=lambda _limit: True,
++        page_size=page_size)
++    return Context(profile, contents, read, service)
++
++
++def build(ctx):
++    return ctx.service.build(SITE, MAC, START, END)
++
++
++def replace_timeline(ctx, epochs):
++    old_ref = ctx.profile.semantic_payload["evidence_source_binding_timeline"]
++    old = ctx.contents[old_ref["artifact_id"]]
++    emitter_ref = old.semantic_payload["binding_epochs"][0]["source_health_emitter_contract"]
++    emitter = ctx.contents[emitter_ref["artifact_id"]]
++    timeline = make_evidence_source_binding_timeline({
++        "binding_timeline_contract_version": 1, "binding_epochs": epochs,
++    }, [emitter])
++    ctx.contents[timeline.artifact_id] = timeline
++    profile_payload = ctx.profile.semantic_payload
++    profile_payload["evidence_source_binding_timeline"] = ref(timeline)
++    ctx.profile = make_foundation_runtime_profile(profile_payload)
++    ctx.service._profile = ctx.profile
++    return timeline
++
++
++def assert_reason(ctx, reason):
++    with pytest.raises(SnapshotBuildError) as caught:
++        build(ctx)
++    assert caught.value.reason_code == reason
++
++
++def test_known_schema_materializes_only_transient_payload():
++    ctx = context([evidence()], [health()])
++    result = build(ctx)
++    content = result.evidence_snapshot_content.semantic_payload
++    record = result.snapshot_record.semantic_payload
++    assert len(content["evidence_descriptors"]) == 1
++    assert content["evidence_descriptors"][0]["rule_version"] is None
++    assert content["evidence_descriptors"][0]["binding_epoch_id"] == "B"
++    assert len(content["source_health_descriptors"]) == 1
++    assert record["verified_evidence_row_count"] == record["materialized_evidence_row_count"] == 1
++    assert record["verified_payload_bytes"] == record["materialized_payload_bytes"] == len(
++        canonical_json(KNOWN).encode("utf-8"))
++    assert record["build_outcome"] == "success"
++    assert result.materialization.ordered_entries[0].normalized_payload == KNOWN
++    assert "vendor_class" not in str(content)
++    assert "vendor_class" not in str(record)
++    assert ctx.read.opens == 1
++
++
++@pytest.mark.parametrize("raw,reason", [
++    ('{', "corrupt_payload"),
++    ('{"a":1,"a":2}', "corrupt_payload"),
++    ('[]', "corrupt_payload"),
++    ('1', "corrupt_payload"),
++    ('{"x": 1}', "corrupt_payload"),
++])
++def test_generic_corruption_fails_whole_snapshot(raw, reason):
++    assert_reason(context([evidence(raw=raw)]), reason)
++
++
++def test_payload_hash_mismatch_fails_whole_snapshot():
++    row = evidence()
++    row["payload_sha256"] = "0" * 64
++    assert_reason(context([row]), "payload_hash_mismatch")
++
++
++def test_known_invalid_schema_never_falls_back_to_unsupported():
++    assert_reason(context([evidence(payload={"unknown": "valid-generic-json"})]),
++                  "schema_validation_failure")
++
++
++def test_intact_future_schema_stays_in_audit_and_verified_sizing():
++    row = evidence(version=99, payload={"future": "opaque"})
++    result = build(context([row]))
++    content, record = result.evidence_snapshot_content.semantic_payload, result.snapshot_record.semantic_payload
++    assert len(content["evidence_descriptors"]) == 1
++    assert result.materialization.ordered_entries == ()
++    assert record["verified_evidence_row_count"] == 1
++    assert record["verified_payload_bytes"] == len(row["payload_json"].encode("utf-8"))
++    assert record["materialized_evidence_row_count"] == record["materialized_payload_bytes"] == 0
++
++
++def test_complete_pagination_and_order_independent_of_page_size():
++    rows = [evidence(number, observed_at="2026-09-15T12:10:00.000Z")
++            for number in range(1, 503)]
++    rows[-1]["payload_json"] = canonical_json({**KNOWN, "vendor_class": "last-page"})
++    rows[-1]["payload_sha256"] = canonical_sha256(rows[-1]["payload_json"])
++    first = build(context(rows, page_size=500))
++    second = build(context(list(reversed(rows)), page_size=97))
++    assert len(first.evidence_snapshot_content.semantic_payload["evidence_descriptors"]) == 502
++    assert any(entry.normalized_payload["vendor_class"] == "last-page"
++               for entry in first.materialization.ordered_entries)
++    assert first.evidence_snapshot_content.artifact_id == second.evidence_snapshot_content.artifact_id
++
++
++def test_real_task01_session_freezes_watermark_before_concurrent_insert(tmp_path):
++    cfg, _repository = initialized(tmp_path)
++    first, later = evidence(1), evidence(2)
++    columns = tuple(first)
++    insert = ("INSERT INTO device_fingerprint_evidence (" + ",".join(columns) + ") VALUES ("
++              + ",".join("?" for _ in columns) + ")")
++    with sqlite3.connect(cfg.db_path) as writer:
++        writer.execute(insert, tuple(first[field] for field in columns))
++        writer.execute("UPDATE device_fingerprint_storage_state SET last_ingest_sequence=1")
++
++    class ConcurrentRead(DeviceFingerprintReadService):
++        opens = 0
++
++        def open_snapshot_read(self):
++            self.opens += 1
++            session = super().open_snapshot_read()
++            with sqlite3.connect(cfg.db_path) as writer:
++                writer.execute(insert, tuple(later[field] for field in columns))
++                writer.execute("UPDATE device_fingerprint_storage_state SET last_ingest_sequence=2")
++            return session
++
++    ctx = context()
++    read = ConcurrentRead(cfg.db_path, retention_days=30)
++    ctx.service._read_service = read
++    result = build(ctx)
++    content = result.evidence_snapshot_content.semantic_payload
++    assert read.opens == 1
++    assert content["max_committed_ingest_sequence"] == 1
++    assert [row["evidence_id"] for row in content["evidence_descriptors"]] == [first["evidence_id"]]
++    assert result.snapshot_record.semantic_payload["verified_evidence_row_count"] == 1
++
++
++def test_binding_authority_and_cutover_quarantine():
++    good = evidence(1)
++    wrong_producer = evidence(2, producer="wrong-producer")
++    wrong_capture = evidence(3, capture="wrong-capture")
++    quarantined = evidence(4, observed_at="2026-09-15T12:00:00.000Z")
++    result = build(context([good, wrong_producer, wrong_capture, quarantined]))
++    assert [item["evidence_id"] for item in result.evidence_snapshot_content.semantic_payload[
++        "evidence_descriptors"]] == [good["evidence_id"]]
++    assert result.snapshot_record.semantic_payload["scope_anomaly_count"] == 3
++    assert {item["reason_code"] for item in result.snapshot_record.semantic_payload[
++        "scope_anomaly_reason_counts"]} == {"binding_scope_mismatch", "binding_cutover_ambiguous"}
++
++
++def test_guard_adjacent_outside_epoch_never_enters_descriptors_or_health_scope():
++    ctx = context([evidence()], [health()])
++    timeline_ref = ctx.profile.semantic_payload["evidence_source_binding_timeline"]
++    epochs = ctx.contents[timeline_ref["artifact_id"]].semantic_payload["binding_epochs"]
++    outside = {**epochs[1], "binding_epoch_id": "C", "origin_group": "tcp",
++               "source_kind": "tcp_syn", "effective_from_utc": END}
++    replace_timeline(ctx, [*epochs, outside])
++    first = build(ctx)
++    assert [row["binding_epoch_id"] for row in first.evidence_snapshot_content.semantic_payload[
++        "binding_epoch_descriptors"]] == ["A", "B"]
++    assert all(scope[2] != "tcp_syn" for scope in ctx.read.health_scopes)
++    first_bytes = first.snapshot_record.semantic_payload["total_semantic_input_bytes"]
++    ctx.read.health_scopes.clear()
++    outside_health = health(1000, observed_at=END)
++    outside_health["source_kind"] = "tcp_syn"
++    ctx.read.health.append(outside_health)
++    second = build(ctx)
++    assert second.evidence_snapshot_content.artifact_id == first.evidence_snapshot_content.artifact_id
++    assert second.snapshot_record.semantic_payload["total_semantic_input_bytes"] == first_bytes
++    assert all(scope[2] != "tcp_syn" for scope in ctx.read.health_scopes)
++
++
++def test_health_pagination_anchor_and_canonical_order():
++    rows = [health(number, observed_at="2026-09-15T12:10:00.000Z")
++            for number in range(1, 503)]
++    anchor = health(700, observed_at="2026-09-15T11:20:00.000Z")
++    result = build(context([], [*rows, anchor], page_size=100))
++    health_rows = result.evidence_snapshot_content.semantic_payload["source_health_descriptors"]
++    assert len(health_rows) == 503
++    assert health_rows[0]["source_health_id"] == anchor["source_health_id"]
++    assert health_rows[-1]["source_health_id"] == rows[-1]["source_health_id"]
++
++
++def test_per_epoch_health_anchors_preserve_old_authority_and_mid_window_transition():
++    predecessor = health(700, observed_at="2026-09-15T11:20:00.000Z")
++    old = health(701, observed_at="2026-09-15T11:40:00.000Z")
++    cutover = health(702, observed_at="2026-09-15T12:00:00.000Z")
++    new = health(703, observed_at="2026-09-15T12:10:00.000Z")
++    ctx = context([], [predecessor, old, cutover, new])
++    result = build(ctx)
++    rows = result.evidence_snapshot_content.semantic_payload["source_health_descriptors"]
++    assert [(row["source_health_id"], row["binding_epoch_id"]) for row in rows] == [
++        (predecessor["source_health_id"], "A"), (old["source_health_id"], "A"),
++        (new["source_health_id"], "B"),
++    ]
++    assert [scope[3] for scope in ctx.read.health_scopes] == [START, "2026-09-15T12:00:00.000Z"]
++    assert result.snapshot_record.semantic_payload["scope_anomaly_count"] == 1
++
++
++def test_pre_epoch_health_cannot_become_new_epoch_anchor():
++    early = health(704, observed_at="2026-09-15T10:50:00.000Z")
++    ctx = context([], [early])
++    result = build(ctx)
++    assert result.evidence_snapshot_content.semantic_payload["source_health_descriptors"] == []
++    assert len(ctx.read.health_scopes) == 2
++
++
++def test_conflicting_duplicate_health_id_fails_closed():
++    first = health(705, observed_at="2026-09-15T11:20:00.000Z")
++    conflicting = health(705, observed_at="2026-09-15T12:10:00.000Z")
++    assert_reason(context([], [first, conflicting]), "corrupt_source_health")
++
++
++@pytest.mark.parametrize("start,end", [
++    (END, START), (START, START),
++    ("2026-09-15T09:00:00.000Z", END),
++    (START, "2026-09-15T14:00:00.001Z"),
++])
++def test_completed_window_validation(start, end):
++    ctx = context()
++    with pytest.raises(SnapshotBuildError, match="invalid_window"):
++        ctx.service.build(SITE, MAC, start, end)
++    assert ctx.read.opens == 0
++
++
++def test_execution_policy_and_capture_time_do_not_change_content_identity():
++    first = build(context([evidence()]))
++    ctx = context([evidence()], execution_changes={"max_read_transaction_duration_ms": 120_000})
++    ctx.service._utc_clock = lambda: "2026-09-15T15:00:00.000Z"
++    second = build(ctx)
++    assert first.evidence_snapshot_content.artifact_id == second.evidence_snapshot_content.artifact_id
++    assert first.snapshot_record.artifact_id != second.snapshot_record.artifact_id
++
++
++def test_operational_timeout_busy_and_missing_memory_adapter_are_not_semantic_results():
++    ctx = context([evidence()], execution_changes={"max_read_transaction_duration_ms": 1})
++    moments = iter((0.0, 0.1))
++    ctx.service._monotonic = lambda: next(moments)
++    assert_reason(ctx, "snapshot_timeout")
++    assert ctx.read.opens == 0
++
++    class BusyRead:
++        def __init__(self):
++            self.opens = 0
++
++        def open_snapshot_read(self):
++            self.opens += 1
++            raise sqlite3.OperationalError("database is locked")
++
++    ctx = context(execution_changes={"max_retry_count": 1})
++    busy = BusyRead()
++    ctx.service._read_service = busy
++    assert_reason(ctx, "retryable_sqlite_busy")
++    assert busy.opens == 2
++    ctx = context()
++    ctx.service._memory_guard = None
++    assert_reason(ctx, "snapshot_memory_guard_unavailable")
++    assert ctx.read.opens == 0
++
++
++def test_real_task01_busy_wrapper_obeys_retry_limit_without_output(monkeypatch):
++    ctx = context(execution_changes={"max_retry_count": 2})
++    attempts = []
++
++    def busy_open(_path):
++        attempts.append(1)
++        raise DeviceFingerprintStorageUnavailable("Fingerprint repository is unavailable") from (
++            sqlite3.OperationalError("database is locked"))
++
++    monkeypatch.setattr("app.device_fingerprint.read_service.open_read_only", busy_open)
++    ctx.service._read_service = DeviceFingerprintReadService("unused-disposable.db", retention_days=30)
++    assert_reason(ctx, "retryable_sqlite_busy")
++    assert len(attempts) == 3
++
++
++def test_nonbusy_task01_storage_wrapper_is_not_misreported_as_busy(monkeypatch):
++    ctx = context(execution_changes={"max_retry_count": 2})
++    attempts = []
++
++    def failed_open(_path):
++        attempts.append(1)
++        raise DeviceFingerprintStorageUnavailable("Fingerprint repository is unavailable") from (
++            sqlite3.DatabaseError("database disk image is malformed"))
++
++    monkeypatch.setattr("app.device_fingerprint.read_service.open_read_only", failed_open)
++    ctx.service._read_service = DeviceFingerprintReadService("unused-disposable.db", retention_days=30)
++    assert_reason(ctx, "storage_unavailable")
++    assert len(attempts) == 1
++
++
++def test_profile_dependency_mismatch_fails_before_task01_row_processing():
++    ctx = context([evidence()])
++    payload = ctx.profile.semantic_payload
++    payload["ttl_capture_placement_proof"] = None
++    ctx.service._profile = make_foundation_runtime_profile(payload)
++    assert_reason(ctx, "runtime_profile_incompatible")
++    assert ctx.read.opens == 0
++
++
++def test_binding_unavailable_fails_closed_before_task01_read():
++    ctx = context()
++    with pytest.raises(SnapshotBuildError, match="binding_unavailable"):
++        ctx.service.build("e" * 24, MAC, START, END)
++    assert ctx.read.opens == 0
++
++
++def test_all_quarantine_window_builds_without_nearest_epoch_assignment():
++    cutover = "2026-09-15T12:00:00.000Z"
++    evidence_row = evidence(observed_at=cutover)
++    health_row = health(observed_at=cutover)
++    ctx = context([evidence_row], [health_row])
++    result = ctx.service.build(SITE, MAC, "2026-09-15T11:59:59.000Z",
++                               "2026-09-15T12:00:01.000Z")
++    content = result.evidence_snapshot_content.semantic_payload
++    record = result.snapshot_record.semantic_payload
++    assert [row["binding_epoch_id"] for row in content["binding_epoch_descriptors"]] == ["A", "B"]
++    assert content["evidence_descriptors"] == []
++    assert content["source_health_descriptors"] == []
++    assert result.materialization.ordered_entries == ()
++    assert record["build_outcome"] == "success"
++    assert record["scope_anomaly_reason_counts"] == [
++        {"reason_code": "binding_cutover_ambiguous", "count": 2},
++    ]
++    assert ctx.read.opens == 1
++
++
++@pytest.mark.parametrize("field", [
++    "max_authorized_evidence_rows", "max_authorized_health_rows",
++    "max_verified_payload_bytes", "max_materialized_payload_bytes",
++    "max_total_semantic_input_bytes",
++])
++def test_zero_pinned_content_ceiling_fails_before_task01_read(field):
++    ctx = context([evidence()], content_limits={field: 0})
++    assert_reason(ctx, "runtime_profile_incompatible")
++    assert ctx.read.opens == 0
++
++
++@pytest.mark.parametrize("field,measured", [
++    ("max_authorized_evidence_rows", "verified_evidence_row_count"),
++    ("max_authorized_health_rows", None),
++    ("max_verified_payload_bytes", "verified_payload_bytes"),
++    ("max_materialized_payload_bytes", "materialized_payload_bytes"),
++    ("max_total_semantic_input_bytes", "total_semantic_input_bytes"),
++])
++def test_content_policy_exact_boundary_and_one_less(field, measured):
++    rows, health_rows = [evidence(1), evidence(2)], [health(1), health(2)]
++    baseline = build(context(rows, health_rows)).snapshot_record.semantic_payload
++    amount = len(health_rows) if measured is None else baseline[measured]
++    assert build(context(rows, health_rows, content_limits={field: amount})).snapshot_record
++    assert_reason(context(rows, health_rows, content_limits={field: amount - 1}), "resource_limited")
++
++
++def test_closed_snapshot_content_and_record_shapes():
++    ctx = context([evidence()], [health()])
++    result = build(ctx)
++    payload = result.evidence_snapshot_content.semantic_payload
++    profile = ctx.profile
++    refs = ctx.contents
++    kwargs = dict(
++        foundation_runtime_profile=profile,
++        binding_timeline=refs[profile.semantic_payload["evidence_source_binding_timeline"]["artifact_id"]],
++        binding_clock_policy=refs[profile.semantic_payload["binding_clock_policy"]["artifact_id"]],
++        schema_registry_contract=refs[profile.semantic_payload["evidence_schema_registry_contract"]["artifact_id"]],
++        origin_runtime_admission=refs[profile.semantic_payload["origin_runtime_admission"]["artifact_id"]],
++    )
++    assert make_evidence_snapshot_content(payload, **kwargs) == result.evidence_snapshot_content
++    for changed in ({**payload, "extra": 1}, {k: v for k, v in payload.items() if k != "site_id"},
++                    {**payload, "snapshot_contract_version": True}):
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_evidence_snapshot_content(changed, **kwargs)
++    wrong_ref = copy.deepcopy(payload)
++    wrong_ref["binding_clock_policy"]["content_sha256"] = "f" * 64
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_evidence_snapshot_content(wrong_ref, **kwargs)
++    duplicated = copy.deepcopy(payload)
++    duplicated["binding_epoch_descriptors"].append(duplicated["binding_epoch_descriptors"][0])
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_evidence_snapshot_content(duplicated, **kwargs)
++    for descriptor_field in ("evidence_descriptors", "source_health_descriptors"):
++        for bad_id in ([], {}, None, ""):
++            invalid = copy.deepcopy(payload)
++            invalid[descriptor_field][0]["binding_epoch_id"] = bad_id
++            with pytest.raises(DeviceFingerprintValidationError):
++                make_evidence_snapshot_content(invalid, **kwargs)
++    record = result.snapshot_record.semantic_payload
++    record_kwargs = dict(
++        evidence_snapshot_content=result.evidence_snapshot_content,
++        foundation_runtime_profile=profile,
++        snapshot_content_policy=refs[profile.semantic_payload["snapshot_content_policy"]["artifact_id"]],
++        snapshot_execution_policy=refs[profile.semantic_payload["snapshot_execution_policy"]["artifact_id"]],
++    )
++    assert make_snapshot_record(record, **record_kwargs) == result.snapshot_record
++    for changed in ({**record, "extra": 1}, {k: v for k, v in record.items() if k != "build_outcome"},
++                    {**record, "scope_anomaly_count": 1},
++                    {**record, "snapshot_captured_at_utc": START}):
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_snapshot_record(changed, **record_kwargs)
++    duplicate_reasons = {**record, "scope_anomaly_count": 2,
++                         "scope_anomaly_reason_counts": [
++                             {"reason_code": "scope", "count": 1},
++                             {"reason_code": "scope", "count": 1}]}
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_snapshot_record(duplicate_reasons, **record_kwargs)
++    wrong_policy = copy.deepcopy(record)
++    wrong_policy["snapshot_execution_policy"] = ref(make_artifact_content(
++        "SnapshotExecutionPolicy", {"synthetic": "wrong"}))
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_snapshot_record(wrong_policy, **record_kwargs)
++    content_refs = {item.artifact_type for item in extract_direct_artifact_refs(
++        result.evidence_snapshot_content) for item in [ctx.contents[item.artifact_id]]}
++    assert {"EvidenceSourceBindingTimeline", "BindingClockPolicy", "EvidenceSchemaRegistryContract",
++            "OriginRuntimeAdmission", "TTLCapturePlacementProof", "SourceHealthEmitterContract"} <= content_refs
++    record_refs = {item.artifact_id for item in extract_direct_artifact_refs(result.snapshot_record)}
++    assert record_refs == {record[field]["artifact_id"] for field in (
++        "evidence_snapshot_content", "foundation_runtime_profile", "snapshot_content_policy",
++        "snapshot_execution_policy")}

@@ -1,0 +1,1204 @@
+diff --git a/app/device_fingerprint/cli.py b/app/device_fingerprint/cli.py
+index d749b73..2bea20c 100644
+--- a/app/device_fingerprint/cli.py
++++ b/app/device_fingerprint/cli.py
+@@ -3,7 +3,9 @@
+ from __future__ import annotations
+ 
+ import argparse
++import json
+ import signal
++from dataclasses import asdict
+ 
+ from app.artifact_identity import ArtifactIdentityError, capture_loaded_artifact_identity
+ from app.settings import get_settings
+@@ -16,6 +18,7 @@ from .schema import SCHEMA_VERSION
+ from .schema_registry import build_production_schema_registry
+ from .service import DeviceFingerprintRuntime
+ from .telemetry import DeviceFingerprintTelemetry, configure_device_fingerprint_logger
++from .storage_v2 import RECOVERY_TRIGGERS, migrate_v1_to_v2, recover_database_generation
+ 
+ _HARD_CONTAINMENT_LOCKS: list[object] = []
+ 
+@@ -24,8 +27,28 @@ def main(argv: list[str] | None = None) -> int:
+     parser = argparse.ArgumentParser(prog="device-fingerprint")
+     commands = parser.add_subparsers(dest="command", required=True)
+     commands.add_parser("run")
++    migration = commands.add_parser("migrate-v1-to-v2")
++    migration.add_argument("--backup-path", required=True)
++    recovery = commands.add_parser("recover-generation")
++    recovery.add_argument("--trigger", required=True, choices=sorted(RECOVERY_TRIGGERS))
+     args = parser.parse_args(argv)
+     config = device_fingerprint_config_from_settings(get_settings())
++    if args.command != "run":
++        try:
++            if args.command == "migrate-v1-to-v2":
++                result = migrate_v1_to_v2(
++                    config.db_path, writer_lock_path=config.writer_lock_path,
++                    backup_path=args.backup_path,
++                )
++            else:
++                result = recover_database_generation(
++                    config.db_path, writer_lock_path=config.writer_lock_path,
++                    trigger=args.trigger,
++                )
++            print(json.dumps(asdict(result), sort_keys=True))
++            return 0
++        except Exception:
++            return 1
+     if not config.enabled:
+         return 0
+     logger = configure_device_fingerprint_logger()
+diff --git a/app/device_fingerprint/models.py b/app/device_fingerprint/models.py
+index a2899ea..2196578 100644
+--- a/app/device_fingerprint/models.py
++++ b/app/device_fingerprint/models.py
+@@ -30,6 +30,10 @@ class DeviceFingerprintStorageUnavailable(DeviceFingerprintError):
+     pass
+ 
+ 
++class DeviceFingerprintMigrationRequired(DeviceFingerprintStorageUnavailable):
++    pass
++
++
+ class DeviceFingerprintStorageCorrupt(DeviceFingerprintError):
+     pass
+ 
+diff --git a/app/device_fingerprint/repository.py b/app/device_fingerprint/repository.py
+index 3b10d3d..039164d 100644
+--- a/app/device_fingerprint/repository.py
++++ b/app/device_fingerprint/repository.py
+@@ -23,6 +23,7 @@ from .config import (
+ from .models import (
+     BatchResult,
+     DeviceFingerprintConflict,
++    DeviceFingerprintMigrationRequired,
+     DeviceFingerprintStorageCorrupt,
+     DeviceFingerprintStorageLimit,
+     DeviceFingerprintStorageUnavailable,
+@@ -30,11 +31,14 @@ from .models import (
+     ValidatedEvidence,
+     ValidatedSourceHealth,
+ )
+-from .schema import EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS, SCHEMA_SQL, SCHEMA_VERSION
++from .schema import (
++    EXPECTED_COLUMNS, EXPECTED_INDEXES, MAX_INGEST_SEQUENCE,
++    REQUIRED_CHECK_FRAGMENTS, SCHEMA_SQL, SCHEMA_VERSION, STORAGE_STATE_TABLE,
++    V1_EXPECTED_COLUMNS, V1_EXPECTED_INDEXES, V1_REQUIRED_CHECK_FRAGMENTS,
++)
+ from .validation import format_utc
+ 
+ UTC = timezone.utc
+-_OWNED_TABLES = frozenset(EXPECTED_COLUMNS)
+ APPROVED_DATA_ROOT = Path("/opt/CaptivePortal/data")
+ _IS_POSIX = os.name == "posix"
+ _SQLITE_BUSY = 5
+@@ -78,8 +82,20 @@ class DeviceFingerprintRepository:
+             tables = self._application_tables(connection)
+             if version > SCHEMA_VERSION or (version == 0 and tables):
+                 raise DeviceFingerprintStorageCorrupt("Fingerprint schema is incompatible")
++            if version == 1:
++                raise DeviceFingerprintMigrationRequired("Fingerprint repository migration is required")
+             if version == 0:
+-                connection.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL + "\nCOMMIT;")
++                connection.execute("BEGIN IMMEDIATE")
++                try:
++                    _create_v2_schema(connection)
++                    connection.execute(
++                        f"INSERT INTO {STORAGE_STATE_TABLE} VALUES (1,?,0)",
++                        (str(uuid.uuid4()),),
++                    )
++                    connection.execute("COMMIT")
++                except BaseException:
++                    connection.execute("ROLLBACK")
++                    raise
+             self._validate_connection(connection)
+             page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+             max_pages = max(1, self.max_db_bytes // page_size)
+@@ -132,6 +148,19 @@ class DeviceFingerprintRepository:
+                 "freelist_count": int(connection.execute("PRAGMA freelist_count").fetchone()[0]),
+             }
+ 
++    @staticmethod
++    def read_ingest_watermark(connection: sqlite3.Connection) -> Mapping[str, int | str]:
++        """Read both watermark fields from the caller's existing SQLite snapshot."""
++        row = connection.execute(
++            f"SELECT database_generation_id,last_ingest_sequence FROM {STORAGE_STATE_TABLE} WHERE singleton_id=1"
++        ).fetchone()
++        if row is None:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint generation state is invalid")
++        return {
++            "database_generation_id": row[0],
++            "max_committed_ingest_sequence": row[1],
++        }
++
+     def ingest_evidence(self, events: Sequence[ValidatedEvidence], *, ingested_at: str) -> BatchResult:
+         columns = tuple(ValidatedEvidence.__slots__)
+         immutable = columns
+@@ -157,34 +186,55 @@ class DeviceFingerprintRepository:
+             connection = self.connection
+             try:
+                 connection.execute("BEGIN IMMEDIATE")
++                watermark = self.read_ingest_watermark(connection)
++                last_sequence = int(watermark["max_committed_ingest_sequence"])
++                pending: dict[tuple[str, str], tuple[Any, ...]] = {}
++                new_values: list[tuple[Any, tuple[Any, ...]]] = []
+                 for value in values:
++                    key = (value.producer_id, getattr(value, producer_event_column))
++                    expected = tuple(getattr(value, column) for column in immutable)
++                    if key in pending:
++                        if pending[key] != expected:
++                            raise DeviceFingerprintConflict("Immutable fingerprint event conflict")
++                        duplicate += 1
++                        continue
+                     existing = connection.execute(
+                         f"SELECT {','.join(immutable)} FROM {table} WHERE producer_id=? AND {producer_event_column}=?",
+-                        (value.producer_id, getattr(value, producer_event_column)),
++                        key,
+                     ).fetchone()
+-                    expected = tuple(getattr(value, column) for column in immutable)
+                     if existing is not None:
+                         if tuple(existing[column] for column in immutable) != expected:
+                             raise DeviceFingerprintConflict("Immutable fingerprint event conflict")
+                         duplicate += 1
+                         continue
+-                    names = (id_column,) + tuple(columns) + ("ingested_at",)
+-                    parameters = (str(uuid.uuid4()),) + expected + (ingested_at,)
++                    pending[key] = expected
++                    new_values.append((value, expected))
++                if len(new_values) > MAX_INGEST_SEQUENCE - last_sequence:
++                    raise DeviceFingerprintStorageLimit("Fingerprint ingest sequence exhausted")
++                for _value, expected in new_values:
++                    last_sequence += 1
++                    names = (id_column,) + tuple(columns) + ("ingested_at", "ingest_sequence")
++                    parameters = (str(uuid.uuid4()),) + expected + (ingested_at, last_sequence)
+                     connection.execute(
+                         f"INSERT INTO {table} ({','.join(names)}) VALUES ({','.join('?' for _ in names)})",
+                         parameters,
+                     )
+                     inserted += 1
++                if inserted:
++                    connection.execute(
++                        f"UPDATE {STORAGE_STATE_TABLE} SET last_ingest_sequence=? WHERE singleton_id=1",
++                        (last_sequence,),
++                    )
+                 connection.execute("COMMIT")
+-            except DeviceFingerprintConflict:
+-                connection.execute("ROLLBACK")
+-                raise
+             except sqlite3.DatabaseError as exc:
+                 try:
+                     connection.execute("ROLLBACK")
+                 except sqlite3.DatabaseError:
+                     pass
+                 raise self._sqlite_error(exc) from exc
++            except Exception:
++                connection.execute("ROLLBACK")
++                raise
+         return BatchResult(len(values), inserted, duplicate)
+ 
+     def cleanup(self, *, now: datetime, evidence_retention_days: int) -> Mapping[str, int]:
+@@ -242,15 +292,46 @@ class DeviceFingerprintRepository:
+         quick = connection.execute("PRAGMA quick_check").fetchall()
+         if [row[0] for row in quick] != ["ok"]:
+             raise DeviceFingerprintStorageCorrupt("Fingerprint repository is corrupt")
+-        if cls._application_tables(connection) != _OWNED_TABLES:
++        cls._validate_schema_signature(
++            connection, EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS,
++        )
++        state = connection.execute(
++            f"SELECT singleton_id,database_generation_id,last_ingest_sequence FROM {STORAGE_STATE_TABLE}"
++        ).fetchall()
++        if len(state) != 1 or state[0][0] != 1 or not _canonical_generation(state[0][1]):
++            raise DeviceFingerprintStorageCorrupt("Fingerprint generation state is invalid")
++        allocator = state[0][2]
++        if type(allocator) is not int or not 0 <= allocator <= MAX_INGEST_SEQUENCE:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint allocator state is invalid")
++        for table in ("device_fingerprint_evidence", "device_fingerprint_source_health_events"):
++            invalid = connection.execute(
++                f"SELECT 1 FROM {table} WHERE typeof(ingest_sequence)!='integer' "
++                "OR ingest_sequence<1 OR ingest_sequence>? LIMIT 1",
++                (allocator,),
++            ).fetchone()
++            if invalid is not None:
++                raise DeviceFingerprintStorageCorrupt("Fingerprint ingest sequence state is invalid")
++        duplicate = connection.execute(
++            "SELECT 1 FROM device_fingerprint_evidence AS evidence "
++            "JOIN device_fingerprint_source_health_events AS health "
++            "ON health.ingest_sequence=evidence.ingest_sequence LIMIT 1"
++        ).fetchone()
++        if duplicate is not None:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint ingest sequence state is invalid")
++
++    @classmethod
++    def _validate_schema_signature(cls, connection: sqlite3.Connection,
++                                   columns: Mapping[str, Any], indexes: Mapping[str, Any],
++                                   fragments: Mapping[str, Any]) -> None:
++        if cls._application_tables(connection) != frozenset(columns):
+             raise DeviceFingerprintStorageCorrupt("Fingerprint table signature is incompatible")
+-        for table, expected in EXPECTED_COLUMNS.items():
++        for table, expected in columns.items():
+             actual = tuple((row[1], row[2].upper(), row[3], row[5]) for row in connection.execute(f"PRAGMA table_info({table})"))
+             if actual != expected:
+                 raise DeviceFingerprintStorageCorrupt("Fingerprint column signature is incompatible")
+             table_sql = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
+             normalized = "".join(table_sql.lower().split())
+-            if any(fragment not in normalized for fragment in REQUIRED_CHECK_FRAGMENTS[table]):
++            if any(fragment not in normalized for fragment in fragments[table]):
+                 raise DeviceFingerprintStorageCorrupt("Fingerprint constraints are missing")
+             actual_indexes = {}
+             for row in connection.execute(f"PRAGMA index_list({table})"):
+@@ -261,9 +342,19 @@ class DeviceFingerprintRepository:
+                     raise DeviceFingerprintStorageCorrupt("Fingerprint index signature is incompatible")
+                 columns = tuple(item[2] for item in connection.execute(f"PRAGMA index_info({name})"))
+                 actual_indexes[name] = (unique, columns)
+-            if actual_indexes != EXPECTED_INDEXES[table]:
++            if actual_indexes != indexes[table]:
+                 raise DeviceFingerprintStorageCorrupt("Fingerprint index signature is incompatible")
+ 
++    @classmethod
++    def validate_v1_for_migration(cls, connection: sqlite3.Connection) -> None:
++        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 1:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint migration source is incompatible")
++        if [row[0] for row in connection.execute("PRAGMA quick_check")] != ["ok"]:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint migration source is corrupt")
++        cls._validate_schema_signature(
++            connection, V1_EXPECTED_COLUMNS, V1_EXPECTED_INDEXES, V1_REQUIRED_CHECK_FRAGMENTS,
++        )
++
+     @staticmethod
+     def _sqlite_error(exc: sqlite3.DatabaseError) -> Exception:
+         code = getattr(exc, "sqlite_errorcode", None)
+@@ -350,6 +441,22 @@ def open_read_only(db_path: str) -> sqlite3.Connection:
+         raise DeviceFingerprintStorageUnavailable("Fingerprint repository is unavailable") from exc
+ 
+ 
++def _create_v2_schema(connection: sqlite3.Connection) -> None:
++    for statement in SCHEMA_SQL.split(";"):
++        if statement.strip():
++            connection.execute(statement)
++
++
++def _canonical_generation(value: Any) -> bool:
++    if not isinstance(value, str):
++        return False
++    try:
++        parsed = uuid.UUID(value)
++    except (ValueError, AttributeError):
++        return False
++    return parsed.version == 4 and str(parsed) == value
++
++
+ def _prepare_local_file_target(path: Path, *, error_type: type[Exception], label: str) -> Path:
+     if not path.is_absolute():
+         raise error_type(f"Fingerprint {label} target is invalid")
+diff --git a/app/device_fingerprint/schema.py b/app/device_fingerprint/schema.py
+index 3c0d3e1..a99ed87 100644
+--- a/app/device_fingerprint/schema.py
++++ b/app/device_fingerprint/schema.py
+@@ -1,6 +1,9 @@
+-"""Exact SQLite schema v1 for fingerprint evidence."""
++"""Exact SQLite schema v2 for fingerprint evidence."""
+ 
+-SCHEMA_VERSION = 1
++SCHEMA_VERSION = 2
++MAX_INGEST_SEQUENCE = 9223372036854775807
++BOOTSTRAP_RULE_ID = "task01_v2_bootstrap_ingested_at_family_id_v1"
++STORAGE_STATE_TABLE = "device_fingerprint_storage_state"
+ 
+ SCHEMA_SQL = """
+ CREATE TABLE device_fingerprint_evidence (
+@@ -22,9 +25,11 @@ CREATE TABLE device_fingerprint_evidence (
+  quality_state TEXT NOT NULL CHECK(quality_state IN ('valid','partial','degraded')),
+  payload_json TEXT NOT NULL CHECK(length(payload_json)>=2),
+  payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'),
+- ingested_at TEXT NOT NULL CHECK(length(ingested_at)=24 AND substr(ingested_at,-1,1)='Z')
++ ingested_at TEXT NOT NULL CHECK(length(ingested_at)=24 AND substr(ingested_at,-1,1)='Z'),
++ ingest_sequence INTEGER NOT NULL CHECK(ingest_sequence BETWEEN 1 AND 9223372036854775807)
+ );
+ CREATE UNIQUE INDEX uq_df_evidence_producer_event ON device_fingerprint_evidence(producer_id,source_event_id);
++CREATE UNIQUE INDEX uq_df_evidence_ingest_sequence ON device_fingerprint_evidence(ingest_sequence);
+ CREATE INDEX idx_df_evidence_site_mac_time ON device_fingerprint_evidence(site_id,observed_mac,observed_at,evidence_id);
+ CREATE INDEX idx_df_evidence_site_kind_time ON device_fingerprint_evidence(site_id,source_kind,observed_at,evidence_id);
+ CREATE INDEX idx_df_evidence_retention ON device_fingerprint_evidence(observed_at,evidence_id);
+@@ -39,12 +44,19 @@ CREATE TABLE device_fingerprint_source_health_events (
+  reason_code TEXT NULL CHECK(reason_code IS NULL OR length(reason_code) BETWEEN 1 AND 64),
+  observed_at TEXT NOT NULL CHECK(length(observed_at)=24 AND substr(observed_at,-1,1)='Z'),
+  content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64 AND content_sha256 NOT GLOB '*[^0-9a-f]*'),
+- ingested_at TEXT NOT NULL CHECK(length(ingested_at)=24 AND substr(ingested_at,-1,1)='Z')
++ ingested_at TEXT NOT NULL CHECK(length(ingested_at)=24 AND substr(ingested_at,-1,1)='Z'),
++ ingest_sequence INTEGER NOT NULL CHECK(ingest_sequence BETWEEN 1 AND 9223372036854775807)
+ );
+ CREATE UNIQUE INDEX uq_df_source_health_producer_event ON device_fingerprint_source_health_events(producer_id,source_health_event_id);
++CREATE UNIQUE INDEX uq_df_source_health_ingest_sequence ON device_fingerprint_source_health_events(ingest_sequence);
+ CREATE INDEX idx_df_source_health_scope_time ON device_fingerprint_source_health_events(site_id,capture_source_id,source_kind,observed_at,source_health_id);
+ CREATE INDEX idx_df_source_health_retention ON device_fingerprint_source_health_events(observed_at,source_health_id);
+-PRAGMA user_version=1;
++CREATE TABLE device_fingerprint_storage_state (
++ singleton_id INTEGER PRIMARY KEY NOT NULL CHECK(singleton_id=1),
++ database_generation_id TEXT NOT NULL CHECK(length(database_generation_id)=36),
++ last_ingest_sequence INTEGER NOT NULL CHECK(last_ingest_sequence BETWEEN 0 AND 9223372036854775807)
++);
++PRAGMA user_version=2;
+ """
+ 
+ EXPECTED_COLUMNS = {
+@@ -58,7 +70,7 @@ EXPECTED_COLUMNS = {
+         ("observed_mac", "TEXT", 1, 0), ("observed_ip", "TEXT", 0, 0),
+         ("privacy_class", "TEXT", 1, 0), ("quality_state", "TEXT", 1, 0),
+         ("payload_json", "TEXT", 1, 0), ("payload_sha256", "TEXT", 1, 0),
+-        ("ingested_at", "TEXT", 1, 0),
++        ("ingested_at", "TEXT", 1, 0), ("ingest_sequence", "INTEGER", 1, 0),
+     ),
+     "device_fingerprint_source_health_events": (
+         ("source_health_id", "TEXT", 1, 1), ("producer_id", "TEXT", 1, 0),
+@@ -66,22 +78,30 @@ EXPECTED_COLUMNS = {
+         ("capture_source_id", "TEXT", 1, 0), ("source_kind", "TEXT", 1, 0),
+         ("status", "TEXT", 1, 0), ("reason_code", "TEXT", 0, 0),
+         ("observed_at", "TEXT", 1, 0), ("content_sha256", "TEXT", 1, 0),
+-        ("ingested_at", "TEXT", 1, 0),
++        ("ingested_at", "TEXT", 1, 0), ("ingest_sequence", "INTEGER", 1, 0),
++    ),
++    STORAGE_STATE_TABLE: (
++        ("singleton_id", "INTEGER", 1, 1),
++        ("database_generation_id", "TEXT", 1, 0),
++        ("last_ingest_sequence", "INTEGER", 1, 0),
+     ),
+ }
+ 
+ EXPECTED_INDEXES = {
+     "device_fingerprint_evidence": {
+         "uq_df_evidence_producer_event": (1, ("producer_id", "source_event_id")),
++        "uq_df_evidence_ingest_sequence": (1, ("ingest_sequence",)),
+         "idx_df_evidence_site_mac_time": (0, ("site_id", "observed_mac", "observed_at", "evidence_id")),
+         "idx_df_evidence_site_kind_time": (0, ("site_id", "source_kind", "observed_at", "evidence_id")),
+         "idx_df_evidence_retention": (0, ("observed_at", "evidence_id")),
+     },
+     "device_fingerprint_source_health_events": {
+         "uq_df_source_health_producer_event": (1, ("producer_id", "source_health_event_id")),
++        "uq_df_source_health_ingest_sequence": (1, ("ingest_sequence",)),
+         "idx_df_source_health_scope_time": (0, ("site_id", "capture_source_id", "source_kind", "observed_at", "source_health_id")),
+         "idx_df_source_health_retention": (0, ("observed_at", "source_health_id")),
+     },
++    STORAGE_STATE_TABLE: {},
+ }
+ 
+ REQUIRED_CHECK_FRAGMENTS = {
+@@ -105,6 +125,7 @@ REQUIRED_CHECK_FRAGMENTS = {
+         "check(length(payload_json)>=2)",
+         "check(length(payload_sha256)=64andpayload_sha256notglob'*[^0-9a-f]*')",
+         "check(length(ingested_at)=24andsubstr(ingested_at,-1,1)='z')",
++        "check(ingest_sequencebetween1and9223372036854775807)",
+     ),
+     "device_fingerprint_source_health_events": (
+         "check(length(source_health_id)=36)",
+@@ -118,5 +139,24 @@ REQUIRED_CHECK_FRAGMENTS = {
+         "check(length(observed_at)=24andsubstr(observed_at,-1,1)='z')",
+         "check(length(content_sha256)=64andcontent_sha256notglob'*[^0-9a-f]*')",
+         "check(length(ingested_at)=24andsubstr(ingested_at,-1,1)='z')",
++        "check(ingest_sequencebetween1and9223372036854775807)",
+     ),
++    STORAGE_STATE_TABLE: (
++        "check(singleton_id=1)",
++        "check(length(database_generation_id)=36)",
++        "check(last_ingest_sequencebetween0and9223372036854775807)",
++    ),
++}
++
++V1_EXPECTED_COLUMNS = {
++    table: tuple(column for column in columns if column[0] != "ingest_sequence")
++    for table, columns in EXPECTED_COLUMNS.items() if table != STORAGE_STATE_TABLE
++}
++V1_EXPECTED_INDEXES = {
++    table: {name: signature for name, signature in indexes.items() if not name.endswith("_ingest_sequence")}
++    for table, indexes in EXPECTED_INDEXES.items() if table != STORAGE_STATE_TABLE
++}
++V1_REQUIRED_CHECK_FRAGMENTS = {
++    table: tuple(fragment for fragment in fragments if not fragment.startswith("check(ingest_sequence"))
++    for table, fragments in REQUIRED_CHECK_FRAGMENTS.items() if table != STORAGE_STATE_TABLE
+ }
+diff --git a/app/device_fingerprint/storage_v2.py b/app/device_fingerprint/storage_v2.py
+new file mode 100644
+index 0000000..b6a555a
+--- /dev/null
++++ b/app/device_fingerprint/storage_v2.py
+@@ -0,0 +1,281 @@
++"""Explicit offline Task-01 schema migration and controlled generation recovery.
++
++Neither operation is called by normal service startup. The caller must stop the
++writer and retain the verified pre-migration backup for pre-v2 rollback.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import shutil
++import sqlite3
++import uuid
++from dataclasses import dataclass
++from pathlib import Path
++
++from .config import BUSY_TIMEOUT_MS
++from .models import DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageUnavailable
++from .repository import (
++    DeviceFingerprintRepository, _create_v2_schema, _prepare_local_file_target,
++    _enforce_posix_mode, writer_lock,
++)
++from .schema import (
++    BOOTSTRAP_RULE_ID, EXPECTED_INDEXES, MAX_INGEST_SEQUENCE,
++    STORAGE_STATE_TABLE, V1_EXPECTED_COLUMNS, V1_EXPECTED_INDEXES,
++)
++
++_EVIDENCE = "device_fingerprint_evidence"
++_HEALTH = "device_fingerprint_source_health_events"
++_LEGACY_EVIDENCE = "df_legacy_evidence"
++_LEGACY_HEALTH = "df_legacy_source_health"
++RECOVERY_TRIGGERS = frozenset({
++    "DATABASE_BACKUP_RESTORE", "VM_SNAPSHOT_ROLLBACK", "FILESYSTEM_ROLLBACK",
++    "DATABASE_REBUILD_FROM_OLDER_MATERIAL",
++})
++
++
++@dataclass(frozen=True, slots=True)
++class MigrationResult:
++    source_path: str
++    source_bytes: int
++    source_identity: str
++    database_generation_id: str
++    assigned_rows: int
++    backup_sha256: str
++    backup_bytes: int
++    bootstrap_rule_id: str = BOOTSTRAP_RULE_ID
++
++
++@dataclass(frozen=True, slots=True)
++class RecoveryResult:
++    database_generation_id: str
++    assigned_rows: int
++    bootstrap_rule_id: str = BOOTSTRAP_RULE_ID
++
++
++def migrate_v1_to_v2(db_path: str, *, writer_lock_path: str,
++                     backup_path: str) -> MigrationResult:
++    """Migrate a stopped v1 writer, retaining an independently verified v1 backup."""
++    source_path = _existing_db(db_path)
++    target = _prepare_local_file_target(
++        Path(backup_path), error_type=DeviceFingerprintStorageUnavailable,
++        label="migration backup",
++    )
++    if (target.exists()
++            or target.resolve(strict=False) == source_path.resolve(strict=False)
++            or target.resolve(strict=False) == Path(writer_lock_path).resolve(strict=False)):
++        raise DeviceFingerprintStorageUnavailable("Fingerprint migration backup target is invalid")
++    source_size = source_path.stat().st_size
++    source_stat = source_path.stat()
++    source_identity = f"{source_stat.st_dev}:{source_stat.st_ino}"
++    wal_path = Path(str(source_path) + "-wal")
++    wal_bytes = wal_path.stat().st_size if wal_path.is_file() else 0
++    estimated_bytes = source_size + wal_bytes
++    if (shutil.disk_usage(target.parent).free < max(16_777_216, estimated_bytes)
++            or shutil.disk_usage(source_path.parent).free < max(16_777_216, estimated_bytes * 2)):
++        raise DeviceFingerprintStorageUnavailable("Fingerprint migration capacity is insufficient")
++
++    with writer_lock(writer_lock_path):
++        locked_stat = source_path.stat()
++        if ((locked_stat.st_dev, locked_stat.st_ino, locked_stat.st_size)
++                != (source_stat.st_dev, source_stat.st_ino, source_size)):
++            raise DeviceFingerprintStorageUnavailable("Fingerprint migration source changed")
++        connection = _open_existing(source_path)
++        try:
++            DeviceFingerprintRepository.validate_v1_for_migration(connection)
++            data_version = connection.execute("PRAGMA data_version").fetchone()[0]
++            handle = os.open(target, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
++            os.close(handle)
++            backup = sqlite3.connect(str(target), isolation_level=None)
++            try:
++                connection.backup(backup)
++                DeviceFingerprintRepository.validate_v1_for_migration(backup)
++                _integrity_check(backup)
++            finally:
++                backup.close()
++            if os.name == "posix":
++                _enforce_posix_mode(
++                    target, 0o640, error_type=DeviceFingerprintStorageUnavailable,
++                    label="migration backup",
++                )
++            backup_bytes = target.stat().st_size
++            backup_sha256 = _sha256(target)
++
++            connection.execute("BEGIN EXCLUSIVE")
++            try:
++                if connection.execute("PRAGMA data_version").fetchone()[0] != data_version:
++                    raise DeviceFingerprintStorageUnavailable("Fingerprint migration source changed")
++                DeviceFingerprintRepository.validate_v1_for_migration(connection)
++                _rename_v1_tables(connection)
++                _create_v2_schema(connection)
++                assigned = _copy_bootstrap_rows(connection)
++                generation = str(uuid.uuid4())
++                connection.execute(
++                    f"INSERT INTO {STORAGE_STATE_TABLE} VALUES (1,?,?)",
++                    (generation, assigned),
++                )
++                _verify_copy(connection, _LEGACY_EVIDENCE, _EVIDENCE)
++                _verify_copy(connection, _LEGACY_HEALTH, _HEALTH)
++                connection.execute(f"DROP TABLE {_LEGACY_EVIDENCE}")
++                connection.execute(f"DROP TABLE {_LEGACY_HEALTH}")
++                DeviceFingerprintRepository._validate_connection(connection)
++                _integrity_check(connection)
++                if _sha256(target) != backup_sha256 or target.stat().st_size != backup_bytes:
++                    raise DeviceFingerprintStorageCorrupt("Fingerprint migration backup changed")
++                connection.execute("COMMIT")
++            except BaseException:
++                connection.execute("ROLLBACK")
++                raise
++            return MigrationResult(
++                str(source_path), source_size, source_identity,
++                generation, assigned, backup_sha256, backup_bytes,
++            )
++        finally:
++            connection.close()
++
++
++def recover_database_generation(db_path: str, *, writer_lock_path: str,
++                                trigger: str) -> RecoveryResult:
++    """Rebaseline a known restored v2 database before admitting its writer."""
++    if trigger not in RECOVERY_TRIGGERS:
++        raise ValueError("Unsupported fingerprint generation recovery trigger")
++    source_path = _existing_db(db_path)
++    with writer_lock(writer_lock_path):
++        connection = _open_existing(source_path)
++        try:
++            connection.execute("BEGIN EXCLUSIVE")
++            try:
++                DeviceFingerprintRepository._validate_connection(connection)
++                for table in (_EVIDENCE, _HEALTH):
++                    for name in EXPECTED_INDEXES[table]:
++                        if name.endswith("_ingest_sequence"):
++                            connection.execute(f"DROP INDEX {name}")
++                assigned = _assign_sequences(connection, _EVIDENCE, _HEALTH)
++                for table in (_EVIDENCE, _HEALTH):
++                    for name in EXPECTED_INDEXES[table]:
++                        if name.endswith("_ingest_sequence"):
++                            connection.execute(f"CREATE UNIQUE INDEX {name} ON {table}(ingest_sequence)")
++                previous_generation = connection.execute(
++                    f"SELECT database_generation_id FROM {STORAGE_STATE_TABLE} WHERE singleton_id=1"
++                ).fetchone()[0]
++                generation = str(uuid.uuid4())
++                while generation == previous_generation:
++                    generation = str(uuid.uuid4())
++                connection.execute(
++                    f"UPDATE {STORAGE_STATE_TABLE} SET database_generation_id=?,last_ingest_sequence=? WHERE singleton_id=1",
++                    (generation, assigned),
++                )
++                DeviceFingerprintRepository._validate_connection(connection)
++                _integrity_check(connection)
++                connection.execute("COMMIT")
++            except BaseException:
++                connection.execute("ROLLBACK")
++                raise
++            return RecoveryResult(generation, assigned)
++        finally:
++            connection.close()
++
++
++def _existing_db(db_path: str) -> Path:
++    path = _prepare_local_file_target(
++        Path(db_path), error_type=DeviceFingerprintStorageUnavailable,
++        label="repository",
++    )
++    if not path.is_file():
++        raise DeviceFingerprintStorageUnavailable("Fingerprint repository is unavailable")
++    return path
++
++
++def _open_existing(path: Path) -> sqlite3.Connection:
++    try:
++        connection = sqlite3.connect(
++            path.as_uri() + "?mode=rw", uri=True,
++            timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None,
++        )
++        connection.row_factory = sqlite3.Row
++        connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
++        connection.execute("PRAGMA foreign_keys=ON")
++        return connection
++    except sqlite3.DatabaseError as exc:
++        raise DeviceFingerprintStorageUnavailable("Fingerprint repository is unavailable") from exc
++
++
++def _rename_v1_tables(connection: sqlite3.Connection) -> None:
++    connection.execute(f"ALTER TABLE {_EVIDENCE} RENAME TO {_LEGACY_EVIDENCE}")
++    connection.execute(f"ALTER TABLE {_HEALTH} RENAME TO {_LEGACY_HEALTH}")
++    for indexes in V1_EXPECTED_INDEXES.values():
++        for name in indexes:
++            connection.execute(f"DROP INDEX {name}")
++
++
++def _ordered_rows(connection: sqlite3.Connection, evidence_table: str,
++                  health_table: str):
++    return connection.execute(
++        f"SELECT ingested_at,0 AS family,evidence_id AS row_id FROM {evidence_table} "
++        f"UNION ALL SELECT ingested_at,1 AS family,source_health_id AS row_id FROM {health_table} "
++        "ORDER BY ingested_at,family,row_id"
++    )
++
++
++def _copy_bootstrap_rows(connection: sqlite3.Connection) -> int:
++    assigned = 0
++    for row in _ordered_rows(connection, _LEGACY_EVIDENCE, _LEGACY_HEALTH):
++        if assigned >= MAX_INGEST_SEQUENCE:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint migration sequence capacity is exhausted")
++        assigned += 1
++        if row[1] == 0:
++            connection.execute(
++                f"INSERT INTO {_EVIDENCE} SELECT *,? FROM {_LEGACY_EVIDENCE} WHERE evidence_id=?",
++                (assigned, row[2]),
++            )
++        else:
++            connection.execute(
++                f"INSERT INTO {_HEALTH} SELECT *,? FROM {_LEGACY_HEALTH} WHERE source_health_id=?",
++                (assigned, row[2]),
++            )
++    return assigned
++
++
++def _assign_sequences(connection: sqlite3.Connection, evidence_table: str,
++                      health_table: str) -> int:
++    assigned = 0
++    for row in _ordered_rows(connection, evidence_table, health_table):
++        if assigned >= MAX_INGEST_SEQUENCE:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint recovery sequence capacity is exhausted")
++        assigned += 1
++        if row[1] == 0:
++            connection.execute(
++                f"UPDATE {_EVIDENCE} SET ingest_sequence=? WHERE evidence_id=?", (assigned, row[2]),
++            )
++        else:
++            connection.execute(
++                f"UPDATE {_HEALTH} SET ingest_sequence=? WHERE source_health_id=?", (assigned, row[2]),
++            )
++    return assigned
++
++
++def _verify_copy(connection: sqlite3.Connection, old_table: str, new_table: str) -> None:
++    columns = ",".join(column[0] for column in V1_EXPECTED_COLUMNS[new_table])
++    if connection.execute(f"SELECT COUNT(*) FROM {old_table}").fetchone()[0] != connection.execute(
++        f"SELECT COUNT(*) FROM {new_table}"
++    ).fetchone()[0]:
++        raise DeviceFingerprintStorageCorrupt("Fingerprint migration row count changed")
++    for first, second in ((old_table, new_table), (new_table, old_table)):
++        if connection.execute(
++            f"SELECT {columns} FROM {first} EXCEPT SELECT {columns} FROM {second} LIMIT 1"
++        ).fetchone() is not None:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint migration row contents changed")
++
++
++def _integrity_check(connection: sqlite3.Connection) -> None:
++    if [row[0] for row in connection.execute("PRAGMA integrity_check")] != ["ok"]:
++        raise DeviceFingerprintStorageCorrupt("Fingerprint repository is corrupt")
++
++
++def _sha256(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as handle:
++        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
+diff --git a/docs/modules/device-fingerprint.md b/docs/modules/device-fingerprint.md
+index 1882da6..8788dac 100644
+--- a/docs/modules/device-fingerprint.md
++++ b/docs/modules/device-fingerprint.md
+@@ -16,12 +16,36 @@ python3 -m app.device_fingerprint.cli run
+ ```
+ 
+ It owns a dedicated direct-TLS Flask app at
+-`/api/internal/device-fingerprint/v1`, a schema-v1 SQLite writer and one bounded
++`/api/internal/device-fingerprint/v1`, a schema-v2 SQLite writer and one bounded
+ retention thread. It is not registered into `run.py` or the main CaptivPortal
+ Flask app. The repository default `DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false`
+ exits normally before logger, identity, lock, database, thread, app, or listener
+ creation.
+ 
++## Task-01 storage v2 readiness
++
++Schema v2 adds one durable database generation (canonical UUIDv4) and one
++shared positive signed-64-bit `ingest_sequence` allocator for evidence and
++source-health rows. The empty generation has watermark 0. Committed sequence
++values are never reused by retention; identical duplicates consume none and
++conflicts roll back the entire batch. The internal watermark read uses the
++caller's existing SQLite connection and snapshot; this task does not assemble
++Task-04 classification snapshots.
++
++Normal service startup rejects a v1 DB with a migration-required error and
++does not migrate it. With the writer stopped, the explicit offline
++`migrate-v1-to-v2 --backup-path <verified-backup-path>` command retains a
++verified v1 backup, preserves normalized rows and IDs, and assigns sequences
++deterministically by `(ingested_at, evidence-before-health, primary ID)`.
++This bootstrap is **not** a reconstruction of historical commit order.
++Known backup/VM/filesystem rollback or rebuild from older material requires
++the stopped-writer `recover-generation --trigger <trigger>` procedure before
++v2 ingestion resumes. It mints a new generation and rebaselines retained rows.
++An arbitrary externally restored self-consistent old DB is not automatically
++detectable. A pre-v2 application rollback requires restoring the verified
++pre-migration v1 DB; old code is not presumed v2-compatible. Neither migration
++nor recovery is automatically run by the service or by this source change.
++
+ ## Data and security
+ 
+ The database contains only normalized P1 device-evidence rows and immutable
+diff --git a/tests/device_fingerprint/test_cli.py b/tests/device_fingerprint/test_cli.py
+index ac99f20..2847b55 100644
+--- a/tests/device_fingerprint/test_cli.py
++++ b/tests/device_fingerprint/test_cli.py
+@@ -2,6 +2,8 @@ from types import SimpleNamespace
+ 
+ import app.device_fingerprint.cli as cli
+ from app.artifact_identity import ArtifactIdentityError
++from app.device_fingerprint.models import DeviceFingerprintMigrationRequired
++from tests.device_fingerprint import config as fingerprint_config
+ 
+ 
+ def test_disabled_run_exits_before_logger_identity_lock_db_or_app(monkeypatch):
+@@ -61,3 +63,52 @@ def test_artifact_identity_failure_exits_before_lock_db_and_app(monkeypatch, tmp
+     monkeypatch.setattr(cli, "writer_lock", lambda _path: (_ for _ in ()).throw(AssertionError("lock must not be acquired")))
+     assert cli.main(["run"]) == 1
+     assert errors
++
++
++def test_offline_migration_and_recovery_are_explicit_commands(monkeypatch, tmp_path, capsys):
++    cfg = SimpleNamespace(enabled=False, db_path=str(tmp_path / "db"), writer_lock_path=str(tmp_path / "lock"))
++    monkeypatch.setattr(cli, "get_settings", lambda: {})
++    monkeypatch.setattr(cli, "device_fingerprint_config_from_settings", lambda _settings: cfg)
++    calls = []
++    from app.device_fingerprint.storage_v2 import MigrationResult, RecoveryResult
++    def migration(*args, **kwargs):
++        calls.append(("migration", args, kwargs))
++        return MigrationResult(cfg.db_path, 4096, "1:2", "a" * 36, 0, "b" * 64, 4096)
++    def recovery(*args, **kwargs):
++        calls.append(("recovery", args, kwargs))
++        return RecoveryResult("c" * 36, 0)
++    monkeypatch.setattr(cli, "migrate_v1_to_v2", migration)
++    monkeypatch.setattr(cli, "recover_database_generation", recovery)
++    monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_args: (_ for _ in ()).throw(AssertionError("offline command must not start service")))
++    assert cli.main(["migrate-v1-to-v2", "--backup-path", str(tmp_path / "backup")]) == 0
++    assert cli.main(["recover-generation", "--trigger", "DATABASE_BACKUP_RESTORE"]) == 0
++    output = capsys.readouterr().out.splitlines()
++    assert len(output) == 2
++    assert '"backup_sha256": "' + "b" * 64 + '"' in output[0]
++    assert '"source_identity": "1:2"' in output[0]
++    assert '"database_generation_id": "' + "c" * 36 + '"' in output[1]
++    assert calls == [
++        ("migration", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "backup_path": str(tmp_path / "backup")}),
++        ("recovery", (cfg.db_path,), {"writer_lock_path": cfg.writer_lock_path, "trigger": "DATABASE_BACKUP_RESTORE"}),
++    ]
++
++
++def test_normal_run_does_not_attempt_offline_migration(monkeypatch, tmp_path):
++    cfg = fingerprint_config(tmp_path)
++    monkeypatch.setattr(cli, "get_settings", lambda: {})
++    monkeypatch.setattr(cli, "device_fingerprint_config_from_settings", lambda _settings: cfg)
++    monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_args: SimpleNamespace(safe_fields=lambda: {}))
++    monkeypatch.setattr(cli, "configure_device_fingerprint_logger", lambda: SimpleNamespace(error=lambda *a, **k: None))
++    monkeypatch.setattr(cli, "DeviceFingerprintTelemetry", lambda *a, **k: SimpleNamespace(emit=lambda *a, **k: None))
++    class Lock:
++        def __enter__(self): return self
++        def __exit__(self, *_args): pass
++    monkeypatch.setattr(cli, "writer_lock", lambda _path: Lock())
++    class Repository:
++        def __init__(self, *_args, **_kwargs): pass
++        def initialize(self): raise DeviceFingerprintMigrationRequired("Fingerprint repository migration is required")
++        def close(self): pass
++    monkeypatch.setattr(cli, "DeviceFingerprintRepository", Repository)
++    monkeypatch.setattr(cli, "migrate_v1_to_v2", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("migration must not run")))
++    monkeypatch.setattr(cli, "create_device_fingerprint_app", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("app must not run")))
++    assert cli.main(["run"]) == 1
+diff --git a/tests/device_fingerprint/test_repository.py b/tests/device_fingerprint/test_repository.py
+index 8ac50a6..439b485 100644
+--- a/tests/device_fingerprint/test_repository.py
++++ b/tests/device_fingerprint/test_repository.py
+@@ -38,7 +38,7 @@ def service(tmp_path):
+     return cfg, repo, DeviceFingerprintService(cfg, repo, registry, now=lambda: NOW)
+ 
+ 
+-def test_schema_v1_exact_tables_indexes_pragmas_and_read_only(tmp_path):
++def test_schema_v2_exact_tables_indexes_pragmas_and_read_only(tmp_path):
+     import app.device_fingerprint.config as constants
+     assert (constants.BUSY_TIMEOUT_MS, constants.WAL_AUTOCHECKPOINT_PAGES,
+             constants.JOURNAL_SIZE_LIMIT_BYTES, constants.RETENTION_DELETE_CHUNK_ROWS,
+@@ -46,8 +46,8 @@ def test_schema_v1_exact_tables_indexes_pragmas_and_read_only(tmp_path):
+             constants.SOURCE_HEALTH_RETENTION_DAYS) == (500, 1000, 67_108_864, 500, 20, 30)
+     cfg, repo = initialized(tmp_path)
+     connection = repo.connection
+-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+-    assert {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == {"device_fingerprint_evidence", "device_fingerprint_source_health_events"}
++    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
++    assert {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == {"device_fingerprint_evidence", "device_fingerprint_source_health_events", "device_fingerprint_storage_state"}
+     assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 500
+     assert connection.execute("PRAGMA synchronous").fetchone()[0] == 1
+diff --git a/tests/device_fingerprint/test_service.py b/tests/device_fingerprint/test_service.py
+index 24281a1..228cbee 100644
+--- a/tests/device_fingerprint/test_service.py
++++ b/tests/device_fingerprint/test_service.py
+@@ -43,7 +43,7 @@ def test_health_payload_consumes_authoritative_schema_and_retention_constants(tm
+     from app.device_fingerprint.schema import SCHEMA_VERSION
+     value = runtime(tmp_path)
+     payload = value.health_payload()
+-    assert payload["schema_version"] == SCHEMA_VERSION == 1
++    assert payload["schema_version"] == SCHEMA_VERSION == 2
+     assert payload["source_health_retention_days"] == SOURCE_HEALTH_RETENTION_DAYS == 30
+ 
+ 
+diff --git a/tests/device_fingerprint/test_storage_v2.py b/tests/device_fingerprint/test_storage_v2.py
+new file mode 100644
+index 0000000..b6a24dd
+--- /dev/null
++++ b/tests/device_fingerprint/test_storage_v2.py
+@@ -0,0 +1,347 @@
++"""Focused Task-01 storage-v2 migration, sequence and recovery proofs."""
++
++import hashlib
++import sqlite3
++import uuid
++from datetime import timedelta
++
++import pytest
++
++from app.device_fingerprint.models import (
++    DeviceFingerprintConflict, DeviceFingerprintMigrationRequired,
++    DeviceFingerprintStorageCorrupt, DeviceFingerprintStorageLimit,
++    DeviceFingerprintWriterUnavailable,
++)
++from app.device_fingerprint.repository import DeviceFingerprintRepository, open_read_only, writer_lock
++from app.device_fingerprint.schema import (
++    BOOTSTRAP_RULE_ID, MAX_INGEST_SEQUENCE, SCHEMA_SQL, V1_EXPECTED_COLUMNS,
++)
++from app.device_fingerprint.storage_v2 import (
++    migrate_v1_to_v2, recover_database_generation,
++)
++from app.device_fingerprint.validation import format_utc
++from tests.device_fingerprint import NOW, evidence_event, health_event, producer
++from tests.device_fingerprint.test_repository import service
++
++
++def _watermark(repo):
++    return DeviceFingerprintRepository.read_ingest_watermark(repo.connection)
++
++
++def _batch_evidence(svc, *events):
++    return svc.evidence_batch(producer(), {"producer_id": producer().producer_id, "events": list(events)})
++
++
++def _batch_health(svc, *events):
++    return svc.source_health_batch(producer(), {"producer_id": producer().producer_id, "events": list(events)})
++
++
++def _generation(value):
++    parsed = uuid.UUID(value)
++    assert parsed.version == 4
++    assert str(parsed) == value
++
++
++def _v1_sql():
++    statements = []
++    for statement in SCHEMA_SQL.split(";"):
++        if not statement.strip():
++            continue
++        if "device_fingerprint_storage_state" in statement:
++            continue
++        if "_ingest_sequence" in statement and "CREATE UNIQUE INDEX" in statement:
++            continue
++        if "PRAGMA user_version" in statement:
++            statements.append("PRAGMA user_version=1")
++            continue
++        statements.append(statement.replace(
++            ",\n ingest_sequence INTEGER NOT NULL CHECK(ingest_sequence BETWEEN 1 AND 9223372036854775807)",
++            "",
++        ))
++    return ";".join(statements) + ";"
++
++
++def _representative_v1(tmp_path):
++    _cfg, seed, svc = service(tmp_path)
++    _batch_evidence(svc, evidence_event())
++    _batch_health(svc, health_event())
++    _batch_evidence(svc, evidence_event(source_event_id="33333333-3333-4333-8333-333333333333"))
++    legacy = tmp_path / "legacy.sqlite3"
++    connection = sqlite3.connect(legacy)
++    connection.executescript(_v1_sql())
++    for table in ("device_fingerprint_evidence", "device_fingerprint_source_health_events"):
++        columns = tuple(item[0] for item in V1_EXPECTED_COLUMNS[table])
++        rows = seed.connection.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall()
++        connection.executemany(
++            f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
++            [tuple(row) for row in rows],
++        )
++    # The second evidence row is historically ingested earliest, followed by
++    # evidence then health at an equal time (family rank breaks the tie).
++    connection.execute(
++        "UPDATE device_fingerprint_evidence SET ingested_at='2026-09-14T11:59:59.000Z' "
++        "WHERE source_event_id='33333333-3333-4333-8333-333333333333'"
++    )
++    connection.commit()
++    before = {
++        table: [tuple(row) for row in connection.execute(f"SELECT * FROM {table} ORDER BY 1")]
++        for table in V1_EXPECTED_COLUMNS
++    }
++    connection.close()
++    seed.close()
++    return legacy, before
++
++
++def test_fresh_v2_empty_generation_and_atomic_existing_snapshot(tmp_path):
++    _cfg, repo, svc = service(tmp_path)
++    initial = _watermark(repo)
++    _generation(initial["database_generation_id"])
++    assert initial["max_committed_ingest_sequence"] == 0
++    assert repo.connection.execute("PRAGMA user_version").fetchone()[0] == 2
++    reader = open_read_only(repo.db_path)
++    try:
++        reader.execute("BEGIN")
++        assert DeviceFingerprintRepository.read_ingest_watermark(reader) == initial
++        _batch_evidence(svc, evidence_event())
++        assert DeviceFingerprintRepository.read_ingest_watermark(reader) == initial
++        reader.execute("COMMIT")
++        assert DeviceFingerprintRepository.read_ingest_watermark(reader)["max_committed_ingest_sequence"] == 1
++    finally:
++        reader.close()
++
++
++def test_shared_sequence_duplicates_conflict_cleanup_and_exhaustion(tmp_path):
++    cfg, repo, svc = service(tmp_path)
++    generation = _watermark(repo)["database_generation_id"]
++    first = evidence_event()
++    second = evidence_event(source_event_id="33333333-3333-4333-8333-333333333333")
++    assert _batch_evidence(svc, first).inserted == 1
++    assert _batch_health(svc, health_event()).inserted == 1
++    result = _batch_evidence(svc, first, second)
++    assert (result.inserted, result.duplicate_noop) == (1, 1)
++    assert _watermark(repo) == {
++        "database_generation_id": generation, "max_committed_ingest_sequence": 3,
++    }
++    assert [row[0] for row in repo.connection.execute(
++        "SELECT ingest_sequence FROM device_fingerprint_evidence ORDER BY ingest_sequence"
++    )] == [1, 3]
++    assert repo.connection.execute(
++        "SELECT ingest_sequence FROM device_fingerprint_source_health_events"
++    ).fetchone()[0] == 2
++    third = evidence_event(source_event_id="44444444-4444-4444-8444-444444444444")
++    with pytest.raises(DeviceFingerprintConflict):
++        _batch_evidence(svc, third, evidence_event(payload={"vendor_class": "conflict"}))
++    assert _watermark(repo)["max_committed_ingest_sequence"] == 3
++    assert repo.connection.execute(
++        "SELECT COUNT(*) FROM device_fingerprint_evidence WHERE source_event_id=?",
++        (third["source_event_id"],),
++    ).fetchone()[0] == 0
++    repo.connection.execute(
++        "UPDATE device_fingerprint_evidence SET observed_at=? WHERE ingest_sequence=1",
++        (format_utc(NOW - timedelta(days=31)),),
++    )
++    deleted = repo.cleanup(now=NOW, evidence_retention_days=cfg.retention_days)
++    assert deleted["device_fingerprint_evidence"] == 1
++    assert _watermark(repo)["max_committed_ingest_sequence"] == 3
++    _batch_evidence(svc, third)
++    assert _watermark(repo)["max_committed_ingest_sequence"] == 4
++    repo.connection.execute(
++        "UPDATE device_fingerprint_storage_state SET last_ingest_sequence=?",
++        (MAX_INGEST_SEQUENCE - 1,),
++    )
++    with pytest.raises(DeviceFingerprintStorageLimit):
++        _batch_evidence(
++            svc,
++            evidence_event(source_event_id="55555555-5555-4555-8555-555555555555"),
++            evidence_event(source_event_id="66666666-6666-4666-8666-666666666666"),
++        )
++    assert _watermark(repo)["max_committed_ingest_sequence"] == MAX_INGEST_SEQUENCE - 1
++    assert repo.connection.execute("SELECT COUNT(*) FROM device_fingerprint_evidence").fetchone()[0] == 2
++    _batch_evidence(svc, evidence_event(source_event_id="55555555-5555-4555-8555-555555555555"))
++    assert _batch_evidence(svc, second).duplicate_noop == 1
++    with pytest.raises(DeviceFingerprintStorageLimit):
++        _batch_evidence(svc, evidence_event(source_event_id="66666666-6666-4666-8666-666666666666"))
++    assert _watermark(repo)["max_committed_ingest_sequence"] == MAX_INGEST_SEQUENCE
++    assert repo.connection.execute("SELECT COUNT(*) FROM device_fingerprint_evidence").fetchone()[0] == 3
++    repo.close()
++    reopened = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
++    reopened.initialize()
++    reopened.close()
++
++
++def test_explicit_v1_migration_preserves_rows_backup_and_bootstrap_order(tmp_path):
++    legacy, before = _representative_v1(tmp_path)
++    with pytest.raises(DeviceFingerprintMigrationRequired, match="migration is required"):
++        DeviceFingerprintRepository(str(legacy), max_db_bytes=67_108_864).initialize()
++    assert sqlite3.connect(legacy).execute("PRAGMA user_version").fetchone()[0] == 1
++    backup = tmp_path / "verified-v1-backup.sqlite3"
++    result = migrate_v1_to_v2(
++        str(legacy), writer_lock_path=str(tmp_path / "offline.lock"),
++        backup_path=str(backup),
++    )
++    assert result.assigned_rows == 3
++    assert result.bootstrap_rule_id == BOOTSTRAP_RULE_ID
++    assert result.source_path == str(legacy)
++    assert result.source_bytes > 0
++    assert result.source_identity
++    _generation(result.database_generation_id)
++    assert hashlib.sha256(backup.read_bytes()).hexdigest() == result.backup_sha256
++    assert len(backup.read_bytes()) == result.backup_bytes
++    preserved_backup = sqlite3.connect(backup)
++    DeviceFingerprintRepository.validate_v1_for_migration(preserved_backup)
++    assert preserved_backup.execute("PRAGMA user_version").fetchone()[0] == 1
++    preserved_backup.close()
++    repo = DeviceFingerprintRepository(str(legacy), max_db_bytes=67_108_864)
++    repo.initialize()
++    assert _watermark(repo) == {
++        "database_generation_id": result.database_generation_id,
++        "max_committed_ingest_sequence": 3,
++    }
++    for table in V1_EXPECTED_COLUMNS:
++        columns = ",".join(column[0] for column in V1_EXPECTED_COLUMNS[table])
++        after = [tuple(row) for row in repo.connection.execute(f"SELECT {columns} FROM {table} ORDER BY 1")]
++        assert after == before[table]
++    ordered = [tuple(row) for row in repo.connection.execute(
++        "SELECT ingested_at,0 AS family,evidence_id AS row_id,ingest_sequence FROM device_fingerprint_evidence "
++        "UNION ALL SELECT ingested_at,1,source_health_id,ingest_sequence "
++        "FROM device_fingerprint_source_health_events ORDER BY ingested_at,family,row_id"
++    )]
++    assert [row[3] for row in ordered] == [1, 2, 3]
++    # Bootstrap follows retained ingested_at, not the historical insert order.
++    assert repo.connection.execute(
++        "SELECT ingest_sequence FROM device_fingerprint_evidence WHERE source_event_id=?",
++        ("33333333-3333-4333-8333-333333333333",),
++    ).fetchone()[0] == 1
++    assert repo.connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
++    assert repo.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
++    repo.close()
++
++
++def test_empty_v1_migration_has_new_generation_and_zero_watermark(tmp_path):
++    legacy = tmp_path / "empty-v1.sqlite3"
++    connection = sqlite3.connect(legacy)
++    connection.executescript(_v1_sql())
++    connection.close()
++    result = migrate_v1_to_v2(
++        str(legacy), writer_lock_path=str(tmp_path / "offline.lock"),
++        backup_path=str(tmp_path / "empty-v1-backup.sqlite3"),
++    )
++    assert result.assigned_rows == 0
++    _generation(result.database_generation_id)
++    repo = DeviceFingerprintRepository(str(legacy), max_db_bytes=67_108_864)
++    repo.initialize()
++    assert _watermark(repo) == {
++        "database_generation_id": result.database_generation_id,
++        "max_committed_ingest_sequence": 0,
++    }
++    repo.close()
++
++
++def test_controlled_restore_recovery_rebaselines_both_families(tmp_path):
++    cfg, repo, svc = service(tmp_path)
++    _batch_evidence(svc, evidence_event())
++    _batch_health(svc, health_event())
++    _batch_evidence(svc, evidence_event(source_event_id="33333333-3333-4333-8333-333333333333"))
++    old_generation = _watermark(repo)["database_generation_id"]
++    repo.connection.execute(
++        "UPDATE device_fingerprint_evidence SET ingested_at='2026-09-14T11:59:59.000Z' "
++        "WHERE source_event_id='33333333-3333-4333-8333-333333333333'"
++    )
++    repo.close()
++    result = recover_database_generation(
++        cfg.db_path, writer_lock_path=cfg.writer_lock_path,
++        trigger="DATABASE_BACKUP_RESTORE",
++    )
++    assert result.assigned_rows == 3
++    assert result.database_generation_id != old_generation
++    _generation(result.database_generation_id)
++    repo.initialize()
++    assert _watermark(repo)["max_committed_ingest_sequence"] == 3
++    assert _watermark(repo)["database_generation_id"] == result.database_generation_id
++    ordered = [row[0] for row in repo.connection.execute(
++        "SELECT ingest_sequence FROM device_fingerprint_evidence "
++        "UNION ALL SELECT ingest_sequence FROM device_fingerprint_source_health_events "
++        "ORDER BY ingest_sequence"
++    )]
++    assert ordered == [1, 2, 3]
++    assert repo.connection.execute(
++        "SELECT ingest_sequence FROM device_fingerprint_evidence WHERE source_event_id=?",
++        ("33333333-3333-4333-8333-333333333333",),
++    ).fetchone()[0] == 1
++    assert repo.connection.execute(
++        "SELECT ingest_sequence FROM device_fingerprint_source_health_events"
++    ).fetchone()[0] == 3
++    repo.close()
++
++
++def test_failed_migration_rolls_back_to_untouched_v1(tmp_path, monkeypatch):
++    import app.device_fingerprint.storage_v2 as storage
++
++    legacy, before = _representative_v1(tmp_path)
++
++    def fail_verification(*_args):
++        raise DeviceFingerprintStorageCorrupt("Fingerprint migration validation failed")
++
++    monkeypatch.setattr(storage, "_verify_copy", fail_verification)
++    backup = tmp_path / "pre-migration-backup.sqlite3"
++    with pytest.raises(DeviceFingerprintStorageCorrupt):
++        migrate_v1_to_v2(
++            str(legacy), writer_lock_path=str(tmp_path / "offline.lock"),
++            backup_path=str(backup),
++        )
++    connection = sqlite3.connect(legacy)
++    DeviceFingerprintRepository.validate_v1_for_migration(connection)
++    assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
++    for table in V1_EXPECTED_COLUMNS:
++        assert [tuple(row) for row in connection.execute(f"SELECT * FROM {table} ORDER BY 1")] == before[table]
++    connection.close()
++    assert backup.is_file()
++
++
++def test_offline_migration_requires_writer_lock(tmp_path):
++    legacy, _before = _representative_v1(tmp_path)
++    lock_path = str(tmp_path / "offline.lock")
++    backup = tmp_path / "backup.sqlite3"
++    with writer_lock(lock_path):
++        with pytest.raises(DeviceFingerprintWriterUnavailable):
++            migrate_v1_to_v2(str(legacy), writer_lock_path=lock_path, backup_path=str(backup))
++    assert not backup.exists()
++    connection = sqlite3.connect(legacy)
++    assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
++    connection.close()
++
++
++def test_missing_singleton_and_newer_schema_fail_closed(tmp_path):
++    cfg, repo, _svc = service(tmp_path)
++    repo.close()
++    connection = sqlite3.connect(cfg.db_path)
++    connection.execute("DELETE FROM device_fingerprint_storage_state")
++    connection.commit()
++    connection.close()
++    with pytest.raises(DeviceFingerprintStorageCorrupt):
++        DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()
++    connection = sqlite3.connect(cfg.db_path)
++    connection.execute("PRAGMA user_version=3")
++    connection.commit()
++    connection.close()
++    with pytest.raises(DeviceFingerprintStorageCorrupt):
++        DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()
++
++
++@pytest.mark.parametrize("corruption", ["invalid_generation", "low_allocator", "cross_family_duplicate"])
++def test_corrupt_generation_or_sequence_fails_closed(tmp_path, corruption):
++    cfg, repo, svc = service(tmp_path)
++    _batch_evidence(svc, evidence_event())
++    _batch_health(svc, health_event())
++    repo.close()
++    connection = sqlite3.connect(cfg.db_path)
++    if corruption == "invalid_generation":
++        connection.execute("UPDATE device_fingerprint_storage_state SET database_generation_id=?", (str(uuid.uuid1()),))
++    elif corruption == "low_allocator":
++        connection.execute("UPDATE device_fingerprint_storage_state SET last_ingest_sequence=1")
++    else:
++        connection.execute("UPDATE device_fingerprint_source_health_events SET ingest_sequence=1")
++    connection.commit()
++    connection.close()
++    with pytest.raises(DeviceFingerprintStorageCorrupt):
++        DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()

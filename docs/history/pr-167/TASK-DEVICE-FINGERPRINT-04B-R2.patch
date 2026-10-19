@@ -1,0 +1,1767 @@
+diff --git a/app/device_fingerprint/origin_assessment.py b/app/device_fingerprint/origin_assessment.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cde0bcfce8cc6452383f02c3ff0f16545e31be28
+--- /dev/null
++++ b/app/device_fingerprint/origin_assessment.py
+@@ -0,0 +1,869 @@
++"""Pure R14 T-03 origin assessment over already materialized T-01 evidence."""
++
++from __future__ import annotations
++
++from collections.abc import Mapping
++from dataclasses import dataclass
++from typing import Any
++import uuid
++
++from .artifact_content import (
++    ArtifactContent, ArtifactRef, canonical_artifact_json, canonical_set,
++    make_artifact_content,
++)
++from .evidence_adapter_contracts import (
++    DIMENSIONS, make_evidence_adapter_contract_set, task01_contract_claim_eligible,
++)
++from .fe5_external_knowledge import evaluate_external_knowledge_freshness
++from .k4_ieee_import import match_k4_records
++from .knowledge_artifacts import match_k1_records
++from .knowledge_bundle import KnowledgeBundleCandidate, validate_knowledge_bundle_dependencies
++from .models import DeviceFingerprintValidationError
++from .p0f_semantics import adapt_tcp_syn_v2, match_request, parse_request_signature
++from .snapshot_service import EvidenceSnapshotMaterialization
++from .validation import parse_utc, validate_uuid
++
++ORIGINS = ("dhcp", "portal", "tcp", "tls", "quic", "mac_registry")
++_SOURCE_ORIGIN = {
++    "dhcp": "dhcp", "portal_headers": "portal", "tcp_syn": "tcp",
++    "tls_client": "tls", "quic_client": "quic",
++}
++_STATES = frozenset({
++    "resolved", "recognized_out_of_scope", "ambiguous", "conflicting",
++    "no_claim", "not_evaluable",
++})
++_STRENGTHS = frozenset({"strong", "supporting"})
++_DERIVATIONS = frozenset({
++    "declared", "deterministic_mapping", "fingerprint_match", "registry_mapping",
++})
++_TOP = frozenset({
++    "origin_assessment_contract_version", "evidence_snapshot_content",
++    "source_evaluability", "origin_group", "dimension_assessments",
++    "evidence_refs", "knowledge_refs", "explanation_codes",
++})
++_DIMENSION = frozenset({
++    "dimension_name", "internal_state", "selected_canonical_value_id",
++    "selected_out_of_scope_taxon_ref", "effective_claim_strength",
++    "claim_derivations", "candidate_set", "conflict_strength",
++    "same_origin_contradiction_records", "broad_unresolved_taxon_refs",
++    "knowledge_refs", "evidence_refs", "explanation_codes",
++})
++_CANDIDATE = frozenset({
++    "candidate_kind", "candidate_value_id", "out_of_scope_taxon_ref",
++    "claim_strength", "claim_derivation", "knowledge_refs", "evidence_refs",
++})
++_EVIDENCE_REF = frozenset({
++    "evidence_id", "payload_sha256", "feature_schema_version",
++    "adapter_contract_id", "adapter_contract_digest",
++})
++_KNOWLEDGE_REF = frozenset({
++    "knowledge_bundle_id", "knowledge_bundle_digest",
++    "canonical_knowledge_record_id", "knowledge_provenance_id",
++    "knowledge_provenance_digest", "rule_or_source_record_identity",
++})
++_CONTRADICTION = frozenset({
++    "dimension_name", "conflict_strength", "retained_candidate_key",
++    "incompatible_candidate_keys", "evidence_refs", "knowledge_refs",
++    "explanation_code",
++})
++_BROAD = frozenset({
++    "reference_kind", "canonical_taxon_or_source_ref", "evidence_refs",
++    "knowledge_refs", "explanation_code",
++})
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _shape(value: Any, fields: frozenset[str], label: str) -> dict[str, Any]:
++    if not isinstance(value, dict) or set(value) != fields:
++        _fail(f"Invalid {label} shape")
++    return value
++
++
++def _text(value: Any, label: str, *, nullable: bool = False) -> str | None:
++    if nullable and value is None:
++        return None
++    if not isinstance(value, str) or not value.strip():
++        _fail(f"Invalid {label}")
++    return value
++
++
++def _strings(value: Any, label: str) -> list[str]:
++    if not isinstance(value, list):
++        _fail(f"Invalid {label} SET")
++    return canonical_set([_text(row, label) for row in value], lambda row: row)
++
++
++def _reference(value: Any, kind: str, *, content: ArtifactContent | None = None) -> dict[str, str]:
++    reference = ArtifactRef.from_dict(value)
++    if not reference.artifact_id.startswith(f"{kind}:v1:sha256:"):
++        _fail(f"Invalid {kind} reference")
++    if content is not None:
++        reference.resolve(content, kind)
++    return reference.as_dict()
++
++
++def _ref(content: ArtifactContent) -> dict[str, str]:
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++def _unique(rows: list[Any]) -> list[Any]:
++    """Collapse identical runtime contributions before constructing strict SETs."""
++    return list({canonical_artifact_json(row): row for row in rows}.values())
++
++
++def _evidence_ref(raw: Any) -> dict[str, Any]:
++    row = dict(_shape(raw, _EVIDENCE_REF, "EvidenceRef"))
++    validate_uuid(row["evidence_id"])
++    if uuid.UUID(row["evidence_id"]).version != 4:
++        _fail("EvidenceRef requires UUIDv4")
++    if not isinstance(row["payload_sha256"], str) or len(row["payload_sha256"]) != 64 or any(
++            letter not in "0123456789abcdef" for letter in row["payload_sha256"]):
++        _fail("Invalid EvidenceRef payload digest")
++    _reference({"artifact_id": row["adapter_contract_id"],
++                "content_sha256": row["adapter_contract_digest"]}, "EvidenceAdapterContractSet")
++    if (type(row["feature_schema_version"]) is not int or
++            not 1 <= row["feature_schema_version"] <= 2147483647):
++        _fail("Invalid EvidenceRef schema version")
++    return row
++
++
++def _knowledge_ref(raw: Any) -> dict[str, str]:
++    row = dict(_shape(raw, _KNOWLEDGE_REF, "KnowledgeRef"))
++    _reference({"artifact_id": row["knowledge_bundle_id"],
++                "content_sha256": row["knowledge_bundle_digest"]}, "KnowledgeBundle")
++    _reference({"artifact_id": row["knowledge_provenance_id"],
++                "content_sha256": row["knowledge_provenance_digest"]}, "KnowledgeProvenanceManifest")
++    for field in ("canonical_knowledge_record_id", "rule_or_source_record_identity"):
++        _text(row[field], field)
++    return row
++
++
++def _evidence_set(raw: Any) -> list[dict[str, Any]]:
++    if not isinstance(raw, list):
++        _fail("Invalid EvidenceRef SET")
++    return canonical_set([_evidence_ref(row) for row in raw], lambda row: row["evidence_id"])
++
++
++def _knowledge_set(raw: Any) -> list[dict[str, str]]:
++    if not isinstance(raw, list):
++        _fail("Invalid KnowledgeRef SET")
++    return canonical_set([_knowledge_ref(row) for row in raw], lambda row: (
++        row["knowledge_provenance_id"], row["canonical_knowledge_record_id"],
++        row["rule_or_source_record_identity"],
++    ))
++
++
++def _candidate(raw: Any) -> dict[str, Any]:
++    row = dict(_shape(raw, _CANDIDATE, "CandidateEntry"))
++    kind = row["candidate_kind"]
++    if kind not in {"CANONICAL_VALUE", "OUT_OF_SCOPE_TAXON"}:
++        _fail("Invalid candidate kind")
++    value = _text(row["candidate_value_id"], "candidate value", nullable=True)
++    outside = _text(row["out_of_scope_taxon_ref"], "out-of-scope taxon", nullable=True)
++    if (kind == "CANONICAL_VALUE") != (value is not None) or (kind == "OUT_OF_SCOPE_TAXON") != (outside is not None):
++        _fail("Invalid candidate target")
++    if row["claim_strength"] not in _STRENGTHS or row["claim_derivation"] not in _DERIVATIONS:
++        _fail("Invalid candidate authority")
++    row["knowledge_refs"] = _knowledge_set(row["knowledge_refs"])
++    row["evidence_refs"] = _evidence_set(row["evidence_refs"])
++    return row
++
++
++def _candidate_set(raw: Any) -> list[dict[str, Any]]:
++    if not isinstance(raw, list):
++        _fail("Invalid candidate SET")
++    return canonical_set([_candidate(row) for row in raw], lambda row: (
++        row["candidate_kind"], row["candidate_value_id"] or "",
++        row["out_of_scope_taxon_ref"] or "", row["claim_strength"],
++        row["claim_derivation"],
++    ))
++
++
++def _contradiction(raw: Any, dimension: str) -> dict[str, Any]:
++    row = dict(_shape(raw, _CONTRADICTION, "SameOriginContradictionRecord"))
++    if row["dimension_name"] != dimension or row["conflict_strength"] not in _STRENGTHS:
++        _fail("Invalid contradiction dimension/strength")
++    _text(row["retained_candidate_key"], "retained candidate", nullable=True)
++    row["incompatible_candidate_keys"] = _strings(row["incompatible_candidate_keys"], "candidate key")
++    if not row["incompatible_candidate_keys"]:
++        _fail("Empty incompatible candidate keys")
++    row["evidence_refs"] = _evidence_set(row["evidence_refs"])
++    row["knowledge_refs"] = _knowledge_set(row["knowledge_refs"])
++    _text(row["explanation_code"], "contradiction explanation")
++    return row
++
++
++def _broad(raw: Any) -> dict[str, Any]:
++    row = dict(_shape(raw, _BROAD, "BroadUnresolvedRef"))
++    if row["reference_kind"] not in {"BROAD_TAXON", "UNMAPPED_TAXON"}:
++        _fail("Invalid broad/unmapped reference kind")
++    _text(row["canonical_taxon_or_source_ref"], "broad/unmapped taxon")
++    row["evidence_refs"] = _evidence_set(row["evidence_refs"])
++    row["knowledge_refs"] = _knowledge_set(row["knowledge_refs"])
++    _text(row["explanation_code"], "broad/unmapped explanation")
++    return row
++
++
++def _dimension(raw: Any, origin: str) -> dict[str, Any]:
++    row = dict(_shape(raw, _DIMENSION, "OriginDimensionAssessment"))
++    dimension = row["dimension_name"]
++    if dimension not in DIMENSIONS or row["internal_state"] not in _STATES:
++        _fail("Invalid origin dimension/state")
++    selected = _text(row["selected_canonical_value_id"], "selected value", nullable=True)
++    outside = _text(row["selected_out_of_scope_taxon_ref"], "selected outside taxon", nullable=True)
++    strength = row["effective_claim_strength"]
++    conflict = row["conflict_strength"]
++    if strength is not None and strength not in _STRENGTHS:
++        _fail("Invalid effective claim strength")
++    if conflict is not None and conflict not in _STRENGTHS:
++        _fail("Invalid conflict strength")
++    if row["internal_state"] == "resolved":
++        if selected is None or outside is not None or strength is None:
++            _fail("Invalid resolved dimension")
++    elif row["internal_state"] == "recognized_out_of_scope":
++        if outside is None or selected is not None or strength is None or dimension not in {"platform_family", "device_class"}:
++            _fail("Invalid out-of-scope dimension")
++    elif selected is not None or outside is not None or strength is not None:
++        _fail("Unselected dimension has a selected claim")
++    row["claim_derivations"] = _strings(row["claim_derivations"], "claim derivation")
++    if any(value not in _DERIVATIONS for value in row["claim_derivations"]):
++        _fail("Invalid claim derivation")
++    row["candidate_set"] = _candidate_set(row["candidate_set"])
++    contradictions = row["same_origin_contradiction_records"]
++    if not isinstance(contradictions, list):
++        _fail("Invalid contradiction SET")
++    row["same_origin_contradiction_records"] = canonical_set(
++        [_contradiction(value, dimension) for value in contradictions],
++        lambda value: (value["dimension_name"], value["conflict_strength"],
++                       value["retained_candidate_key"] or ""),
++    )
++    broad = row["broad_unresolved_taxon_refs"]
++    if not isinstance(broad, list):
++        _fail("Invalid broad/unresolved SET")
++    row["broad_unresolved_taxon_refs"] = canonical_set(
++        [_broad(value) for value in broad],
++        lambda value: (value["reference_kind"], value["canonical_taxon_or_source_ref"]),
++    )
++    row["knowledge_refs"] = _knowledge_set(row["knowledge_refs"])
++    row["evidence_refs"] = _evidence_set(row["evidence_refs"])
++    row["explanation_codes"] = _strings(row["explanation_codes"], "explanation code")
++    derivations = sorted({candidate["claim_derivation"] for candidate in row["candidate_set"]})
++    if row["claim_derivations"] != derivations:
++        _fail("Claim derivations do not match candidate set")
++    if row["internal_state"] in {"no_claim", "not_evaluable"}:
++        if row["candidate_set"] or conflict is not None or row["same_origin_contradiction_records"]:
++            _fail("Unclaimed dimension contains semantic claims")
++    else:
++        expected = _reduce_claims(dimension, row["candidate_set"], k1_ambiguous=origin == "dhcp")
++        for field in ("internal_state", "selected_canonical_value_id",
++                      "selected_out_of_scope_taxon_ref", "effective_claim_strength",
++                      "conflict_strength", "same_origin_contradiction_records"):
++            if row[field] != expected[field]:
++                _fail(f"Incoherent OriginDimensionAssessment {field}")
++    return row
++
++
++def _make_origin_assessment(
++    payload: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
++    source_evaluability: ArtifactContent,
++    evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
++    knowledge: KnowledgeBundleCandidate,
++) -> ArtifactContent:
++    """Validate C.3.30/§101 exact closed schemas and canonical total order."""
++    row = dict(_shape(payload, _TOP, "OriginAssessment"))
++    if type(row["origin_assessment_contract_version"]) is not int or row["origin_assessment_contract_version"] != 1:
++        _fail("Unsupported OriginAssessment version")
++    row["evidence_snapshot_content"] = _reference(
++        row["evidence_snapshot_content"], "EvidenceSnapshotContent", content=evidence_snapshot_content)
++    row["source_evaluability"] = _reference(
++        row["source_evaluability"], "SourceEvaluability", content=source_evaluability)
++    if source_evaluability.semantic_payload["evidence_snapshot_content"] != row["evidence_snapshot_content"]:
++        _fail("SourceEvaluability/snapshot identity mismatch")
++    if row["origin_group"] not in ORIGINS:
++        _fail("Invalid origin group")
++    dimensions = row["dimension_assessments"]
++    if not isinstance(dimensions, list):
++        _fail("Invalid dimension SET")
++    row["dimension_assessments"] = canonical_set([_dimension(value, row["origin_group"]) for value in dimensions],
++                                                 lambda value: value["dimension_name"])
++    if len(row["dimension_assessments"]) != len(DIMENSIONS) or {
++            value["dimension_name"] for value in row["dimension_assessments"]} != set(DIMENSIONS):
++        _fail("OriginAssessment requires exactly four dimensions")
++    row["evidence_refs"] = _evidence_set(row["evidence_refs"])
++    row["knowledge_refs"] = _knowledge_set(row["knowledge_refs"])
++    row["explanation_codes"] = _strings(row["explanation_codes"], "explanation code")
++    _validate_reference_lineage(row, evidence_snapshot_content=evidence_snapshot_content,
++                                evidence_adapter_contract_set=evidence_adapter_contract_set,
++                                knowledge_bundle=knowledge_bundle, knowledge=knowledge)
++    return make_artifact_content("OriginAssessment", row)
++
++
++def make_origin_assessment(
++    payload: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
++    source_evaluability: ArtifactContent,
++    evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
++    knowledge: KnowledgeBundleCandidate,
++) -> ArtifactContent:
++    """Construct a closed R14 assessment with typed malformed-input failures."""
++    try:
++        return _make_origin_assessment(
++            payload, evidence_snapshot_content=evidence_snapshot_content,
++            source_evaluability=source_evaluability,
++            evidence_adapter_contract_set=evidence_adapter_contract_set,
++            knowledge_bundle=knowledge_bundle, knowledge=knowledge)
++    except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
++        raise DeviceFingerprintValidationError("Malformed OriginAssessment") from exc
++
++
++def _validate_reference_lineage(
++    assessment: dict[str, Any], *, evidence_snapshot_content: ArtifactContent,
++    evidence_adapter_contract_set: ArtifactContent, knowledge_bundle: ArtifactContent,
++    knowledge: KnowledgeBundleCandidate,
++) -> None:
++    if (make_evidence_adapter_contract_set(evidence_adapter_contract_set.semantic_payload)
++            != evidence_adapter_contract_set):
++        _fail("Noncanonical adapter contract set")
++    if not validate_knowledge_bundle_dependencies(knowledge_bundle, knowledge):
++        _fail("Unresolved KnowledgeBundle")
++    descriptor_by_id = {row["evidence_id"]: row for row in
++                        evidence_snapshot_content.semantic_payload["evidence_descriptors"]}
++    allowed_slot = {"dhcp": "k1", "portal": "k3", "tcp": "k2b",
++                    "mac_registry": "k4", "tls": None, "quic": None}[assessment["origin_group"]]
++    record_by_key: dict[tuple[str, str, str], str] = {}
++    for slot in ("k1", "k2b", "k4"):
++        provenance = getattr(knowledge, f"{slot}_provenance")
++        for record in getattr(knowledge, f"{slot}_record_set").semantic_payload["records"]:
++            record_by_key[(provenance.artifact_id, record["canonical_record_id"],
++                           record["source_record_identity"])] = slot
++    for rule in knowledge.k3_portal_rule_set.semantic_payload["rules"]:
++        record_by_key[(knowledge.k3_provenance.artifact_id, rule["rule_id"], rule["rule_id"])] = "k3"
++
++    def check_evidence(reference: dict[str, Any]) -> None:
++        descriptor = descriptor_by_id.get(reference["evidence_id"])
++        if (descriptor is None or reference["payload_sha256"] != descriptor["payload_sha256"]
++                or reference["feature_schema_version"] != descriptor["feature_schema_version"]
++                or reference["adapter_contract_id"] != evidence_adapter_contract_set.artifact_id
++                or reference["adapter_contract_digest"] != evidence_adapter_contract_set.content_sha256
++                or _SOURCE_ORIGIN[descriptor["source_kind"]] != assessment["origin_group"]):
++            _fail("EvidenceRef does not resolve to exact origin/adapter lineage")
++
++    def check_knowledge(reference: dict[str, str]) -> None:
++        if allowed_slot is None:
++            _fail("No admitted semantic knowledge for this origin")
++        key = (reference["knowledge_provenance_id"], reference["canonical_knowledge_record_id"],
++               reference["rule_or_source_record_identity"])
++        if (reference["knowledge_bundle_id"] != knowledge_bundle.artifact_id
++                or reference["knowledge_bundle_digest"] != knowledge_bundle.content_sha256
++                or record_by_key.get(key) != allowed_slot):
++            _fail("KnowledgeRef does not resolve to exact origin/bundle lineage")
++        provenance = getattr(knowledge, f"{allowed_slot}_provenance")
++        if reference["knowledge_provenance_digest"] != provenance.content_sha256:
++            _fail("KnowledgeRef provenance digest mismatch")
++
++    def check_refs(value: dict[str, Any]) -> None:
++        for reference in value["evidence_refs"]:
++            check_evidence(reference)
++        for reference in value["knowledge_refs"]:
++            check_knowledge(reference)
++
++    check_refs(assessment)
++    for dimension in assessment["dimension_assessments"]:
++        check_refs(dimension)
++        for candidate in dimension["candidate_set"]:
++            check_refs(candidate)
++        for contradiction in dimension["same_origin_contradiction_records"]:
++            check_refs(contradiction)
++        for broad in dimension["broad_unresolved_taxon_refs"]:
++            check_refs(broad)
++
++
++def _cap(*strengths: str) -> str:
++    return "supporting" if "supporting" in strengths else "strong"
++
++
++def _candidate_key(row: dict[str, Any]) -> str:
++    return canonical_artifact_json([
++        row["candidate_kind"], row["candidate_value_id"], row["out_of_scope_taxon_ref"],
++    ]).decode("utf-8")
++
++
++def _task_adapter_compatible(adapter: dict[str, Any], descriptor: dict[str, Any]) -> bool:
++    """Check the row-wide F-F1 contract before invoking any semantic matcher."""
++    if (adapter["adapter_kind"] != "TASK01_EVIDENCE"
++            or adapter["source_kind"] != descriptor["source_kind"]
++            or adapter["feature_schema_version"] != descriptor["feature_schema_version"]
++            or descriptor["source_subtype"] not in adapter["supported_source_subtypes"]
++            or descriptor["quality_state"] not in {"valid", "partial", "degraded"}):
++        return False
++    for field, constraint in (("extractor_name", "extractor_name_constraints"),
++                              ("extractor_version", "extractor_version_constraints"),
++                              ("rule_version", "rule_version_constraints")):
++        allowed = adapter[constraint]
++        if allowed:
++            if descriptor[field] not in allowed:
++                return False
++        elif field == "rule_version" and descriptor[field] is not None:
++            return False
++    return True
++
++
++def _merge_contributions(
++    rows: list[tuple[str, str, dict[str, Any]]], *, broad: bool = False,
++) -> list[dict[str, Any]]:
++    """Merge exact post-evaluation semantic atoms; keep canonical provenance unions."""
++    merged: dict[tuple[str, ...], dict[str, Any]] = {}
++    for projection, dimension, row in rows:
++        if broad:
++            key = (projection, dimension, row["reference_kind"],
++                   row["canonical_taxon_or_source_ref"], row["explanation_code"])
++        else:
++            key = (projection, dimension, row["candidate_kind"],
++                   row["candidate_value_id"] or "", row["out_of_scope_taxon_ref"] or "",
++                   row["claim_strength"], row["claim_derivation"])
++        if key not in merged:
++            merged[key] = {**row, "evidence_refs": [], "knowledge_refs": []}
++        target = merged[key]
++        target["evidence_refs"].extend(row["evidence_refs"])
++        target["knowledge_refs"].extend(row["knowledge_refs"])
++    for row in merged.values():
++        row["evidence_refs"] = _evidence_set(_unique(row["evidence_refs"]))
++        row["knowledge_refs"] = _knowledge_set(_unique(row["knowledge_refs"]))
++    return list(merged.values())
++
++
++def _reduce_claims(
++    dimension: str, candidates: list[dict[str, Any]], *,
++    broad: list[dict[str, Any]] = (), explanations: list[str] = (),
++    k1_ambiguous: bool = False, not_evaluable: bool = False,
++) -> dict[str, Any]:
++    """Apply §102-104 without row counts, arrival order, or derivation priority."""
++    candidates = _candidate_set(_unique(candidates))
++    broad = canonical_set(list(broad), lambda row: (
++        row["reference_kind"], row["canonical_taxon_or_source_ref"]))
++    strong = [row for row in candidates if row["claim_strength"] == "strong"]
++    supporting = [row for row in candidates if row["claim_strength"] == "supporting"]
++    selected: dict[str, Any] | None = None
++    contradictions: list[dict[str, Any]] = []
++    state = "not_evaluable" if not_evaluable else "no_claim"
++    conflict_strength = None
++    groups = strong if strong else supporting
++    distinct = {_candidate_key(row) for row in groups}
++    if groups and k1_ambiguous and len(distinct) > 1:
++        per_observation: dict[str, set[str]] = {}
++        for candidate in groups:
++            for evidence_ref in candidate["evidence_refs"]:
++                per_observation.setdefault(evidence_ref["evidence_id"], set()).add(
++                    _candidate_key(candidate))
++        if per_observation and set.intersection(*per_observation.values()):
++            state = "ambiguous"
++        else:
++            state = "conflicting"
++            conflict_strength = "strong" if strong else "supporting"
++            contradictions.append({
++                "dimension_name": dimension, "conflict_strength": conflict_strength,
++                "retained_candidate_key": None,
++                "incompatible_candidate_keys": sorted(distinct),
++                "evidence_refs": _evidence_set(_unique([
++                    ref for row in groups for ref in row["evidence_refs"]])),
++                "knowledge_refs": _knowledge_set(_unique([
++                    ref for row in groups for ref in row["knowledge_refs"]])),
++                "explanation_code": "same_origin_incompatible_claims",
++            })
++    elif len(distinct) > 1:
++        state = "conflicting"
++        conflict_strength = "strong" if strong else "supporting"
++        contradictions.append({
++            "dimension_name": dimension, "conflict_strength": conflict_strength,
++            "retained_candidate_key": None,
++            "incompatible_candidate_keys": sorted(distinct),
++            "evidence_refs": _evidence_set(_unique([ref for row in groups for ref in row["evidence_refs"]])),
++            "knowledge_refs": _knowledge_set(_unique([ref for row in groups for ref in row["knowledge_refs"]])),
++            "explanation_code": "same_origin_incompatible_claims",
++        })
++    elif groups:
++        selected = groups[0]
++        state = "resolved" if selected["candidate_kind"] == "CANONICAL_VALUE" else "recognized_out_of_scope"
++        if strong:
++            incompatible = [row for row in supporting if _candidate_key(row) != _candidate_key(selected)]
++            if incompatible:
++                conflict_strength = "supporting"
++                contradictions.append({
++                    "dimension_name": dimension, "conflict_strength": "supporting",
++                    "retained_candidate_key": _candidate_key(selected),
++                    "incompatible_candidate_keys": sorted({_candidate_key(row) for row in incompatible}),
++                    "evidence_refs": _evidence_set(_unique([
++                        ref for row in [selected, *incompatible] for ref in row["evidence_refs"]])),
++                    "knowledge_refs": _knowledge_set(_unique([
++                        ref for row in [selected, *incompatible] for ref in row["knowledge_refs"]])),
++                    "explanation_code": "same_origin_supporting_contradiction",
++                })
++    reasons = list(explanations)
++    if state in {"ambiguous", "conflicting"}:
++        reasons.append(f"same_origin_{state}")
++    if contradictions:
++        reasons.extend(row["explanation_code"] for row in contradictions)
++    return {
++        "dimension_name": dimension, "internal_state": state,
++        "selected_canonical_value_id": selected["candidate_value_id"] if selected else None,
++        "selected_out_of_scope_taxon_ref": selected["out_of_scope_taxon_ref"] if selected else None,
++        "effective_claim_strength": selected["claim_strength"] if selected else None,
++        "claim_derivations": _strings(list({row["claim_derivation"] for row in candidates}), "derivation")
++        if candidates else [],
++        "candidate_set": candidates, "conflict_strength": conflict_strength,
++        "same_origin_contradiction_records": contradictions,
++        "broad_unresolved_taxon_refs": broad,
++        "knowledge_refs": _knowledge_set(_unique([ref for row in candidates for ref in row["knowledge_refs"]])),
++        "evidence_refs": _evidence_set(_unique([ref for row in candidates for ref in row["evidence_refs"]])),
++        "explanation_codes": _strings(list(set(reasons)), "explanation"),
++    }
++
++
++@dataclass(frozen=True, slots=True)
++class OriginAssessmentInputs:
++    """All dependency objects are supplied in memory; no resolver is used at runtime."""
++
++    evidence_snapshot_content: ArtifactContent
++    materialization: EvidenceSnapshotMaterialization
++    source_evaluability: ArtifactContent
++    evidence_adapter_contract_set: ArtifactContent
++    knowledge_bundle: ArtifactContent
++    knowledge: KnowledgeBundleCandidate
++    knowledge_evaluation_at_utc: str
++
++
++class DeviceFingerprintOriginAssessmentBuilder:
++    """Build six isolated origin artifacts from one exact in-memory lineage."""
++
++    def __init__(self, inputs: OriginAssessmentInputs) -> None:
++        if not isinstance(inputs, OriginAssessmentInputs):
++            _fail("Invalid OriginAssessment inputs")
++        self._inputs = inputs
++        snapshot = inputs.evidence_snapshot_content
++        source = inputs.source_evaluability
++        if snapshot.artifact_type != "EvidenceSnapshotContent" or source.artifact_type != "SourceEvaluability":
++            _fail("Invalid snapshot/evaluability artifacts")
++        snap = snapshot.semantic_payload
++        if source.semantic_payload.get("evidence_snapshot_content") != _ref(snapshot):
++            _fail("SourceEvaluability/snapshot mismatch")
++        if not isinstance(inputs.materialization, EvidenceSnapshotMaterialization):
++            _fail("Invalid materialization")
++        inputs.materialization.evidence_snapshot_content.resolve(snapshot, "EvidenceSnapshotContent")
++        if (make_evidence_adapter_contract_set(inputs.evidence_adapter_contract_set.semantic_payload)
++                != inputs.evidence_adapter_contract_set):
++            _fail("Noncanonical adapter contract set")
++        if not validate_knowledge_bundle_dependencies(inputs.knowledge_bundle, inputs.knowledge):
++            _fail("Invalid KnowledgeBundle closure")
++        parse_utc(inputs.knowledge_evaluation_at_utc)
++        descriptors = {row["evidence_id"]: row for row in snap["evidence_descriptors"]}
++        materialized: dict[str, Mapping[str, Any]] = {}
++        for entry in inputs.materialization.ordered_entries:
++            if not isinstance(entry.descriptor, Mapping) or not isinstance(entry.normalized_payload, Mapping):
++                _fail("Invalid materialized entry")
++            identifier = entry.descriptor.get("evidence_id")
++            if identifier in materialized or descriptors.get(identifier) != dict(entry.descriptor):
++                _fail("Materialization descriptor mismatch")
++            materialized[identifier] = entry.normalized_payload
++        self._descriptors = descriptors
++        self._materialized = materialized
++        self._entries = inputs.evidence_adapter_contract_set.semantic_payload["adapter_entries"]
++        self._knowledge_freshness: dict[tuple[str, str], dict[str, Any]] = {}
++        for slot in ("k1", "k2b", "k4"):
++            for dimension in DIMENSIONS:
++                result = evaluate_external_knowledge_freshness(
++                    getattr(inputs.knowledge, f"{slot}_provenance"),
++                    getattr(inputs.knowledge, f"{slot}_freshness_policy"),
++                    knowledge_evaluation_at_utc=inputs.knowledge_evaluation_at_utc,
++                    dimension_name=dimension)
++                if result["failure_code"] == "negative_knowledge_age":
++                    _fail("Negative knowledge age")
++                self._knowledge_freshness[(slot, dimension)] = result
++
++    def _knowledge_ref(self, slot: str, record_id: str, source_id: str) -> dict[str, str]:
++        provenance = getattr(self._inputs.knowledge, f"{slot}_provenance")
++        bundle = self._inputs.knowledge_bundle
++        return {
++            "knowledge_bundle_id": bundle.artifact_id,
++            "knowledge_bundle_digest": bundle.content_sha256,
++            "canonical_knowledge_record_id": record_id,
++            "knowledge_provenance_id": provenance.artifact_id,
++            "knowledge_provenance_digest": provenance.content_sha256,
++            "rule_or_source_record_identity": source_id,
++        }
++
++    def _evidence_ref(self, descriptor: dict[str, Any]) -> dict[str, Any]:
++        contract = self._inputs.evidence_adapter_contract_set
++        return {
++            "evidence_id": descriptor["evidence_id"],
++            "payload_sha256": descriptor["payload_sha256"],
++            "feature_schema_version": descriptor["feature_schema_version"],
++            "adapter_contract_id": contract.artifact_id,
++            "adapter_contract_digest": contract.content_sha256,
++        }
++
++    def _claim(self, outcome: dict[str, Any], *, adapter: dict[str, Any],
++               slot: str, record_id: str, source_id: str,
++               evidence: dict[str, Any] | None, quality: str = "valid",
++               derivation: str | None = None) -> dict[str, Any] | None:
++        dimension = outcome["dimension_name"]
++        freshness = self._knowledge_freshness[(slot, dimension)] if slot != "k3" else None
++        if freshness is not None and not freshness["claim_eligible"]:
++            return None
++        kind = outcome["outcome_kind"]
++        if kind not in {"CANONICAL_VALUE", "RECOGNIZED_OUT_OF_SCOPE"}:
++            return None
++        if kind == "RECOGNIZED_OUT_OF_SCOPE" and dimension not in {"platform_family", "device_class"}:
++            return None
++        strength = _cap(outcome["base_claim_strength"], adapter["base_claim_strength_ceiling"])
++        if quality == "partial" or (freshness is not None and freshness["claim_strength_cap"] == "supporting"):
++            strength = "supporting"
++        knowledge_ref = self._knowledge_ref(slot, record_id, source_id)
++        return {
++            "candidate_kind": "CANONICAL_VALUE" if kind == "CANONICAL_VALUE" else "OUT_OF_SCOPE_TAXON",
++            "candidate_value_id": outcome.get("canonical_target_id") if kind == "CANONICAL_VALUE" else None,
++            "out_of_scope_taxon_ref": (outcome.get("out_of_scope_taxon_ref") or outcome.get("outcome_id_or_ref"))
++            if kind == "RECOGNIZED_OUT_OF_SCOPE" else None,
++            "claim_strength": strength,
++            "claim_derivation": derivation or adapter["claim_derivation"],
++            "knowledge_refs": [knowledge_ref],
++            "evidence_refs": [evidence] if evidence is not None else [],
++        }
++
++    def _task_rows(self, origin: str) -> tuple[list[tuple[dict[str, Any], Mapping[str, Any] | None,
++                                                  dict[str, Any] | None]], list[str]]:
++        rows = []
++        explanations = []
++        for descriptor in self._inputs.evidence_snapshot_content.semantic_payload["evidence_descriptors"]:
++            if _SOURCE_ORIGIN[descriptor["source_kind"]] != origin:
++                continue
++            adapter = next((entry for entry in self._entries if entry["adapter_kind"] == "TASK01_EVIDENCE"
++                            and entry["source_kind"] == descriptor["source_kind"]
++                            and entry["feature_schema_version"] == descriptor["feature_schema_version"]), None)
++            if adapter is None:
++                explanations.append("unsupported_evidence_contract")
++            rows.append((descriptor, self._materialized.get(descriptor["evidence_id"]), adapter))
++        return rows, explanations
++
++    def build(self, origin: str) -> ArtifactContent:
++        if origin not in ORIGINS:
++            _fail("Unknown origin")
++        inputs = self._inputs
++        candidates: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
++            dimension: [] for dimension in DIMENSIONS}
++        broad: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
++            dimension: [] for dimension in DIMENSIONS}
++        explanations: list[str] = []
++        evidence_refs: list[dict[str, Any]] = []
++        knowledge_refs: list[dict[str, str]] = []
++        if origin == "mac_registry":
++            adapter = next(entry for entry in self._entries if entry["adapter_kind"] == "MAC_REGISTRY")
++            freshness = self._knowledge_freshness[("k4", "manufacturer_family")]
++            if freshness["required_explanation_code"]:
++                explanations.append(freshness["required_explanation_code"])
++            if freshness["claim_eligible"]:
++                mac = inputs.evidence_snapshot_content.semantic_payload["observed_mac"].lower()
++                matched = match_k4_records(inputs.knowledge.k4_record_set, mac)
++                if not matched:
++                    explanations.append("no_ieee_assignment_claim")
++                for record in matched:
++                    knowledge_refs.append(self._knowledge_ref(
++                        "k4", record["canonical_record_id"], record["source_record_identity"]))
++                    mapping = record["manufacturer_mapping"]
++                    if mapping is None:
++                        explanations.append("mac_assignment_org_not_manufacturer")
++                        continue
++                    outcome = {"dimension_name": "manufacturer_family", "outcome_kind": "CANONICAL_VALUE",
++                               "canonical_target_id": mapping["manufacturer_id"],
++                               "base_claim_strength": mapping["base_claim_strength"]}
++                    claim = self._claim(outcome, adapter=adapter, slot="k4",
++                                        record_id=record["canonical_record_id"],
++                                        source_id=record["source_record_identity"], evidence=None)
++                    if claim:
++                        candidates["manufacturer_family"].append((
++                            adapter["semantic_projection_id"], "manufacturer_family", claim))
++        else:
++            rows, row_explanations = self._task_rows(origin)
++            explanations.extend(row_explanations)
++            tcp_disabled = origin == "tcp" and inputs.evidence_snapshot_content.semantic_payload[
++                "origin_runtime_admission"]["tcp_state"] != "ENABLED"
++            if tcp_disabled:
++                explanations.append("origin_runtime_disabled")
++            for descriptor, payload, adapter in rows:
++                source_entry = next((entry for entry in inputs.source_evaluability.semantic_payload["source_entries"]
++                                     if entry["binding_epoch_id"] == descriptor["binding_epoch_id"]), None)
++                if source_entry is None:
++                    _fail("Evidence lacks exact SourceEvaluability binding epoch")
++                observed = parse_utc(descriptor["observed_at"])
++                interval = next((interval for interval in source_entry["coverage_intervals"]
++                                 if parse_utc(interval["start_utc"]) <= observed < parse_utc(interval["end_utc"])), None)
++                if interval is None:
++                    _fail("Evidence lies outside evaluability partition")
++                if interval["coverage_class"] != "covered_available":
++                    explanations.append("evidence_present_during_" + interval["coverage_class"])
++                eref = self._evidence_ref(descriptor)
++                evidence_refs.append(eref)
++                if adapter is None:
++                    continue
++                if not _task_adapter_compatible(adapter, descriptor):
++                    explanations.append("unsupported_evidence_contract")
++                    continue
++                if tcp_disabled:
++                    continue
++                if payload is None:
++                    explanations.append("unsupported_evidence_contract")
++                    continue
++                if descriptor["quality_state"] == "degraded":
++                    explanations.append("degraded_evidence_no_claim")
++                    continue
++                if adapter["legacy_current_role"] == "LEGACY_NON_FUSION":
++                    explanations.append("legacy_tcp_schema_insufficient_for_exact_k2a_contract")
++                    continue
++                if adapter["quality_valid_behavior"].startswith("AUDIT_ONLY_"):
++                    explanations.append("ja4_no_semantic_claim")
++                    continue
++                if origin == "dhcp":
++                    records = match_k1_records(inputs.knowledge.k1_record_set, dict(payload))
++                    if not records:
++                        explanations.append("k1_empty_candidate_set")
++                    for record in records:
++                        kref = self._knowledge_ref("k1", record["canonical_record_id"], record["source_record_identity"])
++                        knowledge_refs.append(kref)
++                        for outcome in record["candidate_taxonomy_refs"]:
++                            dimension = outcome["dimension_name"]
++                            if not task01_contract_claim_eligible(
++                                    adapter, source_kind=descriptor["source_kind"],
++                                    feature_schema_version=descriptor["feature_schema_version"],
++                                    source_subtype=descriptor["source_subtype"],
++                                    extractor_name=descriptor["extractor_name"],
++                                    extractor_version=descriptor["extractor_version"],
++                                    rule_version=descriptor["rule_version"],
++                                    quality_state=descriptor["quality_state"],
++                                    normalized_payload=dict(payload), dimension_name=dimension):
++                                continue
++                            freshness = self._knowledge_freshness[("k1", dimension)]
++                            if freshness["required_explanation_code"]:
++                                explanations.append(freshness["required_explanation_code"])
++                            if not freshness["claim_eligible"]:
++                                continue
++                            if outcome["outcome_kind"] in {"BROAD_UNRESOLVED", "UNMAPPED"}:
++                                broad[dimension].append((adapter["semantic_projection_id"], dimension, {
++                                    "reference_kind": "BROAD_TAXON" if outcome["outcome_kind"] == "BROAD_UNRESOLVED"
++                                    else "UNMAPPED_TAXON",
++                                    "canonical_taxon_or_source_ref": outcome["broad_taxon_ref"]
++                                    if outcome["outcome_kind"] == "BROAD_UNRESOLVED"
++                                    else record["source_record_identity"],
++                                    "evidence_refs": [eref], "knowledge_refs": [kref],
++                                    "explanation_code": "k1_broad_unresolved" if outcome["outcome_kind"] == "BROAD_UNRESOLVED"
++                                    else "k1_unmapped_taxon",
++                                }))
++                                continue
++                            claim = self._claim(outcome, adapter=adapter, slot="k1",
++                                                record_id=record["canonical_record_id"],
++                                                source_id=record["source_record_identity"], evidence=eref,
++                                                quality=descriptor["quality_state"])
++                            if claim:
++                                candidates[dimension].append((adapter["semantic_projection_id"], dimension, claim))
++                elif origin == "portal":
++                    from .k3_portal_rules import evaluate_k3_rules
++                    portal_result = evaluate_k3_rules(
++                        inputs.knowledge.k3_portal_rule_set,
++                        descriptor["feature_schema_version"], payload)
++                    matched_ids = set(portal_result["matched_rule_ids"])
++                    matches = [rule for rule in inputs.knowledge.k3_portal_rule_set.semantic_payload["rules"]
++                               if rule["rule_id"] in matched_ids]
++                    for rule in matches:
++                        dimension = rule["dimension_name"]
++                        if not task01_contract_claim_eligible(
++                                adapter, source_kind=descriptor["source_kind"],
++                                feature_schema_version=descriptor["feature_schema_version"],
++                                source_subtype=descriptor["source_subtype"],
++                                extractor_name=descriptor["extractor_name"],
++                                extractor_version=descriptor["extractor_version"],
++                                rule_version=descriptor["rule_version"],
++                                quality_state=descriptor["quality_state"],
++                                normalized_payload=dict(payload), dimension_name=dimension):
++                            continue
++                        kref = self._knowledge_ref("k3", rule["rule_id"], rule["rule_id"])
++                        knowledge_refs.append(kref)
++                        if rule["outcome_kind"] == "BROAD_UNRESOLVED":
++                            broad[dimension].append((adapter["semantic_projection_id"], dimension, {
++                                "reference_kind": "BROAD_TAXON",
++                                "canonical_taxon_or_source_ref": rule["outcome_id_or_ref"],
++                                "evidence_refs": [eref], "knowledge_refs": [kref],
++                                "explanation_code": rule["explanation_code"],
++                            }))
++                        elif rule["outcome_kind"] in {"CANONICAL_VALUE", "RECOGNIZED_OUT_OF_SCOPE"}:
++                            outcome = {"dimension_name": dimension, "outcome_kind": rule["outcome_kind"],
++                                       "canonical_target_id": rule["outcome_id_or_ref"],
++                                       "outcome_id_or_ref": rule["outcome_id_or_ref"],
++                                       "base_claim_strength": rule["base_claim_strength"]}
++                            claim = self._claim(outcome, adapter=adapter, slot="k3",
++                                                record_id=rule["rule_id"], source_id=rule["rule_id"],
++                                                evidence=eref, quality=descriptor["quality_state"],
++                                                derivation=rule["claim_derivation"])
++                            if claim:
++                                candidates[dimension].append((adapter["semantic_projection_id"], dimension, claim))
++                        explanations.append(rule["explanation_code"])
++                elif origin == "tcp":
++                    if not task01_contract_claim_eligible(
++                            adapter, source_kind=descriptor["source_kind"],
++                            feature_schema_version=descriptor["feature_schema_version"],
++                            source_subtype=descriptor["source_subtype"],
++                            extractor_name=descriptor["extractor_name"],
++                            extractor_version=descriptor["extractor_version"],
++                            rule_version=descriptor["rule_version"],
++                            quality_state=descriptor["quality_state"],
++                            normalized_payload=dict(payload), dimension_name="platform_family"):
++                        continue
++                    runtime = adapt_tcp_syn_v2(payload)
++                    records = inputs.knowledge.k2b_record_set.semantic_payload["records"]
++                    signatures = [parse_request_signature(record["canonical_match_rule"],
++                                    signature_id=record["canonical_record_id"])
++                                  for record in records]
++                    matched = match_request(runtime, signatures)
++                    if matched.status != "MATCH":
++                        explanations.append("k2a_no_match")
++                        continue
++                    record = next(record for record in records if record["canonical_record_id"] == matched.signature_id)
++                    for outcome in record["dimension_claims"]:
++                        freshness = self._knowledge_freshness[("k2b", outcome["dimension_name"])]
++                        if freshness["required_explanation_code"]:
++                            explanations.append(freshness["required_explanation_code"])
++                        claim = self._claim(outcome, adapter=adapter, slot="k2b",
++                                            record_id=record["canonical_record_id"],
++                                            source_id=record["source_record_identity"], evidence=eref,
++                                            quality=descriptor["quality_state"])
++                        if claim:
++                            candidates[outcome["dimension_name"]].append((
++                                adapter["semantic_projection_id"], outcome["dimension_name"], claim))
++        source_entries = [entry for entry in inputs.source_evaluability.semantic_payload["source_entries"]
++                          if entry["origin_group"] == origin]
++        coverage_not_evaluable = bool(source_entries) and all(
++            entry["aggregate_evaluability_state"] == "not_evaluable" for entry in source_entries)
++        dimensions = [_reduce_claims(
++            dimension, _merge_contributions(candidates[dimension]),
++            broad=_merge_contributions(broad[dimension], broad=True), explanations=explanations,
++            k1_ambiguous=origin == "dhcp",
++            not_evaluable=(origin != "mac_registry" and not rows and coverage_not_evaluable),
++        ) for dimension in DIMENSIONS]
++        knowledge_refs.extend(ref for dimension in dimensions for ref in dimension["knowledge_refs"])
++        payload = {
++            "origin_assessment_contract_version": 1,
++            "evidence_snapshot_content": _ref(inputs.evidence_snapshot_content),
++            "source_evaluability": _ref(inputs.source_evaluability),
++            "origin_group": origin,
++            "dimension_assessments": dimensions,
++            "evidence_refs": _evidence_set(_unique(evidence_refs)),
++            "knowledge_refs": _knowledge_set(_unique(knowledge_refs)),
++            "explanation_codes": _strings(list(set(explanations)), "explanation"),
++        }
++        return make_origin_assessment(payload, evidence_snapshot_content=inputs.evidence_snapshot_content,
++                                      source_evaluability=inputs.source_evaluability,
++                                      evidence_adapter_contract_set=inputs.evidence_adapter_contract_set,
++                                      knowledge_bundle=inputs.knowledge_bundle,
++                                      knowledge=inputs.knowledge)
++
++    def build_all(self) -> tuple[ArtifactContent, ...]:
++        return tuple(self.build(origin) for origin in ORIGINS)
+diff --git a/tests/device_fingerprint_task04_t03/__init__.py b/tests/device_fingerprint_task04_t03/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..92da61c02c328172cb6bfca6fc3ed5cbb69d2797
+--- /dev/null
++++ b/tests/device_fingerprint_task04_t03/__init__.py
+@@ -0,0 +1 @@
++"""Focused R14 T-03 origin-assessment tests."""
+diff --git a/tests/device_fingerprint_task04_t03/test_origin_assessment.py b/tests/device_fingerprint_task04_t03/test_origin_assessment.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..68787ce490f5b32b752d3fa3280f49faa604abb4
+--- /dev/null
++++ b/tests/device_fingerprint_task04_t03/test_origin_assessment.py
+@@ -0,0 +1,879 @@
++"""Exact OriginAssessment shape, pure lineage, and conservative origin semantics."""
++
++from __future__ import annotations
++
++from dataclasses import fields, replace
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef, make_artifact_content
++from app.device_fingerprint.binding_contracts import (
++    make_binding_clock_policy, make_evidence_source_binding_timeline,
++)
++from app.device_fingerprint.evidence_adapter_contracts import (
++    DIMENSIONS, build_initial_evidence_adapter_contract_set_v1,
++    make_evidence_adapter_contract_set, task01_contract_claim_eligible,
++)
++from app.device_fingerprint.foundation_admission_artifacts import make_origin_runtime_admission
++from app.device_fingerprint.k3_portal_rules import build_k3_portal_rule_set_v1
++from app.device_fingerprint.knowledge_artifacts import make_canonical_k4_record_set
++from app.device_fingerprint.knowledge_artifacts import make_canonical_k1_record_set
++from app.device_fingerprint.snapshot_service import (
++    EvidenceSnapshotMaterialization, MaterializedEvidenceEntry,
++)
++from app.device_fingerprint.knowledge_bundle import build_initial_knowledge_bundle_v1
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.portal_schemas import PORTAL_HEADER_V2_KEYS
++from app.device_fingerprint.origin_assessment import (
++    DeviceFingerprintOriginAssessmentBuilder, OriginAssessmentInputs,
++    _merge_contributions, _reduce_claims, make_origin_assessment,
++)
++from app.device_fingerprint.runtime_profile_artifacts import make_foundation_runtime_profile
++from app.device_fingerprint.source_evaluability import DeviceFingerprintSourceEvaluabilityBuilder
++from tests.device_fingerprint import SITE
++from tests.device_fingerprint_fe7.test_knowledge_bundle import candidate
++from tests.device_fingerprint_task04_t01.test_snapshot_service import MAC, START, END, aid, context, evidence
++from research.device_fingerprint_fe1.fixtures import build_k1_fixture_definitions
++from tests.device_fingerprint.test_network_schemas import quic, tcp_v2, tls
++from tests.device_fingerprint_task04_t01.test_snapshot_service import health
++
++
++def _ref(content):
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++def _inputs(*, evidence_rows=(), health_rows=(), knowledge_time="2026-09-22T22:30:34.464Z",
++            origin="dhcp", mac=MAC, tcp_disabled=False):
++    ctx = context(evidence_rows, health_rows)
++    if origin != "dhcp":
++        source = {"portal": "portal_headers", "tcp": "tcp_syn", "tls": "tls_client",
++                  "quic": "quic_client"}[origin]
++        producer = "portal-zefer-01" if origin == "portal" else "sensor-zefer-01"
++        capture = "zefer-portal-http-01" if origin == "portal" else "zefer-span-01"
++        emitter = next(content for content in ctx.contents.values()
++                       if content.artifact_type == "SourceHealthEmitterContract"
++                       and source in content.semantic_payload["source_kinds"])
++        epoch = {
++            "binding_epoch_id": "P", "site_id": SITE, "origin_group": origin,
++            "source_kind": source, "capture_source_id": capture, "producer_id": producer,
++            "source_health_emitter_contract": _ref(emitter),
++            "effective_from_utc": "2026-09-15T11:00:00.000Z", "effective_to_utc": None,
++        }
++        timeline = make_evidence_source_binding_timeline({
++            "binding_timeline_contract_version": 1, "binding_epochs": [epoch]}, [emitter])
++        clock_ref = ctx.profile.semantic_payload["binding_clock_policy"]
++        clock_payload = ctx.contents[clock_ref["artifact_id"]].semantic_payload
++        if producer not in {row["producer_id"] for row in clock_payload["producer_clock_domains"]}:
++            clock_payload["producer_clock_domains"].append({
++                "clock_domain_id": "portal-clock", "producer_id": producer})
++        clock = make_binding_clock_policy(clock_payload)
++        ctx.contents[timeline.artifact_id] = timeline
++        ctx.contents[clock.artifact_id] = clock
++        profile_payload = ctx.profile.semantic_payload
++        profile_payload.update(evidence_source_binding_timeline=_ref(timeline), binding_clock_policy=_ref(clock))
++        ctx.profile = make_foundation_runtime_profile(profile_payload)
++        ctx.service._profile = ctx.profile
++    if tcp_disabled:
++        disabled = make_origin_runtime_admission({
++            "origin_runtime_admission_contract_version": 1, "tcp_state": "DISABLED",
++            "tcp_reason_code": "PROFILE_POLICY_DISABLED", "ttl_capture_placement_proof": None,
++        })
++        ctx.contents[disabled.artifact_id] = disabled
++        profile_payload = ctx.profile.semantic_payload
++        profile_payload["origin_runtime_admission"] = _ref(disabled)
++        profile_payload["ttl_capture_placement_proof"] = None
++        ctx.profile = make_foundation_runtime_profile(profile_payload)
++        ctx.service._profile = ctx.profile
++    result = ctx.service.build(SITE, mac, START, END)
++    source = DeviceFingerprintSourceEvaluabilityBuilder(
++        foundation_runtime_profile=ctx.profile,
++        artifact_resolver=lambda reference: ctx.contents[reference.artifact_id],
++    ).build(result.evidence_snapshot_content)
++    knowledge = candidate()
++    bundle = build_initial_knowledge_bundle_v1(knowledge)
++    registry = ctx.contents[ctx.profile.semantic_payload["evidence_schema_registry_contract"]["artifact_id"]]
++    adapter = build_initial_evidence_adapter_contract_set_v1(registry)
++    return OriginAssessmentInputs(
++        result.evidence_snapshot_content, result.materialization, source,
++        adapter, bundle, knowledge, knowledge_time,
++    )
++
++
++def _candidate(value="android", strength="supporting", evidence_id="one"):
++    return {
++        "candidate_kind": "CANONICAL_VALUE", "candidate_value_id": value,
++        "out_of_scope_taxon_ref": None, "claim_strength": strength,
++        "claim_derivation": "fingerprint_match", "knowledge_refs": [],
++        "evidence_refs": [{
++            "evidence_id": aid(sum(ord(letter) for letter in evidence_id)), "payload_sha256": "a" * 64,
++            "feature_schema_version": 1,
++            "adapter_contract_id": "EvidenceAdapterContractSet:v1:sha256:" + "b" * 64,
++            "adapter_contract_digest": "b" * 64,
++        }],
++    }
++
++
++def test_six_origin_artifacts_have_exact_four_dimensions_and_stable_identity():
++    inputs = _inputs()
++    builder = DeviceFingerprintOriginAssessmentBuilder(inputs)
++    first = builder.build_all()
++    second = builder.build_all()
++    assert [row.artifact_id for row in first] == [row.artifact_id for row in second]
++    assert {row.semantic_payload["origin_group"] for row in first} == {
++        "dhcp", "portal", "tcp", "tls", "quic", "mac_registry"}
++    for row in first:
++        assert {dimension["dimension_name"] for dimension in row.semantic_payload["dimension_assessments"]} == set(DIMENSIONS)
++        assert all(dimension["internal_state"] == "no_claim" for dimension in row.semantic_payload["dimension_assessments"])
++
++
++def test_exact_schema_and_pinned_snapshot_evaluability_refs():
++    inputs = _inputs()
++    row = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp")
++    payload = row.semantic_payload
++    kwargs = {
++        "evidence_snapshot_content": inputs.evidence_snapshot_content,
++        "source_evaluability": inputs.source_evaluability,
++        "evidence_adapter_contract_set": inputs.evidence_adapter_contract_set,
++        "knowledge_bundle": inputs.knowledge_bundle,
++        "knowledge": inputs.knowledge,
++    }
++    assert make_origin_assessment(payload, **kwargs) == row
++    for change in ({"extra": True}, {"dimension_assessments": []},
++                   {"source_evaluability": _ref(inputs.evidence_snapshot_content)}):
++        wrong = {**payload, **change}
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_origin_assessment(wrong, **kwargs)
++
++
++def test_origin_artifact_input_order_permutation_keeps_identity():
++    inputs = _inputs(evidence_rows=[_dhcp_row(1), _dhcp_row(2)])
++    artifact = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp")
++    payload = artifact.semantic_payload
++    payload["dimension_assessments"].reverse()
++    payload["evidence_refs"].reverse()
++    kwargs = {
++        "evidence_snapshot_content": inputs.evidence_snapshot_content,
++        "source_evaluability": inputs.source_evaluability,
++        "evidence_adapter_contract_set": inputs.evidence_adapter_contract_set,
++        "knowledge_bundle": inputs.knowledge_bundle,
++        "knowledge": inputs.knowledge,
++    }
++    assert make_origin_assessment(payload, **kwargs) == artifact
++
++
++def test_exact_evidence_and_knowledge_reference_lineage_is_enforced():
++    inputs = _inputs(evidence_rows=[_dhcp_row()])
++    artifact = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp")
++    kwargs = {
++        "evidence_snapshot_content": inputs.evidence_snapshot_content,
++        "source_evaluability": inputs.source_evaluability,
++        "evidence_adapter_contract_set": inputs.evidence_adapter_contract_set,
++        "knowledge_bundle": inputs.knowledge_bundle,
++        "knowledge": inputs.knowledge,
++    }
++    wrong_evidence = artifact.semantic_payload
++    wrong_evidence["evidence_refs"][0]["payload_sha256"] = "f" * 64
++    with pytest.raises(DeviceFingerprintValidationError, match="EvidenceRef"):
++        make_origin_assessment(wrong_evidence, **kwargs)
++    wrong_knowledge = artifact.semantic_payload
++    wrong_knowledge["knowledge_refs"][0]["canonical_knowledge_record_id"] = "unknown-record"
++    with pytest.raises(DeviceFingerprintValidationError, match="KnowledgeRef"):
++        make_origin_assessment(wrong_knowledge, **kwargs)
++
++
++@pytest.mark.parametrize("strong,supporting,expected,conflict", [
++    (("android", "android"), (), "resolved", None),
++    (("android", "ios"), (), "conflicting", "strong"),
++    (("android",), ("android",), "resolved", None),
++    (("android",), ("ios",), "resolved", "supporting"),
++    ((), ("android", "android"), "resolved", None),
++    ((), ("android", "ios"), "conflicting", "supporting"),
++])
++def test_same_origin_strength_matrix(strong, supporting, expected, conflict):
++    rows = [_candidate(value, "strong", f"s{index}") for index, value in enumerate(strong)]
++    rows += [_candidate(value, "supporting", f"p{index}") for index, value in enumerate(supporting)]
++    output = _reduce_claims("platform_family", rows)
++    assert output["internal_state"] == expected
++    assert output["conflict_strength"] == conflict
++    if conflict:
++        assert output["same_origin_contradiction_records"]
++    assert _reduce_claims("platform_family", list(reversed(rows))) == output
++
++
++def test_k1_alternatives_are_ambiguous_only_for_differing_dimension():
++    rows = [_candidate("smartphone", evidence_id="one"),
++            _candidate("tablet", evidence_id="one")]
++    assert _reduce_claims("device_class", rows, k1_ambiguous=True)["internal_state"] == "ambiguous"
++    assert _reduce_claims("platform_family", [_candidate("android", evidence_id="one"),
++                                              _candidate("android", evidence_id="two")],
++                          k1_ambiguous=True)["selected_canonical_value_id"] == "android"
++    assert _reduce_claims("device_class", [
++        _candidate("smartphone", evidence_id="one"),
++        _candidate("tablet", evidence_id="two")], k1_ambiguous=True)["internal_state"] == "conflicting"
++
++
++def test_negative_knowledge_age_fails_closed():
++    with pytest.raises(DeviceFingerprintValidationError, match="Negative knowledge age"):
++        DeviceFingerprintOriginAssessmentBuilder(_inputs(knowledge_time="2026-09-15T12:00:00.000Z"))
++
++
++def test_materialization_and_source_identity_mismatch_fail_closed():
++    inputs = _inputs()
++    wrong_snapshot = make_artifact_content("EvidenceSnapshotContent", {"synthetic": True})
++    from dataclasses import replace
++    for changed in (replace(inputs, evidence_snapshot_content=wrong_snapshot),
++                    replace(inputs, source_evaluability=wrong_snapshot)):
++        with pytest.raises((DeviceFingerprintValidationError, KeyError, TypeError)):
++            DeviceFingerprintOriginAssessmentBuilder(changed)
++    wrong_materialization = EvidenceSnapshotMaterialization(
++        ArtifactRef("EvidenceSnapshotContent:v1:sha256:" + "f" * 64, "f" * 64), ())
++    with pytest.raises(DeviceFingerprintValidationError):
++        DeviceFingerprintOriginAssessmentBuilder(replace(inputs, materialization=wrong_materialization))
++    wrong_source_payload = inputs.source_evaluability.semantic_payload
++    wrong_source_payload["evidence_snapshot_content"] = _ref(wrong_snapshot)
++    wrong_source = make_artifact_content("SourceEvaluability", wrong_source_payload)
++    with pytest.raises(DeviceFingerprintValidationError):
++        DeviceFingerprintOriginAssessmentBuilder(replace(inputs, source_evaluability=wrong_source))
++
++
++def _dhcp_row(number=1, **changes):
++    row = evidence(number, payload=changes.pop("payload", None))
++    row.update(source_subtype="discover", extractor_name="packet-dhcp")
++    row.update(changes)
++    return row
++
++
++def _with_descriptor(inputs, **changes):
++    """Change a T-01 descriptor at the T-03 boundary without re-running T-01."""
++    snapshot_payload = inputs.evidence_snapshot_content.semantic_payload
++    descriptor = snapshot_payload["evidence_descriptors"][0]
++    descriptor.update(changes)
++    snapshot = make_artifact_content("EvidenceSnapshotContent", snapshot_payload)
++    materialized = tuple(MaterializedEvidenceEntry(
++        descriptor if entry.descriptor["evidence_id"] == descriptor["evidence_id"] else entry.descriptor,
++        entry.normalized_payload) for entry in inputs.materialization.ordered_entries)
++    materialization = EvidenceSnapshotMaterialization(
++        ArtifactRef(snapshot.artifact_id, snapshot.content_sha256), materialized)
++    source_payload = inputs.source_evaluability.semantic_payload
++    source_payload["evidence_snapshot_content"] = _ref(snapshot)
++    source = make_artifact_content("SourceEvaluability", source_payload)
++    return replace(inputs, evidence_snapshot_content=snapshot,
++                   materialization=materialization, source_evaluability=source)
++
++
++def test_present_dhcp_evidence_remains_usable_without_health_coverage():
++    inputs = _inputs(evidence_rows=[_dhcp_row()])
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    assert output["evidence_refs"]
++    assert output["knowledge_refs"]
++    assert next(row for row in output["dimension_assessments"]
++                if row["dimension_name"] == "platform_family")["internal_state"] == "resolved"
++
++
++def test_present_evidence_during_acquisition_unavailable_still_claims():
++    unavailable = health()
++    unavailable.update(status="unavailable", reason_code="capture_interface_unavailable")
++    inputs = _inputs(evidence_rows=[_dhcp_row()], health_rows=[unavailable])
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    assert "evidence_present_during_acquisition_unavailable" in output["explanation_codes"]
++    assert next(row for row in output["dimension_assessments"]
++                if row["dimension_name"] == "platform_family")["internal_state"] == "resolved"
++
++
++def test_missing_evidence_never_creates_negative_claim():
++    unavailable = health()
++    unavailable.update(status="unavailable", reason_code="capture_interface_unavailable")
++    inputs = _inputs(health_rows=[unavailable])
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    assert not output["evidence_refs"]
++    assert all(not row["candidate_set"] for row in output["dimension_assessments"])
++    assert all(row["internal_state"] in {"no_claim", "not_evaluable"}
++               for row in output["dimension_assessments"])
++
++
++def test_partial_quality_requires_each_admitted_dimension_field():
++    inputs = _inputs()
++    adapter = next(row for row in inputs.evidence_adapter_contract_set.semantic_payload["adapter_entries"]
++                   if row.get("source_kind") == "dhcp")
++    from tests.device_fingerprint_task04_t01.test_snapshot_service import KNOWN
++    kwargs = {
++        "source_kind": "dhcp", "feature_schema_version": 1,
++        "source_subtype": "discover", "extractor_name": "packet-dhcp",
++        "extractor_version": "1.0.0", "rule_version": None,
++        "quality_state": "partial", "dimension_name": "platform_family",
++    }
++    assert task01_contract_claim_eligible(adapter, normalized_payload=KNOWN, **kwargs)
++    missing = dict(KNOWN)
++    missing.pop("vendor_class")
++    assert not task01_contract_claim_eligible(adapter, normalized_payload=missing, **kwargs)
++
++
++def test_partial_quality_caps_an_otherwise_strong_admitted_claim():
++    original = _inputs(evidence_rows=[_dhcp_row(quality_state="partial")])
++    k1_payload = original.knowledge.k1_record_set.semantic_payload
++    for record in k1_payload["records"]:
++        for outcome in record["candidate_taxonomy_refs"]:
++            if outcome["outcome_kind"] == "CANONICAL_VALUE":
++                outcome["base_claim_strength"] = "strong"
++    changed_knowledge = replace(original.knowledge,
++                                k1_record_set=make_canonical_k1_record_set(k1_payload))
++    bundle = build_initial_knowledge_bundle_v1(changed_knowledge)
++    adapter_payload = original.evidence_adapter_contract_set.semantic_payload
++    for entry in adapter_payload["adapter_entries"]:
++        if entry.get("source_kind") == "dhcp":
++            entry["base_claim_strength_ceiling"] = "strong"
++    adapter = make_evidence_adapter_contract_set(adapter_payload)
++    inputs = replace(original, knowledge=changed_knowledge, knowledge_bundle=bundle,
++                     evidence_adapter_contract_set=adapter)
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    platform = next(row for row in output["dimension_assessments"]
++                    if row["dimension_name"] == "platform_family")
++    assert platform["effective_claim_strength"] == "supporting"
++
++
++def _portal_row(number=1, *, payload=None, quality="valid", version=1):
++    if payload is None:
++        rules = build_k3_portal_rule_set_v1().semantic_payload
++        payload = next(row["normalized_input"] for row in rules["test_vectors"]
++                       if row["test_vector_id"] == "k3.vector.platform.android.sec_ch_ua_platform.v1")
++    row = evidence(number, payload=payload, version=version)
++    row.update(source_kind="portal_headers", source_subtype="capport_login",
++               producer_id="portal-zefer-01", capture_source_id="zefer-portal-http-01",
++               extractor_name="portal-http-parser", extractor_version="1.0.0",
++               quality_state=quality)
++    return row
++
++
++def test_portal_k3_uses_only_normalized_provenance_and_no_mobile_heuristic():
++    payload = build_k3_portal_rule_set_v1().semantic_payload
++    platform = next(row["normalized_input"] for row in payload["test_vectors"]
++                    if row["test_vector_id"] == "k3.vector.platform.android.sec_ch_ua_platform.v1")
++    mobile = next(row["normalized_input"] for row in payload["test_vectors"]
++                  if row["test_vector_id"] == "k3.vector.mobile_boolean.no_class.v1")
++    inputs = _inputs(evidence_rows=[_portal_row(1, payload=platform),
++                                   _portal_row(2, payload=mobile)], origin="portal")
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("portal").semantic_payload
++    dimensions = {row["dimension_name"]: row for row in output["dimension_assessments"]}
++    assert dimensions["platform_family"]["selected_canonical_value_id"] == "android", dimensions
++    assert dimensions["device_class"]["internal_state"] == "no_claim"
++    assert output["knowledge_refs"]
++    assert all(row["knowledge_provenance_id"] == inputs.knowledge.k3_provenance.artifact_id
++               for row in output["knowledge_refs"])
++
++
++@pytest.mark.parametrize("quality,claim", [("valid", True), ("partial", True), ("degraded", False)])
++def test_portal_quality_semantics(quality, claim):
++    inputs = _inputs(evidence_rows=[_portal_row(quality=quality)], origin="portal")
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("portal").semantic_payload
++    platform = next(row for row in output["dimension_assessments"]
++                    if row["dimension_name"] == "platform_family")
++    assert bool(platform["candidate_set"]) is claim
++    if quality == "partial":
++        assert platform["effective_claim_strength"] == "supporting"
++
++
++def test_unsupported_future_schema_is_audit_visible_without_claim():
++    inputs = _inputs(evidence_rows=[_portal_row(version=99)], origin="portal")
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("portal").semantic_payload
++    assert "unsupported_evidence_contract" in output["explanation_codes"]
++    assert len(output["evidence_refs"]) == 1
++    assert all(row["internal_state"] == "no_claim" for row in output["dimension_assessments"])
++
++
++def test_expired_external_k1_emits_no_new_claim():
++    inputs = _inputs(evidence_rows=[_dhcp_row()], knowledge_time="2030-01-01T00:00:00.000Z")
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    assert "knowledge_source_expired" in output["explanation_codes"]
++    assert all(row["internal_state"] == "no_claim" for row in output["dimension_assessments"])
++
++
++def test_stale_external_k1_uses_admitted_explanation_and_ceiling():
++    inputs = _inputs(evidence_rows=[_dhcp_row()], knowledge_time="2027-10-01T00:00:00.000Z")
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    assert "knowledge_source_stale" in output["explanation_codes"]
++    platform = next(row for row in output["dimension_assessments"]
++                    if row["dimension_name"] == "platform_family")
++    assert platform["selected_canonical_value_id"] == "android"
++    assert platform["effective_claim_strength"] == "supporting"
++
++
++def test_identical_semantic_repetition_never_creates_another_vote():
++    one = _inputs(evidence_rows=[_portal_row(1)], origin="portal")
++    many = _inputs(evidence_rows=[_portal_row(1), _portal_row(2)], origin="portal")
++    a = DeviceFingerprintOriginAssessmentBuilder(one).build("portal").semantic_payload
++    b = DeviceFingerprintOriginAssessmentBuilder(many).build("portal").semantic_payload
++    a_platform = next(row for row in a["dimension_assessments"] if row["dimension_name"] == "platform_family")
++    b_platform = next(row for row in b["dimension_assessments"] if row["dimension_name"] == "platform_family")
++    assert (a_platform["internal_state"], a_platform["effective_claim_strength"]) == (
++        b_platform["internal_state"], b_platform["effective_claim_strength"])
++    assert len(b_platform["candidate_set"]) == 1
++
++
++def test_cross_version_no_claim_does_not_invent_a_semantic_contribution():
++    rules = build_k3_portal_rule_set_v1().semantic_payload
++    v1 = next(row["normalized_input"] for row in rules["test_vectors"]
++              if row["test_vector_id"] == "k3.vector.unknown_model_ua.no_claim.v1")
++    v2 = next(row["normalized_input"] for row in rules["test_vectors"]
++              if row["test_vector_id"] == "k3.vector.unknown_model_ch.no_claim.v2")
++    assert set(v2) == PORTAL_HEADER_V2_KEYS
++    inputs = _inputs(evidence_rows=[_portal_row(1, payload=v1, version=1),
++                                   _portal_row(2, payload=v2, version=2)], origin="portal")
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("portal").semantic_payload
++    assert all(not row["candidate_set"] for row in output["dimension_assessments"])
++    assert len(output["evidence_refs"]) == 2
++
++
++def test_mac_registry_local_admin_and_raw_assignment_not_manufacturer():
++    local = _inputs()
++    local_output = DeviceFingerprintOriginAssessmentBuilder(local).build("mac_registry").semantic_payload
++    assert "no_ieee_assignment_claim" in local_output["explanation_codes"]
++    global_mac = _inputs(mac="00:11:22:33:44:55")
++    global_output = DeviceFingerprintOriginAssessmentBuilder(global_mac).build("mac_registry").semantic_payload
++    assert "mac_assignment_org_not_manufacturer" in global_output["explanation_codes"]
++    assert all(row["internal_state"] == "no_claim" for row in global_output["dimension_assessments"])
++
++
++def test_mac_registry_explicit_admitted_org_mapping_only():
++    original = _inputs(mac="00:11:22:33:44:55")
++    k = original.knowledge
++    k4_payload = k.k4_record_set.semantic_payload
++    k4_payload["records"][0]["manufacturer_mapping"] = {
++        "manufacturer_id": "synthetic-manufacturer", "mapping_version": "1",
++        "review_basis": "synthetic review", "base_claim_strength": "supporting",
++    }
++    k4 = make_canonical_k4_record_set(k4_payload)
++    changed_knowledge = replace(k, k4_record_set=k4)
++    bundle = build_initial_knowledge_bundle_v1(changed_knowledge)
++    inputs = replace(original, knowledge=changed_knowledge, knowledge_bundle=bundle)
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("mac_registry").semantic_payload
++    manufacturer = next(row for row in output["dimension_assessments"]
++                        if row["dimension_name"] == "manufacturer_family")
++    assert manufacturer["selected_canonical_value_id"] == "synthetic-manufacturer"
++    assert manufacturer["effective_claim_strength"] == "supporting"
++
++
++def test_mac_registry_longest_prefix_and_dhcp_origin_purity():
++    original = _inputs(evidence_rows=[_dhcp_row()], mac=MAC)
++    k = original.knowledge
++    k4_payload = k.k4_record_set.semantic_payload
++    base = k4_payload["records"][0]
++    k4_payload["records"] = []
++    for family, bits, prefix, label in (
++        ("MA-L", 24, "001122", "long"),
++        ("MA-M", 28, "0011223", "medium"),
++        ("MA-S", 36, "001122334", "short"),
++    ):
++        record = dict(base)
++        record.update(registry_family=family, prefix_length_bits=bits, prefix_hex=prefix,
++                      canonical_record_id="synthetic-" + label,
++                      source_record_identity="synthetic-source-" + label,
++                      manufacturer_mapping={
++                          "manufacturer_id": "manufacturer-" + label,
++                          "mapping_version": "1", "review_basis": "synthetic review",
++                          "base_claim_strength": "supporting",
++                      })
++        k4_payload["records"].append(record)
++    k4 = make_canonical_k4_record_set(k4_payload)
++    changed_knowledge = replace(k, k4_record_set=k4)
++    bundle = build_initial_knowledge_bundle_v1(changed_knowledge)
++    changed = replace(original, knowledge=changed_knowledge, knowledge_bundle=bundle)
++    dhcp = DeviceFingerprintOriginAssessmentBuilder(changed).build("dhcp").semantic_payload
++    assert next(row for row in dhcp["dimension_assessments"]
++                if row["dimension_name"] == "manufacturer_family")["internal_state"] == "no_claim"
++
++    global_input = _inputs(mac="00:11:22:33:44:55")
++    global_input = replace(global_input, knowledge=changed_knowledge, knowledge_bundle=bundle)
++    mac = DeviceFingerprintOriginAssessmentBuilder(global_input).build("mac_registry").semantic_payload
++    assert next(row for row in mac["dimension_assessments"]
++                if row["dimension_name"] == "manufacturer_family")["selected_canonical_value_id"] == "manufacturer-short"
++
++
++def test_k1_complete_candidate_enumeration_ambiguity_and_permutation():
++    fixture = build_k1_fixture_definitions()["all_non_any_multi_candidate"]
++    first = _inputs(evidence_rows=[_dhcp_row(payload=fixture["evidence"])])
++    knowledge = first.knowledge
++    k1_payload = fixture["record_set"].semantic_payload
++    k1_payload["knowledge_provenance"] = _ref(knowledge.k1_provenance)
++    k1 = make_canonical_k1_record_set(k1_payload)
++    changed_knowledge = replace(knowledge, k1_record_set=k1)
++    bundle = build_initial_knowledge_bundle_v1(changed_knowledge)
++    inputs = replace(first, knowledge=changed_knowledge, knowledge_bundle=bundle)
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    dimensions = {row["dimension_name"]: row for row in output["dimension_assessments"]}
++    assert dimensions["platform_family"]["selected_canonical_value_id"] == "android", dimensions
++    assert dimensions["device_class"]["internal_state"] == "ambiguous"
++    assert {row["candidate_value_id"] for row in dimensions["device_class"]["candidate_set"]} == {
++        "smartphone", "tablet"}
++    reordered = k1.semantic_payload
++    reordered["records"].reverse()
++    assert make_canonical_k1_record_set(reordered) == k1
++
++
++def test_k1_no_match_is_empty_and_row_order_is_identity_stable():
++    fixture = build_k1_fixture_definitions()["one_non_any_mismatch"]
++    first = _inputs(evidence_rows=[_dhcp_row(payload=fixture["evidence"])])
++    payload = fixture["record_set"].semantic_payload
++    payload["knowledge_provenance"] = _ref(first.knowledge.k1_provenance)
++    changed_knowledge = replace(first.knowledge, k1_record_set=make_canonical_k1_record_set(payload))
++    bundle = build_initial_knowledge_bundle_v1(changed_knowledge)
++    inputs = replace(first, knowledge=changed_knowledge, knowledge_bundle=bundle)
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    assert "k1_empty_candidate_set" in output["explanation_codes"]
++    assert all(not row["candidate_set"] for row in output["dimension_assessments"])
++
++    forward = _inputs(evidence_rows=[_dhcp_row(1), _dhcp_row(2)])
++    reverse = _inputs(evidence_rows=[_dhcp_row(2), _dhcp_row(1)])
++    assert DeviceFingerprintOriginAssessmentBuilder(forward).build("dhcp") == (
++        DeviceFingerprintOriginAssessmentBuilder(reverse).build("dhcp"))
++
++
++def _network_row(origin, *, version=1, number=1):
++    source = {"tcp": "tcp_syn", "tls": "tls_client", "quic": "quic_client"}[origin]
++    payload = {
++        "tcp": {
++            "ip_version": 4, "observed_ttl": 64, "tcp_window": 65535,
++            "mss": 1460, "window_scale": 8, "sack_permitted": True,
++            "timestamps_present": True, "tcp_option_order": [2, 4, 8, 1, 3],
++        },
++        "tls": tls(), "quic": quic(),
++    }[origin]
++    row = evidence(number, payload=payload, version=version)
++    row.update(source_kind=source, source_subtype="ipv4" if origin == "tcp" else "client_hello",
++               extractor_name={"tcp": "packet-tcp-syn", "tls": "suricata-tls-ja4",
++                               "quic": "suricata-quic-ja4"}[origin],
++               extractor_version="1.0.0" if origin == "tcp" else "8.0.6")
++    return row
++
++
++def test_tcp_v2_uses_admitted_k2a_matcher_and_k2b_claim_ceiling():
++    payload = tcp_v2(ip_df=False, ip_id_zero=False, tcp_sequence_zero=False,
++                     tcp_header_length_bytes=20, tcp_option_records=[])
++    row = _network_row("tcp", version=2)
++    from app.device_fingerprint.validation import canonical_json, canonical_sha256
++    row["payload_json"] = canonical_json(payload)
++    row["payload_sha256"] = canonical_sha256(row["payload_json"])
++    row["extractor_version"] = "2.0.0"
++    inputs = _inputs(evidence_rows=[row], origin="tcp")
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("tcp").semantic_payload
++    platform = next(dimension for dimension in output["dimension_assessments"]
++                    if dimension["dimension_name"] == "platform_family")
++    assert platform["selected_canonical_value_id"] == "linux"
++    assert platform["effective_claim_strength"] == "supporting"
++
++
++def test_legacy_tcp_v1_cannot_add_a_vote_to_v2_semantic_claim():
++    payload = tcp_v2(ip_df=False, ip_id_zero=False, tcp_sequence_zero=False,
++                     tcp_header_length_bytes=20, tcp_option_records=[])
++    current = _network_row("tcp", version=2, number=2)
++    from app.device_fingerprint.validation import canonical_json, canonical_sha256
++    current["payload_json"] = canonical_json(payload)
++    current["payload_sha256"] = canonical_sha256(current["payload_json"])
++    current["extractor_version"] = "2.0.0"
++    inputs = _inputs(evidence_rows=[_network_row("tcp", number=1), current], origin="tcp")
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("tcp").semantic_payload
++    platform = next(row for row in output["dimension_assessments"]
++                    if row["dimension_name"] == "platform_family")
++    assert len(output["evidence_refs"]) == 2
++    assert len(platform["candidate_set"]) == 1
++    assert platform["selected_canonical_value_id"] == "linux"
++    assert "legacy_tcp_schema_insufficient_for_exact_k2a_contract" in output["explanation_codes"]
++
++
++@pytest.mark.parametrize("origin,reason", [
++    ("tcp", "legacy_tcp_schema_insufficient_for_exact_k2a_contract"),
++    ("tls", "ja4_no_semantic_claim"),
++    ("quic", "ja4_no_semantic_claim"),
++])
++def test_legacy_tcp_and_ja4_are_audit_only(origin, reason):
++    inputs = _inputs(evidence_rows=[_network_row(origin)], origin=origin)
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build(origin).semantic_payload
++    assert reason in output["explanation_codes"]
++    assert len(output["evidence_refs"]) == 1
++    assert all(row["internal_state"] == "no_claim" for row in output["dimension_assessments"])
++
++
++def test_pinned_tcp_disabled_emits_no_semantic_claim_with_audit_visible_row():
++    inputs = _inputs(evidence_rows=[_network_row("tcp")], origin="tcp", tcp_disabled=True)
++    assert inputs.evidence_snapshot_content.semantic_payload["origin_runtime_admission"]["tcp_state"] == "DISABLED"
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("tcp").semantic_payload
++    assert "origin_runtime_disabled" in output["explanation_codes"]
++    assert len(output["evidence_refs"]) == 1
++    assert all(row["internal_state"] == "no_claim" for row in output["dimension_assessments"])
++
++
++def test_t03_input_boundary_has_no_later_runtime_profile_or_foundation_proof():
++    assert [field.name for field in fields(OriginAssessmentInputs)] == [
++        "evidence_snapshot_content", "materialization", "source_evaluability",
++        "evidence_adapter_contract_set", "knowledge_bundle", "knowledge",
++        "knowledge_evaluation_at_utc",
++    ]
++    assert DeviceFingerprintOriginAssessmentBuilder(_inputs()).build_all()
++
++
++@pytest.mark.parametrize("change", [
++    {"source_subtype": "wrong-subtype"},
++    {"extractor_name": "wrong-extractor"},
++    {"extractor_version": "9.9.9"},
++    {"rule_version": "unexpected-rule"},
++])
++def test_adapter_incompatibility_is_audit_only_before_k1_matcher(change, monkeypatch):
++    import app.device_fingerprint.origin_assessment as module
++
++    inputs = _with_descriptor(_inputs(evidence_rows=[_dhcp_row()]), **change)
++    def forbidden(*_args, **_kwargs):
++        pytest.fail("K1 matcher ran for an incompatible row")
++    monkeypatch.setattr(module, "match_k1_records", forbidden)
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    assert "unsupported_evidence_contract" in output["explanation_codes"]
++    assert len(output["evidence_refs"]) == 1
++    assert not output["knowledge_refs"]
++    assert all(not row["candidate_set"] and not row["broad_unresolved_taxon_refs"]
++               for row in output["dimension_assessments"])
++
++
++def test_degraded_compatible_evidence_does_not_run_k1_matcher(monkeypatch):
++    import app.device_fingerprint.origin_assessment as module
++
++    inputs = _inputs(evidence_rows=[_dhcp_row(quality_state="degraded")])
++    def forbidden(*_args, **_kwargs):
++        pytest.fail("K1 matcher ran for a degraded row")
++    monkeypatch.setattr(module, "match_k1_records", forbidden)
++    output = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    assert "degraded_evidence_no_claim" in output["explanation_codes"]
++    assert len(output["evidence_refs"]) == 1
++    assert not output["knowledge_refs"]
++
++
++def test_incompatible_portal_and_tcp_rows_never_reach_k3_or_k2a(monkeypatch):
++    import app.device_fingerprint.k3_portal_rules as k3
++    import app.device_fingerprint.origin_assessment as module
++    from app.device_fingerprint.validation import canonical_json, canonical_sha256
++
++    def forbidden(*_args, **_kwargs):
++        pytest.fail("Semantic matcher ran for an incompatible row")
++
++    portal = _with_descriptor(_inputs(evidence_rows=[_portal_row()], origin="portal"),
++                              extractor_name="wrong-extractor")
++    monkeypatch.setattr(k3, "evaluate_k3_rules", forbidden)
++    portal_output = DeviceFingerprintOriginAssessmentBuilder(portal).build("portal").semantic_payload
++    assert "unsupported_evidence_contract" in portal_output["explanation_codes"]
++    assert len(portal_output["evidence_refs"]) == 1 and not portal_output["knowledge_refs"]
++
++    payload = tcp_v2(ip_df=False, ip_id_zero=False, tcp_sequence_zero=False,
++                     tcp_header_length_bytes=20, tcp_option_records=[])
++    row = _network_row("tcp", version=2)
++    row["payload_json"] = canonical_json(payload)
++    row["payload_sha256"] = canonical_sha256(row["payload_json"])
++    row["extractor_version"] = "2.0.0"
++    tcp = _with_descriptor(_inputs(evidence_rows=[row], origin="tcp"),
++                           extractor_version="wrong-version")
++    monkeypatch.setattr(module, "match_request", forbidden)
++    tcp_output = DeviceFingerprintOriginAssessmentBuilder(tcp).build("tcp").semantic_payload
++    assert "unsupported_evidence_contract" in tcp_output["explanation_codes"]
++    assert len(tcp_output["evidence_refs"]) == 1 and not tcp_output["knowledge_refs"]
++
++
++def _dimension_from(output, name):
++    return next(row for row in output["dimension_assessments"] if row["dimension_name"] == name)
++
++
++def test_dhcp_semantic_outcome_dedup_unions_refs_across_different_payloads():
++    from tests.device_fingerprint_task04_t01.test_snapshot_service import KNOWN
++
++    variant = dict(KNOWN, maximum_message_size=1400)
++    rows = [_dhcp_row(1), _dhcp_row(2, payload=variant)]
++    forward = DeviceFingerprintOriginAssessmentBuilder(_inputs(evidence_rows=rows)).build("dhcp")
++    reverse = DeviceFingerprintOriginAssessmentBuilder(_inputs(evidence_rows=rows[::-1])).build("dhcp")
++    assert forward == reverse
++    platform = _dimension_from(forward.semantic_payload, "platform_family")
++    assert len(platform["candidate_set"]) == 1
++    assert len(platform["candidate_set"][0]["evidence_refs"]) == 2
++    assert len(platform["candidate_set"][0]["knowledge_refs"]) == 1
++
++
++@pytest.mark.parametrize("version,vector_id,dimension,target", [
++    (1, "k3.vector.platform.android.sec_ch_ua_platform.v1", "platform_family", "android"),
++    (2, "k3.vector.tablet.declared.v2", "device_class", "tablet"),
++])
++def test_portal_same_semantic_repetition_unions_refs_canonically(version, vector_id, dimension, target):
++    rules = build_k3_portal_rule_set_v1().semantic_payload
++    normalized = next(row["normalized_input"] for row in rules["test_vectors"]
++                      if row["test_vector_id"] == vector_id)
++    rows = [_portal_row(1, payload=normalized, version=version),
++            _portal_row(2, payload=normalized, version=version)]
++    forward = DeviceFingerprintOriginAssessmentBuilder(
++        _inputs(evidence_rows=rows, origin="portal")).build("portal")
++    reverse = DeviceFingerprintOriginAssessmentBuilder(
++        _inputs(evidence_rows=rows[::-1], origin="portal")).build("portal")
++    assert forward == reverse
++    selected = _dimension_from(forward.semantic_payload, dimension)
++    assert selected["selected_canonical_value_id"] == target
++    assert len(selected["candidate_set"]) == 1
++    candidate = selected["candidate_set"][0]
++    assert len(candidate["evidence_refs"]) == 2
++    assert len(candidate["knowledge_refs"]) == 1
++    assert candidate["evidence_refs"] == sorted(candidate["evidence_refs"], key=lambda ref: ref["evidence_id"])
++
++
++def test_cross_version_portal_claims_remain_separate_dimensions():
++    rules = build_k3_portal_rule_set_v1().semantic_payload
++    platform = next(row["normalized_input"] for row in rules["test_vectors"]
++                    if row["test_vector_id"] == "k3.vector.platform.android.sec_ch_ua_platform.v1")
++    tablet = next(row["normalized_input"] for row in rules["test_vectors"]
++                  if row["test_vector_id"] == "k3.vector.tablet.declared.v2")
++    rows = [_portal_row(1, payload=platform, version=1),
++            _portal_row(2, payload=tablet, version=2)]
++    output = DeviceFingerprintOriginAssessmentBuilder(
++        _inputs(evidence_rows=rows, origin="portal")).build("portal").semantic_payload
++    assert _dimension_from(output, "platform_family")["selected_canonical_value_id"] == "android"
++    assert _dimension_from(output, "device_class")["selected_canonical_value_id"] == "tablet"
++    assert len(_dimension_from(output, "platform_family")["candidate_set"]) == 1
++    assert len(_dimension_from(output, "device_class")["candidate_set"]) == 1
++
++
++def test_distinct_k3_derivations_are_distinct_but_rule_id_is_not_merge_identity():
++    rules = build_k3_portal_rule_set_v1().semantic_payload
++    declared = next(row["normalized_input"] for row in rules["test_vectors"]
++                    if row["test_vector_id"] == "k3.vector.platform.android.sec_ch_ua_platform.v1")
++    mapped = next(row["normalized_input"] for row in rules["test_vectors"]
++                  if row["test_vector_id"] == "k3.vector.platform.android.user_agent.v1")
++    rows = [_portal_row(1, payload=declared), _portal_row(2, payload=mapped)]
++    output = DeviceFingerprintOriginAssessmentBuilder(
++        _inputs(evidence_rows=rows, origin="portal")).build("portal").semantic_payload
++    platform = _dimension_from(output, "platform_family")
++    assert platform["selected_canonical_value_id"] == "android"
++    assert platform["claim_derivations"] == ["declared", "deterministic_mapping"]
++    assert len(platform["candidate_set"]) == 2
++
++    first, second = (dict(candidate) for candidate in platform["candidate_set"])
++    second["claim_derivation"] = first["claim_derivation"]
++    merged = _merge_contributions([
++        ("portal.k3.semantic-outcomes.v1", "platform_family", first),
++        ("portal.k3.semantic-outcomes.v1", "platform_family", second),
++    ])
++    assert len(merged) == 1
++    assert len(merged[0]["evidence_refs"]) == 2
++    assert len(merged[0]["knowledge_refs"]) == 2
++
++
++def _constructor_kwargs(inputs):
++    return {
++        "evidence_snapshot_content": inputs.evidence_snapshot_content,
++        "source_evaluability": inputs.source_evaluability,
++        "evidence_adapter_contract_set": inputs.evidence_adapter_contract_set,
++        "knowledge_bundle": inputs.knowledge_bundle,
++        "knowledge": inputs.knowledge,
++    }
++
++
++def test_closed_dimension_validator_rejects_no_claim_with_candidate_and_unbacked_selection():
++    inputs = _inputs(evidence_rows=[_dhcp_row()])
++    baseline = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    for field, value in (("internal_state", "no_claim"),
++                         ("selected_canonical_value_id", "ios")):
++        changed = baseline.copy()
++        platform = _dimension_from(changed, "platform_family")
++        platform[field] = value
++        if field == "internal_state":
++            platform["selected_canonical_value_id"] = None
++            platform["effective_claim_strength"] = None
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_origin_assessment(changed, **_constructor_kwargs(inputs))
++
++
++def test_closed_dimension_validator_rejects_unbacked_out_of_scope_selection():
++    inputs = _inputs(evidence_rows=[_dhcp_row()])
++    changed = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    platform = _dimension_from(changed, "platform_family")
++    platform["internal_state"] = "recognized_out_of_scope"
++    platform["selected_canonical_value_id"] = None
++    platform["selected_out_of_scope_taxon_ref"] = "unbacked-taxon"
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_origin_assessment(changed, **_constructor_kwargs(inputs))
++
++
++def test_closed_dimension_validator_rejects_conflict_and_derivation_mismatch():
++    inputs = _inputs(evidence_rows=[_dhcp_row()])
++    baseline = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    changed = baseline.copy()
++    _dimension_from(changed, "platform_family")["claim_derivations"] = ["declared"]
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_origin_assessment(changed, **_constructor_kwargs(inputs))
++
++    conflicting = _reduce_claims("platform_family", [
++        _candidate("android", "strong", "one"), _candidate("ios", "strong", "two")])
++    assert conflicting["internal_state"] == "conflicting"
++    changed = baseline.copy()
++    changed["dimension_assessments"] = [conflicting if row["dimension_name"] == "platform_family" else row
++                                        for row in changed["dimension_assessments"]]
++    conflicting["conflict_strength"] = "supporting"
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_origin_assessment(changed, **_constructor_kwargs(inputs))
++    conflicting["conflict_strength"] = "strong"
++    conflicting["same_origin_contradiction_records"][0]["incompatible_candidate_keys"] = ["missing"]
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_origin_assessment(changed, **_constructor_kwargs(inputs))
++
++
++def test_strong_selected_with_supporting_incompatibility_requires_retained_contradiction():
++    inputs = _inputs(evidence_rows=[_dhcp_row()])
++    changed = DeviceFingerprintOriginAssessmentBuilder(inputs).build("dhcp").semantic_payload
++    platform = _reduce_claims("platform_family", [
++        _candidate("android", "strong", "one"), _candidate("ios", "supporting", "two")])
++    assert platform["internal_state"] == "resolved"
++    platform["same_origin_contradiction_records"] = []
++    changed["dimension_assessments"] = [platform if row["dimension_name"] == "platform_family" else row
++                                        for row in changed["dimension_assessments"]]
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_origin_assessment(changed, **_constructor_kwargs(inputs))
++
++
++@pytest.mark.parametrize("origin", ["tls", "quic"])
++def test_ja4_origin_rejects_semantic_knowledge_ref_with_typed_failure(origin):
++    inputs = _inputs(evidence_rows=[_network_row(origin)], origin=origin)
++    changed = DeviceFingerprintOriginAssessmentBuilder(inputs).build(origin).semantic_payload
++    dhcp_inputs = _inputs(evidence_rows=[_dhcp_row()])
++    dhcp = DeviceFingerprintOriginAssessmentBuilder(dhcp_inputs).build("dhcp").semantic_payload
++    changed["knowledge_refs"] = dhcp["knowledge_refs"]
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_origin_assessment(changed, **_constructor_kwargs(inputs))
++
++
++def test_tcp_distinct_normalized_rows_with_same_k2b_outcome_merge_provenance():
++    from app.device_fingerprint.validation import canonical_json, canonical_sha256
++
++    first_payload = tcp_v2(ip_df=False, ip_id_zero=False, tcp_sequence_zero=False,
++                           tcp_header_length_bytes=20, tcp_option_records=[])
++    second_payload = dict(first_payload, observed_ttl=63)
++    rows = []
++    for number, payload in ((1, first_payload), (2, second_payload)):
++        row = _network_row("tcp", version=2, number=number)
++        row["payload_json"] = canonical_json(payload)
++        row["payload_sha256"] = canonical_sha256(row["payload_json"])
++        row["extractor_version"] = "2.0.0"
++        rows.append(row)
++    forward = DeviceFingerprintOriginAssessmentBuilder(
++        _inputs(evidence_rows=rows, origin="tcp")).build("tcp")
++    reverse = DeviceFingerprintOriginAssessmentBuilder(
++        _inputs(evidence_rows=rows[::-1], origin="tcp")).build("tcp")
++    assert forward == reverse
++    platform = _dimension_from(forward.semantic_payload, "platform_family")
++    assert platform["selected_canonical_value_id"] == "linux"
++    assert len(platform["candidate_set"]) == 1
++    assert len(platform["candidate_set"][0]["evidence_refs"]) == 2
++    assert len(platform["candidate_set"][0]["knowledge_refs"]) == 1
++
++
++def test_broad_semantic_projection_unions_distinct_evidence_references():
++    first = _candidate(evidence_id="one")
++    second = _candidate(evidence_id="two")
++    entries = []
++    for candidate in (first, second):
++        entries.append(("dhcp.k1.candidate-set.v1", "device_class", {
++            "reference_kind": "BROAD_TAXON", "canonical_taxon_or_source_ref": "mobile",
++            "explanation_code": "k1_broad_unresolved",
++            "evidence_refs": candidate["evidence_refs"], "knowledge_refs": [],
++        }))
++    merged = _merge_contributions(entries, broad=True)
++    assert len(merged) == 1
++    assert len(merged[0]["evidence_refs"]) == 2
