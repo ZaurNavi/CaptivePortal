@@ -1,0 +1,114 @@
+diff --git a/tests/settings_control/test_definitions.py b/tests/settings_control/test_definitions.py
+index 87c4f396e92460fdfbb44804416e714761fa11cf..a521f85b2f0507ac9a64eb200729ecc6b54fcc43 100644
+--- a/tests/settings_control/test_definitions.py
++++ b/tests/settings_control/test_definitions.py
+@@ -19,9 +19,28 @@ def test_exact_ordered_definitions_and_shared_defaults():
+         ("HOME_AP_24H_REFRESH_SECONDS", 120, 60, 600, "home_ap_24h_enabled", "home_ap_24h"),
+     ]
+     registry = SettingsDefinitionRegistry()
+-    assert len(registry.definitions) == 15
++    assert len(registry.definitions) == 29
+     assert len(registry.for_domain("general")) == 12
++    assert [item.key for item in registry.for_domain("general")] == [
++        "WEB_ADMIN_" + suffix for suffix, *_ in expected
++    ]
+     assert [item.key for item in registry.for_domain("controller")] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
++    assert [item.key for item in registry.for_domain("portal")] == [
++        "PORTAL_UI_TITLE_AZ",
++        "PORTAL_UI_TITLE_RU",
++        "PORTAL_UI_TITLE_EN",
++        "PORTAL_UI_GREETING_AZ",
++        "PORTAL_UI_GREETING_RU",
++        "PORTAL_UI_GREETING_EN",
++        "PORTAL_UI_DESCRIPTION_AZ",
++        "PORTAL_UI_DESCRIPTION_RU",
++        "PORTAL_UI_DESCRIPTION_EN",
++        "PORTAL_SUPPORT_PHONE",
++        "PORTAL_SUPPORT_EMAIL",
++        "PORTAL_SUPPORT_WHATSAPP_URL",
++        "PORTAL_SUPPORT_TELEGRAM_URL",
++        "PORTAL_SUPPORT_FACEBOOK_URL",
++    ]
+     assert registry.get("OMADA_CLIENT_ID").settings_dict_key == "client_id"
+     assert registry.get("OMADA_CLIENT_SECRET") is None
+     assert registry.get("VERIFY_SSL") is None
+diff --git a/tests/test_admin_controller_settings.py b/tests/test_admin_controller_settings.py
+index 21bcb865378092206314e9fa317af0a2e436a1b0..6a823a3c421227fee0b538cf92b87c631d31f7f0 100644
+--- a/tests/test_admin_controller_settings.py
++++ b/tests/test_admin_controller_settings.py
+@@ -303,9 +303,15 @@ def test_frontend_nonsecret_writable_and_general_allowlist_unchanged():
+     assert 'method: "GET"' in source and 'credentials: "same-origin"' in source
+     assert "Configured presence" in source and "Effective presence" in source
+     registry = tuple(SettingsDefinitionRegistry())
+-    assert len(registry) == 15
++    assert len(registry) == 29
+     assert len([item for item in registry if item.domain == "general"]) == 12
++    assert all(item.key.startswith("WEB_ADMIN_") for item in registry if item.domain == "general")
+     assert [item.key for item in registry if item.domain == "controller"] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
++    assert "OMADA_CLIENT_SECRET" not in {item.key for item in registry}
++    portal = [item for item in registry if item.domain == "portal"]
++    assert len(portal) == 14
++    assert all(item.key.startswith("PORTAL_") for item in portal)
++    assert {item.domain for item in registry} == {"general", "controller", "portal"}
+ 
+ 
+ @pytest.mark.parametrize("injected_settings", [True, False])
+diff --git a/tests/test_portal_design.py b/tests/test_portal_design.py
+index dc954a300568a0284160df30712ba7808d3cabab..0d7239def4b1cc224d9b2957fb2d56f3acfdb685 100644
+--- a/tests/test_portal_design.py
++++ b/tests/test_portal_design.py
+@@ -1,4 +1,7 @@
+ from pathlib import Path
++import re
++
++from app.portal_presentation import PORTAL_SETTING_DEFAULTS
+ 
+ 
+ ROOT = Path(__file__).parents[1]
+@@ -34,10 +37,8 @@ def test_portal_uses_requested_flag_colors_and_copy():
+     assert "color: #0092CC;" in template
+     assert "color: #E4002B;" in template
+     assert "color: #00B140;" in template
+-    assert (
+-        "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!"
+-        in template
+-    )
++    assert PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_AZ"] == "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!"
++    assert "{{ portal_translations['az']['description'] }}" in template
+     assert "white-space: pre-line;" in template
+     assert "font-weight: 700;" in template
+ 
+@@ -46,15 +47,24 @@ def test_portal_has_wifi_decor_support_and_compact_credit():
+     template = read(PORTAL_TEMPLATE)
+ 
+     assert template.count("portal-logo__wave") >= 4
+-    assert 'href="tel:+994504174646"' in template
+-    assert 'href="mailto:zaur.navi@gmail.com"' in template
+-    assert 'href="https://wa.me/994504174646"' in template
+-    assert 'href="https://t.me/ZaurNavi"' in template
+-    assert (
+-        'href="https://www.facebook.com/zaur.navi/'
+-        '?locale=ru_RU"'
+-        in template
+-    )
++    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_PHONE"] == "+994 50 417 46 46"
++    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_EMAIL"] == "zaur.navi@gmail.com"
++    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_WHATSAPP_URL"] == "https://wa.me/994504174646"
++    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_TELEGRAM_URL"] == "https://t.me/ZaurNavi"
++    assert PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_FACEBOOK_URL"] == "https://www.facebook.com/zaur.navi/?locale=ru_RU"
++    assert 'href="{{ portal_support.phone_href }}"' in template
++    assert "{{ portal_support.phone_display }}" in template
++    assert 'href="{{ portal_support.email_href }}"' in template
++    assert "{{ portal_support.email }}" in template
++    for field in ("whatsapp_url", "telegram_url", "facebook_url"):
++        anchor = re.search(
++            r'<a\b[^>]*href="\{\{ portal_support\.' + field + r' \}\}"[^>]*>',
++            template,
++            re.DOTALL,
++        )
++        assert anchor is not None
++        assert 'target="_blank"' in anchor.group()
++        assert 'rel="noopener noreferrer"' in anchor.group()
+     assert 'aria-label="WhatsApp"' in template
+     assert 'aria-label="Telegram"' in template
+     assert 'aria-label="Facebook"' in template

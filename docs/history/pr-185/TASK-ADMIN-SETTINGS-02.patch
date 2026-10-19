@@ -1,0 +1,1364 @@
+diff --git a/app/admin_web/controller_settings.py b/app/admin_web/controller_settings.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..98a510a174754f529de56a287e22285a4699d544
+--- /dev/null
++++ b/app/admin_web/controller_settings.py
+@@ -0,0 +1,55 @@
++"""Read-only, secret-free Controller projection. No provider/store/network access."""
++
++from dataclasses import dataclass
++
++from app.controllers.omada_config import OmadaControllerPublicConfigSnapshot
++
++
++@dataclass(frozen=True, slots=True)
++class ControllerConfigurationReadService:
++    snapshot: OmadaControllerPublicConfigSnapshot
++
++    def __post_init__(self):
++        if type(self.snapshot) is not OmadaControllerPublicConfigSnapshot:
++            raise ValueError("public Controller snapshot required")
++        snapshot = self.snapshot
++        for name in ("controller_url", "controller_id", "client_id"):
++            if not isinstance(getattr(snapshot, name), str) or not getattr(snapshot, name):
++                raise ValueError("public Controller snapshot unavailable")
++        for name in ("controller_url_source", "controller_id_source", "client_id_source",
++                     "client_secret_source", "tls_certificate_verification_source"):
++            if getattr(snapshot, name) not in ("environment", "repository_default"):
++                raise ValueError("public Controller snapshot unavailable")
++        if snapshot.client_secret_presence not in ("configured", "not_configured"):
++            raise ValueError("public Controller snapshot unavailable")
++        if type(snapshot.tls_certificate_verification) is not bool:
++            raise ValueError("public Controller snapshot unavailable")
++
++    def read(self, request_id: str) -> dict:
++        snapshot = self.snapshot
++
++        def value(label, kind, effective_value, source):
++            return {"display_label": label, "value_type": kind,
++                    "effective_value": effective_value, "effective_source": source}
++
++        return {
++            "api_version": "admin.settings.controller.v1",
++            "request_id": request_id,
++            "scope": {"type": "global"},
++            "resource": {"type": "omada_controller", "scope": "installation"},
++            "management_mode": "deployment_controlled",
++            "configuration_state": "configured",
++            "fields": {
++                "controller_url": value("Controller URL", "url", snapshot.controller_url,
++                                        snapshot.controller_url_source),
++                "controller_id": value("Controller ID", "string", snapshot.controller_id,
++                                       snapshot.controller_id_source),
++                "client_id": value("Client / Application ID", "string", snapshot.client_id,
++                                   snapshot.client_id_source),
++                "client_secret": {"display_label": "Client Secret", "value_type": "secret_presence",
++                                  "effective_presence": snapshot.client_secret_presence,
++                                  "effective_source": snapshot.client_secret_source},
++                "tls_certificate_verification": value("TLS certificate verification", "boolean",
++                    snapshot.tls_certificate_verification, snapshot.tls_certificate_verification_source),
++            },
++        }
+diff --git a/app/admin_web/policy.py b/app/admin_web/policy.py
+index dacae089408d702659245633e47ab98384f3f1c3..15c5e32f82a540fbcfd29d5bfca4118784ab9ab9 100644
+--- a/app/admin_web/policy.py
++++ b/app/admin_web/policy.py
+@@ -20,7 +20,7 @@ READ_CAPABILITIES = frozenset(
+ )
+ 
+ GLOBAL_SETTINGS_CAPABILITIES = frozenset({
+-    "admin.read.settings.global", "admin.write.settings.global",
++    "admin.read.settings.global", "admin.write.settings.global", "admin.read.settings.controller",
+ })
+ 
+ 
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index f4dca9129baf89c93ce4703031bd18d51dbbfd41..ecbe62e218d005d3584c1b7060985f3bedccc337 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -160,16 +160,20 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+ 
+     @blueprint.context_processor
+     def settings_navigation():
+-        return {"settings_nav_enabled": (
+-            getattr(runtime, "settings_feature_enabled", False)
+-            and policy.authorize_global(getattr(g, "admin_principal", None), "admin.read.settings.global")
+-        )}
++        enabled = getattr(runtime, "settings_feature_enabled", False)
++        principal = getattr(g, "admin_principal", None)
++        general = enabled and policy.authorize_global(principal, "admin.read.settings.global")
++        controller = enabled and policy.authorize_global(principal, "admin.read.settings.controller")
++        return {"settings_general_allowed": general, "settings_controller_allowed": controller,
++                "settings_nav_enabled": general or controller,
++                "settings_nav_target": "/admin/settings" if general else "/admin/settings/controller"}
+ 
+     def settings_gate(capability):
+         if not getattr(runtime, "settings_feature_enabled", False):
+             return _error("feature_disabled" if _is_api_path(request.path) else "not_found", 404)
+         if not policy.authorize_global(g.admin_principal, capability):
+-            return _error("settings_forbidden", 403)
++            return _error("controller_settings_forbidden" if capability == "admin.read.settings.controller"
++                          else "settings_forbidden", 403)
+         return None
+ 
+     @blueprint.get("/admin/settings")
+@@ -186,6 +190,40 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+         return jsonify({"api_version": "admin.settings.v1", "request_id": g.admin_request_id,
+                         "error": {"code": error.code, "details": list(error.details)}}), error.status
+ 
++    @blueprint.get("/admin/settings/controller")
++    @authenticated
++    def controller_settings_page():
++        rejected = settings_gate("admin.read.settings.controller")
++        if rejected is not None:
++            return rejected
++        if request.args:
++            return _error("invalid_request", 400)
++        return render_template("admin/settings_controller.html",
++            page={"key": "settings_controller", "title": "Controller Settings"},
++            username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token,
++            controller_settings_state=runtime.controller_settings_state)
++
++    @blueprint.get("/admin/api/v1/settings/controller")
++    @authenticated
++    def controller_settings_read():
++        rejected = settings_gate("admin.read.settings.controller")
++        if rejected is not None:
++            return rejected
++        if request.args:
++            return _error("invalid_request", 400)
++        if (runtime.controller_settings_state != "active"
++                or runtime.controller_settings_read_service is None):
++            return _error("controller_settings_read_unavailable", 503)
++        try:
++            model = runtime.controller_settings_read_service.read(g.admin_request_id)
++        except Exception:
++            # Never render or log projection exceptions / raw config.
++            return _error("controller_settings_read_unavailable", 503)
++        try:
++            return jsonify(model)
++        except Exception:
++            return _error("internal_error", 500)
++
+     @blueprint.get("/admin/api/v1/settings")
+     @authenticated
+     def settings_read():
+@@ -2144,7 +2182,9 @@ def _error(code: str, status_code: int) -> Response:
+     if _is_api_path(request.path):
+         return jsonify(
+             {
+-                "api_version": "admin.settings.v1" if request.path.startswith("/admin/api/v1/settings") else API_VERSION,
++                "api_version": ("admin.settings.controller.v1"
++                    if request.path == "/admin/api/v1/settings/controller"
++                    else "admin.settings.v1" if request.path.startswith("/admin/api/v1/settings") else API_VERSION),
+                 "request_id": getattr(g, "admin_request_id", str(uuid.uuid4())),
+                 "error": {
+                     "code": code,
+diff --git a/app/admin_web/runtime.py b/app/admin_web/runtime.py
+index aa344edad57614b866e0c7b05d87a73dfa951d08..0a97c37c94ffbd4d4322cbe44c1e5d7f448585fc 100644
+--- a/app/admin_web/runtime.py
++++ b/app/admin_web/runtime.py
+@@ -68,6 +68,8 @@ class AdminWebRuntime:
+     settings_store_state: str = "disabled"
+     settings_read_service: Any | None = None
+     settings_mutation_service: Any | None = None
++    controller_settings_state: str = "disabled"
++    controller_settings_read_service: Any | None = None
+ 
+     def clear(self) -> None:
+         if self.session_store is not None:
+@@ -92,6 +94,7 @@ def create_admin_web_runtime(
+     observation_runtime: Any | None = None,
+     visit_runtime: Any | None = None,
+     settings_control: Any | None = None,
++    controller_public_snapshot: Any | None = None,
+ ) -> AdminWebRuntime:
+     """Create Admin security state without mutating or querying data sources."""
+     try:
+@@ -408,6 +411,18 @@ def create_admin_web_runtime(
+                         "failure_category": "composition_error",
+                     },
+                 )
++    settings_feature_enabled = settings.get("web_admin_settings_enabled", "false") in (True, "true")
++    controller_settings_state = "disabled"
++    controller_settings_read_service = None
++    if settings_feature_enabled:
++        controller_settings_state = "unavailable"
++        try:
++            from .controller_settings import ControllerConfigurationReadService
++
++            controller_settings_read_service = ControllerConfigurationReadService(controller_public_snapshot)
++            controller_settings_state = "active"
++        except Exception:
++            logger.error("admin.controller_settings_projection_unavailable")
+     runtime = AdminWebRuntime(
+         state=(
+             "active"
+@@ -443,10 +458,12 @@ def create_admin_web_runtime(
+         traffic_completed_sessions_service=completed_sessions_service,
+         traffic_evidence_state=evidence_state,
+         traffic_evidence_aggregator=evidence_aggregator,
+-        settings_feature_enabled=bool(settings_control and settings_control.feature_enabled),
++        settings_feature_enabled=settings_feature_enabled,
+         settings_store_state=settings_control.store_state if settings_control else "disabled",
+         settings_read_service=settings_control.read_service if settings_control else None,
+         settings_mutation_service=settings_control.mutation_service if settings_control else None,
++        controller_settings_state=controller_settings_state,
++        controller_settings_read_service=controller_settings_read_service,
+     )
+     from .routes import create_admin_web_blueprint
+ 
+diff --git a/app/admin_web/static/admin.css b/app/admin_web/static/admin.css
+index 0e196c157e496063ac61318c1cc38e8dafda0fda..a9df8da333ad7ba3e9acf2b37f4df6609bc7ea31 100644
+--- a/app/admin_web/static/admin.css
++++ b/app/admin_web/static/admin.css
+@@ -350,3 +350,5 @@ input[type="radio"] { width: auto; min-height: 0; }
+ .settings-item label { display: block; margin-top: .75rem; }
+ .settings-item input, .settings-item select { max-width: 100%; padding: .5rem; }
+ .settings-actions { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
++.settings-tabs { display: flex; gap: .5rem; margin-bottom: 1rem; }
++.controller-settings-source { display: block; color: var(--muted); margin-top: .25rem; }
+diff --git a/app/admin_web/static/controller_settings.js b/app/admin_web/static/controller_settings.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..56c6b97228bd11aa385ca68e1938743c91363472
+--- /dev/null
++++ b/app/admin_web/static/controller_settings.js
+@@ -0,0 +1,49 @@
++"use strict";
++
++(() => {
++  const page = document.getElementById("controller-settings-page");
++  if (!page || page.dataset.controllerState !== "active") return;
++  const state = document.getElementById("controller-settings-state");
++  const fields = document.getElementById("controller-settings-fields");
++  const keys = ["controller_url", "controller_id", "client_id", "client_secret", "tls_certificate_verification"];
++
++  async function load() {
++    try {
++      const response = await fetch("/admin/api/v1/settings/controller", {
++        method: "GET", credentials: "same-origin", cache: "no-store",
++        headers: {Accept: "application/json"}
++      });
++      if (!response.ok) throw new Error("unavailable");
++      const model = await response.json();
++      if (model.api_version !== "admin.settings.controller.v1") throw new Error("unavailable");
++      const rows = [];
++      for (const key of keys) {
++        const item = model.fields[key];
++        const label = document.createElement("dt");
++        label.textContent = item.display_label;
++        const value = document.createElement("dd");
++        const text = document.createElement("span");
++        if (key === "client_secret") {
++          text.textContent = item.effective_presence === "configured" ? "Configured" : "Not configured";
++        } else if (key === "tls_certificate_verification") {
++          text.textContent = item.effective_value ? "Enabled" : "Disabled";
++        } else {
++          text.textContent = item.effective_value;
++        }
++        const source = document.createElement("small");
++        source.className = "controller-settings-source";
++        source.textContent = item.effective_source === "environment" ? "Environment" : "Repository default";
++        value.append(text, source);
++        rows.push(label, value);
++      }
++      fields.replaceChildren(...rows);
++      fields.hidden = false;
++      state.textContent = "Startup configuration — deployment-controlled. No connection test performed.";
++    } catch (_) {
++      fields.replaceChildren();
++      fields.hidden = true;
++      state.textContent = "Controller configuration read unavailable.";
++    }
++  }
++  load();
++})();
+diff --git a/app/admin_web/templates/admin/base.html b/app/admin_web/templates/admin/base.html
+index 19a8206df1067f5cdf826e99fe4c092e65cf82a8..aba9af20bf43c34a05ae0f1f8713e20949e924c5 100644
+--- a/app/admin_web/templates/admin/base.html
++++ b/app/admin_web/templates/admin/base.html
+@@ -1,4 +1,5 @@
+ <!doctype html>
++{% set global_settings_page = page.key in ('settings', 'settings_controller') %}
+ <html lang="en">
+ <head>
+   <meta charset="utf-8">
+@@ -7,6 +8,8 @@
+   <link rel="stylesheet" href="{{ url_for('admin_web_v1.static', filename='admin.css') }}">
+   {% if page.key == 'settings' %}
+   <script defer src="{{ url_for('admin_web_v1.static', filename='settings.js') }}"></script>
++  {% elif page.key == 'settings_controller' %}
++  <script defer src="{{ url_for('admin_web_v1.static', filename='controller_settings.js') }}"></script>
+   {% else %}
+   <script defer src="{{ url_for('admin_web_v1.static', filename='admin.js') }}"></script>
+   {% endif %}
+@@ -14,12 +17,12 @@
+ <body>
+   <a class="skip-link" href="#main-content">Skip to content</a>
+   <header class="topbar">
+-    <a class="brand" href="{% if page.key == 'settings' %}/admin/{% else %}/admin/sites/{{ site_id }}/{% endif %}" aria-label="CaptivPortal admin home">
++    <a class="brand" href="{% if global_settings_page %}/admin/{% else %}/admin/sites/{{ site_id }}/{% endif %}" aria-label="CaptivPortal admin home">
+       <span class="brand-mark" aria-hidden="true">CP</span>
+       <span>CaptivPortal</span>
+     </a>
+     <div class="topbar-context">
+-      {% if page.key == 'settings' %}
++      {% if global_settings_page %}
+       <span class="eyebrow">Global Settings</span>
+       {% else %}
+       <span class="eyebrow">Current Site</span>
+@@ -36,7 +39,7 @@
+   </header>
+   <div class="app-frame">
+     <nav class="sidebar" aria-label="Admin navigation">
+-      {% if page.key == 'settings' %}
++      {% if global_settings_page %}
+       <a class="nav-link" href="/admin/">Home</a>
+       {% else %}
+       <a class="nav-link{% if page.key == 'home' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/">Home</a>
+@@ -48,22 +51,30 @@
+       {% endif %}
+       {% endif %}
+       {% if settings_nav_enabled %}
+-      <a class="nav-link{% if page.key == 'settings' %} is-active{% endif %}" href="/admin/settings">Settings</a>
++      <a class="nav-link{% if global_settings_page %} is-active{% endif %}" href="{{ settings_nav_target }}">Settings</a>
+       {% endif %}
+     </nav>
+     <main id="main-content" class="content">
+       <div class="page-heading">
+         <div>
+-          <p class="eyebrow">{% if page.key == 'settings' %}Global administration{% else %}Read-only operations{% endif %}</p>
++          <p class="eyebrow">{% if global_settings_page %}Global administration{% else %}Read-only operations{% endif %}</p>
+           <h1>{{ page.title }}</h1>
+           {% block subtitle %}{% endblock %}
+         </div>
+-        {% if page.key != 'settings' %}<button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>{% endif %}
++        {% if not global_settings_page %}<button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>{% endif %}
+       </div>
++      {% if global_settings_page %}
++      <nav class="settings-tabs" aria-label="Settings sections">
++        {% if settings_general_allowed %}<a class="nav-link{% if page.key == 'settings' %} is-active{% endif %}" href="/admin/settings"{% if page.key == 'settings' %} aria-current="page"{% endif %}>General</a>{% endif %}
++        {% if settings_controller_allowed %}<a class="nav-link{% if page.key == 'settings_controller' %} is-active{% endif %}" href="/admin/settings/controller"{% if page.key == 'settings_controller' %} aria-current="page"{% endif %}>Controller</a>{% endif %}
++      </nav>
++      {% endif %}
+       <section
+         {% if page.key == 'settings' %}
+         id="settings-page" data-api-base="/admin/api/v1/settings"
+         data-store-state="{{ settings_store_state }}" data-csrf-token="{{ csrf_token }}"
++        {% elif page.key == 'settings_controller' %}
++        id="controller-settings-page" data-controller-state="{{ controller_settings_state }}"
+         {% else %}
+         id="admin-page"
+         data-page="{{ page.key }}"
+diff --git a/app/admin_web/templates/admin/settings_controller.html b/app/admin_web/templates/admin/settings_controller.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..30fcf17a60a68e3b8e84ad78e8b314802a2f342a
+--- /dev/null
++++ b/app/admin_web/templates/admin/settings_controller.html
+@@ -0,0 +1,8 @@
++{% extends "admin/base.html" %}
++{% block subtitle %}<p>Installation-level configuration adopted at startup. Deployment-controlled and read-only; this page does not check Controller connectivity.</p>{% endblock %}
++{% block page_body %}
++<div id="controller-settings-state" class="state-panel" role="status" aria-live="polite">
++  {% if controller_settings_state == 'active' %}Loading Controller configuration…{% else %}Controller configuration read unavailable.{% endif %}
++</div>
++<dl id="controller-settings-fields" class="detail-list" hidden></dl>
++{% endblock %}
+diff --git a/app/controllers/factory.py b/app/controllers/factory.py
+index 97ddc2ef1014d033f426d54c8e6620dec9fa0c5f..e80a968c261da3e22ce7cb95911788337936585e 100644
+--- a/app/controllers/factory.py
++++ b/app/controllers/factory.py
+@@ -7,10 +7,11 @@ Ensures loose coupling by hiding concrete implementation details.
+ 
+ from app.controllers.base import ControllerInterface
+ from app.controllers.omada import OmadaProvider
++from app.controllers.omada_config import OmadaControllerRuntimeConfig
+ from app.logger import logger
+ 
+ 
+-def create_controller() -> ControllerInterface:
++def create_controller(runtime_config: OmadaControllerRuntimeConfig) -> ControllerInterface:
+     """
+     Create and return a controller provider instance.
+     
+@@ -22,6 +23,6 @@ def create_controller() -> ControllerInterface:
+         ControllerInterface: An instance of a controller provider.
+     """
+     logger.info("Creating controller provider...")
+-    controller = OmadaProvider()
++    controller = OmadaProvider(runtime_config)
+     logger.debug("Controller provider created successfully")
+     return controller
+diff --git a/app/controllers/omada.py b/app/controllers/omada.py
+index ccb6250c87002a61d6185f45c2166725a1788b0f..023315b53b6a5c9a7183fd1b6404c8fdd1552e97 100644
+--- a/app/controllers/omada.py
++++ b/app/controllers/omada.py
+@@ -9,14 +9,12 @@ import threading
+ import time
+ import requests
+ from typing import Any, Optional
+-from urllib.parse import urlsplit
+ 
+ from app.common.mac import format_mac_colon, format_mac_hyphen
+ from app.controllers.base import ControllerInterface
+-from app.exceptions import ConfigurationError
++from app.controllers.omada_config import OmadaControllerRuntimeConfig
+ from app.logger import logger
+ from app.models import Result
+-from app import get_settings
+ 
+ 
+ class OmadaProvider(ControllerInterface):
+@@ -24,71 +22,15 @@ class OmadaProvider(ControllerInterface):
+ 
+     CLIENT_PAGE_SIZE = 100
+     CLIENT_MAX_PAGES = 100
+-    _REQUIRED_CONFIGURATION = (
+-        ("OMADA_URL", "omada_url"),
+-        ("OMADA_ID", "omada_id"),
+-        ("OMADA_CLIENT_ID", "client_id"),
+-        ("OMADA_CLIENT_SECRET", "client_secret"),
+-    )
+-
+-    @staticmethod
+-    def _is_valid_base_url(value: str) -> bool:
+-        if any(character.isspace() for character in value):
+-            return False
+-        if "?" in value or "#" in value:
+-            return False
+-
+-        try:
+-            parsed = urlsplit(value)
+-            port = parsed.port
+-        except ValueError:
+-            return False
+-
+-        if parsed.scheme not in {"http", "https"}:
+-            return False
+-        if not parsed.netloc or parsed.hostname is None:
+-            return False
+-        if parsed.username is not None or parsed.password is not None:
+-            return False
+-        if parsed.path not in {"", "/"}:
+-            return False
+-        if parsed.netloc.endswith(":"):
+-            return False
+-        if port is not None and port == 0:
+-            return False
+-        return True
+-
+-    def __init__(self):
++    def __init__(self, runtime_config: OmadaControllerRuntimeConfig):
+         logger.debug("Initializing OmadaProvider")
+-        settings = get_settings()
+-        missing = [
+-            external_name
+-            for external_name, internal_name in self._REQUIRED_CONFIGURATION
+-            if (
+-                not isinstance(settings.get(internal_name), str)
+-                or not settings[internal_name].strip()
+-            )
+-        ]
+-        if missing:
+-            raise ConfigurationError(
+-                "Missing required configuration: " + ", ".join(missing)
+-            )
+-
+-        normalized = {
+-            internal_name: settings[internal_name].strip()
+-            for _, internal_name in self._REQUIRED_CONFIGURATION
+-        }
+-        omada_url = normalized["omada_url"]
+-        if not self._is_valid_base_url(omada_url):
+-            raise ConfigurationError("Invalid configuration: OMADA_URL")
+-
+-        self._omada_url = (
+-            omada_url[:-1] if omada_url.endswith("/") else omada_url
+-        )
+-        self._omada_id = normalized["omada_id"]
+-        self._client_id = normalized["client_id"]
+-        self._client_secret = normalized["client_secret"]
+-        self._verify_ssl = settings["verify_ssl"]
++        if not isinstance(runtime_config, OmadaControllerRuntimeConfig):
++            raise TypeError("OmadaControllerRuntimeConfig required")
++        self._omada_url = runtime_config.controller_url
++        self._omada_id = runtime_config.controller_id
++        self._client_id = runtime_config.client_id
++        self._client_secret = runtime_config.client_secret
++        self._verify_ssl = runtime_config.verify_ssl
+         self._token_condition = threading.Condition(
+             threading.RLock()
+         )
+diff --git a/app/controllers/omada_config.py b/app/controllers/omada_config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..722602e6806ed1dc73e64d79c0fa22874214a564
+--- /dev/null
++++ b/app/controllers/omada_config.py
+@@ -0,0 +1,102 @@
++"""Canonical startup Omada configuration and its separate public projection."""
++
++from dataclasses import dataclass, field
++from typing import Any, Mapping
++from urllib.parse import urlsplit
++
++from app.exceptions import ConfigurationError
++
++
++_REQUIRED = (
++    ("OMADA_URL", "omada_url", "controller_url"),
++    ("OMADA_ID", "omada_id", "controller_id"),
++    ("OMADA_CLIENT_ID", "client_id", "client_id"),
++    ("OMADA_CLIENT_SECRET", "client_secret", "client_secret"),
++)
++
++
++def _valid_base_url(value: str) -> bool:
++    if any(character.isspace() for character in value) or "?" in value or "#" in value:
++        return False
++    try:
++        parsed = urlsplit(value)
++        port = parsed.port
++    except ValueError:
++        return False
++    return (
++        parsed.scheme in {"http", "https"}
++        and bool(parsed.netloc)
++        and parsed.hostname is not None
++        and parsed.username is None
++        and parsed.password is None
++        and parsed.path in {"", "/"}
++        and not parsed.netloc.endswith(":")
++        and port != 0
++    )
++
++
++@dataclass(frozen=True, slots=True)
++class OmadaControllerRuntimeConfig:
++    controller_url: str
++    controller_id: str
++    client_id: str
++    client_secret: str = field(repr=False)
++    verify_ssl: bool
++
++    def __post_init__(self):
++        missing = [external for external, _, attribute in _REQUIRED
++                   if not isinstance(getattr(self, attribute), str)
++                   or not getattr(self, attribute).strip()]
++        if missing:
++            raise ConfigurationError("Missing required configuration: " + ", ".join(missing))
++        for _, _, attribute in _REQUIRED:
++            object.__setattr__(self, attribute, getattr(self, attribute).strip())
++        if not _valid_base_url(self.controller_url):
++            raise ConfigurationError("Invalid configuration: OMADA_URL")
++        if self.controller_url.endswith("/"):
++            object.__setattr__(self, "controller_url", self.controller_url[:-1])
++
++
++def build_omada_runtime_config(settings: Mapping[str, Any]) -> OmadaControllerRuntimeConfig:
++    """Resolve only from the caller's already-adopted mapping, with no I/O."""
++    return OmadaControllerRuntimeConfig(
++        **{attribute: settings.get(internal) for _, internal, attribute in _REQUIRED},
++        verify_ssl=settings["verify_ssl"],
++    )
++
++
++@dataclass(frozen=True, slots=True)
++class OmadaControllerPublicConfigSnapshot:
++    controller_url: str
++    controller_url_source: str
++    controller_id: str
++    controller_id_source: str
++    client_id: str
++    client_id_source: str
++    client_secret_presence: str
++    client_secret_source: str
++    tls_certificate_verification: bool
++    tls_certificate_verification_source: str
++
++
++def public_omada_snapshot(
++    runtime_config: OmadaControllerRuntimeConfig,
++    explicit_environment_names: frozenset[str],
++) -> OmadaControllerPublicConfigSnapshot:
++    """Project the same config used by the provider; never expose secret material."""
++    def source(name):
++        return "environment" if name in explicit_environment_names else "repository_default"
++
++    return OmadaControllerPublicConfigSnapshot(
++        controller_url=runtime_config.controller_url,
++        controller_url_source=source("OMADA_URL"),
++        controller_id=runtime_config.controller_id,
++        controller_id_source=source("OMADA_ID"),
++        client_id=runtime_config.client_id,
++        client_id_source=source("OMADA_CLIENT_ID"),
++        client_secret_presence="configured" if runtime_config.client_secret else "not_configured",
++        client_secret_source=source("OMADA_CLIENT_SECRET"),
++        tls_certificate_verification=runtime_config.verify_ssl,
++        # VERIFY_SSL is a repository constant, not an environment binding.
++        tls_certificate_verification_source="repository_default",
++    )
+diff --git a/app/web/web.py b/app/web/web.py
+index fcd3e00e1dff159b04c718dac16b36973aa81275..c0d1aa87702e028184582bac01df59007c0ac92c 100644
+--- a/app/web/web.py
++++ b/app/web/web.py
+@@ -14,6 +14,7 @@ from flask import Flask, jsonify, make_response, render_template, request
+ from werkzeug.middleware.proxy_fix import ProxyFix
+ 
+ from app import create_controller, get_settings, logger
++from app.controllers.omada_config import build_omada_runtime_config
+ from app.auth.manager import (
+     AuthSessionManager,
+     RetryOutcome,
+@@ -344,7 +345,7 @@ def create_app(
+         )
+ 
+     if controller is None:
+-        controller = create_controller()
++        controller = create_controller(build_omada_runtime_config(settings))
+     if visitor_snapshot_collector is None:
+         visitor_snapshot_collector = (
+             DISABLED_VISITOR_SNAPSHOT_COLLECTOR
+diff --git a/docs/configuration.md b/docs/configuration.md
+index cdb4e39aea53b8f53ec03d414c20b3a280c6083c..81730f8d03158a22e3f9e86001d724d53bf6858c 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -559,3 +559,22 @@ The main runtime composes one immutable startup snapshot and durably adopts
+ that exact generation before serving. Operational source degradation is not
+ Settings activation failure. No service or production activation is performed
+ by this implementation.
++
++## Read-only Omada Controller Settings
++
++`WEB_ADMIN_SETTINGS_ENABLED` also gates the GLOBAL Controller read page/API.
++The main process builds one immutable `OmadaControllerRuntimeConfig` from the
++Stage-1 resolved settings, injects it into the shared provider and derives a
++separate secret-free public snapshot for Admin. The provider no longer reads
++settings independently. `create_app(controller=None)` retains compatibility
++by using the same canonical builder on its already-resolved local mapping;
++an injected controller is never rebuilt.
++
++`OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID` and `OMADA_CLIENT_SECRET` remain required.
++Existing trim/base-URL normalization and OAuth/request semantics are unchanged.
++Startup environment-name membership determines public `environment` versus
++`repository_default` provenance; `VERIFY_SSL=false` is a repository constant.
++Client Secret is represented only by presence/source, never its value or any
++derived length/hash/mask. No Controller values are stored in SettingsStore and
++the twelve writable integer settings are unchanged. No live probe, reload,
++restart, deployment or production activation is performed.
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index 33451235a8451be0cabe3cb6bda7447aac0d95a5..d278a7fa9165a57bd8815c1c71fd2fe96e891d78 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -873,3 +873,35 @@ Changed writes return 201; no-op writes return 200. Replay returns that original
+ full 12-item response even after configured/effective generations advance.
+ Settings UI offers Set/Clear Override and Save, never restart/reload controls.
+ No activation capability is exposed to Admin handlers.
++
++## GLOBAL Controller Settings — read-only Stage 2
++
++`GET /admin/settings/controller` and `GET /admin/api/v1/settings/controller`
++require `WEB_ADMIN_SETTINGS_ENABLED` and the GLOBAL capability
++`admin.read.settings.controller`. There is no write capability, Site variant,
++generation or mutation route. Unexpected API query parameters return
++`400 invalid_request`. JSON uses `admin.settings.controller.v1`, a request UUID,
++GLOBAL scope, installation-level `omada_controller` resource and
++`management_mode=deployment_controlled`. Responses are `no-store` / `no-cache`.
++
++`ControllerConfigurationReadService` receives only the immutable public
++projection of the exact config adopted by the shared Omada provider at startup.
++It cannot read environment/settings/store/provider state and performs zero
++Omada/OAuth I/O. The five fields show Controller URL, Controller ID,
++Client / Application ID, Client Secret presence and TLS verification, with
++`environment` / `repository_default` sources. No connection/token health is
++claimed and no secret value, substring, length or digest is retained/disclosed.
++
++General and Controller authorization/navigation are independent. The Settings
++top-level link chooses General when allowed, otherwise Controller; secondary
++links are capability-aware. Both pages are GLOBAL. Controller loads only
++`controller_settings.js`, not `settings.js` or Site-oriented `admin.js`.
++
++The Controller read surface has `active`, `disabled` and `unavailable` states.
++Disabled HTML is 404, disabled API is `404 feature_disabled`; unavailable
++projection/read is `503 controller_settings_read_unavailable`. Authentication,
++capability and malformed-query failures are respectively 401, 403 and 400;
++unexpected response serialization errors are sanitized `500 internal_error`.
++SettingsStore failure alone does not disable a trustworthy Controller snapshot.
++Projection failure remains fail-open for the shared provider and Portal/Auth.
++Stage 2 grants no network probe, systemd or production authority.
+diff --git a/run.py b/run.py
+index 8dfc80486e1eea230e04c7b77568283297368f97..36482db50db64d77fbdaf414800fa0c350101c94 100644
+--- a/run.py
++++ b/run.py
+@@ -37,6 +37,7 @@ from app.analytics import create_analytics_runtime
+ from app.analytics.api import API_PREFIX
+ from app.admin_web import create_admin_web_runtime
+ from app.settings_control.bootstrap import bootstrap_settings_control
++from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
+ from app.admin_web.home_ap_24h_telemetry import (
+     create_home_ap_24h_telemetry_worker,
+ )
+@@ -273,7 +274,8 @@ def _configure_analytics(app, settings, registry_read_service) -> None:
+         logger.exception("analytics_api_runtime_configuration_failed")
+ 
+ 
+-def _configure_admin_web(app, settings, registry_read_service, settings_control=None) -> None:
++def _configure_admin_web(app, settings, registry_read_service, settings_control=None,
++                         controller_public_snapshot=None) -> None:
+     """Attach Admin Web after all existing read boundaries are composed."""
+     global _admin_web_runtime
+ 
+@@ -298,6 +300,7 @@ def _configure_admin_web(app, settings, registry_read_service, settings_control=
+             observation_runtime=_observation_foundation,
+             visit_runtime=_visit_lifecycle,
+             settings_control=settings_control,
++            controller_public_snapshot=controller_public_snapshot,
+         )
+         app.extensions["admin_web_runtime"] = _admin_web_runtime
+         if _admin_web_runtime.blueprint is not None:
+@@ -381,15 +384,22 @@ def main() -> None:
+     signal.signal(signal.SIGTERM, signal_handler)
+ 
+     base_settings = get_settings()
++    explicit_environment_names = frozenset(os.environ)
+     settings_bootstrap = bootstrap_settings_control(
+         base_settings=base_settings,
+-        explicit_environment_names=frozenset(os.environ),
++        explicit_environment_names=explicit_environment_names,
+         logger=logger,
+     )
+     settings = settings_bootstrap.runtime_settings
+     logger.info("Configuration loaded")
+ 
+-    controller = create_controller()
++    controller_config = build_omada_runtime_config(settings)
++    controller = create_controller(controller_config)
++    try:
++        controller_public_snapshot = public_omada_snapshot(controller_config, explicit_environment_names)
++    except Exception:
++        controller_public_snapshot = None
++        logger.error("admin.controller_settings_projection_unavailable")
+     _visitor_snapshot_collector = create_visitor_snapshot_collector(
+         settings=settings,
+         provider=controller,
+@@ -476,7 +486,8 @@ def main() -> None:
+     except Exception:
+         logger.exception("visit_lifecycle_reconciliation_start_failed")
+     _configure_analytics(app, settings, registry_read_service)
+-    _configure_admin_web(app, settings, registry_read_service, settings_bootstrap.admin_context)
++    _configure_admin_web(app, settings, registry_read_service, settings_bootstrap.admin_context,
++                         controller_public_snapshot)
+     if settings_bootstrap.activation_service is not None:
+         settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime)
+     _start_public_traffic_worker(app)
+diff --git a/tests/integrations/omada/test_webhook_receiver.py b/tests/integrations/omada/test_webhook_receiver.py
+index e9126510f3c788b4632db5467133bd94f9fdfb46..fbde698068edaa0151bedf0c18ad9943fdb1db83 100644
+--- a/tests/integrations/omada/test_webhook_receiver.py
++++ b/tests/integrations/omada/test_webhook_receiver.py
+@@ -1019,7 +1019,7 @@ def test_disabled_module_returns_404_and_creates_no_log(
+             return_value=object(),
+         ),
+     ):
+-        app = web_module.create_app(portal_counter_service=None)
++        app = web_module.create_app(portal_counter_service=None, controller=object())
+     app.config["TESTING"] = True
+ 
+     with caplog.at_level(logging.WARNING):
+@@ -1052,7 +1052,7 @@ def test_enabled_webhook_is_isolated_from_existing_routes(tmp_path):
+             return_value=object(),
+         ),
+     ):
+-        app = web_module.create_app(portal_counter_service=None)
++        app = web_module.create_app(portal_counter_service=None, controller=object())
+     app.config["TESTING"] = True
+     client = app.test_client()
+ 
+@@ -1108,7 +1108,7 @@ def test_persist_failure_leaves_portal_and_auth_routes_available(
+             return_value=FailingJournal(),
+         ),
+     ):
+-        app = web_module.create_app(portal_counter_service=None)
++        app = web_module.create_app(portal_counter_service=None, controller=object())
+     app.config["TESTING"] = True
+     client = app.test_client()
+ 
+diff --git a/tests/integrations/omada/test_webhook_site_mapping.py b/tests/integrations/omada/test_webhook_site_mapping.py
+index 9750224a2b03f802d6f47b84d711cf0c3d43e380..1337f83e9ee6fc48092b7ba6aa86c1c043f9ba9e 100644
+--- a/tests/integrations/omada/test_webhook_site_mapping.py
++++ b/tests/integrations/omada/test_webhook_site_mapping.py
+@@ -142,7 +142,7 @@ def test_application_wiring_uses_mapping_and_invalid_config_is_fail_open(
+         ),
+         caplog.at_level(logging.WARNING, logger="captivportal"),
+     ):
+-        app = web_module.create_app(portal_counter_service=None)
++        app = web_module.create_app(portal_counter_service=None, controller=object())
+ 
+     response = app.test_client(use_cookies=False).post(
+         WEBHOOK_PATH,
+diff --git a/tests/observations/test_runtime.py b/tests/observations/test_runtime.py
+index 1bea39570bfa9923f23f0f1a6a3ee305919b133d..fd4496a6d6c0862f6abbc5c8eb389ecc35b23855 100644
+--- a/tests/observations/test_runtime.py
++++ b/tests/observations/test_runtime.py
+@@ -262,8 +262,10 @@ def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
+     monkeypatch.setattr(process_runtime.signal, "signal", lambda *args: None)
+     monkeypatch.setattr(process_runtime, "get_settings", lambda: {
+         "host": "127.0.0.1", "port": 8088, "debug": False,
++        "omada_url": "https://controller.invalid", "omada_id": "installation",
++        "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
+     })
+-    monkeypatch.setattr(process_runtime, "create_controller", lambda: provider)
++    monkeypatch.setattr(process_runtime, "create_controller", lambda runtime_config: provider)
+     monkeypatch.setattr(process_runtime, "create_visitor_snapshot_collector", lambda **kwargs: snapshot)
+     monkeypatch.setattr(process_runtime, "create_app", lambda **kwargs: app)
+     monkeypatch.setattr(process_runtime, "create_pending_session_cleaner", lambda **kwargs: cleaner)
+diff --git a/tests/settings_control/test_run_integration.py b/tests/settings_control/test_run_integration.py
+index c87e019b1ac597f6dcc88d5112943ec848e1affb..699a0aeb2068b37d3436f5a8865ee55b8cf3a225 100644
+--- a/tests/settings_control/test_run_integration.py
++++ b/tests/settings_control/test_run_integration.py
+@@ -13,7 +13,9 @@ def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch,
+                         SimpleNamespace(json_line=lambda: "synthetic settings startup test"))
+     from tests.admin_web.conftest import enabled_settings
+     admin_settings = enabled_settings() if failure == "configuration" else {}
+-    boot = stack(tmp_path, **admin_settings, host="127.0.0.1", port=8088, debug=False)
++    boot = stack(tmp_path, **admin_settings, host="127.0.0.1", port=8088, debug=False,
++                 omada_url="https://controller.invalid", omada_id="installation",
++                 client_id="application", client_secret="fixture-secret", verify_ssl=False)
+     # Use the real activation service and snapshot, with a disposable disabled Admin.
+     monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_kwargs: boot)
+     original = boot.activation_service.repository.activation
+diff --git a/tests/test_admin_controller_settings.py b/tests/test_admin_controller_settings.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f57742803eba02ee2014a7add6d1a62eb6a87ead
+--- /dev/null
++++ b/tests/test_admin_controller_settings.py
+@@ -0,0 +1,331 @@
++import ast
++import json
++import logging
++import uuid
++from dataclasses import FrozenInstanceError, asdict
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++from flask import Flask
++
++import app.web.web as web
++import run
++from app.admin_web import create_admin_web_runtime
++from app.admin_web.controller_settings import ControllerConfigurationReadService
++from app.admin_web.models import AdminPrincipal
++from app.admin_web.policy import AdminAccessPolicy, GLOBAL_SETTINGS_CAPABILITIES
++from app.controllers.factory import create_controller
++from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
++from app.settings_control.definitions import SettingsDefinitionRegistry
++from tests.admin_web.conftest import enabled_settings, login
++
++
++SECRET = "AS02_SENTINEL_NEVER_DISCLOSE_z9X7!"
++API = "/admin/api/v1/settings/controller"
++PAGE = "/admin/settings/controller"
++
++
++def settings(**overrides):
++    values = enabled_settings(web_admin_settings_enabled="true")
++    values.update(omada_url=" https://controller.invalid:8043/ ", omada_id=" installation ",
++                  client_id=" application ", client_secret=" " + SECRET + " ", verify_ssl=False,
++                  portal_counter_enabled=False, portal_counter_api_enabled=False,
++                  public_traffic_enabled=False, auth_telemetry_enabled=False, capport_enabled=False)
++    values.update(overrides)
++    return values
++
++
++def snapshot():
++    return public_omada_snapshot(build_omada_runtime_config(settings()),
++        frozenset({"OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID", "OMADA_CLIENT_SECRET"}))
++
++
++def controller_app(*, enabled=True, projection=True, authenticated=True, policy=None, store="unavailable"):
++    runtime = create_admin_web_runtime(settings(web_admin_settings_enabled=enabled),
++        None, None, None, None, logging.getLogger("as02"),
++        settings_control=SimpleNamespace(feature_enabled=enabled, store_state=store,
++                                        read_service=None, mutation_service=None),
++        controller_public_snapshot=snapshot() if projection else None)
++    if policy is not None:
++        runtime.access_policy = policy
++        from app.admin_web.routes import create_admin_web_blueprint
++        runtime.blueprint = create_admin_web_blueprint(runtime, logger=logging.getLogger("as02"))
++    app = Flask(__name__)
++    app.config["TESTING"] = True
++    app.register_blueprint(runtime.blueprint)
++    client = app.test_client()
++    if authenticated:
++        assert login(client).status_code == 302
++    return app, client, runtime
++
++
++def get(client, path=API):
++    return client.get(path, base_url="https://localhost")
++
++
++def test_config_normalization_immutability_and_injected_provider(monkeypatch, caplog):
++    mapping = settings()
++    config = build_omada_runtime_config(mapping)
++    assert config.controller_url == "https://controller.invalid:8043"
++    assert config.controller_id == "installation" and config.client_id == "application"
++    assert config.client_secret == SECRET
++    with pytest.raises(FrozenInstanceError):
++        config.client_secret = "different"
++    mapping["client_secret"] = "changed-after-resolution"
++    monkeypatch.setattr("app.settings.get_settings", lambda: pytest.fail("second settings read"))
++    with caplog.at_level(logging.DEBUG):
++        provider = create_controller(config)
++    assert provider._client_secret == SECRET and provider._omada_url == config.controller_url
++    assert provider._verify_ssl is False
++    for value in (repr(config), str(config), repr(provider), str(provider), caplog.text):
++        assert SECRET not in value
++    import app.controllers.omada as omada
++    assert not hasattr(omada, "get_settings")
++    with pytest.raises(TypeError):
++        create_controller()
++    with pytest.raises(TypeError):
++        omada.OmadaProvider()
++
++
++def test_public_projection_provenance_membership_and_secret_absence():
++    config = build_omada_runtime_config(settings())
++    explicit = public_omada_snapshot(config, frozenset({"OMADA_URL", "OMADA_CLIENT_SECRET"}))
++    default = public_omada_snapshot(config, frozenset())
++    assert explicit.controller_url == default.controller_url
++    assert explicit.controller_url_source == "environment"
++    assert default.controller_url_source == "repository_default"
++    assert explicit.controller_id_source == "repository_default"
++    assert explicit.client_secret_source == "environment"
++    assert explicit.tls_certificate_verification_source == "repository_default"
++    assert SECRET not in json.dumps(asdict(explicit)) + repr(explicit) + str(explicit)
++    assert set(asdict(explicit)) == {"controller_url", "controller_url_source", "controller_id",
++        "controller_id_source", "client_id", "client_id_source", "client_secret_presence",
++        "client_secret_source", "tls_certificate_verification", "tls_certificate_verification_source"}
++    with pytest.raises(FrozenInstanceError):
++        explicit.controller_url = "changed"
++    with pytest.raises(ValueError):
++        ControllerConfigurationReadService(config)
++
++
++def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
++    _, client, runtime = controller_app()
++    monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **k: pytest.fail("network"))
++    monkeypatch.setattr("app.settings.get_settings", lambda: pytest.fail("request settings read"))
++    response = get(client)
++    assert response.status_code == 200
++    model = response.json
++    assert model["api_version"] == "admin.settings.controller.v1"
++    assert str(uuid.UUID(model["request_id"])) == model["request_id"]
++    assert model["scope"] == {"type": "global"}
++    assert model["resource"] == {"type": "omada_controller", "scope": "installation"}
++    assert model["management_mode"] == "deployment_controlled"
++    assert model["configuration_state"] == "configured"
++    assert model["fields"] == {
++        "controller_url": {"display_label": "Controller URL", "value_type": "url",
++            "effective_value": "https://controller.invalid:8043", "effective_source": "environment"},
++        "controller_id": {"display_label": "Controller ID", "value_type": "string",
++            "effective_value": "installation", "effective_source": "environment"},
++        "client_id": {"display_label": "Client / Application ID", "value_type": "string",
++            "effective_value": "application", "effective_source": "environment"},
++        "client_secret": {"display_label": "Client Secret", "value_type": "secret_presence",
++            "effective_presence": "configured", "effective_source": "environment"},
++        "tls_certificate_verification": {"display_label": "TLS certificate verification", "value_type": "boolean",
++            "effective_value": False, "effective_source": "repository_default"}}
++    assert runtime.settings_store_state == "unavailable" and runtime.controller_settings_state == "active"
++    assert response.mimetype == "application/json"
++    assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
++    page = get(client, PAGE)
++    assert page.status_code == 200
++    assert SECRET not in response.text + page.text + caplog.text
++    assert "data-site-id" not in page.text and "/admin/sites/" not in page.text
++    assert "controller_settings.js" in page.text
++    assert "filename=settings.js" not in page.text and 'src="/admin/static/settings.js"' not in page.text
++    assert 'src="/admin/static/admin.js"' not in page.text
++    assert "Save changes" not in page.text
++
++
++@pytest.mark.parametrize("authenticated,enabled,projection,status,code", [
++    (False, True, True, 401, "authentication_required"),
++    (True, False, True, 404, "feature_disabled"),
++    (True, True, False, 503, "controller_settings_read_unavailable"),
++])
++def test_bounded_api_errors(authenticated, enabled, projection, status, code, caplog):
++    _, client, _ = controller_app(authenticated=authenticated, enabled=enabled, projection=projection)
++    response = get(client)
++    assert response.status_code == status and response.json["error"]["code"] == code
++    assert SECRET not in response.text + caplog.text
++    if not enabled:
++        assert get(client, PAGE).status_code == 404
++
++
++def test_query_rejection_and_no_mutation_route():
++    app, client, _ = controller_app()
++    for query in ("site_id=fake", "foo=1", "foo=1&foo=2"):
++        response = get(client, API + "?" + query)
++        assert response.status_code == 400 and response.json["error"]["code"] == "invalid_request"
++    rules = [rule for rule in app.url_map.iter_rules() if rule.rule == API]
++    assert len(rules) == 1 and rules[0].methods == {"GET", "HEAD", "OPTIONS"}
++    assert get(client, "/admin/api/v1/sites/fake/settings/controller").status_code != 200
++
++
++class SelectivePolicy:
++    def __init__(self, allowed):
++        self.allowed = allowed
++
++    def authorize_global(self, principal, capability):
++        return capability in self.allowed
++
++    def authorize(self, *args):
++        return False
++
++
++@pytest.mark.parametrize("general,controller", [(True, True), (True, False), (False, True), (False, False)])
++def test_independent_capabilities_and_navigation(general, controller):
++    allowed = set()
++    if general:
++        allowed.add("admin.read.settings.global")
++    if controller:
++        allowed.add("admin.read.settings.controller")
++    _, client, _ = controller_app(policy=SelectivePolicy(allowed))
++    response = get(client, PAGE if controller or not general else "/admin/settings")
++    if general or controller:
++        assert response.status_code == 200
++        assert ('href="/admin/settings"' in response.text) == general
++        assert ('href="/admin/settings/controller"' in response.text) == controller
++        target = "/admin/settings" if general else PAGE
++        assert f'href="{target}">Settings</a>' in response.text
++    else:
++        assert response.status_code == 403
++    if not controller:
++        assert get(client).json["error"]["code"] == "controller_settings_forbidden"
++
++
++def test_global_policy_and_no_site_resolution(monkeypatch):
++    policy = AdminAccessPolicy(frozenset())
++    assert policy.authorize_global(AdminPrincipal("operator"), "admin.read.settings.controller")
++    assert not policy.authorize_global(AdminPrincipal("operator", "site_operator"), "admin.read.settings.controller")
++    assert not policy.authorize_global(None, "admin.read.settings.controller")
++    assert "admin.write.settings.controller" not in GLOBAL_SETTINGS_CAPABILITIES
++    _, client, _ = controller_app()
++    monkeypatch.setattr("app.admin_web.policy.AdminSiteContextResolver.resolve", lambda *a: pytest.fail("site"))
++    monkeypatch.setattr("app.admin_web.policy.AdminSiteContextResolver.default", lambda *a: pytest.fail("site"))
++    assert get(client).status_code == get(client, PAGE).status_code == 200
++
++
++def test_read_failure_is_sanitized_and_provider_still_usable(monkeypatch, caplog):
++    provider = create_controller(build_omada_runtime_config(settings()))
++    _, client, runtime = controller_app()
++    def fail(*args):
++        raise RuntimeError(SECRET)
++    runtime.controller_settings_read_service = SimpleNamespace(read=fail)
++    response = get(client)
++    assert response.status_code == 503 and SECRET not in response.text + caplog.text
++    assert provider._client_id == "application"
++    app = web.create_app(controller=provider, settings=settings(), portal_counter_service=None,
++                         public_traffic_service=None, portal_evidence_sink=None, client_hints_probe=None)
++    assert app.test_client().get("/").status_code != 500
++    monkeypatch.setattr("app.admin_web.controller_settings.ControllerConfigurationReadService", fail)
++    runtime = create_admin_web_runtime(settings(), None, None, None, None, logging.getLogger("as02"),
++                                      controller_public_snapshot=snapshot())
++    assert runtime.controller_settings_state == "unavailable" and runtime.blueprint is not None
++    assert SECRET not in caplog.text
++
++
++def test_internal_response_failure_is_sanitized():
++    _, client, runtime = controller_app()
++    runtime.controller_settings_read_service = SimpleNamespace(read=lambda _: {"invalid": object()})
++    response = get(client)
++    assert response.status_code == 500 and response.json["error"]["code"] == "internal_error"
++    assert response.json["api_version"] == "admin.settings.controller.v1"
++
++
++def test_frontend_read_only_and_allowlist_unchanged():
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "app/admin_web/static/controller_settings.js").read_text(encoding="utf-8")
++    for forbidden in ("innerHTML", "localStorage", "sessionStorage", "POST", "systemctl", "console."):
++        assert forbidden not in source
++    assert source.count("fetch(") == 1 and f'fetch("{API}"' in source
++    assert 'method: "GET"' in source and 'credentials: "same-origin"' in source
++    assert "Configured" in source and "Not configured" in source
++    registry = tuple(SettingsDefinitionRegistry())
++    assert len(registry) == 12
++    assert all("OMADA" not in item.key for item in registry)
++
++
++@pytest.mark.parametrize("injected_settings", [True, False])
++def test_create_app_fallback_same_local_mapping_once(monkeypatch, injected_settings):
++    values = settings()
++    getter = Mock(return_value=values)
++    factory = Mock(return_value=object())
++    monkeypatch.setattr(web, "get_settings", getter)
++    monkeypatch.setattr(web, "create_controller", factory)
++    web.create_app(controller=None, settings=values if injected_settings else None,
++        portal_counter_service=None, public_traffic_service=None, portal_evidence_sink=None, client_hints_probe=None)
++    assert getter.call_count == (0 if injected_settings else 1)
++    factory.assert_called_once()
++    assert factory.call_args.args == (build_omada_runtime_config(values),)
++
++
++def test_create_app_injected_controller_does_not_build_or_create(monkeypatch):
++    def forbidden(*args):
++        pytest.fail("injected controller rebuilt")
++    monkeypatch.setattr(web, "build_omada_runtime_config", forbidden)
++    monkeypatch.setattr(web, "create_controller", forbidden)
++    monkeypatch.setattr(web, "get_settings", forbidden)
++    web.create_app(controller=object(), settings=settings(), portal_counter_service=None,
++        public_traffic_service=None, portal_evidence_sink=None, client_hints_probe=None)
++
++
++def test_no_zero_argument_production_factory_calls():
++    root = Path(__file__).resolve().parents[1]
++    for path in (root / "run.py", root / "app/web/web.py"):
++        parsed = ast.parse(path.read_text(encoding="utf-8"))
++        for node in ast.walk(parsed):
++            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "create_controller":
++                assert len(node.args) == 1
++
++
++@pytest.mark.parametrize("projection_failure", [False, True])
++def test_main_shared_config_single_environment_capture_and_projection_isolation(monkeypatch, projection_failure):
++    # Composition-only unit test: no real startup identity, service or network execution.
++    from tests.visitor_registry.test_snapshot_runtime import _prepare_main
++    for name in ("_visitor_snapshot_collector", "_visitor_registry", "_pending_session_cleaner",
++                 "_observation_foundation", "_current_state_runtime", "_analytics_runtime", "_admin_web_runtime"):
++        monkeypatch.setattr(run, name, None)
++    _, controller, _, _, app, observed = _prepare_main(monkeypatch)
++    monkeypatch.setattr(run, "capture_loaded_artifact_identity",
++                        lambda _: SimpleNamespace(json_line=lambda: "unit-composition-identity"))
++    values = settings(host="127.0.0.1", port=8088, debug=False, web_admin_settings_enabled=False)
++    monkeypatch.setattr(run, "get_settings", Mock(return_value=values))
++    captured = {}
++    bootstrap = run.bootstrap_settings_control
++    def capture_bootstrap(**kwargs):
++        captured["environment_names"] = kwargs["explicit_environment_names"]
++        return bootstrap(**kwargs)
++    monkeypatch.setattr(run, "bootstrap_settings_control", capture_bootstrap)
++    def factory(config):
++        captured["config"] = config
++        return controller
++    monkeypatch.setattr(run, "create_controller", factory)
++    projector = public_omada_snapshot
++    def project(config, names):
++        assert config is captured["config"]
++        assert names is captured["environment_names"]
++        if projection_failure:
++            raise RuntimeError(SECRET)
++        return projector(config, names)
++    monkeypatch.setattr(run, "public_omada_snapshot", project)
++    def admin(actual_app, actual_settings, registry, context, public_snapshot):
++        captured["public_snapshot"] = public_snapshot
++    monkeypatch.setattr(run, "_configure_admin_web", admin)
++    run.main()
++    run.get_settings.assert_called_once()
++    assert captured["config"].client_secret == SECRET
++    assert observed["app_controller"] is controller and observed["collector_provider"] is controller
++    assert app.run_calls
++    if projection_failure:
++        assert captured["public_snapshot"] is None
++    else:
++        assert captured["public_snapshot"].controller_url == captured["config"].controller_url
+diff --git a/tests/test_auth_retry.py b/tests/test_auth_retry.py
+index 16eaa38c2b330d375620143ba6d024ae4ce28150..7f23fe327c9996b2204ddabdb4723e7616450c3e 100644
+--- a/tests/test_auth_retry.py
++++ b/tests/test_auth_retry.py
+@@ -278,6 +278,7 @@ def create_client(
+         ),
+     ):
+         app = web_module.create_app(
++            controller=controller or AuthorizedProvider(),
+             portal_counter_service=None,
+             visit_start_submitter=visit_start_submitter,
+         )
+diff --git a/tests/test_auth_telemetry.py b/tests/test_auth_telemetry.py
+index b811b76f645c7fffeb8512436241012076b75400..a30de5a94a9b0c8954e4d19da9cce824e37a64a5 100644
+--- a/tests/test_auth_telemetry.py
++++ b/tests/test_auth_telemetry.py
+@@ -887,6 +887,7 @@ class AuthTelemetryWebIntegrationTests(unittest.TestCase):
+                 ),
+             ):
+                 app = web_module.create_app(
++                    controller=object(),
+                     portal_counter_service=None
+                 )
+                 client = app.test_client()
+diff --git a/tests/test_omada_configuration.py b/tests/test_omada_configuration.py
+index 13089d5d742ef06bc0cc48921b21eb7390b77bbe..debcd50a0271840dedbc54241eed7d85ce11a10e 100644
+--- a/tests/test_omada_configuration.py
++++ b/tests/test_omada_configuration.py
+@@ -6,6 +6,7 @@ import pytest
+ import app.config as config_module
+ import app.settings as settings_module
+ from app.controllers.omada import OmadaProvider
++from app.controllers.omada_config import build_omada_runtime_config
+ from app.exceptions import ConfigurationError
+ 
+ 
+@@ -51,15 +52,11 @@ def load_settings_from_environment(monkeypatch):
+ 
+ def configuration_error(settings):
+     with (
+-        patch(
+-            "app.controllers.omada.get_settings",
+-            return_value=settings,
+-        ),
+         patch("app.controllers.omada.requests.post") as request_post,
+         patch("app.controllers.omada.requests.get") as request_get,
+         pytest.raises(ConfigurationError) as exc_info,
+     ):
+-        OmadaProvider()
++        OmadaProvider(build_omada_runtime_config(settings))
+ 
+     request_post.assert_not_called()
+     request_get.assert_not_called()
+@@ -200,14 +197,10 @@ def test_valid_configuration_creates_provider_without_network(
+     )
+ 
+     with (
+-        patch(
+-            "app.controllers.omada.get_settings",
+-            return_value=settings,
+-        ),
+         patch("app.controllers.omada.requests.post") as request_post,
+         patch("app.controllers.omada.requests.get") as request_get,
+     ):
+-        provider = OmadaProvider()
++        provider = OmadaProvider(build_omada_runtime_config(settings))
+ 
+     request_post.assert_not_called()
+     request_get.assert_not_called()
+diff --git a/tests/test_portal_counter.py b/tests/test_portal_counter.py
+index 9585c901f811cce8e827c9e2599bdf4b209cf460..8d19cc2496d6f81b6adc2c5fa0ed490fb823e6aa 100644
+--- a/tests/test_portal_counter.py
++++ b/tests/test_portal_counter.py
+@@ -293,7 +293,7 @@ class PortalCounterWebTests(unittest.TestCase):
+                 self.executor,
+             ),
+         ):
+-            app = web_module.create_app(selected_service)
++            app = web_module.create_app(selected_service, controller=object())
+ 
+         app.config["TESTING"] = True
+         return app.test_client()
+@@ -406,7 +406,7 @@ class PortalCounterWebTests(unittest.TestCase):
+                 self.executor,
+             ),
+         ):
+-            app = web_module.create_app()
++            app = web_module.create_app(controller=object())
+ 
+         app.config["TESTING"] = True
+         client = app.test_client()
+diff --git a/tests/test_proxy_headers.py b/tests/test_proxy_headers.py
+index b771c60e5c31d2b9576aa495b9a8ff5af2cada02..01d9d2b4d53ce2fb90f700692bdf7c50449f8de4 100644
+--- a/tests/test_proxy_headers.py
++++ b/tests/test_proxy_headers.py
+@@ -54,7 +54,8 @@ def create_test_app(portal_evidence_sink=None, *, automatic=False, client_hints_
+         ),
+         patch.object(web_module, "auth_manager", manager if manager is not None else web_module.auth_manager),
+     ):
+-        arguments = {"portal_counter_service": None, "client_hints_probe": client_hints_probe}
++        arguments = {"portal_counter_service": None, "client_hints_probe": client_hints_probe,
++                     "controller": object()}
+         if not automatic:
+             arguments["portal_evidence_sink"] = portal_evidence_sink
+         app = web_module.create_app(**arguments)
+diff --git a/tests/test_public_traffic.py b/tests/test_public_traffic.py
+index 9b98a4a4cdc9fa85e8270e97fdcf30751545e125..b0dd12755cb08583b129e7d2c425045727e730b3 100644
+--- a/tests/test_public_traffic.py
++++ b/tests/test_public_traffic.py
+@@ -1041,6 +1041,8 @@ def test_worker_start_failure_does_not_prevent_flask_start(
+         "host": "127.0.0.1",
+         "port": 8088,
+         "debug": False,
++        "omada_url": "https://controller.invalid", "omada_id": "installation",
++        "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
+     }
+     with (
+         patch.object(run_module, "create_app", return_value=app),
+@@ -1088,7 +1090,7 @@ def test_api_keeps_open_counter_when_traffic_is_unavailable(
+             return_value=object(),
+         ),
+     ):
+-        app = web_module.create_app(open_service)
++        app = web_module.create_app(open_service, controller=object())
+     client = app.test_client()
+ 
+     response = client.get("/api/public/portal-counter")
+@@ -1132,6 +1134,7 @@ def test_api_returns_traffic_and_preserves_old_fields(tmp_path):
+     ):
+         app = web_module.create_app(
+             open_service,
++            controller=object(),
+             public_traffic_service=traffic_service,
+         )
+ 
+@@ -1194,6 +1197,7 @@ def test_corrupt_aggregate_hides_only_traffic_from_api(tmp_path):
+     ):
+         app = web_module.create_app(
+             open_service,
++            controller=object(),
+             public_traffic_service=traffic_service,
+         )
+ 
+@@ -1719,7 +1723,7 @@ def test_disabled_component_creates_no_database_or_worker(tmp_path):
+             return_value=object(),
+         ),
+     ):
+-        app = web_module.create_app(open_service)
++        app = web_module.create_app(open_service, controller=object())
+ 
+     assert app.extensions["public_traffic_worker"] is None
+     assert not traffic_path.exists()
+@@ -1757,7 +1761,7 @@ def test_invalid_traffic_config_is_fail_safe_for_app(tmp_path):
+             return_value=object(),
+         ),
+     ):
+-        app = web_module.create_app(open_service)
++        app = web_module.create_app(open_service, controller=object())
+ 
+     payload = app.test_client().get(
+         "/api/public/portal-counter"
+@@ -1799,8 +1803,8 @@ def test_create_app_constructs_but_does_not_start_worker(tmp_path):
+             return_value=object(),
+         ),
+     ):
+-        first = web_module.create_app(open_service)
+-        second = web_module.create_app(open_service)
++        first = web_module.create_app(open_service, controller=object())
++        second = web_module.create_app(open_service, controller=object())
+ 
+     assert not first.extensions["public_traffic_worker"].running
+     assert not second.extensions["public_traffic_worker"].running
+diff --git a/tests/visitor_registry/test_snapshot_runtime.py b/tests/visitor_registry/test_snapshot_runtime.py
+index c0d10ee55f3d8889eafd5f370edd16a3ef5ca3d7..446c6c847df7e825a059bb5a8dc86f76c8790f43 100644
+--- a/tests/visitor_registry/test_snapshot_runtime.py
++++ b/tests/visitor_registry/test_snapshot_runtime.py
+@@ -167,10 +167,13 @@ def _prepare_main(
+             "host": "127.0.0.1",
+             "port": 8088,
+             "debug": False,
++            "omada_url": "https://controller.invalid", "omada_id": "installation",
++            "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
+         },
+     )
+ 
+-    def create_controller():
++    def create_controller(runtime_config):
++        assert runtime_config.controller_url == "https://controller.invalid"
+         events.append("create_controller")
+         return controller
+ 
+@@ -239,6 +242,8 @@ def test_main_wires_one_provider_and_starts_collector_before_app(
+             "host": "127.0.0.1",
+             "port": 8088,
+             "debug": False,
++            "omada_url": "https://controller.invalid", "omada_id": "installation",
++            "client_id": "application", "client_secret": "fixture-secret", "verify_ssl": False,
+         },
+     }
+     assert collector.start_calls == 1

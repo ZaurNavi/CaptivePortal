@@ -1,0 +1,526 @@
+diff --git a/app/admin_web/static/admin.css b/app/admin_web/static/admin.css
+index a9df8da333ad7ba3e9acf2b37f4df6609bc7ea31..75a96cba2b1d7f34872f1a82f2a6772fbaf1b8a0 100644
+--- a/app/admin_web/static/admin.css
++++ b/app/admin_web/static/admin.css
+@@ -350,5 +350,43 @@ input[type="radio"] { width: auto; min-height: 0; }
+ .settings-item label { display: block; margin-top: .75rem; }
+ .settings-item input, .settings-item select { max-width: 100%; padding: .5rem; }
+ .settings-actions { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+-.settings-tabs { display: flex; gap: .5rem; margin-bottom: 1rem; }
++.settings-tabs { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
++.settings-tabs .nav-link { margin: 0; color: var(--ink); background: var(--surface); border: 1px solid var(--line); }
++.settings-tabs .nav-link:hover, .settings-tabs .nav-link:focus-visible { color: var(--accent-dark); background: #d6f2ef; }
++.settings-tabs .nav-link:focus-visible { outline: 3px solid rgba(0, 127, 120, .25); outline-offset: 2px; }
++.settings-tabs .nav-link[aria-current="page"] { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+ .controller-settings-source { display: block; color: var(--muted); margin-top: .25rem; }
++
++/* Guest Portal editor: presentation only; other Admin forms retain their styles. */
++#portal-settings-page .muted { color: var(--muted); font-size: .82rem; }
++#portal-settings-page .portal-generation { font-size: .75rem; overflow-wrap: anywhere; }
++#portal-settings-page .portal-adoption-note { margin: -.25rem 0 1rem; }
++#portal-settings-page .portal-settings-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
++#portal-settings-page .portal-setting-card { border: 1px solid var(--line); border-radius: 10px; padding: 1rem; background: var(--surface-soft); }
++#portal-settings-page .portal-setting-card h3 { font-size: 1rem; margin: 0 0 .35rem; }
++#portal-settings-page .portal-setting-description { margin: 0 0 .45rem; font-size: .85rem; color: var(--muted); }
++#portal-settings-page .portal-setting-key { margin: 0 0 .8rem; font-size: .7rem; }
++#portal-settings-page .settings-facts { grid-template-columns: minmax(0, .8fr) minmax(0, 1.4fr); gap: .4rem .6rem; font-size: .85rem; }
++#portal-settings-page .settings-facts dt { color: var(--muted); }
++#portal-settings-page .portal-setting-value { white-space: pre-wrap; overflow-wrap: anywhere; }
++#portal-settings-page .portal-setting-pending { color: var(--warning); font-weight: 700; border-left: 3px solid var(--warning); padding-left: .5rem; }
++#portal-settings-page .portal-setting-edit { border-top: 1px solid var(--line); margin-top: .85rem; padding-top: .15rem; }
++#portal-settings-page .portal-setting-edit label { font-size: .85rem; font-weight: 650; }
++#portal-settings-page .portal-setting-input { margin-top: .3rem; scroll-margin-bottom: 8rem; }
++#portal-settings-page textarea.portal-setting-input { font: inherit; width: 100%; max-width: 100%; min-height: 7rem; padding: .55rem .65rem; border: 1px solid #b8c5cd; border-radius: 8px; color: var(--ink); background: #fff; resize: vertical; }
++#portal-settings-page textarea.portal-setting-input:focus-visible { outline: 3px solid rgba(0, 127, 120, .18); border-color: var(--accent); }
++#portal-settings-page .portal-setting-input:disabled, #portal-settings-page select:disabled { background: #eaf0f3; color: var(--muted); cursor: not-allowed; }
++#portal-settings-page .portal-validation-hint { margin: .55rem 0 0; line-height: 1.5; overflow-wrap: anywhere; font-weight: 400; }
++#portal-settings-page .portal-support-warning { padding: .8rem 1rem; border-left: 4px solid var(--warning); border-radius: 6px; color: #734c00; background: #fef0c7; line-height: 1.5; }
++#portal-settings-page .portal-settings-actions { position: sticky; bottom: 0; z-index: 5; margin: 1rem 0 0; padding: .85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 -4px 16px rgba(16, 33, 45, .08); }
++#portal-settings-page .portal-settings-actions .button:disabled { cursor: not-allowed; }
++#portal-settings-page .portal-settings-actions .button:focus-visible { outline: 3px solid rgba(0, 127, 120, .35); outline-offset: 2px; }
++#portal-settings-form { padding-bottom: 1rem; }
++@media (min-width: 1120px) {
++  #portal-settings-page .portal-settings-grid--branding { grid-template-columns: repeat(3, minmax(0, 1fr)); }
++  #portal-settings-page .portal-settings-grid--support { grid-template-columns: repeat(2, minmax(0, 1fr)); }
++}
++@media (max-width: 560px) {
++  #portal-settings-page .portal-setting-card { padding: .8rem; }
++  #portal-settings-page .portal-settings-actions { gap: .5rem; }
++}
+diff --git a/app/admin_web/static/portal_settings.js b/app/admin_web/static/portal_settings.js
+index d31993adad0f46712148c69e83e07d715a0000a9..e593b67e4ffd6b0c09041c235a30ec118068bccd 100644
+--- a/app/admin_web/static/portal_settings.js
++++ b/app/admin_web/static/portal_settings.js
+@@ -4,8 +4,13 @@
+   const root = document.getElementById("portal-settings-page");
+   if (!root) return;
+   const status = document.getElementById("portal-settings-state");
++  const statusTitle = document.getElementById("portal-settings-state-title");
++  const statusMessage = document.getElementById("portal-settings-state-message");
++  const generation = document.getElementById("portal-settings-generation");
++  const adoptionNote = document.getElementById("portal-settings-adoption-note");
+   const groups = document.getElementById("portal-settings-groups");
+   const save = document.getElementById("portal-settings-save");
++  const refresh = document.getElementById("portal-settings-refresh");
+   const writable = root.dataset.writeAllowed === "true";
+   let model = null, etag = null, busy = false, controls = [];
+   const text = value => value === null ? "—" : String(value);
+@@ -15,6 +20,40 @@
+     if (className) element.className = className;
+     return element;
+   }
++  function setStatus(title, message, state) {
++    statusTitle.textContent = title; statusMessage.textContent = message;
++    status.dataset.state = state;
++  }
++  function updateActions() {
++    const editable = writable && model !== null && etag !== null && !busy;
++    save.disabled = !editable || !controls.some(row => row.operation.value !== "unchanged");
++    refresh.disabled = busy;
++    root.setAttribute("aria-busy", String(busy));
++    controls.forEach(row => {
++      row.operation.disabled = !editable;
++      row.input.disabled = !editable || row.operation.value !== "set";
++    });
++  }
++  function sourceLabel(value) {
++    return {repository_default: "Repository default", persisted_override: "Saved override",
++      environment: "Deployment environment"}[value] || "Unavailable";
++  }
++  function validationHint(validation) {
++    const parts = [validation.required ? "Required" : "Optional"];
++    if (validation.content === "plain_text") parts.push("Plain text");
++    if (validation.format === "support_phone_e164_display_v1") parts.push("International phone number");
++    if (validation.format === "support_email_ascii_v1") parts.push("ASCII email address");
++    if (validation.scheme === "https") parts.push("HTTPS");
++    if (Array.isArray(validation.allowed_hosts)) parts.push(validation.allowed_hosts.join(" / ") + " only");
++    if (Number.isInteger(validation.max_length)) parts.push(`Maximum ${validation.max_length} characters`);
++    if (validation.line_policy === "single_line") parts.push("Single line");
++    if (Number.isInteger(validation.max_lines)) parts.push(`Up to ${validation.max_lines} lines`);
++    if (validation.fragment === "forbidden") parts.push("No fragment");
++    if (validation.explicit_port === "forbidden") parts.push("No explicit port");
++    if (validation.query_policy === "forbidden") parts.push("No query parameters");
++    if (validation.query_policy === "none_or_locale_only") parts.push("Locale query only");
++    return parts.join(" · ");
++  }
+   async function request(url, options) {
+     const abort = new AbortController();
+     const timer = window.setTimeout(() => abort.abort(), 30000);
+@@ -32,62 +71,86 @@
+       if (!containers.has(item.group)) {
+         const section = node("section", undefined, "card card-wide settings-group");
+         section.append(node("h2", item.group === "branding" ? "Branding & welcome" : "Support contacts"));
+-        if (item.group === "support") section.append(node("p", "This value is publicly visible to guests. No private credential or personal secret may be entered."));
+-        groups.append(section); containers.set(item.group, section);
++        if (item.group === "support") section.append(node("p", "This value is publicly visible to guests. No private credential or personal secret may be entered.", "portal-support-warning"));
++        const grid = node("div", undefined, "portal-settings-grid " + (item.group === "branding" ? "portal-settings-grid--branding" : "portal-settings-grid--support"));
++        section.append(grid); groups.append(section); containers.set(item.group, grid);
+       }
+-      const row = node("article", undefined, "settings-item");
+-      row.append(node("h3", item.display_label), node("p", item.description), node("p", item.key, "mono muted"));
++      const row = node("article", undefined, "settings-item portal-setting-card");
++      row.append(node("h3", item.display_label), node("p", item.description, "portal-setting-description"), node("p", item.key, "mono muted portal-setting-key"));
+       const facts = node("dl", undefined, "settings-facts");
+       [["Configured", item.configured_value], ["Effective", item.effective_value],
+-       ["Source", item.persisted_override_value !== null ? "persisted_override" : item.base_source],
+-       ["Pending", item.pending_value], ["Apply requirement", item.apply_requirement]].forEach(([label, value]) => facts.append(node("dt", label), node("dd", text(value))));
+-      row.append(facts, node("p", JSON.stringify(item.validation), "muted"));
++       ["Source", sourceLabel(item.persisted_override_value !== null ? "persisted_override" : item.base_source)],
++       ["Pending", item.configured_value !== item.effective_value ? item.pending_value : null]].forEach(([label, value]) => {
++         const pending = label === "Pending" && value !== null;
++         const fact = node("dd", label === "Pending" && value === null ? "None" : text(value), "portal-setting-value" + (pending ? " portal-setting-pending" : ""));
++         fact.dataset.fact = label;
++         facts.append(node("dt", label), fact);
++       });
++      row.append(facts);
+       const operation = node("select");
+-      [["unchanged", "Keep unchanged"], ["set", "Set override"],
++      [["unchanged", "No change"], ["set", "Use custom value"],
+        ...(item.persisted_override_value !== null ? [["clear_override", "Reset to deployment/default"]] : [])]
+         .forEach(([value, label]) => {const option = node("option", label); option.value = value; operation.append(option);});
+       operation.disabled = !writable;
+-      const actionLabel = node("label", "Override action "); actionLabel.append(operation); row.append(actionLabel);
++      const edit = node("div", undefined, "portal-setting-edit");
++      const actionLabel = node("label", "Change "); actionLabel.append(operation); edit.append(actionLabel);
+       const input = node(item.presentation_type === "multiline_plain_text" ? "textarea" : "input");
++      input.className = "portal-setting-input";
++      if (input.tagName === "TEXTAREA") input.rows = 4;
+       if (input.tagName !== "TEXTAREA") input.type = item.presentation_type === "telephone" ? "tel" : item.presentation_type === "email" ? "email" : item.presentation_type === "restricted_url" ? "url" : "text";
+       input.value = item.configured_value; input.disabled = true;
+       // Browser lengths are advisory. Unicode code-point and all semantic checks remain server-owned.
+       input.required = item.validation.required;
+       input.maxLength = item.validation.max_length * 2; // UTF-16 must not reject valid code-point lengths.
+-      operation.addEventListener("change", () => {input.disabled = !writable || operation.value !== "set";});
+-      const valueLabel = node("label", "Value "); valueLabel.append(input); row.append(valueLabel);
++      operation.addEventListener("change", updateActions);
++      const hint = node("p", validationHint(item.validation), "muted portal-validation-hint");
++      hint.id = "portal-validation-" + item.key;
++      input.setAttribute("aria-describedby", hint.id);
++      const valueLabel = node("label", "New value "); valueLabel.append(input); edit.append(valueLabel, hint);
++      row.append(edit);
+       containers.get(item.group).append(row); controls.push({item, input, operation});
+     });
+   }
+   async function load() {
+     save.disabled = true; model = null; etag = null;
++    setStatus("Loading", "Requesting current guest portal settings…", "operational");
+     const result = await request(root.dataset.apiBase, {headers: {Accept: "application/json"}});
+     if (result.body.api_version !== "admin.settings.portal.v1" || !Array.isArray(result.body.settings) || result.body.settings.length !== 14) throw new Error("Invalid Portal model");
+-    model = result.body; etag = result.response.headers.get("ETag"); render(); save.disabled = !writable;
+-    status.textContent = `Configured generation ${model.configured_generation}; effective ${text(model.effective_generation)}. ` + (model.restart_required ? "Pending captive-portal.service restart." : "Current configured generation is adopted.");
++    model = result.body; etag = result.response.headers.get("ETag"); render();
++    generation.textContent = `Configured generation ${model.configured_generation} · Effective generation ${text(model.effective_generation)}`;
++    adoptionNote.hidden = !model.settings.some(item => item.apply_requirement === "main_service_restart");
++    if (model.restart_required) setStatus("Pending restart", "Pending captive-portal.service restart.", "warning");
++    else setStatus("Active", "All guest portal settings are active.", "operational");
+   }
+-  function unavailable() {save.disabled = true; status.textContent = "Portal settings unavailable. No changes have been confirmed.";}
+-  document.getElementById("portal-settings-refresh").addEventListener("click", async () => {
+-    if (busy) return; busy = true;
+-    try {await load();} catch (_error) {unavailable();} finally {busy = false;}
+-  });
++  function unavailable() {
++    model = null; etag = null; generation.textContent = "";
++    setStatus("Unavailable", "Portal settings unavailable. No changes have been confirmed.", "unavailable");
++  }
++  async function refreshSettings() {
++    if (busy) return; busy = true; updateActions();
++    try {await load();} catch (_error) {unavailable();} finally {busy = false; updateActions();}
++  }
++  refresh.addEventListener("click", refreshSettings);
+   document.getElementById("portal-settings-form").addEventListener("submit", async event => {
+     event.preventDefault(); if (busy || !writable || !model || !etag) return;
+     const changes = controls.filter(row => row.operation.value !== "unchanged").map(row => ({key: row.item.key,
+       operation: row.operation.value, ...(row.operation.value === "set" ? {value: row.input.value} : {})}));
+-    if (!changes.length) {status.textContent = "No override changes selected."; return;}
+-    busy = true; save.disabled = true;
++    if (!changes.length) {updateActions(); return;}
++    busy = true; updateActions();
++    setStatus("Saving", "Saving selected changes…", "operational");
+     try {
+       const result = await request(root.dataset.apiBase + "/generations", {method: "POST", headers: {
+         "Content-Type": "application/json", "X-CSRF-Token": root.dataset.csrfToken, "If-Match": etag,
+         "Idempotency-Key": crypto.randomUUID()}, body: JSON.stringify({changes})});
+       await load();
+-      status.textContent = result.body.changed ? "Saved successfully." + (result.body.restart_required ? " Pending captive-portal.service restart." : "") : "Accepted: no persisted override change.";
++      setStatus("Save successful", (result.body.changed ? "Saved successfully." : "Accepted: no persisted override change.") +
++        (model.restart_required ? " Pending captive-portal.service restart." : " All guest portal settings are active."), model.restart_required ? "warning" : "operational");
+     } catch (error) {
+-      if (error.status === 412) {try {await load(); status.textContent = "Configuration changed concurrently. Review current values before another Save.";} catch (_error) {unavailable();}}
+-      else if (error.status === 422 || error.status === 400) {status.textContent = "Save rejected. Nothing was persisted. Review values and validation hints."; save.disabled = !writable;}
++      if (error.status === 412) {try {await load(); setStatus("Concurrent change", "Configuration changed concurrently. Review current values before another Save.", "warning");} catch (_error) {unavailable();}}
++      else if (error.status === 422 || error.status === 400) {setStatus("Save rejected", "Save rejected. Nothing was persisted. Review values and validation hints.", "error");}
+       else {unavailable();}
+-    } finally {busy = false;}
++    } finally {busy = false; updateActions();}
+   });
+-  if (root.dataset.storeState === "available") load().catch(unavailable);
++  if (root.dataset.storeState === "available") refreshSettings();
++  else {unavailable(); updateActions();}
+ })();
+diff --git a/app/admin_web/templates/admin/settings_portal.html b/app/admin_web/templates/admin/settings_portal.html
+index 48e98ddb730f9d43fed2d1585cce24c66cf0d7ad..e59634b2004face694990c64faa646123db44374 100644
+--- a/app/admin_web/templates/admin/settings_portal.html
++++ b/app/admin_web/templates/admin/settings_portal.html
+@@ -1,14 +1,20 @@
+ {% extends "admin/base.html" %}
+ {% block subtitle %}<p>Global guest-facing presentation settings</p>{% endblock %}
+ {% block page_body %}
+-<div id="portal-settings-state" class="state-panel" role="status" aria-live="polite">
+-  {% if portal_settings_state == 'active' %}Loading Portal settings…{% else %}Settings store unavailable. No changes can be saved.{% endif %}
++<div id="portal-settings-state" class="state-panel" role="status" aria-live="polite" data-state="{{ 'operational' if portal_settings_state == 'active' else 'unavailable' }}">
++  <span class="state-dot" aria-hidden="true"></span>
++  <div>
++    <strong id="portal-settings-state-title">{{ 'Loading' if portal_settings_state == 'active' else 'Unavailable' }}</strong>
++    <p id="portal-settings-state-message">{% if portal_settings_state == 'active' %}Loading Portal settings…{% else %}Settings store unavailable. No changes can be saved.{% endif %}</p>
++    <p id="portal-settings-generation" class="mono muted portal-generation"></p>
++  </div>
+ </div>
++<p id="portal-settings-adoption-note" class="muted portal-adoption-note">Saved changes become effective only after an external captive-portal.service restart.</p>
+ <form id="portal-settings-form">
+   <div id="portal-settings-groups" class="content-grid"></div>
+-  <div class="settings-actions">
++  <div class="settings-actions portal-settings-actions">
+     <button id="portal-settings-save" class="button" type="submit" disabled>Save changes</button>
+-    <button id="portal-settings-refresh" class="button button-secondary" type="button">Read current settings</button>
++    <button id="portal-settings-refresh" class="button button-secondary" type="button">Refresh</button>
+   </div>
+ </form>
+ {% endblock %}
+diff --git a/tests/admin_web/portal_settings_stage5_ui.cjs b/tests/admin_web/portal_settings_stage5_ui.cjs
+index 28d08714056d62069dc74621415686c71e5b38a0..c9934fc93ead5984ceefa890b1b1567feb3dc921 100644
+--- a/tests/admin_web/portal_settings_stage5_ui.cjs
++++ b/tests/admin_web/portal_settings_stage5_ui.cjs
+@@ -3,12 +3,13 @@ const fs = require("fs"), vm = require("vm"), assert = require("assert");
+ const [script, scenario, encoded] = process.argv.slice(2);
+ const model = JSON.parse(encoded);
+ class Element {
+-  constructor(tag = "div") { this.tagName = tag.toUpperCase(); this.children = []; this.listeners = {}; this.dataset = {}; this.disabled = false; }
++  constructor(tag = "div") { this.tagName = tag.toUpperCase(); this.children = []; this.listeners = {}; this.dataset = {}; this.attributes = {}; this.disabled = false; }
+   append(...nodes) { if (this.tagName === "SELECT" && !this.children.length) this.value = nodes[0].value; this.children.push(...nodes); }
+   replaceChildren(...nodes) { this.children = nodes; }
+   addEventListener(name, callback) { this.listeners[name] = callback; }
++  setAttribute(name, value) { this.attributes[name] = value; }
+ }
+-const ids = ["page", "state", "groups", "save", "refresh", "form"];
++const ids = ["page", "state", "state-title", "state-message", "generation", "adoption-note", "groups", "save", "refresh", "form"];
+ const nodes = Object.fromEntries(ids.map(id => ["portal-settings-" + id, new Element()]));
+ nodes["portal-settings-page"].dataset = {apiBase: "/admin/api/v1/settings/portal", storeState: "available", csrfToken: "csrf", writeAllowed: scenario === "readonly" ? "false" : "true"};
+ const calls = [];
+@@ -18,7 +19,15 @@ const context = {
+   crypto: {randomUUID: () => "11111111-1111-4111-8111-111111111111"},
+   fetch: async (url, options) => {
+     calls.push({url, options});
+-    const status = options.method === "POST" ? ({conflict: 412, invalid: 422, outage: 503, noop: 200}[scenario] || 201) : 200;
++    const status = options.method === "POST" ? ({conflict: 412, invalid: 422, badrequest: 400, outage: 503, noop: 200}[scenario] || 201) : scenario === "loadoutage" ? 503 : 200;
++    if (options.method === "POST" && status === 201) {
++      model.configured_generation = 1; model.restart_required = true;
++      for (const change of JSON.parse(options.body).changes) {
++        const item = model.settings.find(item => item.key === change.key);
++        item.configured_value = change.operation === "set" ? change.value : item.default_value;
++        item.pending_value = item.configured_value !== item.effective_value ? item.configured_value : null;
++      }
++    }
+     return {ok: status < 400, status, headers: {get: () => '"settings-g0"'}, json: async () => options.method === "POST" ? {changed: scenario !== "noop", restart_required: true} : model};
+   }
+ };
+@@ -26,13 +35,74 @@ const descend = node => [node, ...node.children.flatMap(descend)];
+ const settle = () => new Promise(resolve => setImmediate(resolve));
+ (async () => {
+   vm.runInNewContext(fs.readFileSync(script, "utf8"), context);
++  assert.equal(nodes["portal-settings-state-title"].textContent, "Loading");
++  assert.equal(nodes["portal-settings-save"].disabled, true);
++  assert.equal(nodes["portal-settings-refresh"].disabled, true);
+   await settle();
++  if (scenario === "loadoutage") {
++    assert.equal(nodes["portal-settings-state-title"].textContent, "Unavailable");
++    assert.equal(nodes["portal-settings-state"].dataset.state, "unavailable");
++    assert.equal(nodes["portal-settings-save"].disabled, true);
++    assert.equal(calls.length, 1);
++    return;
++  }
+   const all = descend(nodes["portal-settings-groups"]);
+   const actions = all.filter(node => node.tagName === "SELECT");
+   const inputs = all.filter(node => ["INPUT", "TEXTAREA"].includes(node.tagName));
+   assert.equal(inputs.length, 14);
+   assert.equal(inputs.filter(node => node.tagName === "TEXTAREA").length, 3);
+   assert(all.some(node => node.textContent === "This value is publicly visible to guests. No private credential or personal secret may be entered."));
++  assert.equal(all.filter(node => node.className === "portal-support-warning").length, 1);
++  assert.equal(all.filter(node => node.className && node.className.includes("portal-settings-grid--branding")).length, 1);
++  assert.equal(all.filter(node => node.className && node.className.includes("portal-settings-grid--support")).length, 1);
++  const hints = all.filter(node => node.className === "muted portal-validation-hint");
++  assert.equal(hints.length, 14);
++  assert(hints[0].textContent.includes(`Maximum ${model.settings[0].validation.max_length} characters`));
++  assert(hints[0].textContent.includes("Required · Plain text"));
++  assert(hints[0].textContent.includes("Single line"));
++  assert(hints[6].textContent.includes(`Up to ${model.settings[6].validation.max_lines} lines`));
++  assert(hints[9].textContent.includes("Optional · International phone number"));
++  assert(hints[10].textContent.includes("Optional · ASCII email address"));
++  assert(hints[12].textContent.includes(model.settings[12].validation.allowed_hosts.join(" / ") + " only"));
++  assert(hints[13].textContent.includes("Locale query only"));
++  const renderedText = all.map(node => node.textContent || "").join("\n");
++  for (const forbidden of ["bidi_controls", "max_length", "main_service_restart", "Apply requirement", "Override action", "Keep unchanged", "Set override"])
++    assert(!renderedText.includes(forbidden));
++  for (const source of ["repository_default", "persisted_override", "environment"])
++    assert(!all.some(node => node.textContent === source));
++  assert(all.some(node => node.textContent === "Repository default"));
++  assert(all.some(node => node.textContent === "Saved override"));
++  if (scenario === "environment") assert(all.some(node => node.textContent === "Deployment environment"));
++  inputs.forEach((input, index) => {
++    assert.equal(input.attributes["aria-describedby"], hints[index].id);
++    assert.equal(input.className, "portal-setting-input");
++    if (input.tagName === "TEXTAREA") assert.equal(input.rows, 4);
++  });
++  const rows = all.filter(node => node.tagName === "ARTICLE");
++  rows.forEach((row, index) => {
++    const facts = descend(row).filter(node => node.tagName === "DD");
++    assert.deepEqual(facts.map(node => node.dataset.fact), ["Configured", "Effective", "Source", "Pending"]);
++    assert.equal(facts[0].textContent, model.settings[index].configured_value);
++    assert.equal(facts[1].textContent, model.settings[index].effective_value === null ? "—" : model.settings[index].effective_value);
++    assert(facts[0].className.includes("portal-setting-value"));
++    assert(facts[1].className.includes("portal-setting-value"));
++    if (model.settings[index].pending_value !== null) {
++      assert.equal(facts[3].textContent, model.settings[index].pending_value);
++      assert(facts[3].className.includes("portal-setting-pending"));
++    } else assert.equal(facts[3].textContent, "None");
++  });
++  if (scenario === "pending") {
++    assert.equal(nodes["portal-settings-state-title"].textContent, "Pending restart");
++    assert.equal(nodes["portal-settings-state"].dataset.state, "warning");
++    assert.equal(nodes["portal-settings-state-message"].textContent, "Pending captive-portal.service restart.");
++  } else {
++    assert.equal(nodes["portal-settings-state-title"].textContent, "Active");
++    assert.equal(nodes["portal-settings-state-message"].textContent, "All guest portal settings are active.");
++  }
++  assert.equal(nodes["portal-settings-save"].disabled, true);
++  assert.equal(nodes["portal-settings-refresh"].disabled, false);
++  await nodes["portal-settings-form"].listeners.submit({preventDefault() {}});
++  assert.equal(calls.length, 1); // Zero selected changes never POST.
+   assert.equal(actions[0].children.length, 2); // No reset without a persisted override.
+   assert.equal(actions[13].children.length, 3);
+   assert.equal(inputs[0].value, "<script>literal</script>");
+@@ -40,15 +110,47 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
+   if (scenario === "readonly") {
+     assert.equal(nodes["portal-settings-save"].disabled, true);
+     assert(actions.every(node => node.disabled));
++    assert(inputs.every(node => node.disabled));
++    actions[0].value = "set"; actions[0].listeners.change();
++    assert.equal(nodes["portal-settings-save"].disabled, true);
+     await nodes["portal-settings-form"].listeners.submit({preventDefault() {}});
+     assert.equal(calls.length, 1);
+     return;
+   }
++  actions[0].value = "set"; actions[0].listeners.change();
++  assert.equal(nodes["portal-settings-save"].disabled, false);
++  assert.equal(inputs[0].disabled, false);
++  actions[0].value = "unchanged"; actions[0].listeners.change();
++  assert.equal(nodes["portal-settings-save"].disabled, true);
++  assert.equal(inputs[0].disabled, true);
++  actions[13].value = "clear_override"; actions[13].listeners.change();
++  assert.equal(nodes["portal-settings-save"].disabled, false);
++  assert.equal(inputs[13].disabled, true);
++  actions[13].value = "unchanged"; actions[13].listeners.change();
++  assert.equal(nodes["portal-settings-save"].disabled, true);
++  if (scenario === "dirty") {
++    actions[6].value = "set"; actions[6].listeners.change();
++    inputs[6].value = "First line\nSecond line";
++    assert.equal(nodes["portal-settings-save"].disabled, false);
++    assert.equal(inputs[6].tagName, "TEXTAREA");
++    assert.equal(inputs[6].value, "First line\nSecond line");
++    await nodes["portal-settings-refresh"].listeners.click();
++    assert.equal(calls.length, 2);
++    assert.equal(nodes["portal-settings-save"].disabled, true);
++    assert(descend(nodes["portal-settings-groups"]).filter(node => node.tagName === "SELECT").every(node => node.value === "unchanged"));
++    return;
++  }
+   const index = scenario === "clear" ? 13 : 0;
+   actions[index].value = scenario === "clear" ? "clear_override" : "set";
+   actions[index].listeners.change();
+   inputs[index].value = " exact unchanged input ";
+-  await nodes["portal-settings-form"].listeners.submit({preventDefault() {}});
++  const saving = nodes["portal-settings-form"].listeners.submit({preventDefault() {}});
++  assert.equal(nodes["portal-settings-save"].disabled, true);
++  assert.equal(nodes["portal-settings-refresh"].disabled, true);
++  assert(actions.every(node => node.disabled));
++  assert(inputs.every(node => node.disabled));
++  await nodes["portal-settings-form"].listeners.submit({preventDefault() {}}); // No duplicate in-flight POST.
++  await saving;
+   await settle();
+   assert.equal(calls[1].options.method, "POST");
+   const mutation = JSON.parse(calls[1].options.body);
+@@ -58,10 +160,11 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
+   assert.equal(calls[1].options.headers["Idempotency-Key"], "11111111-1111-4111-8111-111111111111");
+   assert.equal(calls[1].options.credentials, "same-origin");
+   assert.equal(calls[1].options.cache, "no-store");
+-  const message = nodes["portal-settings-state"].textContent;
+-  if (scenario === "conflict") { assert.equal(calls.length, 3); assert(message.includes("Review current values")); }
+-  else if (scenario === "invalid") { assert.equal(calls.length, 2); assert(message.includes("Nothing was persisted")); }
++  const message = nodes["portal-settings-state-message"].textContent;
++  if (scenario === "conflict") { assert.equal(calls.length, 3); assert(message.includes("Review current values")); assert.equal(nodes["portal-settings-save"].disabled, true); }
++  else if (scenario === "invalid" || scenario === "badrequest") { assert.equal(calls.length, 2); assert(message.includes("Nothing was persisted")); assert.equal(nodes["portal-settings-state"].dataset.state, "error"); assert.equal(nodes["portal-settings-save"].disabled, false); }
+   else if (scenario === "outage") { assert.equal(calls.length, 2); assert.equal(nodes["portal-settings-save"].disabled, true); }
+-  else if (scenario === "noop") { assert.equal(calls.length, 3); assert(message.includes("no persisted override change")); }
+-  else { assert.equal(calls.length, 3); assert(message.includes("Pending captive-portal.service restart")); }
++  else if (scenario === "noop") { assert.equal(calls.length, 3); assert(message.includes("no persisted override change")); assert.equal(nodes["portal-settings-save"].disabled, true); }
++  else { assert.equal(calls.length, 3); assert(message.includes("Pending captive-portal.service restart")); assert.equal(nodes["portal-settings-save"].disabled, true); }
++  assert(calls.every(call => call.options.credentials === "same-origin" && call.options.cache === "no-store"));
+ })().catch(error => { console.error(error); process.exitCode = 1; });
+diff --git a/tests/admin_web/test_portal_settings_stage5.py b/tests/admin_web/test_portal_settings_stage5.py
+index 1acb1fa3e4525279b54db871b83409be67cdfe75..03d8ed48ea7498dc8cffc8f83c0ece95744a612a 100644
+--- a/tests/admin_web/test_portal_settings_stage5.py
++++ b/tests/admin_web/test_portal_settings_stage5.py
+@@ -133,6 +133,15 @@ def test_portal_shell_is_global_and_navigation_is_capability_bound(tmp_path):
+     assert "portal_settings.js" in page and "admin.js" not in page and "controller_settings.js" not in page
+     assert 'data-site-id="' not in page and 'data-write-allowed="true"' in page
+     assert page.index('href="/admin/settings"') < page.index('href="/admin/settings/controller"') < page.index('href="/admin/settings/portal"')
++    assert 'aria-current="page">Portal</a>' in page
++    for required in ('class="state-dot"', 'id="portal-settings-state-title"',
++                     'id="portal-settings-state-message"', 'id="portal-settings-generation"',
++                     'role="status"', 'aria-live="polite"', 'class="settings-actions portal-settings-actions"'):
++        assert required in page
++    assert '>Refresh</button>' in page and '>Save changes</button>' in page
++    assert "external captive-portal.service restart" in page
++    for forbidden in ("Read current settings", "Apply now", "Reload service", "systemctl"):
++        assert forbidden not in page
+     _app, client, _runtime, _boot, _csrf = portal_app(tmp_path / "readonly", grants=(READ,))
+     page = client.get("/admin/settings/portal", base_url="https://localhost").get_data(as_text=True)
+     assert 'data-write-allowed="false"' in page and 'href="/admin/settings/controller"' not in page
+diff --git a/tests/admin_web/test_portal_settings_stage5_frontend.py b/tests/admin_web/test_portal_settings_stage5_frontend.py
+index 86a6e59a28024948c8afcebe4c336fb7146cbce4..e09fbf32ee9089fd561e66a4b7f7a182522ac5d0 100644
+--- a/tests/admin_web/test_portal_settings_stage5_frontend.py
++++ b/tests/admin_web/test_portal_settings_stage5_frontend.py
+@@ -2,6 +2,7 @@ import json
+ from pathlib import Path
+ import shutil
+ import subprocess
++import re
+ import pytest
+ from app.settings_control.definitions import SettingsDefinitionRegistry
+ from app.portal_presentation import portal_validation_metadata
+@@ -9,15 +10,26 @@ from app.portal_presentation import portal_validation_metadata
+ ROOT = Path(__file__).resolve().parents[2]
+ 
+ 
+-@pytest.mark.parametrize("scenario", ["changed", "clear", "noop", "conflict", "invalid", "outage", "readonly"])
++@pytest.mark.parametrize("scenario", ["changed", "clear", "noop", "conflict", "invalid", "outage", "readonly", "dirty", "metadata", "pending", "environment", "badrequest", "loadoutage"])
+ def test_real_portal_script_uses_server_metadata_and_safe_dom(scenario):
+     registry = SettingsDefinitionRegistry()
+     items = [{"key": item.key, "display_label": item.display_label, "description": item.description,
+         "group": item.group, "presentation_type": item.presentation_type, "configured_value": "<script>literal</script>" if index == 0 else item.repository_default_value,
+-        "effective_value": None, "pending_value": None, "persisted_override_value": "old" if index == 13 else None,
++        "effective_value": "<script>literal</script>" if index == 0 else item.repository_default_value,
++        "default_value": item.repository_default_value,
++        "pending_value": None, "persisted_override_value": "old" if index == 13 else None,
+         "base_source": "repository_default", "apply_requirement": item.apply_requirement,
+         "validation": portal_validation_metadata(item.key)} for index, item in enumerate(registry.for_domain("portal"))]
+-    model = {"api_version": "admin.settings.portal.v1", "settings": items, "configured_generation": 0, "effective_generation": None, "restart_required": False}
++    model = {"api_version": "admin.settings.portal.v1", "settings": items, "configured_generation": 0, "effective_generation": 0, "restart_required": False}
++    if scenario == "metadata":
++        items[0]["validation"]["max_length"] = 73
++        items[6]["validation"]["max_lines"] = 6
++        items[12]["validation"]["allowed_hosts"] = ["links.example.invalid"]
++    if scenario == "environment":
++        items[0]["base_source"] = "environment"
++    if scenario == "pending":
++        model.update(configured_generation=1, restart_required=True)
++        items[6].update(configured_value="Configured first\nConfigured second", effective_value="Effective first\nEffective second", pending_value="Configured first\nConfigured second")
+     node = shutil.which("node")
+     assert node
+     result = subprocess.run([node, str(Path(__file__).with_name("portal_settings_stage5_ui.cjs")),
+@@ -27,7 +39,35 @@ def test_real_portal_script_uses_server_metadata_and_safe_dom(scenario):
+ 
+ def test_no_parallel_validation_table_or_unsafe_rendering():
+     source = (ROOT / "app/admin_web/static/portal_settings.js").read_text(encoding="utf-8")
+-    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "localStorage", "sessionStorage", "systemctl", ".trim()", "wa.me", "t.me", "facebook.com", "PORTAL_UI_TITLE", "restart("):
++    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "localStorage", "sessionStorage", "systemctl", ".trim()", "wa.me", "t.me", "facebook.com", "PORTAL_UI_TITLE", "restart(", "JSON.stringify(item.validation)"):
+         assert forbidden not in source
+     for required in ("textContent", "item.validation.max_length", "item.presentation_type", "item.configured_value", "item.effective_value", "item.pending_value", "item.base_source", "item.apply_requirement"):
+         assert required in source
++
++
++def test_portal_presentation_css_hooks_are_scoped_and_responsive():
++    css = (ROOT / "app/admin_web/static/admin.css").read_text(encoding="utf-8")
++    def rule(selector):
++        matches = list(re.finditer(re.escape(selector) + r"\s*\{([^}]+)\}", css))
++        assert matches, selector
++        return "\n".join(match.group(1) for match in matches)
++    assert "white-space: pre-wrap" in rule("#portal-settings-page .portal-setting-value")
++    assert "font-size: .7rem" in rule("#portal-settings-page .portal-setting-key")
++    assert "color: var(--muted)" in rule("#portal-settings-page .muted")
++    textarea = rule("#portal-settings-page textarea.portal-setting-input")
++    for required in ("font: inherit", "width: 100%", "max-width: 100%", "min-height", "padding", "border", "resize: vertical"):
++        assert required in textarea
++    assert "outline" in rule("#portal-settings-page textarea.portal-setting-input:focus-visible")
++    assert "background" in rule("#portal-settings-page .portal-setting-input:disabled, #portal-settings-page select:disabled")
++    assert "grid-template-columns: minmax(0, 1fr)" in rule("#portal-settings-page .portal-settings-grid")
++    assert "@media (min-width: 1120px)" in css
++    assert "repeat(3, minmax(0, 1fr))" in rule("#portal-settings-page .portal-settings-grid--branding")
++    assert "repeat(2, minmax(0, 1fr))" in rule("#portal-settings-page .portal-settings-grid--support")
++    assert "flex-wrap: wrap" in rule(".settings-tabs")
++    assert "color: var(--ink)" in rule(".settings-tabs .nav-link")
++    assert "outline" in rule(".settings-tabs .nav-link:focus-visible")
++    assert "background: var(--accent)" in rule('.settings-tabs .nav-link[aria-current="page"]')
++    assert "border-left" in rule("#portal-settings-page .portal-support-warning")
++    assert "position: sticky" in rule("#portal-settings-page .portal-settings-actions")
++    assert "bottom: 0" in rule("#portal-settings-page .portal-settings-actions")
++    assert "scroll-margin-bottom" in rule("#portal-settings-page .portal-setting-input")
