@@ -1,0 +1,3386 @@
+diff --git a/.env.example b/.env.example
+index fb3720c2d1ef091a71a6d70bfff904f5b40e8e8a..473f496357e2c3bbdd61f760fc8091bedbe87a75 100644
+--- a/.env.example
++++ b/.env.example
+@@ -273,3 +273,31 @@ PENDING_SESSION_CLEANER_LOG_FILE=/opt/CaptivePortal/logs/pending_session_cleaner
+ PENDING_SESSION_CLEANER_ROTATION_MAX_BYTES=52428800
+ PENDING_SESSION_CLEANER_ROTATION_BACKUP_COUNT=20
+ PENDING_SESSION_CLEANER_SHUTDOWN_TIMEOUT_SECONDS=20
++# TASK-DEVICE-FINGERPRINT-02 sensor process only; ignored by the main runtime.
++DEVICE_FINGERPRINT_SENSOR_ENABLED=false
++DEVICE_FINGERPRINT_SENSOR_INTERFACE=enp8s0
++DEVICE_FINGERPRINT_SENSOR_PRODUCER_ID=sensor-zefer-01
++DEVICE_FINGERPRINT_SENSOR_CAPTURE_SOURCE_ID=zefer-span-01
++DEVICE_FINGERPRINT_SENSOR_SITE_ID=6a64f17630da7c70d232187a
++DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS=192.168.8.0/22
++DEVICE_FINGERPRINT_SENSOR_DHCP_SERVER_AUTHORITY=192.168.10.1
++DEVICE_FINGERPRINT_SENSOR_DHCP_OPTION54_AUTHORITY=192.168.10.1
++DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL=https://192.168.0.202:9443/api/internal/device-fingerprint/v1
++DEVICE_FINGERPRINT_SENSOR_CA_CERT_PATH=/etc/captive-portal/device-fingerprint/sensor-ca.crt
++DEVICE_FINGERPRINT_SENSOR_SPOOL_PATH=/var/lib/captive-portal/fingerprint-sensor/spool.sqlite3
++DEVICE_FINGERPRINT_SENSOR_SPOOL_TOTAL_BUDGET_BYTES=134217728
++DEVICE_FINGERPRINT_SENSOR_SPOOL_MAIN_DB_MAX_BYTES=117440512
++DEVICE_FINGERPRINT_SENSOR_SPOOL_WRITE_HEADROOM_BYTES=16777216
++DEVICE_FINGERPRINT_SENSOR_SPOOL_MAX_EVENTS=100000
++DEVICE_FINGERPRINT_SENSOR_DELIVERY_BATCH_SIZE=100
++DEVICE_FINGERPRINT_SENSOR_HTTP_TIMEOUT_SECONDS=5
++DEVICE_FINGERPRINT_SENSOR_RAW_DEDUP_MAX_ENTRIES=65536
++DEVICE_FINGERPRINT_SENSOR_RAW_DEDUP_HORIZON_MS=0.25
++DEVICE_FINGERPRINT_SENSOR_CORE_READY_HOST=127.0.0.1
++DEVICE_FINGERPRINT_SENSOR_CORE_READY_PORT=8088
++DEVICE_FINGERPRINT_SENSOR_CORE_READY_CONNECT_TIMEOUT_SECONDS=1
++DEVICE_FINGERPRINT_SENSOR_CORE_READY_POLL_INTERVAL_SECONDS=10
++DEVICE_FINGERPRINT_SENSOR_CORE_READY_MAX_WAIT_SECONDS=1800
++DEVICE_FINGERPRINT_SENSOR_EVE_MAX_DATAGRAM_BYTES=262144
++DEVICE_FINGERPRINT_SENSOR_EVE_SOCKET_PATH=/run/captive-portal/fingerprint-sensor/suricata-eve.sock
++DEVICE_FINGERPRINT_SENSOR_EVE_SOCKET_WAIT_SECONDS=1830
+diff --git a/AGENTS.md b/AGENTS.md
+index 52a50bbc56c7a87b26b567242725fb8b88994b3f..b191d1e4d876927719f970253734ae25c05d560c 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -144,6 +144,9 @@ into run.py or the main CaptivPortal Flask runtime.
+ 
+ For TASK-DEVICE-FINGERPRINT-01 the authorized exception is exactly:
+ `python3 -m app.device_fingerprint.cli run`.
++For TASK-DEVICE-FINGERPRINT-02 the additional isolated sensor exception is
++exactly `python3 -m app.device_fingerprint_sensor.cli run`; it must not be
++imported or composed by `run.py`.
+ - app/web/web.py:create_app() — Flask composition factory.
+ - Один OmadaProvider передаётся в web/auth и зависимые компоненты процесса.
+ - AuthSessionManager и auth executor находятся в памяти процесса; production предполагает один WSGI process.
+diff --git a/README.md b/README.md
+index 4b3f88227094f9062acdcb7d53fea3d13e8d21c2..a73295d42b747817848c3fb528d9d4ef59509181 100644
+--- a/README.md
++++ b/README.md
+@@ -1414,6 +1414,16 @@ That is the direction of the platform as it evolves from a captive portal into a
+ 
+ ---
+ 
++## Passive device fingerprint sensor
++
++`TASK-DEVICE-FINGERPRINT-02` adds an opt-in, separately supervised passive
++sensor for normalized DHCP, TCP SYN, TLS JA4 and QUIC JA4 evidence. It has no
++authorization-path dependency, performs no active network probing, stores no
++packet capture or full EVE stream, and remains disabled by repository default.
++Deployment and activation are separate Owner-controlled operations.
++
++---
++
+ ## License
+ 
+ See [LICENSE](LICENSE).
+diff --git a/README_RU.md b/README_RU.md
+index 3d9dccd8f0dac36e3325401fbd14299fd6cf3a7e..9c10204ea0bc148c2474036ef55d2ae8d6d3fdb5 100644
+--- a/README_RU.md
++++ b/README_RU.md
+@@ -1405,6 +1405,15 @@ Tenant не равен Site.
+ 
+ ---
+ 
++## Пассивный Device Fingerprint sensor
++
++`TASK-DEVICE-FINGERPRINT-02` добавляет отдельный opt-in sensor для
++нормализованных DHCP, TCP SYN, TLS JA4 и QUIC JA4 evidence. Sensor не участвует
++в Authorization, не выполняет active probing, не сохраняет PCAP или полный EVE
++и по умолчанию выключен. Deployment и activation выполняются Owner отдельно.
++
++---
++
+ ## License
+ 
+ См. [LICENSE](LICENSE).
+diff --git a/app/device_fingerprint/network_schemas.py b/app/device_fingerprint/network_schemas.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ab9d0520e07dfeeb79f299c5d95f5953ef3f405
+--- /dev/null
++++ b/app/device_fingerprint/network_schemas.py
+@@ -0,0 +1,146 @@
++"""Strict normalized network-evidence payload schemas for Task-02."""
++
++from __future__ import annotations
++
++import re
++from collections.abc import Mapping
++from typing import Any
++
++from .models import DeviceFingerprintValidationError
++
++_JA4_A = re.compile(r"[tq](?:13|12|11|10|s3|s2|00)[di][0-9]{4}[0-9A-Za-z]{2}")
++_JA4_HASH = re.compile(r"[0-9a-f]{12}")
++_PRINTABLE_ASCII = re.compile(r"[\x21-\x7e]{1,255}")
++
++_DHCP_KEYS = frozenset({
++    "message_type", "parameter_request_list", "option_order", "vendor_class",
++    "client_identifier_kind", "maximum_message_size", "rapid_commit_requested",
++    "capport_requested", "ipv6_only_preferred_requested", "hostname_present",
++})
++_TCP_KEYS = frozenset({
++    "ip_version", "observed_ttl", "tcp_window", "mss", "window_scale",
++    "sack_permitted", "timestamps_present", "tcp_option_order",
++})
++_TLS_KEYS = frozenset({
++    "ja4", "ja4_a", "ja4_b", "ja4_c", "tls_version_family",
++    "client_alpns", "ech_extension_present", "grease_extension_present",
++})
++_QUIC_KEYS = frozenset({
++    "ja4", "ja4_a", "ja4_b", "ja4_c", "quic_version",
++    "ech_extension_present", "grease_extension_present",
++})
++
++
++def validate_dhcp_v1(value: Mapping[str, Any]) -> Mapping[str, Any]:
++    _keys(value, _DHCP_KEYS)
++    if value["message_type"] not in {"discover", "request", "inform", "decline", "release"}:
++        _fail()
++    prl = _integer_list(value["parameter_request_list"], 64)
++    order = _integer_list(value["option_order"], 64)
++    vendor = value["vendor_class"]
++    if vendor is not None and (
++        not isinstance(vendor, str)
++        or not 1 <= len(vendor) <= 128
++        or any(ord(character) < 0x20 or ord(character) > 0x7E for character in vendor)
++    ):
++        _fail()
++    if value["client_identifier_kind"] not in {"absent", "mac", "opaque"}:
++        _fail()
++    maximum = value["maximum_message_size"]
++    if maximum is not None and not _integer(maximum, 576, 65535):
++        _fail()
++    for key in (
++        "rapid_commit_requested", "capport_requested",
++        "ipv6_only_preferred_requested", "hostname_present",
++    ):
++        if type(value[key]) is not bool:
++            _fail()
++    return {
++        **value,
++        "parameter_request_list": prl,
++        "option_order": order,
++    }
++
++
++def validate_tcp_syn_v1(value: Mapping[str, Any]) -> Mapping[str, Any]:
++    _keys(value, _TCP_KEYS)
++    if value["ip_version"] != 4 or type(value["ip_version"]) is not int:
++        _fail()
++    if not _integer(value["observed_ttl"], 0, 255):
++        _fail()
++    if not _integer(value["tcp_window"], 0, 65535):
++        _fail()
++    if value["mss"] is not None and not _integer(value["mss"], 0, 65535):
++        _fail()
++    if value["window_scale"] is not None and not _integer(value["window_scale"], 0, 14):
++        _fail()
++    if type(value["sack_permitted"]) is not bool or type(value["timestamps_present"]) is not bool:
++        _fail()
++    return {**value, "tcp_option_order": _integer_list(value["tcp_option_order"], 32)}
++
++
++def validate_tls_v1(value: Mapping[str, Any]) -> Mapping[str, Any]:
++    _keys(value, _TLS_KEYS)
++    _ja4(value, "t")
++    if value["tls_version_family"] not in {"tls1_3", "tls1_2", "other"}:
++        _fail()
++    expected = {"13": "tls1_3", "12": "tls1_2"}.get(value["ja4_a"][1:3], "other")
++    if value["tls_version_family"] != expected:
++        _fail()
++    alpns = value["client_alpns"]
++    if alpns is not None:
++        if not isinstance(alpns, list) or not 1 <= len(alpns) <= 16:
++            _fail()
++        if any(not isinstance(item, str) or _PRINTABLE_ASCII.fullmatch(item) is None for item in alpns):
++            _fail()
++        alpns = list(alpns)
++    _nullable_bools(value)
++    return {**value, "client_alpns": alpns}
++
++
++def validate_quic_v1(value: Mapping[str, Any]) -> Mapping[str, Any]:
++    _keys(value, _QUIC_KEYS)
++    _ja4(value, "q")
++    version = value["quic_version"]
++    if not isinstance(version, str) or re.fullmatch(r"0x[0-9a-f]{8}", version) is None:
++        _fail()
++    _nullable_bools(value)
++    return dict(value)
++
++
++def _keys(value: Mapping[str, Any], expected: frozenset[str]) -> None:
++    if not isinstance(value, Mapping) or set(value) != expected:
++        _fail()
++
++
++def _ja4(value: Mapping[str, Any], family: str) -> None:
++    a, b, c, full = value["ja4_a"], value["ja4_b"], value["ja4_c"], value["ja4"]
++    if (
++        not isinstance(a, str) or _JA4_A.fullmatch(a) is None or not a.startswith(family)
++        or not isinstance(b, str) or _JA4_HASH.fullmatch(b) is None
++        or not isinstance(c, str) or _JA4_HASH.fullmatch(c) is None
++        or not isinstance(full, str) or full != f"{a}_{b}_{c}"
++    ):
++        _fail()
++
++
++def _nullable_bools(value: Mapping[str, Any]) -> None:
++    for key in ("ech_extension_present", "grease_extension_present"):
++        if value[key] is not None and type(value[key]) is not bool:
++            _fail()
++
++
++def _integer(value: Any, minimum: int, maximum: int) -> bool:
++    return type(value) is int and minimum <= value <= maximum
++
++
++def _integer_list(value: Any, maximum_length: int) -> list[int]:
++    if not isinstance(value, list) or len(value) > maximum_length:
++        _fail()
++    if any(not _integer(item, 0, 255) for item in value):
++        _fail()
++    return list(value)
++
++
++def _fail() -> None:
++    raise DeviceFingerprintValidationError("Invalid network evidence payload")
+diff --git a/app/device_fingerprint/schema_registry.py b/app/device_fingerprint/schema_registry.py
+index 3967beace7cfaefb01d8f06337008eab1d6fa28d..435984b594e3d006321330667a6a0a190930ce50 100644
+--- a/app/device_fingerprint/schema_registry.py
++++ b/app/device_fingerprint/schema_registry.py
+@@ -7,6 +7,12 @@ from typing import Any
+ 
+ from .models import DeviceFingerprintUnsupportedSchema, DeviceFingerprintValidationError
+ from .validation import canonical_json, validate_feature_schema_version, validate_source_kind
++from .network_schemas import (
++    validate_dhcp_v1,
++    validate_quic_v1,
++    validate_tcp_syn_v1,
++    validate_tls_v1,
++)
+ 
+ Validator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+ 
+@@ -47,4 +53,9 @@ class EvidenceSchemaRegistry:
+ 
+ 
+ def build_production_schema_registry() -> EvidenceSchemaRegistry:
+-    return EvidenceSchemaRegistry().freeze()
++    registry = EvidenceSchemaRegistry()
++    registry.register("dhcp", 1, validate_dhcp_v1)
++    registry.register("tcp_syn", 1, validate_tcp_syn_v1)
++    registry.register("tls_client", 1, validate_tls_v1)
++    registry.register("quic_client", 1, validate_quic_v1)
++    return registry.freeze()
+diff --git a/app/device_fingerprint_sensor/__init__.py b/app/device_fingerprint_sensor/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..87d768902b92e258051f76f59b3fe2cd17bb5bbe
+--- /dev/null
++++ b/app/device_fingerprint_sensor/__init__.py
+@@ -0,0 +1 @@
++"""Isolated passive packet-sensor package."""
+diff --git a/app/device_fingerprint_sensor/capture.py b/app/device_fingerprint_sensor/capture.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..248666491b6e413534956f8578716212ebe71cd6
+--- /dev/null
++++ b/app/device_fingerprint_sensor/capture.py
+@@ -0,0 +1,155 @@
++"""Read-only interface preflight and passive AF_PACKET capture."""
++
++from __future__ import annotations
++
++import json
++import os
++import socket
++import struct
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Callable
++
++from app.device_fingerprint.validation import format_utc
++
++from .capture_filter import attach_frozen_filter
++from .models import SensorPreflightError
++
++SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)
++
++
++class InterfacePreflight:
++    def __init__(self, interface: str = "enp8s0", *, sys_root: Path = Path("/sys"),
++                 proc_root: Path = Path("/proc"), runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> None:
++        self.interface = interface
++        self.sys_root = sys_root
++        self.proc_root = proc_root
++        self.runner = runner
++
++    def validate(self) -> None:
++        try:
++            self._validate()
++        except SensorPreflightError:
++            raise
++        except Exception as exc:
++            raise SensorPreflightError("capture_interface_unavailable") from exc
++
++    def _validate(self) -> None:
++        if self.interface != "enp8s0":
++            self._fail()
++        net = self.sys_root / "class" / "net" / self.interface
++        if not net.exists() or self._read(net / "operstate") != "up":
++            self._fail()
++        if (net / "master").exists() or (net / "master").is_symlink():
++            self._fail()
++        addresses = self._json(["ip", "-j", "address", "show", "dev", self.interface])
++        if len(addresses) != 1 or any(item.get("family") in {"inet", "inet6"} for item in addresses[0].get("addr_info", [])):
++            self._fail()
++        for family in ([], ["-6"]):
++            routes = self._json(["ip", *family, "-j", "route", "show", "default", "dev", self.interface])
++            if routes:
++                self._fail()
++        if self._read(self.proc_root / "sys" / "net" / "ipv4" / "conf" / self.interface / "forwarding") != "0":
++            self._fail()
++        if self._read(self.proc_root / "sys" / "net" / "ipv6" / "conf" / self.interface / "forwarding") != "0":
++            self._fail()
++        for key in ("dhcp4", "dhcp6"):
++            output = self._run(["netplan", "get", f"ethernets.{self.interface}.{key}"])
++            if output.stdout.strip().lower() != "false":
++                self._fail()
++        self._active_dhcp_defense()
++        try:
++            active = self.runner(["systemctl", "is-active", "NetworkManager"], capture_output=True, text=True, check=False)
++        except FileNotFoundError:
++            active = None
++        if active is not None and active.returncode == 0 and active.stdout.strip() == "active":
++            profiles = self._run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])
++            if any(line.rsplit(":", 1)[-1] == self.interface for line in profiles.stdout.splitlines() if line):
++                self._fail()
++
++    def _active_dhcp_defense(self) -> None:
++        try:
++            entries = tuple(self.proc_root.iterdir())
++        except OSError:
++            self._fail()
++        for entry in entries:
++            if not entry.name.isdigit():
++                continue
++            try:
++                tokens = (entry / "cmdline").read_bytes().split(b"\0")
++                decoded = [token.decode("utf-8", "strict") for token in tokens if token]
++            except FileNotFoundError:
++                continue
++            except (OSError, UnicodeDecodeError):
++                self._fail()
++            if not decoded:
++                continue
++            executable = os.path.basename(decoded[0])
++            interface_argument = any(token == self.interface or token == f"--interface={self.interface}" for token in decoded[1:])
++            if executable in {"dhclient", "dhcpcd", "udhcpc"} and interface_argument:
++                self._fail()
++
++    def _json(self, command: list[str]) -> object:
++        output = self._run(command)
++        try:
++            return json.loads(output.stdout)
++        except (TypeError, ValueError):
++            self._fail()
++
++    def _run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
++        result = self.runner(command, capture_output=True, text=True, check=False)
++        if result.returncode != 0:
++            self._fail()
++        return result
++
++    @staticmethod
++    def _read(path: Path) -> str:
++        try:
++            return path.read_text(encoding="ascii").strip()
++        except OSError as exc:
++            raise SensorPreflightError("capture_interface_unavailable") from exc
++
++    @staticmethod
++    def _fail() -> None:
++        raise SensorPreflightError("capture_interface_unavailable")
++
++
++class RawCapture:
++    def __init__(self, interface: str, *, socket_factory=socket.socket) -> None:
++        self.interface = interface
++        self._socket_factory = socket_factory
++        self.socket: socket.socket | None = None
++
++    def open(self) -> None:
++        raw = self._socket_factory(socket.AF_PACKET, socket.SOCK_RAW, 0)
++        try:
++            raw.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
++            attach_frozen_filter(raw)
++            raw.bind((self.interface, socket.htons(0x0003)))
++        except Exception:
++            raw.close()
++            raise
++        self.socket = raw
++
++    def receive(self, size: int = 65535) -> tuple[bytes, int, str]:
++        if self.socket is None:
++            raise RuntimeError("capture is closed")
++        data, ancillary, flags, _address = self.socket.recvmsg(size, 256)
++        if flags & getattr(socket, "MSG_TRUNC", 0):
++            raise SensorPreflightError("raw_frame_truncated")
++        timestamp_ns = None
++        for level, kind, payload in ancillary:
++            if level == socket.SOL_SOCKET and kind == SO_TIMESTAMPNS and len(payload) >= 16:
++                seconds, nanos = struct.unpack("qq", payload[:16])
++                timestamp_ns = seconds * 1_000_000_000 + nanos
++                break
++        if timestamp_ns is None:
++            raise SensorPreflightError("kernel_timestamp_unavailable")
++        observed = format_utc(datetime.fromtimestamp(timestamp_ns / 1_000_000_000, timezone.utc))
++        return data, timestamp_ns, observed
++
++    def close(self) -> None:
++        if self.socket is not None:
++            self.socket.close()
++            self.socket = None
+diff --git a/app/device_fingerprint_sensor/capture_filter.py b/app/device_fingerprint_sensor/capture_filter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2112ece1eb619d4ff99da5ac92a3bccd4f6851d
+--- /dev/null
++++ b/app/device_fingerprint_sensor/capture_filter.py
+@@ -0,0 +1,76 @@
++"""Compile the frozen raw-capture expression with libpcap and attach it."""
++
++from __future__ import annotations
++
++import ctypes
++import ctypes.util
++import socket
++from pathlib import Path
++
++from .models import SensorError
++
++DLT_EN10MB = 1
++SO_ATTACH_FILTER = 26
++RAW_CAPTURE_FILTER = (
++    "(udp and (port 67 or port 68)) or "
++    "(src net 192.168.8.0/22 and tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn)"
++)
++DEPLOYED_FILTER_PATH = Path("/etc/captive-portal/device-fingerprint/raw-capture.bpf")
++
++
++class _BpfInsn(ctypes.Structure):
++    _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte), ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint32)]
++
++
++class _BpfProgram(ctypes.Structure):
++    _fields_ = [("bf_len", ctypes.c_uint), ("bf_insns", ctypes.POINTER(_BpfInsn))]
++
++
++class _SockFprog(ctypes.Structure):
++    _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(_BpfInsn))]
++
++
++def load_deployed_filter(path: Path = DEPLOYED_FILTER_PATH) -> str:
++    try:
++        value = path.read_text(encoding="ascii").strip()
++    except OSError as exc:
++        raise SensorError("raw capture filter artifact is unavailable") from exc
++    if value != RAW_CAPTURE_FILTER:
++        raise SensorError("raw capture filter artifact is invalid")
++    return value
++
++
++def attach_frozen_filter(raw_socket: socket.socket, *, library: str | None = None,
++                         expression: str | None = None) -> int:
++    expression = load_deployed_filter() if expression is None else expression
++    if expression != RAW_CAPTURE_FILTER:
++        raise SensorError("raw capture filter is invalid")
++    pcap_name = library or ctypes.util.find_library("pcap")
++    if not pcap_name:
++        raise SensorError("libpcap is unavailable")
++    pcap = ctypes.CDLL(pcap_name)
++    pcap.pcap_open_dead.argtypes = [ctypes.c_int, ctypes.c_int]
++    pcap.pcap_open_dead.restype = ctypes.c_void_p
++    pcap.pcap_compile.argtypes = [ctypes.c_void_p, ctypes.POINTER(_BpfProgram), ctypes.c_char_p, ctypes.c_int, ctypes.c_uint32]
++    pcap.pcap_compile.restype = ctypes.c_int
++    pcap.pcap_freecode.argtypes = [ctypes.POINTER(_BpfProgram)]
++    pcap.pcap_close.argtypes = [ctypes.c_void_p]
++    handle = pcap.pcap_open_dead(DLT_EN10MB, 65535)
++    if not handle:
++        raise SensorError("libpcap compile context is unavailable")
++    program = _BpfProgram()
++    try:
++        if pcap.pcap_compile(handle, ctypes.byref(program), expression.encode("ascii"), 1, 0xFFFFFFFF) != 0:
++            raise SensorError("raw capture filter compilation failed")
++        if not 0 < program.bf_len <= 4096:
++            raise SensorError("raw capture filter is invalid")
++        copied = (_BpfInsn * program.bf_len)(*[program.bf_insns[index] for index in range(program.bf_len)])
++        fprog = _SockFprog(program.bf_len, ctypes.cast(copied, ctypes.POINTER(_BpfInsn)))
++        libc = ctypes.CDLL(None, use_errno=True)
++        result = libc.setsockopt(raw_socket.fileno(), socket.SOL_SOCKET, SO_ATTACH_FILTER, ctypes.byref(fprog), ctypes.sizeof(fprog))
++        if result != 0:
++            raise OSError(ctypes.get_errno(), "SO_ATTACH_FILTER failed")
++        return int(program.bf_len)
++    finally:
++        pcap.pcap_freecode(ctypes.byref(program))
++        pcap.pcap_close(handle)
+diff --git a/app/device_fingerprint_sensor/cli.py b/app/device_fingerprint_sensor/cli.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..320c46acc0bc7fc057143330ca43f28ce3de5c3b
+--- /dev/null
++++ b/app/device_fingerprint_sensor/cli.py
+@@ -0,0 +1,83 @@
++"""Opt-in sensor service entry point."""
++
++from __future__ import annotations
++
++import argparse
++import signal
++import socket
++import time
++
++from app.artifact_identity import ArtifactIdentityError, capture_loaded_artifact_identity
++
++from .config import sensor_config_from_env
++from .runtime import SensorRuntime
++from .telemetry import SensorTelemetry, configure_sensor_logger
++
++
++def wait_for_core(host: str, port: int, *, connect_timeout: float, poll_interval: float,
++                  max_wait: float, monotonic=time.monotonic, sleep=time.sleep,
++                  connector=socket.create_connection) -> bool:
++    deadline = monotonic() + max_wait
++    while True:
++        try:
++            connection = connector((host, port), timeout=connect_timeout)
++            connection.close()
++            return True
++        except OSError:
++            remaining = deadline - monotonic()
++            if remaining <= 0:
++                return False
++            sleep(min(poll_interval, remaining))
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(prog="fingerprint-sensor")
++    commands = parser.add_subparsers(dest="command", required=True)
++    commands.add_parser("run")
++    parser.parse_args(argv)
++    config = sensor_config_from_env()
++    if not config.enabled:
++        return 0
++    logger = configure_sensor_logger()
++    try:
++        identity = capture_loaded_artifact_identity("fingerprint-sensor.service")
++    except ArtifactIdentityError:
++        logger.error("fingerprint_sensor_startup_failed error_category=artifact_identity")
++        return 1
++    telemetry = SensorTelemetry(logger, runtime_fields=identity.safe_fields())
++    if not wait_for_core(
++        config.core_ready_host, config.core_ready_port,
++        connect_timeout=config.core_ready_connect_timeout_seconds,
++        poll_interval=config.core_ready_poll_interval_seconds,
++        max_wait=config.core_ready_max_wait_seconds,
++    ):
++        telemetry.emit("fingerprint_sensor_startup_failed", runtime_state="unavailable", error_category="core_listener_unavailable")
++        return 1
++    runtime = SensorRuntime(config, telemetry=telemetry)
++    try:
++        runtime.initialize_transport()
++        runtime.producer.read_credential()
++        if not runtime.preflight_or_report():
++            try:
++                runtime.producer.deliver_once()
++            except Exception:
++                pass
++            runtime.shutdown()
++            return 1
++        runtime.start()
++        signal.signal(signal.SIGTERM, lambda *_args: runtime.stop_event.set())
++        signal.signal(signal.SIGINT, lambda *_args: runtime.stop_event.set())
++        while not runtime.stop_event.wait(1.0):
++            pass
++        return 0 if runtime.shutdown() else 1
++    except Exception:
++        telemetry.emit("fingerprint_sensor_startup_failed", runtime_state="unavailable", error_category="startup")
++        try:
++            runtime.shutdown()
++        except Exception:
++            pass
++        return 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/app/device_fingerprint_sensor/config.py b/app/device_fingerprint_sensor/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..98c8e2ae965ee5c1a522804f4892e5c6066ccff0
+--- /dev/null
++++ b/app/device_fingerprint_sensor/config.py
+@@ -0,0 +1,162 @@
++"""Strict sensor-only environment parsing; never imported by the core app."""
++
++from __future__ import annotations
++
++import ipaddress
++import os
++import re
++from collections.abc import Mapping
++from pathlib import Path
++from urllib.parse import urlsplit
++
++from .models import SensorConfig, SensorConfigError
++
++INTERFACE = "enp8s0"
++PRODUCER_ID = "sensor-zefer-01"
++CAPTURE_SOURCE_ID = "zefer-span-01"
++SITE_ID = "6a64f17630da7c70d232187a"
++GUEST_CIDRS = "192.168.8.0/22"
++DHCP_SERVER_AUTHORITY = "192.168.10.1"
++DHCP_OPTION54_AUTHORITY = "192.168.10.1"
++EVIDENCE_BASE_URL = "https://192.168.0.202:9443/api/internal/device-fingerprint/v1"
++CA_CERT_PATH = "/etc/captive-portal/device-fingerprint/sensor-ca.crt"
++SPOOL_PATH = "/var/lib/captive-portal/fingerprint-sensor/spool.sqlite3"
++EVE_SOCKET_PATH = "/run/captive-portal/fingerprint-sensor/suricata-eve.sock"
++
++_MACHINE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
++_SITE = re.compile(r"[0-9a-f]{24}")
++
++
++def sensor_config_from_env(env: Mapping[str, str] | None = None) -> SensorConfig:
++    values = os.environ if env is None else env
++    enabled = _boolean(values.get("DEVICE_FINGERPRINT_SENSOR_ENABLED", "false"), "ENABLED")
++    if not enabled:
++        return _build(False, {})
++    return _build(True, values)
++
++
++def _build(enabled: bool, env: Mapping[str, str]) -> SensorConfig:
++    def value(name: str, default: str) -> str:
++        raw = env.get("DEVICE_FINGERPRINT_SENSOR_" + name, default)
++        if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
++            raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} is invalid")
++        return raw.strip()
++
++    interface = value("INTERFACE", INTERFACE)
++    if interface != INTERFACE:
++        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_INTERFACE must be enp8s0")
++    producer = value("PRODUCER_ID", PRODUCER_ID)
++    capture = value("CAPTURE_SOURCE_ID", CAPTURE_SOURCE_ID)
++    site = value("SITE_ID", SITE_ID)
++    if _MACHINE.fullmatch(producer) is None or _MACHINE.fullmatch(capture) is None or _SITE.fullmatch(site) is None:
++        raise SensorConfigError("Sensor identity is invalid")
++    cidrs = _cidrs(value("GUEST_CIDRS", GUEST_CIDRS))
++    server = _ipv4(value("DHCP_SERVER_AUTHORITY", DHCP_SERVER_AUTHORITY))
++    option54 = _ipv4(value("DHCP_OPTION54_AUTHORITY", DHCP_OPTION54_AUTHORITY))
++    if cidrs != (ipaddress.ip_network(GUEST_CIDRS),) or server != DHCP_SERVER_AUTHORITY or option54 != DHCP_OPTION54_AUTHORITY:
++        raise SensorConfigError("Sensor guest scope authority is invalid")
++    base_url = value("EVIDENCE_BASE_URL", EVIDENCE_BASE_URL).rstrip("/")
++    parsed = urlsplit(base_url)
++    if parsed.scheme != "https" or parsed.query or parsed.fragment or not parsed.netloc or base_url != EVIDENCE_BASE_URL:
++        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL is invalid")
++    ca = _absolute(value("CA_CERT_PATH", CA_CERT_PATH), "CA_CERT_PATH")
++    spool = _absolute(value("SPOOL_PATH", SPOOL_PATH), "SPOOL_PATH")
++    socket_path = _absolute(value("EVE_SOCKET_PATH", EVE_SOCKET_PATH), "EVE_SOCKET_PATH")
++    credential = env.get("CREDENTIALS_DIRECTORY")
++    credential_path = None
++    if credential:
++        credential_path = str(Path(credential) / "device-fingerprint-bearer")
++    config = SensorConfig(
++        enabled=enabled, interface=interface, producer_id=producer,
++        capture_source_id=capture, site_id=site, guest_cidrs=cidrs,
++        dhcp_server_authority=server, dhcp_option54_authority=option54,
++        evidence_base_url=base_url, ca_cert_path=ca, credential_path=credential_path,
++        spool_path=spool,
++        spool_total_budget_bytes=_integer(env, "SPOOL_TOTAL_BUDGET_BYTES", 134217728, 1, 1 << 40),
++        spool_main_db_max_bytes=_integer(env, "SPOOL_MAIN_DB_MAX_BYTES", 117440512, 1, 1 << 40),
++        spool_write_headroom_bytes=_integer(env, "SPOOL_WRITE_HEADROOM_BYTES", 16777216, 0, 1 << 40),
++        spool_max_events=_integer(env, "SPOOL_MAX_EVENTS", 100000, 1, 100000),
++        delivery_batch_size=_integer(env, "DELIVERY_BATCH_SIZE", 100, 1, 100),
++        http_timeout_seconds=float(_integer(env, "HTTP_TIMEOUT_SECONDS", 5, 1, 60)),
++        raw_dedup_max_entries=_integer(env, "RAW_DEDUP_MAX_ENTRIES", 65536, 1, 65536),
++        raw_dedup_horizon_ms=_exact_decimal(env, "RAW_DEDUP_HORIZON_MS", 0.25),
++        core_ready_host=_exact(value("CORE_READY_HOST", "127.0.0.1"), "127.0.0.1", "CORE_READY_HOST"),
++        core_ready_port=_exact_integer(env, "CORE_READY_PORT", 8088),
++        core_ready_connect_timeout_seconds=float(_integer(env, "CORE_READY_CONNECT_TIMEOUT_SECONDS", 1, 1, 10)),
++        core_ready_poll_interval_seconds=float(_integer(env, "CORE_READY_POLL_INTERVAL_SECONDS", 10, 1, 60)),
++        core_ready_max_wait_seconds=float(_integer(env, "CORE_READY_MAX_WAIT_SECONDS", 1800, 1, 1800)),
++        eve_max_datagram_bytes=_integer(env, "EVE_MAX_DATAGRAM_BYTES", 262144, 4096, 262144),
++        eve_socket_path=socket_path,
++        eve_socket_wait_seconds=_integer(env, "EVE_SOCKET_WAIT_SECONDS", 1830, 1, 1830),
++    )
++    if config.spool_main_db_max_bytes + config.spool_write_headroom_bytes > config.spool_total_budget_bytes:
++        raise SensorConfigError("Sensor spool capacity budget is invalid")
++    return config
++
++
++def _boolean(value: object, name: str) -> bool:
++    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
++        return value.strip().lower() == "true"
++    raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} must be true or false")
++
++
++def _integer(env: Mapping[str, str], name: str, default: int, minimum: int, maximum: int) -> int:
++    raw = env.get("DEVICE_FINGERPRINT_SENSOR_" + name, str(default))
++    try:
++        result = int(raw)
++    except (TypeError, ValueError) as exc:
++        raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} is invalid") from exc
++    if not minimum <= result <= maximum:
++        raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} is outside the allowed range")
++    return result
++
++
++def _decimal(env: Mapping[str, str], name: str, default: float, minimum: float, maximum: float) -> float:
++    try:
++        result = float(env.get("DEVICE_FINGERPRINT_SENSOR_" + name, str(default)))
++    except (TypeError, ValueError) as exc:
++        raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} is invalid") from exc
++    if not minimum <= result <= maximum:
++        raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} is outside the allowed range")
++    return result
++
++
++def _cidrs(raw: str) -> tuple[object, ...]:
++    try:
++        result = tuple(ipaddress.ip_network(item.strip(), strict=True) for item in raw.split(","))
++    except ValueError as exc:
++        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid") from exc
++    if not result or any(network.version != 4 for network in result):
++        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid")
++    return result
++
++
++def _ipv4(raw: str) -> str:
++    try:
++        parsed = ipaddress.ip_address(raw)
++    except ValueError as exc:
++        raise SensorConfigError("DHCP authority is invalid") from exc
++    if parsed.version != 4:
++        raise SensorConfigError("DHCP authority is invalid")
++    return str(parsed)
++
++
++def _absolute(raw: str, name: str) -> str:
++    if not (raw.startswith("/") or Path(raw).is_absolute()):
++        raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} must be absolute")
++    return raw
++
++
++def _exact(value: str, expected: str, name: str) -> str:
++    if value != expected:
++        raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} is fixed")
++    return value
++
++
++def _exact_integer(env: Mapping[str, str], name: str, expected: int) -> int:
++    value = _integer(env, name, expected, expected, expected)
++    return value
++
++
++def _exact_decimal(env: Mapping[str, str], name: str, expected: float) -> float:
++    return _decimal(env, name, expected, expected, expected)
+diff --git a/app/device_fingerprint_sensor/dedup.py b/app/device_fingerprint_sensor/dedup.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..340f2206dd1c99485d9e1ec10d0d9eb4761fe0b1
+--- /dev/null
++++ b/app/device_fingerprint_sensor/dedup.py
+@@ -0,0 +1,39 @@
++"""Bounded exact-frame duplicate suppression."""
++
++from __future__ import annotations
++
++import hashlib
++from collections import OrderedDict
++
++
++class ExactFrameDeduplicator:
++    def __init__(self, capture_source_id: str, *, max_entries: int = 65536, horizon_ms: float = 0.25) -> None:
++        self._prefix = capture_source_id.encode("ascii") + b"\0"
++        self._max_entries = max_entries
++        self._horizon_ns = int(horizon_ms * 1_000_000)
++        self._seen: OrderedDict[bytes, int] = OrderedDict()
++        self.raw_packet_count = 0
++        self.duplicate_packet_count = 0
++        self.deduplicated_packet_count = 0
++
++    def is_duplicate(self, frame: bytes, received_ns: int) -> bool:
++        self.raw_packet_count += 1
++        key = hashlib.blake2s(
++            self._prefix + len(frame).to_bytes(8, "big") + frame,
++            digest_size=16,
++        ).digest()
++        previous = self._seen.get(key)
++        duplicate = previous is not None and 0 <= received_ns - previous <= self._horizon_ns
++        self._seen[key] = received_ns
++        self._seen.move_to_end(key)
++        while len(self._seen) > self._max_entries:
++            self._seen.popitem(last=False)
++        if duplicate:
++            self.duplicate_packet_count += 1
++        else:
++            self.deduplicated_packet_count += 1
++        return duplicate
++
++    @property
++    def ratio(self) -> float:
++        return self.duplicate_packet_count / self.raw_packet_count if self.raw_packet_count else 0.0
+diff --git a/app/device_fingerprint_sensor/dhcp.py b/app/device_fingerprint_sensor/dhcp.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5508fd8025b15891d5b958217948393b767227c8
+--- /dev/null
++++ b/app/device_fingerprint_sensor/dhcp.py
+@@ -0,0 +1,155 @@
++"""Exact bounded DHCPv4 parser for BPF-admitted Ethernet frames."""
++
++from __future__ import annotations
++
++import ipaddress
++import struct
++from dataclasses import dataclass
++from typing import Any
++
++_TYPES = {1: "discover", 3: "request", 4: "decline", 7: "release", 8: "inform"}
++_SERVER_TYPES = {2: "offer", 5: "ack", 6: "nak"}
++
++
++@dataclass(frozen=True, slots=True)
++class DhcpPacket:
++    client_mac: str
++    observed_mac: str | None
++    xid: int
++    source_ip: str
++    ciaddr: str
++    yiaddr: str
++    message_type: str
++    option54: str | None
++    requested_ip: str | None
++    lease_seconds: int | None
++    payload: dict[str, Any] | None
++
++    @property
++    def is_client(self) -> bool:
++        return self.message_type in set(_TYPES.values())
++
++
++def parse_dhcp_frame(frame: bytes) -> DhcpPacket | None:
++    network = _ipv4_udp(frame)
++    if network is None:
++        return None
++    source_ip, source_port, destination_port, data = network
++    if {source_port, destination_port}.isdisjoint({67, 68}) or len(data) < 240:
++        return None
++    op, _htype, hlen = data[0], data[1], data[2]
++    if hlen != 6 or op not in {1, 2}:
++        return None
++    xid = struct.unpack_from("!I", data, 4)[0]
++    ciaddr = str(ipaddress.ip_address(data[12:16]))
++    yiaddr = str(ipaddress.ip_address(data[16:20]))
++    mac_bytes = data[28:34]
++    mac = ":".join(f"{part:02x}" for part in mac_bytes)
++    ethernet_source = ":".join(f"{part:02x}" for part in frame[6:12])
++    if data[236:240] != b"\x63\x82\x53\x63":
++        return None
++    options, order = _options(data[240:])
++    if options is None or 53 not in options or len(options[53][0]) != 1:
++        return None
++    number = options[53][0][0]
++    message_type = _TYPES.get(number) or _SERVER_TYPES.get(number)
++    if message_type is None:
++        return None
++    option54 = _ipv4_option(options, 54)
++    lease = _uint_option(options, 51, 4)
++    if message_type in _SERVER_TYPES.values():
++        return DhcpPacket(mac, None, xid, source_ip, ciaddr, yiaddr, message_type, option54, _ipv4_option(options, 50), lease, None)
++    if ethernet_source != mac:
++        return None
++    prl = list(options.get(55, [b""])[0])
++    vendor_raw = options.get(60, [None])[0]
++    vendor = None
++    if vendor_raw is not None:
++        try:
++            vendor = vendor_raw.decode("ascii")
++        except UnicodeDecodeError:
++            return None
++        if not vendor or any(ord(char) < 0x20 or ord(char) > 0x7E for char in vendor):
++            return None
++    client_id = options.get(61, [None])[0]
++    client_kind = "absent"
++    if client_id is not None:
++        client_kind = "mac" if len(client_id) == 7 and client_id[0] == 1 and client_id[1:] == mac_bytes else "opaque"
++    maximum = _uint_option(options, 57, 2)
++    if maximum is not None and not 576 <= maximum <= 65535:
++        return None
++    if len(prl) > 64 or len(order) > 64:
++        return None
++    payload = {
++        "message_type": message_type,
++        "parameter_request_list": prl,
++        "option_order": order,
++        "vendor_class": vendor,
++        "client_identifier_kind": client_kind,
++        "maximum_message_size": maximum,
++        "rapid_commit_requested": 80 in options,
++        "capport_requested": 114 in options,
++        "ipv6_only_preferred_requested": 108 in options,
++        "hostname_present": 12 in options,
++    }
++    return DhcpPacket(mac, ethernet_source, xid, source_ip, ciaddr, yiaddr, message_type, option54, _ipv4_option(options, 50), lease, payload)
++
++
++def _options(raw: bytes) -> tuple[dict[int, list[bytes]] | None, list[int]]:
++    result: dict[int, list[bytes]] = {}
++    order: list[int] = []
++    offset = 0
++    while offset < len(raw):
++        code = raw[offset]
++        offset += 1
++        if code == 255:
++            return result, order
++        if code == 0:
++            continue
++        if offset >= len(raw):
++            return None, []
++        length = raw[offset]
++        offset += 1
++        if offset + length > len(raw):
++            return None, []
++        value = raw[offset:offset + length]
++        offset += length
++        order.append(code)
++        result.setdefault(code, []).append(value)
++    return None, []
++
++
++def _ipv4_udp(frame: bytes) -> tuple[str, int, int, bytes] | None:
++    offset = 14
++    if len(frame) < offset:
++        return None
++    ether_type = struct.unpack_from("!H", frame, 12)[0]
++    while ether_type in {0x8100, 0x88A8}:
++        if len(frame) < offset + 4:
++            return None
++        ether_type = struct.unpack_from("!H", frame, offset + 2)[0]
++        offset += 4
++    if ether_type != 0x0800 or len(frame) < offset + 20:
++        return None
++    ihl = (frame[offset] & 0x0F) * 4
++    if frame[offset] >> 4 != 4 or ihl < 20 or len(frame) < offset + ihl + 8 or frame[offset + 9] != 17:
++        return None
++    total = struct.unpack_from("!H", frame, offset + 2)[0]
++    if total < ihl + 8 or len(frame) < offset + total:
++        return None
++    source = str(ipaddress.ip_address(frame[offset + 12:offset + 16]))
++    udp = offset + ihl
++    source_port, destination_port, length = struct.unpack_from("!HHH", frame, udp)
++    if length < 8 or udp + length > offset + total:
++        return None
++    return source, source_port, destination_port, frame[udp + 8:udp + length]
++
++
++def _ipv4_option(options: dict[int, list[bytes]], code: int) -> str | None:
++    value = options.get(code, [None])[0]
++    return str(ipaddress.ip_address(value)) if value is not None and len(value) == 4 else None
++
++
++def _uint_option(options: dict[int, list[bytes]], code: int, length: int) -> int | None:
++    value = options.get(code, [None])[0]
++    return int.from_bytes(value, "big") if value is not None and len(value) == length else None
+diff --git a/app/device_fingerprint_sensor/eve.py b/app/device_fingerprint_sensor/eve.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b1efcfa5f96c0358212c6b3965fc408feb1ee46e
+--- /dev/null
++++ b/app/device_fingerprint_sensor/eve.py
+@@ -0,0 +1,65 @@
++"""Bounded Unix-datagram receiver for minimized Suricata EVE."""
++
++from __future__ import annotations
++
++import json
++import os
++import socket
++from pathlib import Path
++from typing import Any
++
++
++class EveReceiver:
++    def __init__(self, path: str, *, max_datagram_bytes: int = 262144, socket_factory=socket.socket) -> None:
++        self.path = Path(path)
++        self.max_datagram_bytes = max_datagram_bytes
++        self._socket_factory = socket_factory
++        self.socket: socket.socket | None = None
++        self.truncated = 0
++        self.invalid = 0
++
++    def open(self) -> None:
++        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
++        os.chmod(self.path.parent, 0o750)
++        if os.name == "posix":
++            import grp
++            os.chown(self.path.parent, -1, grp.getgrnam("fingerprint-eve").gr_gid)
++        if self.path.exists() or self.path.is_socket():
++            self.path.unlink()
++        server = self._socket_factory(socket.AF_UNIX, socket.SOCK_DGRAM)
++        try:
++            server.bind(str(self.path))
++            os.chmod(self.path, 0o660)
++            if os.name == "posix":
++                import grp
++                os.chown(self.path, -1, grp.getgrnam("fingerprint-eve").gr_gid)
++        except Exception:
++            server.close()
++            raise
++        self.socket = server
++
++    def receive(self) -> dict[str, Any] | None:
++        if self.socket is None:
++            raise RuntimeError("EVE receiver is closed")
++        data, _ancillary, flags, _address = self.socket.recvmsg(self.max_datagram_bytes + 1, 0)
++        if flags & getattr(socket, "MSG_TRUNC", 0) or len(data) > self.max_datagram_bytes:
++            self.truncated += 1
++            return None
++        try:
++            value = json.loads(data.decode("utf-8", "strict"))
++        except (UnicodeDecodeError, ValueError):
++            self.invalid += 1
++            return None
++        if not isinstance(value, dict):
++            self.invalid += 1
++            return None
++        return value
++
++    def close(self) -> None:
++        if self.socket is not None:
++            self.socket.close()
++            self.socket = None
++        try:
++            self.path.unlink()
++        except FileNotFoundError:
++            pass
+diff --git a/app/device_fingerprint_sensor/health.py b/app/device_fingerprint_sensor/health.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d3b7c60bebdd5577ac39176ae39d6e7a9ae92490
+--- /dev/null
++++ b/app/device_fingerprint_sensor/health.py
+@@ -0,0 +1,55 @@
++"""Source-family health transitions and bounded heartbeats."""
++
++from __future__ import annotations
++
++import uuid
++from datetime import datetime, timezone
++from typing import Callable
++
++from app.device_fingerprint.validation import format_utc
++
++from .models import NormalizedEvent, SensorConfig
++
++SOURCE_KINDS = ("dhcp", "tcp_syn", "tls_client", "quic_client")
++HEARTBEAT_SECONDS = 300.0
++
++
++class SourceHealthTracker:
++    def __init__(self, config: SensorConfig, *, monotonic: Callable[[], float], now=None) -> None:
++        self.config = config
++        self.monotonic = monotonic
++        self.now = now or (lambda: datetime.now(timezone.utc))
++        self._states: dict[str, tuple[str, str | None, float]] = {}
++
++    def transition(self, source_kind: str, status: str, reason: str | None) -> NormalizedEvent | None:
++        if source_kind not in SOURCE_KINDS or status not in {"available", "unavailable", "unsupported"}:
++            raise ValueError("source health transition is invalid")
++        current = self.monotonic()
++        previous = self._states.get(source_kind)
++        if previous and previous[:2] == (status, reason) and current - previous[2] < HEARTBEAT_SECONDS:
++            return None
++        self._states[source_kind] = (status, reason, current)
++        identity = str(uuid.uuid4())
++        observed = format_utc(self.now())
++        return NormalizedEvent("source_health", identity, source_kind, observed, {
++            "source_health_event_id": identity,
++            "site_id": self.config.site_id,
++            "capture_source_id": self.config.capture_source_id,
++            "source_kind": source_kind,
++            "status": status,
++            "reason_code": reason,
++            "observed_at": observed,
++        })
++
++    def all(self, status: str, reason: str | None) -> list[NormalizedEvent]:
++        return [event for kind in SOURCE_KINDS if (event := self.transition(kind, status, reason)) is not None]
++
++    def raw(self, status: str, reason: str | None) -> list[NormalizedEvent]:
++        return [event for kind in SOURCE_KINDS[:2] if (event := self.transition(kind, status, reason)) is not None]
++
++    def suricata(self, status: str, reason: str | None) -> list[NormalizedEvent]:
++        return [event for kind in SOURCE_KINDS[2:] if (event := self.transition(kind, status, reason)) is not None]
++
++    @property
++    def ready(self) -> bool:
++        return all(self._states.get(kind, (None, None, 0))[0] == "available" for kind in SOURCE_KINDS)
+diff --git a/app/device_fingerprint_sensor/models.py b/app/device_fingerprint_sensor/models.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..87f3a384ab211d6b5f4de2434052b77de88e140d
+--- /dev/null
++++ b/app/device_fingerprint_sensor/models.py
+@@ -0,0 +1,63 @@
++"""Sensor-only immutable models."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any
++
++
++class SensorError(RuntimeError):
++    pass
++
++
++class SensorConfigError(SensorError):
++    pass
++
++
++class SensorPreflightError(SensorError):
++    pass
++
++
++class SensorSpoolError(SensorError):
++    pass
++
++
++@dataclass(frozen=True, slots=True)
++class SensorConfig:
++    enabled: bool
++    interface: str
++    producer_id: str
++    capture_source_id: str
++    site_id: str
++    guest_cidrs: tuple[Any, ...]
++    dhcp_server_authority: str
++    dhcp_option54_authority: str
++    evidence_base_url: str
++    ca_cert_path: str
++    credential_path: str | None
++    spool_path: str
++    spool_total_budget_bytes: int
++    spool_main_db_max_bytes: int
++    spool_write_headroom_bytes: int
++    spool_max_events: int
++    delivery_batch_size: int
++    http_timeout_seconds: float
++    raw_dedup_max_entries: int
++    raw_dedup_horizon_ms: float
++    core_ready_host: str
++    core_ready_port: int
++    core_ready_connect_timeout_seconds: float
++    core_ready_poll_interval_seconds: float
++    core_ready_max_wait_seconds: float
++    eve_max_datagram_bytes: int
++    eve_socket_path: str
++    eve_socket_wait_seconds: int
++
++
++@dataclass(frozen=True, slots=True)
++class NormalizedEvent:
++    endpoint: str
++    event_id: str
++    source_kind: str
++    observed_at: str
++    document: dict[str, Any]
+diff --git a/app/device_fingerprint_sensor/normalizer.py b/app/device_fingerprint_sensor/normalizer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc94758d10559a31b033349a73ecc9a998f4fd8c
+--- /dev/null
++++ b/app/device_fingerprint_sensor/normalizer.py
+@@ -0,0 +1,219 @@
++"""Normalize raw and EVE observations into the frozen Task-01 envelope."""
++
++from __future__ import annotations
++
++import ipaddress
++import uuid
++from datetime import datetime, timezone
++from typing import Any, Callable
++
++from app.device_fingerprint.network_schemas import validate_quic_v1, validate_tls_v1
++from app.device_fingerprint.validation import format_utc
++
++from .dhcp import DhcpPacket, parse_dhcp_frame
++from .models import NormalizedEvent, SensorConfig
++from .scope import DhcpScopeResolver
++from .tcp_syn import parse_tcp_syn_frame
++
++UTC = timezone.utc
++_GREASE = frozenset(range(0x0A0A, 0xFAFA + 1, 0x1010))
++
++
++class NetworkNormalizer:
++    def __init__(self, config: SensorConfig, *, monotonic: Callable[[], float]) -> None:
++        self.config = config
++        self.scope = DhcpScopeResolver(
++            config.guest_cidrs, config.dhcp_server_authority,
++            config.dhcp_option54_authority, monotonic=monotonic,
++        )
++        self.counters: dict[str, int] = {}
++
++    def raw(self, frame: bytes, observed_at: str) -> list[NormalizedEvent]:
++        dhcp = parse_dhcp_frame(frame)
++        if dhcp is not None:
++            self._count("dhcp_candidate_count")
++            return self._dhcp(dhcp, observed_at)
++        syn = parse_tcp_syn_frame(frame, self.config.guest_cidrs)
++        if syn is None:
++            return []
++        mac, ip, payload = syn
++        self._count("tcp_syn_event_count")
++        return [self._evidence("tcp_syn", "ipv4", "packet-tcp-syn", "1.0.0", observed_at, mac, ip, "valid", payload)]
++
++    def eve(self, value: Any) -> list[NormalizedEvent]:
++        if not isinstance(value, dict):
++            self._count("eve_json_invalid")
++            return []
++        kind = value.get("event_type")
++        if kind == "tls":
++            self._count("tls_eve_count")
++            event = self._tls(value)
++            if event:
++                self._count("tls_normalized_count")
++            return [event] if event else []
++        if kind == "quic":
++            self._count("quic_eve_count")
++            event = self._quic(value)
++            if event:
++                self._count("quic_normalized_count")
++            return [event] if event else []
++        return []
++
++    def _dhcp(self, packet: DhcpPacket, observed_at: str) -> list[NormalizedEvent]:
++        if not packet.is_client:
++            if packet.message_type not in {"offer", "ack"} or packet.option54 is None:
++                return []
++            released = self.scope.server_reply(
++                packet.client_mac, packet.xid, yiaddr=packet.yiaddr,
++                server_source=packet.source_ip, option54=packet.option54,
++                lease_seconds=packet.lease_seconds, is_ack=packet.message_type == "ack",
++            )
++            result = [self._from_pending(item) for item in released]
++            if result:
++                self._count("dhcp_scoped_count", len(result))
++            return result
++        actual = packet.source_ip if self._guest(packet.source_ip) else packet.ciaddr if self._guest(packet.ciaddr) else None
++        direct = actual is not None
++        if packet.message_type == "decline" and not direct:
++            direct = bool(packet.requested_ip and self.scope.lease_proves(packet.client_mac, packet.requested_ip))
++        if packet.message_type == "release" and not direct:
++            direct = bool(packet.requested_ip and self.scope.lease_proves(packet.client_mac, packet.requested_ip))
++        pending = {
++            "observed_at": observed_at,
++            "mac": packet.observed_mac,
++            "ip": actual,
++            "subtype": packet.message_type,
++            "payload": packet.payload,
++        }
++        released = self.scope.client(packet.client_mac, packet.xid, pending, directly_scoped=direct)
++        result = [self._from_pending(item) for item in released]
++        if result:
++            self._count("dhcp_scoped_count", len(result))
++        return result
++
++    def _from_pending(self, item: dict[str, Any]) -> NormalizedEvent:
++        return self._evidence(
++            "dhcp", item["subtype"], "packet-dhcp", "1.0.0",
++            item["observed_at"], item["mac"], item["ip"], "valid", item["payload"],
++        )
++
++    def _tls(self, event: dict[str, Any]) -> NormalizedEvent | None:
++        common = self._eve_common(event)
++        tls = event.get("tls")
++        if common is None or not isinstance(tls, dict):
++            return None
++        split = _split_ja4(tls.get("ja4"), "t")
++        if split is None:
++            return None
++        alpns = tls.get("client_alpns")
++        if alpns == []:
++            alpns = None
++        handshake = tls.get("client_handshake")
++        extensions = handshake.get("exts") if isinstance(handshake, dict) else None
++        flags = _extension_flags(extensions)
++        a, b, c = split
++        payload = {
++            "ja4": tls["ja4"], "ja4_a": a, "ja4_b": b, "ja4_c": c,
++            "tls_version_family": {"13": "tls1_3", "12": "tls1_2"}.get(a[1:3], "other"),
++            "client_alpns": alpns,
++            "ech_extension_present": flags[0], "grease_extension_present": flags[1],
++        }
++        try:
++            payload = dict(validate_tls_v1(payload))
++        except Exception:
++            return None
++        return self._evidence("tls_client", "client_hello", "suricata-tls-ja4", "8.0.6", *common, "valid" if extensions is not None else "partial", payload)
++
++    def _quic(self, event: dict[str, Any]) -> NormalizedEvent | None:
++        common = self._eve_common(event)
++        quic = event.get("quic")
++        if common is None or not isinstance(quic, dict):
++            return None
++        split = _split_ja4(quic.get("ja4"), "q")
++        raw_version = quic.get("version")
++        if split is None or not isinstance(raw_version, str) or not __import__("re").fullmatch(r"[0-9a-f]{1,8}", raw_version):
++            self._count("quic_version_invalid")
++            return None
++        extensions = quic.get("extensions")
++        types = None
++        if isinstance(extensions, list):
++            types = []
++            for item in extensions:
++                if not isinstance(item, dict) or type(item.get("type")) is not int:
++                    return None
++                types.append(item["type"])
++        flags = _extension_flags(types)
++        a, b, c = split
++        payload = {
++            "ja4": quic["ja4"], "ja4_a": a, "ja4_b": b, "ja4_c": c,
++            "quic_version": "0x" + f"{int(raw_version, 16):08x}",
++            "ech_extension_present": flags[0], "grease_extension_present": flags[1],
++        }
++        try:
++            payload = dict(validate_quic_v1(payload))
++        except Exception:
++            return None
++        return self._evidence("quic_client", "client_hello", "suricata-quic-ja4", "8.0.6", *common, "valid" if types is not None else "partial", payload)
++
++    def _eve_common(self, event: dict[str, Any]) -> tuple[str, str, str] | None:
++        try:
++            timestamp = _eve_timestamp(event.get("timestamp"))
++            ip = str(ipaddress.ip_address(event.get("src_ip")))
++            ether = event.get("ether")
++            mac = ether.get("src_mac") if isinstance(ether, dict) else None
++            if not isinstance(mac, str) or not self._guest(ip):
++                return None
++            normalized = __import__("app.common.mac", fromlist=["format_mac_colon"]).format_mac_colon(
++                __import__("app.common.mac", fromlist=["parse_mac"]).parse_mac(mac)
++            )
++            return timestamp, normalized, ip
++        except (TypeError, ValueError):
++            self._count("missing_l2_identity")
++            return None
++
++    def _evidence(self, kind: str, subtype: str, extractor: str, version: str,
++                  observed_at: str, mac: str, ip: str | None, quality: str,
++                  payload: dict[str, Any]) -> NormalizedEvent:
++        identity = str(uuid.uuid4())
++        return NormalizedEvent("evidence", identity, kind, observed_at, {
++            "source_event_id": identity, "source_kind": kind, "source_subtype": subtype,
++            "extractor_name": extractor, "extractor_version": version,
++            "feature_schema_version": 1, "rule_version": None,
++            "site_id": self.config.site_id, "capture_source_id": self.config.capture_source_id,
++            "observed_at": observed_at, "observed_mac": mac, "observed_ip": ip,
++            "quality_state": quality, "payload": payload,
++        })
++
++    def _guest(self, value: str) -> bool:
++        try:
++            address = ipaddress.ip_address(value)
++        except ValueError:
++            return False
++        return any(address in network for network in self.config.guest_cidrs)
++
++    def _count(self, name: str, amount: int = 1) -> None:
++        self.counters[name] = self.counters.get(name, 0) + amount
++
++
++def _split_ja4(value: Any, family: str) -> tuple[str, str, str] | None:
++    if not isinstance(value, str):
++        return None
++    parts = value.split("_")
++    if len(parts) != 3 or not parts[0].startswith(family):
++        return None
++    return parts[0], parts[1], parts[2]
++
++
++def _extension_flags(values: Any) -> tuple[bool | None, bool | None]:
++    if not isinstance(values, list) or any(type(item) is not int for item in values):
++        return None, None
++    return 65037 in values, any(item in _GREASE for item in values)
++
++
++def _eve_timestamp(value: Any) -> str:
++    if not isinstance(value, str):
++        raise ValueError
++    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
++    if parsed.tzinfo is None:
++        raise ValueError
++    return format_utc(parsed.astimezone(UTC))
+diff --git a/app/device_fingerprint_sensor/producer.py b/app/device_fingerprint_sensor/producer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c9df6c01ac0d93aa4fc4fad79ada756c7972404
+--- /dev/null
++++ b/app/device_fingerprint_sensor/producer.py
+@@ -0,0 +1,94 @@
++"""At-least-once HTTPS producer for the normalized spool."""
++
++from __future__ import annotations
++
++import random
++import re
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++import requests
++
++from .models import SensorConfig, SensorError
++from .spool import SensorSpool
++
++_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,256}")
++_TRANSIENT = frozenset({429, 500, 503})
++_PERMANENT = frozenset({400, 401, 403, 404, 405, 409, 413})
++
++
++@dataclass(frozen=True, slots=True)
++class DeliveryResult:
++    status: str
++    delivered: int
++    delay_seconds: float
++    http_status: int | None
++
++
++class EvidenceProducer:
++    def __init__(self, config: SensorConfig, spool: SensorSpool, *, session: Any = requests,
++                 random_value=None) -> None:
++        self.config = config
++        self.spool = spool
++        self.session = session
++        self.random_value = random_value or random.random
++        self.attempt = 0
++        self.permanent_fault = False
++
++    def read_credential(self) -> str:
++        if not self.config.credential_path:
++            raise SensorError("producer credential is unavailable")
++        try:
++            token = Path(self.config.credential_path).read_text(encoding="ascii").strip()
++        except OSError as exc:
++            raise SensorError("producer credential is unavailable") from exc
++        if _TOKEN.fullmatch(token) is None:
++            raise SensorError("producer credential is invalid")
++        return token
++
++    def deliver_once(self) -> DeliveryResult:
++        if self.permanent_fault:
++            return DeliveryResult("permanent", 0, 0, None)
++        batch = self.spool.batch(self.config.delivery_batch_size)
++        if batch is None:
++            self.attempt = 0
++            return DeliveryResult("empty", 0, 0, None)
++        endpoint, rows = batch
++        url_path = "evidence/batch" if endpoint == "evidence" else "source-health/batch"
++        token = self.read_credential()
++        try:
++            response = self.session.post(
++                f"{self.config.evidence_base_url}/{url_path}",
++                json={"producer_id": self.config.producer_id, "events": [row[1] for row in rows]},
++                headers={"Authorization": f"Bearer {token}"},
++                timeout=self.config.http_timeout_seconds,
++                verify=self.config.ca_cert_path,
++            )
++        except requests.RequestException:
++            return self._retry(None, None)
++        status = int(response.status_code)
++        if status == 200:
++            self.spool.acknowledge(row[0] for row in rows)
++            self.attempt = 0
++            return DeliveryResult("delivered", len(rows), 0, 200)
++        if status in _PERMANENT:
++            self.permanent_fault = True
++            return DeliveryResult("permanent", 0, 0, status)
++        if status in _TRANSIENT:
++            return self._retry(status, response.headers.get("Retry-After"))
++        self.permanent_fault = True
++        return DeliveryResult("permanent", 0, 0, status)
++
++    def _retry(self, status: int | None, retry_after: str | None) -> DeliveryResult:
++        if status == 429 and retry_after is not None:
++            try:
++                value = int(retry_after)
++            except ValueError:
++                value = 0
++            if 1 <= value <= 60:
++                return DeliveryResult("retry", 0, float(value), status)
++        base = min(30, 2 ** min(self.attempt, 5))
++        self.attempt += 1
++        jitter = (self.random_value() * 0.2) - 0.1
++        return DeliveryResult("retry", 0, base * (1 + jitter), status)
+diff --git a/app/device_fingerprint_sensor/runtime.py b/app/device_fingerprint_sensor/runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a0a9489b012f94dc6cbf1c5133da2a275830303
+--- /dev/null
++++ b/app/device_fingerprint_sensor/runtime.py
+@@ -0,0 +1,223 @@
++"""Independent fail-open sensor lifecycle and workers."""
++
++from __future__ import annotations
++
++import subprocess
++import threading
++import time
++from typing import Any
++
++from .capture import InterfacePreflight, RawCapture
++from .dedup import ExactFrameDeduplicator
++from .eve import EveReceiver
++from .health import SourceHealthTracker
++from .models import SensorConfig
++from .normalizer import NetworkNormalizer
++from .producer import EvidenceProducer
++from .spool import SensorSpool
++from .telemetry import SensorTelemetry, resource_snapshot
++
++
++class SensorRuntime:
++    def __init__(self, config: SensorConfig, *, telemetry: SensorTelemetry,
++                 monotonic=time.monotonic, now=None, preflight=None, capture=None,
++                 eve=None, spool=None, producer=None) -> None:
++        self.config = config
++        self.telemetry = telemetry
++        self.monotonic = monotonic
++        self.stop_event = threading.Event()
++        self.state = "initializing"
++        self.reason: str | None = None
++        self.preflight = preflight or InterfacePreflight(config.interface)
++        self.capture = capture or RawCapture(config.interface)
++        self.eve = eve or EveReceiver(config.eve_socket_path, max_datagram_bytes=config.eve_max_datagram_bytes)
++        self.spool = spool or SensorSpool(
++            config.spool_path, total_budget_bytes=config.spool_total_budget_bytes,
++            main_db_max_bytes=config.spool_main_db_max_bytes,
++            max_events=config.spool_max_events,
++            write_headroom_bytes=config.spool_write_headroom_bytes, now=now,
++        )
++        self.producer = producer or EvidenceProducer(config, self.spool)
++        self.normalizer = NetworkNormalizer(config, monotonic=monotonic)
++        self.health = SourceHealthTracker(config, monotonic=monotonic, now=now)
++        self.dedup = ExactFrameDeduplicator(
++            config.capture_source_id, max_entries=config.raw_dedup_max_entries,
++            horizon_ms=config.raw_dedup_horizon_ms,
++        )
++        self.threads: list[threading.Thread] = []
++        self._suricata_ready = False
++        self._local_health = {
++            "dhcp": ("unavailable", "raw_parser_unavailable"),
++            "tcp_syn": ("unavailable", "raw_parser_unavailable"),
++            "tls_client": ("unavailable", "suricata_unavailable"),
++            "quic_client": ("unavailable", "suricata_unavailable"),
++        }
++        self._delivery_available = True
++
++    def initialize_transport(self) -> None:
++        self.spool.initialize()
++
++    def preflight_or_report(self) -> bool:
++        try:
++            self.preflight.validate()
++        except Exception:
++            self.state, self.reason = "unavailable", "capture_interface_unavailable"
++            self.spool.enqueue(self.health.all("unavailable", "capture_interface_unavailable"))
++            self.telemetry.emit("fingerprint_sensor_unavailable", runtime_state=self.state, reason=self.reason)
++            return False
++        return True
++
++    def start(self) -> None:
++        self.eve.open()
++        self.capture.open()
++        self._set_local(("dhcp", "tcp_syn"), "available", None)
++        self._set_local(("tls_client", "quic_client"), "unavailable", "suricata_unavailable")
++        self.state, self.reason = "degraded", "suricata_unavailable"
++        self.threads = [
++            threading.Thread(target=self._raw_loop, name="fingerprint-raw", daemon=False),
++            threading.Thread(target=self._eve_loop, name="fingerprint-eve", daemon=False),
++            threading.Thread(target=self._delivery_loop, name="fingerprint-delivery", daemon=False),
++            threading.Thread(target=self._telemetry_loop, name="fingerprint-telemetry", daemon=False),
++        ]
++        for thread in self.threads:
++            thread.start()
++        self.telemetry.emit("fingerprint_sensor_started", runtime_state=self.state, reason=self.reason)
++
++    def _raw_loop(self) -> None:
++        try:
++            while not self.stop_event.is_set():
++                frame, received_ns, observed_at = self.capture.receive()
++                if self.dedup.is_duplicate(frame, received_ns):
++                    continue
++                self.spool.enqueue(self.normalizer.raw(frame, observed_at))
++        except Exception:
++            if not self.stop_event.is_set():
++                self.state, self.reason = "degraded", "raw_parser_unavailable"
++                self._set_local(("dhcp", "tcp_syn"), "unavailable", "raw_parser_unavailable")
++
++    def _eve_loop(self) -> None:
++        last_truncated = 0
++        try:
++            while not self.stop_event.is_set():
++                value = self.eve.receive()
++                if self.eve.truncated != last_truncated:
++                    last_truncated = self.eve.truncated
++                    self.state, self.reason = "degraded", "eve_datagram_truncated"
++                    self._set_local(("tls_client", "quic_client"), "unavailable", "eve_datagram_truncated")
++                    continue
++                if value is None:
++                    continue
++                if value.get("event_type") == "stats" and self._valid_stats(value):
++                    self._suricata_ready = True
++                    self._emit_stats(value)
++                    continue
++                events = self.normalizer.eve(value)
++                self.spool.enqueue(events)
++                for event in events:
++                    if self._suricata_ready and event.source_kind in {"tls_client", "quic_client"}:
++                        self._set_local((event.source_kind,), "available", None)
++        except Exception:
++            if not self.stop_event.is_set():
++                self.state, self.reason = "degraded", "suricata_unavailable"
++                self._set_local(("tls_client", "quic_client"), "unavailable", "suricata_unavailable")
++
++    def _delivery_loop(self) -> None:
++        while not self.stop_event.is_set():
++            try:
++                result = self.producer.deliver_once()
++            except Exception:
++                result = None
++            if result is None or result.status == "retry":
++                self._delivery_available = False
++                self.spool.enqueue(self.health.all("unavailable", "ingest_delivery_unavailable"))
++                delay = result.delay_seconds if result is not None else 1.0
++                self.telemetry.emit("fingerprint_delivery_retry", delivery_retry=1)
++            elif result.status == "permanent":
++                self.state, self.reason = "degraded", "delivery_permanent_reject"
++                self.telemetry.emit("fingerprint_delivery_rejected", delivery_permanent_reject=1)
++                return
++            else:
++                if result.status == "delivered":
++                    if not self._delivery_available:
++                        self._delivery_available = True
++                        self._publish_local_health()
++                    self.telemetry.emit("fingerprint_delivery_completed", delivery_success=result.delivered)
++                delay = 1.0
++            self.stop_event.wait(delay)
++
++    def _telemetry_loop(self) -> None:
++        while not self.stop_event.wait(60.0):
++            if self._delivery_available:
++                self._publish_local_health()
++            self._refresh_state()
++            metrics = self.spool.metrics()
++            self.telemetry.emit(
++                "fingerprint_sensor_metrics", runtime_state=self.state,
++                raw_packet_count=self.dedup.raw_packet_count,
++                duplicate_packet_count=self.dedup.duplicate_packet_count,
++                deduplicated_packet_count=self.dedup.deduplicated_packet_count,
++                raw_dedup_ratio=self.dedup.ratio,
++                spool_rows=metrics["rows"], spool_bytes=metrics["spool_bytes"],
++                oldest_spool_age=metrics["oldest_spool_age"],
++                stale_spool_event_dropped=self.spool.stale_dropped,
++                **self.normalizer.counters, **resource_snapshot(),
++            )
++
++    def _set_local(self, kinds: tuple[str, ...], status: str, reason: str | None) -> None:
++        events = []
++        for kind in kinds:
++            self._local_health[kind] = (status, reason)
++            if self._delivery_available:
++                event = self.health.transition(kind, status, reason)
++                if event is not None:
++                    events.append(event)
++        self.spool.enqueue(events)
++        self._refresh_state()
++
++    def _publish_local_health(self) -> None:
++        events = []
++        for kind, (status, reason) in self._local_health.items():
++            event = self.health.transition(kind, status, reason)
++            if event is not None:
++                events.append(event)
++        self.spool.enqueue(events)
++        self._refresh_state()
++
++    def _emit_stats(self, value: dict[str, Any]) -> None:
++        capture = value["stats"]["capture"]
++        self.telemetry.emit(
++            "fingerprint_suricata_stats",
++            suricata_version="8.0.6",
++            capture_kernel_packets=capture.get("kernel_packets"),
++            capture_kernel_drops=capture.get("kernel_drops"),
++            capture_kernel_ifdrops=capture.get("kernel_ifdrops"),
++        )
++
++    @staticmethod
++    def _valid_stats(value: dict[str, Any]) -> bool:
++        stats = value.get("stats")
++        if not isinstance(stats, dict):
++            return False
++        capture = stats.get("capture")
++        return isinstance(capture, dict) and all(type(capture.get(key)) in {int, float} for key in ("kernel_packets", "kernel_drops"))
++
++    def _refresh_state(self) -> None:
++        if all(status == "available" for status, _reason in self._local_health.values()) and self._delivery_available and not self.spool.capacity_blocked:
++            self.state, self.reason = "ready", None
++        elif self.state != "unavailable":
++            self.state = "degraded"
++            if self.spool.capacity_blocked:
++                self.reason = "spool_capacity"
++
++    def shutdown(self) -> bool:
++        self.state, self.reason = "stopping", "stopping"
++        self.stop_event.set()
++        self.capture.close()
++        self.eve.close()
++        deadline = self.monotonic() + 20.0
++        for thread in self.threads:
++            thread.join(max(0.0, deadline - self.monotonic()))
++        clean = all(not thread.is_alive() for thread in self.threads)
++        self.spool.close()
++        self.telemetry.emit("fingerprint_sensor_stopped", runtime_state="stopping")
++        return clean
+diff --git a/app/device_fingerprint_sensor/scope.py b/app/device_fingerprint_sensor/scope.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8a879bf28b16ce64c1f1ca4ed63884891f10e13
+--- /dev/null
++++ b/app/device_fingerprint_sensor/scope.py
+@@ -0,0 +1,132 @@
++"""Bounded DHCP guest-scope correlation and lease authority."""
++
++from __future__ import annotations
++
++import ipaddress
++from collections import OrderedDict
++from dataclasses import dataclass, field
++from typing import Any, Callable
++
++DHCP_TRANSACTION_TTL_SECONDS = 120.0
++DHCP_TRANSACTION_MAX_ENTRIES = 4096
++DHCP_TRANSACTION_MAX_PENDING_CLIENT_EVENTS = 8
++DHCP_LEASE_CACHE_MAX_ENTRIES = 4096
++
++
++@dataclass(slots=True)
++class _Transaction:
++    first_seen: float
++    sequence: int
++    pending: list[dict[str, Any]] = field(default_factory=list)
++    confirmed: tuple[str, str, str] | None = None
++
++
++@dataclass(slots=True)
++class _Lease:
++    expires: float
++    sequence: int
++
++
++class DhcpScopeResolver:
++    def __init__(self, guest_cidrs: tuple[Any, ...], server: str, option54: str, *, monotonic: Callable[[], float]) -> None:
++        self._guest = guest_cidrs
++        self._server = server
++        self._option54 = option54
++        self._clock = monotonic
++        self._transactions: OrderedDict[tuple[str, int], _Transaction] = OrderedDict()
++        self._leases: dict[tuple[str, str, str], _Lease] = {}
++        self._sequence = 0
++
++    def client(self, mac: str, xid: int, event: dict[str, Any], *, directly_scoped: bool) -> list[dict[str, Any]]:
++        now = self._clock()
++        self._purge(now)
++        if directly_scoped:
++            return [event]
++        key = (mac, xid)
++        tx = self._transactions.get(key)
++        if tx is None:
++            tx = self._new_transaction(key, now)
++        if tx.confirmed is not None:
++            return [event]
++        if len(tx.pending) >= DHCP_TRANSACTION_MAX_PENDING_CLIENT_EVENTS:
++            del self._transactions[key]
++            return []
++        tx.pending.append(dict(event))
++        return []
++
++    def server_reply(self, mac: str, xid: int, *, yiaddr: str, server_source: str,
++                     option54: str, lease_seconds: int | None = None,
++                     is_ack: bool = False) -> list[dict[str, Any]]:
++        now = self._clock()
++        self._purge(now)
++        key = (mac, xid)
++        tx = self._transactions.get(key)
++        if tx is None:
++            tx = self._new_transaction(key, now)
++        fact = (yiaddr, server_source, option54)
++        valid = (
++            self._inside(yiaddr)
++            and server_source == self._server
++            and option54 == self._option54
++        )
++        if not valid:
++            if tx.confirmed is not None:
++                del self._transactions[key]
++            return []
++        if tx.confirmed is not None and tx.confirmed != fact:
++            del self._transactions[key]
++            return []
++        released = list(tx.pending) if tx.confirmed is None else []
++        tx.pending.clear()
++        tx.confirmed = fact
++        if is_ack:
++            self._record_lease(mac, yiaddr, server_source, lease_seconds, now)
++        return released
++
++    def lease_proves(self, mac: str, ip: str) -> bool:
++        now = self._clock()
++        self._purge(now)
++        return (mac, ip, self._server) in self._leases
++
++    def _new_transaction(self, key: tuple[str, int], now: float) -> _Transaction:
++        if len(self._transactions) >= DHCP_TRANSACTION_MAX_ENTRIES:
++            self._transactions.popitem(last=False)
++        self._sequence += 1
++        tx = _Transaction(now, self._sequence)
++        self._transactions[key] = tx
++        return tx
++
++    def _record_lease(self, mac: str, ip: str, server: str, lease_seconds: int | None, now: float) -> None:
++        for key in tuple(self._leases):
++            if key[0] == mac and key[2] == server and key[1] != ip:
++                del self._leases[key]
++        seconds = 3600 if lease_seconds is None else min(max(0, lease_seconds), 86400)
++        key = (mac, ip, server)
++        self._sequence += 1
++        self._leases[key] = _Lease(now + seconds, self._sequence)
++        if len(self._leases) > DHCP_LEASE_CACHE_MAX_ENTRIES:
++            victim = min(self._leases, key=lambda item: (self._leases[item].expires, self._leases[item].sequence))
++            del self._leases[victim]
++
++    def _purge(self, now: float) -> None:
++        for key, tx in tuple(self._transactions.items()):
++            if now - tx.first_seen >= DHCP_TRANSACTION_TTL_SECONDS:
++                del self._transactions[key]
++        for key, lease in tuple(self._leases.items()):
++            if now >= lease.expires:
++                del self._leases[key]
++
++    def _inside(self, value: str) -> bool:
++        try:
++            address = ipaddress.ip_address(value)
++        except ValueError:
++            return False
++        return any(address in network for network in self._guest)
++
++    @property
++    def transaction_count(self) -> int:
++        return len(self._transactions)
++
++    @property
++    def lease_count(self) -> int:
++        return len(self._leases)
+diff --git a/app/device_fingerprint_sensor/spool.py b/app/device_fingerprint_sensor/spool.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..602f3acfe4ff30e1eefb3dba1a9a0841c98a772e
+--- /dev/null
++++ b/app/device_fingerprint_sensor/spool.py
+@@ -0,0 +1,207 @@
++"""Bounded DELETE-journal SQLite transport spool."""
++
++from __future__ import annotations
++
++import json
++import os
++import sqlite3
++import threading
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++from typing import Iterable
++
++from app.device_fingerprint.validation import format_utc
++
++from .models import NormalizedEvent, SensorSpoolError
++
++UTC = timezone.utc
++SCHEMA_VERSION = 1
++MAX_TRANSACTION_ROWS = 100
++
++
++class SensorSpool:
++    def __init__(self, path: str, *, total_budget_bytes: int, main_db_max_bytes: int,
++                 max_events: int, write_headroom_bytes: int = 0, now=None) -> None:
++        self.path = Path(path)
++        self.total_budget_bytes = total_budget_bytes
++        self.main_db_max_bytes = main_db_max_bytes
++        self.max_events = max_events
++        self.write_headroom_bytes = write_headroom_bytes
++        self.now = now or (lambda: datetime.now(UTC))
++        self.connection: sqlite3.Connection | None = None
++        self.capacity_blocked = False
++        self.stale_dropped = 0
++        self.evicted = 0
++        self._lock = threading.RLock()
++
++    def initialize(self) -> None:
++        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
++        connection = sqlite3.connect(str(self.path), timeout=0.5, isolation_level=None, check_same_thread=False)
++        try:
++            connection.execute("PRAGMA journal_mode=DELETE")
++            connection.execute("PRAGMA synchronous=FULL")
++            connection.execute("PRAGMA busy_timeout=500")
++            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
++            connection.execute(f"PRAGMA max_page_count={max(1, self.main_db_max_bytes // page_size)}")
++            connection.executescript("""
++                BEGIN IMMEDIATE;
++                CREATE TABLE IF NOT EXISTS sensor_spool (
++                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
++                    endpoint TEXT NOT NULL CHECK(endpoint IN ('evidence','source_health')),
++                    event_id TEXT NOT NULL UNIQUE,
++                    source_kind TEXT NOT NULL,
++                    observed_at TEXT NOT NULL,
++                    payload_json TEXT NOT NULL,
++                    created_at TEXT NOT NULL
++                );
++                CREATE INDEX IF NOT EXISTS idx_sensor_spool_endpoint_sequence
++                    ON sensor_spool(endpoint, sequence);
++                CREATE INDEX IF NOT EXISTS idx_sensor_spool_observed
++                    ON sensor_spool(observed_at, sequence);
++                PRAGMA user_version=1;
++                COMMIT;
++            """)
++            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
++            quick = connection.execute("PRAGMA quick_check").fetchone()[0]
++            if version != SCHEMA_VERSION or quick != "ok":
++                raise SensorSpoolError("spool schema is unavailable")
++            os.chmod(self.path, 0o640)
++        except Exception:
++            connection.close()
++            raise
++        self.connection = connection
++
++    def enqueue(self, events: Iterable[NormalizedEvent]) -> int:
++        with self._lock:
++            return self._enqueue(events)
++
++    def _enqueue(self, events: Iterable[NormalizedEvent]) -> int:
++        values = list(events)
++        if not values:
++            return 0
++        if len(values) > MAX_TRANSACTION_ROWS:
++            raise SensorSpoolError("spool transaction is too large")
++        self.purge_stale()
++        threshold = format_utc(self.now() - timedelta(seconds=86400))
++        fresh = [event for event in values if event.observed_at >= threshold]
++        self.stale_dropped += len(values) - len(fresh)
++        values = fresh
++        if not values:
++            return 0
++        self._make_room(len(values))
++        if self.capacity_blocked:
++            return 0
++        now = format_utc(self.now())
++        rows = [(
++            event.endpoint, event.event_id, event.source_kind, event.observed_at,
++            json.dumps(event.document, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")), now,
++        ) for event in values]
++        connection = self._connection()
++        before = int(connection.execute("SELECT COUNT(*) FROM sensor_spool").fetchone()[0])
++        try:
++            with connection:
++                connection.executemany(
++                    "INSERT OR IGNORE INTO sensor_spool(endpoint,event_id,source_kind,observed_at,payload_json,created_at) VALUES(?,?,?,?,?,?)",
++                    rows,
++                )
++        except sqlite3.Error as exc:
++            raise SensorSpoolError("spool enqueue failed") from exc
++        if self.physical_bytes() > self.total_budget_bytes:
++            self.capacity_blocked = True
++        after = int(connection.execute("SELECT COUNT(*) FROM sensor_spool").fetchone()[0])
++        return after - before
++
++    def batch(self, limit: int) -> tuple[str, list[tuple[int, dict[str, object]]]] | None:
++        with self._lock:
++            self.purge_stale()
++            return self._batch(limit)
++
++    def _batch(self, limit: int) -> tuple[str, list[tuple[int, dict[str, object]]]] | None:
++        connection = self._connection()
++        first = connection.execute("SELECT endpoint FROM sensor_spool ORDER BY sequence LIMIT 1").fetchone()
++        if first is None:
++            return None
++        endpoint = str(first[0])
++        rows = connection.execute(
++            "SELECT sequence,payload_json FROM sensor_spool WHERE endpoint=? ORDER BY sequence LIMIT ?",
++            (endpoint, min(limit, MAX_TRANSACTION_ROWS)),
++        ).fetchall()
++        return endpoint, [(int(row[0]), json.loads(row[1])) for row in rows]
++
++    def acknowledge(self, sequences: Iterable[int]) -> int:
++        with self._lock:
++            return self._acknowledge(sequences)
++
++    def _acknowledge(self, sequences: Iterable[int]) -> int:
++        values = list(sequences)
++        if not values or len(values) > MAX_TRANSACTION_ROWS:
++            return 0
++        connection = self._connection()
++        marks = ",".join("?" for _ in values)
++        with connection:
++            cursor = connection.execute(f"DELETE FROM sensor_spool WHERE sequence IN ({marks})", values)
++        if self.capacity_blocked and self.physical_bytes() <= self.total_budget_bytes:
++            self.capacity_blocked = False
++        return int(cursor.rowcount)
++
++    def purge_stale(self) -> int:
++        with self._lock:
++            return self._purge_stale()
++
++    def _purge_stale(self) -> int:
++        threshold = format_utc(self.now() - timedelta(seconds=86400))
++        connection = self._connection()
++        with connection:
++            cursor = connection.execute(
++                "DELETE FROM sensor_spool WHERE sequence IN (SELECT sequence FROM sensor_spool WHERE observed_at < ? ORDER BY observed_at,sequence LIMIT 100)",
++                (threshold,),
++            )
++        self.stale_dropped += int(cursor.rowcount)
++        return int(cursor.rowcount)
++
++    def _make_room(self, incoming: int) -> None:
++        connection = self._connection()
++        count = int(connection.execute("SELECT COUNT(*) FROM sensor_spool").fetchone()[0])
++        needed = max(0, count + incoming - self.max_events)
++        if needed:
++            amount = min(needed, MAX_TRANSACTION_ROWS)
++            with connection:
++                cursor = connection.execute(
++                    "DELETE FROM sensor_spool WHERE sequence IN (SELECT sequence FROM sensor_spool WHERE endpoint='evidence' ORDER BY sequence LIMIT ?)",
++                    (amount,),
++                )
++            self.evicted += int(cursor.rowcount)
++            if cursor.rowcount < needed:
++                self.capacity_blocked = True
++        if self.physical_bytes() + self.write_headroom_bytes > self.total_budget_bytes:
++            with connection:
++                cursor = connection.execute(
++                    "DELETE FROM sensor_spool WHERE sequence IN (SELECT sequence FROM sensor_spool WHERE endpoint='evidence' ORDER BY sequence LIMIT 100)"
++                )
++            self.evicted += int(cursor.rowcount)
++            if self.physical_bytes() + self.write_headroom_bytes > self.total_budget_bytes:
++                self.capacity_blocked = True
++
++    def physical_bytes(self) -> int:
++        return sum(path.stat().st_size for path in (self.path, Path(str(self.path) + "-journal")) if path.exists())
++
++    def metrics(self) -> dict[str, int | bool]:
++        with self._lock:
++            connection = self._connection()
++            row = connection.execute("SELECT COUNT(*),MIN(observed_at) FROM sensor_spool").fetchone()
++            oldest_age = 0
++            if row[1]:
++                parsed = datetime.strptime(row[1], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
++                oldest_age = max(0, int((self.now() - parsed).total_seconds()))
++            return {"rows": int(row[0]), "spool_bytes": self.physical_bytes(), "oldest_spool_age": oldest_age, "capacity_blocked": self.capacity_blocked}
++
++    def close(self) -> None:
++        with self._lock:
++            if self.connection is not None:
++                self.connection.close()
++                self.connection = None
++
++    def _connection(self) -> sqlite3.Connection:
++        if self.connection is None:
++            raise SensorSpoolError("spool is closed")
++        return self.connection
+diff --git a/app/device_fingerprint_sensor/tcp_syn.py b/app/device_fingerprint_sensor/tcp_syn.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec06c256bde65a291e5444f97857bea3ae1421b1
+--- /dev/null
++++ b/app/device_fingerprint_sensor/tcp_syn.py
+@@ -0,0 +1,86 @@
++"""IPv4 outbound SYN fingerprint parser."""
++
++from __future__ import annotations
++
++import ipaddress
++import struct
++from typing import Any
++
++
++def parse_tcp_syn_frame(frame: bytes, guest_cidrs: tuple[Any, ...]) -> tuple[str, str, dict[str, Any]] | None:
++    if len(frame) < 34:
++        return None
++    source_mac = ":".join(f"{part:02x}" for part in frame[6:12])
++    offset = 14
++    ether_type = struct.unpack_from("!H", frame, 12)[0]
++    while ether_type in {0x8100, 0x88A8}:
++        if len(frame) < offset + 4:
++            return None
++        ether_type = struct.unpack_from("!H", frame, offset + 2)[0]
++        offset += 4
++    if ether_type != 0x0800 or len(frame) < offset + 20 or frame[offset] >> 4 != 4:
++        return None
++    ihl = (frame[offset] & 0x0F) * 4
++    total = struct.unpack_from("!H", frame, offset + 2)[0]
++    fragment = struct.unpack_from("!H", frame, offset + 6)[0]
++    if ihl < 20 or total < ihl + 20 or len(frame) < offset + total or frame[offset + 9] != 6 or fragment & 0x3FFF:
++        return None
++    source = ipaddress.ip_address(frame[offset + 12:offset + 16])
++    if not any(source in network for network in guest_cidrs):
++        return None
++    tcp = offset + ihl
++    data_offset = (frame[tcp + 12] >> 4) * 4
++    flags = frame[tcp + 13]
++    if data_offset < 20 or tcp + data_offset > offset + total or flags & 0x12 != 0x02:
++        return None
++    options = frame[tcp + 20:tcp + data_offset]
++    parsed = _options(options)
++    if parsed is None:
++        return None
++    order, mss, scale, sack, timestamps = parsed
++    return source_mac, str(source), {
++        "ip_version": 4,
++        "observed_ttl": frame[offset + 8],
++        "tcp_window": struct.unpack_from("!H", frame, tcp + 14)[0],
++        "mss": mss,
++        "window_scale": scale,
++        "sack_permitted": sack,
++        "timestamps_present": timestamps,
++        "tcp_option_order": order,
++    }
++
++
++def _options(raw: bytes) -> tuple[list[int], int | None, int | None, bool, bool] | None:
++    order: list[int] = []
++    mss = scale = None
++    sack = timestamps = False
++    offset = 0
++    while offset < len(raw):
++        kind = raw[offset]
++        offset += 1
++        order.append(kind)
++        if len(order) > 32:
++            return None
++        if kind == 0:
++            if any(byte != 0 for byte in raw[offset:]):
++                return None
++            break
++        if kind == 1:
++            continue
++        if offset >= len(raw):
++            return None
++        length = raw[offset]
++        offset += 1
++        if length < 2 or offset + length - 2 > len(raw):
++            return None
++        value = raw[offset:offset + length - 2]
++        offset += length - 2
++        if kind == 2 and length == 4:
++            mss = int.from_bytes(value, "big")
++        elif kind == 3 and length == 3 and value[0] <= 14:
++            scale = value[0]
++        elif kind == 4 and length == 2:
++            sack = True
++        elif kind == 8 and length == 10:
++            timestamps = True
++    return order, mss, scale, sack, timestamps
+diff --git a/app/device_fingerprint_sensor/telemetry.py b/app/device_fingerprint_sensor/telemetry.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a02390dc1b39ff85ffcaf93246dbd88f65a3cd20
+--- /dev/null
++++ b/app/device_fingerprint_sensor/telemetry.py
+@@ -0,0 +1,75 @@
++"""Sanitized sensor operational telemetry."""
++
++from __future__ import annotations
++
++import json
++import logging
++import math
++from pathlib import Path
++from typing import Any, Mapping
++
++SAFE_FIELDS = frozenset({
++    "runtime_state", "reason", "source_kind", "status", "error_category",
++    "raw_packet_count", "duplicate_packet_count", "deduplicated_packet_count",
++    "raw_dedup_ratio", "dhcp_candidate_count", "dhcp_scoped_count",
++    "tcp_syn_event_count", "tls_eve_count", "tls_normalized_count",
++    "quic_eve_count", "quic_normalized_count", "eve_datagram_truncated",
++    "eve_json_invalid", "missing_l2_identity", "spool_rows", "spool_bytes",
++    "oldest_spool_age", "delivery_success", "delivery_retry",
++    "delivery_permanent_reject", "stale_spool_event_dropped", "artifact_sha",
++    "artifact_tree", "service_name", "process_started_at", "suricata_version",
++    "capture_kernel_packets", "capture_kernel_drops", "capture_kernel_ifdrops",
++    "sensor_cpu_usec", "sensor_memory_current", "suricata_cpu_usec",
++    "suricata_memory_current", "suricata_process_active",
++})
++
++
++class SensorTelemetry:
++    def __init__(self, logger: logging.Logger, *, runtime_fields: Mapping[str, Any] | None = None) -> None:
++        self.logger = logger
++        self.runtime_fields = {key: value for key, value in dict(runtime_fields or {}).items() if key in SAFE_FIELDS}
++
++    def emit(self, event: str, **fields: Any) -> None:
++        try:
++            payload = {"event": str(event)[:128]}
++            for key, value in {**fields, **self.runtime_fields}.items():
++                if key in SAFE_FIELDS and _safe(value):
++                    payload[key] = value
++            self.logger.info(json.dumps(payload, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")))
++        except Exception:
++            return
++
++
++def configure_sensor_logger() -> logging.Logger:
++    logger = logging.getLogger("captivportal.device_fingerprint_sensor")
++    logger.setLevel(logging.INFO)
++    logger.propagate = False
++    if not logger.handlers:
++        handler = logging.StreamHandler()
++        handler.setFormatter(logging.Formatter("%(message)s"))
++        logger.addHandler(handler)
++    return logger
++
++
++def _safe(value: Any) -> bool:
++    return value is None or type(value) in {bool, int} or (isinstance(value, float) and math.isfinite(value)) or (isinstance(value, str) and len(value) <= 256)
++
++
++def resource_snapshot(root: Path = Path("/sys/fs/cgroup/system.slice")) -> dict[str, int | bool]:
++    result: dict[str, int | bool] = {}
++    for prefix, service in (("sensor", "fingerprint-sensor.service"), ("suricata", "fingerprint-suricata.service")):
++        directory = root / service
++        if prefix == "suricata":
++            result["suricata_process_active"] = directory.exists()
++        try:
++            memory = int((directory / "memory.current").read_text(encoding="ascii").strip())
++            cpu = {
++                line.split()[0]: int(line.split()[1])
++                for line in (directory / "cpu.stat").read_text(encoding="ascii").splitlines()
++                if len(line.split()) == 2
++            }
++        except (OSError, ValueError):
++            continue
++        result[f"{prefix}_memory_current"] = memory
++        result[f"{prefix}_cpu_usec"] = cpu.get("usage_usec", 0)
++    return result
+diff --git a/deploy/device-fingerprint/fingerprint-sensor.service b/deploy/device-fingerprint/fingerprint-sensor.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..3043fbadb8cc0eb054c1c532b2578d5c1da68389
+--- /dev/null
++++ b/deploy/device-fingerprint/fingerprint-sensor.service
+@@ -0,0 +1,30 @@
++[Unit]
++Description=CaptivPortal passive device fingerprint sensor
++After=captive-portal.service
++
++[Service]
++Type=simple
++User=fingerprint-sensor
++Group=fingerprint-sensor
++SupplementaryGroups=fingerprint-eve
++WorkingDirectory=/opt/CaptivePortal
++EnvironmentFile=-/etc/captive-portal/device-fingerprint/sensor.env
++LoadCredential=device-fingerprint-bearer:/etc/captive-portal/device-fingerprint/sensor.bearer
++ExecStart=/usr/bin/python3 -m app.device_fingerprint_sensor.cli run
++Restart=on-failure
++RestartSec=30
++TimeoutStopSec=20
++AmbientCapabilities=CAP_NET_RAW
++CapabilityBoundingSet=CAP_NET_RAW
++NoNewPrivileges=true
++CPUQuota=50%
++MemoryMax=256M
++TasksMax=64
++Nice=10
++PrivateTmp=true
++ProtectSystem=strict
++ProtectHome=true
++ReadWritePaths=/run/captive-portal/fingerprint-sensor /var/lib/captive-portal/fingerprint-sensor
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/deploy/device-fingerprint/fingerprint-suricata.service b/deploy/device-fingerprint/fingerprint-suricata.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..13db84d3728559e838d63abaa1ac49500fd2d6e7
+--- /dev/null
++++ b/deploy/device-fingerprint/fingerprint-suricata.service
+@@ -0,0 +1,31 @@
++[Unit]
++Description=CaptivPortal dedicated passive fingerprint Suricata
++After=fingerprint-sensor.service
++BindsTo=fingerprint-sensor.service
++PartOf=fingerprint-sensor.service
++
++[Service]
++Type=simple
++User=suricata
++Group=suricata
++SupplementaryGroups=fingerprint-eve
++ExecStartPre=/usr/bin/test -r /etc/captive-portal/device-fingerprint/suricata.yaml
++ExecStartPre=/usr/bin/timeout 1830 /bin/sh -c 'until test -S /run/captive-portal/fingerprint-sensor/suricata-eve.sock; do sleep 1; done'
++ExecStartPre=/bin/sh -c '/usr/bin/suricata --build-info | /bin/grep -q "^This is Suricata version 8.0.6 RELEASE"'
++ExecStartPre=/usr/bin/suricata -T -c /etc/captive-portal/device-fingerprint/suricata.yaml
++ExecStart=/usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers
++Restart=on-failure
++RestartSec=30
++AmbientCapabilities=CAP_NET_RAW
++CapabilityBoundingSet=CAP_NET_RAW
++NoNewPrivileges=true
++CPUQuota=150%
++MemoryHigh=768M
++MemoryMax=1024M
++Nice=10
++PrivateTmp=true
++ProtectSystem=strict
++ProtectHome=true
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/deploy/device-fingerprint/raw-capture.bpf b/deploy/device-fingerprint/raw-capture.bpf
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a2c6c6ad3e7099a0625673535cf8502cc58ff63
+--- /dev/null
++++ b/deploy/device-fingerprint/raw-capture.bpf
+@@ -0,0 +1 @@
++(udp and (port 67 or port 68)) or (src net 192.168.8.0/22 and tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn)
+diff --git a/deploy/device-fingerprint/suricata.yaml b/deploy/device-fingerprint/suricata.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..86764e315e0d57ab9f9028868f70f6d4eb0534a0
+--- /dev/null
++++ b/deploy/device-fingerprint/suricata.yaml
+@@ -0,0 +1,58 @@
++%YAML 1.1
++---
++runmode: workers
++
++vars:
++  address-groups:
++    HOME_NET: "[192.168.8.0/22]"
++    EXTERNAL_NET: "!$HOME_NET"
++  port-groups:
++    HTTP_PORTS: "80"
++
++default-log-dir: /run/captive-portal/fingerprint-sensor
++default-rule-path: /etc/suricata/rules
++rule-files: []
++
++af-packet:
++  - interface: enp8s0
++    threads: 1
++    cluster-id: 99
++    cluster-type: cluster_flow
++    defrag: yes
++    use-mmap: yes
++    tpacket-v3: yes
++    bpf-filter: "net 192.168.8.0/22"
++
++app-layer:
++  protocols:
++    tls:
++      enabled: yes
++      ja3-fingerprints: no
++      ja4-fingerprints: yes
++    quic:
++      enabled: yes
++
++outputs:
++  - console:
++      enabled: no
++  - eve-log:
++      enabled: yes
++      filetype: unix_dgram
++      filename: /run/captive-portal/fingerprint-sensor/suricata-eve.sock
++      ethernet: yes
++      types:
++        - tls:
++            extended: no
++            custom: [ja4, client_alpns, client_handshake]
++        - quic:
++            extended: no
++        - stats:
++            totals: yes
++            threads: no
++            deltas: no
++
++logging:
++  default-log-level: notice
++  outputs:
++    - console:
++        enabled: yes
+diff --git a/docs/README.md b/docs/README.md
+index c210102d789897be8c8e1b1c6a06411b275e357d..1d0098015f2cdf0452bc45d8a8ab9c0b9c162e99 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -419,3 +419,9 @@ Activation → separate step.
+ Подробный факт хранится в одном нормативном документе и связывается ссылкой.
+ Не копируйте целые TASK/research reports в current architecture. Не передавайте
+ агенту весь repository KB, если TASK требует 1–3 связанных contracts.
++
++## Device Fingerprint sensor
++
++Текущее устройство passive network evidence описано в
++`docs/modules/device-fingerprint.md`; deployment boundary — в
++`docs/deployment.md`, sensor-only configuration — в `docs/configuration.md`.
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 774a4867888a3e6df738ebe15b66220222b3ddd9..fe5117fcdd919a2fcbb071866cb1db7423a67fe7 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -721,3 +721,11 @@ Admin Web applies HTTPS/source allowlist/session/CSRF/rate-limit/security-header
+ ## 15. Infrastructure boundary
+ 
+ Repository code/docs do not own production systemd, reverse proxy, Alloy, Loki or Grafana configuration unless a separate infrastructure/deploy TASK explicitly changes them.
++
++## 16. Passive fingerprint sensor
++
++`fingerprint-sensor.service` and `fingerprint-suricata.service` are isolated
++auxiliary processes. Core CaptivPortal never imports or waits for them. The
++sensor consumes only the no-L3 `enp8s0` mirrored feed, keeps raw frames in
++memory, durably spools only normalized P1 envelopes, and sends those envelopes
++to the existing direct-TLS Task-01 service.
+diff --git a/docs/configuration.md b/docs/configuration.md
+index b536b836a5612cefe66ed47520b25bfe025f177f..e498e27d1c97428679f639b0d0e29eb1b700fe04 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -470,3 +470,11 @@ Never write:
+ `historical production acceptance ⇒ currently healthy`.
+ 
+ Production EnvironmentFile/systemd values are host facts and must be verified separately without printing secrets.
++
++### Device Fingerprint sensor
++
++All `DEVICE_FINGERPRINT_SENSOR_*` variables are parsed exclusively by
++`app/device_fingerprint_sensor/config.py`. The main application settings path
++does not parse them. Repository default is
++`DEVICE_FINGERPRINT_SENSOR_ENABLED=false`. The Bearer credential is supplied
++through systemd `LoadCredential`; it is never stored in `.env.example`.
+diff --git a/docs/deployment.md b/docs/deployment.md
+index 66b8b025b6353acd62c71139f92d713c9bdc33fb..5c11992ed480ac70b633da4aa21433d96311c95c 100644
+--- a/docs/deployment.md
++++ b/docs/deployment.md
+@@ -929,3 +929,12 @@ Never delete audit/history to make rollback appear clean.
+ 
+ systemd, reverse proxy, Alloy, Loki and Grafana require their own
+ deploy/infrastructure authorization.
++
++## Device Fingerprint Task-02 artifacts
++
++Repository templates live under `deploy/device-fingerprint/`. Deployment keeps
++both custom services disabled, masks the vendor `suricata.service`, pins
++Suricata 8.0.6, installs the public CA and protected producer credential, and
++starts the sensor before separately starting its bound Suricata service.
++Before checkout mutation, active fingerprint services must be stopped.
++Activation and enable-at-boot require separate Owner authorization.
+diff --git a/docs/logging.md b/docs/logging.md
+index 15b3006dff504219f5d95eb4e60aede679ddae9c..cb57f6a61eda976629e338f8693e9198e8e357a7 100644
+--- a/docs/logging.md
++++ b/docs/logging.md
+@@ -75,3 +75,10 @@ Audit-before-action is a safety invariant: `action.planned` must be durably writ
+ ## Agent log handoff
+ 
+ Send only bounded relevant time windows/events/correlation identifiers. Do not dump multi-day logs, rotated journals or secrets into TASK/PR/handoff.
++
++## Fingerprint sensor
++
++Sensor telemetry is structured and allowlisted. It may report source kind,
++health transition, capture/dedup counters, Suricata aggregate counters, spool
++capacity and delivery outcomes. It must not contain packet bytes, destination
++identity, SNI, full EVE, authorization headers or the producer credential.
+diff --git a/docs/module-index.md b/docs/module-index.md
+index 7b4c9b350c4188c5aaa8c8449f4212f94036c715..7e3acf56043ec043e503b96b65be66e4a735d25a 100644
+--- a/docs/module-index.md
++++ b/docs/module-index.md
+@@ -161,3 +161,10 @@ separately approved by Owner / Tech Lead.
+ A historical production PASS proves a feature worked at a named artifact/time.
+ It does not convert repository defaults into production configuration and does
+ not prove current health after later changes.
++
++## Device Fingerprint
++
++- Central evidence service: `app/device_fingerprint/`
++- Passive sensor: `app/device_fingerprint_sensor/`
++- Deployment templates: `deploy/device-fingerprint/`
++- Current contract: `docs/modules/device-fingerprint.md`
+diff --git a/docs/modules/device-fingerprint.md b/docs/modules/device-fingerprint.md
+index 9343cee66dfa80150194c9391e004d0364e93fbb..1da4e3895f40176b25a9de4a52c6d0f1ff52e8c8 100644
+--- a/docs/modules/device-fingerprint.md
++++ b/docs/modules/device-fingerprint.md
+@@ -26,8 +26,8 @@ creation.
+ 
+ The database contains only normalized P1 device-evidence rows and immutable
+ point-in-time source-health rows. Evidence schemas are registered locally before
+-the registry is frozen; Task-01 production composition intentionally registers
+-none. Unknown schemas fail closed. Retention is based on `observed_at` (configured
++the registry is frozen; Task-02 registers four bounded network schemas. Unknown
++schemas fail closed. Retention is based on `observed_at` (configured
+ 1–90 days for evidence and fixed 30 days for source health).
+ 
+ Every endpoint is protected by exact Bearer authentication and direct-peer CIDR
+@@ -39,8 +39,13 @@ to Git.
+ The frozen initial deployment mapping (without its external secret) is
+ `sensor-zefer-01` → capture source `zefer-span-01` → Site
+ `6a64f17630da7c70d232187a`, guest CIDR `192.168.8.0/22`, with authorized source
+-kinds `dhcp`, `tcp_syn`, `tls_client`, and `quic_client`. These authorized kinds
+-do not register evidence schemas; the Task-01 production registry remains empty.
++kinds `dhcp`, `tcp_syn`, `tls_client`, and `quic_client`. The Task-02 sensor
++captures raw DHCP/TCP through an attached kernel BPF and consumes minimized
++TLS/QUIC EVE over a Unix datagram socket. Only normalized bounded envelopes are
++written to its DELETE-journal transport spool; raw frames and EVE are never
++durable.
+ 
+ The authoritative accepted design and verification contract is
+ `TASK-DEVICE-FINGERPRINT-01-FINAL.md`.
++Task-02 extends only the reserved schema-registry boundary and is governed by
++`TASK-DEVICE-FINGERPRINT-02-FINAL.md` plus FINAL ADDENDUM-1.
+diff --git a/docs/project-inventory.md b/docs/project-inventory.md
+index 18e33f3f795fd88afc5eec91174c0a3c845d371d..20b4f468744111fa1e95ffa9bf284c88669270c6 100644
+--- a/docs/project-inventory.md
++++ b/docs/project-inventory.md
+@@ -706,3 +706,10 @@ Repository alone does not prove:
+ - production enabled-state must be host-verified;
+ - Omada private UI APIs are not approved product contracts;
+ - custom client rate-limit public full-clear remains unresolved on tested Omada 5.14.31.
++
++## 22. Device Fingerprint network sensor
++
++Repository artifacts include the isolated Task-02 sensor package and disabled
++service templates. Four production evidence schemas are registered: `dhcp`,
++`tcp_syn`, `tls_client`, and `quic_client`, all at version 1. Merge or deployment
++does not imply service activation.
+diff --git a/docs/security.md b/docs/security.md
+index 5795952715f3acffcff93727e1b39701a73fa1fd..bb0ff8b99027b39a92bb6afda4223adbbd75a669 100644
+--- a/docs/security.md
++++ b/docs/security.md
+@@ -81,3 +81,11 @@ Admin browser must not consume this bearer API directly.
+ Research proving a mutation works does not authorize product exposure.
+ 
+ New write/control behavior requires explicit policy/audit/change-intent. Private Omada UI `/api/v2` behavior is research evidence, not an approved integration contract.
++
++## Passive fingerprint sensor
++
++The sensor has `CAP_NET_RAW` only and cannot configure interfaces, routes or
++forwarding. Kernel BPF runs before Python parsing. No PCAP, full EVE, SNI,
++DNS/HTTP history, ClientHello, QUIC Initial, opaque DHCP identifier, hostname or
++credential may enter its spool or telemetry. Task-01 direct TLS, Bearer and
++direct-peer CIDR controls remain authoritative for ingestion.
+diff --git a/tests/device_fingerprint/test_network_schemas.py b/tests/device_fingerprint/test_network_schemas.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c59a772b498985ee184d6492ff5ca7d3d2f4380
+--- /dev/null
++++ b/tests/device_fingerprint/test_network_schemas.py
+@@ -0,0 +1,98 @@
++import pytest
++
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.network_schemas import (
++    validate_dhcp_v1, validate_quic_v1, validate_tcp_syn_v1, validate_tls_v1,
++)
++from app.device_fingerprint.schema_registry import build_production_schema_registry
++
++
++def tls(**changes):
++    value = {
++        "ja4": "t13d0203h2_0123456789ab_abcdef012345",
++        "ja4_a": "t13d0203h2", "ja4_b": "0123456789ab", "ja4_c": "abcdef012345",
++        "tls_version_family": "tls1_3", "client_alpns": ["h2", "http/1.1"],
++        "ech_extension_present": False, "grease_extension_present": True,
++    }
++    value.update(changes)
++    return value
++
++
++def quic(**changes):
++    value = {
++        "ja4": "q13d0203h3_0123456789ab_abcdef012345",
++        "ja4_a": "q13d0203h3", "ja4_b": "0123456789ab", "ja4_c": "abcdef012345",
++        "quic_version": "0x00000001", "ech_extension_present": None,
++        "grease_extension_present": None,
++    }
++    value.update(changes)
++    return value
++
++
++def test_production_registry_contains_exact_task02_schemas():
++    registry = build_production_schema_registry()
++    assert registry.frozen
++    assert registry.validate("tls_client", 1, tls())["ja4_a"].startswith("t")
++    assert registry.validate("quic_client", 1, quic())["ja4_a"].startswith("q")
++
++
++@pytest.mark.parametrize("alpns", [None, ["h2", "http/1.1"], ["h2", "h2"]])
++def test_tls_alpns_valid_and_ordered(alpns):
++    assert validate_tls_v1(tls(client_alpns=alpns))["client_alpns"] == alpns
++
++
++@pytest.mark.parametrize("alpns", [["x"] * 17, ["x" * 256], [1], ["bad value"], ["\x7f"]])
++def test_tls_alpns_malformed_fails(alpns):
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_tls_v1(tls(client_alpns=alpns))
++
++
++def test_empty_alpn_is_normalizer_only_and_validator_rejects_it():
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_tls_v1(tls(client_alpns=[]))
++
++
++@pytest.mark.parametrize("change", [
++    {"ja4_a": "t12d0203h2"}, {"ja4_b": "1123456789ab"},
++    {"ja4_c": "bbcdef012345"}, {"ja4_b": "ABCDEF012345"},
++    {"ja4": "t13d0203h2*0123456789ab*abcdef012345"},
++])
++def test_ja4_redundant_fields_must_match(change):
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_tls_v1(tls(**change))
++
++
++def test_family_is_strict():
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_quic_v1(quic(ja4="t13d0203h3_0123456789ab_abcdef012345", ja4_a="t13d0203h3"))
++
++
++def test_quic_version_is_canonical():
++    assert validate_quic_v1(quic())["quic_version"] == "0x00000001"
++    for value in ("1", "0x1", "0xABCDEF01", 1):
++        with pytest.raises(DeviceFingerprintValidationError):
++            validate_quic_v1(quic(quic_version=value))
++
++
++def test_dhcp_exact_payload_contract():
++    payload = {
++        "message_type": "discover", "parameter_request_list": [1, 3, 6],
++        "option_order": [53, 55], "vendor_class": "android-dhcp-13",
++        "client_identifier_kind": "mac", "maximum_message_size": 1500,
++        "rapid_commit_requested": False, "capport_requested": True,
++        "ipv6_only_preferred_requested": False, "hostname_present": True,
++    }
++    assert validate_dhcp_v1(payload) == payload
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_dhcp_v1({**payload, "hostname": "secret"})
++
++
++def test_tcp_exact_payload_contract():
++    payload = {
++        "ip_version": 4, "observed_ttl": 64, "tcp_window": 65535,
++        "mss": 1460, "window_scale": 8, "sack_permitted": True,
++        "timestamps_present": True, "tcp_option_order": [2, 4, 8, 1, 3],
++    }
++    assert validate_tcp_syn_v1(payload) == payload
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_tcp_syn_v1({**payload, "window_scale": 15})
+diff --git a/tests/device_fingerprint/test_schema_registry.py b/tests/device_fingerprint/test_schema_registry.py
+index 914e6b6cf819133b0901d149748913fa04b7640f..32b5aa4c678284bf457d901cab62f807e1741193 100644
+--- a/tests/device_fingerprint/test_schema_registry.py
++++ b/tests/device_fingerprint/test_schema_registry.py
+@@ -4,11 +4,14 @@ from app.device_fingerprint.models import DeviceFingerprintUnsupportedSchema, De
+ from app.device_fingerprint.schema_registry import EvidenceSchemaRegistry, build_production_schema_registry
+ 
+ 
+-def test_production_registry_is_frozen_and_empty():
++def test_production_registry_is_frozen_and_contains_task02_schemas():
+     registry = build_production_schema_registry()
+     assert registry.frozen
++    for source_kind in ("dhcp", "tcp_syn", "tls_client", "quic_client"):
++        with pytest.raises(DeviceFingerprintValidationError):
++            registry.validate(source_kind, 1, {})
+     with pytest.raises(DeviceFingerprintUnsupportedSchema):
+-        registry.validate("dhcp", 1, {})
++        registry.validate("portal_ua", 1, {})
+ 
+ 
+ def test_test_schema_normalizes_before_freeze():
+diff --git a/tests/device_fingerprint_sensor/__init__.py b/tests/device_fingerprint_sensor/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/tests/device_fingerprint_sensor/test_cli.py b/tests/device_fingerprint_sensor/test_cli.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..43c1a6286beac83020b9a5605898400976f7ad35
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_cli.py
+@@ -0,0 +1,31 @@
++from app.device_fingerprint_sensor import cli
++
++
++class Connection:
++    def close(self): pass
++
++
++def test_core_readiness_retries_bounded_without_business_request():
++    times = iter([0, 0, 10, 10])
++    calls = []
++    def connect(address, timeout):
++        calls.append((address, timeout))
++        if len(calls) == 1: raise OSError
++        return Connection()
++    assert cli.wait_for_core("127.0.0.1", 8088, connect_timeout=1, poll_interval=10, max_wait=1800, monotonic=lambda: next(times), sleep=lambda value: calls.append(("sleep", value)), connector=connect)
++    assert calls[0] == (("127.0.0.1", 8088), 1)
++
++
++def test_disabled_cli_returns_before_artifact_identity(monkeypatch):
++    monkeypatch.setattr(cli, "sensor_config_from_env", lambda: type("C", (), {"enabled": False})())
++    monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_: (_ for _ in ()).throw(AssertionError()))
++    assert cli.main(["run"]) == 0
++
++
++def test_readiness_timeout_fails_before_runtime(monkeypatch):
++    config = type("C", (), {"enabled": True, "core_ready_host": "127.0.0.1", "core_ready_port": 8088, "core_ready_connect_timeout_seconds": 1, "core_ready_poll_interval_seconds": 10, "core_ready_max_wait_seconds": 1800})()
++    identity = type("I", (), {"safe_fields": lambda self: {}})()
++    monkeypatch.setattr(cli, "sensor_config_from_env", lambda: config)
++    monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_: identity)
++    monkeypatch.setattr(cli, "wait_for_core", lambda *_args, **_kwargs: False)
++    assert cli.main(["run"]) == 1
+diff --git a/tests/device_fingerprint_sensor/test_config.py b/tests/device_fingerprint_sensor/test_config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8dabade8225ca6de1c156c3870396ddf6ba60b26
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_config.py
+@@ -0,0 +1,38 @@
++import pytest
++
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.device_fingerprint_sensor.models import SensorConfigError
++
++
++def enabled(**values):
++    return {"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true", **values}
++
++
++def test_disabled_is_a_strict_noop_configuration():
++    assert sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "false"}).enabled is False
++
++
++def test_frozen_defaults_are_sensor_only():
++    config = sensor_config_from_env(enabled(CREDENTIALS_DIRECTORY="/run/credentials/unit"))
++    assert config.interface == "enp8s0"
++    assert str(config.guest_cidrs[0]) == "192.168.8.0/22"
++    assert config.raw_dedup_horizon_ms == 0.25
++    assert config.credential_path.endswith("device-fingerprint-bearer")
++
++
++@pytest.mark.parametrize("values", [
++    {"DEVICE_FINGERPRINT_SENSOR_INTERFACE": "enp1s0"},
++    {"DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS": "192.168.8.1/22"},
++    {"DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL": "http://192.168.0.202"},
++    {"DEVICE_FINGERPRINT_SENSOR_RAW_DEDUP_HORIZON_MS": "nan"},
++])
++def test_invalid_sensor_configuration_fails_closed(values):
++    with pytest.raises(SensorConfigError):
++        sensor_config_from_env(enabled(**values))
++
++
++def test_sensor_package_does_not_import_main_settings():
++    import app.device_fingerprint_sensor.config as module
++    source = open(module.__file__, encoding="utf-8").read()
++    assert "app.settings" not in source
++    assert "app.config" not in source
+diff --git a/tests/device_fingerprint_sensor/test_dedup.py b/tests/device_fingerprint_sensor/test_dedup.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..aac1c8cd7b8f6ddd17e1a81e43a4672171b61b46
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_dedup.py
+@@ -0,0 +1,22 @@
++from app.device_fingerprint_sensor.dedup import ExactFrameDeduplicator
++
++
++def test_exact_frame_inside_250_microseconds_is_suppressed():
++    dedup = ExactFrameDeduplicator("zefer-span-01")
++    assert not dedup.is_duplicate(b"frame", 1_000_000)
++    assert dedup.is_duplicate(b"frame", 1_250_000)
++    assert (dedup.raw_packet_count, dedup.duplicate_packet_count, dedup.deduplicated_packet_count) == (2, 1, 1)
++
++
++def test_long_interval_and_different_frames_are_not_suppressed():
++    dedup = ExactFrameDeduplicator("zefer-span-01", max_entries=2)
++    assert not dedup.is_duplicate(b"same", 0)
++    assert not dedup.is_duplicate(b"same", 250_001)
++    assert not dedup.is_duplicate(b"other", 250_002)
++    assert dedup.raw_packet_count == dedup.duplicate_packet_count + dedup.deduplicated_packet_count
++
++
++def test_negative_time_delta_is_not_duplicate():
++    dedup = ExactFrameDeduplicator("zefer-span-01")
++    assert not dedup.is_duplicate(b"same", 10)
++    assert not dedup.is_duplicate(b"same", 9)
+diff --git a/tests/device_fingerprint_sensor/test_dhcp.py b/tests/device_fingerprint_sensor/test_dhcp.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e9683b41787be1c941ecfbbd84d4b76a177f07c
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_dhcp.py
+@@ -0,0 +1,81 @@
++import ipaddress
++import struct
++
++from app.device_fingerprint_sensor.dhcp import parse_dhcp_frame
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.device_fingerprint_sensor.normalizer import NetworkNormalizer
++
++
++MAC = bytes.fromhex("001122334455")
++
++
++def frame(*, message=1, source="0.0.0.0", ciaddr="0.0.0.0", yiaddr="0.0.0.0", options=b""):
++    bootp = bytearray(236)
++    bootp[0:3] = bytes((1 if message in {1, 3, 4, 7, 8} else 2, 1, 6))
++    struct.pack_into("!I", bootp, 4, 123)
++    bootp[12:16] = ipaddress.ip_address(ciaddr).packed
++    bootp[16:20] = ipaddress.ip_address(yiaddr).packed
++    bootp[28:34] = MAC
++    payload = bytes(bootp) + b"\x63\x82\x53\x63" + bytes((53, 1, message)) + options + b"\xff"
++    udp = struct.pack("!HHHH", 68 if message in {1,3,4,7,8} else 67, 67 if message in {1,3,4,7,8} else 68, 8 + len(payload), 0) + payload
++    ip = bytearray(20)
++    ip[0] = 0x45; ip[8] = 64; ip[9] = 17
++    struct.pack_into("!H", ip, 2, 20 + len(udp))
++    ip[12:16] = ipaddress.ip_address(source).packed
++    ethernet = b"\xff" * 6 + MAC + b"\x08\x00"
++    return ethernet + bytes(ip) + udp
++
++
++def option(code, value):
++    return bytes((code, len(value))) + value
++
++
++def test_client_payload_extracts_only_approved_features():
++    raw = frame(options=(
++        option(55, b"\x01\x03\x06") + option(60, b"android") +
++        option(61, b"\x01" + MAC) + option(57, b"\x05\xdc") +
++        option(80, b"") + option(114, b"") + option(108, b"\x00\x00\x00\x01") +
++        option(12, b"private-host")
++    ))
++    parsed = parse_dhcp_frame(raw)
++    assert parsed is not None
++    assert parsed.payload == {
++        "message_type": "discover", "parameter_request_list": [1, 3, 6],
++        "option_order": [53, 55, 60, 61, 57, 80, 114, 108, 12],
++        "vendor_class": "android", "client_identifier_kind": "mac",
++        "maximum_message_size": 1500, "rapid_commit_requested": True,
++        "capport_requested": True, "ipv6_only_preferred_requested": True,
++        "hostname_present": True,
++    }
++    assert "private-host" not in repr(parsed.payload)
++
++
++def test_server_authority_fields_are_correlation_only():
++    raw = frame(message=5, source="192.168.10.1", yiaddr="192.168.8.20", options=option(54, ipaddress.ip_address("192.168.10.1").packed) + option(51, (3600).to_bytes(4, "big")))
++    parsed = parse_dhcp_frame(raw)
++    assert parsed.message_type == "ack"
++    assert parsed.option54 == "192.168.10.1"
++    assert parsed.payload is None
++
++
++def test_truncated_or_malformed_options_emit_nothing():
++    assert parse_dhcp_frame(b"short") is None
++    assert parse_dhcp_frame(frame(options=b"\x37\x08\x01")) is None
++
++
++def test_zero_address_client_is_released_only_by_exact_guest_authority():
++    normalizer = NetworkNormalizer(sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"}), monotonic=lambda: 0)
++    observed = "2026-09-14T00:00:00.000Z"
++    assert normalizer.raw(frame(), observed) == []
++    wrong = frame(message=2, source="192.168.0.1", yiaddr="192.168.8.20", options=option(54, ipaddress.ip_address("192.168.0.1").packed))
++    assert normalizer.raw(wrong, observed) == []
++    valid = frame(message=2, source="192.168.10.1", yiaddr="192.168.8.20", options=option(54, ipaddress.ip_address("192.168.10.1").packed))
++    released = normalizer.raw(valid, observed)
++    assert len(released) == 1
++    assert released[0].document["observed_ip"] is None
++    assert released[0].document["source_kind"] == "dhcp"
++
++
++def test_vlan10_dhcp_client_is_not_inferred_as_guest():
++    normalizer = NetworkNormalizer(sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"}), monotonic=lambda: 0)
++    assert normalizer.raw(frame(source="192.168.0.20", ciaddr="192.168.0.20"), "2026-09-14T00:00:00.000Z") == []
+diff --git a/tests/device_fingerprint_sensor/test_eve.py b/tests/device_fingerprint_sensor/test_eve.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6bbbe24ec2f0eb74d73f262044b06fb59ee4364
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_eve.py
+@@ -0,0 +1,71 @@
++import json
++
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.device_fingerprint_sensor.eve import EveReceiver
++from app.device_fingerprint_sensor.normalizer import NetworkNormalizer
++
++
++def config():
++    return sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++
++
++def event(kind, body):
++    return {
++        "event_type": kind, "timestamp": "2026-09-14T10:00:00.123456+00:00",
++        "src_ip": "192.168.8.20", "dest_ip": "1.1.1.1",
++        "ether": {"src_mac": "00:11:22:33:44:55", "dest_mac": "aa:bb:cc:dd:ee:ff"},
++        kind: body,
++    }
++
++
++def test_tls_adapter_keeps_only_approved_fields_and_empty_alpn_becomes_null():
++    normalizer = NetworkNormalizer(config(), monotonic=lambda: 0)
++    values = normalizer.eve(event("tls", {
++        "ja4": "t13d0203h2_0123456789ab_abcdef012345", "client_alpns": [],
++        "client_handshake": {"exts": [0, 65037, 2570], "version": "TLS 1.3"},
++        "sni": "private.example", "ja3": "forbidden", "certificate": "forbidden",
++    }))
++    assert len(values) == 1
++    document = values[0].document
++    assert document["payload"]["client_alpns"] is None
++    assert document["payload"]["ech_extension_present"] is True
++    assert document["payload"]["grease_extension_present"] is True
++    assert "private.example" not in repr(document)
++
++
++def test_tls_invalid_alpn_and_missing_l2_emit_no_evidence():
++    normalizer = NetworkNormalizer(config(), monotonic=lambda: 0)
++    bad = event("tls", {"ja4": "t13d0203h2_0123456789ab_abcdef012345", "client_alpns": ["bad value"]})
++    assert normalizer.eve(bad) == []
++    bad["tls"]["client_alpns"] = ["h2"]
++    del bad["ether"]
++    assert normalizer.eve(bad) == []
++
++
++def test_quic_version_and_extensions_are_normalized_without_private_fields():
++    normalizer = NetworkNormalizer(config(), monotonic=lambda: 0)
++    values = normalizer.eve(event("quic", {
++        "ja4": "q00d0203h3_0123456789ab_abcdef012345", "version": "faceb002",
++        "extensions": [{"type": 65037, "values": ["secret"]}],
++        "sni": "private", "ua": "private", "cyu": "private",
++    }))
++    payload = values[0].document["payload"]
++    assert payload["quic_version"] == "0xfaceb002"
++    assert payload["ech_extension_present"] is True
++    assert "secret" not in repr(values[0].document)
++
++
++class FakeSocket:
++    def __init__(self, payload, flags=0): self.payload, self.flags = payload, flags
++    def recvmsg(self, *_args): return self.payload, [], self.flags, None
++
++
++def test_receiver_rejects_truncated_and_invalid_datagrams():
++    receiver = EveReceiver("unused", max_datagram_bytes=20)
++    receiver.socket = FakeSocket(b"x" * 21)
++    assert receiver.receive() is None and receiver.truncated == 1
++    receiver.socket = FakeSocket(b"not-json")
++    assert receiver.receive() is None and receiver.invalid == 1
++    receiver.max_datagram_bytes = 100
++    receiver.socket = FakeSocket(json.dumps({"event_type": "stats"}).encode())
++    assert receiver.receive()["event_type"] == "stats"
+diff --git a/tests/device_fingerprint_sensor/test_health.py b/tests/device_fingerprint_sensor/test_health.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f0e2d9b002957b106e95754e5e0f3d05adae0ddc
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_health.py
+@@ -0,0 +1,25 @@
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.device_fingerprint_sensor.health import SourceHealthTracker
++
++
++class Clock:
++    value = 0.0
++    def __call__(self): return self.value
++
++
++def test_health_emits_transition_and_300_second_heartbeat_without_identity():
++    clock = Clock(); tracker = SourceHealthTracker(sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"}), monotonic=clock)
++    first = tracker.transition("dhcp", "available", None)
++    assert first.document["source_kind"] == "dhcp"
++    assert "observed_mac" not in first.document and "observed_ip" not in first.document
++    assert tracker.transition("dhcp", "available", None) is None
++    clock.value = 300
++    assert tracker.transition("dhcp", "available", None) is not None
++
++
++def test_ready_requires_all_four_sources_available():
++    clock = Clock(); tracker = SourceHealthTracker(sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"}), monotonic=clock)
++    tracker.raw("available", None)
++    assert not tracker.ready
++    tracker.suricata("available", None)
++    assert tracker.ready
+diff --git a/tests/device_fingerprint_sensor/test_producer.py b/tests/device_fingerprint_sensor/test_producer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0194c44968c112949d501deefdf3c031a991e7bf
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_producer.py
+@@ -0,0 +1,54 @@
++import requests
++
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.device_fingerprint_sensor.models import NormalizedEvent
++from app.device_fingerprint_sensor.producer import EvidenceProducer
++from app.device_fingerprint_sensor.spool import SensorSpool
++
++
++class Response:
++    def __init__(self, status, headers=None): self.status_code, self.headers = status, headers or {}
++
++
++class Session:
++    def __init__(self, values): self.values, self.calls = list(values), []
++    def post(self, url, **kwargs):
++        self.calls.append((url, kwargs))
++        value = self.values.pop(0)
++        if isinstance(value, Exception): raise value
++        return value
++
++
++def setup(tmp_path, monkeypatch, responses):
++    credential = tmp_path / "device-fingerprint-bearer"; credential.write_text("a" * 32)
++    config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true", "CREDENTIALS_DIRECTORY": str(tmp_path), "DEVICE_FINGERPRINT_SENSOR_SPOOL_PATH": str(tmp_path / "spool.sqlite3"), "DEVICE_FINGERPRINT_SENSOR_CA_CERT_PATH": str(tmp_path / "ca.crt")})
++    spool = SensorSpool(config.spool_path, total_budget_bytes=1_000_000, main_db_max_bytes=500_000, max_events=100)
++    spool.initialize()
++    event = NormalizedEvent("evidence", "00000000-0000-4000-8000-000000000001", "dhcp", "2026-09-14T00:00:00.000Z", {"safe": True})
++    spool.enqueue([event])
++    session = Session(responses)
++    return config, spool, session, EvidenceProducer(config, spool, session=session, random_value=lambda: 0.5)
++
++
++def test_https_delivery_uses_ca_bearer_and_acknowledges(tmp_path, monkeypatch):
++    config, spool, session, producer = setup(tmp_path, monkeypatch, [Response(200)])
++    result = producer.deliver_once()
++    assert result.status == "delivered" and spool.metrics()["rows"] == 0
++    url, options = session.calls[0]
++    assert url.startswith("https://") and options["verify"] == config.ca_cert_path
++    assert options["headers"]["Authorization"] == "Bearer " + "a" * 32
++
++
++def test_retry_keeps_stable_event_and_honors_retry_after(tmp_path, monkeypatch):
++    _config, spool, _session, producer = setup(tmp_path, monkeypatch, [Response(429, {"Retry-After": "60"}), Response(200)])
++    assert producer.deliver_once().delay_seconds == 60
++    assert spool.metrics()["rows"] == 1
++    assert producer.deliver_once().status == "delivered"
++
++
++def test_transport_backoff_and_permanent_rejection(tmp_path, monkeypatch):
++    _config, spool, _session, producer = setup(tmp_path, monkeypatch, [requests.ConnectionError(), Response(400)])
++    assert producer.deliver_once().delay_seconds == 1
++    assert producer.deliver_once().status == "permanent"
++    assert producer.deliver_once().status == "permanent"
++    assert spool.metrics()["rows"] == 1
+diff --git a/tests/device_fingerprint_sensor/test_runtime.py b/tests/device_fingerprint_sensor/test_runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ba42705adf5ac57a88f096f6f7a8f77a2e8eef3
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_runtime.py
+@@ -0,0 +1,130 @@
++import json
++import subprocess
++from pathlib import Path
++
++import pytest
++
++from app.device_fingerprint_sensor.capture import InterfacePreflight
++from app.device_fingerprint_sensor.capture_filter import RAW_CAPTURE_FILTER
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.device_fingerprint_sensor.models import SensorPreflightError
++from app.device_fingerprint_sensor.runtime import SensorRuntime
++from app.device_fingerprint_sensor.telemetry import SensorTelemetry
++
++
++def make_tree(tmp_path, *, operstate="up", ipv4="0", ipv6="0"):
++    sys_root = tmp_path / "sys"; proc_root = tmp_path / "proc"
++    net = sys_root / "class/net/enp8s0"; net.mkdir(parents=True)
++    (net / "operstate").write_text(operstate)
++    for family, value in (("ipv4", ipv4), ("ipv6", ipv6)):
++        path = proc_root / f"sys/net/{family}/conf/enp8s0"; path.mkdir(parents=True)
++        (path / "forwarding").write_text(value)
++    (proc_root / "100").mkdir(parents=True); (proc_root / "100/cmdline").write_bytes(b"/usr/bin/python\0")
++    return sys_root, proc_root
++
++
++def runner(command, **_kwargs):
++    if command[:2] == ["netplan", "get"]:
++        return subprocess.CompletedProcess(command, 0, "false\n", "")
++    if command[:3] == ["systemctl", "is-active", "NetworkManager"]:
++        return subprocess.CompletedProcess(command, 3, "inactive\n", "")
++    if command[0] == "ip":
++        return subprocess.CompletedProcess(command, 0, "[]\n" if "route" in command else '[{"addr_info":[]}]\n', "")
++    raise AssertionError(command)
++
++
++def test_interface_preflight_accepts_exact_no_l3_state(tmp_path):
++    sys_root, proc_root = make_tree(tmp_path)
++    InterfacePreflight(sys_root=sys_root, proc_root=proc_root, runner=runner).validate()
++
++
++@pytest.mark.parametrize("kind", ["unknown", "down", "dormant", "lowerlayerdown", "notpresent", "testing"])
++def test_interface_preflight_rejects_every_non_up_operstate(tmp_path, kind):
++    sys_root, proc_root = make_tree(tmp_path, operstate=kind)
++    with pytest.raises(SensorPreflightError):
++        InterfacePreflight(sys_root=sys_root, proc_root=proc_root, runner=runner).validate()
++
++
++def test_interface_preflight_rejects_dhcp_process(tmp_path):
++    sys_root, proc_root = make_tree(tmp_path)
++    (proc_root / "100/cmdline").write_bytes(b"/sbin/dhclient\0-v\0enp8s0\0")
++    with pytest.raises(SensorPreflightError):
++        InterfacePreflight(sys_root=sys_root, proc_root=proc_root, runner=runner).validate()
++
++
++def test_netplan_failure_or_networkmanager_profile_fails_closed(tmp_path):
++    sys_root, proc_root = make_tree(tmp_path)
++    def failing(command, **kwargs):
++        if command[:2] == ["netplan", "get"]: return subprocess.CompletedProcess(command, 1, "", "error")
++        return runner(command, **kwargs)
++    with pytest.raises(SensorPreflightError):
++        InterfacePreflight(sys_root=sys_root, proc_root=proc_root, runner=failing).validate()
++    def nm(command, **kwargs):
++        if command[:3] == ["systemctl", "is-active", "NetworkManager"]: return subprocess.CompletedProcess(command, 0, "active\n", "")
++        if command[0] == "nmcli": return subprocess.CompletedProcess(command, 0, "wired:enp8s0\n", "")
++        return runner(command, **kwargs)
++    with pytest.raises(SensorPreflightError):
++        InterfacePreflight(sys_root=sys_root, proc_root=proc_root, runner=nm).validate()
++
++
++class Log:
++    def info(self, *_args): pass
++
++
++class Spool:
++    capacity_blocked = False
++    def initialize(self): self.initialized = True
++    def enqueue(self, values): return len(values)
++    def close(self): pass
++
++
++class Preflight:
++    def __init__(self, fails=False): self.fails = fails
++    def validate(self):
++        if self.fails: raise SensorPreflightError("capture_interface_unavailable")
++
++
++class Capture:
++    def open(self): pass
++    def close(self): pass
++    def receive(self): raise RuntimeError
++
++
++class Eve:
++    truncated = 0
++    def open(self): pass
++    def close(self): pass
++    def receive(self): raise RuntimeError
++
++
++class Producer:
++    def deliver_once(self): raise RuntimeError
++
++
++def test_preflight_failure_spools_all_source_health_without_capture():
++    config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++    spool = Spool()
++    runtime = SensorRuntime(config, telemetry=SensorTelemetry(Log()), preflight=Preflight(True), capture=Capture(), eve=Eve(), spool=spool, producer=Producer())
++    runtime.initialize_transport()
++    assert runtime.preflight_or_report() is False
++    assert runtime.state == "unavailable"
++
++
++def test_repository_bpf_artifact_is_exact_frozen_expression():
++    root = Path(__file__).resolve().parents[2]
++    assert (root / "deploy/device-fingerprint/raw-capture.bpf").read_text(encoding="ascii").strip() == RAW_CAPTURE_FILTER
++
++
++def test_raw_filter_attaches_before_interface_bind(monkeypatch):
++    from app.device_fingerprint_sensor import capture as module
++    calls = []
++    class Socket:
++        def setsockopt(self, *_args): calls.append("timestamp")
++        def bind(self, value): calls.append(("bind", value))
++        def close(self): calls.append("close")
++    monkeypatch.setattr(module, "attach_frozen_filter", lambda _socket: calls.append("filter"))
++    monkeypatch.setattr(module.socket, "AF_PACKET", 17, raising=False)
++    raw = module.RawCapture("enp8s0", socket_factory=lambda *args: (calls.append(("socket", args)) or Socket()))
++    raw.open()
++    assert calls[0][0] == "socket" and calls[0][1][2] == 0
++    assert calls.index("filter") < next(index for index, item in enumerate(calls) if isinstance(item, tuple) and item[0] == "bind")
+diff --git a/tests/device_fingerprint_sensor/test_scope.py b/tests/device_fingerprint_sensor/test_scope.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c3ef3e9123bebef04e9e4ea462bf9ed314a3e93
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_scope.py
+@@ -0,0 +1,72 @@
++from ipaddress import ip_network
++
++from app.device_fingerprint_sensor.scope import (
++    DHCP_LEASE_CACHE_MAX_ENTRIES, DHCP_TRANSACTION_MAX_ENTRIES,
++    DhcpScopeResolver,
++)
++
++
++class Clock:
++    value = 0.0
++    def __call__(self):
++        return self.value
++
++
++def resolver(clock):
++    return DhcpScopeResolver((ip_network("192.168.8.0/22"),), "192.168.10.1", "192.168.10.1", monotonic=clock)
++
++
++def test_transaction_confirmation_releases_once_and_does_not_extend_ttl():
++    clock = Clock(); scope = resolver(clock)
++    event = {"kind": "discover"}
++    assert scope.client("00:11:22:33:44:55", 1, event, directly_scoped=False) == []
++    clock.value = 119
++    assert scope.server_reply("00:11:22:33:44:55", 1, yiaddr="192.168.8.2", server_source="192.168.10.1", option54="192.168.10.1") == [event]
++    assert scope.server_reply("00:11:22:33:44:55", 1, yiaddr="192.168.8.2", server_source="192.168.10.1", option54="192.168.10.1") == []
++    clock.value = 120
++    assert scope.client("00:11:22:33:44:55", 1, event, directly_scoped=False) == []
++
++
++def test_pending_limit_ninth_event_invalidates_transaction():
++    clock = Clock(); scope = resolver(clock)
++    for index in range(8):
++        assert scope.client("00:11:22:33:44:55", 2, {"index": index}, directly_scoped=False) == []
++    scope.client("00:11:22:33:44:55", 2, {"index": 8}, directly_scoped=False)
++    assert scope.transaction_count == 0
++
++
++def test_oldest_transaction_is_evicted_at_4096():
++    clock = Clock(); scope = resolver(clock)
++    for xid in range(DHCP_TRANSACTION_MAX_ENTRIES + 1):
++        scope.client("00:11:22:33:44:55", xid, {"xid": xid}, directly_scoped=False)
++    assert scope.transaction_count == DHCP_TRANSACTION_MAX_ENTRIES
++    assert ("00:11:22:33:44:55", 0) not in scope._transactions
++
++
++def test_conflicting_confirmed_fact_fails_closed():
++    clock = Clock(); scope = resolver(clock)
++    scope.client("00:11:22:33:44:55", 3, {"x": 1}, directly_scoped=False)
++    assert scope.server_reply("00:11:22:33:44:55", 3, yiaddr="192.168.8.2", server_source="192.168.10.1", option54="192.168.10.1")
++    assert scope.server_reply("00:11:22:33:44:55", 3, yiaddr="192.168.8.3", server_source="192.168.10.1", option54="192.168.10.1") == []
++    assert scope.transaction_count == 0
++
++
++def test_lease_refresh_replace_expire_and_cache_miss():
++    clock = Clock(); scope = resolver(clock)
++    scope.server_reply("00:11:22:33:44:55", 4, yiaddr="192.168.8.2", server_source="192.168.10.1", option54="192.168.10.1", lease_seconds=10, is_ack=True)
++    assert scope.lease_proves("00:11:22:33:44:55", "192.168.8.2")
++    clock.value = 5
++    scope.server_reply("00:11:22:33:44:55", 5, yiaddr="192.168.8.3", server_source="192.168.10.1", option54="192.168.10.1", lease_seconds=10, is_ack=True)
++    assert not scope.lease_proves("00:11:22:33:44:55", "192.168.8.2")
++    assert scope.lease_proves("00:11:22:33:44:55", "192.168.8.3")
++    clock.value = 15
++    assert not scope.lease_proves("00:11:22:33:44:55", "192.168.8.3")
++
++
++def test_lease_cache_is_bounded_by_earliest_expiry():
++    clock = Clock(); scope = resolver(clock)
++    for xid in range(DHCP_LEASE_CACHE_MAX_ENTRIES + 1):
++        mac = f"02:00:{(xid >> 24) & 255:02x}:{(xid >> 16) & 255:02x}:{(xid >> 8) & 255:02x}:{xid & 255:02x}"
++        ip = f"192.168.{8 + ((xid // 254) % 4)}.{1 + xid % 254}"
++        scope.server_reply(mac, xid, yiaddr=ip, server_source="192.168.10.1", option54="192.168.10.1", lease_seconds=100 + xid, is_ack=True)
++    assert scope.lease_count == DHCP_LEASE_CACHE_MAX_ENTRIES
+diff --git a/tests/device_fingerprint_sensor/test_spool.py b/tests/device_fingerprint_sensor/test_spool.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d661ac162f5df9a68fbcd1aee4e601705ad76520
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_spool.py
+@@ -0,0 +1,66 @@
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++import pytest
++
++from app.device_fingerprint_sensor.models import NormalizedEvent, SensorSpoolError
++from app.device_fingerprint_sensor.spool import SensorSpool
++
++UTC = timezone.utc
++
++
++class Clock:
++    value = datetime(2026, 9, 14, tzinfo=UTC)
++    def __call__(self): return self.value
++
++
++def event(index, endpoint="evidence", observed=None):
++    identity = f"00000000-0000-4000-8000-{index:012d}"
++    return NormalizedEvent(endpoint, identity, "dhcp", observed or "2026-09-14T00:00:00.000Z", {"id": index})
++
++
++def spool(tmp_path, clock, **changes):
++    value = SensorSpool(str(tmp_path / "spool.sqlite3"), total_budget_bytes=changes.get("budget", 10_000_000), main_db_max_bytes=5_000_000, max_events=changes.get("max_events", 100), now=clock)
++    value.initialize(); return value
++
++
++def test_spool_is_delete_journal_bounded_and_endpoint_homogeneous(tmp_path):
++    clock = Clock(); value = spool(tmp_path, clock)
++    assert value.connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
++    assert value.connection.execute("PRAGMA user_version").fetchone()[0] == 1
++    value.enqueue([event(1), event(2, "source_health")])
++    endpoint, rows = value.batch(100)
++    assert endpoint == "evidence" and len(rows) == 1
++    value.acknowledge([rows[0][0]])
++    assert value.batch(100)[0] == "source_health"
++
++
++def test_stable_id_is_idempotent_and_stale_rows_are_dropped(tmp_path):
++    clock = Clock(); value = spool(tmp_path, clock)
++    value.enqueue([event(1), event(1)])
++    assert value.metrics()["rows"] == 1
++    value.enqueue([event(2, observed="2026-09-12T00:00:00.000Z")])
++    assert value.metrics()["rows"] == 1
++    assert value.stale_dropped == 1
++
++
++def test_row_cap_evicts_oldest_evidence_not_health(tmp_path):
++    clock = Clock(); value = spool(tmp_path, clock, max_events=2)
++    value.enqueue([event(1, "source_health"), event(2)])
++    value.enqueue([event(3)])
++    assert value.metrics()["rows"] == 2
++    documents = [row[1] for row in value.batch(100)[1]]
++    assert documents[0]["id"] == 1
++
++
++def test_transaction_is_limited_to_100(tmp_path):
++    clock = Clock(); value = spool(tmp_path, clock, max_events=1000)
++    with pytest.raises(SensorSpoolError):
++        value.enqueue([event(index) for index in range(101)])
++
++
++def test_physical_fingerprint_contains_no_raw_packet_material(tmp_path):
++    clock = Clock(); value = spool(tmp_path, clock)
++    value.enqueue([event(1)])
++    raw = Path(value.path).read_bytes()
++    assert b"raw_packet" not in raw and b"private.example" not in raw
+diff --git a/tests/device_fingerprint_sensor/test_tcp_syn.py b/tests/device_fingerprint_sensor/test_tcp_syn.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f05cfcaccc2e7049319267b3d3d994dade0a7ff9
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_tcp_syn.py
+@@ -0,0 +1,40 @@
++import ipaddress
++import struct
++
++from app.device_fingerprint_sensor.tcp_syn import parse_tcp_syn_frame
++
++
++def syn(*, source="192.168.8.20", flags=0x02, options=b"\x02\x04\x05\xb4\x04\x02\x08\x0a" + b"\0" * 8):
++    while len(options) % 4:
++        options += b"\x01"
++    tcp = bytearray(20 + len(options))
++    struct.pack_into("!HH", tcp, 0, 12345, 443)
++    tcp[12] = ((20 + len(options)) // 4) << 4
++    tcp[13] = flags
++    struct.pack_into("!H", tcp, 14, 65535)
++    tcp[20:] = options
++    ip = bytearray(20)
++    ip[0] = 0x45; ip[8] = 64; ip[9] = 6
++    struct.pack_into("!H", ip, 2, 20 + len(tcp))
++    ip[12:16] = ipaddress.ip_address(source).packed
++    ip[16:20] = ipaddress.ip_address("1.1.1.1").packed
++    return bytes.fromhex("aabbccddeeff0011223344550800") + bytes(ip) + bytes(tcp)
++
++
++def test_ipv4_guest_syn_is_normalized_without_destination_or_ports():
++    parsed = parse_tcp_syn_frame(syn(), (ipaddress.ip_network("192.168.8.0/22"),))
++    assert parsed is not None
++    mac, ip, payload = parsed
++    assert mac == "00:11:22:33:44:55"
++    assert ip == "192.168.8.20"
++    assert payload["mss"] == 1460
++    assert payload["sack_permitted"] is True
++    assert payload["timestamps_present"] is True
++    assert "destination" not in payload and "port" not in payload
++
++
++def test_ack_or_non_guest_or_truncated_is_rejected():
++    guest = (ipaddress.ip_network("192.168.8.0/22"),)
++    assert parse_tcp_syn_frame(syn(flags=0x12), guest) is None
++    assert parse_tcp_syn_frame(syn(source="192.168.0.20"), guest) is None
++    assert parse_tcp_syn_frame(syn()[:30], guest) is None
