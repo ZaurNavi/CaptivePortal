@@ -118,11 +118,13 @@ def parse_node(location, node_identity, values, *, root=False):
         require(type(value) is str and value.strip().isascii() and value.strip().isdecimal())
         return integer(int(value.strip()))
     def limit(value): return None if value is not None and value.strip()=='max' else number(value)
-    fields=('memory.max','memory.current','memory.swap.max','memory.swap.current','memory.events','memory.pressure')
-    absent=[values.get(key) is None for key in fields]
+    controls=('memory.max','memory.current','memory.swap.max','memory.swap.current','memory.events')
+    absent=[values.get(key) is None for key in controls]
     if root and all(absent):
-        return Node(location,node_identity,None,None,None,None,None,None,None,(),'ROOT_CONTROL_NOT_EXPOSED')
-    require(not any(absent))
+        raw_psi=values.get('memory.pressure')
+        psi=None if raw_psi is None else tuple(sorted(pressure(raw_psi).items()))
+        return Node(location,node_identity,None,None,None,None,None,psi,None,(),'ROOT_CONTROL_NOT_EXPOSED')
+    require(not any(absent) and values.get('memory.pressure') is not None)
     maximum=limit(values['memory.max']); current=number(values['memory.current'])
     swap_max=limit(values['memory.swap.max']); swap_current=number(values['memory.swap.current'])
     require((maximum is None or current<=maximum) and (swap_max is None or swap_current<=swap_max))
@@ -157,7 +159,8 @@ class LocalSample:
         require(all(not values[0] for _,values in self.guest_pressure))
         for node in self.nodes:
             if node.root_controls=='ROOT_CONTROL_NOT_EXPOSED':
-                require(node.location=='/'); continue
+                require(node.location=='/' and (node.psi is None or all(not values[0] for _,values in node.psi)))
+                continue
             require(node.swap_current==0 and node.psi is not None and all(not values[0] for _,values in node.psi))
         if previous is not None:
             require(self.captured_ns>=previous.captured_ns and len(self.nodes)==len(previous.nodes))

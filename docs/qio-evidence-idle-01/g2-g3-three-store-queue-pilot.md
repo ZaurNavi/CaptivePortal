@@ -200,3 +200,103 @@ both permanent lock inodes; do not truncate/delete/reprovision to clear HOLD.
 Unknown orphan requires explicit reconciliation, not bypass. Re-enabling old
 direct tools requires separate Owner/TechLead decision and no surviving audit.
 No Coder deploy, service restart, real cgroup mutation or production action.
+
+## Root-control correction and one-shot administrative abandonment (#226)
+
+Repair base: `a31a52875f49a336ddf556e54ffb6559eadd3342` (not `main`).
+Authority: TechLead4 comment 6272056294 and TechLead5 comment 6276728081.
+This code is an offline review candidate. **Real recovery/install remains HOLD**
+until independent source acceptance, explicit Owner/TechLead execution GO and
+fresh SysAdmin containment. No automatic startup repair or socket operation exists.
+
+Native cgroup2 `/` may omit all five memory controls/counters while exporting
+`memory.pressure`. The parser validates any such PSI, retains it for pressure/
+stability checks, and keeps absent cap/current/swap/events as `None` plus
+`ROOT_CONTROL_NOT_EXPOSED`. It does not invent a cap or counters. A partial
+five-control bundle, malformed PSI, missing non-root control, unbounded leaf,
+nonzero swap or identity drift still denies admission. This reproduces the
+separate confirmed root-layout defect; it **does not prove the exact original
+19:40 exit-3 cause**. The daemon now emits only one closed `stage/reason_code`
+line on exit 3, without exception payload, traceback, paths or identities.
+
+### Operator runbook — preparation only, NOT execution authorization
+
+Only the fixed old epoch `475efdfc-1ee0-44b7-9829-98552752a3e4`, A job
+`8f5a1f66-3b5b-464e-801f-17de2ce72a39`, attempt
+`dc1bc15e-a8b1-44f8-a44a-836bb727491c` is eligible. Old A must still be
+`public_traffic`, seq1, claimed, PID null; B/C seq2/3 must still be queued,
+unclaimed NI-04/Traffic Projection. Exactly three ACKs, next_sequence=4 and
+empty last-attempt/last-success maps are required. Any difference is HOLD.
+
+1. SysAdmin first obtains separate exact-queue execution approval. Stop and
+   fence all coordinator/worker/legacy launch paths for the entire exclusive
+   operator window. Preserve existing queue, locks, profile, release and
+   journald. Do not start the daemon to inspect or repair the queue.
+2. Perform TWO distinct, stable current kernel observations on the same boot:
+   original `qio226-abc-coordinator-lab.service` stopped, MainPID=0; original
+   cgroup/descendants absent; all coordinator/worker processes and relevant FD
+   owners absent; old child launch paths contained; unexpected legacy auditors
+   absent; socket absent. A missing inventory or uncertain release is HOLD.
+   Retain the complete bounded read-only evidence for both observations.
+   These establish **current nonexistence**, never recovered historical wait,
+   pidfd, audit success or positive old child release.
+3. Prepare (separately approved installation step) root-owned directory
+   `/var/lib/captive-portal/db-audit-recovery`, mode 0700, outside active queue.
+   No tool code provisions it. Put the two root-only regular single-link
+   evidence files `observation-1.txt` and `observation-2.txt` there. In the same
+   directory place root-only `containment.v1.json`. No symlinks or writable
+   untrusted ancestors. Its closed schema is defined by `recover_once.attestation`:
+   - schema `db_audit_coordinator.abandon.old_epoch.v1`;
+   - exact `epoch`, `job_id`, `attempt_id` above, exact original `service`;
+   - `queue_identity`, `owner_identity`, `heavy_identity`: [device, inode]
+     of current queue, permanent coordinator.lock and independent heavy.lock;
+   - exact original queue `queue_sha256`, `queue_bytes`, same kernel `boot_id`;
+   - `observations`: exactly two records with distinct `captured_ns` from the
+     same machine's monotonic clock, `evidence_sha256`, integer `main_pid=0`,
+     and closed `checks` with every value literal true:
+     `original_unit_stopped`, `original_cgroup_and_descendants_absent`,
+     `coordinator_and_worker_absent`, `process_fd_owners_absent`,
+     `old_child_launch_paths_contained`, `unexpected_legacy_auditors_absent`,
+     `launches_fenced_for_operator_window`, `socket_absent`.
+   Both observations must be younger than 60 seconds at validation and again
+   immediately before queue publication. Their evidence files must match both
+   hashes. **This is explicit root operator attestation, not automated proof
+   that every process is absent.** Do not fill true without the named checks.
+4. From the exact accepted immutable repaired release, approved interpreter,
+   with no parallel launch activity, root may later invoke exactly:
+   `python -B -E -s -m app.db_audit_coordinator.recover_once abandon-old-epoch`.
+   There are no path, epoch, force, reset or environment overrides. It checks
+   both permanent locks non-blocking, exact inode/dev and modes (0600 owner,
+   0640 heavy, empty single-link root-owned files); never replaces a lock.
+5. Before the one atomic transition it exclusively creates a 0400 exact-byte
+   queue backup `old-epoch-<epoch>.queue-before.json` and a copy of the root
+   attestation alongside it, fsyncing both files and directory. Receipt holds
+   the original queue SHA256. Files are immutable **by protected policy** (not
+   a claim of filesystem immutable flags). Existing/partial evidence blocks
+   retry; never overwrite or delete it to resume. Recheck source bytes/inode,
+   directory identities, receipt freshness and both locks before publication.
+6. A becomes `deferred`, with `incomplete/restarted_after_claim`, no snapshot
+   or verified success. B/C become `canceled` with null attempt/worker/result:
+   **canceled before execution**, not failed worker results. All three ACKs,
+   job IDs, scoped idempotency hashes, seq, old claim/attempt/epoch and the
+   unchanged 128-history semantics survive. next_sequence stays 4. The single
+   existing queue atomic replacement uses file+directory fsync; the new JSON
+   is independently parsed and compared. There is no reset, pruning or new
+   queue. Repeating the command makes no queue/evidence write and returns HOLD.
+7. Exit 3 or unknown directory-fsync outcome means STOP and independent review
+   of queue plus protected evidence, not retry or manual JSON surgery. A
+   pre-publication evidence failure can leave a protected partial backup and
+   unchanged queue. A post-rename fsync failure may leave terminal bytes with
+   unknown durability; do not treat it as completed recovery or start work.
+8. Only after independently verified committed abandonment, accepted repaired
+   install and all original P0/resource/source/host gates may a NEW supervised
+   coordinator epoch accept a fresh A/B/C batch. Recovery itself never rotates
+   epoch, starts services, submits work or claims old B/C. Real pilot remains
+   **A PASS → B contained failure → C PASS**, not a historical PASS retrofit.
+
+Coder verification uses only disposable queues/locks and synthetic observation
+documents; no real LAB state or native cgroup tree is mutated. Linux root
+fixtures exercise actual flock, nofollow, root modes, evidence fsync, atomic
+publication, repeat refusal and injected faults. Portable contract/diagnostic
+cases also run on Windows. Wider security/crash/release acceptance is TechLead5's
+responsibility; these tests do not grant operational recovery authority.
