@@ -1,0 +1,2094 @@
+diff --git a/.env.example b/.env.example
+index cdce5c14d682e84fe599f21976323c9b7065cc9d..281ab7270d3079b99ad56aa063e5135abad88489 100644
+--- a/.env.example
++++ b/.env.example
+@@ -327,3 +327,8 @@ DEVICE_FINGERPRINT_SENSOR_CORE_READY_MAX_WAIT_SECONDS=1800
+ DEVICE_FINGERPRINT_SENSOR_EVE_MAX_DATAGRAM_BYTES=262144
+ DEVICE_FINGERPRINT_SENSOR_EVE_SOCKET_PATH=/run/captive-portal/fingerprint-sensor/suricata-eve.sock
+ DEVICE_FINGERPRINT_SENSOR_EVE_SOCKET_WAIT_SECONDS=1830
++
++# Settings Foundation V1 bootstrap controls; not writable through Admin Settings.
++# Disabled by default. Provision the parent directory externally before enabling.
++WEB_ADMIN_SETTINGS_ENABLED=false
++SETTINGS_DB_PATH=/opt/CaptivePortal/data/settings.sqlite3
+diff --git a/app/admin_web/policy.py b/app/admin_web/policy.py
+index 3d395d5f0283bea2a24cde6afc00212fc2d214f4..dacae089408d702659245633e47ab98384f3f1c3 100644
+--- a/app/admin_web/policy.py
++++ b/app/admin_web/policy.py
+@@ -19,6 +19,10 @@ READ_CAPABILITIES = frozenset(
+     }
+ )
+ 
++GLOBAL_SETTINGS_CAPABILITIES = frozenset({
++    "admin.read.settings.global", "admin.write.settings.global",
++})
++
+ 
+ class AdminSiteContextError(ValueError):
+     pass
+@@ -48,6 +52,13 @@ class AdminSiteContextResolver:
+ class AdminAccessPolicy:
+     allowed_site_ids: frozenset[str]
+ 
++    def authorize_global(self, principal: AdminPrincipal, capability: str) -> bool:
++        return (
++            isinstance(principal, AdminPrincipal)
++            and principal.principal_type == "platform_operator"
++            and capability in GLOBAL_SETTINGS_CAPABILITIES
++        )
++
+     def authorize(
+         self,
+         principal: AdminPrincipal,
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index 22248e6f5a460e8dd4d54dd35d161b875b3bbafd..f4dca9129baf89c93ce4703031bd18d51dbbfd41 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -107,7 +107,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             and any(len(request.args.getlist(key)) != 1 for key in request.args)
+         ):
+             return _error("invalid_request", 400)
+-        if request.method == "POST":
++        if request.method == "POST" and request.path != "/admin/api/v1/settings/generations":
+             if request.content_length is None:
+                 return _error("length_required", 411)
+             if request.content_length > config.max_post_bytes:
+@@ -158,6 +158,96 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+ 
+         return wrapped
+ 
++    @blueprint.context_processor
++    def settings_navigation():
++        return {"settings_nav_enabled": (
++            getattr(runtime, "settings_feature_enabled", False)
++            and policy.authorize_global(getattr(g, "admin_principal", None), "admin.read.settings.global")
++        )}
++
++    def settings_gate(capability):
++        if not getattr(runtime, "settings_feature_enabled", False):
++            return _error("feature_disabled" if _is_api_path(request.path) else "not_found", 404)
++        if not policy.authorize_global(g.admin_principal, capability):
++            return _error("settings_forbidden", 403)
++        return None
++
++    @blueprint.get("/admin/settings")
++    @authenticated
++    def settings_page():
++        rejected = settings_gate("admin.read.settings.global")
++        if rejected is not None:
++            return rejected
++        return render_template("admin/settings.html", page={"key": "settings", "title": "Settings"},
++            username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token,
++            settings_store_state=runtime.settings_store_state)
++
++    def settings_failure(error):
++        return jsonify({"api_version": "admin.settings.v1", "request_id": g.admin_request_id,
++                        "error": {"code": error.code, "details": list(error.details)}}), error.status
++
++    @blueprint.get("/admin/api/v1/settings")
++    @authenticated
++    def settings_read():
++        from app.settings_control.models import SettingsError
++        rejected = settings_gate("admin.read.settings.global")
++        if rejected is not None:
++            return rejected
++        try:
++            if runtime.settings_read_service is None:
++                raise SettingsError("settings_store_unavailable")
++            model = runtime.settings_read_service.read()
++            response = jsonify(model)
++            response.headers["ETag"] = model["etag"]
++            return response
++        except SettingsError as error:
++            return settings_failure(error)
++
++    @blueprint.post("/admin/api/v1/settings/generations")
++    @authenticated
++    def settings_mutation():
++        import re
++        from app.settings_control.models import SettingsError
++        rejected = settings_gate("admin.write.settings.global")
++        if rejected is not None:
++            return rejected
++        try:
++            submitted = request.headers.get("X-CSRF-Token", "")
++            if len(submitted) > config.max_csrf_chars or not token_matches(submitted, g.admin_session.csrf_token):
++                raise SettingsError("invalid_csrf", 400)
++            match = request.headers.get("If-Match")
++            if match is None:
++                raise SettingsError("precondition_required", 428)
++            parsed = re.fullmatch(r'"settings-g(0|[1-9][0-9]{0,18})"', match)
++            if parsed is None:
++                raise SettingsError("invalid_request", 400)
++            key = request.headers.get("Idempotency-Key", "")
++            try:
++                if str(uuid.UUID(key)) != key:
++                    raise ValueError()
++            except (ValueError, AttributeError):
++                raise SettingsError("invalid_request", 400)
++            if request.mimetype != "application/json":
++                raise SettingsError("unsupported_media_type", 415)
++            if request.content_length is None:
++                raise SettingsError("length_required", 411)
++            if request.content_length > 32768:
++                raise SettingsError("request_too_large", 413)
++            raw = request.get_data(cache=False)
++            if len(raw) > 32768 or request.args:
++                raise SettingsError("invalid_request", 400)
++            if runtime.settings_mutation_service is None:
++                raise SettingsError("settings_store_unavailable")
++            result = runtime.settings_mutation_service.mutate(raw, principal=g.admin_principal,
++                source_ip=g.admin_source_ip, request_id=g.admin_request_id,
++                idempotency_key=key, expected_generation=int(parsed[1]))
++            response = jsonify(result.body)
++            response.status_code = result.status
++            response.headers["ETag"] = f'"settings-g{result.body["configured_generation"]}"'
++            return response
++        except SettingsError as error:
++            return settings_failure(error)
++
+     @blueprint.get("/admin/login")
+     def login_form() -> Response:
+         if set(request.args) - {"next"}:
+@@ -2054,7 +2144,7 @@ def _error(code: str, status_code: int) -> Response:
+     if _is_api_path(request.path):
+         return jsonify(
+             {
+-                "api_version": API_VERSION,
++                "api_version": "admin.settings.v1" if request.path.startswith("/admin/api/v1/settings") else API_VERSION,
+                 "request_id": getattr(g, "admin_request_id", str(uuid.uuid4())),
+                 "error": {
+                     "code": code,
+diff --git a/app/admin_web/runtime.py b/app/admin_web/runtime.py
+index c15bf33092d6d3828e6906a24d95e7cb11751d87..aa344edad57614b866e0c7b05d87a73dfa951d08 100644
+--- a/app/admin_web/runtime.py
++++ b/app/admin_web/runtime.py
+@@ -64,6 +64,10 @@ class AdminWebRuntime:
+     traffic_evidence_state: str = "disabled"
+     traffic_evidence_aggregator: Any | None = None
+     blueprint: Any | None = None
++    settings_feature_enabled: bool = False
++    settings_store_state: str = "disabled"
++    settings_read_service: Any | None = None
++    settings_mutation_service: Any | None = None
+ 
+     def clear(self) -> None:
+         if self.session_store is not None:
+@@ -87,6 +91,7 @@ def create_admin_web_runtime(
+     current_state_runtime: Any | None = None,
+     observation_runtime: Any | None = None,
+     visit_runtime: Any | None = None,
++    settings_control: Any | None = None,
+ ) -> AdminWebRuntime:
+     """Create Admin security state without mutating or querying data sources."""
+     try:
+@@ -438,6 +443,10 @@ def create_admin_web_runtime(
+         traffic_completed_sessions_service=completed_sessions_service,
+         traffic_evidence_state=evidence_state,
+         traffic_evidence_aggregator=evidence_aggregator,
++        settings_feature_enabled=bool(settings_control and settings_control.feature_enabled),
++        settings_store_state=settings_control.store_state if settings_control else "disabled",
++        settings_read_service=settings_control.read_service if settings_control else None,
++        settings_mutation_service=settings_control.mutation_service if settings_control else None,
+     )
+     from .routes import create_admin_web_blueprint
+ 
+diff --git a/app/admin_web/static/admin.css b/app/admin_web/static/admin.css
+index 59e0a03f908be6037efddf6ae23526f492557d5a..0e196c157e496063ac61318c1cc38e8dafda0fda 100644
+--- a/app/admin_web/static/admin.css
++++ b/app/admin_web/static/admin.css
+@@ -342,3 +342,11 @@ input[type="radio"] { width: auto; min-height: 0; }
+   .device-inventory-metrics { grid-template-columns: minmax(0, 1fr); }
+   .device-row-network { display: none; }
+ }
++.settings-item { border-top: 1px solid var(--border, #d8dee9); padding: 1rem 0; min-width: 0; }
++.settings-item h3 { margin-bottom: .4rem; }
++.settings-item .mono { overflow-wrap: anywhere; }
++.settings-facts { display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(0, 2fr); gap: .3rem 1rem; }
++.settings-facts dd { margin: 0; overflow-wrap: anywhere; }
++.settings-item label { display: block; margin-top: .75rem; }
++.settings-item input, .settings-item select { max-width: 100%; padding: .5rem; }
++.settings-actions { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+diff --git a/app/admin_web/static/settings.js b/app/admin_web/static/settings.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2e67a8cb052cdd3308aad0490e77ddf9c1c9611
+--- /dev/null
++++ b/app/admin_web/static/settings.js
+@@ -0,0 +1,106 @@
++/* Global Settings V1. No Site controller, precedence, activation or restart authority. */
++(function () {
++  "use strict";
++  const root = document.getElementById("settings-page");
++  if (!root) return;
++  const status = document.getElementById("settings-state");
++  const groups = document.getElementById("settings-groups");
++  const save = document.getElementById("settings-save");
++  let model = null;
++  let etag = null;
++  let busy = false;
++  let controls = [];
++  function node(tag, text, className) {
++    const element = document.createElement(tag);
++    if (text !== undefined) element.textContent = text;
++    if (className) element.className = className;
++    return element;
++  }
++  const text = (value) => value === null ? "—" : String(value);
++  async function request(url, options) {
++    const abort = new AbortController();
++    const timer = window.setTimeout(() => abort.abort(), 30000);
++    try {
++      const response = await fetch(url, {...options, credentials: "same-origin", cache: "no-store", signal: abort.signal});
++      const body = await response.json();
++      if (!response.ok) {
++        const error = new Error("Settings request failed");
++        error.status = response.status;
++        error.code = body.error && body.error.code;
++        throw error;
++      }
++      return {response, body};
++    } finally { window.clearTimeout(timer); }
++  }
++  function render() {
++    groups.replaceChildren(); controls = [];
++    const containers = new Map();
++    model.settings.forEach((item) => {
++      if (!containers.has(item.group)) {
++        const section = node("section", undefined, "card card-wide settings-group");
++        section.append(node("h2", item.group)); groups.append(section); containers.set(item.group, section);
++      }
++      const row = node("article", undefined, "settings-item");
++      row.append(node("h3", item.display_label), node("p", item.description), node("p", item.key, "mono muted"));
++      const facts = node("dl", undefined, "settings-facts");
++      [["Configured", item.configured_value], ["Effective", item.effective_value],
++        ["Persisted override", item.persisted_override_value], ["Base source", item.base_source],
++        ["Base value", item.base_value], ["Pending", item.pending_value],
++        ["Consumer", item.consumer_state], ["Activation", item.activation_state],
++        ["Apply requirement", item.apply_requirement]].forEach(([label, value]) => {
++          facts.append(node("dt", label), node("dd", text(value)));
++        });
++      row.append(facts);
++      const label = node("label", "Override action ");
++      const operation = node("select");
++      [["unchanged", "Keep unchanged"], ["set", "Set override"], ["clear_override", "Clear override / use deployment value"]]
++        .forEach(([value, title]) => {const option = node("option", title); option.value = value; operation.append(option);});
++      label.append(operation); row.append(label);
++      const valueLabel = node("label", `Value (${item.validation.min_value}–${item.validation.max_value}) `);
++      const input = node("input"); input.type = "number"; input.step = "1";
++      input.min = String(item.validation.min_value); input.max = String(item.validation.max_value);
++      input.value = String(item.configured_value); input.disabled = true;
++      operation.addEventListener("change", () => {input.disabled = operation.value !== "set";});
++      valueLabel.append(input); row.append(valueLabel);
++      containers.get(item.group).append(row); controls.push({item, operation, input});
++    });
++  }
++  async function load() {
++    save.disabled = true; model = null; etag = null;
++    const result = await request(root.dataset.apiBase, {headers: {Accept: "application/json"}});
++    if (result.body.api_version !== "admin.settings.v1" || !Array.isArray(result.body.settings) || result.body.settings.length !== 12) throw new Error("Invalid Settings model");
++    model = result.body; etag = result.response.headers.get("ETag");
++    render(); save.disabled = false;
++    status.textContent = `Configured generation ${model.configured_generation}; effective ${text(model.effective_generation)}. ` +
++      (model.restart_required ? "Pending captive-portal.service restart." : "Current configured generation is adopted.");
++  }
++  function unavailable() {save.disabled = true; status.textContent = "Settings unavailable. No changes have been confirmed.";}
++  document.getElementById("settings-refresh").addEventListener("click", async () => {
++    if (busy) return;
++    busy = true; try {await load();} catch (_error) {unavailable();} finally {busy = false;}
++  });
++  document.getElementById("settings-form").addEventListener("submit", async (event) => {
++    event.preventDefault(); if (busy || !model || !etag) return;
++    const changes = controls.filter((row) => row.operation.value !== "unchanged").map((row) => ({
++      key: row.item.key, operation: row.operation.value,
++      ...(row.operation.value === "set" ? {value: Number(row.input.value)} : {}),
++    }));
++    if (!changes.length) {status.textContent = "No override changes selected."; return;}
++    busy = true; save.disabled = true;
++    try {
++      const result = await request(root.dataset.apiBase + "/generations", {method: "POST",
++        headers: {"Content-Type": "application/json", "X-CSRF-Token": root.dataset.csrfToken,
++          "If-Match": etag, "Idempotency-Key": crypto.randomUUID()}, body: JSON.stringify({changes})});
++      await load();
++      status.textContent = result.body.changed ? "Persisted successfully. Pending captive-portal.service restart." : "Accepted: no persisted override change.";
++    } catch (error) {
++      if (error.status === 412) {
++        try {await load(); status.textContent = "Settings changed concurrently. Review the current values before a new Save.";} catch (_error) {unavailable();}
++      } else if (error.status === 422 || error.status === 400) {
++        status.textContent = "Save rejected. Review values and validation bounds. Nothing was persisted.";
++        save.disabled = false;
++      } else {unavailable();}
++    } finally {busy = false;}
++  });
++  if (root.dataset.storeState === "available") load().catch(unavailable);
++})();
+diff --git a/app/admin_web/templates/admin/base.html b/app/admin_web/templates/admin/base.html
+index ca501ef9a955953b34d98c27aaf97ff9e5e4a280..19a8206df1067f5cdf826e99fe4c092e65cf82a8 100644
+--- a/app/admin_web/templates/admin/base.html
++++ b/app/admin_web/templates/admin/base.html
+@@ -5,18 +5,26 @@
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>{{ page.title }} · CaptivPortal</title>
+   <link rel="stylesheet" href="{{ url_for('admin_web_v1.static', filename='admin.css') }}">
++  {% if page.key == 'settings' %}
++  <script defer src="{{ url_for('admin_web_v1.static', filename='settings.js') }}"></script>
++  {% else %}
+   <script defer src="{{ url_for('admin_web_v1.static', filename='admin.js') }}"></script>
++  {% endif %}
+ </head>
+ <body>
+   <a class="skip-link" href="#main-content">Skip to content</a>
+   <header class="topbar">
+-    <a class="brand" href="/admin/sites/{{ site_id }}/" aria-label="CaptivPortal admin home">
++    <a class="brand" href="{% if page.key == 'settings' %}/admin/{% else %}/admin/sites/{{ site_id }}/{% endif %}" aria-label="CaptivPortal admin home">
+       <span class="brand-mark" aria-hidden="true">CP</span>
+       <span>CaptivPortal</span>
+     </a>
+     <div class="topbar-context">
++      {% if page.key == 'settings' %}
++      <span class="eyebrow">Global Settings</span>
++      {% else %}
+       <span class="eyebrow">Current Site</span>
+       <strong class="mono">{{ site_id }}</strong>
++      {% endif %}
+     </div>
+     <div class="topbar-account">
+       <span>{{ username }}</span>
+@@ -28,6 +36,9 @@
+   </header>
+   <div class="app-frame">
+     <nav class="sidebar" aria-label="Admin navigation">
++      {% if page.key == 'settings' %}
++      <a class="nav-link" href="/admin/">Home</a>
++      {% else %}
+       <a class="nav-link{% if page.key == 'home' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/">Home</a>
+       <a class="nav-link{% if page.key in ('devices', 'device') %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/devices">Devices</a>
+       <a class="nav-link{% if page.key == 'visits' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/visits">Visits</a>
+@@ -35,17 +46,25 @@
+       {% if traffic_enabled %}
+       <a class="nav-link{% if page.key == 'traffic' %} is-active{% endif %}" href="/admin/sites/{{ site_id }}/traffic">Traffic</a>
+       {% endif %}
++      {% endif %}
++      {% if settings_nav_enabled %}
++      <a class="nav-link{% if page.key == 'settings' %} is-active{% endif %}" href="/admin/settings">Settings</a>
++      {% endif %}
+     </nav>
+     <main id="main-content" class="content">
+       <div class="page-heading">
+         <div>
+-          <p class="eyebrow">Read-only operations</p>
++          <p class="eyebrow">{% if page.key == 'settings' %}Global administration{% else %}Read-only operations{% endif %}</p>
+           <h1>{{ page.title }}</h1>
+           {% block subtitle %}{% endblock %}
+         </div>
+-        <button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>
++        {% if page.key != 'settings' %}<button id="refresh-button" class="button" type="button"{% if page.key == 'traffic' %} disabled{% endif %}>Refresh</button>{% endif %}
+       </div>
+       <section
++        {% if page.key == 'settings' %}
++        id="settings-page" data-api-base="/admin/api/v1/settings"
++        data-store-state="{{ settings_store_state }}" data-csrf-token="{{ csrf_token }}"
++        {% else %}
+         id="admin-page"
+         data-page="{{ page.key }}"
+         data-site-id="{{ site_id }}"
+@@ -84,6 +103,7 @@
+         data-home-ap24h-refresh-seconds="{{ home_ap_24h_refresh_seconds }}"
+         data-home-ap24h-request-timeout-seconds="{{ home_ap_24h_request_timeout_seconds }}"
+         {% endif %}
++        {% endif %}
+       >
+         {% block page_body %}
+         {% block controls %}{% endblock %}
+diff --git a/app/admin_web/templates/admin/settings.html b/app/admin_web/templates/admin/settings.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba70468295bf53f1a3bdc70ab26a121eb8000978
+--- /dev/null
++++ b/app/admin_web/templates/admin/settings.html
+@@ -0,0 +1,14 @@
++{% extends "admin/base.html" %}
++{% block subtitle %}<p>Global presentation and refresh settings. Saves are persisted; activation requires a main-service restart by an operator.</p>{% endblock %}
++{% block page_body %}
++<div id="settings-state" class="state-panel" role="status" aria-live="polite">
++  {% if settings_store_state == 'available' %}Loading Settings…{% else %}Settings store unavailable. No changes can be saved.{% endif %}
++</div>
++<form id="settings-form">
++  <div id="settings-groups" class="content-grid"></div>
++  <div class="settings-actions">
++    <button id="settings-save" class="button" type="submit" disabled>Save changes</button>
++    <button id="settings-refresh" class="button button-secondary" type="button">Read current settings</button>
++  </div>
++</form>
++{% endblock %}
+diff --git a/app/config.py b/app/config.py
+index c9cf758886e0261614285115c6688f437328bfe7..0c077d20b6e3cea6d44cfd08a2f9473ce9cf8dc5 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -559,7 +559,21 @@ WEB_ADMIN_MAX_QUERY_DURATION_SECONDS = os.getenv(
+ WEB_ADMIN_MAX_RESPONSE_BYTES = os.getenv(
+     "WEB_ADMIN_MAX_RESPONSE_BYTES", "1048576"
+ )
+-WEB_ADMIN_DEVICE_PAGE_SIZE = os.getenv("WEB_ADMIN_DEVICE_PAGE_SIZE", "100")
++DEFAULT_WEB_ADMIN_DEVICE_PAGE_SIZE: int = 100
++DEFAULT_WEB_ADMIN_VISIT_PAGE_SIZE: int = 100
++DEFAULT_WEB_ADMIN_OBSERVATION_PAGE_SIZE: int = 100
++DEFAULT_WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS: int = 24
++DEFAULT_WEB_ADMIN_CURRENT_STATE_PAGE_SIZE: int = 100
++DEFAULT_WEB_ADMIN_HOME_TRAFFIC_PAGE_SIZE: int = 100
++DEFAULT_WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS: int = 60
++DEFAULT_WEB_ADMIN_HOME_TRAFFIC_REFRESH_SECONDS: int = 60
++DEFAULT_WEB_ADMIN_TRAFFIC_REFRESH_SECONDS: int = 60
++DEFAULT_WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS: int = 60
++DEFAULT_WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS: int = 60
++DEFAULT_WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS: int = 120
++WEB_ADMIN_SETTINGS_ENABLED = os.getenv("WEB_ADMIN_SETTINGS_ENABLED", "false")
++SETTINGS_DB_PATH = os.getenv("SETTINGS_DB_PATH", "/opt/CaptivePortal/data/settings.sqlite3")
++WEB_ADMIN_DEVICE_PAGE_SIZE = os.getenv("WEB_ADMIN_DEVICE_PAGE_SIZE", str(DEFAULT_WEB_ADMIN_DEVICE_PAGE_SIZE))
+ WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED = os.getenv(
+     "WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED", "false"
+ )
+@@ -569,34 +583,34 @@ WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET = os.getenv(
+ WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED = os.getenv(
+     "WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED", "false"
+ )
+-WEB_ADMIN_VISIT_PAGE_SIZE = os.getenv("WEB_ADMIN_VISIT_PAGE_SIZE", "100")
++WEB_ADMIN_VISIT_PAGE_SIZE = os.getenv("WEB_ADMIN_VISIT_PAGE_SIZE", str(DEFAULT_WEB_ADMIN_VISIT_PAGE_SIZE))
+ WEB_ADMIN_OBSERVATION_PAGE_SIZE = os.getenv(
+-    "WEB_ADMIN_OBSERVATION_PAGE_SIZE", "100"
++    "WEB_ADMIN_OBSERVATION_PAGE_SIZE", str(DEFAULT_WEB_ADMIN_OBSERVATION_PAGE_SIZE)
+ )
+ WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS = os.getenv(
+-    "WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS", "24"
++    "WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS", str(DEFAULT_WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS)
+ )
+ WEB_ADMIN_HOME_LIVE_ENABLED = os.getenv("WEB_ADMIN_HOME_LIVE_ENABLED", "false")
+ WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS = os.getenv(
+-    "WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS", "60"
++    "WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS", str(DEFAULT_WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS)
+ )
+ WEB_ADMIN_HOME_LIVE_REQUEST_TIMEOUT_SECONDS = os.getenv(
+     "WEB_ADMIN_HOME_LIVE_REQUEST_TIMEOUT_SECONDS", "30"
+ )
+ WEB_ADMIN_CURRENT_STATE_PAGE_SIZE = os.getenv(
+-    "WEB_ADMIN_CURRENT_STATE_PAGE_SIZE", "100"
++    "WEB_ADMIN_CURRENT_STATE_PAGE_SIZE", str(DEFAULT_WEB_ADMIN_CURRENT_STATE_PAGE_SIZE)
+ )
+ WEB_ADMIN_HOME_TRAFFIC_ENABLED = os.getenv(
+     "WEB_ADMIN_HOME_TRAFFIC_ENABLED", "false"
+ )
+ WEB_ADMIN_HOME_TRAFFIC_REFRESH_SECONDS = os.getenv(
+-    "WEB_ADMIN_HOME_TRAFFIC_REFRESH_SECONDS", "60"
++    "WEB_ADMIN_HOME_TRAFFIC_REFRESH_SECONDS", str(DEFAULT_WEB_ADMIN_HOME_TRAFFIC_REFRESH_SECONDS)
+ )
+ WEB_ADMIN_HOME_TRAFFIC_REQUEST_TIMEOUT_SECONDS = os.getenv(
+     "WEB_ADMIN_HOME_TRAFFIC_REQUEST_TIMEOUT_SECONDS", "30"
+ )
+ WEB_ADMIN_HOME_TRAFFIC_PAGE_SIZE = os.getenv(
+-    "WEB_ADMIN_HOME_TRAFFIC_PAGE_SIZE", "100"
++    "WEB_ADMIN_HOME_TRAFFIC_PAGE_SIZE", str(DEFAULT_WEB_ADMIN_HOME_TRAFFIC_PAGE_SIZE)
+ )
+ WEB_ADMIN_HOME_TRAFFIC_FRESH_MAX_AGE_SECONDS = os.getenv(
+     "WEB_ADMIN_HOME_TRAFFIC_FRESH_MAX_AGE_SECONDS", "90"
+@@ -611,7 +625,7 @@ WEB_ADMIN_HOME_ACTIVITY_ENABLED = os.getenv(
+     "WEB_ADMIN_HOME_ACTIVITY_ENABLED", "false"
+ )
+ WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS = os.getenv(
+-    "WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS", "60"
++    "WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS", str(DEFAULT_WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS)
+ )
+ WEB_ADMIN_HOME_ACTIVITY_REQUEST_TIMEOUT_SECONDS = os.getenv(
+     "WEB_ADMIN_HOME_ACTIVITY_REQUEST_TIMEOUT_SECONDS", "30"
+@@ -629,7 +643,7 @@ WEB_ADMIN_HOME_HEALTH_ENABLED = os.getenv(
+     "WEB_ADMIN_HOME_HEALTH_ENABLED", "false"
+ )
+ WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS = os.getenv(
+-    "WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS", "60"
++    "WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS", str(DEFAULT_WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS)
+ )
+ WEB_ADMIN_HOME_HEALTH_REQUEST_TIMEOUT_SECONDS = os.getenv(
+     "WEB_ADMIN_HOME_HEALTH_REQUEST_TIMEOUT_SECONDS", "30"
+@@ -641,7 +655,7 @@ WEB_ADMIN_HOME_AP_24H_ENABLED = os.getenv(
+     "WEB_ADMIN_HOME_AP_24H_ENABLED", "false"
+ )
+ WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS = os.getenv(
+-    "WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS", "120"
++    "WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS", str(DEFAULT_WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS)
+ )
+ WEB_ADMIN_HOME_AP_24H_REQUEST_TIMEOUT_SECONDS = os.getenv(
+     "WEB_ADMIN_HOME_AP_24H_REQUEST_TIMEOUT_SECONDS", "30"
+@@ -684,7 +698,7 @@ WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED = os.getenv(
+     "WEB_ADMIN_TRAFFIC_EVIDENCE_ENABLED", "false"
+ )
+ WEB_ADMIN_TRAFFIC_REFRESH_SECONDS = os.getenv(
+-    "WEB_ADMIN_TRAFFIC_REFRESH_SECONDS", "60"
++    "WEB_ADMIN_TRAFFIC_REFRESH_SECONDS", str(DEFAULT_WEB_ADMIN_TRAFFIC_REFRESH_SECONDS)
+ )
+ WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS = os.getenv(
+     "WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS", "30"
+diff --git a/app/settings.py b/app/settings.py
+index c40613533de1b8ab6274bc7caac803b10ccdd7f8..c040e3f4df16972dc2b111530258a09f12f0e14e 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -150,6 +150,7 @@ from app.config import (
+     WEB_ADMIN_MAX_NEXT_CHARS, WEB_ADMIN_MAX_CURSOR_CHARS,
+     WEB_ADMIN_MAX_FILTER_CHARS, WEB_ADMIN_MAX_CONCURRENT_QUERIES,
+     WEB_ADMIN_MAX_QUERY_DURATION_SECONDS, WEB_ADMIN_MAX_RESPONSE_BYTES,
++    WEB_ADMIN_SETTINGS_ENABLED, SETTINGS_DB_PATH,
+     WEB_ADMIN_DEVICE_PAGE_SIZE, WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED,
+     WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET,
+     WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED,
+@@ -616,6 +617,8 @@ def get_settings() -> dict:
+             WEB_ADMIN_MAX_QUERY_DURATION_SECONDS
+         ),
+         "web_admin_max_response_bytes": WEB_ADMIN_MAX_RESPONSE_BYTES,
++        "web_admin_settings_enabled": WEB_ADMIN_SETTINGS_ENABLED,
++        "settings_db_path": SETTINGS_DB_PATH,
+         "web_admin_device_page_size": WEB_ADMIN_DEVICE_PAGE_SIZE,
+         "web_admin_device_list_context_enabled": (
+             WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED
+diff --git a/app/settings_control/__init__.py b/app/settings_control/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e5872c22d0e32293283f1cb07c1a0fe3efd2d88
+--- /dev/null
++++ b/app/settings_control/__init__.py
+@@ -0,0 +1 @@
++"""Global Settings V1 domain. Importing this package performs no I/O."""
+diff --git a/app/settings_control/activation.py b/app/settings_control/activation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..484c48ead28bf2209c1703a7584d43f1a3e6ac94
+--- /dev/null
++++ b/app/settings_control/activation.py
+@@ -0,0 +1,39 @@
++"""Main-runtime lifecycle capability; never included in SettingsAdminContext."""
++from .models import SettingsError
++
++
++class SettingsActivationService:
++    def __init__(self, repository, snapshot, read_service):
++        self.repository, self.snapshot, self.read_service = repository, snapshot, read_service
++
++    def adopt(self, runtime_settings, admin_runtime):
++        # Exact startup snapshot, not a fresh configured-head lookup.
++        if runtime_settings is not self.snapshot.values:
++            self.fail("snapshot_mismatch")
++            raise SettingsError("settings_activation_failed", 500)
++        admin_enabled = runtime_settings.get("web_admin_enabled", "false") in (True, "true")
++        if admin_enabled and admin_runtime is None:
++            # An absent runtime alone is not positive Settings-validation evidence.
++            raise SettingsError("settings_activation_unavailable", 503)
++        invalid = admin_enabled and admin_runtime.config is None
++        if admin_runtime is not None:
++            for enabled_key, attribute in (
++                ("web_admin_home_activity_enabled", "home_activity_config"),
++                ("web_admin_home_health_enabled", "home_health_config"),
++                ("web_admin_home_ap_24h_enabled", "home_ap_24h_config"),
++            ):
++                if runtime_settings.get(enabled_key, "false") in (True, "true"):
++                    config = getattr(admin_runtime, attribute, None)
++                    invalid |= config is None or not config.enabled
++        if invalid:
++            self.fail("admin_configuration_adoption_failed")
++            raise SettingsError("settings_activation_failed", 500)
++        if admin_enabled and admin_runtime.blueprint is None:
++            raise SettingsError("settings_activation_unavailable", 503)
++        self.repository.activation(self.snapshot.generation_id, True)
++        self.read_service._adopted = True
++
++    def fail(self, safe_error_code):
++        if safe_error_code not in {"snapshot_mismatch", "admin_configuration_adoption_failed", "settings_validation_failed"}:
++            raise ValueError("invalid activation failure category")
++        self.repository.activation(self.snapshot.generation_id, False, safe_error_code)
+diff --git a/app/settings_control/bootstrap.py b/app/settings_control/bootstrap.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ebc142cd3376457cb5194557bbd33cba4b44790
+--- /dev/null
++++ b/app/settings_control/bootstrap.py
+@@ -0,0 +1,34 @@
++"""One-shot startup resolution, disabled/store-unavailable fail-open boundary."""
++from .activation import SettingsActivationService
++from .models import SettingsAdminContext, SettingsBootstrapResult, ResolvedSettingsSnapshot, SettingsError
++from .repository import SettingsRepository
++from .resolver import resolve_settings, freeze
++from .services import SettingsReadService, SettingsMutationService
++from .validation import SettingsValidationService
++
++
++def bootstrap_settings_control(*, base_settings, explicit_environment_names, logger):
++    enabled = base_settings.get("web_admin_settings_enabled", "false") in (True, "true")
++    empty = freeze({})
++    fallback = ResolvedSettingsSnapshot(None, freeze(dict(base_settings)), empty, empty, empty)
++    if not enabled:
++        return SettingsBootstrapResult(False, "disabled", base_settings, fallback, SettingsAdminContext(False, "disabled"))
++    try:
++        repository = SettingsRepository(base_settings.get("settings_db_path", "/opt/CaptivePortal/data/settings.sqlite3"))
++        generation, overrides = repository.configured()
++    except (SettingsError, TypeError, ValueError, OSError):
++        logger.error("settings.store_unavailable")
++        return SettingsBootstrapResult(True, "unavailable", base_settings, fallback, SettingsAdminContext(True, "unavailable"))
++    try:
++        snapshot = resolve_settings(base_settings, explicit_environment_names, overrides, generation)
++        SettingsValidationService().validate(snapshot)
++    except SettingsError:
++        try:
++            repository.activation(generation, False, "settings_validation_failed")
++        except SettingsError:
++            logger.error("settings.failure_attestation_unavailable")
++        raise
++    read = SettingsReadService(repository, freeze(dict(base_settings)), explicit_environment_names, snapshot)
++    mutation = SettingsMutationService(repository, read)
++    return SettingsBootstrapResult(True, "available", snapshot.values, snapshot,
++        SettingsAdminContext(True, "available", read, mutation), SettingsActivationService(repository, snapshot, read))
+diff --git a/app/settings_control/definitions.py b/app/settings_control/definitions.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd61f9a3f51c0b26fe515b88098343829b92ea0b
+--- /dev/null
++++ b/app/settings_control/definitions.py
+@@ -0,0 +1,67 @@
++"""The ordered, closed twelve-key writable Settings definition registry."""
++from dataclasses import dataclass
++from app import config
++
++
++@dataclass(frozen=True, slots=True)
++class SettingsDefinition:
++    key: str
++    repository_default_value: int
++    min_value: int
++    max_value: int
++    display_label: str
++    description: str
++    semantic_validator: str
++    consumer_enable_settings_dict_key: str
++    group: str
++    value_type: str = "integer"
++    scope_type: str = "global"
++    secret_class: str = "normal"
++    editable: bool = True
++    apply_requirement: str = "main_service_restart"
++    activation_target: str = "captive-portal.service"
++
++    @property
++    def settings_dict_key(self):
++        return self.key.lower()
++
++    @property
++    def environment_variable_name(self):
++        return self.key
++
++
++_ROWS = (
++    ("DEVICE_PAGE_SIZE", 1, 500, "Device page size", "Devices per page.", "admin_web", "enabled"),
++    ("VISIT_PAGE_SIZE", 1, 500, "Visit page size", "Visits per page.", "admin_web", "enabled"),
++    ("OBSERVATION_PAGE_SIZE", 1, 500, "Observation page size", "Observations per page.", "admin_web", "enabled"),
++    ("OBSERVATION_MAX_WINDOW_HOURS", 1, 168, "Observation window", "Maximum observation window in hours.", "admin_web", "enabled"),
++    ("CURRENT_STATE_PAGE_SIZE", 1, 250, "Current state page size", "Current devices and APs per page.", "admin_web", "home_live_enabled"),
++    ("HOME_TRAFFIC_PAGE_SIZE", 1, 250, "Home traffic page size", "Traffic APs per page.", "admin_web", "home_traffic_enabled"),
++    ("HOME_LIVE_REFRESH_SECONDS", 60, 300, "Home live refresh", "Refresh interval in seconds.", "admin_web", "home_live_enabled"),
++    ("HOME_TRAFFIC_REFRESH_SECONDS", 60, 300, "Home traffic refresh", "Refresh interval in seconds.", "admin_web", "home_traffic_enabled"),
++    ("TRAFFIC_REFRESH_SECONDS", 60, 300, "Traffic refresh", "Refresh interval in seconds.", "admin_web", "traffic_enabled"),
++    ("HOME_ACTIVITY_REFRESH_SECONDS", 60, 300, "Home activity refresh", "Refresh interval in seconds.", "home_activity", "home_activity_enabled"),
++    ("HOME_HEALTH_REFRESH_SECONDS", 60, 300, "Home health refresh", "Refresh interval in seconds.", "home_health", "home_health_enabled"),
++    ("HOME_AP_24H_REFRESH_SECONDS", 60, 600, "AP 24-hour refresh", "Refresh interval in seconds.", "home_ap_24h", "home_ap_24h_enabled"),
++)
++
++
++class SettingsDefinitionRegistry:
++    def __init__(self):
++        self.definitions = tuple(
++            SettingsDefinition(
++                "WEB_ADMIN_" + suffix,
++                getattr(config, "DEFAULT_WEB_ADMIN_" + suffix), minimum, maximum,
++                label, description, validator + "_config_from_settings",
++                "web_admin_" + consumer,
++                "Pagination / Presentation" if index < 6 else "Refresh Cadence",
++            )
++            for index, (suffix, minimum, maximum, label, description, validator, consumer)
++            in enumerate(_ROWS)
++        )
++
++    def __iter__(self):
++        return iter(self.definitions)
++
++    def get(self, key):
++        return next((item for item in self if item.key == key), None)
+diff --git a/app/settings_control/models.py b/app/settings_control/models.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8fc1eceb466adc36ff9bce4b98ce021d0715695e
+--- /dev/null
++++ b/app/settings_control/models.py
+@@ -0,0 +1,121 @@
++"""Immutable Settings boundary models and bounded public errors."""
++from dataclasses import dataclass
++from datetime import datetime, timezone
++from enum import Enum
++from typing import Any, Mapping
++
++TARGET = "captive-portal.service"
++API_VERSION = "admin.settings.v1"
++
++
++class ActivationState(str, Enum):
++    ACTIVE = "active"
++    PENDING = "pending_main_restart"
++    FAILED = "activation_failed"
++    UNAVAILABLE = "runtime_unavailable"
++
++
++class ConsumerState(str, Enum):
++    ACTIVE = "active"
++    DISABLED = "consumer_disabled"
++
++
++class StoreState(str, Enum):
++    DISABLED = "disabled"
++    AVAILABLE = "available"
++    UNAVAILABLE = "unavailable"
++
++
++class SettingsError(Exception):
++    def __init__(self, code, status=503, details=()):
++        super().__init__(code)
++        self.code, self.status, self.details = code, status, tuple(details)
++
++
++def utc_now():
++    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
++
++
++@dataclass(frozen=True, slots=True)
++class ResolvedSettingsSnapshot:
++    generation_id: int | None
++    values: Mapping[str, Any]
++    base_source_by_key: Mapping[str, str]
++    base_value_by_key: Mapping[str, int]
++    persisted_override_by_key: Mapping[str, int | None]
++
++
++@dataclass(frozen=True, slots=True)
++class SettingReadModelV1:
++    key: str
++    display_label: str
++    description: str
++    group: str
++    value_type: str
++    scope_type: str
++    scope_id: None
++    editable: bool
++    read_only_reason: None
++    secret_class: str
++    default_value: int
++    base_source: str
++    base_value: int
++    persisted_override_value: int | None
++    configured_value: int
++    effective_value: int | None
++    pending_value: int | None
++    configured_generation: int
++    effective_generation: int | None
++    activation_state: str
++    apply_requirement: str
++    activation_target: str
++    consumer_state: str | None
++    validation: Mapping[str, int]
++    last_changed_at: str | None
++    last_changed_by: Mapping[str, str] | None
++
++
++@dataclass(frozen=True, slots=True)
++class SettingsReadModelV1:
++    body: Mapping[str, Any]
++
++
++@dataclass(frozen=True, slots=True)
++class SettingsMutationChange:
++    key: str
++    operation: str
++    value: int | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class SettingsMutationResult:
++    status: int
++    body: Mapping[str, Any]
++
++
++@dataclass(frozen=True, slots=True)
++class SettingsActivationEvent:
++    generation_id: int
++    target: str
++    attempted_at_utc: str
++    activation_result: str
++    effective_generation_after_attempt: int | None
++    safe_error_code: str | None
++
++
++@dataclass(frozen=True, slots=True)
++class SettingsAdminContext:
++    feature_enabled: bool
++    store_state: str
++    read_service: Any = None
++    mutation_service: Any = None
++
++
++@dataclass(frozen=True, slots=True)
++class SettingsBootstrapResult:
++    feature_enabled: bool
++    store_state: str
++    runtime_settings: Mapping[str, Any]
++    resolved_snapshot: ResolvedSettingsSnapshot
++    admin_context: SettingsAdminContext
++    activation_service: Any = None
+diff --git a/app/settings_control/repository.py b/app/settings_control/repository.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c5ab58f6d550e385908143092545cd88a1bcc4b
+--- /dev/null
++++ b/app/settings_control/repository.py
+@@ -0,0 +1,169 @@
++"""SQLite-only SettingsStore: bounded connections, immutable history, one writer."""
++import json
++import sqlite3
++from contextlib import contextmanager
++from .definitions import SettingsDefinitionRegistry
++from .models import SettingsError, TARGET, utc_now
++
++SETTINGS_SCHEMA_VERSION = 1
++SETTINGS_SQLITE_BUSY_TIMEOUT_MS = 1000
++_DDL = (
++    """CREATE TABLE settings_generations (
++        generation_id INTEGER PRIMARY KEY,
++        parent_generation_id INTEGER REFERENCES settings_generations(generation_id),
++        scope_type TEXT NOT NULL CHECK(scope_type='global'), created_at_utc TEXT NOT NULL,
++        created_by_principal_type TEXT NOT NULL, created_by_principal_name TEXT NOT NULL,
++        request_id TEXT)""",
++    """CREATE TABLE settings_overrides (
++        generation_id INTEGER NOT NULL REFERENCES settings_generations(generation_id),
++        setting_key TEXT NOT NULL, value_type TEXT NOT NULL CHECK(value_type='integer'),
++        integer_value INTEGER NOT NULL, PRIMARY KEY(generation_id,setting_key))""",
++    """CREATE TABLE settings_target_state (
++        target TEXT PRIMARY KEY, effective_generation INTEGER REFERENCES settings_generations(generation_id),
++        updated_at_utc TEXT)""",
++    """CREATE TABLE settings_activation_events (
++        event_id INTEGER PRIMARY KEY, generation_id INTEGER NOT NULL REFERENCES settings_generations(generation_id),
++        target TEXT NOT NULL, attempted_at_utc TEXT NOT NULL,
++        activation_result TEXT NOT NULL CHECK(activation_result IN ('adopted','failed')),
++        effective_generation_after_attempt INTEGER REFERENCES settings_generations(generation_id),
++        safe_error_code TEXT)""",
++    """CREATE TABLE settings_mutation_audit (
++        audit_id INTEGER PRIMARY KEY, generation_id INTEGER NOT NULL REFERENCES settings_generations(generation_id),
++        parent_generation_id INTEGER REFERENCES settings_generations(generation_id),
++        principal_type TEXT NOT NULL, principal_name TEXT NOT NULL,
++        source_ip TEXT NOT NULL, request_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
++        timestamp_utc TEXT NOT NULL, scope_type TEXT NOT NULL CHECK(scope_type='global'), scope_id TEXT,
++        setting_key TEXT NOT NULL, operation TEXT NOT NULL CHECK(operation IN ('set','clear_override')),
++        previous_persisted_override INTEGER, new_persisted_override INTEGER,
++        previous_configured_value INTEGER NOT NULL, new_configured_value INTEGER NOT NULL,
++        apply_requirement TEXT NOT NULL, activation_target TEXT NOT NULL,
++        UNIQUE(generation_id,setting_key))""",
++    """CREATE TABLE settings_idempotency (
++        idempotency_id INTEGER PRIMARY KEY, principal_type TEXT NOT NULL, principal_name TEXT NOT NULL,
++        scope_type TEXT NOT NULL CHECK(scope_type='global'), idempotency_key TEXT NOT NULL,
++        request_payload_hash TEXT NOT NULL, result_http_status INTEGER NOT NULL,
++        result_response_json TEXT NOT NULL CHECK(length(CAST(result_response_json AS BLOB))<=65536),
++        result_generation INTEGER NOT NULL REFERENCES settings_generations(generation_id),
++        result_changed INTEGER NOT NULL CHECK(result_changed IN (0,1)), created_at_utc TEXT NOT NULL,
++        UNIQUE(principal_type,principal_name,scope_type,idempotency_key))""",
++)
++_IMMUTABLE = (
++    "settings_generations", "settings_overrides", "settings_activation_events",
++    "settings_mutation_audit", "settings_idempotency",
++)
++_TRIGGERS = tuple(
++    f"CREATE TRIGGER {table}_immutable_{action.lower()} BEFORE {action} ON {table} "
++    "BEGIN SELECT RAISE(ABORT,'immutable settings history'); END"
++    for table in _IMMUTABLE for action in ("UPDATE", "DELETE")
++)
++
++
++def canonical_json(value):
++    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
++
++
++class SettingsRepository:
++    def __init__(self, db_path, registry=None):
++        self.db_path = str(db_path)
++        self.registry = registry or SettingsDefinitionRegistry()
++        self.initialize()
++
++    @contextmanager
++    def transaction(self, *, write=False):
++        connection = None
++        try:
++            connection = sqlite3.connect(self.db_path, timeout=1, isolation_level=None)
++            connection.row_factory = sqlite3.Row
++            connection.execute("PRAGMA foreign_keys=ON")
++            connection.execute(f"PRAGMA busy_timeout={SETTINGS_SQLITE_BUSY_TIMEOUT_MS}")
++            connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
++            yield connection
++            connection.commit()
++        except sqlite3.Error as exc:
++            if connection is not None:
++                connection.rollback()
++            raise SettingsError("settings_store_unavailable") from exc
++        except Exception:
++            if connection is not None:
++                connection.rollback()
++            raise
++        finally:
++            if connection is not None:
++                connection.close()
++
++    def initialize(self):
++        with self.transaction(write=True) as db:
++            version = db.execute("PRAGMA user_version").fetchone()[0]
++            tables = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
++            if version == 0 and not tables:
++                for statement in (*_DDL, *_TRIGGERS):
++                    db.execute(statement)
++                db.execute("PRAGMA user_version=1")
++                db.execute("INSERT INTO settings_generations VALUES(0,NULL,'global',?,'system','settings_bootstrap',NULL)", (utc_now(),))
++                db.execute("INSERT INTO settings_target_state VALUES(?,NULL,NULL)", (TARGET,))
++            elif version != SETTINGS_SCHEMA_VERSION:
++                raise SettingsError("settings_store_unavailable")
++            expected = {statement.split()[2]: statement for statement in (*_DDL, *_TRIGGERS)}
++            actual = {row[0]: row[1] for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type IN ('table','trigger') AND name NOT LIKE 'sqlite_%'")}
++            normalize = lambda value: " ".join(value.split())
++            if actual.keys() != expected.keys() or any(normalize(actual[key]) != normalize(sql) for key, sql in expected.items()):
++                raise SettingsError("settings_store_unavailable")
++            if db.execute("PRAGMA quick_check").fetchall()[0][0] != "ok" or db.execute("PRAGMA foreign_key_check").fetchall():
++                raise SettingsError("settings_store_unavailable")
++            root = db.execute("SELECT * FROM settings_generations WHERE generation_id=0").fetchone()
++            if root is None or root[1] is not None or root[2] != "global" or tuple(root)[4:] != ("system", "settings_bootstrap", None):
++                raise SettingsError("settings_store_unavailable")
++            if db.execute("SELECT 1 FROM settings_overrides WHERE generation_id=0").fetchone():
++                raise SettingsError("settings_store_unavailable")
++            if db.execute("SELECT COUNT(*) FROM settings_target_state WHERE target=?", (TARGET,)).fetchone()[0] != 1:
++                raise SettingsError("settings_store_unavailable")
++            for row in db.execute("SELECT setting_key,value_type,integer_value FROM settings_overrides"):
++                definition = self.registry.get(row[0])
++                if definition is None or row[1] != "integer" or type(row[2]) is not int or not definition.min_value <= row[2] <= definition.max_value:
++                    raise SettingsError("settings_store_unavailable")
++
++    @staticmethod
++    def head(db):
++        # Reading the head under a transaction is not generation allocation.
++        return db.execute("SELECT generation_id FROM settings_generations ORDER BY generation_id DESC LIMIT 1").fetchone()[0]
++
++    @staticmethod
++    def overrides(db, generation):
++        return {row[0]: row[1] for row in db.execute("SELECT setting_key,integer_value FROM settings_overrides WHERE generation_id=?", (generation,))}
++
++    def configured(self):
++        with self.transaction() as db:
++            head = self.head(db)
++            return head, self.overrides(db, head)
++
++    @staticmethod
++    def effective(db):
++        return db.execute("SELECT effective_generation FROM settings_target_state WHERE target=?", (TARGET,)).fetchone()[0]
++
++    @staticmethod
++    def idempotency(db, principal, key):
++        return db.execute("SELECT * FROM settings_idempotency WHERE principal_type=? AND principal_name=? AND scope_type='global' AND idempotency_key=?", (principal.principal_type, principal.username, key)).fetchone()
++
++    @staticmethod
++    def save_idempotency(db, principal, key, payload_hash, status, body):
++        serialized = canonical_json(body)
++        if len(serialized.encode("utf-8")) > 65536:
++            raise SettingsError("settings_store_unavailable")
++        db.execute("""INSERT INTO settings_idempotency (
++            principal_type,principal_name,scope_type,idempotency_key,request_payload_hash,
++            result_http_status,result_response_json,result_generation,result_changed,created_at_utc)
++            VALUES(?,?,'global',?,?,?,?,?,?,?)""", (
++                principal.principal_type, principal.username, key, payload_hash, status,
++                serialized, body["configured_generation"], int(body["changed"]), utc_now(),
++            ))
++
++    def activation(self, generation, adopted, safe_error_code=None):
++        with self.transaction(write=True) as db:
++            previous = self.effective(db)
++            now = utc_now()
++            after = generation if adopted else previous
++            db.execute("""INSERT INTO settings_activation_events
++                (generation_id,target,attempted_at_utc,activation_result,effective_generation_after_attempt,safe_error_code)
++                VALUES(?,?,?,?,?,?)""", (generation, TARGET, now, "adopted" if adopted else "failed", after, safe_error_code))
++            if adopted:
++                db.execute("UPDATE settings_target_state SET effective_generation=?,updated_at_utc=? WHERE target=?", (generation, now, TARGET))
+diff --git a/app/settings_control/resolver.py b/app/settings_control/resolver.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8248debc237f0160d6358852ecce22d94870905
+--- /dev/null
++++ b/app/settings_control/resolver.py
+@@ -0,0 +1,33 @@
++"""One resolver; explicit environment membership, never scalar-origin inference."""
++from types import MappingProxyType
++from .definitions import SettingsDefinitionRegistry
++from .models import ResolvedSettingsSnapshot, SettingsError
++
++
++def freeze(value):
++    if isinstance(value, dict):
++        return MappingProxyType({key: freeze(item) for key, item in value.items()})
++    if isinstance(value, (list, tuple)):
++        return tuple(freeze(item) for item in value)
++    return value
++
++
++def resolve_settings(base_settings, explicit_environment_names, overrides, generation_id, registry=None):
++    registry = registry or SettingsDefinitionRegistry()
++    if set(overrides) - {item.key for item in registry}:
++        raise SettingsError("settings_store_unavailable")
++    values = dict(base_settings)
++    sources, base_values, persisted = {}, {}, {}
++    for definition in registry:
++        raw = base_settings.get(definition.settings_dict_key, definition.repository_default_value)
++        if type(raw) is int:
++            base = raw
++        elif isinstance(raw, str) and raw.isascii() and raw.isdigit():
++            base = int(raw)
++        else:
++            raise SettingsError("validation_failed", 422, ({"key": definition.key, "reason": "invalid_base_integer"},))
++        sources[definition.key] = "environment" if definition.key in explicit_environment_names else "repository_default"
++        base_values[definition.key] = base
++        persisted[definition.key] = overrides.get(definition.key)
++        values[definition.settings_dict_key] = overrides.get(definition.key, base)
++    return ResolvedSettingsSnapshot(generation_id, freeze(values), freeze(sources), freeze(base_values), freeze(persisted))
+diff --git a/app/settings_control/services.py b/app/settings_control/services.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a695d2f7c5fc1383c876e7b595f3c733237bdd9a
+--- /dev/null
++++ b/app/settings_control/services.py
+@@ -0,0 +1,160 @@
++"""Read projections and atomic global mutation, with no activation authority."""
++import hashlib
++import json
++from dataclasses import asdict
++from .definitions import SettingsDefinitionRegistry
++from .models import API_VERSION, SettingsError, SettingReadModelV1, SettingsMutationChange, SettingsMutationResult, utc_now
++from .repository import canonical_json
++from .resolver import resolve_settings
++from .validation import SettingsValidationService
++
++
++def parse_changes(raw, registry=None):
++    registry = registry or SettingsDefinitionRegistry()
++
++    def pairs(values):
++        result = {}
++        for key, value in values:
++            if key in result:
++                raise ValueError("duplicate member")
++            result[key] = value
++        return result
++
++    def invalid_constant(_value):
++        raise ValueError("non-JSON constant")
++
++    try:
++        document = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
++        if type(document) is not dict or set(document) != {"changes"}:
++            raise ValueError()
++        changes = document["changes"]
++        if type(changes) is not list or not 1 <= len(changes) <= 64:
++            raise ValueError()
++        seen, result = set(), []
++        for change in changes:
++            if type(change) is not dict:
++                raise ValueError()
++            key, operation = change.get("key"), change.get("operation")
++            if type(key) is not str or registry.get(key) is None or key in seen:
++                raise ValueError()
++            seen.add(key)
++            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is int:
++                result.append(SettingsMutationChange(key, operation, change["value"]))
++            elif operation == "clear_override" and set(change) == {"key", "operation"}:
++                result.append(SettingsMutationChange(key, operation))
++            else:
++                raise ValueError()
++        return tuple(sorted(result, key=lambda item: item.key))
++    except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
++        raise SettingsError("invalid_request", 400) from exc
++
++
++class SettingsReadService:
++    def __init__(self, repository, base_settings, explicit_environment_names, startup_snapshot, registry=None):
++        self.repository = repository
++        self.base_settings = startup_snapshot.values if startup_snapshot.generation_id is None else base_settings
++        self.environment_names = frozenset(explicit_environment_names)
++        self.startup_snapshot = startup_snapshot
++        self.registry = registry or SettingsDefinitionRegistry()
++        self._adopted = False
++
++    def project(self, db, generation=None):
++        generation = self.repository.head(db) if generation is None else generation
++        snapshot = resolve_settings(self.base_settings, self.environment_names, self.repository.overrides(db, generation), generation, self.registry)
++        effective = self.repository.effective(db)
++        trustworthy = self._adopted and effective == self.startup_snapshot.generation_id
++        failed = db.execute("SELECT activation_result FROM settings_activation_events WHERE generation_id=? ORDER BY event_id DESC LIMIT 1", (generation,)).fetchone()
++        activation = "runtime_unavailable" if not trustworthy else (
++            "active" if generation == effective else "activation_failed" if failed and failed[0] == "failed" else "pending_main_restart"
++        )
++        settings = []
++        for item in self.registry:
++            enabled = self.startup_snapshot.values.get(item.consumer_enable_settings_dict_key, "false") in (True, "true")
++            consumer = ("active" if enabled else "consumer_disabled") if trustworthy else None
++            audit = db.execute("SELECT timestamp_utc,principal_type,principal_name FROM settings_mutation_audit WHERE setting_key=? AND generation_id<=? ORDER BY audit_id DESC LIMIT 1", (item.key, generation)).fetchone()
++            value = snapshot.values[item.settings_dict_key]
++            settings.append(asdict(SettingReadModelV1(
++                item.key, item.display_label, item.description, item.group, item.value_type,
++                item.scope_type, None, item.editable, None, item.secret_class,
++                item.repository_default_value, snapshot.base_source_by_key[item.key],
++                snapshot.base_value_by_key[item.key], snapshot.persisted_override_by_key[item.key],
++                value, self.startup_snapshot.values[item.settings_dict_key] if trustworthy and enabled else None,
++                value if generation != effective else None, generation, effective, activation,
++                item.apply_requirement, item.activation_target, consumer,
++                {"min_value": item.min_value, "max_value": item.max_value},
++                audit[0] if audit else None,
++                {"principal_type": audit[1], "principal_name": audit[2]} if audit else None,
++            )))
++        return {
++            "api_version": API_VERSION, "scope": {"type": "global"}, "store_state": "available",
++            "configured_generation": generation, "effective_generation": effective,
++            "etag": f'"settings-g{generation}"', "restart_required": generation != effective,
++            "pending_setting_count": len(settings) if generation != effective else 0,
++            "settings": settings,
++        }
++
++    def read(self):
++        with self.repository.transaction() as db:
++            return self.project(db)
++
++
++class SettingsMutationService:
++    def __init__(self, repository, read_service, validation=None):
++        self.repository, self.read_service = repository, read_service
++        self.validation = validation or SettingsValidationService(read_service.registry)
++
++    def mutate(self, raw_body, *, principal, source_ip, request_id, idempotency_key, expected_generation):
++        changes = parse_changes(raw_body, self.read_service.registry)
++        canonical = {"changes": [
++            {"key": change.key, "operation": change.operation, **({"value": change.value} if change.operation == "set" else {})}
++            for change in changes
++        ]}
++        payload_hash = hashlib.sha256(canonical_json(canonical).encode("utf-8")).hexdigest()
++        with self.repository.transaction(write=True) as db:
++            existing = self.repository.idempotency(db, principal, idempotency_key)
++            if existing:
++                if existing["request_payload_hash"] != payload_hash:
++                    raise SettingsError("idempotency_conflict", 409)
++                return SettingsMutationResult(existing["result_http_status"], json.loads(existing["result_response_json"]))
++            parent = self.repository.head(db)
++            if expected_generation != parent:
++                raise SettingsError("stale_generation", 412)
++            previous = self.repository.overrides(db, parent)
++            overrides = dict(previous)
++            for change in changes:
++                if change.operation == "set":
++                    overrides[change.key] = change.value
++                else:
++                    overrides.pop(change.key, None)
++            current = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, previous, parent, self.read_service.registry)
++            candidate = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, overrides, parent, self.read_service.registry)
++            self.validation.validate(candidate)
++            changed = previous != overrides
++            generation = parent
++            if changed:
++                now = utc_now()
++                generation = db.execute("""INSERT INTO settings_generations
++                    (parent_generation_id,scope_type,created_at_utc,created_by_principal_type,created_by_principal_name,request_id)
++                    VALUES(?,'global',?,?,?,?)""", (parent, now, principal.principal_type, principal.username, request_id)).lastrowid
++                db.executemany("INSERT INTO settings_overrides VALUES(?,?,'integer',?)", [(generation, key, value) for key, value in sorted(overrides.items())])
++                for change in changes:
++                    if previous.get(change.key) == overrides.get(change.key):
++                        continue
++                    definition = self.read_service.registry.get(change.key)
++                    db.execute("""INSERT INTO settings_mutation_audit (
++                        generation_id,parent_generation_id,principal_type,principal_name,source_ip,request_id,
++                        idempotency_key,timestamp_utc,scope_type,scope_id,setting_key,operation,
++                        previous_persisted_override,new_persisted_override,previous_configured_value,new_configured_value,
++                        apply_requirement,activation_target) VALUES(?,?,?,?,?,?,?,?,'global',NULL,?,?,?,?,?,?,?,?)""", (
++                            generation, parent, principal.principal_type, principal.username, source_ip, request_id,
++                            idempotency_key, now, change.key, change.operation, previous.get(change.key), overrides.get(change.key),
++                            current.values[definition.settings_dict_key], candidate.values[definition.settings_dict_key],
++                            definition.apply_requirement, definition.activation_target,
++                        ))
++            projection = self.read_service.project(db, generation)
++            body = {key: projection[key] for key in ("api_version", "scope", "configured_generation", "effective_generation", "restart_required", "settings")}
++            body.update(request_id=request_id, changed=changed,
++                        activation_state="pending_main_restart" if changed else projection["settings"][0]["activation_state"])
++            status = 201 if changed else 200
++            self.repository.save_idempotency(db, principal, idempotency_key, payload_hash, status, body)
++            return SettingsMutationResult(status, body)
+diff --git a/app/settings_control/validation.py b/app/settings_control/validation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe94a49f632e9404f0b8426e4c9c668bb0cf2ba5
+--- /dev/null
++++ b/app/settings_control/validation.py
+@@ -0,0 +1,37 @@
++"""Primitive validation plus existing authoritative semantic validators."""
++from app.admin_web.config import admin_web_config_from_settings
++from app.admin_web.home_activity_config import home_activity_config_from_settings
++from app.admin_web.home_health_config import home_health_config_from_settings
++from app.admin_web.home_ap_24h_config import home_ap_24h_config_from_settings
++from app.current_state.config import current_state_config_from_settings
++from .definitions import SettingsDefinitionRegistry
++from .models import SettingsError
++
++
++class SettingsValidationService:
++    def __init__(self, registry=None):
++        self.registry = registry or SettingsDefinitionRegistry()
++
++    def validate(self, snapshot):
++        details = []
++        for item in self.registry:
++            value = snapshot.values[item.settings_dict_key]
++            if type(value) is not int:
++                details.append({"key": item.key, "reason": "integer_required"})
++            elif not item.min_value <= value <= item.max_value:
++                details.append({"key": item.key, "reason": "out_of_range"})
++            base = snapshot.base_value_by_key[item.key]
++            if not item.min_value <= base <= item.max_value:
++                details.append({"key": item.key, "reason": "invalid_base_value"})
++        if details:
++            raise SettingsError("validation_failed", 422, details)
++        try:
++            admin = admin_web_config_from_settings(snapshot.values)
++            current = None
++            if snapshot.values.get("web_admin_home_activity_enabled") in (True, "true"):
++                current = current_state_config_from_settings(snapshot.values)
++            home_activity_config_from_settings(snapshot.values, admin_config=admin, current_state_config=current)
++            home_health_config_from_settings(snapshot.values, admin_config=admin)
++            home_ap_24h_config_from_settings(snapshot.values, admin_config=admin)
++        except (ValueError, TypeError) as exc:
++            raise SettingsError("validation_failed", 422, ({"key": None, "reason": "semantic_validation_failed"},)) from exc
+diff --git a/app/web/web.py b/app/web/web.py
+index 33432920e6f27f55dc4082d44bde95ddd9af4398..fcd3e00e1dff159b04c718dac16b36973aa81275 100644
+--- a/app/web/web.py
++++ b/app/web/web.py
+@@ -126,6 +126,7 @@ def create_app(
+     authorization_health_tracker=None,
+     portal_evidence_sink=_AUTO_PORTAL_EVIDENCE,
+     client_hints_probe=_AUTO_CLIENT_HINTS_PROBE,
++    settings=None,
+ ) -> Flask:
+     """Create and configure the Flask application."""
+     template_dir = os.path.abspath(
+@@ -142,7 +143,8 @@ def create_app(
+         x_port=1,
+     )
+ 
+-    settings = get_settings()
++    if settings is None:
++        settings = get_settings()
+     auth_telemetry = configure_auth_telemetry(settings)
+     portal_evidence_telemetry = PortalEvidenceTelemetry()
+     portal_evidence_runtime = None
+diff --git a/docs/configuration.md b/docs/configuration.md
+index db5fd91b8c0cc313ae5eb8b86259dacb99baa15b..cdb4e39aea53b8f53ec03d414c20b3a280c6083c 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -515,3 +515,47 @@ The current 1-GiB `SnapshotExecutionPolicy.process_memory_guard_bytes` is a
+ versioned classifier/foundation policy artifact, not a replacement environment
+ variable and not a 1-GiB reservation.
+ <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
++
++## Settings Foundation V1
++
++`WEB_ADMIN_SETTINGS_ENABLED=false` is the default. Disabled startup performs no
++SettingsStore I/O and keeps base settings authoritative. `SETTINGS_DB_PATH`
++defaults to `/opt/CaptivePortal/data/settings.sqlite3`; these two bootstrap
++controls are not editable Settings. Provision the parent directory externally;
++the application does not create it or migrate an incompatible database.
++
++When enabled and available, GLOBAL persisted overrides precede explicit
++environment values, which precede the shared typed repository defaults. An
++available but semantically invalid startup configuration aborts; only an
++unavailable SettingsStore permits automatic base-settings fallback.
++
++The ordered writable allowlist is exactly:
++
++| Key | Default | Bounds |
++| --- | ---: | --- |
++| WEB_ADMIN_DEVICE_PAGE_SIZE | 100 | 1–500 |
++| WEB_ADMIN_VISIT_PAGE_SIZE | 100 | 1–500 |
++| WEB_ADMIN_OBSERVATION_PAGE_SIZE | 100 | 1–500 |
++| WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS | 24 | 1–168 |
++| WEB_ADMIN_CURRENT_STATE_PAGE_SIZE | 100 | 1–250 |
++| WEB_ADMIN_HOME_TRAFFIC_PAGE_SIZE | 100 | 1–250 |
++| WEB_ADMIN_HOME_LIVE_REFRESH_SECONDS | 60 | 60–300 |
++| WEB_ADMIN_HOME_TRAFFIC_REFRESH_SECONDS | 60 | 60–300 |
++| WEB_ADMIN_TRAFFIC_REFRESH_SECONDS | 60 | 60–300 |
++| WEB_ADMIN_HOME_ACTIVITY_REFRESH_SECONDS | 60 | 60–300 |
++| WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS | 60 | 60–300 |
++| WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS | 120 | 60–600 |
++
++SQLite schema v1 retains immutable generations, complete per-generation
++override sets, mutation audit, successful idempotency responses and activation
++events, plus the mutable `captive-portal.service` effective-generation target.
++Generation 0 is created with `system / settings_bootstrap`, no overrides, no
++mutation audit and no idempotency record. Foreign keys are enabled and the
++SQLite busy timeout is 1000 ms.
++
++A successful Save persists configuration only. All keys require a main-service
++restart; the Settings API cannot restart services or hot-reload configuration.
++The main runtime composes one immutable startup snapshot and durably adopts
++that exact generation before serving. Operational source degradation is not
++Settings activation failure. No service or production activation is performed
++by this implementation.
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index eea1541d3a880ea227852c93a1fad708853b85fb..33451235a8451be0cabe3cb6bda7447aac0d95a5 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -844,3 +844,32 @@ Completed Guest Session Traffic is a separate Visit-scoped guest-session domain.
+ 
+ Admin Web has no business-write worker. Failure of Admin Web remains fail-open
+ relative to guest authorization.
++
++## GLOBAL Settings V1
++
++When `WEB_ADMIN_SETTINGS_ENABLED=true`, authorized platform operators receive
++the GLOBAL `/admin/settings` page and navigation entry. This page neither
++resolves a Site nor creates a fake Site context. Its dedicated controller is
++`settings.js`; existing `admin.js` does not control Settings.
++
++`GET /admin/api/v1/settings` returns `admin.settings.v1` with the complete
++ordered 12-item `SettingReadModelV1`, configured/effective generation, ETag,
++override/base values and activation state. Disabled consumers have a null
++effective value. Without a trustworthy adopted runtime snapshot, state is
++`runtime_unavailable`; silence is never synthesized as `activation_failed`.
++Navigation/page remain reachable in the bounded store-unavailable state while
++read and mutation APIs return `503 settings_store_unavailable`.
++
++`POST /admin/api/v1/settings/generations` requires global write authorization,
++the session CSRF header, canonical UUID `Idempotency-Key`, and quoted
++`If-Match: "settings-gN"`. Missing If-Match is 428, malformed input is 400,
++stale generation is 412 and conflicting idempotency payload is 409. This route
++accepts JSON only (32768-byte limit, 64-change structural limit) and does not
++parse form data. Duplicate members, NaN and infinities are rejected.
++
++One `BEGIN IMMEDIATE` transaction validates the complete candidate, persists
++the complete override set and audit, and saves the original success response.
++Changed writes return 201; no-op writes return 200. Replay returns that original
++full 12-item response even after configured/effective generations advance.
++Settings UI offers Set/Clear Override and Save, never restart/reload controls.
++No activation capability is exposed to Admin handlers.
+diff --git a/run.py b/run.py
+index f5ef1929024e8ac9c9537c58d07cb504d0672c87..8dfc80486e1eea230e04c7b77568283297368f97 100644
+--- a/run.py
++++ b/run.py
+@@ -8,6 +8,7 @@ No other module should be run standalone.
+ 
+ import atexit
+ import inspect
++import os
+ import signal
+ import sys
+ import threading
+@@ -35,6 +36,7 @@ from app.current_state import create_current_state_runtime
+ from app.analytics import create_analytics_runtime
+ from app.analytics.api import API_PREFIX
+ from app.admin_web import create_admin_web_runtime
++from app.settings_control.bootstrap import bootstrap_settings_control
+ from app.admin_web.home_ap_24h_telemetry import (
+     create_home_ap_24h_telemetry_worker,
+ )
+@@ -271,7 +273,7 @@ def _configure_analytics(app, settings, registry_read_service) -> None:
+         logger.exception("analytics_api_runtime_configuration_failed")
+ 
+ 
+-def _configure_admin_web(app, settings, registry_read_service) -> None:
++def _configure_admin_web(app, settings, registry_read_service, settings_control=None) -> None:
+     """Attach Admin Web after all existing read boundaries are composed."""
+     global _admin_web_runtime
+ 
+@@ -295,6 +297,7 @@ def _configure_admin_web(app, settings, registry_read_service) -> None:
+             current_state_runtime=_current_state_runtime,
+             observation_runtime=_observation_foundation,
+             visit_runtime=_visit_lifecycle,
++            settings_control=settings_control,
+         )
+         app.extensions["admin_web_runtime"] = _admin_web_runtime
+         if _admin_web_runtime.blueprint is not None:
+@@ -377,7 +380,13 @@ def main() -> None:
+     signal.signal(signal.SIGINT, signal_handler)
+     signal.signal(signal.SIGTERM, signal_handler)
+ 
+-    settings = get_settings()
++    base_settings = get_settings()
++    settings_bootstrap = bootstrap_settings_control(
++        base_settings=base_settings,
++        explicit_environment_names=frozenset(os.environ),
++        logger=logger,
++    )
++    settings = settings_bootstrap.runtime_settings
+     logger.info("Configuration loaded")
+ 
+     controller = create_controller()
+@@ -392,6 +401,7 @@ def main() -> None:
+     app_kwargs = {
+         "controller": controller,
+         "visitor_snapshot_collector": _visitor_snapshot_collector,
++        "settings": settings,
+     }
+     if "authorization_health_tracker" in inspect.signature(
+         create_app
+@@ -466,7 +476,9 @@ def main() -> None:
+     except Exception:
+         logger.exception("visit_lifecycle_reconciliation_start_failed")
+     _configure_analytics(app, settings, registry_read_service)
+-    _configure_admin_web(app, settings, registry_read_service)
++    _configure_admin_web(app, settings, registry_read_service, settings_bootstrap.admin_context)
++    if settings_bootstrap.activation_service is not None:
++        settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime)
+     _start_public_traffic_worker(app)
+ 
+     host = settings["host"]
+diff --git a/tests/admin_web/test_settings_routes.py b/tests/admin_web/test_settings_routes.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8aea15dc33c5716759a7754e9f40e897dc6133a0
+--- /dev/null
++++ b/tests/admin_web/test_settings_routes.py
+@@ -0,0 +1,123 @@
++import logging
++import uuid
++from types import SimpleNamespace
++import pytest
++from flask import Flask
++from app.admin_web import create_admin_web_runtime
++from app.admin_web.models import AdminPrincipal
++from app.admin_web.policy import AdminAccessPolicy
++from app.settings_control.bootstrap import bootstrap_settings_control
++from .conftest import enabled_settings, login
++
++
++def settings_app(tmp_path, *, enabled=True, unavailable=False):
++    base = enabled_settings(web_admin_settings_enabled="true" if enabled else "false",
++                            settings_db_path=str(tmp_path / ("missing/settings.sqlite3" if unavailable else "settings.sqlite3")))
++    boot = bootstrap_settings_control(base_settings=base, explicit_environment_names=set(), logger=logging.getLogger("settings-ui"))
++    runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None,
++                                      logging.getLogger("settings-ui"), settings_control=boot.admin_context)
++    app = Flask(__name__)
++    app.config["TESTING"] = True
++    app.register_blueprint(runtime.blueprint)
++    if boot.activation_service:
++        boot.activation_service.adopt(boot.runtime_settings, runtime)
++    client = app.test_client()
++    assert login(client).status_code == 302
++    session = client.get("/admin/api/v1/session", base_url="https://localhost").json["result"]
++    return app, client, runtime, boot, session["csrf_token"]
++
++
++def post(client, csrf, body, *, etag='"settings-g0"', key=None, **options):
++    headers = {"X-CSRF-Token": csrf, "If-Match": etag, "Idempotency-Key": key or str(uuid.uuid4())}
++    return client.post("/admin/api/v1/settings/generations", data=body, content_type="application/json",
++                       headers=headers, base_url="https://localhost", **options)
++
++
++VALID = '{"changes":[{"key":"WEB_ADMIN_DEVICE_PAGE_SIZE","operation":"set","value":120}]}'
++
++
++def test_global_policy_site_independent():
++    policy = AdminAccessPolicy(frozenset())
++    assert policy.authorize_global(AdminPrincipal("operator"), "admin.read.settings.global")
++    assert policy.authorize_global(AdminPrincipal("operator"), "admin.write.settings.global")
++    assert not policy.authorize_global(AdminPrincipal("operator", "site_operator"), "admin.write.settings.global")
++    assert not policy.authorize_global(None, "admin.read.settings.global")
++    assert not policy.authorize_global(AdminPrincipal("operator"), "admin.read.devices")
++    assert not policy.authorize(AdminPrincipal("operator"), "admin.read.devices", "0123456789abcdef01234567")
++
++
++def test_read_mutate_replay_and_etag_without_query_source(tmp_path):
++    app, client, runtime, boot, csrf = settings_app(tmp_path)
++    assert runtime.query_service is None
++    read = client.get("/admin/api/v1/settings", base_url="https://localhost")
++    assert read.status_code == 200 and read.headers["ETag"] == '"settings-g0"'
++    assert read.headers["Cache-Control"] == "no-store" and len(read.json["settings"]) == 12
++    key = str(uuid.uuid4())
++    first = post(client, csrf, VALID, key=key)
++    assert first.status_code == 201 and len(first.json["settings"]) == 12
++    assert post(client, csrf, VALID, key=key).json == first.json
++    assert post(client, csrf, VALID).status_code == 412
++    assert client.get("/admin/api/v1/settings", base_url="https://localhost").headers["ETag"] == '"settings-g1"'
++
++
++@pytest.mark.parametrize("body", [
++    '{"changes":[],"changes":[]}',
++    '{"changes":[{"key":"WEB_ADMIN_DEVICE_PAGE_SIZE","key":"WEB_ADMIN_VISIT_PAGE_SIZE","operation":"set","value":100}]}',
++    '{"changes":[{"key":"WEB_ADMIN_DEVICE_PAGE_SIZE","operation":"set","operation":"set","value":100}]}',
++    '{"changes":[{"key":"WEB_ADMIN_DEVICE_PAGE_SIZE","operation":"set","value":100,"value":101}]}',
++    *['{"changes":[{"key":"WEB_ADMIN_DEVICE_PAGE_SIZE","operation":"set","value":' + value + '}]}' for value in ("NaN", "Infinity", "-Infinity", "true", '"100"')],
++    '{"changes":[]}', '[]', '{',
++    '{"changes":[{"key":"WEB_ADMIN_ENABLED","operation":"set","value":100}]}',
++    '{"changes":[{"key":"WEB_ADMIN_DEVICE_PAGE_SIZE","operation":"clear_override","value":100}]}',
++    '{"changes":[{"key":"WEB_ADMIN_DEVICE_PAGE_SIZE","operation":"set","value":100}],"site_id":"fake"}',
++])
++def test_strict_json_rejected_before_any_mutation(tmp_path, body):
++    _app, client, _runtime, boot, csrf = settings_app(tmp_path)
++    response = post(client, csrf, body)
++    assert response.status_code == 400 and response.json["error"]["code"] == "invalid_request"
++    assert response.json["api_version"] == "admin.settings.v1"
++    assert boot.admin_context.read_service.repository.configured() == (0, {})
++
++
++def test_headers_csrf_and_json_carveout(tmp_path):
++    _app, client, runtime, _boot, csrf = settings_app(tmp_path)
++    assert post(client, "invalid", VALID).json["error"]["code"] == "invalid_csrf"
++    assert post(client, csrf, VALID, etag="*").status_code == 400
++    assert post(client, csrf, VALID, key="not-uuid").status_code == 400
++    response = client.post("/admin/api/v1/settings/generations", data=VALID, content_type="application/json",
++                           headers={"X-CSRF-Token": csrf}, base_url="https://localhost")
++    assert response.status_code == 428
++    large_valid = VALID + " " * (runtime.config.max_post_bytes + 1)
++    assert len(large_valid) < 32768
++    assert post(client, csrf, large_valid).status_code == 201
++    assert post(client, csrf, VALID + " " * 32768).status_code == 413
++    # Existing form-only login/logout security is not widened.
++    assert client.post("/admin/logout", json={"csrf_token": csrf}, base_url="https://localhost").status_code == 415
++
++
++@pytest.mark.parametrize("disabled", [False, True])
++def test_disabled_and_unavailable_are_bounded(tmp_path, disabled):
++    _app, client, runtime, _boot, csrf = settings_app(tmp_path, enabled=not disabled, unavailable=not disabled)
++    page = client.get("/admin/settings", base_url="https://localhost")
++    api = client.get("/admin/api/v1/settings", base_url="https://localhost")
++    assert page.status_code == (404 if disabled else 200)
++    assert api.status_code == (404 if disabled else 503)
++    assert post(client, csrf, VALID).status_code == (404 if disabled else 503)
++    assert str(tmp_path).encode() not in api.data
++    shell = client.get("/admin/sites/0123456789abcdef01234567/", base_url="https://localhost")
++    assert (b'href="/admin/settings"' in shell.data) is not disabled
++
++
++def test_global_route_never_resolves_site(tmp_path, monkeypatch):
++    _app, client, runtime, _boot, _csrf = settings_app(tmp_path)
++    def forbidden(*_args):
++        pytest.fail("Settings resolved a Site")
++    runtime.site_resolver = SimpleNamespace(default=forbidden, resolve=forbidden)
++    # Closure holds the original resolver, so also replace its class methods.
++    from app.admin_web.policy import AdminSiteContextResolver
++    monkeypatch.setattr(AdminSiteContextResolver, "default", forbidden)
++    monkeypatch.setattr(AdminSiteContextResolver, "resolve", forbidden)
++    page = client.get("/admin/settings", base_url="https://localhost")
++    assert page.status_code == 200
++    assert b"data-site-id" not in page.data and b"/admin/api/v1/sites/" not in page.data
++    assert client.get("/admin/api/v1/settings", base_url="https://localhost").status_code == 200
+diff --git a/tests/admin_web/test_settings_ui.py b/tests/admin_web/test_settings_ui.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e7657e9236f997bbaceae3e7f3acb8bd6776c6a
+--- /dev/null
++++ b/tests/admin_web/test_settings_ui.py
+@@ -0,0 +1,29 @@
++from pathlib import Path
++import shutil
++import subprocess
++from .test_settings_routes import settings_app
++
++
++def test_settings_script_isolation_and_global_shell(tmp_path):
++    _app, client, _runtime, _boot, _csrf = settings_app(tmp_path)
++    page = client.get("/admin/settings", base_url="https://localhost")
++    assert b"settings.js" in page.data and b"admin.js" not in page.data
++    assert b"Global Settings" in page.data and b'data-csrf-token="' in page.data
++    assert b'data-site-id="' not in page.data and b"/admin/sites/" not in page.data
++    assert b"Save changes" in page.data and b"restart by an operator" in page.data
++    ordinary = client.get("/admin/sites/0123456789abcdef01234567/", base_url="https://localhost")
++    assert b"admin.js" in ordinary.data and b"settings.js" not in ordinary.data
++
++
++def test_dedicated_js_metadata_and_security_contract():
++    root = Path(__file__).resolve().parents[2]
++    source = (root / "app/admin_web/static/settings.js").read_text(encoding="utf-8")
++    for required in ("crypto.randomUUID()", '"X-CSRF-Token"', '"If-Match"', '"Idempotency-Key"',
++                     'error.status === 412', "await load()", "item.validation.min_value", "item.validation.max_value"):
++        assert required in source
++    for forbidden in ("innerHTML", "localStorage", "sessionStorage", "systemctl", "location.reload"):
++        assert forbidden not in source
++    assert "const changes" in source and 'method: "POST"' in source
++    node = shutil.which("node")
++    assert node
++    subprocess.run([node, "--check", str(root / "app/admin_web/static/settings.js")], check=True)
+diff --git a/tests/settings_control/__init__.py b/tests/settings_control/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fed4087785e4ebbac7c07be0ff8fde144e1e7100
+--- /dev/null
++++ b/tests/settings_control/__init__.py
+@@ -0,0 +1,19 @@
++"""Synthetic disposable Settings V1 test helpers; no production access."""
++import json
++import logging
++import uuid
++from app.admin_web.models import AdminPrincipal
++from app.settings_control.bootstrap import bootstrap_settings_control
++
++
++def stack(tmp_path, **values):
++    base = {"web_admin_settings_enabled": "true", "settings_db_path": str(tmp_path / "settings.sqlite3")}
++    base.update(values)
++    return bootstrap_settings_control(base_settings=base, explicit_environment_names=frozenset(), logger=logging.getLogger("settings-test"))
++
++
++def mutation(boot, *, generation=0, key=None, changes=None):
++    changes = changes if changes is not None else [{"key": "WEB_ADMIN_DEVICE_PAGE_SIZE", "operation": "set", "value": 120}]
++    return boot.admin_context.mutation_service.mutate(json.dumps({"changes": changes}),
++        principal=AdminPrincipal("operator"), source_ip="127.0.0.1", request_id=str(uuid.uuid4()),
++        idempotency_key=key or str(uuid.uuid4()), expected_generation=generation)
+diff --git a/tests/settings_control/test_activation.py b/tests/settings_control/test_activation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9cf78b27c18c11d92c26de522ccb29a6618a7d3
+--- /dev/null
++++ b/tests/settings_control/test_activation.py
+@@ -0,0 +1,58 @@
++from types import SimpleNamespace
++import pytest
++from app.settings_control.models import SettingsError
++from . import stack, mutation
++
++
++def test_adopts_exact_g_not_new_configured_head(tmp_path):
++    boot = stack(tmp_path)
++    mutation(boot)
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    model = boot.admin_context.read_service.read()
++    assert (model["configured_generation"], model["effective_generation"]) == (1, 0)
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    with boot.admin_context.read_service.repository.transaction() as db:
++        assert db.execute("SELECT COUNT(*) FROM settings_activation_events").fetchone()[0] == 2
++
++
++def test_durable_failure_no_effective_advance(tmp_path):
++    boot = stack(tmp_path)
++    boot.activation_service.fail("settings_validation_failed")
++    with boot.admin_context.read_service.repository.transaction() as db:
++        assert boot.admin_context.read_service.repository.effective(db) is None
++        assert db.execute("SELECT activation_result FROM settings_activation_events").fetchone()[0] == "failed"
++    with pytest.raises(SettingsError):
++        boot.activation_service.adopt(dict(boot.runtime_settings), None)
++    assert not boot.admin_context.read_service._adopted
++
++
++def test_commit_failure_never_claims_adoption(tmp_path, monkeypatch):
++    boot = stack(tmp_path)
++    def unavailable(*_args, **_kwargs):
++        raise SettingsError("settings_store_unavailable")
++    monkeypatch.setattr(boot.activation_service.repository, "activation", unavailable)
++    with pytest.raises(SettingsError):
++        boot.activation_service.adopt(boot.runtime_settings, None)
++    assert not boot.admin_context.read_service._adopted
++
++
++def test_no_activation_authority_in_admin_context(tmp_path):
++    boot = stack(tmp_path)
++    assert not hasattr(boot.admin_context, "activation_service")
++    assert not hasattr(boot.admin_context.mutation_service, "adopt")
++
++
++def test_absent_runtime_is_not_positive_configuration_failure(tmp_path):
++    from tests.admin_web.conftest import enabled_settings
++    boot = stack(tmp_path, **enabled_settings())
++    with pytest.raises(SettingsError, match="settings_activation_unavailable"):
++        boot.activation_service.adopt(boot.runtime_settings, None)
++    repository = boot.admin_context.read_service.repository
++    with repository.transaction() as db:
++        assert db.execute("SELECT COUNT(*) FROM settings_activation_events").fetchone()[0] == 0
++        assert repository.effective(db) is None
++    with pytest.raises(SettingsError, match="settings_activation_failed"):
++        boot.activation_service.adopt(boot.runtime_settings, SimpleNamespace(config=None))
++    with repository.transaction() as db:
++        assert db.execute("SELECT activation_result FROM settings_activation_events").fetchone()[0] == "failed"
++        assert repository.effective(db) is None
+diff --git a/tests/settings_control/test_bootstrap.py b/tests/settings_control/test_bootstrap.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ad7f32b79c23025ef966e0a7afa58b0247c245e
+--- /dev/null
++++ b/tests/settings_control/test_bootstrap.py
+@@ -0,0 +1,30 @@
++import logging
++import pytest
++from app.settings_control.bootstrap import bootstrap_settings_control
++from app.settings_control.models import SettingsError
++from . import stack
++
++
++def test_disabled_no_store_access_or_creation(tmp_path, monkeypatch):
++    import app.settings_control.bootstrap as module
++    monkeypatch.setattr(module, "SettingsRepository", lambda *_args: pytest.fail("disabled store opened"))
++    base = {"settings_db_path": str(tmp_path / "not-created.sqlite3")}
++    boot = bootstrap_settings_control(base_settings=base, explicit_environment_names=set(), logger=logging.getLogger("test"))
++    assert boot.runtime_settings is base and boot.resolved_snapshot.generation_id is None
++    assert boot.store_state == "disabled" and boot.activation_service is None
++    assert not (tmp_path / "not-created.sqlite3").exists()
++
++
++def test_unavailable_parent_fallback_and_no_mkdir(tmp_path):
++    boot = stack(tmp_path, settings_db_path=str(tmp_path / "missing" / "settings.sqlite3"))
++    assert boot.feature_enabled and boot.store_state == "unavailable"
++    assert boot.resolved_snapshot.generation_id is None and boot.activation_service is None
++    assert not (tmp_path / "missing").exists()
++
++
++def test_available_invalid_configuration_aborts_not_hidden_fallback(tmp_path):
++    with pytest.raises(SettingsError, match="validation_failed"):
++        stack(tmp_path, web_admin_device_page_size="bad")
++    import sqlite3
++    with sqlite3.connect(tmp_path / "settings.sqlite3") as db:
++        assert db.execute("SELECT activation_result,safe_error_code FROM settings_activation_events").fetchone() == ("failed", "settings_validation_failed")
+diff --git a/tests/settings_control/test_definitions.py b/tests/settings_control/test_definitions.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9f27d8cf381f2ddb8dbab4325453e3eb96a3df9
+--- /dev/null
++++ b/tests/settings_control/test_definitions.py
+@@ -0,0 +1,37 @@
++from app import config
++from app.settings import get_settings
++from app.settings_control.definitions import SettingsDefinitionRegistry
++
++
++def test_exact_ordered_definitions_and_shared_defaults():
++    expected = [
++        ("DEVICE_PAGE_SIZE", 100, 1, 500, "enabled", "admin_web"),
++        ("VISIT_PAGE_SIZE", 100, 1, 500, "enabled", "admin_web"),
++        ("OBSERVATION_PAGE_SIZE", 100, 1, 500, "enabled", "admin_web"),
++        ("OBSERVATION_MAX_WINDOW_HOURS", 24, 1, 168, "enabled", "admin_web"),
++        ("CURRENT_STATE_PAGE_SIZE", 100, 1, 250, "home_live_enabled", "admin_web"),
++        ("HOME_TRAFFIC_PAGE_SIZE", 100, 1, 250, "home_traffic_enabled", "admin_web"),
++        ("HOME_LIVE_REFRESH_SECONDS", 60, 60, 300, "home_live_enabled", "admin_web"),
++        ("HOME_TRAFFIC_REFRESH_SECONDS", 60, 60, 300, "home_traffic_enabled", "admin_web"),
++        ("TRAFFIC_REFRESH_SECONDS", 60, 60, 300, "traffic_enabled", "admin_web"),
++        ("HOME_ACTIVITY_REFRESH_SECONDS", 60, 60, 300, "home_activity_enabled", "home_activity"),
++        ("HOME_HEALTH_REFRESH_SECONDS", 60, 60, 300, "home_health_enabled", "home_health"),
++        ("HOME_AP_24H_REFRESH_SECONDS", 120, 60, 600, "home_ap_24h_enabled", "home_ap_24h"),
++    ]
++    registry = SettingsDefinitionRegistry()
++    assert len(registry.definitions) == 12
++    for definition, (suffix, default, minimum, maximum, consumer, validator) in zip(registry, expected):
++        key = "WEB_ADMIN_" + suffix
++        assert definition.key == definition.environment_variable_name == key
++        assert definition.settings_dict_key == key.lower()
++        assert definition.repository_default_value == default == getattr(config, "DEFAULT_" + key)
++        assert (definition.min_value, definition.max_value) == (minimum, maximum)
++        assert definition.semantic_validator == validator + "_config_from_settings"
++        assert definition.consumer_enable_settings_dict_key == "web_admin_" + consumer
++        assert definition.editable and definition.value_type == "integer"
++        assert definition.scope_type == "global" and definition.secret_class == "normal"
++        assert definition.apply_requirement == "main_service_restart"
++        assert definition.activation_target == "captive-portal.service"
++    assert registry.get("WEB_ADMIN_ENABLED") is None
++    assert registry.get("SETTINGS_DB_PATH") is None
++    assert get_settings()["web_admin_settings_enabled"] == "false"
+diff --git a/tests/settings_control/test_repository.py b/tests/settings_control/test_repository.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..716b53ae6fc80fd4e3fd273be577950299835f52
+--- /dev/null
++++ b/tests/settings_control/test_repository.py
+@@ -0,0 +1,70 @@
++import sqlite3
++import pytest
++from app.settings_control.repository import SettingsRepository
++from app.settings_control.models import SettingsError
++from . import stack, mutation
++
++
++def test_physical_bootstrap_identity_and_idempotent_schema(tmp_path):
++    repository = SettingsRepository(tmp_path / "settings.sqlite3")
++    SettingsRepository(repository.db_path)
++    with repository.transaction() as db:
++        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
++        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
++        assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 1000
++        root = db.execute("SELECT * FROM settings_generations").fetchone()
++        assert tuple(root)[:3] == (0, None, "global")
++        assert tuple(root)[4:] == ("system", "settings_bootstrap", None)
++        assert root[3].endswith("Z")
++        assert tuple(db.execute("SELECT * FROM settings_target_state").fetchone()) == ("captive-portal.service", None, None)
++        for table in ("settings_overrides", "settings_mutation_audit", "settings_idempotency", "settings_activation_events"):
++            assert db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0] == 0
++    assert repository.configured() == (0, {})
++
++
++@pytest.mark.parametrize("mode", ["newer", "old_nonempty", "shape", "corrupt", "unknown_key"])
++def test_incompatible_store_is_not_recreated(tmp_path, mode):
++    path = tmp_path / "settings.sqlite3"
++    if mode == "corrupt":
++        path.write_bytes(b"not SQLite")
++    else:
++        repository = SettingsRepository(path)
++        with sqlite3.connect(path) as db:
++            if mode == "newer":
++                db.execute("PRAGMA user_version=2")
++            elif mode == "old_nonempty":
++                db.execute("PRAGMA user_version=0")
++            elif mode == "shape":
++                db.execute("ALTER TABLE settings_target_state ADD COLUMN unexpected TEXT")
++            else:
++                db.execute("INSERT INTO settings_generations VALUES(1,0,'global','2026-10-06T00:00:00.000Z','platform_operator','operator','request')")
++                db.execute("INSERT INTO settings_overrides VALUES(1,'UNKNOWN','integer',100)")
++    before = path.read_bytes()
++    with pytest.raises(SettingsError):
++        SettingsRepository(path)
++    assert path.read_bytes() == before
++
++
++def test_history_immutability_fk_and_uniqueness(tmp_path):
++    boot = stack(tmp_path)
++    mutation(boot)
++    repository = boot.admin_context.read_service.repository
++    for sql in ("DELETE FROM settings_generations", "UPDATE settings_overrides SET integer_value=99",
++                "DELETE FROM settings_mutation_audit", "UPDATE settings_idempotency SET result_changed=0",
++                "INSERT INTO settings_overrides VALUES(999,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100)",
++                "INSERT INTO settings_overrides VALUES(1,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100)"):
++        with pytest.raises(SettingsError):
++            with repository.transaction(write=True) as db:
++                db.execute(sql)
++
++
++def test_busy_writer_fails_without_success(tmp_path):
++    boot = stack(tmp_path)
++    db = sqlite3.connect(boot.admin_context.read_service.repository.db_path)
++    db.execute("BEGIN IMMEDIATE")
++    try:
++        with pytest.raises(SettingsError, match="settings_store_unavailable"):
++            mutation(boot)
++    finally:
++        db.rollback(); db.close()
++    assert boot.admin_context.read_service.repository.configured() == (0, {})
+diff --git a/tests/settings_control/test_resolver.py b/tests/settings_control/test_resolver.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..04e3ed00b5e6901002350095dc87e49a67170442
+--- /dev/null
++++ b/tests/settings_control/test_resolver.py
+@@ -0,0 +1,24 @@
++import pytest
++from app.settings_control.resolver import resolve_settings
++from app.settings_control.models import SettingsError
++
++
++def test_override_environment_default_and_clear():
++    key = "WEB_ADMIN_DEVICE_PAGE_SIZE"
++    base = {key.lower(): "125"}
++    env = {key}
++    override = resolve_settings(base, env, {key: 150}, 1)
++    assert override.values[key.lower()] == 150
++    assert override.base_value_by_key[key] == 125 and override.base_source_by_key[key] == "environment"
++    cleared = resolve_settings(base, env, {}, 2)
++    assert cleared.values[key.lower()] == 125 and cleared.persisted_override_by_key[key] is None
++    default = resolve_settings({}, {}, {}, 0)
++    assert default.values[key.lower()] == 100 and default.base_source_by_key[key] == "repository_default"
++    with pytest.raises(TypeError):
++        default.values[key.lower()] = 42
++
++
++@pytest.mark.parametrize("value", [True, "not-int", 1.2, None])
++def test_invalid_explicit_environment_not_replaced(value):
++    with pytest.raises(SettingsError):
++        resolve_settings({"web_admin_device_page_size": value}, {"WEB_ADMIN_DEVICE_PAGE_SIZE"}, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 100}, 1)
+diff --git a/tests/settings_control/test_run_integration.py b/tests/settings_control/test_run_integration.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c87e019b1ac597f6dcc88d5112943ec848e1affb
+--- /dev/null
++++ b/tests/settings_control/test_run_integration.py
+@@ -0,0 +1,46 @@
++import pytest
++from types import SimpleNamespace
++import run as runtime
++from app.settings_control.models import SettingsError
++from tests.visitor_registry.test_snapshot_runtime import _prepare_main
++from . import stack
++
++
++@pytest.mark.parametrize("failure", [None, "durable_write", "configuration"])
++def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch, failure):
++    events, _controller, _collector, _registry, app, _observed = _prepare_main(monkeypatch)
++    monkeypatch.setattr(runtime, "capture_loaded_artifact_identity", lambda *_args:
++                        SimpleNamespace(json_line=lambda: "synthetic settings startup test"))
++    from tests.admin_web.conftest import enabled_settings
++    admin_settings = enabled_settings() if failure == "configuration" else {}
++    boot = stack(tmp_path, **admin_settings, host="127.0.0.1", port=8088, debug=False)
++    # Use the real activation service and snapshot, with a disposable disabled Admin.
++    monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_kwargs: boot)
++    original = boot.activation_service.repository.activation
++    def activation(*args, **kwargs):
++        events.append("durable_adoption")
++        if failure == "durable_write":
++            raise SettingsError("settings_store_unavailable")
++        return original(*args, **kwargs)
++    monkeypatch.setattr(boot.activation_service.repository, "activation", activation)
++    monkeypatch.setattr(runtime, "_admin_web_runtime", SimpleNamespace(config=None) if failure == "configuration" else None)
++    monkeypatch.setattr(runtime, "_configure_admin_web", lambda *_args: None)
++    def factory(**kwargs):
++        assert kwargs["settings"] is boot.runtime_settings
++        # The old test helper only observes host; supply an otherwise equivalent fake app.
++        events.append("create_app")
++        return app
++    monkeypatch.setattr(runtime, "create_app", factory)
++    if failure:
++        with pytest.raises(SettingsError):
++            runtime.main()
++        assert not app.run_calls
++        if failure == "configuration":
++            repository = boot.activation_service.repository
++            with repository.transaction() as db:
++                assert repository.effective(db) is None
++                assert db.execute("SELECT activation_result FROM settings_activation_events").fetchone()[0] == "failed"
++    else:
++        runtime.main()
++        assert events.index("durable_adoption") < events.index("app.run")
++        assert boot.admin_context.read_service._adopted
+diff --git a/tests/settings_control/test_services.py b/tests/settings_control/test_services.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..41e833f330509a8287ce1559fa94504fde453afb
+--- /dev/null
++++ b/tests/settings_control/test_services.py
+@@ -0,0 +1,81 @@
++import uuid
++from concurrent.futures import ThreadPoolExecutor
++import pytest
++from app.settings_control.models import SettingsError
++from . import stack, mutation
++
++
++def test_changed_noop_replay_audit_full_snapshot(tmp_path):
++    boot = stack(tmp_path)
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    key = str(uuid.uuid4())
++    first = mutation(boot, key=key)
++    assert first.status == 201 and first.body["changed"]
++    assert first.body["configured_generation"] == 1 and first.body["effective_generation"] == 0
++    assert first.body["activation_state"] == "pending_main_restart" and first.body["restart_required"]
++    assert len(first.body["settings"]) == 12
++    noop_key = str(uuid.uuid4())
++    noop = mutation(boot, generation=1, key=noop_key)
++    assert noop.status == 200 and not noop.body["changed"]
++    mutation(boot, generation=1, changes=[{"key": "WEB_ADMIN_VISIT_PAGE_SIZE", "operation": "set", "value": 140}])
++    newer = stack(tmp_path)
++    newer.activation_service.adopt(newer.runtime_settings, None)
++    assert mutation(boot, key=key).body == first.body
++    assert mutation(boot, generation=1, key=noop_key).body == noop.body
++    with pytest.raises(SettingsError, match="idempotency_conflict"):
++        mutation(boot, key=key, changes=[{"key": "WEB_ADMIN_DEVICE_PAGE_SIZE", "operation": "set", "value": 130}])
++    repository = boot.admin_context.read_service.repository
++    with repository.transaction() as db:
++        assert db.execute("SELECT COUNT(*) FROM settings_generations").fetchone()[0] == 3
++        assert db.execute("SELECT COUNT(*) FROM settings_mutation_audit").fetchone()[0] == 2
++        assert db.execute("SELECT COUNT(*) FROM settings_idempotency").fetchone()[0] == 3
++        row = db.execute("SELECT * FROM settings_mutation_audit ORDER BY audit_id LIMIT 1").fetchone()
++        assert row["previous_persisted_override"] is None and row["new_persisted_override"] == 120
++        assert row["principal_type"] == "platform_operator"
++
++
++def test_clear_override_and_atomic_validation_failure(tmp_path):
++    boot = stack(tmp_path, web_admin_device_page_size="115")
++    mutation(boot)
++    cleared = mutation(boot, generation=1, changes=[{"key": "WEB_ADMIN_DEVICE_PAGE_SIZE", "operation": "clear_override"}])
++    assert cleared.body["settings"][0]["configured_value"] == 115
++    assert cleared.body["settings"][0]["persisted_override_value"] is None
++    with pytest.raises(SettingsError, match="validation_failed"):
++        mutation(boot, generation=2, changes=[{"key": "WEB_ADMIN_DEVICE_PAGE_SIZE", "operation": "set", "value": 130},
++                                           {"key": "WEB_ADMIN_VISIT_PAGE_SIZE", "operation": "set", "value": 501}])
++    assert boot.admin_context.read_service.repository.configured() == (2, {})
++
++
++def test_concurrent_head_cas_exactly_one_child(tmp_path):
++    boot = stack(tmp_path)
++    def write(_index):
++        try:
++            return mutation(boot).status
++        except SettingsError as error:
++            return error.status
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        assert sorted(pool.map(write, range(2))) == [201, 412]
++    assert boot.admin_context.read_service.repository.configured()[0] == 1
++
++
++def test_disabled_consumer_and_silence_are_not_failure(tmp_path):
++    boot = stack(tmp_path)
++    model = boot.admin_context.read_service.read()
++    assert model["settings"][0]["activation_state"] == "runtime_unavailable"
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    model = boot.admin_context.read_service.read()
++    assert all(item["consumer_state"] == "consumer_disabled" and item["effective_value"] is None for item in model["settings"])
++    mutation(boot)
++    assert boot.admin_context.read_service.read()["settings"][0]["activation_state"] == "pending_main_restart"
++
++
++def test_change_and_object_order_preserve_idempotent_result(tmp_path):
++    boot = stack(tmp_path)
++    key = str(uuid.uuid4())
++    changes = [{"key": "WEB_ADMIN_DEVICE_PAGE_SIZE", "operation": "set", "value": 120},
++               {"key": "WEB_ADMIN_VISIT_PAGE_SIZE", "operation": "set", "value": 130}]
++    first = mutation(boot, key=key, changes=changes)
++    reversed_changes = [dict(reversed(list(change.items()))) for change in reversed(changes)]
++    replay = mutation(boot, key=key, changes=reversed_changes)
++    assert replay.status == first.status == 201
++    assert replay.body == first.body
+diff --git a/tests/settings_control/test_validation.py b/tests/settings_control/test_validation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e72b409d3c428a4fd06a3e35e4e27e011f4e48a
+--- /dev/null
++++ b/tests/settings_control/test_validation.py
+@@ -0,0 +1,33 @@
++from dataclasses import replace
++import pytest
++from app.settings_control.resolver import resolve_settings
++from app.settings_control.validation import SettingsValidationService
++from app.settings_control.models import SettingsError
++import app.settings_control.validation as validators
++
++
++@pytest.mark.parametrize("value", [True, 0, 501, 1.5, "100"])
++def test_primitive_validation_even_when_disabled(value):
++    snapshot = resolve_settings({}, {}, {}, 0)
++    snapshot = replace(snapshot, values={**snapshot.values, "web_admin_device_page_size": value})
++    with pytest.raises(SettingsError, match="validation_failed"):
++        SettingsValidationService().validate(snapshot)
++
++
++def test_existing_semantic_authorities_called(monkeypatch):
++    calls = []
++    for name in ("admin_web", "home_activity", "home_health", "home_ap_24h"):
++        function = getattr(validators, name + "_config_from_settings")
++        def wrapper(*args, _name=name, _function=function, **kwargs):
++            calls.append(_name)
++            return _function(*args, **kwargs)
++        monkeypatch.setattr(validators, name + "_config_from_settings", wrapper)
++    SettingsValidationService().validate(resolve_settings({}, {}, {}, 0))
++    assert calls == ["admin_web", "home_activity", "home_health", "home_ap_24h"]
++
++
++def test_cross_setting_validation_remains_authoritative():
++    from tests.admin_web.conftest import enabled_settings
++    snapshot = resolve_settings(enabled_settings(web_admin_home_live_request_timeout_seconds="5"), {}, {}, 0)
++    with pytest.raises(SettingsError, match="validation_failed"):
++        SettingsValidationService().validate(snapshot)
+diff --git a/tests/settings_control/test_web_settings_injection.py b/tests/settings_control/test_web_settings_injection.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..35eb215b604852eb80e204a85913f340a342ff29
+--- /dev/null
++++ b/tests/settings_control/test_web_settings_injection.py
+@@ -0,0 +1,14 @@
++import app.web.web as web
++
++
++def test_explicit_factory_injection_never_reads_settings(monkeypatch):
++    def forbidden():
++        raise AssertionError("get_settings called despite injection")
++    monkeypatch.setattr(web, "get_settings", forbidden)
++    settings = {"portal_counter_enabled": False, "public_traffic_enabled": False,
++                "auth_telemetry_enabled": False, "capport_enabled": False,
++                "secret_key": "synthetic-injection-proof"}
++    app = web.create_app(settings=settings, controller=object(), portal_counter_service=None,
++                         public_traffic_service=None, public_traffic_worker=None,
++                         portal_evidence_sink=None, client_hints_probe=None)
++    assert app is not None
+diff --git a/tests/visitor_registry/test_snapshot_runtime.py b/tests/visitor_registry/test_snapshot_runtime.py
+index 15fd40ee15581a9ab7950e23e70f05f56fce94e5..c0d10ee55f3d8889eafd5f370edd16a3ef5ca3d7 100644
+--- a/tests/visitor_registry/test_snapshot_runtime.py
++++ b/tests/visitor_registry/test_snapshot_runtime.py
+@@ -186,7 +186,8 @@ def _prepare_main(
+             raise registry_create_error
+         return registry
+ 
+-    def create_app(*, controller, visitor_snapshot_collector):
++    def create_app(*, controller, visitor_snapshot_collector, settings):
++        assert settings["host"] == "127.0.0.1"
+         events.append("create_app")
+         observed["app_controller"] = controller
+         observed["app_collector"] = visitor_snapshot_collector

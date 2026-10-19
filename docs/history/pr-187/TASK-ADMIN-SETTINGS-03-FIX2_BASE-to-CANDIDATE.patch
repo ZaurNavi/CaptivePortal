@@ -1,0 +1,508 @@
+diff --git a/app/analytics/runtime.py b/app/analytics/runtime.py
+index 3fd9cee4ba063a70d7ec8c556fe89e6c27c6eaac..fdbcdb85b011698785dc74e7b33c0f930ba97ea8 100644
+--- a/app/analytics/runtime.py
++++ b/app/analytics/runtime.py
+@@ -267,7 +267,8 @@ def create_analytics_runtime(
+ 
+ 
+ def _observation_read_service(runtime: Any) -> Any | None:
+-    if getattr(runtime, "state", None) not in {"active", "degraded"}:
++    if (getattr(runtime, "state", None) not in {"active", "degraded"}
++            and getattr(runtime, "read_boundary_ready", False) is not True):
+         return None
+     repository = getattr(runtime, "repository", None)
+     return ObservationReadService(repository) if repository is not None else None
+diff --git a/app/observations/runtime.py b/app/observations/runtime.py
+index a8462ab8ef97c73f0ac1772c40ce86958edb43ea..e9a2857f032ad09a388e571114359643bc168f3e 100644
+--- a/app/observations/runtime.py
++++ b/app/observations/runtime.py
+@@ -12,7 +12,7 @@ from .cleanup import ObservationCleanup, ObservationCleanupWorker
+ from .client_worker import ClientObservationWorker
+ from .config import observation_config_from_settings
+ from .integrity import ObservationIntegrityWorker
+-from .models import ObservationConfig, ObservationConfigError
++from .models import InitializationResult, ObservationConfig, ObservationConfigError
+ from .repository import ObservationRepository
+ from .telemetry import ObservationTelemetry
+ 
+@@ -20,6 +20,10 @@ from .telemetry import ObservationTelemetry
+ class DisabledObservationFoundation:
+     state = "disabled"
+     config: ObservationConfig | None = None
++    read_boundary_ready = False
++
++    def prepare_read_boundary(self) -> bool:
++        return False
+ 
+     def start(self) -> bool:
+         return False
+@@ -30,10 +34,14 @@ class DisabledObservationFoundation:
+ 
+ class UnavailableObservationFoundation:
+     state = "unavailable"
++    read_boundary_ready = False
+ 
+     def __init__(self, *, config: ObservationConfig | None = None):
+         self.config = config
+ 
++    def prepare_read_boundary(self) -> bool:
++        return False
++
+     def start(self) -> bool:
+         return False
+ 
+@@ -77,6 +85,31 @@ class ObservationFoundationRuntime:
+         )
+         self._state = "disabled"
+         self._lock = threading.RLock()
++        self._initialization_result: InitializationResult | None = None
++
++    @property
++    def read_boundary_ready(self) -> bool:
++        with self._lock:
++            return self._initialization_result is not None and self._state not in {"unavailable", "stopping"}
++
++    def prepare_read_boundary(self) -> bool:
++        """Prepare local storage only; never start workers or contact the provider."""
++        with self._lock:
++            if self._state in {"unavailable", "stopping"}:
++                return False
++            if self._initialization_result is not None:
++                return True
++            try:
++                self._initialization_result = self.repository.initialize()
++            except Exception:
++                self._state = "unavailable"
++                self.telemetry.emit(
++                    "observation.runtime_unavailable",
++                    "error",
++                    failure_category="initialization_error",
++                )
++                return False
++            return True
+ 
+     @property
+     def state(self) -> str:
+@@ -98,7 +131,10 @@ class ObservationFoundationRuntime:
+                 return False
+             self._state = "starting"
+         try:
+-            initialized = self.repository.initialize()
++            if not self.prepare_read_boundary():
++                self._stop_started_workers()
++                return False
++            initialized = self._initialization_result
+             started = []
+             if self.config.client_enabled:
+                 started.append(self.client_worker.start())
+@@ -132,6 +168,7 @@ class ObservationFoundationRuntime:
+     def stop(self, timeout_seconds: float | None = None) -> bool:
+         with self._lock:
+             if self._state == "disabled":
++                self._initialization_result = None
+                 return True
+             self._state = "stopping"
+         timeout = self.config.shutdown_timeout_seconds if timeout_seconds is None else max(0.0, float(timeout_seconds))
+@@ -151,6 +188,7 @@ class ObservationFoundationRuntime:
+         if success:
+             with self._lock:
+                 self._state = "disabled"
++                self._initialization_result = None
+             self.telemetry.emit("observation.runtime_stopped")
+             return True
+         return False
+diff --git a/run.py b/run.py
+index cf519e68ececb46dc64baaa0ef606858322bab32..7c89daf99e7062ee20ab8d621c3962ecd76d8a63 100644
+--- a/run.py
++++ b/run.py
+@@ -441,6 +441,10 @@ def main() -> None:
+         telemetry=app.extensions.get("auth_telemetry"),
+         logger=logger,
+     )
++    try:
++        _observation_foundation.prepare_read_boundary()
++    except Exception:
++        logger.exception("observation_read_boundary_preparation_failed")
+     _configure_current_state(app, settings, controller)
+     _pending_session_cleaner = create_pending_session_cleaner(
+         settings=settings,
+diff --git a/tests/analytics/test_prepared_observation_runtime.py b/tests/analytics/test_prepared_observation_runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..30e07023e3f55507606fa2120147d50c1b737a4a
+--- /dev/null
++++ b/tests/analytics/test_prepared_observation_runtime.py
+@@ -0,0 +1,91 @@
++"""Regression for pre-adoption Analytics/Admin composition from local reads."""
++import logging
++import threading
++
++import pytest
++
++from app.admin_web import create_admin_web_runtime
++from app.admin_web.home_ap_24h_telemetry import create_home_ap_24h_telemetry_worker
++from app.current_state.runtime import create_current_state_runtime
++from app.observations.runtime import ObservationFoundationRuntime
++from app.observations.telemetry import ObservationTelemetry
++from app.analytics.runtime import create_analytics_runtime
++from tests.admin_web.conftest import enabled_settings
++from tests.observations.test_read_boundary_preparation import ProviderSpy, workers
++from tests.observations.test_runtime import Telemetry
++from .test_runtime import _settings, _sources, SITE
++
++
++def local_observation(stack):
++    provider, telemetry = ProviderSpy(), Telemetry()
++    runtime = ObservationFoundationRuntime(config=stack.observations.config, provider=provider,
++        telemetry=ObservationTelemetry(telemetry, logging.getLogger("fix2-observation")),
++        logger=logging.getLogger("fix2-observation"))
++    return runtime, provider, telemetry
++
++
++@pytest.mark.parametrize("prepared", [False, True])
++def test_analytics_requires_explicit_preparation_without_starting_workers(analytics_stack, monkeypatch, prepared):
++    observation, provider, _ = local_observation(analytics_stack)
++    _, visit, registry = _sources(analytics_stack)
++    for worker in workers(observation):
++        monkeypatch.setattr(worker, "start", lambda: pytest.fail("pre-adoption worker start"))
++    if prepared:
++        assert observation.prepare_read_boundary() is True
++    before = tuple(thread.ident for thread in threading.enumerate())
++    analytics = create_analytics_runtime(_settings(), observation, visit, registry, logging.getLogger("fix2-analytics"))
++    assert analytics.state == ("active" if prepared else "unavailable")
++    assert analytics.source_health["observations"].available is prepared
++    if prepared:
++        assert analytics.source_health["observations"].query_only is True
++        assert analytics.source_health["observations"].actual_schema_version == 1
++    assert observation.state == "disabled"
++    assert all(not worker.running for worker in workers(observation))
++    assert tuple(thread.ident for thread in threading.enumerate()) == before
++    assert provider.calls == []
++
++
++def test_prepared_read_boundary_still_requires_exact_source_schema(analytics_stack):
++    observation, provider, _ = local_observation(analytics_stack)
++    _, visit, registry = _sources(analytics_stack)
++    assert observation.prepare_read_boundary() is True
++    with observation.repository._connect() as connection:
++        connection.execute("PRAGMA user_version=999")
++    analytics = create_analytics_runtime(_settings(), observation, visit, registry, logging.getLogger("fix2-schema"))
++    assert analytics.state == "unavailable"
++    assert not analytics.source_health["observations"].available
++    assert analytics.source_health["observations"].actual_schema_version == 999
++    assert provider.calls == []
++
++
++def test_prepared_observation_restores_admin_home_ap24_and_telemetry(analytics_stack, tmp_path, caplog):
++    observation, provider, _ = local_observation(analytics_stack)
++    _, visit, registry = _sources(analytics_stack)
++    settings = {**_settings(), **enabled_settings(),
++        "web_admin_home_ap_24h_enabled": "true",
++        "web_admin_home_ap_24h_telemetry_enabled": "true",
++        "current_state_enabled": "true", "current_state_site_ids": SITE,
++        "current_state_client_ssids_json": '["synthetic-guest"]',
++        "current_state_db_path": str(tmp_path / "data" / "current.sqlite3")}
++    current = create_current_state_runtime(settings, provider, Telemetry())
++    assert current.state == "disabled" and current.read_service is not None
++    assert observation.prepare_read_boundary() is True
++    analytics = create_analytics_runtime(settings, observation, visit, registry, logging.getLogger("fix2-admin"))
++    assert analytics.state == "active"
++    admin = create_admin_web_runtime(settings, analytics, registry, visit.read_service,
++        analytics._source_services["observations"], logging.getLogger("fix2-admin"),
++        current_state_read_service=current.read_service, current_state_runtime=current,
++        observation_runtime=observation)
++    assert admin.state == "active" and admin.query_service is not None
++    assert all(source is not None for source in (registry, visit.read_service, analytics._source_services["observations"]))
++    assert admin.home_ap_24h_state == "active" and admin.home_ap_24h_service is not None
++    telemetry = type("HealthyTelemetry", (), {
++        "enabled": True, "available": True, "safe_emit_system": lambda *_args, **_kwargs: True})()
++    worker = create_home_ap_24h_telemetry_worker(settings, admin_runtime=admin,
++        telemetry=telemetry, logger=logging.getLogger("fix2-telemetry"))
++    assert worker is not None and worker._thread is None
++    assert "admin.home_ap_24h_composition_failed" not in caplog.text
++    assert "admin.home_ap_24h_telemetry_composition_failed" not in caplog.text
++    assert observation.state == current.state == "disabled"
++    assert all(not item.running for item in workers(observation))
++    assert provider.calls == []
+diff --git a/tests/observations/test_read_boundary_preparation.py b/tests/observations/test_read_boundary_preparation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..867ef10ef4b8ae750c59b66ce1e5f4fd77b489a2
+--- /dev/null
++++ b/tests/observations/test_read_boundary_preparation.py
+@@ -0,0 +1,123 @@
++"""Local preparation is separate from provider-capable worker startup."""
++import threading
++
++import pytest
++
++from app.observations.runtime import create_observation_foundation
++from .test_runtime import Telemetry, enabled
++
++
++class ProviderSpy:
++    def __init__(self):
++        self.calls = []
++
++    def __getattr__(self, name):
++        self.calls.append(name)
++        raise AssertionError("provider access during local preparation")
++
++
++def workers(runtime):
++    return (runtime.client_worker, runtime.ap_worker,
++            runtime.cleanup_worker, runtime.integrity_worker)
++
++
++def test_fresh_local_preparation_is_idempotent_and_network_thread_free(tmp_path, monkeypatch):
++    (tmp_path / "data").mkdir(mode=0o750)
++    provider, telemetry = ProviderSpy(), Telemetry()
++    runtime = create_observation_foundation(enabled(tmp_path), provider, telemetry)
++    calls = []
++    initialize = runtime.repository.initialize
++
++    def prepare_repository():
++        calls.append("initialize")
++        return initialize()
++
++    monkeypatch.setattr(runtime.repository, "initialize", prepare_repository)
++    for worker in workers(runtime):
++        monkeypatch.setattr(worker, "start", lambda: pytest.fail("worker started during preparation"))
++    before = tuple(thread.ident for thread in threading.enumerate())
++    assert runtime.state == "disabled" and not runtime.read_boundary_ready
++    assert all(not worker.running for worker in workers(runtime))
++    assert provider.calls == []
++    assert runtime.prepare_read_boundary() is True
++    assert runtime.read_boundary_ready and runtime.state == "disabled"
++    assert runtime.repository.db_path.is_file()
++    assert runtime.prepare_read_boundary() is True
++    assert calls == ["initialize"]
++    assert all(not worker.running for worker in workers(runtime))
++    assert tuple(thread.ident for thread in threading.enumerate()) == before
++    assert provider.calls == []
++    assert not any(event[0] == "observation.runtime_started" for event in telemetry.events)
++
++
++@pytest.mark.parametrize("prepare_first", [False, True])
++def test_start_initializes_once_and_preserves_abandoned_cycle_telemetry(tmp_path, monkeypatch, prepare_first):
++    (tmp_path / "data").mkdir(mode=0o750)
++    provider, telemetry = ProviderSpy(), Telemetry()
++    runtime = create_observation_foundation(enabled(tmp_path), provider, telemetry)
++    runtime.repository.initialize("2026-01-01T00:00:00.000Z")
++    runtime.repository.create_cycle(kind="client", site_id="site-a",
++        started_at="2026-01-01T00:00:00.000Z", cycle_id="abandoned-before-prepare")
++    initialized, started = [], []
++    original = runtime.repository.initialize
++
++    def initialize():
++        initialized.append(True)
++        return original()
++
++    monkeypatch.setattr(runtime.repository, "initialize", initialize)
++    for name, worker in zip(("client", "ap", "cleanup", "integrity"), workers(runtime)):
++        monkeypatch.setattr(worker, "start", lambda name=name: started.append(name) or True)
++        monkeypatch.setattr(worker, "stop", lambda *_: True)
++    if prepare_first:
++        assert runtime.prepare_read_boundary() is True
++        assert started == []
++    assert runtime.start() is True
++    assert runtime.start() is False
++    assert initialized == [True]
++    assert started == ["client", "ap", "cleanup", "integrity"]
++    assert runtime.state == "active" and runtime.read_boundary_ready
++    event = next(item for item in telemetry.events if item[0] == "observation.runtime_started")
++    assert event[2]["abandoned_cycles"] == 1
++    assert event[2]["client_enabled"] is True and event[2]["ap_enabled"] is True
++    assert event[2]["site_count"] == 1
++    assert provider.calls == []
++    assert runtime.stop() is True
++    assert not runtime.read_boundary_ready
++    assert runtime.prepare_read_boundary() is True
++    assert initialized == [True, True]  # A stopped lifecycle validates again.
++
++
++def test_failed_preparation_is_fail_open_and_never_starts_workers(tmp_path, monkeypatch):
++    provider, telemetry = ProviderSpy(), Telemetry()
++    runtime = create_observation_foundation(enabled(tmp_path), provider, telemetry)
++    initialized = []
++
++    def fail():
++        initialized.append(True)
++        raise OSError("disposable unavailable storage")
++
++    monkeypatch.setattr(runtime.repository, "initialize", fail)
++    for worker in workers(runtime):
++        monkeypatch.setattr(worker, "start", lambda: pytest.fail("worker started after preparation failure"))
++    assert runtime.prepare_read_boundary() is False
++    assert runtime.prepare_read_boundary() is False
++    assert runtime.start() is False
++    assert runtime.state == "unavailable" and not runtime.read_boundary_ready
++    assert initialized == [True] and provider.calls == []
++    failures = [event for event in telemetry.events if event[0] == "observation.runtime_unavailable"]
++    assert len(failures) == 1
++    assert failures[0][2]["failure_category"] == "initialization_error"
++
++
++@pytest.mark.parametrize("settings", [
++    {"observation_foundation_enabled": "false"},
++    {"observation_foundation_enabled": "true", "observation_site_ids": ""},
++])
++def test_disabled_unavailable_variants_have_no_prepared_read_boundary(settings):
++    provider = ProviderSpy()
++    runtime = create_observation_foundation(settings, provider, Telemetry())
++    assert runtime.prepare_read_boundary() is False
++    assert runtime.read_boundary_ready is False
++    assert runtime.start() is False
++    assert provider.calls == []
+diff --git a/tests/observations/test_runtime.py b/tests/observations/test_runtime.py
+index fd4496a6d6c0862f6abbc5c8eb389ecc35b23855..b32897868c7199aa8357153d7756a64b98fa77a5 100644
+--- a/tests/observations/test_runtime.py
++++ b/tests/observations/test_runtime.py
+@@ -241,6 +241,7 @@ def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
+     provider = object()
+     auth_telemetry = object()
+     observation = SimpleNamespace(
++        prepare_read_boundary=lambda: events.append("observation.prepare"),
+         start=lambda: events.append("observation.start"),
+         stop=lambda *a: events.append("observation.stop"),
+     )
+@@ -280,7 +281,7 @@ def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
+     monkeypatch.setattr(process_runtime, "create_observation_foundation", factory)
+     process_runtime.main()
+     assert captured == {"provider": provider, "telemetry": auth_telemetry}
+-    assert events == ["observation.start", "app.run"]
++    assert events == ["observation.prepare", "observation.start", "app.run"]
+ 
+ 
+ def test_process_shutdown_orders_cleaner_before_observations(monkeypatch):
+diff --git a/tests/settings_control/test_run_integration.py b/tests/settings_control/test_run_integration.py
+index dcd07dedbd4aea7fc9fdbda7bcf939bbfbe37c4d..097329fa66c4650d4241844fc02e04a241ea253b 100644
+--- a/tests/settings_control/test_run_integration.py
++++ b/tests/settings_control/test_run_integration.py
+@@ -73,7 +73,8 @@ def test_all_controller_consumers_follow_adoption(tmp_path, monkeypatch, failure
+         return invoke
+     monkeypatch.setattr(collector, "start", start("collector.start"))
+     pending = SimpleNamespace(start=start("pending.start"), stop=lambda *_: None)
+-    observation = SimpleNamespace(start=start("observation.start"), stop=lambda: None)
++    observation = SimpleNamespace(prepare_read_boundary=lambda: events.append("observation.prepare"),
++        start=start("observation.start"), stop=lambda: None)
+     current = SimpleNamespace(start=start("current.start"), stop=lambda: None, read_service=None)
+     monkeypatch.setattr(runtime, "create_pending_session_cleaner", lambda **_: pending)
+     monkeypatch.setattr(runtime, "create_observation_foundation", lambda **_: observation)
+@@ -117,3 +118,118 @@ def test_enabled_bootstrap_failure_precedes_provider(tmp_path, monkeypatch, fail
+         runtime.main()
+     assert "create_controller" not in events
+     assert "create_app" not in events
++
++
++@pytest.mark.parametrize("adoption_failure", [False, True])
++def test_local_observation_preparation_precedes_composition_and_adoption(tmp_path, monkeypatch, adoption_failure):
++    from app.analytics.runtime import _observation_read_service, _check_source
++    from tests.observations.test_runtime import enabled, Telemetry
++    from tests.observations.test_read_boundary_preparation import workers
++
++    events, _, collector, _, app, _ = _prepare_main(monkeypatch)
++    (tmp_path / "data").mkdir(mode=0o750)
++    boot = stack(tmp_path, **enabled(tmp_path), host="127.0.0.1", port=8088, debug=False)
++    monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_: boot)
++    monkeypatch.setattr(runtime, "capture_loaded_artifact_identity", lambda *_:
++        SimpleNamespace(json_line=lambda: "synthetic FIX2 startup identity"))
++    monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **k: pytest.fail("network"))
++    provider_calls = []
++
++    def provider_call(name):
++        assert boot.admin_context.read_service._adopted, "provider call before durable adoption"
++        provider_calls.append(name)
++
++    provider = SimpleNamespace(probe=provider_call)
++    monkeypatch.setattr(runtime, "create_controller", lambda _: provider)
++    real_factory = runtime.create_observation_foundation
++    captured = {}
++
++    def start(name, *, provider_capable=True):
++        def invoke(*_args):
++            assert boot.admin_context.read_service._adopted
++            events.append(name)
++            if provider_capable:
++                provider.probe(name)
++            return True
++        return invoke
++
++    def observation_factory(**kwargs):
++        observation = real_factory(**{**kwargs, "telemetry": Telemetry()})
++        captured["observation"] = observation
++        initialize = observation.repository.initialize
++
++        def local_initialize():
++            assert not boot.admin_context.read_service._adopted
++            assert provider_calls == []
++            events.append("observation.initialize")
++            return initialize()
++
++        monkeypatch.setattr(observation.repository, "initialize", local_initialize)
++        prepare = observation.prepare_read_boundary
++
++        def local_prepare():
++            events.append("observation.prepare")
++            return prepare()
++
++        monkeypatch.setattr(observation, "prepare_read_boundary", local_prepare)
++        for name, worker in zip(("client", "ap", "cleanup", "integrity"), workers(observation)):
++            monkeypatch.setattr(worker, "start", start("worker." + name,
++                provider_capable=name in ("client", "ap")))
++        original_start = observation.start
++
++        def observation_start():
++            events.append("observation.start")
++            assert boot.admin_context.read_service._adopted
++            return original_start()
++
++        monkeypatch.setattr(observation, "start", observation_start)
++        return observation
++
++    monkeypatch.setattr(runtime, "create_observation_foundation", observation_factory)
++    monkeypatch.setattr(runtime, "create_pending_session_cleaner", lambda **_:
++        SimpleNamespace(start=start("pending.start")))
++    monkeypatch.setattr(collector, "start", start("collector.start"))
++    current = SimpleNamespace(start=start("current.start"), read_service=None)
++    monkeypatch.setattr(runtime, "_configure_current_state", lambda *_:
++        setattr(runtime, "_current_state_runtime", current))
++
++    def analytics(*_):
++        events.append("configure_analytics")
++        observation = captured["observation"]
++        assert observation.read_boundary_ready and observation.state == "disabled"
++        assert _check_source("observations", _observation_read_service(observation)).available
++        assert all(not worker.running for worker in workers(observation))
++        assert provider_calls == []
++
++    def admin(*_):
++        events.append("configure_admin_web")
++        assert not boot.admin_context.read_service._adopted and provider_calls == []
++        runtime._admin_web_runtime = None
++
++    monkeypatch.setattr(runtime, "_configure_analytics", analytics)
++    monkeypatch.setattr(runtime, "_configure_admin_web", admin)
++    activation = boot.activation_service.repository.activation
++
++    def adopt(*args, **kwargs):
++        assert provider_calls == []
++        if adoption_failure:
++            raise SettingsError("settings_store_unavailable")
++        result = activation(*args, **kwargs)
++        events.append("durable_adoption")
++        return result
++
++    monkeypatch.setattr(boot.activation_service.repository, "activation", adopt)
++    if adoption_failure:
++        with pytest.raises(SettingsError):
++            runtime.main()
++        assert provider_calls == [] and not app.run_calls
++        assert "observation.start" not in events
++    else:
++        runtime.main()
++        required = ["observation.prepare", "configure_analytics", "configure_admin_web",
++                    "durable_adoption", "pending.start", "observation.start",
++                    "current.start", "collector.start", "app.run"]
++        positions = [events.index(name) for name in required]
++        assert positions == sorted(positions)
++        assert events.count("observation.initialize") == 1
++        assert provider_calls == ["pending.start", "worker.client", "worker.ap", "current.start", "collector.start"]

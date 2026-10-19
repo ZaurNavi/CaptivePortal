@@ -1,0 +1,2694 @@
+diff --git a/.env.example b/.env.example
+index 0f025b9bdde71bf01ea0b216d4d018ea8278be78..7b73b0704080c0e14e20940e4a976758e6565a70 100644
+--- a/.env.example
++++ b/.env.example
+@@ -334,3 +334,27 @@ WEB_ADMIN_SETTINGS_ENABLED=false
+ SETTINGS_DB_PATH=/opt/CaptivePortal/data/settings.sqlite3
+ # Startup session grants; secret-write is deliberately NOT granted by default.
+ WEB_ADMIN_GLOBAL_CAPABILITIES=admin.read.settings.global,admin.write.settings.global,admin.read.settings.controller,admin.write.settings.controller
++
++# Guest Portal presentation: public plain text, never private credentials.
++# Persisted GLOBAL overrides win over explicit environment, then code defaults.
++# Descriptions use LF (up to four lines); retain literal LF in quoted dotenv values.
++# Changes require a separately authorized main-service restart and durable adoption.
++PORTAL_UI_TITLE_AZ="Zəfər Parkı"
++PORTAL_UI_TITLE_RU="Zəfər Parkı"
++PORTAL_UI_TITLE_EN="Zəfər Parkı"
++PORTAL_UI_GREETING_AZ="Xoş gəlmisiniz!"
++PORTAL_UI_GREETING_RU="Добро пожаловать!"
++PORTAL_UI_GREETING_EN="Welcome!"
++PORTAL_UI_DESCRIPTION_AZ="Parkımızın qonaqları üçün pulsuz
++Wi-Fi!!"
++PORTAL_UI_DESCRIPTION_RU="Бесплатный Wi-Fi
++для гостей парка!!"
++PORTAL_UI_DESCRIPTION_EN="Free Wi-Fi
++for park guests!!"
++PORTAL_SUPPORT_PHONE="+994 50 417 46 46"
++PORTAL_SUPPORT_EMAIL="zaur.navi@gmail.com"
++PORTAL_SUPPORT_WHATSAPP_URL="https://wa.me/994504174646"
++PORTAL_SUPPORT_TELEGRAM_URL="https://t.me/ZaurNavi"
++PORTAL_SUPPORT_FACEBOOK_URL="https://www.facebook.com/zaur.navi/?locale=ru_RU"
++# Portal grants are known but NOT included in the default above:
++# admin.read.settings.portal,admin.write.settings.portal
+diff --git a/app/admin_web/capabilities.py b/app/admin_web/capabilities.py
+index d185c8eb4c02310bee4c0fff6c7337bbe579a0b3..6166cc4496a09cecc60e8cb6ab089454862bf793 100644
+--- a/app/admin_web/capabilities.py
++++ b/app/admin_web/capabilities.py
+@@ -4,7 +4,8 @@ DEFAULT_GLOBAL_CAPABILITIES = frozenset({
+     "admin.read.settings.controller", "admin.write.settings.controller",
+ })
+ SECRET_WRITE_CAPABILITY = "admin.write.settings.controller.secret"
+-GLOBAL_CAPABILITIES = DEFAULT_GLOBAL_CAPABILITIES | {SECRET_WRITE_CAPABILITY}
++GLOBAL_CAPABILITIES = DEFAULT_GLOBAL_CAPABILITIES | {SECRET_WRITE_CAPABILITY,
++    "admin.read.settings.portal", "admin.write.settings.portal"}
+ DEFAULT_GLOBAL_CAPABILITIES_TEXT = ",".join(sorted(DEFAULT_GLOBAL_CAPABILITIES))
+ 
+ 
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index 06a7897d875d4ccb716bd5fa3a003441bd11de93..1408c8912e14981962d429d11191cbe9104c2637 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -107,7 +107,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             and any(len(request.args.getlist(key)) != 1 for key in request.args)
+         ):
+             return _error("invalid_request", 400)
+-        if request.method == "POST" and request.path not in ("/admin/api/v1/settings/generations", "/admin/api/v1/settings/controller/generations", "/admin/api/v1/settings/controller/client-secret/generations"):
++        if request.method == "POST" and request.path not in ("/admin/api/v1/settings/generations", "/admin/api/v1/settings/controller/generations", "/admin/api/v1/settings/controller/client-secret/generations", "/admin/api/v1/settings/portal/generations"):
+             if request.content_length is None:
+                 return _error("length_required", 411)
+             if request.content_length > config.max_post_bytes:
+@@ -164,9 +164,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+         principal = getattr(g, "admin_principal", None)
+         general = enabled and policy.authorize_global(principal, "admin.read.settings.global")
+         controller = enabled and policy.authorize_global(principal, "admin.read.settings.controller")
++        portal = enabled and policy.authorize_global(principal, "admin.read.settings.portal")
+         return {"settings_general_allowed": general, "settings_controller_allowed": controller,
+-                "settings_nav_enabled": general or controller,
+-                "settings_nav_target": "/admin/settings" if general else "/admin/settings/controller"}
++                "settings_portal_allowed": portal, "settings_nav_enabled": general or controller or portal,
++                "settings_nav_target": "/admin/settings" if general else "/admin/settings/controller" if controller else "/admin/settings/portal"}
+ 
+     def settings_gate(capability):
+         if not getattr(runtime, "settings_feature_enabled", False):
+@@ -190,6 +191,47 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+         return jsonify({"api_version": "admin.settings.v1", "request_id": g.admin_request_id,
+                         "error": {"code": error.code, "details": list(error.details)}}), error.status
+ 
++    @blueprint.get("/admin/settings/portal")
++    @authenticated
++    def portal_settings_page():
++        rejected = settings_gate("admin.read.settings.portal")
++        if rejected is not None:
++            return rejected
++        if request.args:
++            return _error("invalid_request", 400)
++        return render_template("admin/settings_portal.html", page={"key": "settings_portal", "title": "Guest Portal"},
++            username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token,
++            portal_settings_state=runtime.portal_settings_state,
++            portal_settings_write_allowed=policy.authorize_global(g.admin_principal, "admin.write.settings.portal"))
++
++    @blueprint.get("/admin/api/v1/settings/portal")
++    @authenticated
++    def portal_settings_read():
++        from app.settings_control.models import SettingsError
++        rejected = settings_gate("admin.read.settings.portal")
++        if rejected is not None:
++            return rejected
++        if request.args or (request.content_length or 0) > 0 or request.stream.read(1):
++            return _error("invalid_request", 400)
++        try:
++            service = runtime.portal_settings_read_service
++            if runtime.portal_settings_state != "active" or service is None:
++                raise SettingsError("settings_store_unavailable")
++            model = service.read_portal()
++            model["request_id"] = g.admin_request_id
++            response = jsonify(model)
++            response.headers["ETag"] = model["etag"]
++            return response
++        except SettingsError as error:
++            return jsonify({"api_version": "admin.settings.portal.v1", "request_id": g.admin_request_id,
++                "error": {"code": "settings_store_unavailable", "details": []}}), 503
++
++    @blueprint.post("/admin/api/v1/settings/portal/generations")
++    @authenticated
++    def portal_settings_mutation():
++        rejected = settings_gate("admin.read.settings.portal")
++        return rejected if rejected is not None else mutate_settings("portal")
++
+     @blueprint.get("/admin/settings/controller")
+     @authenticated
+     def controller_settings_page():
+@@ -309,7 +351,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+     def mutate_settings(domain):
+         import re
+         from app.settings_control.models import SettingsError
+-        rejected = settings_gate("admin.write.settings.controller" if domain == "controller" else "admin.write.settings.global")
++        rejected = settings_gate("admin.write.settings." + (domain if domain != "general" else "global"))
+         if rejected is not None:
+             return rejected
+         try:
+@@ -347,8 +389,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             response.headers["ETag"] = f'"settings-g{result.body["configured_generation"]}"'
+             return response
+         except SettingsError as error:
+-            if domain == "controller":
+-                return jsonify({"api_version": "admin.settings.controller.mutation.v1", "request_id": g.admin_request_id,
++            if domain in ("controller", "portal"):
++                return jsonify({"api_version": f"admin.settings.{domain}.mutation.v1", "request_id": g.admin_request_id,
+                     "error": {"code": error.code, "details": list(error.details)}}), error.status
+             return settings_failure(error)
+         except Exception:
+@@ -2251,7 +2293,9 @@ def _error(code: str, status_code: int) -> Response:
+     if _is_api_path(request.path):
+         return jsonify(
+             {
+-                "api_version": ("admin.settings.controller.secret.mutation.v1"
++                "api_version": ("admin.settings.portal.mutation.v1" if request.path == "/admin/api/v1/settings/portal/generations"
++                    else "admin.settings.portal.v1" if request.path == "/admin/api/v1/settings/portal"
++                    else "admin.settings.controller.secret.mutation.v1"
+                     if request.path == "/admin/api/v1/settings/controller/client-secret/generations"
+                     else "admin.settings.controller.mutation.v1"
+                     if request.path == "/admin/api/v1/settings/controller/generations"
+diff --git a/app/admin_web/runtime.py b/app/admin_web/runtime.py
+index 213d9d550f0f658ca7ee6c148740133a79041290..01ff384fb295b7bbfdfdabe59459a72d1921972b 100644
+--- a/app/admin_web/runtime.py
++++ b/app/admin_web/runtime.py
+@@ -71,6 +71,8 @@ class AdminWebRuntime:
+     controller_secret_mutation_service: Any | None = None
+     controller_settings_state: str = "disabled"
+     controller_settings_read_service: Any | None = None
++    portal_settings_state: str = "disabled"
++    portal_settings_read_service: Any | None = None
+ 
+     def clear(self) -> None:
+         if self.session_store is not None:
+@@ -468,6 +470,10 @@ def create_admin_web_runtime(
+         controller_secret_mutation_service=getattr(settings_control, "secret_mutation_service", None),
+         controller_settings_state=controller_settings_state,
+         controller_settings_read_service=controller_settings_read_service,
++        portal_settings_state=("active" if settings_control and settings_control.store_state == "available"
++                               and settings_control.read_service is not None else "unavailable") if settings_feature_enabled else "disabled",
++        portal_settings_read_service=settings_control.read_service if settings_feature_enabled and settings_control
++                                     and settings_control.store_state == "available" else None,
+     )
+     from .routes import create_admin_web_blueprint
+ 
+diff --git a/app/admin_web/static/portal_settings.js b/app/admin_web/static/portal_settings.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..d31993adad0f46712148c69e83e07d715a0000a9
+--- /dev/null
++++ b/app/admin_web/static/portal_settings.js
+@@ -0,0 +1,93 @@
++/* GLOBAL guest presentation. Server-owned metadata; no preview or restart authority. */
++(function () {
++  "use strict";
++  const root = document.getElementById("portal-settings-page");
++  if (!root) return;
++  const status = document.getElementById("portal-settings-state");
++  const groups = document.getElementById("portal-settings-groups");
++  const save = document.getElementById("portal-settings-save");
++  const writable = root.dataset.writeAllowed === "true";
++  let model = null, etag = null, busy = false, controls = [];
++  const text = value => value === null ? "—" : String(value);
++  function node(tag, value, className) {
++    const element = document.createElement(tag);
++    if (value !== undefined) element.textContent = value;
++    if (className) element.className = className;
++    return element;
++  }
++  async function request(url, options) {
++    const abort = new AbortController();
++    const timer = window.setTimeout(() => abort.abort(), 30000);
++    try {
++      const response = await fetch(url, {...options, credentials: "same-origin", cache: "no-store", signal: abort.signal});
++      const body = await response.json();
++      if (!response.ok) {const error = new Error("Portal settings rejected"); error.status = response.status; throw error;}
++      return {response, body};
++    } finally {window.clearTimeout(timer);}
++  }
++  function render() {
++    groups.replaceChildren(); controls = [];
++    const containers = new Map();
++    model.settings.forEach(item => {
++      if (!containers.has(item.group)) {
++        const section = node("section", undefined, "card card-wide settings-group");
++        section.append(node("h2", item.group === "branding" ? "Branding & welcome" : "Support contacts"));
++        if (item.group === "support") section.append(node("p", "This value is publicly visible to guests. No private credential or personal secret may be entered."));
++        groups.append(section); containers.set(item.group, section);
++      }
++      const row = node("article", undefined, "settings-item");
++      row.append(node("h3", item.display_label), node("p", item.description), node("p", item.key, "mono muted"));
++      const facts = node("dl", undefined, "settings-facts");
++      [["Configured", item.configured_value], ["Effective", item.effective_value],
++       ["Source", item.persisted_override_value !== null ? "persisted_override" : item.base_source],
++       ["Pending", item.pending_value], ["Apply requirement", item.apply_requirement]].forEach(([label, value]) => facts.append(node("dt", label), node("dd", text(value))));
++      row.append(facts, node("p", JSON.stringify(item.validation), "muted"));
++      const operation = node("select");
++      [["unchanged", "Keep unchanged"], ["set", "Set override"],
++       ...(item.persisted_override_value !== null ? [["clear_override", "Reset to deployment/default"]] : [])]
++        .forEach(([value, label]) => {const option = node("option", label); option.value = value; operation.append(option);});
++      operation.disabled = !writable;
++      const actionLabel = node("label", "Override action "); actionLabel.append(operation); row.append(actionLabel);
++      const input = node(item.presentation_type === "multiline_plain_text" ? "textarea" : "input");
++      if (input.tagName !== "TEXTAREA") input.type = item.presentation_type === "telephone" ? "tel" : item.presentation_type === "email" ? "email" : item.presentation_type === "restricted_url" ? "url" : "text";
++      input.value = item.configured_value; input.disabled = true;
++      // Browser lengths are advisory. Unicode code-point and all semantic checks remain server-owned.
++      input.required = item.validation.required;
++      input.maxLength = item.validation.max_length * 2; // UTF-16 must not reject valid code-point lengths.
++      operation.addEventListener("change", () => {input.disabled = !writable || operation.value !== "set";});
++      const valueLabel = node("label", "Value "); valueLabel.append(input); row.append(valueLabel);
++      containers.get(item.group).append(row); controls.push({item, input, operation});
++    });
++  }
++  async function load() {
++    save.disabled = true; model = null; etag = null;
++    const result = await request(root.dataset.apiBase, {headers: {Accept: "application/json"}});
++    if (result.body.api_version !== "admin.settings.portal.v1" || !Array.isArray(result.body.settings) || result.body.settings.length !== 14) throw new Error("Invalid Portal model");
++    model = result.body; etag = result.response.headers.get("ETag"); render(); save.disabled = !writable;
++    status.textContent = `Configured generation ${model.configured_generation}; effective ${text(model.effective_generation)}. ` + (model.restart_required ? "Pending captive-portal.service restart." : "Current configured generation is adopted.");
++  }
++  function unavailable() {save.disabled = true; status.textContent = "Portal settings unavailable. No changes have been confirmed.";}
++  document.getElementById("portal-settings-refresh").addEventListener("click", async () => {
++    if (busy) return; busy = true;
++    try {await load();} catch (_error) {unavailable();} finally {busy = false;}
++  });
++  document.getElementById("portal-settings-form").addEventListener("submit", async event => {
++    event.preventDefault(); if (busy || !writable || !model || !etag) return;
++    const changes = controls.filter(row => row.operation.value !== "unchanged").map(row => ({key: row.item.key,
++      operation: row.operation.value, ...(row.operation.value === "set" ? {value: row.input.value} : {})}));
++    if (!changes.length) {status.textContent = "No override changes selected."; return;}
++    busy = true; save.disabled = true;
++    try {
++      const result = await request(root.dataset.apiBase + "/generations", {method: "POST", headers: {
++        "Content-Type": "application/json", "X-CSRF-Token": root.dataset.csrfToken, "If-Match": etag,
++        "Idempotency-Key": crypto.randomUUID()}, body: JSON.stringify({changes})});
++      await load();
++      status.textContent = result.body.changed ? "Saved successfully." + (result.body.restart_required ? " Pending captive-portal.service restart." : "") : "Accepted: no persisted override change.";
++    } catch (error) {
++      if (error.status === 412) {try {await load(); status.textContent = "Configuration changed concurrently. Review current values before another Save.";} catch (_error) {unavailable();}}
++      else if (error.status === 422 || error.status === 400) {status.textContent = "Save rejected. Nothing was persisted. Review values and validation hints."; save.disabled = !writable;}
++      else {unavailable();}
++    } finally {busy = false;}
++  });
++  if (root.dataset.storeState === "available") load().catch(unavailable);
++})();
+diff --git a/app/admin_web/templates/admin/base.html b/app/admin_web/templates/admin/base.html
+index 4a1fec7666f10b23f3235f26eb6f606a08e1bb6b..cff43a3028c7ac72ade73bf8b099682dbcff4537 100644
+--- a/app/admin_web/templates/admin/base.html
++++ b/app/admin_web/templates/admin/base.html
+@@ -1,5 +1,5 @@
+ <!doctype html>
+-{% set global_settings_page = page.key in ('settings', 'settings_controller') %}
++{% set global_settings_page = page.key in ('settings', 'settings_controller', 'settings_portal') %}
+ <html lang="en">
+ <head>
+   <meta charset="utf-8">
+@@ -10,6 +10,8 @@
+   <script defer src="{{ url_for('admin_web_v1.static', filename='settings.js') }}"></script>
+   {% elif page.key == 'settings_controller' %}
+   <script defer src="{{ url_for('admin_web_v1.static', filename='controller_settings.js') }}"></script>
++  {% elif page.key == 'settings_portal' %}
++  <script defer src="{{ url_for('admin_web_v1.static', filename='portal_settings.js') }}"></script>
+   {% else %}
+   <script defer src="{{ url_for('admin_web_v1.static', filename='admin.js') }}"></script>
+   {% endif %}
+@@ -67,6 +69,7 @@
+       <nav class="settings-tabs" aria-label="Settings sections">
+         {% if settings_general_allowed %}<a class="nav-link{% if page.key == 'settings' %} is-active{% endif %}" href="/admin/settings"{% if page.key == 'settings' %} aria-current="page"{% endif %}>General</a>{% endif %}
+         {% if settings_controller_allowed %}<a class="nav-link{% if page.key == 'settings_controller' %} is-active{% endif %}" href="/admin/settings/controller"{% if page.key == 'settings_controller' %} aria-current="page"{% endif %}>Controller</a>{% endif %}
++        {% if settings_portal_allowed %}<a class="nav-link{% if page.key == 'settings_portal' %} is-active{% endif %}" href="/admin/settings/portal"{% if page.key == 'settings_portal' %} aria-current="page"{% endif %}>Portal</a>{% endif %}
+       </nav>
+       {% endif %}
+       <section
+@@ -76,6 +79,10 @@
+         {% elif page.key == 'settings_controller' %}
+         id="controller-settings-page" data-controller-state="{{ controller_settings_state }}"
+         data-write-allowed="{{ 'true' if controller_settings_write_allowed else 'false' }}" data-csrf-token="{{ csrf_token }}"
++        {% elif page.key == 'settings_portal' %}
++        id="portal-settings-page" data-api-base="/admin/api/v1/settings/portal"
++        data-store-state="{{ 'available' if portal_settings_state == 'active' else 'unavailable' }}"
++        data-write-allowed="{{ 'true' if portal_settings_write_allowed else 'false' }}" data-csrf-token="{{ csrf_token }}"
+         {% else %}
+         id="admin-page"
+         data-page="{{ page.key }}"
+diff --git a/app/admin_web/templates/admin/settings_portal.html b/app/admin_web/templates/admin/settings_portal.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..48e98ddb730f9d43fed2d1585cce24c66cf0d7ad
+--- /dev/null
++++ b/app/admin_web/templates/admin/settings_portal.html
+@@ -0,0 +1,14 @@
++{% extends "admin/base.html" %}
++{% block subtitle %}<p>Global guest-facing presentation settings</p>{% endblock %}
++{% block page_body %}
++<div id="portal-settings-state" class="state-panel" role="status" aria-live="polite">
++  {% if portal_settings_state == 'active' %}Loading Portal settings…{% else %}Settings store unavailable. No changes can be saved.{% endif %}
++</div>
++<form id="portal-settings-form">
++  <div id="portal-settings-groups" class="content-grid"></div>
++  <div class="settings-actions">
++    <button id="portal-settings-save" class="button" type="submit" disabled>Save changes</button>
++    <button id="portal-settings-refresh" class="button button-secondary" type="button">Read current settings</button>
++  </div>
++</form>
++{% endblock %}
+diff --git a/app/capport/routes.py b/app/capport/routes.py
+index ef8a2c87d3c79727c64bd7ac0b6900281f811d15..df694dc94a340fc4f9070ee4fe92bbcade8ec8ca 100644
+--- a/app/capport/routes.py
++++ b/app/capport/routes.py
+@@ -18,7 +18,7 @@ from flask import (
+ 
+ from app.auth_telemetry import events
+ from app.logger import logger
+-from app.web.localization import PORTAL_TRANSLATIONS
++from app.portal_presentation import PortalTemplatePresentationV1
+ from app.web.portal_entry import PortalClientContext, PortalEntryResult
+ 
+ from .models import CapportConfig
+@@ -33,6 +33,7 @@ def create_capport_blueprint(
+     portal_entry_handler,
+     config: CapportConfig,
+     telemetry,
++    portal_template_presentation: PortalTemplatePresentationV1,
+     portal_evidence_extractor=None,
+     portal_evidence_telemetry=None,
+     client_hints_probe=None,
+@@ -91,6 +92,7 @@ def create_capport_blueprint(
+                     "Сервис авторизации временно недоступен. "
+                     "Попробуйте ещё раз.",
+                     503,
++                    portal_template_presentation,
+                 ))
+         if not state.client_found or state.client is None:
+             discovery = _discovery_contract()
+@@ -111,7 +113,8 @@ def create_capport_blueprint(
+                     "terminal": discovery["terminal"],
+                     "retryable": discovery["retryable"],
+                 },
+-                portal_translations=PORTAL_TRANSLATIONS,
++                portal_translations=portal_template_presentation.translations,
++                portal_support=portal_template_presentation.support,
+                 retry_url=discovery["retry_url"],
+                 restart_url=discovery["restart_url"],
+                 auto_retry=discovery["auto_retry"],
+@@ -326,7 +329,7 @@ def _no_store(response, status_code: int | None = None):
+     return prepared
+ 
+ 
+-def _controlled_error(message: str, status_code: int):
++def _controlled_error(message: str, status_code: int, portal_template_presentation: PortalTemplatePresentationV1):
+     try:
+         initial_state = {
+             "state": "FAILED",
+@@ -344,7 +347,8 @@ def _controlled_error(message: str, status_code: int):
+                 initial_progress=100,
+                 error_message=message,
+                 initial_state=initial_state,
+-                portal_translations=PORTAL_TRANSLATIONS,
++                portal_translations=portal_template_presentation.translations,
++                portal_support=portal_template_presentation.support,
+             ),
+             status_code,
+         )
+diff --git a/app/config.py b/app/config.py
+index 5041d97810515053272add9681886fc650d5db27..fc3d387a7c2d01865f5aff27ee504fc28fd5dc96 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -5,6 +5,23 @@ This module stores default values for the application.
+ """
+ 
+ import os
++from app.portal_presentation import PORTAL_SETTING_DEFAULTS
++
++# GLOBAL guest-facing presentation; explicit environment bytes are validated later.
++PORTAL_UI_TITLE_AZ = os.getenv("PORTAL_UI_TITLE_AZ", PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_AZ"])
++PORTAL_UI_TITLE_RU = os.getenv("PORTAL_UI_TITLE_RU", PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_RU"])
++PORTAL_UI_TITLE_EN = os.getenv("PORTAL_UI_TITLE_EN", PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_EN"])
++PORTAL_UI_GREETING_AZ = os.getenv("PORTAL_UI_GREETING_AZ", PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_AZ"])
++PORTAL_UI_GREETING_RU = os.getenv("PORTAL_UI_GREETING_RU", PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_RU"])
++PORTAL_UI_GREETING_EN = os.getenv("PORTAL_UI_GREETING_EN", PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_EN"])
++PORTAL_UI_DESCRIPTION_AZ = os.getenv("PORTAL_UI_DESCRIPTION_AZ", PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_AZ"])
++PORTAL_UI_DESCRIPTION_RU = os.getenv("PORTAL_UI_DESCRIPTION_RU", PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_RU"])
++PORTAL_UI_DESCRIPTION_EN = os.getenv("PORTAL_UI_DESCRIPTION_EN", PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_EN"])
++PORTAL_SUPPORT_PHONE = os.getenv("PORTAL_SUPPORT_PHONE", PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_PHONE"])
++PORTAL_SUPPORT_EMAIL = os.getenv("PORTAL_SUPPORT_EMAIL", PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_EMAIL"])
++PORTAL_SUPPORT_WHATSAPP_URL = os.getenv("PORTAL_SUPPORT_WHATSAPP_URL", PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_WHATSAPP_URL"])
++PORTAL_SUPPORT_TELEGRAM_URL = os.getenv("PORTAL_SUPPORT_TELEGRAM_URL", PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_TELEGRAM_URL"])
++PORTAL_SUPPORT_FACEBOOK_URL = os.getenv("PORTAL_SUPPORT_FACEBOOK_URL", PORTAL_SETTING_DEFAULTS["PORTAL_SUPPORT_FACEBOOK_URL"])
+ 
+ # Server settings
+ HOST = "127.0.0.1"
+diff --git a/app/portal_presentation.py b/app/portal_presentation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..479705568988f13a4b419b12793eee31c7a40c03
+--- /dev/null
++++ b/app/portal_presentation.py
+@@ -0,0 +1,163 @@
++"""Code-owned, validated plain-text guest presentation; no runtime I/O."""
++from dataclasses import dataclass
++import re
++from types import MappingProxyType
++import unicodedata
++from urllib.parse import urlsplit
++
++
++PORTAL_SETTING_DEFAULTS = MappingProxyType({
++    "PORTAL_UI_TITLE_AZ": "Zəfər Parkı",
++    "PORTAL_UI_TITLE_RU": "Zəfər Parkı",
++    "PORTAL_UI_TITLE_EN": "Zəfər Parkı",
++    "PORTAL_UI_GREETING_AZ": "Xoş gəlmisiniz!",
++    "PORTAL_UI_GREETING_RU": "Добро пожаловать!",
++    "PORTAL_UI_GREETING_EN": "Welcome!",
++    "PORTAL_UI_DESCRIPTION_AZ": "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!",
++    "PORTAL_UI_DESCRIPTION_RU": "Бесплатный Wi-Fi\nдля гостей парка!!",
++    "PORTAL_UI_DESCRIPTION_EN": "Free Wi-Fi\nfor park guests!!",
++    "PORTAL_SUPPORT_PHONE": "+994 50 417 46 46",
++    "PORTAL_SUPPORT_EMAIL": "zaur.navi@gmail.com",
++    "PORTAL_SUPPORT_WHATSAPP_URL": "https://wa.me/994504174646",
++    "PORTAL_SUPPORT_TELEGRAM_URL": "https://t.me/ZaurNavi",
++    "PORTAL_SUPPORT_FACEBOOK_URL": "https://www.facebook.com/zaur.navi/?locale=ru_RU",
++})
++
++
++class PortalPresentationConfigError(ValueError):
++    def __init__(self, key=None, reason="invalid_portal_configuration"):
++        super().__init__(reason)
++        self.key, self.reason = key, reason
++
++
++class _FrozenJsonDict(dict):
++    """Immutable mapping also supported by Jinja's JSON serializer."""
++    def _reject(self, *args, **kwargs):
++        raise TypeError("immutable Portal presentation")
++
++    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _reject
++
++
++def _freeze(value):
++    if isinstance(value, dict):
++        return _FrozenJsonDict({key: _freeze(item) for key, item in value.items()})
++    if isinstance(value, (tuple, list)):
++        return tuple(_freeze(item) for item in value)
++    return value
++
++
++def portal_validation_metadata(key):
++    """A fresh public projection of the single server-owned validation contract."""
++    if key not in PORTAL_SETTING_DEFAULTS:
++        raise PortalPresentationConfigError(key, "unknown_key")
++    if key.startswith("PORTAL_UI_"):
++        kind = key.split("_")[2]
++        result = {"type": "string", "required": True, "min_length": 1,
++                  "max_length": {"TITLE": 80, "GREETING": 120, "DESCRIPTION": 400}[kind],
++                  "unicode_normalization": "NFC", "content": "plain_text",
++                  "line_policy": "lf_multiline" if kind == "DESCRIPTION" else "single_line",
++                  "control_characters": "forbidden_except_lf" if kind == "DESCRIPTION" else "forbidden",
++                  "bidi_controls": "forbidden"}
++        if kind == "DESCRIPTION":
++            result["max_lines"] = 4
++        return result
++    result = {"type": "string", "required": False, "empty_allowed": True, "min_length": 0}
++    if key == "PORTAL_SUPPORT_PHONE":
++        return dict(result, max_length=32, format="support_phone_e164_display_v1", href_scheme="tel")
++    if key == "PORTAL_SUPPORT_EMAIL":
++        return dict(result, max_length=254, format="support_email_ascii_v1", href_scheme="mailto")
++    result.update(max_length=512 if key.endswith("FACEBOOK_URL") else 256,
++                  format="restricted_https_url_v1", scheme="https", explicit_port="forbidden",
++                  userinfo="forbidden", fragment="forbidden")
++    if key.endswith("WHATSAPP_URL"):
++        result.update(allowed_hosts=["wa.me"], query_policy="forbidden", path_pattern="/[0-9]{8,15}")
++    elif key.endswith("TELEGRAM_URL"):
++        result.update(allowed_hosts=["t.me"], query_policy="forbidden", path_pattern="/[A-Za-z0-9_]{5,64}")
++    else:
++        result.update(allowed_hosts=["facebook.com", "www.facebook.com"], query_policy="none_or_locale_only",
++                      locale_pattern="[A-Za-z]{2,3}_[A-Za-z]{2,3}", path_policy="non_empty_max_256")
++    return result
++
++
++def validate_portal_setting(key, value):
++    metadata = portal_validation_metadata(key)
++    def fail(reason):
++        raise PortalPresentationConfigError(key, reason)
++    if type(value) is not str:
++        fail("string_required")
++    if not metadata["min_length"] <= len(value) <= metadata["max_length"]:
++        fail("invalid_length")
++    if not value:
++        return value
++    if value[0].isspace() or value[-1].isspace():
++        fail("edge_whitespace")
++    if key.startswith("PORTAL_UI_"):
++        if unicodedata.normalize("NFC", value) != value:
++            fail("non_canonical_unicode")
++        multiline = metadata["line_policy"] == "lf_multiline"
++        if any((ord(char) < 32 and not (char == "\n" and multiline)) or 127 <= ord(char) <= 159
++               or ord(char) in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)) for char in value):
++            fail("forbidden_character")
++        if (not multiline and any(char in value for char in ("\u2028", "\u2029"))) or (multiline and len(value.split("\n")) > 4):
++            fail("invalid_lines")
++        return value
++    if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value):
++        fail("forbidden_character")
++    if key == "PORTAL_SUPPORT_PHONE":
++        if not re.fullmatch(r"\+[0-9 ]+", value) or not 8 <= len(value[1:].replace(" ", "")) <= 15:
++            fail("invalid_phone")
++    elif key == "PORTAL_SUPPORT_EMAIL":
++        if not value.isascii() or not re.fullmatch(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+", value):
++            fail("invalid_email")
++    else:
++        try:
++            parsed = urlsplit(value)
++        except ValueError:
++            fail("invalid_url")
++        # Inspect the original authority, not a normalized hostname/port.
++        if not value.startswith("https://") or parsed.netloc not in metadata["allowed_hosts"]:
++            fail("invalid_url")
++        if any(char.isspace() for char in value) or "#" in value or "\\" in value:
++            fail("invalid_url")
++        if metadata["query_policy"] == "forbidden":
++            if "?" in value or not re.fullmatch(metadata["path_pattern"], parsed.path):
++                fail("invalid_url")
++        elif not parsed.path or len(parsed.path) > 256 or (
++            "?" in value and not re.fullmatch(r"locale=[A-Za-z]{2,3}_[A-Za-z]{2,3}", parsed.query)
++        ):
++            fail("invalid_url")
++    return value
++
++
++@dataclass(frozen=True, slots=True)
++class PortalPresentationConfigV1:
++    translations: dict
++    support: dict
++
++    @classmethod
++    def from_settings(cls, settings):
++        values = {key: validate_portal_setting(key, settings.get(key.lower(), default))
++                  for key, default in PORTAL_SETTING_DEFAULTS.items()}
++        translations = {lang: {field: values[f"PORTAL_UI_{field.upper()}_{lang.upper()}"]
++                               for field in ("title", "greeting", "description")} for lang in ("az", "ru", "en")}
++        phone, email = values["PORTAL_SUPPORT_PHONE"], values["PORTAL_SUPPORT_EMAIL"]
++        support = {"phone_display": phone, "phone_href": "tel:" + phone.replace(" ", "") if phone else "",
++                   "email": email, "email_href": "mailto:" + email if email else "",
++                   **{name + "_url": values[f"PORTAL_SUPPORT_{name.upper()}_URL"]
++                      for name in ("whatsapp", "telegram", "facebook")}}
++        return cls(_freeze(translations), _freeze(support))
++
++
++@dataclass(frozen=True, slots=True)
++class PortalTemplatePresentationV1:
++    translations: dict
++    support: dict
++
++    @classmethod
++    def compose(cls, candidate):
++        from app.web.localization import PORTAL_TRANSLATIONS
++        if not isinstance(candidate, PortalPresentationConfigV1) or set(candidate.translations) != {"az", "ru", "en"}:
++            raise PortalPresentationConfigError()
++        translations = {lang: dict(PORTAL_TRANSLATIONS[lang], **candidate.translations[lang])
++                        for lang in ("az", "ru", "en")}
++        return cls(_freeze(translations), candidate.support)
+diff --git a/app/settings.py b/app/settings.py
+index 26fb13c47b28feb10df5c4c256a3cf17134c2569..bee077c5a3bd29219d09e205cff95e164fe2ae75 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -6,6 +6,11 @@ Designed to be extended in future versions to read from files or environment.
+ """
+ 
+ from app.config import (
++    PORTAL_UI_TITLE_AZ, PORTAL_UI_TITLE_RU, PORTAL_UI_TITLE_EN,
++    PORTAL_UI_GREETING_AZ, PORTAL_UI_GREETING_RU, PORTAL_UI_GREETING_EN,
++    PORTAL_UI_DESCRIPTION_AZ, PORTAL_UI_DESCRIPTION_RU, PORTAL_UI_DESCRIPTION_EN,
++    PORTAL_SUPPORT_PHONE, PORTAL_SUPPORT_EMAIL, PORTAL_SUPPORT_WHATSAPP_URL,
++    PORTAL_SUPPORT_TELEGRAM_URL, PORTAL_SUPPORT_FACEBOOK_URL,
+     HOST, PORT, DEBUG, VERIFY_SSL, LOG_LEVEL,
+     PORTAL_COUNTER_ENABLED, PORTAL_COUNTER_DB_PATH,
+     PORTAL_COUNTER_TIMEZONE, PORTAL_COUNTER_API_ENABLED,
+@@ -717,6 +722,20 @@ def get_settings() -> dict:
+         ),
+         "omada_url": OMADA_URL,
+         "omada_id": OMADA_ID,
++        "portal_ui_title_az": PORTAL_UI_TITLE_AZ,
++        "portal_ui_title_ru": PORTAL_UI_TITLE_RU,
++        "portal_ui_title_en": PORTAL_UI_TITLE_EN,
++        "portal_ui_greeting_az": PORTAL_UI_GREETING_AZ,
++        "portal_ui_greeting_ru": PORTAL_UI_GREETING_RU,
++        "portal_ui_greeting_en": PORTAL_UI_GREETING_EN,
++        "portal_ui_description_az": PORTAL_UI_DESCRIPTION_AZ,
++        "portal_ui_description_ru": PORTAL_UI_DESCRIPTION_RU,
++        "portal_ui_description_en": PORTAL_UI_DESCRIPTION_EN,
++        "portal_support_phone": PORTAL_SUPPORT_PHONE,
++        "portal_support_email": PORTAL_SUPPORT_EMAIL,
++        "portal_support_whatsapp_url": PORTAL_SUPPORT_WHATSAPP_URL,
++        "portal_support_telegram_url": PORTAL_SUPPORT_TELEGRAM_URL,
++        "portal_support_facebook_url": PORTAL_SUPPORT_FACEBOOK_URL,
+         "client_id": CLIENT_ID,
+         "client_secret": CLIENT_SECRET,
+         # Pending Session Cleaner settings (raw strings from config.py; parsed by PendingSessionCleanerConfig)
+diff --git a/app/settings_control/activation.py b/app/settings_control/activation.py
+index b96ccf58211d1951f5428df98ba0c53cd9268130..e05c66bf915e2853a8951b66484583596bebeb2c 100644
+--- a/app/settings_control/activation.py
++++ b/app/settings_control/activation.py
+@@ -34,7 +34,7 @@ class SettingsActivationService:
+         self.read_service._adopted = True
+ 
+     def fail(self, safe_error_code):
+-        if safe_error_code not in {"snapshot_mismatch", "admin_configuration_adoption_failed", "settings_validation_failed", "controller_configuration_adoption_failed",
++        if safe_error_code not in {"snapshot_mismatch", "admin_configuration_adoption_failed", "settings_validation_failed", "controller_configuration_adoption_failed", "portal_configuration_adoption_failed",
+                 "controller_secret_key_unavailable", "controller_secret_permissions_invalid", "controller_secret_reference_missing",
+                 "controller_secret_decrypt_failed", "controller_secret_integrity_failed", "controller_secret_configuration_invalid"}:
+             raise ValueError("invalid activation failure category")
+diff --git a/app/settings_control/definitions.py b/app/settings_control/definitions.py
+index 84f526fea3326444d254764f76945f5c54c964ab..f32cf5e62e9ed43e7f2da81f0cc4e4e4f3dff2c1 100644
+--- a/app/settings_control/definitions.py
++++ b/app/settings_control/definitions.py
+@@ -1,6 +1,7 @@
+-"""One ordered domain-aware registry: twelve General and three Controller keys."""
++"""One ordered domain-aware registry for ordinary GLOBAL settings."""
+ from dataclasses import dataclass
+ from app import config
++from app.portal_presentation import PORTAL_SETTING_DEFAULTS
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -66,6 +67,32 @@ class SettingsDefinitionRegistry:
+             ("OMADA_ID", "omada_id", "Controller ID", "string"),
+             ("OMADA_CLIENT_ID", "client_id", "Client / Application ID", "string"),
+         ))
++        languages = {"AZ": "Azerbaijani", "RU": "Russian", "EN": "English"}
++        branding = {"TITLE": ("Portal title", "title", "plain_text"),
++                    "GREETING": ("Welcome text", "welcome text", "plain_text"),
++                    "DESCRIPTION": ("Guest description", "short guest description", "multiline_plain_text")}
++        support = {"PHONE": ("Support phone", "phone number", "telephone"),
++                   "EMAIL": ("Support email", "email address", "email"),
++                   "WHATSAPP_URL": ("WhatsApp support link", "WhatsApp support link", "restricted_url"),
++                   "TELEGRAM_URL": ("Telegram support link", "Telegram support link", "restricted_url"),
++                   "FACEBOOK_URL": ("Facebook support link", "Facebook support link", "restricted_url")}
++        portal = []
++        for key, default in PORTAL_SETTING_DEFAULTS.items():
++            if key.startswith("PORTAL_UI_"):
++                _, _, kind, language = key.split("_")
++                label, description, presentation = branding[kind]
++                label += " — " + languages[language]
++                description = f"Public {description} shown to guests in {languages[language]}."
++                group, required = "branding", True
++            else:
++                label, description, presentation = support[key.removeprefix("PORTAL_SUPPORT_")]
++                description = f"Public {description} shown to guests."
++                group, required = "support", False
++            portal.append(SettingsDefinition(key, default, None, None, label, description,
++                "portal_presentation", "", group, value_type="string", domain="portal",
++                settings_dict_key=key.lower(), environment_variable_name=key,
++                presentation_type=presentation, required=required))
++        self.definitions += tuple(portal)
+ 
+     def __iter__(self):
+         return iter(self.definitions)
+diff --git a/app/settings_control/repository.py b/app/settings_control/repository.py
+index 7de17e4e745b8af7f8cced18a2baf1401005945b..7757d6595c4572fe436db06d0c2648d67105de1b 100644
+--- a/app/settings_control/repository.py
++++ b/app/settings_control/repository.py
+@@ -1,11 +1,12 @@
+ """SQLite-only SettingsStore: bounded connections, immutable history, one writer."""
+ import json
+ import sqlite3
++from pathlib import Path
+ from contextlib import contextmanager
+ from .definitions import SettingsDefinitionRegistry
+ from .models import SettingsError, TARGET, utc_now
+ 
+-SETTINGS_SCHEMA_VERSION = 3
++SETTINGS_SCHEMA_VERSION = 4
+ SETTINGS_SQLITE_BUSY_TIMEOUT_MS = 1000
+ _V1_DDL = (
+     """CREATE TABLE settings_generations (
+@@ -111,9 +112,13 @@ _SECRET_TRIGGERS = tuple(
+                            ("settings_secret_mutation_audit", ("UPDATE", "DELETE")))
+     for action in actions
+ )
+-_DDL = tuple(sql.replace("('general','controller')", "('general','controller','controller_secret')")
++_V3_DDL = tuple(sql.replace("('general','controller')", "('general','controller','controller_secret')")
+              .replace("request_payload_hash TEXT NOT NULL", "request_fingerprint_kind TEXT NOT NULL CHECK(request_fingerprint_kind IN ('sha256_canonical_json_v1','hmac_sha256_controller_secret_v1')), request_fingerprint TEXT NOT NULL")
+              if sql.startswith("CREATE TABLE settings_idempotency ") else sql for sql in _V2_DDL) + _SECRET_DDL
++_DDL = tuple(sql.replace("setting_domain IN ('general','controller')", "setting_domain IN ('general','controller','portal')")
++             .replace("setting_domain='controller' AND", "setting_domain IN ('controller','portal') AND")
++             .replace("mutation_domain IN ('general','controller','controller_secret')",
++                      "mutation_domain IN ('general','controller','controller_secret','portal')") for sql in _V3_DDL)
+ 
+ 
+ def canonical_json(value):
+@@ -122,11 +127,20 @@ def canonical_json(value):
+ 
+ class SettingsRepository:
+     @classmethod
+-    def open_existing_v3(cls, db_path):
+-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+-            if db.execute("PRAGMA user_version").fetchone()[0] != 3:
++    def open_existing_for_recovery(cls, db_path):
++        # Never run initialization/migration or permit SQLite to create a file.
++        repository = cls.__new__(cls)
++        repository.db_path = str(db_path)
++        repository.registry = SettingsDefinitionRegistry()
++        repository._existing_only = True
++        with repository.transaction() as db:
++            if db.execute("PRAGMA user_version").fetchone()[0] != SETTINGS_SCHEMA_VERSION:
+                 raise SettingsError("settings_store_unavailable")
+-        return cls(db_path)
++            repository._validate_schema(db, _DDL)
++            repository._validate_history(db)
++            from .controller_secret import validate_secret_history
++            validate_secret_history(db)
++        return repository
+ 
+     def __init__(self, db_path, registry=None):
+         self.db_path = str(db_path)
+@@ -137,7 +151,11 @@ class SettingsRepository:
+     def transaction(self, *, write=False):
+         connection = None
+         try:
+-            connection = sqlite3.connect(self.db_path, timeout=1, isolation_level=None)
++            if getattr(self, "_existing_only", False):
++                connection = sqlite3.connect(Path(self.db_path).resolve().as_uri() + ("?mode=rw" if write else "?mode=ro"),
++                                             uri=True, timeout=1, isolation_level=None)
++            else:
++                connection = sqlite3.connect(self.db_path, timeout=1, isolation_level=None)
+             connection.row_factory = sqlite3.Row
+             connection.execute("PRAGMA foreign_keys=ON")
+             connection.execute(f"PRAGMA busy_timeout={SETTINGS_SQLITE_BUSY_TIMEOUT_MS}")
+@@ -163,7 +181,7 @@ class SettingsRepository:
+             if version == 0 and not tables:
+                 for statement in (*_DDL, *_TRIGGERS, *_SECRET_TRIGGERS):
+                     db.execute(statement)
+-                db.execute("PRAGMA user_version=3")
++                db.execute("PRAGMA user_version=4")
+                 db.execute("INSERT INTO settings_generations VALUES(0,NULL,'global',?,'system','settings_bootstrap',NULL)", (utc_now(),))
+                 db.execute("INSERT INTO settings_target_state VALUES(?,NULL,NULL)", (TARGET,))
+             elif version == 1:
+@@ -171,10 +189,14 @@ class SettingsRepository:
+                 self._validate_history(db, legacy=True)
+                 self._migrate_v1(db)
+                 self._migrate_v2(db)
++                self._migrate_v3(db)
+             elif version == 2:
+                 self._validate_schema(db, _V2_DDL)
+                 self._validate_history(db)
+                 self._migrate_v2(db)
++                self._migrate_v3(db)
++            elif version == 3:
++                self._migrate_v3(db)
+             elif version != SETTINGS_SCHEMA_VERSION:
+                 raise SettingsError("settings_store_unavailable")
+             self._validate_schema(db, _DDL)
+@@ -184,7 +206,7 @@ class SettingsRepository:
+ 
+     @staticmethod
+     def _validate_schema(db, ddl):
+-        extra = _SECRET_TRIGGERS if ddl is _DDL else ()
++        extra = _SECRET_TRIGGERS if ddl is _DDL or ddl is _V3_DDL else ()
+         expected = {statement.split()[2]: statement for statement in (*ddl, *_TRIGGERS, *extra)}
+         actual = {row[0]: row[1] for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type IN ('table','trigger') AND name NOT LIKE 'sqlite_%'")}
+         normalize = lambda value: " ".join(value.split())
+@@ -216,7 +238,7 @@ class SettingsRepository:
+         for action in ("update", "delete"):
+             db.execute(f"DROP TRIGGER settings_idempotency_immutable_{action}")
+         db.execute("ALTER TABLE settings_idempotency RENAME TO settings_idempotency_v2")
+-        db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE settings_idempotency ")))
++        db.execute(next(sql for sql in _V3_DDL if sql.startswith("CREATE TABLE settings_idempotency ")))
+         columns = [row[1] for row in db.execute("PRAGMA table_info(settings_idempotency_v2)")]
+         target = ["request_fingerprint" if name == "request_payload_hash" else name for name in columns]
+         db.execute(f"INSERT INTO settings_idempotency ({','.join(target)},request_fingerprint_kind) SELECT {','.join(columns)},'sha256_canonical_json_v1' FROM settings_idempotency_v2")
+@@ -228,6 +250,28 @@ class SettingsRepository:
+                 db.execute(sql)
+         db.execute("PRAGMA user_version=3")
+ 
++    def _migrate_v3(self, db):
++        self._validate_schema(db, _V3_DDL)
++        self._validate_history(db)
++        from .controller_secret import validate_secret_history
++        validate_secret_history(db)
++        for table in ("settings_mutation_audit", "settings_idempotency"):
++            for action in ("update", "delete"):
++                db.execute(f"DROP TRIGGER {table}_immutable_{action}")
++            db.execute(f"ALTER TABLE {table} RENAME TO {table}_v3")
++            db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE " + table + " ")))
++            columns = [row[1] for row in db.execute(f"PRAGMA table_info({table}_v3)")]
++            names = ",".join(columns)
++            db.execute(f"INSERT INTO {table} ({names}) SELECT {names} FROM {table}_v3")
++            db.execute(f"DROP TABLE {table}_v3")
++            for statement in _TRIGGERS:
++                if statement.startswith("CREATE TRIGGER " + table + "_"):
++                    db.execute(statement)
++        db.execute("PRAGMA user_version=4")
++        self._validate_schema(db, _DDL)
++        self._validate_history(db)
++        validate_secret_history(db)
++
+     def _validate_history(self, db, legacy=False):
+         if db.execute("PRAGMA quick_check").fetchall()[0][0] != "ok" or db.execute("PRAGMA foreign_key_check").fetchall():
+             raise SettingsError("settings_store_unavailable")
+@@ -238,21 +282,18 @@ class SettingsRepository:
+             raise SettingsError("settings_store_unavailable")
+         if db.execute("SELECT COUNT(*) FROM settings_target_state WHERE target=?", (TARGET,)).fetchone()[0] != 1:
+             raise SettingsError("settings_store_unavailable")
++        schema_version = db.execute("PRAGMA user_version").fetchone()[0]
+         for row in db.execute("SELECT setting_key,value_type,integer_value" + ("" if legacy else ",string_value") + " FROM settings_overrides"):
+             definition = self.registry.get(row[0])
+-            if definition is None or row[1] != definition.value_type:
++            if definition is None or row[1] != definition.value_type or (schema_version < 4 and definition.domain == "portal"):
+                 raise SettingsError("settings_store_unavailable")
+             if row[1] == "integer":
+                 if type(row[2]) is not int or not definition.min_value <= row[2] <= definition.max_value:
+                     raise SettingsError("settings_store_unavailable")
+             else:
+-                from app.controllers.omada_config import normalize_controller_setting
+-                from app.exceptions import ConfigurationError
+-                try:
+-                    if legacy or normalize_controller_setting(row[0], row[3]) != row[3]:
+-                        raise SettingsError("settings_store_unavailable")
+-                except ConfigurationError as exc:
+-                    raise SettingsError("settings_store_unavailable") from exc
++                from .value_validation import validate_setting_value
++                if legacy or validate_setting_value(definition, row[3], durable=True) != row[3]:
++                    raise SettingsError("settings_store_unavailable")
+ 
+     @staticmethod
+     def head(db):
+@@ -283,21 +324,13 @@ class SettingsRepository:
+         return dict(row) if row else None
+ 
+     def create_generation(self, db, *, parent, principal, request_id, created_at, overrides, carry_secret=True):
+-        from app.controllers.omada_config import normalize_controller_setting
+-        from app.exceptions import ConfigurationError
++        from .value_validation import validate_setting_value
+         for key, value in overrides.items():
+             definition = self.registry.get(key)
+             if definition is None:
+                 raise SettingsError("settings_store_unavailable")
+-            if definition.value_type == "integer":
+-                if type(value) is not int or not definition.min_value <= value <= definition.max_value:
+-                    raise SettingsError("settings_store_unavailable")
+-            else:
+-                try:
+-                    if normalize_controller_setting(key, value) != value:
+-                        raise SettingsError("settings_store_unavailable")
+-                except ConfigurationError as exc:
+-                    raise SettingsError("settings_store_unavailable") from exc
++            if validate_setting_value(definition, value, durable=True) != value:
++                raise SettingsError("settings_store_unavailable")
+         generation = db.execute("""INSERT INTO settings_generations
+             (parent_generation_id,scope_type,created_at_utc,created_by_principal_type,created_by_principal_name,request_id)
+             VALUES(?,'global',?,?,?,?)""", (parent, created_at, principal.principal_type, principal.username, request_id)).lastrowid
+diff --git a/app/settings_control/resolver.py b/app/settings_control/resolver.py
+index ee25fb187c0fc4bde974baa2522c3a15ae9fedc0..4d2b12e8d2be928b5da7f6d66d272bd017a6abef 100644
+--- a/app/settings_control/resolver.py
++++ b/app/settings_control/resolver.py
+@@ -2,8 +2,7 @@
+ from types import MappingProxyType
+ from .definitions import SettingsDefinitionRegistry
+ from .models import ResolvedSettingsSnapshot, SettingsError
+-from app.controllers.omada_config import normalize_controller_setting
+-from app.exceptions import ConfigurationError
++from .value_validation import validate_setting_value
+ 
+ 
+ def freeze(value):
+@@ -26,11 +25,7 @@ def resolve_settings(base_settings, explicit_environment_names, overrides, gener
+             # A shadowed invalid deployment value is not the selected candidate.
+             base = raw
+             selected = overrides.get(definition.key, base)
+-            try:
+-                selected = normalize_controller_setting(definition.key, selected)
+-            except ConfigurationError as exc:
+-                raise SettingsError("validation_failed", 422, ({"key": definition.key,
+-                    "reason": "required" if not isinstance(selected, str) or not selected.strip() else "invalid_url"},)) from exc
++            selected = validate_setting_value(definition, selected)
+             sources[definition.key] = "environment" if definition.environment_variable_name in explicit_environment_names else "repository_default"
+             base_values[definition.key] = base
+             persisted[definition.key] = overrides.get(definition.key)
+diff --git a/app/settings_control/secret_recovery.py b/app/settings_control/secret_recovery.py
+index 9800ab668f9ff9cf2ccc1f49a5a7c3e712a8a9dc..48d9204e76300258057d504af04a730f857f9460 100644
+--- a/app/settings_control/secret_recovery.py
++++ b/app/settings_control/secret_recovery.py
+@@ -45,7 +45,7 @@ def main(argv=None):
+     try:
+         filesystem = SecretFilesystem()
+         filesystem.validate_db(SETTINGS_DB_PATH)
+-        generation, changed = clear_managed_secret(SettingsRepository.open_existing_v3(SETTINGS_DB_PATH), args.expected_generation, filesystem=filesystem)
++        generation, changed = clear_managed_secret(SettingsRepository.open_existing_for_recovery(SETTINGS_DB_PATH), args.expected_generation, filesystem=filesystem)
+         print(f"configured_generation={generation} changed={str(changed).lower()}")
+         return 0
+     except SettingsError as error:
+diff --git a/app/settings_control/services.py b/app/settings_control/services.py
+index 0cf6a3071f04f7a41fb34afaeb9d201e19e2d407..d4b33b44e6b80ba82079b8834df94970a618348e 100644
+--- a/app/settings_control/services.py
++++ b/app/settings_control/services.py
+@@ -7,8 +7,8 @@ from .models import API_VERSION, SettingsError, SettingReadModelV1, SettingsMuta
+ from .repository import canonical_json
+ from .resolver import resolve_settings
+ from .validation import SettingsValidationService
+-from app.controllers.omada_config import normalize_controller_setting
+-from app.exceptions import ConfigurationError
++from .value_validation import validate_setting_value
++from app.portal_presentation import portal_validation_metadata
+ 
+ 
+ def parse_changes(raw, registry=None, domain="general"):
+@@ -30,7 +30,7 @@ def parse_changes(raw, registry=None, domain="general"):
+         if type(document) is not dict or set(document) != {"changes"}:
+             raise ValueError()
+         changes = document["changes"]
+-        if domain not in ("general", "controller") or type(changes) is not list or not 1 <= len(changes) <= (3 if domain == "controller" else 64):
++        if domain not in ("general", "controller", "portal") or type(changes) is not list or not 1 <= len(changes) <= {"general": 64, "controller": 3, "portal": 14}[domain]:
+             raise ValueError()
+         seen, result = set(), []
+         for change in changes:
+@@ -41,13 +41,10 @@ def parse_changes(raw, registry=None, domain="general"):
+             if definition is None or definition.domain != domain or key in seen:
+                 raise ValueError()
+             seen.add(key)
+-            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is (str if domain == "controller" else int):
++            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is (int if domain == "general" else str):
+                 value = change["value"]
+-                if domain == "controller":
+-                    try:
+-                        value = normalize_controller_setting(key, value)
+-                    except ConfigurationError as exc:
+-                        raise SettingsError("validation_failed", 422, ({"key": key, "reason": "required" if not value.strip() else "invalid_url"},)) from exc
++                if definition.value_type == "string":
++                    value = validate_setting_value(definition, value)
+                 result.append(SettingsMutationChange(key, operation, value))
+             elif operation == "clear_override" and set(change) == {"key", "operation"}:
+                 result.append(SettingsMutationChange(key, operation))
+@@ -130,6 +127,40 @@ class SettingsReadService:
+             return {"configured_generation": generation, "activation_state": activation,
+                     "restart_required": generation != effective, "fields": fields}
+ 
++    def read_portal(self):
++        with self.repository.transaction() as db:
++            generation = self.repository.head(db)
++            snapshot = resolve_settings(self.base_settings, self.environment_names,
++                self.repository.overrides(db, generation), generation, self.registry)
++            effective = self.repository.effective(db)
++            trustworthy = self._adopted and effective == self.startup_snapshot.generation_id
++            latest = self.repository.latest_activation_result(db, generation)
++            activation = "runtime_unavailable" if not trustworthy else (
++                "active" if generation == effective else "activation_failed" if latest == "failed" else "pending_main_restart")
++            settings = []
++            for item in self.registry.for_domain("portal"):
++                audit = self.repository.latest_setting_audit(db, item.key, generation)
++                configured = snapshot.values[item.settings_dict_key]
++                adopted = self.startup_snapshot.values.get(item.settings_dict_key, item.repository_default_value) if trustworthy else None
++                settings.append({
++                    "key": item.key, "display_label": item.display_label, "description": item.description,
++                    "group": item.group, "value_type": item.value_type, "presentation_type": item.presentation_type,
++                    "scope_type": item.scope_type, "scope_id": None, "editable": item.editable,
++                    "secret_class": item.secret_class, "default_value": item.repository_default_value,
++                    "base_source": snapshot.base_source_by_key[item.key], "base_value": snapshot.base_value_by_key[item.key],
++                    "persisted_override_value": snapshot.persisted_override_by_key[item.key],
++                    "configured_value": configured, "effective_value": adopted,
++                    "pending_value": configured if trustworthy and generation != effective and configured != adopted else None,
++                    "configured_generation": generation, "effective_generation": effective, "activation_state": activation,
++                    "apply_requirement": item.apply_requirement, "activation_target": item.activation_target,
++                    "validation": portal_validation_metadata(item.key), "last_changed_at": audit["timestamp_utc"] if audit else None,
++                    "last_changed_by": {"principal_type": audit["principal_type"], "principal_name": audit["principal_name"]} if audit else None,
++                })
++            return {"api_version": "admin.settings.portal.v1", "scope": {"type": "global"}, "store_state": "available",
++                    "configured_generation": generation, "effective_generation": effective, "etag": f'"settings-g{generation}"',
++                    "restart_required": generation != effective,
++                    "pending_setting_count": sum(item["pending_value"] is not None for item in settings), "settings": settings}
++
+ 
+ class SettingsMutationService:
+     def __init__(self, repository, read_service, validation=None):
+@@ -169,17 +200,28 @@ class SettingsMutationService:
+                     overrides[change.key] = change.value
+                 else:
+                     overrides.pop(change.key, None)
+-            current = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, previous, parent, self.read_service.registry)
+-            candidate = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, overrides, parent, self.read_service.registry)
++            try:
++                current = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, previous, parent, self.read_service.registry)
++                candidate = resolve_settings(self.read_service.base_settings, self.read_service.environment_names, overrides, parent, self.read_service.registry)
++            except SettingsError as error:
++                controller_keys = {item.key for item in self.read_service.registry.for_domain("controller")}
++                if domain == "portal" and error.code == "validation_failed" and any(
++                    detail.get("key") in controller_keys for detail in error.details
++                ):
++                    raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
++                raise
+             resolution = None
+-            if self.secret_repository is not None:
++            if domain != "portal" and self.secret_repository is not None:
+                 try:
+                     resolution = self.secret_repository.resolve(parent, self.read_service.base_settings, self.read_service.environment_names)
+                 except SettingsError as error:
+                     if error.code != "controller_secret_configuration_invalid":
+                         raise
+                     raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
+-            self.validation.validate(candidate, secret_resolution=resolution)
++            if domain == "portal":
++                self.validation.validate_portal_candidate(candidate)
++            else:
++                self.validation.validate(candidate, secret_resolution=resolution)
+             changed = previous != overrides
+             generation = parent
+             if changed:
+@@ -198,14 +240,14 @@ class SettingsMutationService:
+                         new_value=candidate.values[definition.settings_dict_key],
+                         apply_requirement=definition.apply_requirement, activation_target=definition.activation_target,
+                         domain=domain, value_type=definition.value_type)
+-            if domain == "controller":
++            if domain in ("controller", "portal"):
+                 effective = self.repository.effective(db)
+                 latest = self.repository.latest_activation_result(db, generation)
+                 activation = "pending_main_restart" if changed else (
+                     "runtime_unavailable" if not self.read_service._adopted else "active" if generation == effective
+                     else "activation_failed" if latest == "failed" else "pending_main_restart")
+-                body = {"api_version": "admin.settings.controller.mutation.v1", "request_id": request_id,
+-                        "scope": {"type": "global"}, "resource": {"type": "omada_controller", "scope": "installation"},
++                body = {"api_version": f"admin.settings.{domain}.mutation.v1", "request_id": request_id,
++                        "scope": {"type": "global"}, "resource": {"type": "guest_portal" if domain == "portal" else "omada_controller", "scope": "installation"},
+                         "changed": changed, "changed_keys": [item.key for item in changes if previous.get(item.key) != overrides.get(item.key)],
+                         "configured_generation": generation, "effective_generation": effective,
+                         "activation_state": activation, "restart_required": generation != effective}
+diff --git a/app/settings_control/validation.py b/app/settings_control/validation.py
+index db49e33173f7069e8cf66c7419de21f2a211f086..a05baed1d15a490841c70570de6320ccc0875bb4 100644
+--- a/app/settings_control/validation.py
++++ b/app/settings_control/validation.py
+@@ -6,7 +6,8 @@ from app.admin_web.home_ap_24h_config import home_ap_24h_config_from_settings
+ from app.current_state.config import current_state_config_from_settings
+ from .definitions import SettingsDefinitionRegistry
+ from .models import SettingsError
+-from app.controllers.omada_config import build_omada_runtime_config
++from app.controllers.omada_config import build_omada_runtime_config, normalize_controller_setting
++from app.portal_presentation import PortalPresentationConfigV1, PortalPresentationConfigError
+ from app.exceptions import ConfigurationError
+ 
+ 
+@@ -14,7 +15,7 @@ class SettingsValidationService:
+     def __init__(self, registry=None):
+         self.registry = registry or SettingsDefinitionRegistry()
+ 
+-    def validate(self, snapshot, *, secret_resolution=None):
++    def _validate_general(self, snapshot):
+         details = []
+         for item in self.registry:
+             if item.domain != "general":
+@@ -39,6 +40,25 @@ class SettingsValidationService:
+             home_ap_24h_config_from_settings(snapshot.values, admin_config=admin)
+         except (ValueError, TypeError) as exc:
+             raise SettingsError("validation_failed", 422, ({"key": None, "reason": "semantic_validation_failed"},)) from exc
++
++    @staticmethod
++    def _validate_portal(snapshot):
++        try:
++            PortalPresentationConfigV1.from_settings(snapshot.values)
++        except PortalPresentationConfigError as error:
++            raise SettingsError("validation_failed", 422, ({"key": error.key, "reason": error.reason},)) from None
++
++    def validate_portal_candidate(self, snapshot):
++        self._validate_general(snapshot)
++        try:
++            for item in self.registry.for_domain("controller"):
++                normalize_controller_setting(item.key, snapshot.values.get(item.settings_dict_key))
++        except ConfigurationError:
++            raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
++        self._validate_portal(snapshot)
++
++    def validate(self, snapshot, *, secret_resolution=None):
++        self._validate_general(snapshot)
+         try:
+             from .controller_secret import OmadaClientSecretResolution
+             if not isinstance(secret_resolution, OmadaClientSecretResolution):
+@@ -46,3 +66,4 @@ class SettingsValidationService:
+             build_omada_runtime_config(snapshot.values, secret_resolution=secret_resolution)
+         except (ConfigurationError, KeyError, TypeError):
+             raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from None
++        self._validate_portal(snapshot)
+diff --git a/app/settings_control/value_validation.py b/app/settings_control/value_validation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3f346a0973d8e39185d3ac1166ffc1eb7ca6cb1
+--- /dev/null
++++ b/app/settings_control/value_validation.py
+@@ -0,0 +1,29 @@
++"""Definition-owned ordinary value validation shared by all Store boundaries."""
++from app.controllers.omada_config import normalize_controller_setting
++from app.exceptions import ConfigurationError
++from app.portal_presentation import PortalPresentationConfigError, validate_portal_setting
++from .models import SettingsError
++
++
++def validate_setting_value(definition, value, *, durable=False):
++    try:
++        if definition.value_type == "integer":
++            if type(value) is not int:
++                raise SettingsError("validation_failed", 422, ({"key": definition.key, "reason": "integer_required"},))
++            if not definition.min_value <= value <= definition.max_value:
++                raise SettingsError("validation_failed", 422, ({"key": definition.key, "reason": "out_of_range"},))
++            return value
++        if definition.domain == "portal":
++            return validate_portal_setting(definition.key, value)
++        return normalize_controller_setting(definition.key, value)
++    except PortalPresentationConfigError as error:
++        raise SettingsError("settings_store_unavailable" if durable else "validation_failed",
++                            503 if durable else 422, () if durable else ({"key": definition.key, "reason": error.reason},)) from None
++    except ConfigurationError:
++        raise SettingsError("settings_store_unavailable" if durable else "validation_failed", 503 if durable else 422,
++                            () if durable else ({"key": definition.key,
++                             "reason": "required" if not isinstance(value, str) or not value.strip() else "invalid_url"},)) from None
++    except SettingsError:
++        if durable:
++            raise SettingsError("settings_store_unavailable") from None
++        raise
+diff --git a/app/web/localization.py b/app/web/localization.py
+index 38fdf283d82841137c9fab944dae44aa2c714775..78bfac5c5e2ab2942ac2ea30a5d0440dd07fe659 100644
+--- a/app/web/localization.py
++++ b/app/web/localization.py
+@@ -1,11 +1,12 @@
+ """Portal UI translations kept outside the HTML/JavaScript template."""
++from app.portal_presentation import PORTAL_SETTING_DEFAULTS
+ 
+ 
+ PORTAL_TRANSLATIONS = {
+     "az": {
+-        "title": "Zəfər Parkı",
+-        "greeting": "Xoş gəlmisiniz!",
+-        "description": "Parkımızın qonaqları üçün pulsuz\nWi-Fi!!",
++        "title": PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_AZ"],
++        "greeting": PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_AZ"],
++        "description": PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_AZ"],
+         "counterHeading": "Wi-Fi qoşulmaları",
+         "counterToday": "Bu gün",
+         "counterTotal": "Ümumi",
+@@ -49,9 +50,9 @@ PORTAL_TRANSLATIONS = {
+         ),
+     },
+     "ru": {
+-        "title": "Zəfər Parkı",
+-        "greeting": "Добро пожаловать!",
+-        "description": "Бесплатный Wi-Fi\nдля гостей парка!!",
++        "title": PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_RU"],
++        "greeting": PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_RU"],
++        "description": PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_RU"],
+         "counterHeading": "Подключения к Wi-Fi",
+         "counterToday": "Сегодня",
+         "counterTotal": "Всего",
+@@ -92,9 +93,9 @@ PORTAL_TRANSLATIONS = {
+         ),
+     },
+     "en": {
+-        "title": "Zəfər Parkı",
+-        "greeting": "Welcome!",
+-        "description": "Free Wi-Fi\nfor park guests!!",
++        "title": PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_EN"],
++        "greeting": PORTAL_SETTING_DEFAULTS["PORTAL_UI_GREETING_EN"],
++        "description": PORTAL_SETTING_DEFAULTS["PORTAL_UI_DESCRIPTION_EN"],
+         "counterHeading": "Wi-Fi connections",
+         "counterToday": "Today",
+         "counterTotal": "Total",
+diff --git a/app/web/portal_entry.py b/app/web/portal_entry.py
+index e82b31208f02addf05afd2052288b4d0aeb2b6f6..5b74e441edbbe553775571e8a802e13c22645455 100644
+--- a/app/web/portal_entry.py
++++ b/app/web/portal_entry.py
+@@ -11,7 +11,7 @@ from app.auth.worker import log_auth_event
+ from app.auth_telemetry import events as telemetry_events
+ from app.logger import logger
+ from app.device_fingerprint_portal.telemetry import safe_emit as safe_portal_evidence_emit
+-from app.web.localization import PORTAL_TRANSLATIONS
++from app.portal_presentation import PortalTemplatePresentationV1
+ 
+ 
+ @dataclass(frozen=True)
+@@ -45,6 +45,7 @@ class PortalEntryHandler:
+         auth_worker: Any,
+         executor: Any,
+         auth_telemetry: Any,
++        portal_template_presentation: PortalTemplatePresentationV1,
+         portal_counter_service: Any = None,
+         counter_recording_enabled: bool = False,
+         portal_evidence_sink: Any = None,
+@@ -54,6 +55,7 @@ class PortalEntryHandler:
+         self._auth_worker = auth_worker
+         self._executor = executor
+         self._auth_telemetry = auth_telemetry
++        self._portal_template_presentation = portal_template_presentation
+         self._portal_counter_service = portal_counter_service
+         self._counter_recording_enabled = counter_recording_enabled
+         self._portal_evidence_sink = portal_evidence_sink
+@@ -72,7 +74,8 @@ class PortalEntryHandler:
+             ),
+             initial_progress=result.initial_state.get("progress", 100),
+             initial_state=result.initial_state,
+-            portal_translations=PORTAL_TRANSLATIONS,
++            portal_translations=self._portal_template_presentation.translations,
++            portal_support=self._portal_template_presentation.support,
+             error_message=result.error_message,
+         )
+         if result.status_code == 200:
+diff --git a/app/web/templates/portal.html b/app/web/templates/portal.html
+index d01d5cb10d015843c4a21504e22c0ee12bd76752..3115f3c3ec286cf36377eb9ea1a09f7642cdae38 100644
+--- a/app/web/templates/portal.html
++++ b/app/web/templates/portal.html
+@@ -670,21 +670,20 @@
+                 class="portal-title"
+                 data-i18n="title"
+             >
+-                Zəfər Parkı
++                {{ portal_translations['az']['title'] }}
+             </h1>
+ 
+             <p
+                 class="portal-greeting"
+                 data-i18n="greeting"
+             >
+-                Xoş gəlmisiniz!
++                {{ portal_translations['az']['greeting'] }}
+             </p>
+ 
+             <p
+                 class="portal-description"
+                 data-i18n="description"
+-            >Parkımızın qonaqları üçün pulsuz
+-Wi-Fi!!</p>
++            >{{ portal_translations['az']['description'] }}</p>
+ 
+             <div
+                 id="portal-error"
+@@ -749,6 +748,7 @@ Wi-Fi!!</p>
+                 {% include "components/portal_counter.html" %}
+             {% endif %}
+ 
++            {% if portal_support.phone_display or portal_support.email or portal_support.whatsapp_url or portal_support.telegram_url or portal_support.facebook_url %}
+             <section
+                 class="portal-support"
+                 aria-labelledby="portal-support-title"
+@@ -761,38 +761,43 @@ Wi-Fi!!</p>
+                     Texniki dəstək
+                 </h2>
+ 
++                {% if portal_support.phone_display %}
+                 <a
+                     class="portal-support__link"
+-                    href="tel:+994504174646"
++                    href="{{ portal_support.phone_href }}"
+                 >
+                     <span
+                         class="portal-support__icon"
+                         aria-hidden="true"
+                     >📞</span>
+-                    <span>+994 50 417 46 46</span>
++                    <span>{{ portal_support.phone_display }}</span>
+                 </a>
++                {% endif %}
+ 
++                {% if portal_support.email %}
+                 <a
+                     class="portal-support__link"
+-                    href="mailto:zaur.navi@gmail.com"
++                    href="{{ portal_support.email_href }}"
+                 >
+                     <span
+                         class="portal-support__icon"
+                         aria-hidden="true"
+                     >✉️</span>
+-                    <span>zaur.navi@gmail.com</span>
++                    <span>{{ portal_support.email }}</span>
+                 </a>
++                {% endif %}
+ 
+                 <div
+                     class="portal-support__socials"
+                     aria-label="Sosial şəbəkələr"
+                 >
++                    {% if portal_support.whatsapp_url %}
+                     <a
+                         class="
+                             portal-social-link
+                             portal-social-link--whatsapp
+                         "
+-                        href="https://wa.me/994504174646"
++                        href="{{ portal_support.whatsapp_url }}"
+                         target="_blank"
+                         rel="noopener noreferrer"
+                         aria-label="WhatsApp"
+@@ -826,13 +831,15 @@ Wi-Fi!!</p>
+                             />
+                         </svg>
+                     </a>
++                    {% endif %}
+ 
++                    {% if portal_support.telegram_url %}
+                     <a
+                         class="
+                             portal-social-link
+                             portal-social-link--telegram
+                         "
+-                        href="https://t.me/ZaurNavi"
++                        href="{{ portal_support.telegram_url }}"
+                         target="_blank"
+                         rel="noopener noreferrer"
+                         aria-label="Telegram"
+@@ -850,13 +857,15 @@ Wi-Fi!!</p>
+                             />
+                         </svg>
+                     </a>
++                    {% endif %}
+ 
++                    {% if portal_support.facebook_url %}
+                     <a
+                         class="
+                             portal-social-link
+                             portal-social-link--facebook
+                         "
+-                        href="https://www.facebook.com/zaur.navi/?locale=ru_RU"
++                        href="{{ portal_support.facebook_url }}"
+                         target="_blank"
+                         rel="noopener noreferrer"
+                         aria-label="Facebook"
+@@ -874,8 +883,10 @@ Wi-Fi!!</p>
+                             />
+                         </svg>
+                     </a>
++                    {% endif %}
+                 </div>
+             </section>
++            {% endif %}
+ 
+             <footer class="designer-credit">
+                 © Designer: Zaur Navi | Country should know its heroes.
+diff --git a/app/web/web.py b/app/web/web.py
+index c0d1aa87702e028184582bac01df59007c0ac92c..9aef3d245d7ed8ac99a2baf4e3a82283fb0c970d 100644
+--- a/app/web/web.py
++++ b/app/web/web.py
+@@ -61,7 +61,7 @@ from app.web.portal_entry import (
+     PortalClientContext,
+     PortalEntryHandler,
+ )
+-from app.web.localization import PORTAL_TRANSLATIONS
++from app.portal_presentation import PortalPresentationConfigV1, PortalTemplatePresentationV1
+ from app.device_fingerprint_portal import (
+     PortalEvidenceRuntime,
+     extract_portal_evidence_candidate,
+@@ -146,6 +146,8 @@ def create_app(
+ 
+     if settings is None:
+         settings = get_settings()
++    portal_template_presentation = PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings(settings))
++    app.extensions["portal_template_presentation"] = portal_template_presentation
+     auth_telemetry = configure_auth_telemetry(settings)
+     portal_evidence_telemetry = PortalEvidenceTelemetry()
+     portal_evidence_runtime = None
+@@ -369,6 +371,7 @@ def create_app(
+         authorization_health_tracker=authorization_health_tracker,
+     )
+     portal_entry_handler = PortalEntryHandler(
++        portal_template_presentation=portal_template_presentation,
+         session_manager=auth_manager,
+         auth_worker=auth_worker,
+         executor=auth_executor,
+@@ -390,6 +393,7 @@ def create_app(
+         app.extensions["capport_service"] = capport_service
+         app.register_blueprint(
+             create_capport_blueprint(
++                portal_template_presentation=portal_template_presentation,
+                 service=capport_service,
+                 portal_entry_handler=portal_entry_handler,
+                 config=capport_config,
+@@ -442,7 +446,8 @@ def create_app(
+                     "progress": 100,
+                     "terminal": True,
+                 },
+-                portal_translations=PORTAL_TRANSLATIONS,
++                portal_translations=portal_template_presentation.translations,
++                portal_support=portal_template_presentation.support,
+                 error_message=(
+                     "Не удалось определить параметры подключения."
+                 ),
+diff --git a/docs/configuration.md b/docs/configuration.md
+index f607a0f7e1f71a65e57cd44fa9956facc96c5db6..119e851dd1cac527c66b7b2d08835dc7e83bccda 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -522,8 +522,8 @@ variable and not a 1-GiB reservation.
+ SettingsStore I/O and keeps base settings authoritative. `SETTINGS_DB_PATH`
+ defaults to `/opt/CaptivePortal/data/settings.sqlite3`; these two bootstrap
+ controls are not editable Settings. Provision the parent directory externally;
+-the application does not create it. Only the exact accepted schema-v1 database
+-is migrated automatically to v2 during Settings-enabled startup; incompatible
++the application does not create it. Exact accepted schema-v1/v2/v3 databases
++are migrated transactionally to v4 during Settings-enabled startup; incompatible
+ or corrupt stores are rejected.
+ 
+ When enabled and available, GLOBAL persisted overrides precede explicit
+@@ -549,17 +549,17 @@ The unchanged ordered General integer allowlist is exactly:
+ | WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS | 60 | 60–300 |
+ | WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS | 120 | 60–600 |
+ 
+-SQLite schema v3 retains immutable generations, complete typed per-generation
++SQLite schema v4 retains immutable generations, complete typed per-generation
+ override sets, mutation audit, successful idempotency responses and activation
+ events, plus the mutable `captive-portal.service` effective-generation target.
+ Generation 0 is created with `system / settings_bootstrap`, no overrides, no
+ mutation audit and no idempotency record. Foreign keys are enabled and the
+ SQLite busy timeout is 1000 ms.
+ 
+-The common definition registry has 15 entries: the twelve General integers
++The common definition registry has 29 entries: the twelve General integers
+ above and exactly three Controller strings (`OMADA_URL`, `OMADA_ID`,
+-`OMADA_CLIENT_ID`). The same Store, generation head and CAS authority serve
+-all domains. Idempotency keys are scoped by domain. The transactional v1→v2→v3
++`OMADA_CLIENT_ID`) and fourteen public Portal strings. The same Store, generation head and CAS authority serve
++all domains. Idempotency keys are scoped by domain. The transactional v1→v2→v3→v4
+ migration preserves generation IDs, original audit/activation history and exact
+ successful General response bytes; migration itself creates no generation,
+ audit or activation event.
+@@ -647,3 +647,42 @@ Managed ownership outranks environment/repository default and fails closed on
+ security, reference or decryption failure without fallback. Without a managed
+ binding, a valid deployment secret can run even if the managed secret store/key is
+ unavailable. There is no live credential test, hot reconnect or restart authority.
++
++## Guest Portal presentation — Settings Stage 5
++
++The ordinary GLOBAL registry now includes exactly fourteen public string settings:
++`PORTAL_UI_TITLE_AZ/RU/EN`, `PORTAL_UI_GREETING_AZ/RU/EN`,
++`PORTAL_UI_DESCRIPTION_AZ/RU/EN`, `PORTAL_SUPPORT_PHONE`, `PORTAL_SUPPORT_EMAIL`,
++`PORTAL_SUPPORT_WHATSAPP_URL`, `PORTAL_SUPPORT_TELEGRAM_URL`, and
++`PORTAL_SUPPORT_FACEBOOK_URL`. Each uppercase key is its environment variable;
++the runtime mapping uses its lowercase name. `.env.example` lists exact defaults.
++Code-owned `PORTAL_SETTING_DEFAULTS` is the single default authority.
++
++Persisted override wins over explicit environment, then the repository default.
++Clear Override removes the persisted value; it does not write a default.
++Branding is NFC plain text, with no trimming/normalization: title 1–80,
++greeting 1–120, description 1–400 Unicode code points. Descriptions allow LF and
++at most four lines; edge whitespace, C0/C1 controls and bidi controls are rejected
++(LF is the description exception). HTML-like text is valid and escaped literally.
++
++Support values can be exactly empty to hide that contact. Phone uses `+` and
++ASCII digits/spaces with 8–15 digits; email is ASCII without display names or
++query parameters. Social links require exact HTTPS authorities (`wa.me`, `t.me`,
++`facebook.com`/`www.facebook.com`), restricted paths, no userinfo/port/fragment,
++and no query except Facebook's single `locale` parameter. Server-derived
++`tel:`/`mailto:` links and escaped HTTPS values are the only link projections.
++
++One validated, immutable `PortalTemplatePresentationV1` is built during startup
++and shared by normal Portal, CAPPORT, discovery and controlled-error HTML. Only
++the nine branding translations are overlaid; other full-catalog translations,
++Auth, counters and JSON contracts are unchanged. Requests do not read Settings
++or environment. Invalid Portal composition records the safe failed-adoption
++category `portal_configuration_adoption_failed` and never advances effective
++generation or serves HTTP. An already adopted projection remains usable during
++SettingsStore outages.
++
++Portal reads/mutations/rendering do not access the Controller secret repository.
++Portal candidate validation checks General/Admin values, canonical non-secret
++Controller prerequisites and all fourteen Portal values. A new generation carries
++its parent secret binding unchanged without decrypting it. General/Controller
++full secret validation and Stage-4 fail-closed startup remain unchanged.
+diff --git a/docs/deployment.md b/docs/deployment.md
+index 8ab91dff4254de6a51a7ba9613ed0f40ae2f9e53..82ff84ee0889d765bbb43e29e608c2387c7ca1c6 100644
+--- a/docs/deployment.md
++++ b/docs/deployment.md
+@@ -1016,7 +1016,7 @@ For authorized local recovery **with the service already stopped**, run:
+ python3 -m app.settings_control.secret_recovery clear-omada-client-secret --expected-generation <N>
+ ```
+ 
+-The command requires secure/trustworthy schema-v3 DB and exact configured CAS,
++The command requires secure/trustworthy current schema-v4 DB and exact configured CAS,
+ clears only managed ownership, carries ordinary overrides, creates a safe local
+ audit, retains any effective version and does not load/decrypt the master key,
+ test Omada, change environment or control the service. No binding is a safe no-op.
+@@ -1027,3 +1027,28 @@ backups plus their matching key may decrypt historical ciphertext. Backup retent
+ and destruction are operator policy. Live version GC is logical deletion only,
+ not forensic erasure of pages, backups or physical storage. This implementation
+ does not export/backup a key or change production/services.
++
++## Settings Stage 5 schema and presentation rollout boundary
++
++New enabled stores use schema v4. Exact v1/v2 history follows the existing chain
++through v3. After validating the complete physical v3 schema, ordinary history
++and secret references, v3→v4 replaces only the immutable mutation-audit and
++idempotency leaf tables inside the existing initialization transaction. Original
++IDs, values, response JSON bytes, fingerprints, timestamps, secret versions,
++bindings, configured/effective state and activation history remain unchanged.
++No Portal defaults are persisted during migration. Missing triggers, incompatible
++schema/history or newer versions abort startup; migration failures roll back.
++Old code rejecting v4 needs a separately authorized coherent rollback plan.
++
++Recovery uses an existing-only, non-creating/non-migrating v4 opener with exact
++schema, trigger, integrity, generation/target and secret-reference checks. It
++retains the Stage-4 filesystem policy and never repairs/migrates the DB or loads
++the master key. A local clear carries every ordinary override, including Portal,
++and does not advance effective generation. This documentation does not authorize
++running recovery or changing production.
++
++Portal settings require an externally authorized main-service restart and durable
++startup adoption. The Admin API does not restart services or hot-replace the guest
++projection. Explicitly grant Portal read/write capabilities only to authorized
++sessions; defaults are unchanged. This implementation performs no deployment,
++service restart, Controller API probe or production test.
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index 63ac54e89c115000ba7adc475b3a8a857cb5afa9..c60c3e027f4c46dd46f4c00671ad55b9d29e707e 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -945,3 +945,35 @@ every success/replay reloads v3. No browser/OS physical-memory erasure is claime
+ Replacement/clear persist ownership only; the existing provider stays unchanged
+ until external restart and durable adoption. Settings outage retains only the safe
+ effective snapshot; key outage disables secret writes without hot-fallback.
++
++## GLOBAL Guest Portal Settings — Stage 5
++
++`/admin/settings/portal` is a GLOBAL page without a fake Site context. General,
++Controller and Portal tabs appear in that order only when their independent read
++capabilities are granted. `admin.read.settings.portal` and
++`admin.write.settings.portal` are recognized but not granted by default. Portal
++POST requires both. The feature remains gated by `WEB_ADMIN_SETTINGS_ENABLED`.
++
++`GET /admin/api/v1/settings/portal` returns `admin.settings.portal.v1`: an ordered
++fourteen-item ordinary read model with configured/effective/base/override/pending
++values and authoritative validation metadata. No Controller secret or consumer
++feature flag is projected. Effective values require the exact locally adopted
++startup snapshot. All API responses are no-store and use the common generation
++ETag; no Site/query/body input is accepted by the read route.
++
++`POST /admin/api/v1/settings/portal/generations` accepts at most fourteen distinct
++allowlisted string changes under the existing 32768-byte strict JSON boundary,
++CSRF, quoted Settings ETag and UUIDv4 idempotency. Duplicate object members,
++non-finite constants, wrong domains and unknown fields are rejected. Candidate
++validation is atomic. A changed save returns 201, no-op 200; the closed
++`admin.settings.portal.mutation.v1` receipt contains state/changed keys only,
++never settings values. Identical replay precedes CAS and reproduces the stored
++receipt; conflicting reuse is 409 and stale generation 412.
++
++Dedicated `portal_settings.js` uses server metadata, safe text nodes and one
++batch save. Branding descriptions are textareas; optional contacts may be set to
++empty. Reset appears only for a persisted override. The page shows configured,
++effective, source, pending and apply state, with the public-contact warning.
++Inputs are not trimmed or normalized. Success reloads the current model; 412
++requires review of current values. There is no preview, browser persistence,
++credential input, hot application, restart button or systemd authority.
+diff --git a/run.py b/run.py
+index 9422d8dae7aa25494579fdeb1da80e7f66a176c3..9de1fae27a4be9d04f263cd6d185dfed3114ac02 100644
+--- a/run.py
++++ b/run.py
+@@ -433,7 +433,13 @@ def main() -> None:
+         )
+     if "fingerprint_integration_submitter" in inspect.signature(create_app).parameters:
+         app_kwargs["fingerprint_integration_submitter"] = create_fingerprint_integration_submitter(settings)
+-    app = create_app(**app_kwargs)
++    from app.portal_presentation import PortalPresentationConfigError
++    try:
++        app = create_app(**app_kwargs)
++    except PortalPresentationConfigError:
++        if settings_bootstrap.activation_service is not None:
++            settings_bootstrap.activation_service.fail("portal_configuration_adoption_failed")
++        raise
+     logger.info("Web application created")
+     _observation_foundation = create_observation_foundation(
+         settings=settings,
+diff --git a/tests/admin_web/portal_settings_stage5_ui.cjs b/tests/admin_web/portal_settings_stage5_ui.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..28d08714056d62069dc74621415686c71e5b38a0
+--- /dev/null
++++ b/tests/admin_web/portal_settings_stage5_ui.cjs
+@@ -0,0 +1,67 @@
++// Disposable DOM and fetch only: executes the actual Settings controller, no network.
++const fs = require("fs"), vm = require("vm"), assert = require("assert");
++const [script, scenario, encoded] = process.argv.slice(2);
++const model = JSON.parse(encoded);
++class Element {
++  constructor(tag = "div") { this.tagName = tag.toUpperCase(); this.children = []; this.listeners = {}; this.dataset = {}; this.disabled = false; }
++  append(...nodes) { if (this.tagName === "SELECT" && !this.children.length) this.value = nodes[0].value; this.children.push(...nodes); }
++  replaceChildren(...nodes) { this.children = nodes; }
++  addEventListener(name, callback) { this.listeners[name] = callback; }
++}
++const ids = ["page", "state", "groups", "save", "refresh", "form"];
++const nodes = Object.fromEntries(ids.map(id => ["portal-settings-" + id, new Element()]));
++nodes["portal-settings-page"].dataset = {apiBase: "/admin/api/v1/settings/portal", storeState: "available", csrfToken: "csrf", writeAllowed: scenario === "readonly" ? "false" : "true"};
++const calls = [];
++const context = {
++  document: {getElementById: id => nodes[id], createElement: tag => new Element(tag)},
++  window: {setTimeout, clearTimeout}, AbortController,
++  crypto: {randomUUID: () => "11111111-1111-4111-8111-111111111111"},
++  fetch: async (url, options) => {
++    calls.push({url, options});
++    const status = options.method === "POST" ? ({conflict: 412, invalid: 422, outage: 503, noop: 200}[scenario] || 201) : 200;
++    return {ok: status < 400, status, headers: {get: () => '"settings-g0"'}, json: async () => options.method === "POST" ? {changed: scenario !== "noop", restart_required: true} : model};
++  }
++};
++const descend = node => [node, ...node.children.flatMap(descend)];
++const settle = () => new Promise(resolve => setImmediate(resolve));
++(async () => {
++  vm.runInNewContext(fs.readFileSync(script, "utf8"), context);
++  await settle();
++  const all = descend(nodes["portal-settings-groups"]);
++  const actions = all.filter(node => node.tagName === "SELECT");
++  const inputs = all.filter(node => ["INPUT", "TEXTAREA"].includes(node.tagName));
++  assert.equal(inputs.length, 14);
++  assert.equal(inputs.filter(node => node.tagName === "TEXTAREA").length, 3);
++  assert(all.some(node => node.textContent === "This value is publicly visible to guests. No private credential or personal secret may be entered."));
++  assert.equal(actions[0].children.length, 2); // No reset without a persisted override.
++  assert.equal(actions[13].children.length, 3);
++  assert.equal(inputs[0].value, "<script>literal</script>");
++  assert.equal(inputs[0].maxLength, model.settings[0].validation.max_length * 2);
++  if (scenario === "readonly") {
++    assert.equal(nodes["portal-settings-save"].disabled, true);
++    assert(actions.every(node => node.disabled));
++    await nodes["portal-settings-form"].listeners.submit({preventDefault() {}});
++    assert.equal(calls.length, 1);
++    return;
++  }
++  const index = scenario === "clear" ? 13 : 0;
++  actions[index].value = scenario === "clear" ? "clear_override" : "set";
++  actions[index].listeners.change();
++  inputs[index].value = " exact unchanged input ";
++  await nodes["portal-settings-form"].listeners.submit({preventDefault() {}});
++  await settle();
++  assert.equal(calls[1].options.method, "POST");
++  const mutation = JSON.parse(calls[1].options.body);
++  assert.deepEqual(mutation, {changes: [{key: model.settings[index].key, operation: scenario === "clear" ? "clear_override" : "set", ...(scenario === "clear" ? {} : {value: " exact unchanged input "})}]});
++  assert.equal(calls[1].options.headers["X-CSRF-Token"], "csrf");
++  assert.equal(calls[1].options.headers["If-Match"], '"settings-g0"');
++  assert.equal(calls[1].options.headers["Idempotency-Key"], "11111111-1111-4111-8111-111111111111");
++  assert.equal(calls[1].options.credentials, "same-origin");
++  assert.equal(calls[1].options.cache, "no-store");
++  const message = nodes["portal-settings-state"].textContent;
++  if (scenario === "conflict") { assert.equal(calls.length, 3); assert(message.includes("Review current values")); }
++  else if (scenario === "invalid") { assert.equal(calls.length, 2); assert(message.includes("Nothing was persisted")); }
++  else if (scenario === "outage") { assert.equal(calls.length, 2); assert.equal(nodes["portal-settings-save"].disabled, true); }
++  else if (scenario === "noop") { assert.equal(calls.length, 3); assert(message.includes("no persisted override change")); }
++  else { assert.equal(calls.length, 3); assert(message.includes("Pending captive-portal.service restart")); }
++})().catch(error => { console.error(error); process.exitCode = 1; });
+diff --git a/tests/admin_web/test_portal_settings_stage5.py b/tests/admin_web/test_portal_settings_stage5.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1acb1fa3e4525279b54db871b83409be67cdfe75
+--- /dev/null
++++ b/tests/admin_web/test_portal_settings_stage5.py
+@@ -0,0 +1,138 @@
++import json
++import logging
++import uuid
++import pytest
++from flask import Flask
++from app.admin_web import create_admin_web_runtime
++from app.admin_web.capabilities import DEFAULT_GLOBAL_CAPABILITIES, GLOBAL_CAPABILITIES
++from app.settings_control.bootstrap import bootstrap_settings_control
++from tests.settings_control import CONTROLLER_BASE
++from .conftest import enabled_settings, login
++
++READ = "admin.read.settings.portal"
++WRITE = "admin.write.settings.portal"
++BASE = "/admin/api/v1/settings/portal"
++VALID = json.dumps({"changes": [{"key": "PORTAL_UI_TITLE_EN", "operation": "set", "value": "New park"}]})
++
++
++def portal_app(tmp_path, *, grants=(READ, WRITE), enabled=True, unavailable=False):
++    tmp_path.mkdir(parents=True, exist_ok=True)
++    base = {**CONTROLLER_BASE, **enabled_settings(web_admin_settings_enabled="true" if enabled else "false",
++        web_admin_global_capabilities=",".join(grants) if grants else "admin.read.settings.global",
++        settings_db_path=str(tmp_path / "settings.sqlite3"))}
++    boot = bootstrap_settings_control(base_settings=base, explicit_environment_names=set(), logger=logging.getLogger("portal-admin-test"))
++    runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None,
++        logging.getLogger("portal-admin-test"), settings_control=boot.admin_context)
++    app = Flask(__name__)
++    app.config["TESTING"] = True
++    app.register_blueprint(runtime.blueprint)
++    if boot.activation_service:
++        boot.activation_service.adopt(boot.runtime_settings, runtime)
++    if unavailable:
++        boot.admin_context.read_service.repository.db_path = str(tmp_path / "missing" / "settings.sqlite3")
++    client = app.test_client()
++    assert login(client).status_code == 302
++    csrf = client.get("/admin/api/v1/session", base_url="https://localhost").json["result"]["csrf_token"]
++    return app, client, runtime, boot, csrf
++
++
++def post(client, csrf, body=VALID, *, etag='"settings-g0"', key=None, **kwargs):
++    return client.post(BASE + "/generations", data=body, content_type="application/json",
++        headers={"X-CSRF-Token": csrf, "If-Match": etag, "Idempotency-Key": key or str(uuid.uuid4())},
++        base_url="https://localhost", **kwargs)
++
++
++def test_global_capabilities_are_explicit_not_default():
++    assert {READ, WRITE} <= GLOBAL_CAPABILITIES
++    assert not {READ, WRITE} & DEFAULT_GLOBAL_CAPABILITIES
++
++
++@pytest.mark.parametrize("grants,read_status,write_status", [((READ, WRITE), 200, 201), ((READ,), 200, 403), ((WRITE,), 403, 403), ((), 403, 403)])
++def test_global_read_and_write_authorization(tmp_path, grants, read_status, write_status):
++    _app, client, _runtime, _boot, csrf = portal_app(tmp_path, grants=grants)
++    assert client.get(BASE, base_url="https://localhost").status_code == read_status
++    assert client.get("/admin/settings/portal", base_url="https://localhost").status_code == read_status
++    assert post(client, csrf).status_code == write_status
++
++
++def test_closed_read_model_and_mutation_receipt(tmp_path, monkeypatch):
++    _app, client, runtime, boot, csrf = portal_app(tmp_path)
++    monkeypatch.setattr(boot.admin_context.mutation_service.secret_repository, "resolve", lambda *a, **k: pytest.fail("Portal secret I/O"))
++    assert runtime.query_service is None
++    read = client.get(BASE, base_url="https://localhost")
++    assert read.status_code == 200
++    assert set(read.json) == {"api_version", "request_id", "scope", "store_state", "configured_generation", "effective_generation", "etag", "restart_required", "pending_setting_count", "settings"}
++    expected_item = {"key", "display_label", "description", "group", "value_type", "presentation_type", "scope_type", "scope_id", "editable", "secret_class", "default_value", "base_source", "base_value", "persisted_override_value", "configured_value", "effective_value", "pending_value", "configured_generation", "effective_generation", "activation_state", "apply_requirement", "activation_target", "validation", "last_changed_at", "last_changed_by"}
++    assert len(read.json["settings"]) == 14
++    assert all(set(item) == expected_item and item["scope_id"] is None and item["secret_class"] == "normal" for item in read.json["settings"])
++    for response in (read, post(client, csrf)):
++        assert response.headers["Cache-Control"] == "no-store"
++        assert response.headers["Pragma"] == "no-cache"
++    assert read.headers["ETag"] == '"settings-g0"'
++    key = str(uuid.uuid4())
++    body = json.dumps({"changes": [{"key": "PORTAL_UI_TITLE_EN", "operation": "set", "value": "Next park"}]})
++    first = post(client, csrf, body, etag='"settings-g1"', key=key)
++    assert first.status_code == 201 and first.headers["ETag"] == '"settings-g2"'
++    assert set(first.json) == {"api_version", "request_id", "scope", "resource", "changed", "changed_keys", "configured_generation", "effective_generation", "activation_state", "restart_required"}
++    assert first.json["resource"] == {"type": "guest_portal", "scope": "installation"}
++    assert "Next park" not in first.get_data(as_text=True)
++    assert post(client, csrf, body, key=key).json == first.json
++    assert post(client, csrf, VALID, key=key).status_code == 409
++    assert post(client, csrf).status_code == 412
++    noop = post(client, csrf, body, etag='"settings-g2"')
++    assert noop.status_code == 200 and not noop.json["changed"] and noop.json["restart_required"]
++    assert noop.json["activation_state"] == "pending_main_restart"
++
++
++@pytest.mark.parametrize("body", ['{"changes":[],"changes":[]}', *['{"changes":[{"key":"PORTAL_UI_TITLE_EN","operation":"set","value":' + value + '}]}' for value in ("NaN", "Infinity", "-Infinity", "true", "42", "null")],
++    '{"changes":[{"key":"PORTAL_UI_TITLE_EN","operation":"set","value":"x","value":"y"}]}',
++    '{"changes":[{"key":"OMADA_URL","operation":"set","value":"https://other.invalid"}]}',
++    '{"changes":[{"key":"PORTAL_UI_TITLE_EN","operation":"clear_override","value":"x"}]}',
++    '{"changes":[],"site_id":"fake"}', '[]', '{'])
++def test_strict_request_errors_are_atomic(tmp_path, body):
++    _app, client, _runtime, boot, csrf = portal_app(tmp_path)
++    response = post(client, csrf, body)
++    assert response.status_code == 400 and response.json["error"]["code"] == "invalid_request"
++    assert response.json["api_version"] == "admin.settings.portal.mutation.v1"
++    assert boot.admin_context.read_service.repository.configured() == (0, {})
++
++
++def test_security_transport_and_safe_validation_error(tmp_path):
++    _app, client, _runtime, boot, csrf = portal_app(tmp_path)
++    assert post(client, "bad").status_code == 400
++    assert post(client, "bad").json["error"]["code"] == "invalid_csrf"
++    assert post(client, csrf, etag="*").status_code == 400
++    assert post(client, csrf, key="invalid").status_code == 400
++    missing = client.post(BASE + "/generations", json=json.loads(VALID), headers={"X-CSRF-Token": csrf}, base_url="https://localhost")
++    assert missing.status_code == 428
++    assert post(client, csrf, VALID + " " * 32768).status_code == 413
++    assert post(client, csrf, query_string={"site": "fake"}).status_code == 400
++    assert client.get(BASE + "?site=fake", base_url="https://localhost").status_code == 400
++    assert client.get(BASE, data="body", base_url="https://localhost").status_code == 400
++    assert client.post(BASE + "/generations", data=VALID, headers={"X-CSRF-Token": csrf, "If-Match": '"settings-g0"', "Idempotency-Key": str(uuid.uuid4())}, content_type="text/plain", base_url="https://localhost").status_code == 415
++    invalid = VALID.replace("New park", "<script>secretish</script> ")
++    error = post(client, csrf, invalid)
++    assert error.status_code == 422 and "secretish" not in error.get_data(as_text=True)
++    assert boot.admin_context.read_service.repository.configured() == (0, {})
++
++
++@pytest.mark.parametrize("enabled,unavailable", [(False, False), (True, True)])
++def test_unavailable_store_is_safe(tmp_path, enabled, unavailable):
++    _app, client, _runtime, _boot, csrf = portal_app(tmp_path, enabled=enabled, unavailable=unavailable)
++    for response in (client.get(BASE, base_url="https://localhost"), post(client, csrf)):
++        assert response.status_code == (503 if enabled else 404)
++        assert response.json["error"]["code"] == ("settings_store_unavailable" if enabled else "feature_disabled")
++        assert response.json["api_version"] == ("admin.settings.portal.mutation.v1" if response.request.method == "POST" else "admin.settings.portal.v1")
++        assert response.headers["Cache-Control"] == "no-store"
++
++
++def test_portal_shell_is_global_and_navigation_is_capability_bound(tmp_path):
++    _app, client, _runtime, _boot, _csrf = portal_app(tmp_path, grants=(*DEFAULT_GLOBAL_CAPABILITIES, READ, WRITE))
++    page = client.get("/admin/settings/portal", base_url="https://localhost").get_data(as_text=True)
++    assert "Guest Portal" in page and "Global guest-facing presentation settings" in page
++    assert "portal_settings.js" in page and "admin.js" not in page and "controller_settings.js" not in page
++    assert 'data-site-id="' not in page and 'data-write-allowed="true"' in page
++    assert page.index('href="/admin/settings"') < page.index('href="/admin/settings/controller"') < page.index('href="/admin/settings/portal"')
++    _app, client, _runtime, _boot, _csrf = portal_app(tmp_path / "readonly", grants=(READ,))
++    page = client.get("/admin/settings/portal", base_url="https://localhost").get_data(as_text=True)
++    assert 'data-write-allowed="false"' in page and 'href="/admin/settings/controller"' not in page
+diff --git a/tests/admin_web/test_portal_settings_stage5_frontend.py b/tests/admin_web/test_portal_settings_stage5_frontend.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..86a6e59a28024948c8afcebe4c336fb7146cbce4
+--- /dev/null
++++ b/tests/admin_web/test_portal_settings_stage5_frontend.py
+@@ -0,0 +1,33 @@
++import json
++from pathlib import Path
++import shutil
++import subprocess
++import pytest
++from app.settings_control.definitions import SettingsDefinitionRegistry
++from app.portal_presentation import portal_validation_metadata
++
++ROOT = Path(__file__).resolve().parents[2]
++
++
++@pytest.mark.parametrize("scenario", ["changed", "clear", "noop", "conflict", "invalid", "outage", "readonly"])
++def test_real_portal_script_uses_server_metadata_and_safe_dom(scenario):
++    registry = SettingsDefinitionRegistry()
++    items = [{"key": item.key, "display_label": item.display_label, "description": item.description,
++        "group": item.group, "presentation_type": item.presentation_type, "configured_value": "<script>literal</script>" if index == 0 else item.repository_default_value,
++        "effective_value": None, "pending_value": None, "persisted_override_value": "old" if index == 13 else None,
++        "base_source": "repository_default", "apply_requirement": item.apply_requirement,
++        "validation": portal_validation_metadata(item.key)} for index, item in enumerate(registry.for_domain("portal"))]
++    model = {"api_version": "admin.settings.portal.v1", "settings": items, "configured_generation": 0, "effective_generation": None, "restart_required": False}
++    node = shutil.which("node")
++    assert node
++    result = subprocess.run([node, str(Path(__file__).with_name("portal_settings_stage5_ui.cjs")),
++        str(ROOT / "app/admin_web/static/portal_settings.js"), scenario, json.dumps(model)], capture_output=True, text=True)
++    assert result.returncode == 0, result.stdout + result.stderr
++
++
++def test_no_parallel_validation_table_or_unsafe_rendering():
++    source = (ROOT / "app/admin_web/static/portal_settings.js").read_text(encoding="utf-8")
++    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "localStorage", "sessionStorage", "systemctl", ".trim()", "wa.me", "t.me", "facebook.com", "PORTAL_UI_TITLE", "restart("):
++        assert forbidden not in source
++    for required in ("textContent", "item.validation.max_length", "item.presentation_type", "item.configured_value", "item.effective_value", "item.pending_value", "item.base_source", "item.apply_requirement"):
++        assert required in source
+diff --git a/tests/settings_control/test_controller_secret_repository.py b/tests/settings_control/test_controller_secret_repository.py
+index bc95afaf0660c5ef91063f0939d63c0c920bcfa4..6fea2e9513147998ac5a35bc4b3e079401805b50 100644
+--- a/tests/settings_control/test_controller_secret_repository.py
++++ b/tests/settings_control/test_controller_secret_repository.py
+@@ -37,7 +37,7 @@ def test_v2_migration_preserves_history_and_receipts(tmp_path):
+             "settings_generations", "settings_overrides", "settings_target_state", "settings_activation_events", "settings_mutation_audit")}
+     repository = SettingsRepository(path)
+     with repository.transaction() as db:
+-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
++        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+         for table, rows in before.items(): assert [tuple(row) for row in db.execute(f"SELECT * FROM {table}")] == rows
+         row = db.execute("SELECT * FROM settings_idempotency").fetchone()
+         assert row["request_fingerprint_kind"] == "sha256_canonical_json_v1"
+diff --git a/tests/settings_control/test_controller_secret_startup.py b/tests/settings_control/test_controller_secret_startup.py
+index b8acd18f4a792b2a06956553e299c64bef6ff5ad..1c4f2d6546dfff2913602ab9a862e3f54200a60b 100644
+--- a/tests/settings_control/test_controller_secret_startup.py
++++ b/tests/settings_control/test_controller_secret_startup.py
+@@ -20,7 +20,9 @@ def test_secret_definition_is_immutable_and_outside_ordinary_registry():
+             setattr(definition, name, "changed")
+     registry = SettingsDefinitionRegistry()
+     assert registry.get("OMADA_CLIENT_SECRET") is None
+-    assert len(tuple(registry)) == 15
++    assert len(tuple(registry)) == 29
++    assert len(registry.for_domain("controller")) == 3
++    assert len(registry.for_domain("portal")) == 14
+ 
+ 
+ def test_admin_metadata_boundary_contains_only_safe_facts(tmp_path, monkeypatch):
+diff --git a/tests/settings_control/test_controller_stage3.py b/tests/settings_control/test_controller_stage3.py
+index 833e3794b06cf602fff70f835872da1cf765a02a..8905381f3a1b7c102e22ee8d1aad313d59d1e6ef 100644
+--- a/tests/settings_control/test_controller_stage3.py
++++ b/tests/settings_control/test_controller_stage3.py
+@@ -67,7 +67,7 @@ def test_v1_migration_preserves_all_history_and_replay_bytes(tmp_path):
+     repository = SettingsRepository(path)
+     assert repository.configured() == (7, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 123})
+     with repository.transaction() as db:
+-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
++        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+         for name, rows in histories.items():
+             assert [tuple(row) for row in db.execute("SELECT * FROM " + name)] == rows
+         audit = db.execute("SELECT * FROM settings_mutation_audit").fetchone()
+diff --git a/tests/settings_control/test_portal_stage5.py b/tests/settings_control/test_portal_stage5.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b47d2e9ae704169c2eccfae48c1a1d115c386b5f
+--- /dev/null
++++ b/tests/settings_control/test_portal_stage5.py
+@@ -0,0 +1,277 @@
++"""Stage-5 + C1 disposable ordinary Settings proofs; no external I/O."""
++import json
++import logging
++import uuid
++from dataclasses import replace
++from types import SimpleNamespace
++import pytest
++
++from app.admin_web.models import AdminPrincipal
++from app.portal_presentation import (PORTAL_SETTING_DEFAULTS, PortalPresentationConfigV1,
++    PortalPresentationConfigError, portal_validation_metadata, validate_portal_setting)
++from app.settings_control.bootstrap import bootstrap_settings_control
++from app.settings_control.definitions import SettingsDefinitionRegistry
++from app.settings_control.models import SettingsError
++from app.settings_control.resolver import resolve_settings, freeze
++from app.settings_control.services import parse_changes
++from app.settings_control.validation import SettingsValidationService
++from . import CONTROLLER_BASE, stack, mutation
++from .stage4_helpers import secret_stack, secret_mutation
++
++
++def portal_write(boot, changes=None, *, generation=0, key=None):
++    return boot.admin_context.mutation_service.mutate(json.dumps({"changes": changes if changes is not None else [
++        {"key": "PORTAL_UI_TITLE_AZ", "operation": "set", "value": "Yeni başlıq"}]}),
++        principal=AdminPrincipal("operator"), source_ip="127.0.0.1", request_id=str(uuid.uuid4()),
++        idempotency_key=key or str(uuid.uuid4()), expected_generation=generation, domain="portal")
++
++
++def test_exact_definitions_defaults_metadata():
++    registry = SettingsDefinitionRegistry()
++    definitions = registry.for_domain("portal")
++    assert [item.key for item in definitions] == list(PORTAL_SETTING_DEFAULTS)
++    assert len(definitions) == 14 and len(registry.for_domain("general")) == 12 and len(registry.for_domain("controller")) == 3
++    for item in definitions:
++        assert item.repository_default_value == PORTAL_SETTING_DEFAULTS[item.key]
++        assert item.settings_dict_key == item.key.lower() and item.environment_variable_name == item.key
++        assert item.scope_type == "global" and item.secret_class == "normal" and item.editable
++        assert item.value_type == "string" and item.apply_requirement == "main_service_restart"
++        assert item.activation_target == "captive-portal.service"
++        assert item.group == ("branding" if "_UI_" in item.key else "support")
++        assert item.semantic_validator == "portal_presentation"
++        if "_UI_" in item.key:
++            kind, lang = item.key.split("_")[2:]
++            language = {"AZ": "Azerbaijani", "RU": "Russian", "EN": "English"}[lang]
++            label, description = {"TITLE": ("Portal title", "title"), "GREETING": ("Welcome text", "welcome text"),
++                                  "DESCRIPTION": ("Guest description", "short guest description")}[kind]
++            assert item.display_label == label + " — " + language
++            assert item.description == f"Public {description} shown to guests in {language}."
++            assert item.presentation_type == ("multiline_plain_text" if kind == "DESCRIPTION" else "plain_text")
++        else:
++            label, description, presentation = {
++                "PHONE": ("Support phone", "phone number", "telephone"),
++                "EMAIL": ("Support email", "email address", "email"),
++                **{name + "_URL": (display + " support link", display + " support link", "restricted_url")
++                   for name, display in (("WHATSAPP", "WhatsApp"), ("TELEGRAM", "Telegram"), ("FACEBOOK", "Facebook"))},
++            }[item.key.removeprefix("PORTAL_SUPPORT_")]
++            assert (item.display_label, item.description, item.presentation_type) == (label, f"Public {description} shown to guests.", presentation)
++    assert portal_validation_metadata("PORTAL_UI_TITLE_EN") == {"type": "string", "required": True,
++        "min_length": 1, "max_length": 80, "unicode_normalization": "NFC", "content": "plain_text",
++        "line_policy": "single_line", "control_characters": "forbidden", "bidi_controls": "forbidden"}
++    with pytest.raises(TypeError):
++        PORTAL_SETTING_DEFAULTS["OTHER"] = "invalid"
++
++
++@pytest.mark.parametrize("key", list(PORTAL_SETTING_DEFAULTS))
++def test_default_and_metadata_are_single_source(key):
++    assert validate_portal_setting(key, PORTAL_SETTING_DEFAULTS[key]) == PORTAL_SETTING_DEFAULTS[key]
++    metadata = portal_validation_metadata(key)
++    assert metadata["type"] == "string"
++    assert metadata["required"] == ("_UI_" in key)
++    if "_SUPPORT_" in key:
++        assert validate_portal_setting(key, "") == ""
++
++
++@pytest.mark.parametrize("field,maximum", [("TITLE", 80), ("GREETING", 120), ("DESCRIPTION", 400)])
++@pytest.mark.parametrize("value", ["", " ", " leading", "trailing\u2003", "a\x00b", "a\x01b", "a\x85b",
++                                  "a\rb", "a\tb", "a\u202eb", "a\u2066b", "e\u0301"])
++def test_text_invalid(field, maximum, value):
++    with pytest.raises(PortalPresentationConfigError):
++        validate_portal_setting("PORTAL_UI_" + field + "_EN", value)
++
++
++@pytest.mark.parametrize("field,maximum", [("TITLE", 80), ("GREETING", 120), ("DESCRIPTION", 400)])
++def test_text_exact_unicode_boundaries(field, maximum):
++    key = "PORTAL_UI_" + field + "_AZ"
++    for value in ("Zəfər", "Добро пожаловать", "Welcome", "é", "<script>alert(1)</script>", "😀" * maximum):
++        assert validate_portal_setting(key, value) == value
++    with pytest.raises(PortalPresentationConfigError):
++        validate_portal_setting(key, "x" * (maximum + 1))
++    with pytest.raises(PortalPresentationConfigError) as error:
++        validate_portal_setting(key, "e\u0301")
++    assert error.value.reason == "non_canonical_unicode"
++
++
++def test_line_contract():
++    for kind in ("TITLE", "GREETING"):
++        with pytest.raises(PortalPresentationConfigError):
++            validate_portal_setting("PORTAL_UI_" + kind + "_EN", "a\nb")
++    assert validate_portal_setting("PORTAL_UI_DESCRIPTION_EN", "a\nb\nc\nd") == "a\nb\nc\nd"
++    with pytest.raises(PortalPresentationConfigError):
++        validate_portal_setting("PORTAL_UI_DESCRIPTION_EN", "a\nb\nc\nd\ne")
++
++
++@pytest.mark.parametrize("value", ["12345678", "+1234567", "+1234567890123456", "+1234-5678", "+12345678 ", "+12345678\r\n", "+１２３４５６７８"])
++def test_phone_rejections(value):
++    with pytest.raises(PortalPresentationConfigError): validate_portal_setting("PORTAL_SUPPORT_PHONE", value)
++
++
++@pytest.mark.parametrize("value", ["no-at", "a@@b", "a @b", "Name <a@b.com>", "a@b.com\r\n", "a@b.com?subject=x", "a@b/com", "é@b.com", "mailto:a@b.com"])
++def test_email_rejections(value):
++    with pytest.raises(PortalPresentationConfigError): validate_portal_setting("PORTAL_SUPPORT_EMAIL", value)
++
++
++@pytest.mark.parametrize("name,values", [
++    ("WHATSAPP", ["https://wa.me/1234567", "https://wa.me/1234567890123456", "https://wa.me/12345678?x=1", "https://wa.me/12345678/extra"]),
++    ("TELEGRAM", ["https://t.me/abcd", "https://t.me/username/extra", "https://t.me/username?x=1"]),
++    ("FACEBOOK", ["https://facebook.com", "https://facebook.com/user?x=1", "https://facebook.com/user?locale=ru_RU&locale=en_US", "https://facebook.com/user?locale=bad", "https://facebook.com/" + "a" * 256]),
++])
++def test_social_path_rejections(name, values):
++    for value in values:
++        with pytest.raises(PortalPresentationConfigError): validate_portal_setting(f"PORTAL_SUPPORT_{name}_URL", value)
++
++
++@pytest.mark.parametrize("host,path,name", [("wa.me", "12345678", "WHATSAPP"), ("t.me", "username", "TELEGRAM"), ("www.facebook.com", "user", "FACEBOOK")])
++@pytest.mark.parametrize("shape", ["http://{host}/{path}", "https://user@{host}/{path}", "https://{host}:443/{path}",
++    "https://{host}:8443/{path}", "https://{host}./{path}", "https://{host}/{path}#x", "//{host}/{path}",
++    "https://127.0.0.1/{path}", "https://[::1]/{path}", "https://ｗa.me/{path}"])
++def test_social_authority_rejections(host, path, name, shape):
++    with pytest.raises(PortalPresentationConfigError): validate_portal_setting(f"PORTAL_SUPPORT_{name}_URL", shape.format(host=host, path=path))
++
++
++def test_support_projection_and_valid_urls():
++    values = {"portal_support_phone": "+1234 5678", "portal_support_email": "a._%+-@b-c.example"}
++    candidate = PortalPresentationConfigV1.from_settings(values)
++    assert candidate.support["phone_display"] == "+1234 5678" and candidate.support["phone_href"] == "tel:+12345678"
++    assert candidate.support["email_href"] == "mailto:a._%+-@b-c.example"
++    for key, value in (("WHATSAPP", "https://wa.me/12345678"), ("TELEGRAM", "https://t.me/username"),
++                       ("FACEBOOK", "https://facebook.com/user"), ("FACEBOOK", "https://www.facebook.com/user?locale=en_US")):
++        assert validate_portal_setting(f"PORTAL_SUPPORT_{key}_URL", value) == value
++
++
++def test_resolution_and_clear_precedence(tmp_path):
++    base = {**CONTROLLER_BASE, "web_admin_settings_enabled": True, "settings_db_path": str(tmp_path / "settings.sqlite3"),
++            "portal_ui_title_az": "Deployment"}
++    boot = bootstrap_settings_control(base_settings=base, explicit_environment_names={"PORTAL_UI_TITLE_AZ"}, logger=logging.getLogger("stage5"))
++    original = boot.admin_context.read_service.read_portal()["settings"]
++    assert original[0]["base_source"] == "environment" and original[0]["configured_value"] == "Deployment"
++    assert original[1]["base_source"] == "repository_default"
++    result = portal_write(boot)
++    assert result.status == 201 and result.body["changed_keys"] == ["PORTAL_UI_TITLE_AZ"]
++    portal_write(boot, [{"key": "PORTAL_UI_TITLE_AZ", "operation": "clear_override"}], generation=1)
++    assert boot.admin_context.read_service.read_portal()["settings"][0]["configured_value"] == "Deployment"
++    resolved = resolve_settings(CONTROLLER_BASE, set(), {}, 0)
++    assert resolved.values["portal_ui_title_az"] == PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_AZ"]
++
++
++def test_mutation_receipts_common_cas_and_exact_response(tmp_path):
++    boot = stack(tmp_path)
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    key = str(uuid.uuid4())
++    changed = portal_write(boot, key=key)
++    assert changed.status == 201
++    assert set(changed.body) == {"api_version", "request_id", "scope", "resource", "changed", "changed_keys", "configured_generation", "effective_generation", "activation_state", "restart_required"}
++    assert changed.body["resource"] == {"type": "guest_portal", "scope": "installation"}
++    assert changed.body["activation_state"] == "pending_main_restart"
++    noop = portal_write(boot, generation=1)
++    assert noop.status == 200 and not noop.body["changed"] and noop.body["restart_required"]
++    assert noop.body["changed_keys"] == [] and noop.body["activation_state"] == "pending_main_restart"
++    mutation(boot, generation=1)
++    replay = portal_write(boot, key=key)
++    assert replay == changed
++    with pytest.raises(SettingsError, match="stale_generation"): portal_write(boot, generation=1)
++    with pytest.raises(SettingsError, match="idempotency_conflict"):
++        portal_write(boot, [{"key": "PORTAL_UI_TITLE_AZ", "operation": "set", "value": "Different"}], key=key)
++    with boot.admin_context.read_service.repository.transaction() as db:
++        assert db.execute("SELECT COUNT(*) FROM settings_mutation_audit WHERE setting_domain='portal'").fetchone()[0] == 1
++        assert db.execute("SELECT COUNT(*) FROM settings_idempotency WHERE mutation_domain='portal'").fetchone()[0] == 2
++
++
++def test_full_14_batch_and_atomic_invalid_candidate(tmp_path):
++    boot = stack(tmp_path)
++    changes = [{"key": key, "operation": "set", "value": value} for key, value in PORTAL_SETTING_DEFAULTS.items()]
++    assert portal_write(boot, changes).body["changed_keys"] == sorted(PORTAL_SETTING_DEFAULTS)
++    repository = boot.admin_context.read_service.repository
++    with repository.transaction() as db:
++        before = [db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0] for table in ("settings_generations", "settings_mutation_audit", "settings_idempotency")]
++    changes[-1]["value"] = "http://facebook.com/invalid"
++    with pytest.raises(SettingsError, match="validation_failed"): portal_write(boot, changes, generation=1)
++    with repository.transaction() as db:
++        assert before == [db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0] for table in ("settings_generations", "settings_mutation_audit", "settings_idempotency")]
++    service = boot.admin_context.mutation_service
++    service.read_service.base_settings = {**service.read_service.base_settings, "portal_ui_greeting_ru": ""}
++    # Shadowed persisted value is selected, not an invalid deployment value.
++    assert portal_write(boot, generation=1).status == 201
++    service.read_service.base_settings = {**service.read_service.base_settings, "portal_ui_title_en": ""}
++    with pytest.raises(SettingsError):
++        portal_write(boot, [{"key": "PORTAL_UI_TITLE_EN", "operation": "clear_override"}], generation=2)
++
++
++@pytest.mark.parametrize("changes", [[{"key": "OTHER", "operation": "set", "value": "x"}],
++    [{"key": "OMADA_ID", "operation": "set", "value": "x"}],
++    [{"key": "PORTAL_UI_TITLE_AZ", "operation": "set", "value": 1}],
++    [{"key": "PORTAL_UI_TITLE_AZ", "operation": "clear_override", "value": "x"}],
++    [{"key": "PORTAL_UI_TITLE_AZ", "operation": "set", "value": "x"}] * 2])
++def test_parser_closed(changes):
++    with pytest.raises(SettingsError, match="invalid_request"): parse_changes(json.dumps({"changes": changes}), domain="portal")
++
++
++def test_c1_no_secret_resolution_no_keys_and_inheritance(tmp_path, monkeypatch):
++    boot, filesystem = secret_stack(tmp_path)
++    secret_mutation(boot)
++    service = boot.admin_context.mutation_service
++    from app.settings_control.controller_secret import binding
++    with service.repository.transaction() as db: parent_binding = binding(db, 1)
++    reads = filesystem.key_reads
++    def forbidden(*args, **kwargs): raise AssertionError("Portal must not access secret store")
++    monkeypatch.setattr(service.secret_repository, "resolve", forbidden)
++    monkeypatch.setattr(service.secret_repository, "keys", forbidden)
++    filesystem.key_valid = False
++    assert portal_write(boot, generation=1).status == 201
++    with service.repository.transaction() as db: assert binding(db, 2) == parent_binding
++    assert filesystem.key_reads == reads
++    # General and Controller remain on the full secret path.
++    with pytest.raises(AssertionError, match="secret store"): mutation(boot, generation=2)
++    with pytest.raises(AssertionError, match="secret store"):
++        service.mutate(json.dumps({"changes": [{"key": "OMADA_ID", "operation": "set", "value": "new"}]}),
++            principal=AdminPrincipal("operator"), source_ip="127.0.0.1", request_id="r", idempotency_key=str(uuid.uuid4()), expected_generation=2, domain="controller")
++    # Later startup still fails closed on the inherited binding.
++    with pytest.raises(SettingsError, match="controller_secret_key_unavailable"):
++        bootstrap_settings_control(base_settings={**CONTROLLER_BASE, "web_admin_settings_enabled": True,
++            "settings_db_path": service.repository.db_path}, explicit_environment_names=set(), logger=logging.getLogger("stage5"), secret_filesystem=filesystem)
++
++
++def test_c1_no_binding_and_complete_candidate_validation(tmp_path):
++    boot = stack(tmp_path)
++    portal_write(boot)
++    with boot.admin_context.read_service.repository.transaction() as db:
++        assert db.execute("SELECT COUNT(*) FROM settings_secret_bindings").fetchone()[0] == 0
++    snapshot = boot.resolved_snapshot
++    validation = SettingsValidationService()
++    for key, value in (("omada_url", "invalid"), ("omada_id", ""), ("client_id", "")):
++        with pytest.raises(SettingsError) as error:
++            validation.validate_portal_candidate(replace(snapshot, values=freeze({**snapshot.values, key: value})))
++        assert error.value.details == ({"key": None, "reason": "controller_prerequisite_invalid"},)
++    for key in PORTAL_SETTING_DEFAULTS:
++        with pytest.raises(SettingsError):
++            validation.validate_portal_candidate(replace(snapshot, values=freeze({**snapshot.values, key.lower(): "invalid" if "_SUPPORT_" in key else ""})))
++
++
++@pytest.mark.parametrize("key,value", [("omada_url", "invalid"), ("omada_id", ""), ("client_id", "")])
++def test_c1_invalid_nonsecret_prerequisites_fail_atomically_at_mutation(tmp_path, key, value):
++    boot = stack(tmp_path)
++    service = boot.admin_context.mutation_service
++    service.read_service.base_settings = {**service.read_service.base_settings, key: value}
++    with pytest.raises(SettingsError) as error: portal_write(boot)
++    assert error.value.status == 422
++    assert error.value.details == ({"key": None, "reason": "controller_prerequisite_invalid"},)
++    assert service.repository.configured() == (0, {})
++    with service.repository.transaction() as db:
++        assert db.execute("SELECT COUNT(*) FROM settings_mutation_audit").fetchone()[0] == 0
++        assert db.execute("SELECT COUNT(*) FROM settings_idempotency").fetchone()[0] == 0
++
++
++def test_read_adopted_pending_and_untrusted(tmp_path):
++    boot = stack(tmp_path)
++    read = boot.admin_context.read_service
++    assert all(row["effective_value"] is None for row in read.read_portal()["settings"])
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    portal_write(boot)
++    body = read.read_portal()
++    assert body["pending_setting_count"] == 1
++    assert body["settings"][0]["effective_value"] == PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_AZ"]
++    assert body["settings"][0]["pending_value"] == "Yeni başlıq"
++    assert body["settings"][0]["last_changed_by"] == {"principal_type": "platform_operator", "principal_name": "operator"}
++    assert all(row["pending_value"] is None for row in body["settings"][1:])
++    read.repository.activation(1, True)  # Another process adopted; this process isn't that runtime.
++    assert all(row["effective_value"] is None and row["pending_value"] is None for row in read.read_portal()["settings"])
+diff --git a/tests/settings_control/test_repository.py b/tests/settings_control/test_repository.py
+index 48910076aa535518acbdafd0e657a06fdbab1454..5af9fc0c396f3af3d4849135718d67deeed1b3d2 100644
+--- a/tests/settings_control/test_repository.py
++++ b/tests/settings_control/test_repository.py
+@@ -11,7 +11,7 @@ def test_physical_bootstrap_identity_and_idempotent_schema(tmp_path):
+     repository = SettingsRepository(tmp_path / "settings.sqlite3")
+     SettingsRepository(repository.db_path)
+     with repository.transaction() as db:
+-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
++        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+         assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+         assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 1000
+         root = db.execute("SELECT * FROM settings_generations").fetchone()
+@@ -33,7 +33,7 @@ def test_incompatible_store_is_not_recreated(tmp_path, mode):
+         repository = SettingsRepository(path)
+         with sqlite3.connect(path) as db:
+             if mode == "newer":
+-                db.execute("PRAGMA user_version=4")
++                db.execute("PRAGMA user_version=5")
+             elif mode == "old_nonempty":
+                 db.execute("PRAGMA user_version=0")
+             elif mode == "shape":
+diff --git a/tests/settings_control/test_schema_v4_portal.py b/tests/settings_control/test_schema_v4_portal.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c17a5c2bc9e3991b5c5f604e7cd8676d2523d033
+--- /dev/null
++++ b/tests/settings_control/test_schema_v4_portal.py
+@@ -0,0 +1,109 @@
++"""Exact v3-to-v4 forward migration, no historical row rewriting."""
++import sqlite3
++import uuid
++import pytest
++from app.settings_control.repository import SettingsRepository, _V3_DDL, _TRIGGERS, _SECRET_TRIGGERS
++from app.settings_control.models import SettingsError
++
++
++def populated_v3(path):
++    version = str(uuid.uuid4())
++    with sqlite3.connect(path) as db:
++        for sql in (*_V3_DDL, *_TRIGGERS, *_SECRET_TRIGGERS): db.execute(sql)
++        db.execute("PRAGMA user_version=3")
++        db.execute("INSERT INTO settings_generations VALUES(0,NULL,'global','2026-10-08T00:00:00.000Z','system','settings_bootstrap',NULL)")
++        db.execute("INSERT INTO settings_generations VALUES(7,0,'global','2026-10-08T01:00:00.000Z','platform_operator','operator','r')")
++        db.execute("INSERT INTO settings_target_state VALUES('captive-portal.service',7,'2026-10-08T01:00:00.000Z')")
++        db.execute("INSERT INTO settings_overrides VALUES(7,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',123,NULL)")
++        db.execute("INSERT INTO settings_overrides VALUES(7,'OMADA_ID','string',NULL,'installation-7')")
++        db.execute("INSERT INTO controller_secret_versions VALUES(?,'OMADA_CLIENT_SECRET',1,?,?,?)", (version, b'n' * 12, b'x' * 4116, '2026-10-08T01:00:00.000Z'))
++        db.execute("INSERT INTO settings_secret_bindings VALUES(7,'OMADA_CLIENT_SECRET',?)", (version,))
++        db.execute("INSERT INTO settings_activation_events VALUES(3,7,'captive-portal.service','2026-10-08T01:00:00.000Z','adopted',7,NULL)")
++        db.execute("""INSERT INTO settings_mutation_audit VALUES(2,7,0,'platform_operator','operator','127.0.0.1','r','i',
++            '2026-10-08T01:00:00.000Z','global',NULL,'OMADA_ID','set','controller','string',NULL,'installation-7',
++            'installation','installation-7','main_service_restart','captive-portal.service')""")
++        db.execute("""INSERT INTO settings_secret_mutation_audit VALUES(2,7,0,'platform_operator','operator','127.0.0.1','r','i',
++            '2026-10-08T01:00:00.000Z','global',NULL,'OMADA_CLIENT_SECRET','replace_secret',0,1,'environment','managed_secret_override',
++            'main_service_restart','captive-portal.service')""")
++        db.execute("""INSERT INTO settings_idempotency VALUES(5,'platform_operator','operator','global','controller','i',
++            'sha256_canonical_json_v1','hash',201,'{ "configured_generation": 7, "changed": true }',7,1,'2026-10-08T01:00:00.000Z')""")
++    return version
++
++
++def dump_tables(path):
++    with sqlite3.connect(path) as db:
++        return {row[0]: db.execute('SELECT * FROM "' + row[0] + '"').fetchall() for row in
++                db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()}
++
++
++def test_populated_v3_migrates_one_transaction_and_preserves_every_row(tmp_path, monkeypatch):
++    path = tmp_path / "v3.sqlite3"
++    populated_v3(path)
++    before = dump_tables(path)
++    traces = []
++    connect = sqlite3.connect
++    def traced(*args, **kwargs):
++        db = connect(*args, **kwargs); db.set_trace_callback(traces.append); return db
++    monkeypatch.setattr(sqlite3, "connect", traced)
++    repository = SettingsRepository(path)
++    assert sum(sql == "BEGIN IMMEDIATE" for sql in traces) == 1
++    assert sum(sql == "COMMIT" for sql in traces) == 1
++    assert dump_tables(path) == before
++    assert repository.configured() == (7, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 123, "OMADA_ID": "installation-7"})
++    with repository.transaction() as db:
++        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
++        assert repository.effective(db) == 7
++        assert db.execute("SELECT 1 FROM settings_overrides WHERE setting_key LIKE 'PORTAL_%'").fetchone() is None
++        assert not db.execute("SELECT name FROM sqlite_master WHERE name LIKE '%_v3'").fetchall()
++    SettingsRepository(path)
++
++
++def test_migration_failure_rolls_back_all_ddl_and_rows(tmp_path, monkeypatch):
++    path = tmp_path / "v3.sqlite3"
++    populated_v3(path)
++    original = path.read_bytes()
++    validate = SettingsRepository._validate_schema
++    from app.settings_control.repository import _DDL
++    def fail(db, ddl):
++        if ddl is _DDL: raise SettingsError("settings_store_unavailable")
++        return validate(db, ddl)
++    monkeypatch.setattr(SettingsRepository, "_validate_schema", staticmethod(fail))
++    with pytest.raises(SettingsError): SettingsRepository(path)
++    assert path.read_bytes() == original
++
++
++def test_v3_cannot_contain_preexisting_portal_overrides(tmp_path):
++    path = tmp_path / "invalid-v3.sqlite3"
++    populated_v3(path)
++    with sqlite3.connect(path) as db:
++        db.execute("INSERT INTO settings_overrides VALUES(7,'PORTAL_UI_TITLE_EN','string',NULL,'unexpected')")
++    original = path.read_bytes()
++    with pytest.raises(SettingsError): SettingsRepository(path)
++    assert path.read_bytes() == original
++
++
++@pytest.mark.parametrize("corruption", ["trigger", "column", "future_version", "invalid_portal"])
++def test_v4_schema_and_invalid_durable_values_fail_closed(tmp_path, corruption):
++    path = tmp_path / "settings.sqlite3"
++    SettingsRepository(path)
++    with sqlite3.connect(path) as db:
++        if corruption == "trigger": db.execute("DROP TRIGGER settings_idempotency_immutable_update")
++        elif corruption == "column": db.execute("ALTER TABLE settings_idempotency ADD COLUMN unexpected TEXT")
++        elif corruption == "future_version": db.execute("PRAGMA user_version=5")
++        else:
++            db.execute("INSERT INTO settings_generations VALUES(1,0,'global','2026-10-08T01:00:00.000Z','platform_operator','operator','r')")
++            db.execute("INSERT INTO settings_overrides VALUES(1,'PORTAL_UI_TITLE_EN','string',NULL,' bad ')")
++    before = path.read_bytes()
++    with pytest.raises(SettingsError, match="settings_store_unavailable"): SettingsRepository(path)
++    assert path.read_bytes() == before
++
++
++def test_portal_sqlite_audit_text_type_constraints(tmp_path):
++    repository = SettingsRepository(tmp_path / "v4.sqlite3")
++    for value in (5, None, b"text"):
++        with pytest.raises(SettingsError):
++            with repository.transaction(write=True) as db:
++                repository.append_mutation_audit(db, generation=0, parent=0, principal=type('P', (), {'principal_type': 'platform_operator', 'username': 'operator'})(),
++                    source_ip='local', request_id='r', idempotency_key='i', timestamp='2026-10-08T00:00:00.000Z', key='PORTAL_UI_TITLE_EN',
++                    operation='set', previous_override=None, new_override=value, previous_value='old', new_value=value,
++                    apply_requirement='main_service_restart', activation_target='captive-portal.service', domain='portal', value_type='string')
+diff --git a/tests/settings_control/test_secret_recovery.py b/tests/settings_control/test_secret_recovery.py
+index 94b70ef6097d896f4d32fe55363f20e41457a6e6..3a6a8ec7fa0f46f2283ce401af3dc513bfaa6619 100644
+--- a/tests/settings_control/test_secret_recovery.py
++++ b/tests/settings_control/test_secret_recovery.py
+@@ -53,7 +53,7 @@ def test_default_recovery_identity_ignores_spoofed_environment(tmp_path, monkeyp
+     assert secret_recovery.effective_operator_name() == expected
+     repository = boot.admin_context.read_service.repository
+     monkeypatch.setattr(secret_recovery, "SecretFilesystem", lambda: filesystem)
+-    monkeypatch.setattr(secret_recovery.SettingsRepository, "open_existing_v3", lambda _path: repository)
++    monkeypatch.setattr(secret_recovery.SettingsRepository, "open_existing_for_recovery", lambda _path: repository)
+     reads = filesystem.key_reads
+     assert secret_recovery.main(["clear-omada-client-secret", "--expected-generation", "1"]) == 0
+     with repository.transaction() as db:
+diff --git a/tests/settings_control/test_secret_recovery_v4.py b/tests/settings_control/test_secret_recovery_v4.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5803a0e22cdd409a9b28d7dc65594c3d621eedbf
+--- /dev/null
++++ b/tests/settings_control/test_secret_recovery_v4.py
+@@ -0,0 +1,89 @@
++"""R1-REC-01..15: current-schema existing-only local recovery, no keys."""
++import sqlite3
++from pathlib import Path
++import pytest
++from app.settings_control.repository import SettingsRepository
++from app.settings_control.models import SettingsError
++from app.settings_control.secret_recovery import clear_managed_secret
++from app.settings_control.controller_secret import binding
++from .stage4_helpers import secret_stack, secret_mutation
++from .test_portal_stage5 import portal_write
++from .test_schema_v4_portal import populated_v3, dump_tables
++from . import mutation
++from .test_controller_stage3 import write
++
++
++def test_recovery_v4_keeps_all_domains_history_receipts_and_effective(tmp_path, monkeypatch):
++    boot, filesystem = secret_stack(tmp_path)
++    secret_mutation(boot)
++    portal_write(boot, generation=1)
++    mutation(boot, generation=2)
++    write(boot, generation=3)
++    repository = boot.admin_context.read_service.repository
++    repository.activation(4, True)
++    before = dump_tables(repository.db_path)
++    overrides = repository.configured()[1]
++    reads = filesystem.key_reads
++    filesystem.key_valid = False
++    def forbidden(*args, **kwargs): raise AssertionError("recovery must not initialize or migrate")
++    monkeypatch.setattr(SettingsRepository, "initialize", forbidden)
++    monkeypatch.setattr(SettingsRepository, "_migrate_v3", forbidden)
++    reopened = SettingsRepository.open_existing_for_recovery(repository.db_path)
++    assert clear_managed_secret(reopened, 4, filesystem=filesystem, operator=lambda: "local") == (5, True)
++    assert reopened.configured() == (5, overrides)
++    assert filesystem.key_reads == reads
++    with reopened.transaction() as db:
++        assert binding(db, 5) is None and binding(db, 4) is not None
++        assert reopened.effective(db) == 4
++    after = dump_tables(repository.db_path)
++    for table in ("settings_mutation_audit", "settings_idempotency", "settings_activation_events", "settings_target_state"):
++        assert after[table] == before[table]
++    assert after["settings_secret_mutation_audit"][:-1] == before["settings_secret_mutation_audit"]
++    assert clear_managed_secret(reopened, 5, filesystem=filesystem) == (5, False)
++    unchanged = dump_tables(repository.db_path)
++    with pytest.raises(SettingsError) as error: clear_managed_secret(reopened, 4, filesystem=filesystem)
++    assert error.value.status == 412 and dump_tables(repository.db_path) == unchanged
++
++
++def test_recovery_never_creates_or_migrates(tmp_path):
++    missing = tmp_path / "missing.sqlite3"
++    with pytest.raises(SettingsError): SettingsRepository.open_existing_for_recovery(missing)
++    assert not missing.exists()
++    path = tmp_path / "v3.sqlite3"
++    populated_v3(path)
++    before = path.read_bytes()
++    with pytest.raises(SettingsError): SettingsRepository.open_existing_for_recovery(path)
++    assert path.read_bytes() == before
++
++
++@pytest.mark.parametrize("damage", ["trigger", "integrity", "root", "target", "secret_ref", "unknown_override"])
++def test_recovery_revalidates_schema_history_reference_integrity(tmp_path, damage):
++    repository = SettingsRepository(tmp_path / "v4.sqlite3")
++    with sqlite3.connect(repository.db_path) as db:
++        if damage == "trigger": db.execute("DROP TRIGGER settings_secret_bindings_immutable_delete")
++        elif damage == "integrity":
++            db.execute("PRAGMA writable_schema=ON")
++            db.execute("UPDATE sqlite_master SET rootpage=99999 WHERE name='settings_overrides'")
++        elif damage == "root":
++            db.execute("DROP TRIGGER settings_generations_immutable_update")
++            db.execute("UPDATE settings_generations SET created_by_principal_name='fake'")
++            from app.settings_control.repository import _TRIGGERS
++            db.execute(next(sql for sql in _TRIGGERS if sql.startswith("CREATE TRIGGER settings_generations_immutable_update")))
++        elif damage == "target": db.execute("DELETE FROM settings_target_state")
++        else:
++            db.execute("INSERT INTO settings_generations VALUES(1,0,'global','2026-10-08T00:00:00.000Z','platform_operator','operator','r')")
++            if damage == "secret_ref": db.execute("INSERT INTO settings_secret_bindings VALUES(1,'OMADA_CLIENT_SECRET','11111111-1111-4111-8111-111111111111')")
++            else: db.execute("INSERT INTO settings_overrides VALUES(1,'UNKNOWN','string',NULL,'x')")
++    before = Path(repository.db_path).read_bytes()
++    with pytest.raises(SettingsError): SettingsRepository.open_existing_for_recovery(repository.db_path)
++    assert Path(repository.db_path).read_bytes() == before
++
++
++def test_recovery_filesystem_security_remains_required(tmp_path):
++    boot, filesystem = secret_stack(tmp_path)
++    secret_mutation(boot)
++    repository = SettingsRepository.open_existing_for_recovery(boot.admin_context.read_service.repository.db_path)
++    filesystem.db_valid = False
++    with pytest.raises(SettingsError, match="controller_secret_permissions_invalid"):
++        clear_managed_secret(repository, 1, filesystem=filesystem)
++    assert repository.configured()[0] == 1
+diff --git a/tests/test_auth_retry_frontend.py b/tests/test_auth_retry_frontend.py
+index 800802c17f7e73d191d8b0e63fce24452996ff3d..093625d4c4b765607922b71f6b7def0237138b45 100644
+--- a/tests/test_auth_retry_frontend.py
++++ b/tests/test_auth_retry_frontend.py
+@@ -9,6 +9,7 @@ import pytest
+ from flask import Flask, render_template
+ 
+ from app.web.localization import PORTAL_TRANSLATIONS
++from app.portal_presentation import PortalPresentationConfigV1
+ 
+ 
+ ROOT = Path(__file__).parents[1]
+@@ -32,6 +33,7 @@ def render_portal_script(initial_state):
+             initial_progress=initial_state.get("progress", 0),
+             initial_state=initial_state,
+             portal_translations=PORTAL_TRANSLATIONS,
++            portal_support=PortalPresentationConfigV1.from_settings({}).support,
+             portal_counter_visible=False,
+             error_message=None,
+         )
+diff --git a/tests/test_capport_discovery_frontend.py b/tests/test_capport_discovery_frontend.py
+index 822eb773b6a5f0b18c97b4353344cc65cff7c3bd..19efd916619155590f2c2ef9843b330f5c3278d9 100644
+--- a/tests/test_capport_discovery_frontend.py
++++ b/tests/test_capport_discovery_frontend.py
+@@ -9,6 +9,7 @@ import pytest
+ from flask import Flask, render_template
+ 
+ from app.web.localization import PORTAL_TRANSLATIONS
++from app.portal_presentation import PortalPresentationConfigV1
+ 
+ 
+ ROOT = Path(__file__).parents[1]
+@@ -37,6 +38,7 @@ def render_discovery_script(*, auto_retry=True, remaining_seconds=60):
+                 "retryable": True,
+             },
+             portal_translations=PORTAL_TRANSLATIONS,
++            portal_support=PortalPresentationConfigV1.from_settings({}).support,
+             portal_counter_visible=False,
+             error_message=None,
+             retry_url="/capport/login?wait_until=1060",
+diff --git a/tests/test_capport_portal_presentation_stage5.py b/tests/test_capport_portal_presentation_stage5.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9525941f8fbfe90ce4c8096fc4207e45427c1cc
+--- /dev/null
++++ b/tests/test_capport_portal_presentation_stage5.py
+@@ -0,0 +1,33 @@
++from unittest.mock import Mock
++import pytest
++from flask import template_rendered
++from app.portal_presentation import PortalPresentationConfigV1, PortalTemplatePresentationV1
++from app.auth.manager import AuthSessionManager
++from app.web.portal_entry import PortalEntryHandler
++from tests.test_capport_routes import app_for, state
++
++
++@pytest.mark.parametrize("lookup", ["normal", "discovery", "error"])
++def test_capport_html_uses_exact_startup_projection_and_json_excludes_presentation(lookup):
++    projection = PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({
++        "portal_ui_title_az": "CAPPORT custom title", "portal_support_email": "support@example.invalid"}))
++    service = Mock()
++    service.resolve.return_value = state()
++    service.resolve_for_login.return_value = state(found=lookup == "normal", lookup_failed=lookup == "error")
++    handler = PortalEntryHandler(portal_template_presentation=projection, session_manager=AuthSessionManager(),
++        auth_worker=Mock(), executor=Mock(), auth_telemetry=Mock())
++    app, _ = app_for(service, handler, presentation=projection)
++    contexts = []
++    def capture(sender, template, context, **kwargs): contexts.append(context)
++    client = app.test_client()
++    options = {"base_url": "https://portal.example", "environ_base": {"REMOTE_ADDR": "192.168.1.10"}}
++    with template_rendered.connected_to(capture, app): response = client.get("/capport/login", **options)
++    assert response.status_code == (503 if lookup == "error" else 200)
++    assert "CAPPORT custom title" in response.get_data(as_text=True)
++    assert contexts[0]["portal_translations"] is projection.translations and contexts[0]["portal_support"] is projection.support
++    for response in (client.get("/capport/api", **options), client.get("/capport/login", headers={"Accept": "application/json"}, **options)):
++        assert response.is_json
++        body = response.get_data(as_text=True)
++        assert "CAPPORT custom title" not in body and "support@example.invalid" not in body
++        assert "portal_support" not in body and "portal_translations" not in body
++        assert response.headers["Cache-Control"] == "private, no-store"
+diff --git a/tests/test_capport_routes.py b/tests/test_capport_routes.py
+index 20d53b7c9468f1a77b1ca8781bbee10b04252f52..f1572c18967409c0d6aa751dd15e1d39c0ae84fe 100644
+--- a/tests/test_capport_routes.py
++++ b/tests/test_capport_routes.py
+@@ -22,6 +22,7 @@ from app.models import Result
+ from app.web.portal_entry import PortalClientContext, PortalEntryResult
+ from app.web.portal_entry import PortalEntryHandler
+ from app.auth.manager import AuthSessionManager
++from app.portal_presentation import PortalPresentationConfigV1, PortalTemplatePresentationV1
+ from app.device_fingerprint_portal.client_hints_probe import PortalClientHintsProbe, ProbeConfig
+ 
+ 
+@@ -91,7 +92,7 @@ def state(
+     )
+ 
+ 
+-def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, client_hints_probe=None):
++def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, client_hints_probe=None, presentation=None):
+     template_dir = (
+         Path(__file__).parents[1] / "app" / "web" / "templates"
+     )
+@@ -103,6 +104,7 @@ def app_for(service, handler=None, *, extractor=None, portal_telemetry=None, cli
+             portal_entry_handler=handler,
+             config=config(),
+             telemetry=NoopTelemetry(),
++            portal_template_presentation=presentation or PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({})),
+             portal_evidence_extractor=extractor,
+             portal_evidence_telemetry=portal_telemetry,
+             client_hints_probe=client_hints_probe,
+@@ -160,6 +162,7 @@ def test_capport_real_session_submission_and_reuse_are_probe_invariant():
+         manager = AuthSessionManager()
+         executor = Executor()
+         handler = PortalEntryHandler(
++            portal_template_presentation=PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({})),
+             session_manager=manager, auth_worker=Mock(), executor=executor,
+             auth_telemetry=Mock(),
+         )
+diff --git a/tests/test_portal_entry.py b/tests/test_portal_entry.py
+index ddb4e841b1603cc4a87f002c30e630f8c2c80c89..33e619fab5c671be7e9274ea9c0e412a14f85c15 100644
+--- a/tests/test_portal_entry.py
++++ b/tests/test_portal_entry.py
+@@ -13,6 +13,12 @@ from app.web.portal_entry import (
+     PortalClientContext,
+     PortalEntryHandler,
+ )
++from functools import partial
++from app.portal_presentation import PortalPresentationConfigV1, PortalTemplatePresentationV1
++
++# Direct handler fixtures now receive the same validated startup projection as create_app.
++PortalEntryHandler = partial(PortalEntryHandler, portal_template_presentation=
++    PortalTemplatePresentationV1.compose(PortalPresentationConfigV1.from_settings({})))
+ 
+ 
+ class FailingExecutor:
+diff --git a/tests/web/test_portal_presentation_stage5.py b/tests/web/test_portal_presentation_stage5.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb5f15074c956467858687e927452da52edaea39
+--- /dev/null
++++ b/tests/web/test_portal_presentation_stage5.py
+@@ -0,0 +1,145 @@
++from dataclasses import FrozenInstanceError
++import json
++import logging
++from types import SimpleNamespace
++from unittest.mock import Mock
++import pytest
++from flask import template_rendered
++from app.portal_presentation import PORTAL_SETTING_DEFAULTS, PortalPresentationConfigV1, PortalTemplatePresentationV1, PortalPresentationConfigError
++from app.web.localization import PORTAL_TRANSLATIONS
++from app.web.web import create_app
++from tests.settings_control import stack
++
++
++def guest_app(**overrides):
++    from app.settings import get_settings
++    settings = {**get_settings(), "portal_counter_enabled": False, "portal_counter_api_enabled": False,
++        "capport_enabled": False, "auth_telemetry_enabled": False, **overrides}
++    return create_app(portal_counter_service=None, public_traffic_service=None, public_traffic_worker=None,
++        controller=Mock(), portal_evidence_sink=None, client_hints_probe=None, settings=settings), settings
++
++
++def test_complete_projection_is_immutable_and_changes_only_nine_catalog_values():
++    config = PortalPresentationConfigV1.from_settings({"portal_ui_title_en": "<script>literal</script>"})
++    projection = PortalTemplatePresentationV1.compose(config)
++    assert set(projection.translations) == {"az", "ru", "en"}
++    for language in projection.translations:
++        assert set(projection.translations[language]) == set(PORTAL_TRANSLATIONS[language])
++        for key, value in PORTAL_TRANSLATIONS[language].items():
++            if key not in {"title", "greeting", "description"}:
++                assert projection.translations[language][key] == value
++    assert projection.translations["en"]["title"] == "<script>literal</script>"
++    assert json.loads(json.dumps(projection.translations))["en"]["title"] == "<script>literal</script>"
++    with pytest.raises(TypeError): projection.translations["en"]["title"] = "changed"
++    with pytest.raises(TypeError): projection.support.update({"email": "changed"})
++    with pytest.raises(FrozenInstanceError): projection.support = {}
++    with pytest.raises(TypeError): PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_EN"] = "changed"
++
++
++def test_one_startup_projection_normal_and_error_entry_escape_html_without_request_settings_io(monkeypatch):
++    app, settings = guest_app(portal_ui_title_az="<b>literal title</b>", portal_ui_greeting_az="<script>alert(1)</script>",
++        portal_ui_description_az="First line\nSecond line")
++    projection = app.extensions["portal_template_presentation"]
++    assert app.extensions["portal_entry_handler"]._portal_template_presentation is projection
++    settings["portal_ui_title_az"] = "must not be adopted"
++    monkeypatch.setattr("app.web.web.get_settings", lambda: pytest.fail("request Settings lookup"))
++    monkeypatch.setattr("app.portal_presentation.PortalPresentationConfigV1.from_settings", lambda *a: pytest.fail("request projection rebuild"))
++    monkeypatch.setattr("app.settings_control.repository.SettingsRepository.transaction", lambda *a, **k: pytest.fail("request Settings DB"))
++    app.extensions["portal_entry_handler"]._executor = SimpleNamespace(submit=lambda *a, **k: None)
++    seen = []
++    def capture(sender, template, context, **kwargs): seen.append(context)
++    with template_rendered.connected_to(capture, app):
++        client = app.test_client()
++        invalid = client.get("/")
++        normal = client.get("/?site=fixture-site&clientMac=AA:BB:CC:DD:EE:FF&clientIp=192.168.8.10")
++    assert invalid.status_code == 400 and normal.status_code == 200
++    assert len(seen) == 2
++    assert all(context["portal_translations"] is projection.translations and context["portal_support"] is projection.support for context in seen)
++    for response in (invalid, normal):
++        html = response.get_data(as_text=True)
++        assert "&lt;b&gt;literal title&lt;/b&gt;" in html and "&lt;script&gt;alert(1)&lt;/script&gt;" in html
++        assert "<script>alert(1)</script>" not in html and "must not be adopted" not in html
++        assert "First line\nSecond line" in html
++        assert "tel:+994504174646" in html and "mailto:zaur.navi@gmail.com" in html
++        assert 'rel="noopener noreferrer"' in html
++        assert "<title>Zəfər Parkı - Wi-Fi</title>" in html
++
++
++def test_empty_contacts_hide_complete_support_section():
++    values = {key.lower(): "" for key in PORTAL_SETTING_DEFAULTS if key.startswith("PORTAL_SUPPORT_")}
++    app, _ = guest_app(**values)
++    html = app.test_client().get("/").get_data(as_text=True)
++    assert "mailto:" not in html and "tel:" not in html and "social-links" not in html
++    assert "Texniki dəstək" not in html
++
++
++@pytest.mark.parametrize("key,marker", [("phone", 'href="tel:'), ("email", 'href="mailto:'),
++    ("whatsapp_url", 'aria-label="WhatsApp"'), ("telegram_url", 'aria-label="Telegram"'), ("facebook_url", 'aria-label="Facebook"')])
++def test_each_empty_contact_hides_only_its_own_link(key, marker):
++    app, _ = guest_app(**{"portal_support_" + key: ""})
++    html = app.test_client().get("/").get_data(as_text=True)
++    assert marker not in html
++    assert 'class="portal-support"' in html
++
++
++def test_success_page_is_not_a_portal_settings_consumer():
++    app, _ = guest_app(portal_ui_title_az="custom guest-only branding")
++    html = app.test_client().get("/success").get_data(as_text=True)
++    assert "custom guest-only branding" not in html
++    assert "portal_support" not in html
++
++
++def test_operational_counter_and_controller_degradation_does_not_change_settings_adoption(tmp_path):
++    boot = stack(tmp_path)
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    # A failed worker/provider does not own Settings activation; normal error HTML still has the projection.
++    app, _ = guest_app(**boot.runtime_settings)
++    handler = app.extensions["portal_entry_handler"]
++    handler._executor = SimpleNamespace(submit=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline worker")))
++    counter = Mock()
++    counter.record_open.side_effect = RuntimeError("offline counter")
++    handler._portal_counter_service = counter
++    handler._counter_recording_enabled = True
++    response = app.test_client().get("/?site=fixture-outage&clientMac=AA:BB:CC:DD:EE:02&clientIp=192.168.8.11")
++    assert response.status_code == 500  # Existing worker-start-failure contract, not an activation failure.
++    counter.record_open.assert_called_once()
++    assert PORTAL_SETTING_DEFAULTS["PORTAL_UI_TITLE_AZ"] in response.get_data(as_text=True)
++    with boot.admin_context.read_service.repository.transaction() as db:
++        assert boot.admin_context.read_service.repository.effective(db) == 0
++        assert db.execute("SELECT COUNT(*) FROM settings_activation_events WHERE activation_result='failed'").fetchone()[0] == 0
++
++
++@pytest.mark.parametrize("key,value", [("portal_ui_title_en", ""), ("portal_ui_description_ru", "bad\r\nline"), ("portal_support_telegram_url", "javascript:alert(1)")])
++def test_invalid_startup_does_not_compose_guest_application(key, value):
++    with pytest.raises(PortalPresentationConfigError): guest_app(**{key: value})
++
++
++def test_failed_portal_adoption_never_serves_or_advances_effective(tmp_path, monkeypatch):
++    import run as runtime
++    from tests.visitor_registry.test_snapshot_runtime import _prepare_main
++    events, _controller, _collector, _registry, app, _observed = _prepare_main(monkeypatch)
++    monkeypatch.setattr(runtime, "capture_loaded_artifact_identity", lambda *_: SimpleNamespace(json_line=lambda: "synthetic Portal startup"))
++    boot = stack(tmp_path, host="127.0.0.1", port=8088, debug=False)
++    monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_: boot)
++    monkeypatch.setattr(runtime, "create_app", lambda **_: (_ for _ in ()).throw(PortalPresentationConfigError()))
++    with pytest.raises(PortalPresentationConfigError): runtime.main()
++    assert not app.run_calls and "collector.start" not in events
++    repository = boot.admin_context.read_service.repository
++    with repository.transaction() as db:
++        assert repository.effective(db) is None
++        row = db.execute("SELECT activation_result,safe_error_code FROM settings_activation_events").fetchone()
++        assert tuple(row) == ("failed", "portal_configuration_adoption_failed")
++
++
++def test_unrelated_application_failure_not_misclassified_as_portal(tmp_path, monkeypatch):
++    import run as runtime
++    from tests.visitor_registry.test_snapshot_runtime import _prepare_main
++    _events, _controller, _collector, _registry, app, _observed = _prepare_main(monkeypatch)
++    monkeypatch.setattr(runtime, "capture_loaded_artifact_identity", lambda *_: SimpleNamespace(json_line=lambda: "synthetic non-Portal startup"))
++    boot = stack(tmp_path, host="127.0.0.1", port=8088, debug=False)
++    monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_: boot)
++    monkeypatch.setattr(runtime, "create_app", lambda **_: (_ for _ in ()).throw(RuntimeError("unrelated composition failure")))
++    with pytest.raises(RuntimeError): runtime.main()
++    assert not app.run_calls
++    with boot.admin_context.read_service.repository.transaction() as db:
++        assert db.execute("SELECT COUNT(*) FROM settings_activation_events WHERE safe_error_code='portal_configuration_adoption_failed'").fetchone()[0] == 0
