@@ -1,0 +1,1939 @@
+diff --git a/app/device_fingerprint/control_plane_store.py b/app/device_fingerprint/control_plane_store.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ab72d801012c9f79b13a1c042bf7cb80801bf1e
+--- /dev/null
++++ b/app/device_fingerprint/control_plane_store.py
+@@ -0,0 +1,516 @@
++"""Single-SQLite-domain R14 runtime-profile activation and validity control plane."""
++
++from __future__ import annotations
++
++import sqlite3
++from dataclasses import astuple, dataclass
++from pathlib import Path
++from typing import Callable, Iterable
++
++from .artifact_content import ArtifactContent, ArtifactRef
++from .models import DeviceFingerprintValidationError
++from .runtime_profile_artifacts import (
++    direct_artifact_refs, make_classification_runtime_profile,
++    make_foundation_runtime_profile, make_runtime_profile_activation_record,
++    make_runtime_profile_admission_manifest, make_runtime_profile_validity_record,
++)
++
++_VALIDATORS = {
++    "FoundationRuntimeProfile": make_foundation_runtime_profile,
++    "ClassificationRuntimeProfile": make_classification_runtime_profile,
++    "RuntimeProfileAdmissionManifest": make_runtime_profile_admission_manifest,
++    "RuntimeProfileActivationRecord": make_runtime_profile_activation_record,
++    "RuntimeProfileValidityRecord": make_runtime_profile_validity_record,
++}
++
++
++class ControlPlaneOperationError(RuntimeError):
++    def __init__(self, reason_code: str):
++        self.reason_code = reason_code
++        super().__init__(reason_code)
++
++
++@dataclass(frozen=True, slots=True)
++class ActiveProfilePointerV1:
++    profile_kind: str
++    runtime_profile_id: str
++    runtime_profile_digest: str
++    activation_record_id: str
++    activation_generation_id: str
++
++
++@dataclass(frozen=True, slots=True)
++class PinnedRuntimeProfile:
++    pointer: ActiveProfilePointerV1
++    runtime_profile: ArtifactContent
++    admission_manifest: ArtifactContent
++    activation_record: ArtifactContent
++    validity_record: ArtifactContent
++
++
++class DeviceFingerprintControlPlaneStore:
++    """All pointer, lineage, validity, and immutable dependency writes share one DB."""
++
++    def __init__(self, database_path: str | Path, *, fault_hook: Callable[[str], None] | None = None):
++        self.database_path = str(database_path)
++        self.fault_hook = fault_hook
++
++    def _connect(self) -> sqlite3.Connection:
++        conn = sqlite3.connect(self.database_path, timeout=10, isolation_level=None)
++        conn.row_factory = sqlite3.Row
++        conn.execute("PRAGMA foreign_keys=ON")
++        conn.execute("PRAGMA synchronous=FULL")
++        return conn
++
++    def _fault(self, stage: str) -> None:
++        if self.fault_hook is not None:
++            self.fault_hook(stage)
++
++    def initialize(self) -> None:
++        with self._connect() as conn:
++            conn.executescript("""
++                CREATE TABLE IF NOT EXISTS artifacts (
++                    artifact_id TEXT PRIMARY KEY, artifact_type TEXT NOT NULL,
++                    content_sha256 TEXT NOT NULL, semantic_payload_json BLOB NOT NULL
++                );
++                CREATE TABLE IF NOT EXISTS artifact_dependencies (
++                    owner_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
++                    dependency_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
++                    dependency_digest TEXT NOT NULL,
++                    PRIMARY KEY (owner_id, dependency_id)
++                );
++                CREATE TABLE IF NOT EXISTS activations (
++                    activation_record_id TEXT PRIMARY KEY,
++                    artifact_id TEXT NOT NULL UNIQUE REFERENCES artifacts(artifact_id),
++                    profile_kind TEXT NOT NULL, runtime_profile_id TEXT NOT NULL,
++                    runtime_profile_digest TEXT NOT NULL, activation_generation_id TEXT NOT NULL UNIQUE
++                );
++                CREATE TABLE IF NOT EXISTS validities (
++                    validity_record_id TEXT PRIMARY KEY,
++                    artifact_id TEXT NOT NULL UNIQUE REFERENCES artifacts(artifact_id),
++                    activation_record_id TEXT NOT NULL REFERENCES activations(activation_record_id)
++                );
++                CREATE TABLE IF NOT EXISTS validity_heads (
++                    activation_record_id TEXT PRIMARY KEY REFERENCES activations(activation_record_id),
++                    validity_record_id TEXT NOT NULL REFERENCES validities(validity_record_id)
++                );
++                CREATE TABLE IF NOT EXISTS active_pointers (
++                    profile_kind TEXT PRIMARY KEY, runtime_profile_id TEXT NOT NULL,
++                    runtime_profile_digest TEXT NOT NULL,
++                    activation_record_id TEXT NOT NULL REFERENCES activations(activation_record_id),
++                    activation_generation_id TEXT NOT NULL
++                );
++            """)
++
++    @staticmethod
++    def _validated(content: ArtifactContent) -> None:
++        if not isinstance(content, ArtifactContent):
++            raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++        validator = _VALIDATORS.get(content.artifact_type)
++        if validator is not None and validator(content.semantic_payload).artifact_id != content.artifact_id:
++            raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++
++    @staticmethod
++    def _load(conn: sqlite3.Connection, artifact_id: str, digest: str | None = None) -> ArtifactContent:
++        row = conn.execute("SELECT * FROM artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
++        if row is None:
++            raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++        try:
++            content = ArtifactContent(row["artifact_type"], 1, row["semantic_payload_json"],
++                                      row["content_sha256"], row["artifact_id"])
++            DeviceFingerprintControlPlaneStore._validated(content)
++        except (DeviceFingerprintValidationError, UnicodeError, TypeError, ValueError) as exc:
++            raise ControlPlaneOperationError("runtime_profile_dependency_unavailable") from exc
++        if digest is not None and content.content_sha256 != digest:
++            raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++        return content
++
++    @staticmethod
++    def _put(conn: sqlite3.Connection, content: ArtifactContent,
++             refs: Iterable[ArtifactRef] = ()) -> None:
++        DeviceFingerprintControlPlaneStore._validated(content)
++        current = conn.execute("SELECT semantic_payload_json, content_sha256 FROM artifacts WHERE artifact_id=?",
++                               (content.artifact_id,)).fetchone()
++        if current is not None:
++            if current[0] != content.semantic_payload_json or current[1] != content.content_sha256:
++                raise ControlPlaneOperationError("artifact_immutable_conflict")
++            return
++        conn.execute("INSERT INTO artifacts VALUES (?,?,?,?)",
++                     (content.artifact_id, content.artifact_type, content.content_sha256,
++                      content.semantic_payload_json))
++        for ref in refs:
++            DeviceFingerprintControlPlaneStore._load(conn, ref.artifact_id, ref.content_sha256)
++            conn.execute("INSERT INTO artifact_dependencies VALUES (?,?,?)",
++                         (content.artifact_id, ref.artifact_id, ref.content_sha256))
++
++    def persist_artifact(self, content: ArtifactContent, dependency_refs: Iterable[ArtifactRef] = ()) -> None:
++        refs = tuple(dependency_refs)
++        if any(not isinstance(ref, ArtifactRef) for ref in refs):
++            raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++        declared = direct_artifact_refs(content)
++        if content.artifact_type in (
++                "FoundationRuntimeProfile", "ClassificationRuntimeProfile", "RuntimeProfileAdmissionManifest"):
++            if refs != declared:
++                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++        conn = self._connect()
++        try:
++            conn.execute("BEGIN IMMEDIATE")
++            self._put(conn, content, refs)
++            conn.commit()
++        except Exception:
++            if conn.in_transaction:
++                conn.rollback()
++            raise
++        finally:
++            conn.close()
++
++    def load_artifact(self, artifact_id: str, expected_content_sha256: str | None = None) -> ArtifactContent:
++        with self._connect() as conn:
++            return self._load(conn, artifact_id, expected_content_sha256)
++
++    @staticmethod
++    def _closure(conn: sqlite3.Connection, content: ArtifactContent, seen: set[str] | None = None) -> None:
++        seen = set() if seen is None else seen
++        if content.artifact_id in seen:
++            return
++        seen.add(content.artifact_id)
++        declared = direct_artifact_refs(content)
++        edges = conn.execute("SELECT dependency_id, dependency_digest FROM artifact_dependencies "
++                             "WHERE owner_id=? ORDER BY dependency_id", (content.artifact_id,)).fetchall()
++        actual = tuple(ArtifactRef(row[0], row[1]) for row in edges)
++        if content.artifact_type in (
++                "FoundationRuntimeProfile", "ClassificationRuntimeProfile", "RuntimeProfileAdmissionManifest"):
++            if actual != declared:
++                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++        if content.artifact_type == "FoundationRuntimeProfile":
++            payload = content.semantic_payload
++            origin_ref = ArtifactRef.from_dict(payload["origin_runtime_admission"])
++            origin = DeviceFingerprintControlPlaneStore._load(
++                conn, origin_ref.artifact_id, origin_ref.content_sha256).semantic_payload
++            if (set(origin) != {"origin_runtime_admission_contract_version", "tcp_state",
++                                "tcp_reason_code", "ttl_capture_placement_proof"} or
++                    type(origin["origin_runtime_admission_contract_version"]) is not int or
++                    origin["origin_runtime_admission_contract_version"] < 1):
++                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++            ttl = payload["ttl_capture_placement_proof"]
++            if origin["tcp_state"] == "ENABLED":
++                if (origin["tcp_reason_code"] != "TTL_PROOF_VALID" or ttl is None or
++                        origin["ttl_capture_placement_proof"] != ttl):
++                    raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++            elif origin["tcp_state"] == "DISABLED":
++                if (origin["tcp_reason_code"] not in {"TTL_PROOF_INVALID", "PROFILE_POLICY_DISABLED"}
++                        or origin["ttl_capture_placement_proof"] is not None or ttl is not None):
++                    raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++            else:
++                raise ControlPlaneOperationError("runtime_profile_dependency_unavailable")
++        for ref in actual:
++            dependency = DeviceFingerprintControlPlaneStore._load(conn, ref.artifact_id, ref.content_sha256)
++            DeviceFingerprintControlPlaneStore._closure(conn, dependency, seen)
++
++    @staticmethod
++    def _pointer(conn: sqlite3.Connection, kind: str) -> ActiveProfilePointerV1 | None:
++        row = conn.execute("SELECT * FROM active_pointers WHERE profile_kind=?", (kind,)).fetchone()
++        return ActiveProfilePointerV1(**dict(row)) if row is not None else None
++
++    def get_active_pointer(self, profile_kind: str) -> ActiveProfilePointerV1 | None:
++        with self._connect() as conn:
++            return self._pointer(conn, profile_kind)
++
++    def get_validity_head(self, activation_record_id: str) -> ArtifactContent | None:
++        with self._connect() as conn:
++            row = conn.execute("SELECT v.artifact_id FROM validity_heads h JOIN validities v "
++                               "ON v.validity_record_id=h.validity_record_id "
++                               "WHERE h.activation_record_id=?", (activation_record_id,)).fetchone()
++            return self._load(conn, row[0]) if row is not None else None
++
++    @staticmethod
++    def _precheck(conn: sqlite3.Connection, rpm: ArtifactContent, activation: ArtifactContent,
++                  initial: ArtifactContent, predecessor: ArtifactContent | None) -> None:
++        try:
++            if (not all(isinstance(item, ArtifactContent) for item in (rpm, activation, initial)) or
++                    (predecessor is not None and not isinstance(predecessor, ArtifactContent)) or
++                    rpm.artifact_type != "RuntimeProfileAdmissionManifest" or
++                    activation.artifact_type != "RuntimeProfileActivationRecord" or
++                    initial.artifact_type != "RuntimeProfileValidityRecord" or
++                    (predecessor is not None and
++                     predecessor.artifact_type != "RuntimeProfileValidityRecord")):
++                raise ValueError("wrong activation artifact type")
++            DeviceFingerprintControlPlaneStore._validated(rpm)
++            DeviceFingerprintControlPlaneStore._validated(activation)
++            DeviceFingerprintControlPlaneStore._validated(initial)
++            if predecessor is not None:
++                DeviceFingerprintControlPlaneStore._validated(predecessor)
++            rp = rpm.semantic_payload
++            ap = activation.semantic_payload
++            vp = initial.semantic_payload
++            stored_rpm = DeviceFingerprintControlPlaneStore._load(conn, rpm.artifact_id, rpm.content_sha256)
++            candidate = DeviceFingerprintControlPlaneStore._load(
++                conn, rp["candidate_profile"]["artifact_id"], rp["candidate_profile"]["content_sha256"])
++            if stored_rpm != rpm or ap["profile_kind"] != rp["profile_kind"] or (
++                    ap["runtime_profile_id"], ap["runtime_profile_digest"]) != (
++                    candidate.artifact_id, candidate.content_sha256) or (
++                    ap["runtime_profile_admission_manifest_id"],
++                    ap["runtime_profile_admission_manifest_digest"]) != (
++                    rpm.artifact_id, rpm.content_sha256) or ap["activation_reason_update_class"] != rp["update_class"]:
++                raise ValueError("activation/RPM mismatch")
++            if (ap["previous_activation_record_id"] != rp["expected_previous_activation_record_id"] or
++                    (ap["previous_active_profile_id"], ap["previous_active_profile_digest"]) != (
++                        (rp["previous_active_profile"] or {}).get("artifact_id"),
++                        (rp["previous_active_profile"] or {}).get("content_sha256"))):
++                raise ValueError("activation predecessor mismatch")
++            if (vp["state"] != "ACTIVE" or vp["previous_validity_record_id"] is not None or
++                    vp["reason_code"] != ("ROLLBACK_REACTIVATED" if rp["update_class"] == "ROLLBACK_REACTIVATION"
++                                          else "ACTIVATED") or
++                    (vp["profile_kind"], vp["runtime_profile_id"], vp["runtime_profile_digest"],
++                     vp["activation_record_id"]) != (
++                        ap["profile_kind"], ap["runtime_profile_id"], ap["runtime_profile_digest"],
++                        ap["activation_record_id"])):
++                raise ValueError("initial validity mismatch")
++            if rp["profile_kind"] == "classification":
++                foundation_ref = candidate.semantic_payload["foundation_runtime_profile"]
++                foundation_rpm_ref = rp["foundation_runtime_profile_admission_manifest"]
++                foundation_rpm = DeviceFingerprintControlPlaneStore._load(
++                    conn, foundation_rpm_ref["artifact_id"], foundation_rpm_ref["content_sha256"])
++                if (foundation_rpm.semantic_payload["profile_kind"] != "foundation" or
++                        foundation_rpm.semantic_payload["candidate_profile"] != foundation_ref):
++                    raise ValueError("foundation admission lineage mismatch")
++            if rp["update_class"] == "ROLLBACK_REACTIVATION":
++                prior = conn.execute("SELECT artifact_id FROM artifacts WHERE "
++                                     "artifact_type='RuntimeProfileAdmissionManifest' AND artifact_id<>?",
++                                     (rpm.artifact_id,)).fetchall()
++                if not any(DeviceFingerprintControlPlaneStore._load(conn, row[0]).semantic_payload[
++                        "candidate_profile"] == rp["candidate_profile"] for row in prior):
++                    raise ValueError("rollback target was not previously admitted")
++            if predecessor is not None and (predecessor.semantic_payload["state"] != "INACTIVE" or
++                    predecessor.semantic_payload["reason_code"] != "SUPERSEDED_SAFE" or
++                    predecessor.semantic_payload["activation_record_id"] !=
++                    rp["expected_previous_activation_record_id"]):
++                raise ValueError("predecessor validity mismatch")
++            DeviceFingerprintControlPlaneStore._closure(conn, stored_rpm)
++            DeviceFingerprintControlPlaneStore._closure(conn, candidate)
++        except (KeyError, TypeError, ValueError, DeviceFingerprintValidationError,
++                ControlPlaneOperationError) as exc:
++            raise ControlPlaneOperationError("runtime_profile_dependency_unavailable") from exc
++
++    def activate_profile(self, admission_manifest: ArtifactContent, activation_record: ArtifactContent,
++                         initial_validity_record: ArtifactContent, *,
++                         predecessor_inactive_validity_record: ArtifactContent | None = None) -> ActiveProfilePointerV1:
++        conn = self._connect()
++        try:
++            self._precheck(conn, admission_manifest, activation_record, initial_validity_record,
++                           predecessor_inactive_validity_record)
++            self._fault("BEFORE_BEGIN")
++            conn.execute("BEGIN IMMEDIATE")
++            self._fault("AFTER_BEGIN_BEFORE_WRITES")
++            rp = admission_manifest.semantic_payload
++            ap = activation_record.semantic_payload
++            kind = rp["profile_kind"]
++            current = self._pointer(conn, kind)
++            expected_ref = rp["previous_active_profile"]
++            expected = None if expected_ref is None else ActiveProfilePointerV1(
++                kind, expected_ref["artifact_id"], expected_ref["content_sha256"],
++                rp["expected_previous_activation_record_id"],
++                rp["expected_previous_activation_generation_id"])
++            if current != expected:
++                raise ControlPlaneOperationError("active_profile_precondition_mismatch")
++            if current is not None:
++                head = self._head(conn, current.activation_record_id)
++                if head.semantic_payload["state"] == "ACTIVE":
++                    old = predecessor_inactive_validity_record
++                    if old is None or old.semantic_payload["previous_validity_record_id"] != (
++                            head.semantic_payload["validity_record_id"]) or (
++                            old.semantic_payload["profile_kind"], old.semantic_payload["runtime_profile_id"],
++                            old.semantic_payload["runtime_profile_digest"]) != (
++                                kind, current.runtime_profile_id, current.runtime_profile_digest):
++                        raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++                    self._put(conn, old)
++                    self._insert_validity(conn, old)
++                    changed = conn.execute("UPDATE validity_heads SET validity_record_id=? "
++                                           "WHERE activation_record_id=? AND validity_record_id=?",
++                                           (old.semantic_payload["validity_record_id"], current.activation_record_id,
++                                            head.semantic_payload["validity_record_id"])).rowcount
++                    if changed != 1:
++                        raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++                elif predecessor_inactive_validity_record is not None:
++                    raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++            elif predecessor_inactive_validity_record is not None:
++                raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++            self._put(conn, activation_record)
++            conn.execute("INSERT INTO activations VALUES (?,?,?,?,?,?)", (
++                ap["activation_record_id"], activation_record.artifact_id, kind,
++                ap["runtime_profile_id"], ap["runtime_profile_digest"], ap["activation_generation_id"]))
++            self._put(conn, initial_validity_record)
++            self._insert_validity(conn, initial_validity_record)
++            conn.execute("INSERT INTO validity_heads VALUES (?,?)", (
++                ap["activation_record_id"], initial_validity_record.semantic_payload["validity_record_id"]))
++            pointer = ActiveProfilePointerV1(kind, ap["runtime_profile_id"], ap["runtime_profile_digest"],
++                                             ap["activation_record_id"], ap["activation_generation_id"])
++            if current is None:
++                conn.execute("INSERT INTO active_pointers VALUES (?,?,?,?,?)", astuple(pointer))
++            else:
++                changed = conn.execute("UPDATE active_pointers SET runtime_profile_id=?, "
++                                       "runtime_profile_digest=?, activation_record_id=?, activation_generation_id=? "
++                                       "WHERE profile_kind=? AND runtime_profile_id=? AND runtime_profile_digest=? "
++                                       "AND activation_record_id=? AND activation_generation_id=?", (
++                                           pointer.runtime_profile_id, pointer.runtime_profile_digest,
++                                           pointer.activation_record_id, pointer.activation_generation_id,
++                                           *astuple(current))).rowcount
++                if changed != 1:
++                    raise ControlPlaneOperationError("active_profile_precondition_mismatch")
++            self._fault("AFTER_WRITES_BEFORE_COMMIT")
++            conn.commit()
++            self._fault("AFTER_COMMIT")
++            return pointer
++        except Exception:
++            if conn.in_transaction:
++                conn.rollback()
++            raise
++        finally:
++            conn.close()
++
++    @staticmethod
++    def _insert_validity(conn: sqlite3.Connection, content: ArtifactContent) -> None:
++        vp = content.semantic_payload
++        conn.execute("INSERT INTO validities VALUES (?,?,?)", (
++            vp["validity_record_id"], content.artifact_id, vp["activation_record_id"]))
++
++    @staticmethod
++    def _head(conn: sqlite3.Connection, activation_record_id: str) -> ArtifactContent:
++        row = conn.execute("SELECT v.artifact_id FROM validity_heads h JOIN validities v "
++                           "ON v.validity_record_id=h.validity_record_id "
++                           "WHERE h.activation_record_id=?", (activation_record_id,)).fetchone()
++        if row is None:
++            raise ControlPlaneOperationError("activation_lineage_unavailable")
++        return DeviceFingerprintControlPlaneStore._load(conn, row[0])
++
++    def transition_validity(self, new_validity_record: ArtifactContent, *,
++                            expected_head_validity_record_id: str) -> ArtifactContent:
++        self._validated(new_validity_record)
++        if new_validity_record.artifact_type != "RuntimeProfileValidityRecord":
++            raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++        vp = new_validity_record.semantic_payload
++        if (vp["previous_validity_record_id"] != expected_head_validity_record_id
++                or vp["state"] == "ACTIVE"):
++            raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++        conn = self._connect()
++        try:
++            conn.execute("BEGIN IMMEDIATE")
++            row = conn.execute("SELECT validity_record_id FROM validity_heads WHERE activation_record_id=?",
++                               (vp["activation_record_id"],)).fetchone()
++            if row is None or row[0] != expected_head_validity_record_id:
++                raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++            previous = self._head(conn, vp["activation_record_id"]).semantic_payload
++            if (vp["profile_kind"], vp["runtime_profile_id"], vp["runtime_profile_digest"]) != (
++                    previous["profile_kind"], previous["runtime_profile_id"], previous["runtime_profile_digest"]):
++                raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++            self._put(conn, new_validity_record)
++            self._insert_validity(conn, new_validity_record)
++            changed = conn.execute("UPDATE validity_heads SET validity_record_id=? WHERE activation_record_id=? "
++                                   "AND validity_record_id=?", (vp["validity_record_id"], vp["activation_record_id"],
++                                                                expected_head_validity_record_id)).rowcount
++            if changed != 1:
++                raise ControlPlaneOperationError("runtime_profile_validity_cas_conflict")
++            conn.commit()
++            return new_validity_record
++        except Exception:
++            if conn.in_transaction:
++                conn.rollback()
++            raise
++        finally:
++            conn.close()
++
++    @staticmethod
++    def _resolve_pin(conn: sqlite3.Connection, pointer: ActiveProfilePointerV1) -> PinnedRuntimeProfile:
++        try:
++            row = conn.execute("SELECT * FROM activations WHERE activation_record_id=?",
++                               (pointer.activation_record_id,)).fetchone()
++            if row is None or (row["profile_kind"], row["runtime_profile_id"],
++                               row["runtime_profile_digest"], row["activation_generation_id"]) != (
++                                   pointer.profile_kind, pointer.runtime_profile_id,
++                                   pointer.runtime_profile_digest, pointer.activation_generation_id):
++                raise ValueError("activation index mismatch")
++            activation = DeviceFingerprintControlPlaneStore._load(conn, row["artifact_id"])
++            if activation.artifact_type != "RuntimeProfileActivationRecord":
++                raise ValueError("activation artifact type mismatch")
++            ap = activation.semantic_payload
++            if (ap["activation_record_id"], ap["activation_generation_id"], ap["profile_kind"],
++                    ap["runtime_profile_id"], ap["runtime_profile_digest"]) != (
++                        pointer.activation_record_id, pointer.activation_generation_id, pointer.profile_kind,
++                        pointer.runtime_profile_id, pointer.runtime_profile_digest):
++                raise ValueError("activation mismatch")
++            rpm = DeviceFingerprintControlPlaneStore._load(conn, ap["runtime_profile_admission_manifest_id"],
++                                                            ap["runtime_profile_admission_manifest_digest"])
++            if rpm.artifact_type != "RuntimeProfileAdmissionManifest":
++                raise ValueError("admission artifact type mismatch")
++            rp = rpm.semantic_payload
++            if (rp["candidate_profile"], rp["profile_kind"], rp["update_class"]) != (
++                    {"artifact_id": pointer.runtime_profile_id,
++                     "content_sha256": pointer.runtime_profile_digest}, pointer.profile_kind,
++                    ap["activation_reason_update_class"]):
++                raise ValueError("admission mismatch")
++            profile = DeviceFingerprintControlPlaneStore._load(conn, pointer.runtime_profile_id,
++                                                                pointer.runtime_profile_digest)
++            expected_type = ("FoundationRuntimeProfile" if pointer.profile_kind == "foundation"
++                             else "ClassificationRuntimeProfile" if pointer.profile_kind == "classification"
++                             else None)
++            if profile.artifact_type != expected_type:
++                raise ValueError("runtime profile artifact type mismatch")
++            DeviceFingerprintControlPlaneStore._closure(conn, rpm)
++            DeviceFingerprintControlPlaneStore._closure(conn, profile)
++            validity = DeviceFingerprintControlPlaneStore._head(conn, pointer.activation_record_id)
++            if validity.artifact_type != "RuntimeProfileValidityRecord":
++                raise ValueError("validity artifact type mismatch")
++            vp = validity.semantic_payload
++            if (vp["activation_record_id"], vp["profile_kind"], vp["runtime_profile_id"],
++                    vp["runtime_profile_digest"]) != (
++                        pointer.activation_record_id, pointer.profile_kind,
++                        pointer.runtime_profile_id, pointer.runtime_profile_digest):
++                raise ValueError("validity mismatch")
++            return PinnedRuntimeProfile(pointer, profile, rpm, activation, validity)
++        except (ControlPlaneOperationError, DeviceFingerprintValidationError,
++                KeyError, TypeError, ValueError) as exc:
++            raise ControlPlaneOperationError("activation_lineage_unavailable") from exc
++
++    def pin_active_profile(self, profile_kind: str) -> PinnedRuntimeProfile:
++        conn = self._connect()
++        try:
++            conn.execute("BEGIN")
++            pointer = self._pointer(conn, profile_kind)
++            if pointer is None:
++                raise ControlPlaneOperationError("activation_lineage_unavailable")
++            pinned = self._resolve_pin(conn, pointer)
++            if pinned.validity_record.semantic_payload["inflight_commit_rule"] != "ALLOW_PINNED_INFLIGHT":
++                raise ControlPlaneOperationError("runtime_profile_invalidated")
++            conn.commit()
++            return pinned
++        finally:
++            conn.close()
++
++    def check_pinned_commit_allowed(self, pinned: PinnedRuntimeProfile) -> bool:
++        if not isinstance(pinned, PinnedRuntimeProfile):
++            raise ControlPlaneOperationError("runtime_profile_invalidated")
++        with self._connect() as conn:
++            try:
++                head = self._head(conn, pinned.pointer.activation_record_id)
++                state = head.semantic_payload
++                if (state["activation_record_id"] != pinned.pointer.activation_record_id or
++                        state["runtime_profile_id"] != pinned.pointer.runtime_profile_id or
++                        state["runtime_profile_digest"] != pinned.pointer.runtime_profile_digest or
++                        state["inflight_commit_rule"] != "ALLOW_PINNED_INFLIGHT" or
++                        state["state"] == "SUSPENDED_INVALIDATED"):
++                    raise ControlPlaneOperationError("runtime_profile_invalidated")
++                return True
++            except ControlPlaneOperationError as exc:
++                raise ControlPlaneOperationError("runtime_profile_invalidated") from exc
++
++    def validate_startup_integrity(self) -> None:
++        conn = self._connect()
++        try:
++            conn.execute("BEGIN")
++            for row in conn.execute("SELECT * FROM active_pointers ORDER BY profile_kind"):
++                self._resolve_pin(conn, ActiveProfilePointerV1(**dict(row)))
++            conn.commit()
++        except Exception as exc:
++            raise ControlPlaneOperationError("activation_lineage_unavailable") from exc
++        finally:
++            conn.close()
+diff --git a/app/device_fingerprint/ff5_runtime_profile_atomicity.py b/app/device_fingerprint/ff5_runtime_profile_atomicity.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a330959f82cb730c458d1f7036eef976379088e6
+--- /dev/null
++++ b/app/device_fingerprint/ff5_runtime_profile_atomicity.py
+@@ -0,0 +1,569 @@
++"""Executable synthetic F-F5 atomicity proof; never connects to production."""
++
++from __future__ import annotations
++
++import json
++import sqlite3
++import tempfile
++import uuid
++from concurrent.futures import ThreadPoolExecutor
++from dataclasses import dataclass
++from pathlib import Path
++from threading import Barrier
++from typing import Any
++
++from .artifact_content import ArtifactContent, ArtifactRef, canonical_set, make_artifact_content
++from .control_plane_store import (
++    ControlPlaneOperationError, DeviceFingerprintControlPlaneStore,
++)
++from .foundation_gate_artifacts import make_gate_result_manifest
++from .gate_proof_artifacts import make_gate_proof_artifact
++from .models import DeviceFingerprintValidationError
++from .runtime_profile_artifacts import (
++    direct_artifact_refs, make_classification_runtime_profile,
++    make_foundation_runtime_profile, make_runtime_profile_activation_record,
++    make_runtime_profile_admission_manifest, make_runtime_profile_validity_record,
++)
++
++_AT = "2026-09-23T12:00:00.000Z"
++_EVIDENCE_LABELS = (
++    "runtime_profile_switch_pinning_trace",
++    "runtime_profile_transaction_crash_point_trace",
++    "runtime_profile_rollback_trace",
++    "runtime_profile_cas_race_trace",
++    "runtime_profile_restart_recovery_trace",
++    "runtime_profile_compatibility_test_fixtures",
++)
++_CHECK_REASONS = {
++    "fixture": "runtime_profile_fixture_invalid",
++    "dependency": "runtime_profile_dependency_unavailable",
++    "crash": "activation_crash_atomicity_failed",
++    "pinning": "runtime_profile_pinning_failed",
++    "rollback": "runtime_profile_rollback_failed",
++    "validity_cas": "runtime_profile_validity_cas_failed",
++    "activation_cas": "runtime_profile_activation_cas_failed",
++    "aba": "runtime_profile_aba_protection_failed",
++    "recovery": "runtime_profile_restart_recovery_failed",
++}
++
++
++def _uuid(number: int) -> str:
++    return str(uuid.UUID(int=number, version=4))
++
++
++def _ref(content: ArtifactContent) -> dict[str, str]:
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++def _synthetic(kind: str, label: str) -> ArtifactContent:
++    return make_artifact_content(kind, {"synthetic_ff5_fixture_only": label})
++
++
++@dataclass(frozen=True, slots=True)
++class FF5ScenarioExecution:
++    fixture_artifact_refs: tuple[dict[str, str], ...]
++    profile_switch_pinning_trace: dict[str, Any]
++    transaction_crash_point_trace: dict[str, Any]
++    rollback_trace: dict[str, Any]
++    cas_race_trace: dict[str, Any]
++    restart_recovery_trace: dict[str, Any]
++    compatibility_test_fixtures: dict[str, Any]
++    checks: dict[str, bool]
++    failure_reasons: tuple[str, ...]
++
++
++@dataclass(frozen=True, slots=True)
++class FF5GateExecution:
++    gate_proof_artifact: ArtifactContent
++    gate_result_manifest: ArtifactContent
++    failure_reasons: tuple[str, ...]
++
++
++class _Fixture:
++    """Clearly synthetic typed ArtifactContent graph, scoped to one disposable DB."""
++
++    def __init__(self, database_path: Path, *, fault_hook=None):
++        self.store = DeviceFingerprintControlPlaneStore(database_path, fault_hook=fault_hook)
++        self.store.initialize()
++        self.leaves: dict[str, ArtifactContent] = {}
++        for kind in (
++            "EvidenceSourceBindingTimeline", "BindingClockPolicy", "SourceHealthPolicy",
++            "SnapshotContentPolicy", "SnapshotExecutionPolicy", "EvidenceSchemaRegistryContract",
++            "Task01HealthRetentionContract", "SourceHealthEmitterContract",
++            "KnowledgeBundle", "ClassificationPolicy", "EvidenceAdapterContractSet",
++            "ClassifierArtifactManifest", "FoundationAdmissionManifest", "Task04AcceptanceManifest",
++        ):
++            content = _synthetic(kind, kind)
++            self.leaves[kind] = content
++            self.store.persist_artifact(content)
++        disabled_origin = make_artifact_content("OriginRuntimeAdmission", {
++            "origin_runtime_admission_contract_version": 1,
++            "tcp_state": "DISABLED", "tcp_reason_code": "PROFILE_POLICY_DISABLED",
++            "ttl_capture_placement_proof": None,
++        })
++        self.leaves["OriginRuntimeAdmission"] = disabled_origin
++        self.store.persist_artifact(disabled_origin)
++        second_clock = _synthetic("BindingClockPolicy", "alternate synthetic clock fixture")
++        self.store.persist_artifact(second_clock)
++        self.leaves["alternate_clock"] = second_clock
++        self.foundation_a = self.foundation("A")
++        self.foundation_b = self.foundation("B")
++        self.foundation_c = self.foundation("C")
++        self.classification_a = self.classification(self.foundation_a, "A")
++        self.classification_b = self.classification(self.foundation_b, "B")
++
++    def foundation(self, label: str) -> ArtifactContent:
++        leaves = self.leaves
++        payload = {
++            "foundation_profile_contract_version": 1,
++            "evidence_source_binding_timeline": _ref(leaves["EvidenceSourceBindingTimeline"]),
++            "binding_clock_policy": _ref(leaves["alternate_clock"] if label != "A"
++                                         else leaves["BindingClockPolicy"]),
++            "source_health_policy": _ref(leaves["SourceHealthPolicy"]),
++            "snapshot_content_policy": _ref(leaves["SnapshotContentPolicy"]),
++            "snapshot_execution_policy": _ref(leaves["SnapshotExecutionPolicy"]),
++            "evidence_schema_registry_contract": _ref(leaves["EvidenceSchemaRegistryContract"]),
++            "task01_health_retention_contract": _ref(leaves["Task01HealthRetentionContract"]),
++            "origin_runtime_admission": _ref(leaves["OriginRuntimeAdmission"]),
++            "classification_foundation_valid_from_utc": _AT,
++            "source_health_emitter_contracts": [_ref(leaves["SourceHealthEmitterContract"])],
++            "ttl_capture_placement_proof": None,
++            "snapshot_contract_version": 2 if label == "C" else 1,
++        }
++        content = make_foundation_runtime_profile(payload)
++        self.store.persist_artifact(content, direct_artifact_refs(content))
++        return content
++
++    def classification(self, foundation: ArtifactContent, label: str) -> ArtifactContent:
++        content = make_classification_runtime_profile({
++            "classification_runtime_profile_contract_version": 1,
++            "foundation_runtime_profile": _ref(foundation),
++            "knowledge_bundle": _ref(self.leaves["KnowledgeBundle"]),
++            "classification_policy": _ref(self.leaves["ClassificationPolicy"]),
++            "evidence_adapter_contract_set": _ref(self.leaves["EvidenceAdapterContractSet"]),
++            "classifier_artifact_manifest": _ref(self.leaves["ClassifierArtifactManifest"]),
++        })
++        self.store.persist_artifact(content, direct_artifact_refs(content))
++        return content
++
++    def admission(self, kind: str, candidate: ArtifactContent, previous=None,
++                  update_class: str | None = None, foundation_admission=None) -> ArtifactContent:
++        initial = previous is None
++        update = update_class or (f"INITIAL_{kind.upper()}" if initial else "BINDING_TIMELINE_CHANGE")
++        content = make_runtime_profile_admission_manifest({
++            "runtime_profile_admission_contract_version": 1,
++            "profile_kind": kind,
++            "candidate_profile": _ref(candidate),
++            "previous_active_profile": None if initial else {
++                "artifact_id": previous.runtime_profile_id,
++                "content_sha256": previous.runtime_profile_digest,
++            },
++            "expected_previous_activation_record_id": None if initial else previous.activation_record_id,
++            "expected_previous_activation_generation_id": None if initial else previous.activation_generation_id,
++            "update_class": update,
++            "prerequisite_gate_results": [],
++            "compatibility_validation_result": "PASS",
++            "candidate_repository_commit_sha": "a" * 40,
++            "candidate_repository_tree_sha": "b" * 40,
++            "foundation_admission_manifest": _ref(self.leaves["FoundationAdmissionManifest"]),
++            "task04_acceptance_manifest": (_ref(self.leaves["Task04AcceptanceManifest"])
++                                          if kind == "classification" else None),
++            "foundation_runtime_profile_admission_manifest": (_ref(foundation_admission)
++                                                               if kind == "classification" else None),
++        })
++        self.store.persist_artifact(content, direct_artifact_refs(content))
++        return content
++
++    def records(self, rpm: ArtifactContent, number: int, previous_head=None):
++        rp = rpm.semantic_payload
++        candidate = rp["candidate_profile"]
++        previous = rp["previous_active_profile"]
++        activation_id = _uuid(number * 10 + 1)
++        activation = make_runtime_profile_activation_record({
++            "activation_contract_version": 1,
++            "activation_record_id": activation_id,
++            "profile_kind": rp["profile_kind"],
++            "runtime_profile_id": candidate["artifact_id"],
++            "runtime_profile_digest": candidate["content_sha256"],
++            "runtime_profile_admission_manifest_id": rpm.artifact_id,
++            "runtime_profile_admission_manifest_digest": rpm.content_sha256,
++            "previous_activation_record_id": rp["expected_previous_activation_record_id"],
++            "previous_active_profile_id": None if previous is None else previous["artifact_id"],
++            "previous_active_profile_digest": None if previous is None else previous["content_sha256"],
++            "activated_at_utc": _AT,
++            "activation_reason_update_class": rp["update_class"],
++            "activation_result": "ACTIVE",
++            "activation_generation_id": _uuid(number * 10 + 2),
++        })
++        initial = make_runtime_profile_validity_record({
++            "runtime_profile_validity_contract_version": 1,
++            "validity_record_id": _uuid(number * 10 + 3),
++            "profile_kind": rp["profile_kind"],
++            "runtime_profile_id": candidate["artifact_id"],
++            "runtime_profile_digest": candidate["content_sha256"],
++            "activation_record_id": activation_id,
++            "state": "ACTIVE",
++            "reason_code": ("ROLLBACK_REACTIVATED" if rp["update_class"] == "ROLLBACK_REACTIVATION"
++                            else "ACTIVATED"),
++            "effective_at_utc": _AT,
++            "inflight_commit_rule": "ALLOW_PINNED_INFLIGHT",
++            "previous_validity_record_id": None,
++        })
++        inactive = None
++        if previous_head is not None:
++            old = previous_head.semantic_payload
++            inactive = make_runtime_profile_validity_record({
++                **old,
++                "validity_record_id": _uuid(number * 10 + 4),
++                "state": "INACTIVE",
++                "reason_code": "SUPERSEDED_SAFE",
++                "inflight_commit_rule": "ALLOW_PINNED_INFLIGHT",
++                "previous_validity_record_id": old["validity_record_id"],
++            })
++        return activation, initial, inactive
++
++    def activate(self, rpm: ArtifactContent, number: int, previous_head=None):
++        activation, initial, inactive = self.records(rpm, number, previous_head)
++        pointer = self.store.activate_profile(
++            rpm, activation, initial, predecessor_inactive_validity_record=inactive)
++        return pointer, activation, initial, inactive
++
++
++def _success_or_reason(callback) -> str:
++    try:
++        callback()
++        return "success"
++    except ControlPlaneOperationError as exc:
++        return exc.reason_code
++
++
++def _run_scenarios(root: Path) -> tuple[dict[str, bool], dict[str, Any], tuple[dict[str, str], ...]]:
++    checks: dict[str, bool] = {}
++    trace: dict[str, Any] = {}
++    fixture = _Fixture(root / "switch.sqlite")
++    store = fixture.store
++    rpm_a = fixture.admission("foundation", fixture.foundation_a)
++    pointer_a, _, _, _ = fixture.activate(rpm_a, 1)
++    old_pin = store.pin_active_profile("foundation")
++    rpm_c = fixture.admission("classification", fixture.classification_a,
++                              foundation_admission=rpm_a)
++    class_pointer, _, _, _ = fixture.activate(rpm_c, 11)
++    checks["fixture"] = (
++        old_pin.runtime_profile.artifact_id == fixture.foundation_a.artifact_id
++        and store.pin_active_profile("classification").pointer == class_pointer
++        and "task04_acceptance_manifest" not in fixture.classification_a.semantic_payload
++        and "foundation_admission_manifest" not in fixture.foundation_a.semantic_payload)
++    rpm_b = fixture.admission("foundation", fixture.foundation_b, pointer_a)
++    proof_inputs = (fixture.foundation_a, fixture.foundation_b, fixture.foundation_c,
++                    fixture.classification_a, fixture.classification_b, rpm_a, rpm_b, rpm_c)
++    pointer_b, _, _, _ = fixture.activate(rpm_b, 2, store.get_validity_head(pointer_a.activation_record_id))
++    new_pin = store.pin_active_profile("foundation")
++    checks["pinning"] = (old_pin.pointer == pointer_a and new_pin.pointer == pointer_b
++                         and store.check_pinned_commit_allowed(old_pin)
++                         and store.get_validity_head(pointer_a.activation_record_id).semantic_payload["state"] == "INACTIVE")
++    validity_b = store.get_validity_head(pointer_b.activation_record_id)
++    invalidated = make_runtime_profile_validity_record({
++        **validity_b.semantic_payload,
++        "validity_record_id": _uuid(35),
++        "state": "SUSPENDED_INVALIDATED", "reason_code": "EXPLICIT_POLICY_SUSPEND",
++        "inflight_commit_rule": "REJECT_PINNED_INFLIGHT",
++        "previous_validity_record_id": validity_b.semantic_payload["validity_record_id"],
++    })
++    store.transition_validity(invalidated,
++                              expected_head_validity_record_id=validity_b.semantic_payload["validity_record_id"])
++    checks["pinning"] &= (_success_or_reason(lambda: store.check_pinned_commit_allowed(new_pin))
++                          == "runtime_profile_invalidated")
++    trace["pinning"] = {"old": pointer_a.runtime_profile_id, "new": pointer_b.runtime_profile_id,
++                        "old_safe": True, "new_invalidated": True}
++
++    crash_trace = {}
++    for index, stage in enumerate(("BEFORE_BEGIN", "AFTER_BEGIN_BEFORE_WRITES",
++                                   "AFTER_WRITES_BEFORE_COMMIT", "AFTER_COMMIT"), start=1):
++        f = _Fixture(root / f"crash-{index}.sqlite")
++        base = f.admission("foundation", f.foundation_a)
++        before, _, _, _ = f.activate(base, 100 + index)
++        next_rpm = f.admission("foundation", f.foundation_b, before)
++        next_records = f.records(next_rpm, 200 + index, f.store.get_validity_head(before.activation_record_id))
++
++        def fault(observed, expected=stage):
++            if observed == expected:
++                raise RuntimeError(f"synthetic crash {expected}")
++
++        f.store.fault_hook = fault
++        try:
++            f.store.activate_profile(next_rpm, next_records[0], next_records[1],
++                                     predecessor_inactive_validity_record=next_records[2])
++            crash_trace[stage] = False
++        except RuntimeError:
++            f.store.fault_hook = None
++            current = f.store.get_active_pointer("foundation")
++            wanted = next_records[0].semantic_payload["activation_record_id"]
++            committed = stage == "AFTER_COMMIT"
++            crash_trace[stage] = (current.activation_record_id == wanted if committed else current == before)
++            crash_trace[stage] &= (f.store.get_validity_head(wanted) is not None) == committed
++            f.store.validate_startup_integrity()
++    checks["crash"] = all(crash_trace.values())
++    trace["crash"] = crash_trace
++
++    rollback_fixture = _Fixture(root / "rollback.sqlite")
++    f = rollback_fixture
++    rpm_a = f.admission("foundation", f.foundation_a)
++    epoch_x, _, _, _ = f.activate(rpm_a, 301)
++    stale_rpm = f.admission("foundation", f.foundation_b, epoch_x)
++    rpm_b = stale_rpm
++    epoch_b, _, _, _ = f.activate(rpm_b, 302, f.store.get_validity_head(epoch_x.activation_record_id))
++    rollback_rpm = f.admission("foundation", f.foundation_a, epoch_b,
++                               update_class="ROLLBACK_REACTIVATION")
++    epoch_y, _, _, _ = f.activate(rollback_rpm, 303, f.store.get_validity_head(epoch_b.activation_record_id))
++    checks["rollback"] = (epoch_x.runtime_profile_id == epoch_y.runtime_profile_id
++                          and epoch_x.activation_record_id != epoch_y.activation_record_id
++                          and epoch_x.activation_generation_id != epoch_y.activation_generation_id)
++    stale_activation = f.records(stale_rpm, 304, f.store.get_validity_head(epoch_x.activation_record_id))
++    checks["aba"] = (_success_or_reason(lambda: f.store.activate_profile(
++        stale_rpm, stale_activation[0], stale_activation[1],
++        predecessor_inactive_validity_record=stale_activation[2]))
++        == "active_profile_precondition_mismatch")
++    rollback_crash = _Fixture(root / "rollback-crash.sqlite")
++    crash_a = rollback_crash.admission("foundation", rollback_crash.foundation_a)
++    crash_pointer_a, _, _, _ = rollback_crash.activate(crash_a, 311)
++    crash_b = rollback_crash.admission("foundation", rollback_crash.foundation_b, crash_pointer_a)
++    crash_pointer_b, _, _, _ = rollback_crash.activate(
++        crash_b, 312, rollback_crash.store.get_validity_head(crash_pointer_a.activation_record_id))
++    crash_rollback = rollback_crash.admission(
++        "foundation", rollback_crash.foundation_a, crash_pointer_b,
++        update_class="ROLLBACK_REACTIVATION")
++    crash_rollback_records = rollback_crash.records(
++        crash_rollback, 313, rollback_crash.store.get_validity_head(crash_pointer_b.activation_record_id))
++
++    def rollback_fault(stage):
++        if stage == "AFTER_WRITES_BEFORE_COMMIT":
++            raise RuntimeError("synthetic rollback crash")
++
++    rollback_crash.store.fault_hook = rollback_fault
++    try:
++        rollback_crash.store.activate_profile(
++            crash_rollback, crash_rollback_records[0], crash_rollback_records[1],
++            predecessor_inactive_validity_record=crash_rollback_records[2])
++        checks["rollback"] = False
++    except RuntimeError:
++        rollback_crash.store.fault_hook = None
++        checks["rollback"] &= (
++            rollback_crash.store.get_active_pointer("foundation") == crash_pointer_b
++            and rollback_crash.store.get_validity_head(
++                crash_rollback_records[0].semantic_payload["activation_record_id"]) is None)
++    trace["rollback"] = {"epoch_x": epoch_x.activation_record_id,
++                         "epoch_b": epoch_b.activation_record_id,
++                         "epoch_y": epoch_y.activation_record_id}
++
++    race = _Fixture(root / "races.sqlite")
++    first_rpm = race.admission("foundation", race.foundation_a)
++    first_pointer, _, _, _ = race.activate(first_rpm, 401)
++    head = race.store.get_validity_head(first_pointer.activation_record_id)
++    race_rpms = [race.admission("foundation", candidate, first_pointer)
++                 for candidate in (race.foundation_b, race.foundation_c)]
++    race_records = [race.records(rpm, 402 + index, head) for index, rpm in enumerate(race_rpms)]
++    barrier = Barrier(2)
++
++    def activation_attempt(index):
++        contender = DeviceFingerprintControlPlaneStore(race.store.database_path)
++        barrier.wait()
++        records = race_records[index]
++        return _success_or_reason(lambda: contender.activate_profile(
++            race_rpms[index], records[0], records[1],
++            predecessor_inactive_validity_record=records[2]))
++
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        results = list(pool.map(activation_attempt, range(2)))
++    checks["activation_cas"] = sorted(results) == ["active_profile_precondition_mismatch", "success"]
++    for index, result in enumerate(results):
++        if result != "success":
++            losing_activation = race_records[index][0]
++            losing_id = losing_activation.semantic_payload["activation_record_id"]
++            checks["activation_cas"] &= race.store.get_validity_head(losing_id) is None
++            checks["activation_cas"] &= (_success_or_reason(lambda artifact=losing_activation:
++                race.store.load_artifact(artifact.artifact_id))
++                == "runtime_profile_dependency_unavailable")
++    winning = race.store.get_active_pointer("foundation")
++    winning_head = race.store.get_validity_head(winning.activation_record_id)
++    successor_payload = winning_head.semantic_payload
++    successors = [make_runtime_profile_validity_record({
++        **successor_payload,
++        "validity_record_id": _uuid(450 + index),
++        "state": "SUSPENDED_INVALIDATED", "reason_code": "EXPLICIT_POLICY_SUSPEND",
++        "inflight_commit_rule": "REJECT_PINNED_INFLIGHT",
++        "previous_validity_record_id": successor_payload["validity_record_id"],
++    }) for index in range(2)]
++    barrier = Barrier(2)
++
++    def validity_attempt(index):
++        contender = DeviceFingerprintControlPlaneStore(race.store.database_path)
++        barrier.wait()
++        return _success_or_reason(lambda: contender.transition_validity(
++            successors[index], expected_head_validity_record_id=successor_payload["validity_record_id"]))
++
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        validity_results = list(pool.map(validity_attempt, range(2)))
++    checks["validity_cas"] = sorted(validity_results) == ["runtime_profile_validity_cas_conflict", "success"]
++    for index, result in enumerate(validity_results):
++        if result != "success":
++            checks["validity_cas"] &= (_success_or_reason(lambda artifact=successors[index]:
++                race.store.load_artifact(artifact.artifact_id))
++                == "runtime_profile_dependency_unavailable")
++    stale_records = race.records(race_rpms[0], 409, race.store.get_validity_head(first_pointer.activation_record_id))
++    checks["activation_cas"] &= (_success_or_reason(lambda: race.store.activate_profile(
++        race_rpms[0], stale_records[0], stale_records[1],
++        predecessor_inactive_validity_record=stale_records[2]))
++        == "active_profile_precondition_mismatch")
++    trace["races"] = {"activation": sorted(results), "validity": sorted(validity_results)}
++
++    restarted = DeviceFingerprintControlPlaneStore(race.store.database_path)
++    restarted.validate_startup_integrity()
++    checks["recovery"] = (restarted.get_active_pointer("foundation") == winning
++                          and _success_or_reason(lambda: restarted.pin_active_profile("foundation"))
++                          == "runtime_profile_invalidated")
++    with sqlite3.connect(race.store.database_path) as conn:
++        conn.execute("PRAGMA foreign_keys=OFF")
++        conn.execute("DELETE FROM validity_heads WHERE activation_record_id=?", (winning.activation_record_id,))
++    checks["recovery"] &= (_success_or_reason(restarted.validate_startup_integrity)
++                           == "activation_lineage_unavailable")
++    missing_activation = _Fixture(root / "missing-activation.sqlite")
++    missing_rpm = missing_activation.admission("foundation", missing_activation.foundation_a)
++    missing_pointer, _, _, _ = missing_activation.activate(missing_rpm, 460)
++    with sqlite3.connect(missing_activation.store.database_path) as conn:
++        conn.execute("PRAGMA foreign_keys=OFF")
++        conn.execute("DELETE FROM activations WHERE activation_record_id=?",
++                     (missing_pointer.activation_record_id,))
++    checks["recovery"] &= (_success_or_reason(missing_activation.store.validate_startup_integrity)
++                           == "activation_lineage_unavailable")
++    missing_dependency = _Fixture(root / "missing-dependency-recovery.sqlite")
++    dependency_rpm = missing_dependency.admission("foundation", missing_dependency.foundation_a)
++    missing_dependency.activate(dependency_rpm, 470)
++    with sqlite3.connect(missing_dependency.store.database_path) as conn:
++        conn.execute("PRAGMA foreign_keys=OFF")
++        conn.execute("DELETE FROM artifacts WHERE artifact_id=?",
++                     (missing_dependency.leaves["BindingClockPolicy"].artifact_id,))
++    checks["recovery"] &= (_success_or_reason(missing_dependency.store.validate_startup_integrity)
++                           == "activation_lineage_unavailable")
++    trace["recovery"] = {"reopen": True, "missing_head_fail_closed": checks["recovery"]}
++
++    missing = _Fixture(root / "missing-dependency.sqlite")
++    m_rpm = missing.admission("foundation", missing.foundation_a)
++    m_records = missing.records(m_rpm, 501)
++    with sqlite3.connect(missing.store.database_path) as conn:
++        conn.execute("PRAGMA foreign_keys=OFF")
++        conn.execute("DELETE FROM artifacts WHERE artifact_id=?",
++                     (missing.leaves["BindingClockPolicy"].artifact_id,))
++    reached_begin = []
++    missing.store.fault_hook = reached_begin.append
++    checks["dependency"] = (_success_or_reason(lambda: missing.store.activate_profile(
++        m_rpm, m_records[0], m_records[1])) == "runtime_profile_dependency_unavailable"
++        and not reached_begin and missing.store.get_active_pointer("foundation") is None)
++    trace["dependency"] = {"failure_before_begin": checks["dependency"]}
++
++    refs = tuple(ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++                 for content in proof_inputs)
++    return checks, trace, refs
++
++
++def execute_ff5_runtime_profile_atomicity_scenarios(
++    *, working_directory: str | Path, candidate_repository_commit_sha: str,
++    candidate_repository_tree_sha: str,
++) -> FF5ScenarioExecution:
++    """Run deterministic disposable DB scenarios; no production path or network."""
++    root = Path(working_directory)
++    root.mkdir(parents=True, exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix="synthetic-ff5-", dir=root) as ephemeral:
++        checks, trace, refs = _run_scenarios(Path(ephemeral))
++    ordered_refs = canonical_set(list(refs), lambda ref: ref["artifact_id"])
++    reasons = tuple(sorted(_CHECK_REASONS[key] for key, passed in checks.items() if not passed))
++    return FF5ScenarioExecution(
++        tuple(ordered_refs), trace["pinning"], trace["crash"], trace["rollback"],
++        trace["races"], trace["recovery"],
++        {"synthetic_only": True, "candidate_commit": candidate_repository_commit_sha,
++         "candidate_tree": candidate_repository_tree_sha, **trace["dependency"]},
++        checks, reasons,
++    )
++
++
++def run_ff5_runtime_profile_atomicity_gate(
++    execution: FF5ScenarioExecution, *, candidate_repository_commit_sha: str,
++    candidate_repository_tree_sha: str, environment_identity: str,
++    retained_evidence_refs: list[dict[str, Any]],
++) -> FF5GateExecution:
++    """Materialize proof and F-F5 result; synthetic fixture refs are not admission."""
++    if not isinstance(execution, FF5ScenarioExecution):
++        raise DeviceFingerprintValidationError("Invalid F-F5 execution")
++    if not isinstance(retained_evidence_refs, list):
++        raise DeviceFingerprintValidationError("Invalid F-F5 evidence")
++    reasons = list(execution.failure_reasons)
++    required_checks = set(_CHECK_REASONS)
++    if (not isinstance(execution.checks, dict) or set(execution.checks) != required_checks
++            or any(type(value) is not bool for value in execution.checks.values())
++            or not execution.fixture_artifact_refs
++            or not all(isinstance(trace, dict) and trace for trace in (
++                execution.profile_switch_pinning_trace,
++                execution.transaction_crash_point_trace,
++                execution.rollback_trace, execution.cas_race_trace,
++                execution.restart_recovery_trace, execution.compatibility_test_fixtures))
++            or execution.compatibility_test_fixtures.get("synthetic_only") is not True
++            or execution.compatibility_test_fixtures.get("candidate_commit") != candidate_repository_commit_sha
++            or execution.compatibility_test_fixtures.get("candidate_tree") != candidate_repository_tree_sha):
++        reasons.append("runtime_profile_fixture_invalid")
++    if not retained_evidence_refs:
++        reasons.append("retained_evidence_required")
++    for row in retained_evidence_refs:
++        if not isinstance(row, dict) or not isinstance(row.get("evidence_label"), str):
++            raise DeviceFingerprintValidationError("Invalid F-F5 evidence")
++    for label in _EVIDENCE_LABELS:
++        if sum(row["evidence_label"] == label for row in retained_evidence_refs) != 1:
++            reasons.append(f"{label}_required")
++    if isinstance(execution.checks, dict) and not all(execution.checks.values()):
++        reasons.extend(_CHECK_REASONS[key] for key, value in execution.checks.items()
++                       if not value and key in _CHECK_REASONS)
++    reasons = sorted(set(reasons))
++    # Generic manifest validation owns the evidence-row shape. Identical
++    # mandatory duplicates must produce FAIL, not a duplicate-SET exception.
++    evidence_rows = []
++    seen = set()
++    for row in retained_evidence_refs:
++        identity = (row["evidence_label"], json.dumps(row, sort_keys=True, default=str))
++        if row["evidence_label"] in _EVIDENCE_LABELS and identity in seen:
++            continue
++        seen.add(identity)
++        evidence_rows.append(row)
++    proof_identity = {
++        "execution_id": str(uuid.uuid4()), "executor_kind": "TECHLEAD_GATE_TOOL",
++        "repository_commit_sha": candidate_repository_commit_sha,
++        "repository_tree_sha": candidate_repository_tree_sha,
++        "procedure_or_test_suite_id": "F-F5-runtime-profile-atomicity-v1",
++        "environment_identity": environment_identity, "execution_artifact_sha256": None,
++    }
++    proof = make_gate_proof_artifact({
++        "proof_kind": "RUNTIME_PROFILE_ATOMICITY", "source_gate_id": "F-F5",
++        "candidate_repository_commit_sha": candidate_repository_commit_sha,
++        "candidate_repository_tree_sha": candidate_repository_tree_sha,
++        "input_artifact_refs": list(execution.fixture_artifact_refs),
++        "procedure_or_test_suite_id": "F-F5-runtime-profile-atomicity-v1",
++        "proof_execution_identity": proof_identity,
++        "canonical_result_summary": json.dumps({"checks": execution.checks,
++                                                "failure_reasons": reasons}, sort_keys=True, separators=(",", ":")),
++        "retained_evidence_refs": evidence_rows,
++    })
++    manifest = make_gate_result_manifest({
++        "gate_id": "F-F5", "gate_contract_version": "R14-F-F5-v1",
++        "status": "FAIL" if reasons else "PASS",
++        "candidate_repository_commit_sha": candidate_repository_commit_sha,
++        "candidate_repository_tree_sha": candidate_repository_tree_sha,
++        "input_artifact_refs": list(execution.fixture_artifact_refs),
++        "output_artifact_refs": [_ref(proof)] if not reasons else [],
++        "retained_evidence_refs": evidence_rows,
++        "proof_execution_identity": {**proof_identity, "execution_id": str(uuid.uuid4()),
++                                     "procedure_or_test_suite_id": "F-F5-runtime-profile-atomicity-gate-v1"},
++        "trusted_time_inputs": {
++            "foundation_knowledge_evaluation_at_utc": None,
++            "foundation_admission_evaluation_at_utc": None,
++            "knowledge_evaluation_at_utc": None,
++        },
++        "decision_record_refs": [],
++    })
++    return FF5GateExecution(proof, manifest, tuple(reasons))
+diff --git a/app/device_fingerprint/gate_proof_artifacts.py b/app/device_fingerprint/gate_proof_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2fb3515db161b376190e1ea592c257571fec559
+--- /dev/null
++++ b/app/device_fingerprint/gate_proof_artifacts.py
+@@ -0,0 +1,59 @@
++"""Closed R14 GateProofArtifact V1 builder."""
++
++from __future__ import annotations
++
++from typing import Any
++
++from .artifact_content import ArtifactContent, make_artifact_content
++from .foundation_gate_artifacts import make_gate_result_manifest
++from .models import DeviceFingerprintValidationError
++
++PROOF_KINDS = frozenset({
++    "SNAPSHOT_CONCURRENCY", "SNAPSHOT_PERFORMANCE", "RUNTIME_PROFILE_ATOMICITY",
++    "SNAPSHOT_MATERIALIZATION_EXECUTION", "SOURCE_EVALUABILITY_EXECUTION",
++    "ORIGIN_ASSESSMENT_EXECUTION", "FUSION_EXECUTION", "REQUEST_ASSEMBLY_DETERMINISM",
++    "CLASSIFICATION_AUDIT_PERSISTENCE", "OFFLINE_FAILURE_ISOLATION",
++    "TASK04_PRODUCT_VALIDATION", "ARTIFACT_GRAPH_ACYCLICITY",
++    "CLASSIFICATION_PROFILE_COMPATIBILITY",
++})
++_FIELDS = frozenset({
++    "proof_kind", "source_gate_id", "candidate_repository_commit_sha",
++    "candidate_repository_tree_sha", "input_artifact_refs", "procedure_or_test_suite_id",
++    "proof_execution_identity", "canonical_result_summary", "retained_evidence_refs",
++})
++
++
++def make_gate_proof_artifact(payload: dict[str, Any]) -> ArtifactContent:
++    """Validate V1 proof shape, reusing generic gate ref/evidence/proof rules."""
++    if not isinstance(payload, dict) or set(payload) != _FIELDS:
++        raise DeviceFingerprintValidationError("Invalid GateProofArtifact shape")
++    if not isinstance(payload["proof_kind"], str) or payload["proof_kind"] not in PROOF_KINDS:
++        raise DeviceFingerprintValidationError("Invalid proof kind")
++    if any(not isinstance(payload[field], str) or not payload[field] for field in (
++            "source_gate_id", "procedure_or_test_suite_id", "canonical_result_summary")):
++        raise DeviceFingerprintValidationError("Invalid proof text")
++    # The shared validator owns exact ProofExecutionIdentity, refs, retained
++    # evidence, Git SHA, and canonical SET semantics. No duplicate schema fork.
++    generic = make_gate_result_manifest({
++        "gate_id": payload["source_gate_id"],
++        "gate_contract_version": "R14-GateProofArtifact-v1",
++        "status": "PASS",
++        "candidate_repository_commit_sha": payload["candidate_repository_commit_sha"],
++        "candidate_repository_tree_sha": payload["candidate_repository_tree_sha"],
++        "input_artifact_refs": payload["input_artifact_refs"],
++        "output_artifact_refs": [],
++        "retained_evidence_refs": payload["retained_evidence_refs"],
++        "proof_execution_identity": payload["proof_execution_identity"],
++        "trusted_time_inputs": {
++            "foundation_knowledge_evaluation_at_utc": None,
++            "foundation_admission_evaluation_at_utc": None,
++            "knowledge_evaluation_at_utc": None,
++        },
++        "decision_record_refs": [],
++    }).semantic_payload
++    return make_artifact_content("GateProofArtifact", {
++        **payload,
++        "input_artifact_refs": generic["input_artifact_refs"],
++        "retained_evidence_refs": generic["retained_evidence_refs"],
++        "proof_execution_identity": generic["proof_execution_identity"],
++    })
+diff --git a/app/device_fingerprint/runtime_profile_artifacts.py b/app/device_fingerprint/runtime_profile_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..30b99f1951635de24961f71a6b28047f3eb88e16
+--- /dev/null
++++ b/app/device_fingerprint/runtime_profile_artifacts.py
+@@ -0,0 +1,278 @@
++"""Closed R14 runtime-profile and activation-lineage ArtifactContent contracts."""
++
++from __future__ import annotations
++
++import re
++from typing import Any
++
++from .artifact_content import ArtifactContent, ArtifactRef, canonical_set, make_artifact_content
++from .models import DeviceFingerprintValidationError
++from .validation import parse_utc
++
++_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
++_GIT = re.compile(r"[0-9a-f]{40}")
++_KINDS = {"foundation": "FoundationRuntimeProfile", "classification": "ClassificationRuntimeProfile"}
++UPDATE_CLASSES = frozenset({
++    "INITIAL_FOUNDATION", "INITIAL_CLASSIFICATION", "KNOWLEDGE_BUNDLE_REFRESH",
++    "KNOWLEDGE_FRESHNESS_POLICY_CHANGE", "BINDING_TIMELINE_CHANGE",
++    "CAPTURE_TOPOLOGY_CHANGE", "SOURCE_HEALTH_EMITTER_CHANGE",
++    "SOURCE_HEALTH_POLICY_CHANGE", "SNAPSHOT_CONTENT_POLICY_CHANGE",
++    "SNAPSHOT_EXECUTION_POLICY_CHANGE", "EVIDENCE_SCHEMA_CHANGE",
++    "EVIDENCE_ADAPTER_CHANGE", "EVIDENCE_ADAPTER_AND_CLASSIFICATION_POLICY_CHANGE",
++    "CLASSIFICATION_POLICY_CHANGE", "CLASSIFIER_ARTIFACT_CHANGE",
++    "FOUNDATION_VALID_FROM_LATER", "ROLLBACK_REACTIVATION",
++})
++_FOUNDATION_REFS = {
++    "evidence_source_binding_timeline": "EvidenceSourceBindingTimeline",
++    "binding_clock_policy": "BindingClockPolicy",
++    "source_health_policy": "SourceHealthPolicy",
++    "snapshot_content_policy": "SnapshotContentPolicy",
++    "snapshot_execution_policy": "SnapshotExecutionPolicy",
++    "evidence_schema_registry_contract": "EvidenceSchemaRegistryContract",
++    "task01_health_retention_contract": "Task01HealthRetentionContract",
++    "origin_runtime_admission": "OriginRuntimeAdmission",
++}
++_CLASSIFICATION_REFS = {
++    "foundation_runtime_profile": "FoundationRuntimeProfile",
++    "knowledge_bundle": "KnowledgeBundle",
++    "classification_policy": "ClassificationPolicy",
++    "evidence_adapter_contract_set": "EvidenceAdapterContractSet",
++    "classifier_artifact_manifest": "ClassifierArtifactManifest",
++}
++_FOUNDATION_FIELDS = frozenset({
++    "foundation_profile_contract_version", "classification_foundation_valid_from_utc",
++    "source_health_emitter_contracts", "ttl_capture_placement_proof", "snapshot_contract_version",
++    *_FOUNDATION_REFS,
++})
++_CLASSIFICATION_FIELDS = frozenset({"classification_runtime_profile_contract_version", *_CLASSIFICATION_REFS})
++_ADMISSION_FIELDS = frozenset({
++    "runtime_profile_admission_contract_version", "profile_kind", "candidate_profile",
++    "previous_active_profile", "expected_previous_activation_record_id",
++    "expected_previous_activation_generation_id", "update_class", "prerequisite_gate_results",
++    "compatibility_validation_result", "candidate_repository_commit_sha",
++    "candidate_repository_tree_sha", "foundation_admission_manifest",
++    "task04_acceptance_manifest", "foundation_runtime_profile_admission_manifest",
++})
++_ACTIVATION_FIELDS = frozenset({
++    "activation_contract_version", "activation_record_id", "profile_kind", "runtime_profile_id",
++    "runtime_profile_digest", "runtime_profile_admission_manifest_id",
++    "runtime_profile_admission_manifest_digest", "previous_activation_record_id",
++    "previous_active_profile_id", "previous_active_profile_digest", "activated_at_utc",
++    "activation_reason_update_class", "activation_result", "activation_generation_id",
++})
++_VALIDITY_FIELDS = frozenset({
++    "runtime_profile_validity_contract_version", "validity_record_id", "profile_kind",
++    "runtime_profile_id", "runtime_profile_digest", "activation_record_id", "state",
++    "reason_code", "effective_at_utc", "inflight_commit_rule", "previous_validity_record_id",
++})
++
++
++def _fail(label: str) -> None:
++    raise DeviceFingerprintValidationError(f"Invalid {label}")
++
++
++def _shape(payload: Any, fields: frozenset[str], label: str) -> dict[str, Any]:
++    if not isinstance(payload, dict) or set(payload) != fields:
++        _fail(label)
++    return payload
++
++
++def _positive(value: Any, label: str) -> int:
++    if type(value) is not int or not 1 <= value <= 2_147_483_647:
++        _fail(label)
++    return value
++
++
++def _match(value: Any, pattern: re.Pattern[str], label: str, *, nullable: bool = False) -> Any:
++    if value is None and nullable:
++        return None
++    if not isinstance(value, str) or pattern.fullmatch(value) is None:
++        _fail(label)
++    return value
++
++
++def _kind(value: Any) -> str:
++    if not isinstance(value, str) or value not in _KINDS:
++        _fail("profile kind")
++    return value
++
++
++def _ref(value: Any, target: str, *, nullable: bool = False) -> dict[str, str] | None:
++    if value is None and nullable:
++        return None
++    ref = ArtifactRef.from_dict(value)
++    if not ref.artifact_id.startswith(f"{target}:v1:sha256:"):
++        _fail(f"{target} reference")
++    return ref.as_dict()
++
++
++def _ref_pair(artifact_id: Any, digest: Any, target: str, *, nullable: bool = False) -> None:
++    if artifact_id is None and digest is None and nullable:
++        return
++    _ref({"artifact_id": artifact_id, "content_sha256": digest}, target)
++
++
++def _refs(values: Any, target: str) -> list[dict[str, str]]:
++    if not isinstance(values, list):
++        _fail(f"{target} references")
++    return canonical_set([_ref(value, target) for value in values], lambda ref: ref["artifact_id"])
++
++
++def make_foundation_runtime_profile(payload: dict[str, Any]) -> ArtifactContent:
++    value = _shape(payload, _FOUNDATION_FIELDS, "FoundationRuntimeProfile shape")
++    _positive(value["foundation_profile_contract_version"], "foundation profile version")
++    _positive(value["snapshot_contract_version"], "snapshot contract version")
++    parse_utc(value["classification_foundation_valid_from_utc"])
++    normalized = dict(value)
++    for field, target in _FOUNDATION_REFS.items():
++        normalized[field] = _ref(value[field], target)
++    normalized["source_health_emitter_contracts"] = _refs(
++        value["source_health_emitter_contracts"], "SourceHealthEmitterContract")
++    normalized["ttl_capture_placement_proof"] = _ref(
++        value["ttl_capture_placement_proof"], "TTLCapturePlacementProof", nullable=True)
++    return make_artifact_content("FoundationRuntimeProfile", normalized)
++
++
++def make_classification_runtime_profile(payload: dict[str, Any]) -> ArtifactContent:
++    value = _shape(payload, _CLASSIFICATION_FIELDS, "ClassificationRuntimeProfile shape")
++    _positive(value["classification_runtime_profile_contract_version"], "classification profile version")
++    normalized = dict(value)
++    for field, target in _CLASSIFICATION_REFS.items():
++        normalized[field] = _ref(value[field], target)
++    return make_artifact_content("ClassificationRuntimeProfile", normalized)
++
++
++def make_runtime_profile_admission_manifest(payload: dict[str, Any]) -> ArtifactContent:
++    value = _shape(payload, _ADMISSION_FIELDS, "RuntimeProfileAdmissionManifest shape")
++    _positive(value["runtime_profile_admission_contract_version"], "admission version")
++    kind = _kind(value["profile_kind"])
++    normalized = dict(value)
++    normalized["candidate_profile"] = _ref(value["candidate_profile"], _KINDS[kind])
++    normalized["previous_active_profile"] = _ref(
++        value["previous_active_profile"], _KINDS[kind], nullable=True)
++    for field in ("expected_previous_activation_record_id", "expected_previous_activation_generation_id"):
++        _match(value[field], _UUID, field, nullable=True)
++    update = value["update_class"]
++    if not isinstance(update, str) or update not in UPDATE_CLASSES:
++        _fail("update class")
++    initial = update in {"INITIAL_FOUNDATION", "INITIAL_CLASSIFICATION"}
++    if initial:
++        if update != f"INITIAL_{kind.upper()}" or any(value[field] is not None for field in (
++                "previous_active_profile", "expected_previous_activation_record_id",
++                "expected_previous_activation_generation_id")):
++            _fail("initial predecessor")
++    elif any(value[field] is None for field in (
++            "previous_active_profile", "expected_previous_activation_record_id",
++            "expected_previous_activation_generation_id")):
++        _fail("non-initial predecessor")
++    normalized["prerequisite_gate_results"] = _refs(value["prerequisite_gate_results"], "GateResultManifest")
++    if value["compatibility_validation_result"] != "PASS":
++        _fail("compatibility result")
++    for field in ("candidate_repository_commit_sha", "candidate_repository_tree_sha"):
++        _match(value[field], _GIT, field)
++    normalized["foundation_admission_manifest"] = _ref(
++        value["foundation_admission_manifest"], "FoundationAdmissionManifest")
++    normalized["task04_acceptance_manifest"] = _ref(
++        value["task04_acceptance_manifest"], "Task04AcceptanceManifest", nullable=True)
++    normalized["foundation_runtime_profile_admission_manifest"] = _ref(
++        value["foundation_runtime_profile_admission_manifest"], "RuntimeProfileAdmissionManifest", nullable=True)
++    if kind == "foundation" and (normalized["task04_acceptance_manifest"] is not None
++                                 or normalized["foundation_runtime_profile_admission_manifest"] is not None):
++        _fail("foundation admission lineage")
++    if kind == "classification" and (normalized["task04_acceptance_manifest"] is None
++                                     or normalized["foundation_runtime_profile_admission_manifest"] is None):
++        _fail("classification admission lineage")
++    return make_artifact_content("RuntimeProfileAdmissionManifest", normalized)
++
++
++def make_runtime_profile_activation_record(payload: dict[str, Any]) -> ArtifactContent:
++    value = _shape(payload, _ACTIVATION_FIELDS, "RuntimeProfileActivationRecord shape")
++    _positive(value["activation_contract_version"], "activation version")
++    kind = _kind(value["profile_kind"])
++    for field in ("activation_record_id", "activation_generation_id"):
++        _match(value[field], _UUID, field)
++    if value["activation_record_id"] == value["activation_generation_id"]:
++        _fail("separate activation identities")
++    _match(value["previous_activation_record_id"], _UUID, "previous activation", nullable=True)
++    _ref_pair(value["runtime_profile_id"], value["runtime_profile_digest"], _KINDS[kind])
++    _ref_pair(value["runtime_profile_admission_manifest_id"],
++              value["runtime_profile_admission_manifest_digest"], "RuntimeProfileAdmissionManifest")
++    _ref_pair(value["previous_active_profile_id"], value["previous_active_profile_digest"],
++              _KINDS[kind], nullable=True)
++    if (not isinstance(value["activation_reason_update_class"], str)
++            or value["activation_reason_update_class"] not in UPDATE_CLASSES):
++        _fail("activation update class")
++    initial = value["activation_reason_update_class"] in {"INITIAL_FOUNDATION", "INITIAL_CLASSIFICATION"}
++    if initial and (value["activation_reason_update_class"] != f"INITIAL_{kind.upper()}" or
++                    value["previous_activation_record_id"] is not None or
++                    value["previous_active_profile_id"] is not None):
++        _fail("initial activation predecessor")
++    if not initial and (value["previous_activation_record_id"] is None or
++                        value["previous_active_profile_id"] is None):
++        _fail("activation predecessor")
++    if value["previous_activation_record_id"] == value["activation_record_id"]:
++        _fail("self activation predecessor")
++    if value["activation_result"] != "ACTIVE":
++        _fail("activation result")
++    parse_utc(value["activated_at_utc"])
++    return make_artifact_content("RuntimeProfileActivationRecord", value)
++
++
++def make_runtime_profile_validity_record(payload: dict[str, Any]) -> ArtifactContent:
++    value = _shape(payload, _VALIDITY_FIELDS, "RuntimeProfileValidityRecord shape")
++    _positive(value["runtime_profile_validity_contract_version"], "validity version")
++    kind = _kind(value["profile_kind"])
++    for field in ("validity_record_id", "activation_record_id"):
++        _match(value[field], _UUID, field)
++    if value["validity_record_id"] == value["activation_record_id"]:
++        _fail("separate validity identity")
++    _match(value["previous_validity_record_id"], _UUID, "previous validity", nullable=True)
++    if value["previous_validity_record_id"] == value["validity_record_id"]:
++        _fail("self validity predecessor")
++    _ref_pair(value["runtime_profile_id"], value["runtime_profile_digest"], _KINDS[kind])
++    permitted = {
++        "ACTIVE": ({"ACTIVATED", "ROLLBACK_REACTIVATED"}, "ALLOW_PINNED_INFLIGHT"),
++        "INACTIVE": ({"SUPERSEDED_SAFE"}, "ALLOW_PINNED_INFLIGHT"),
++        "SUSPENDED_INVALIDATED": ({"TTL_CAPTURE_PROOF_INVALIDATED", "EXPLICIT_POLICY_SUSPEND",
++                                   "PROFILE_COMPATIBILITY_INVALIDATED"}, "REJECT_PINNED_INFLIGHT"),
++    }
++    if not isinstance(value["state"], str) or value["state"] not in permitted:
++        _fail("validity state")
++    reasons, inflight = permitted[value["state"]]
++    if value["reason_code"] not in reasons or value["inflight_commit_rule"] != inflight:
++        _fail("validity state rule")
++    parse_utc(value["effective_at_utc"])
++    return make_artifact_content("RuntimeProfileValidityRecord", value)
++
++
++def direct_artifact_refs(content: ArtifactContent) -> tuple[ArtifactRef, ...]:
++    """Return only explicitly declared semantic ArtifactRefs in canonical order."""
++    if not isinstance(content, ArtifactContent):
++        _fail("artifact content")
++    payload = content.semantic_payload
++    refs: list[dict[str, str]] = []
++    if content.artifact_type == "FoundationRuntimeProfile":
++        make_foundation_runtime_profile(payload)
++        refs.extend(payload[field] for field in _FOUNDATION_REFS)
++        refs.extend(payload["source_health_emitter_contracts"])
++        if payload["ttl_capture_placement_proof"] is not None:
++            refs.append(payload["ttl_capture_placement_proof"])
++    elif content.artifact_type == "ClassificationRuntimeProfile":
++        make_classification_runtime_profile(payload)
++        refs.extend(payload[field] for field in _CLASSIFICATION_REFS)
++    elif content.artifact_type == "RuntimeProfileAdmissionManifest":
++        make_runtime_profile_admission_manifest(payload)
++        refs.extend([payload["candidate_profile"], payload["foundation_admission_manifest"]])
++        refs.extend(payload["prerequisite_gate_results"])
++        for field in ("previous_active_profile", "task04_acceptance_manifest",
++                      "foundation_runtime_profile_admission_manifest"):
++            if payload[field] is not None:
++                refs.append(payload[field])
++    else:
++        return ()
++    unique = {ref["artifact_id"]: ref for ref in refs}
++    if len(unique) < len(refs) and any(
++            ref != unique[ref["artifact_id"]] for ref in refs):
++        _fail("conflicting artifact reference")
++    ordered = canonical_set(list(unique.values()), lambda ref: ref["artifact_id"])
++    return tuple(ArtifactRef.from_dict(ref) for ref in ordered)
+diff --git a/tests/device_fingerprint_ff5/__init__.py b/tests/device_fingerprint_ff5/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..31602263e73449ec2faf336fe542b8ef365e9e2f
+--- /dev/null
++++ b/tests/device_fingerprint_ff5/__init__.py
+@@ -0,0 +1 @@
++"""Focused synthetic F-F5 control-plane proofs."""
+diff --git a/tests/device_fingerprint_ff5/test_runtime_profile_artifacts.py b/tests/device_fingerprint_ff5/test_runtime_profile_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..78f5e779d485f1cd26f0c25f679546dfa6c4e2c3
+--- /dev/null
++++ b/tests/device_fingerprint_ff5/test_runtime_profile_artifacts.py
+@@ -0,0 +1,213 @@
++"""R14 closed runtime profile, admission, activation, and validity schemas."""
++
++from __future__ import annotations
++
++from copy import deepcopy
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef
++from app.device_fingerprint.ff5_runtime_profile_atomicity import _Fixture
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.runtime_profile_artifacts import (
++    direct_artifact_refs, make_classification_runtime_profile,
++    make_foundation_runtime_profile, make_runtime_profile_activation_record,
++    make_runtime_profile_admission_manifest, make_runtime_profile_validity_record,
++)
++
++_BUILDERS = (
++    make_foundation_runtime_profile,
++    make_classification_runtime_profile,
++    make_runtime_profile_admission_manifest,
++    make_runtime_profile_activation_record,
++    make_runtime_profile_validity_record,
++)
++
++
++@pytest.fixture
++def samples(tmp_path):
++    fixture = _Fixture(tmp_path / "artifacts.sqlite")
++    rpm = fixture.admission("foundation", fixture.foundation_a)
++    activation, validity, _ = fixture.records(rpm, 1)
++    return fixture, (
++        fixture.foundation_a.semantic_payload,
++        fixture.classification_a.semantic_payload,
++        rpm.semantic_payload,
++        activation.semantic_payload,
++        validity.semantic_payload,
++    )
++
++
++@pytest.mark.parametrize("index", range(5))
++def test_each_artifact_closed_shape_and_deterministic_double_build(samples, index):
++    _, payloads = samples
++    builder = _BUILDERS[index]
++    payload = payloads[index]
++    first = builder(payload)
++    second = builder(deepcopy(payload))
++    assert first.artifact_id == second.artifact_id
++    assert first.semantic_payload_json == second.semantic_payload_json
++    assert first.content_sha256 == second.content_sha256
++    missing = deepcopy(payload)
++    missing.pop(next(iter(missing)))
++    extra = {**payload, "forbidden": "value"}
++    for bad in (missing, extra):
++        with pytest.raises(DeviceFingerprintValidationError):
++            builder(bad)
++
++
++@pytest.mark.parametrize("index,field", [
++    (0, "foundation_profile_contract_version"),
++    (1, "classification_runtime_profile_contract_version"),
++    (2, "runtime_profile_admission_contract_version"),
++    (3, "activation_contract_version"),
++    (4, "runtime_profile_validity_contract_version"),
++])
++def test_bool_is_not_positive_integer(samples, index, field):
++    _, payloads = samples
++    bad = deepcopy(payloads[index])
++    bad[field] = True
++    with pytest.raises(DeviceFingerprintValidationError):
++        _BUILDERS[index](bad)
++
++
++@pytest.mark.parametrize("index,field", [
++    (0, "binding_clock_policy"),
++    (1, "knowledge_bundle"),
++    (2, "foundation_admission_manifest"),
++])
++def test_wrong_or_invalid_artifact_ref_is_rejected(samples, index, field):
++    _, payloads = samples
++    bad = deepcopy(payloads[index])
++    bad[field] = payloads[0]["source_health_policy"]  # valid ref, wrong target type
++    with pytest.raises(DeviceFingerprintValidationError):
++        _BUILDERS[index](bad)
++    bad[field] = {"artifact_id": "invalid", "content_sha256": "0" * 64}
++    with pytest.raises(DeviceFingerprintValidationError):
++        _BUILDERS[index](bad)
++
++
++@pytest.mark.parametrize("index,id_field,digest_field", [
++    (3, "runtime_profile_id", "runtime_profile_digest"),
++    (4, "runtime_profile_id", "runtime_profile_digest"),
++])
++def test_record_wrong_target_artifact_type_is_rejected(samples, index, id_field, digest_field):
++    _, payloads = samples
++    bad = deepcopy(payloads[index])
++    other = payloads[0]["binding_clock_policy"]
++    bad[id_field], bad[digest_field] = other["artifact_id"], other["content_sha256"]
++    with pytest.raises(DeviceFingerprintValidationError):
++        _BUILDERS[index](bad)
++
++
++@pytest.mark.parametrize("index,field", [
++    (2, "expected_previous_activation_record_id"),
++    (3, "activation_record_id"),
++    (3, "activation_generation_id"),
++    (4, "validity_record_id"),
++    (4, "activation_record_id"),
++])
++def test_invalid_uuid_is_rejected(samples, index, field):
++    _, payloads = samples
++    bad = deepcopy(payloads[index])
++    bad[field] = "not-a-uuid"
++    with pytest.raises(DeviceFingerprintValidationError):
++        _BUILDERS[index](bad)
++
++
++@pytest.mark.parametrize("index,field", [
++    (0, "classification_foundation_valid_from_utc"),
++    (3, "activated_at_utc"),
++    (4, "effective_at_utc"),
++])
++def test_invalid_utc_ms_is_rejected(samples, index, field):
++    _, payloads = samples
++    bad = deepcopy(payloads[index])
++    bad[field] = "2026-09-23T12:00:00Z"
++    with pytest.raises(DeviceFingerprintValidationError):
++        _BUILDERS[index](bad)
++
++
++def test_foundation_canonical_emitter_set_and_nullable_ttl(samples):
++    fixture, payloads = samples
++    payload = deepcopy(payloads[0])
++    second = ArtifactRef(fixture.leaves["SourceHealthEmitterContract"].artifact_id,
++                         fixture.leaves["SourceHealthEmitterContract"].content_sha256).as_dict()
++    payload["source_health_emitter_contracts"].append(second)
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_foundation_runtime_profile(payload)
++    payload = deepcopy(payloads[0])
++    payload["ttl_capture_placement_proof"] = payload["binding_clock_policy"]
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_foundation_runtime_profile(payload)
++    assert payloads[0]["ttl_capture_placement_proof"] is None
++
++
++def test_classification_profile_has_no_acceptance_lineage(samples):
++    _, payloads = samples
++    assert set(payloads[1]) == {
++        "classification_runtime_profile_contract_version", "foundation_runtime_profile",
++        "knowledge_bundle", "classification_policy", "evidence_adapter_contract_set",
++        "classifier_artifact_manifest",
++    }
++
++
++def test_admission_initial_noninitial_and_lineage_invariants(samples):
++    fixture, payloads = samples
++    initial = payloads[2]
++    assert initial["previous_active_profile"] is None
++    for field, value in (
++        ("previous_active_profile", initial["candidate_profile"]),
++        ("expected_previous_activation_record_id", "00000000-0000-4000-8000-000000000001"),
++        ("expected_previous_activation_generation_id", "00000000-0000-4000-8000-000000000002"),
++        ("task04_acceptance_manifest", ArtifactRef(
++            fixture.leaves["Task04AcceptanceManifest"].artifact_id,
++            fixture.leaves["Task04AcceptanceManifest"].content_sha256).as_dict()),
++        ("update_class", "UNKNOWN_UPDATE"),
++        ("compatibility_validation_result", "FAIL"),
++    ):
++        bad = deepcopy(initial)
++        bad[field] = value
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_runtime_profile_admission_manifest(bad)
++    bad = deepcopy(initial)
++    bad["profile_kind"] = "classification"
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_runtime_profile_admission_manifest(bad)
++
++
++def test_activation_predecessor_and_validity_state_rules(samples):
++    _, payloads = samples
++    activation = payloads[3]
++    validity = payloads[4]
++    for field, value in (
++        ("activation_result", "PENDING"),
++        ("previous_activation_record_id", activation["activation_record_id"]),
++        ("activation_reason_update_class", "UNKNOWN"),
++    ):
++        bad = deepcopy(activation)
++        bad[field] = value
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_runtime_profile_activation_record(bad)
++    for field, value in (
++        ("state", "UNKNOWN"),
++        ("reason_code", "SUPERSEDED_SAFE"),
++        ("inflight_commit_rule", "REJECT_PINNED_INFLIGHT"),
++        ("previous_validity_record_id", validity["validity_record_id"]),
++    ):
++        bad = deepcopy(validity)
++        bad[field] = value
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_runtime_profile_validity_record(bad)
++
++
++def test_direct_refs_are_exact_and_canonical(samples):
++    fixture, payloads = samples
++    foundation = fixture.foundation_a
++    classification = fixture.classification_a
++    rpm = make_runtime_profile_admission_manifest(payloads[2])
++    for artifact, count in ((foundation, 9), (classification, 5), (rpm, 2)):
++        refs = direct_artifact_refs(artifact)
++        assert len(refs) == count
++        assert [ref.artifact_id for ref in refs] == sorted(ref.artifact_id for ref in refs)
++    assert direct_artifact_refs(fixture.leaves["KnowledgeBundle"]) == ()
+diff --git a/tests/device_fingerprint_ff5/test_runtime_profile_atomicity.py b/tests/device_fingerprint_ff5/test_runtime_profile_atomicity.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3642824cdf13974e6ac7174dfe857e50faeef68b
+--- /dev/null
++++ b/tests/device_fingerprint_ff5/test_runtime_profile_atomicity.py
+@@ -0,0 +1,261 @@
++"""Disposable SQLite crash/CAS/pinning proof and F-F5 gate contract."""
++
++from __future__ import annotations
++
++import sqlite3
++from dataclasses import replace
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef, make_artifact_content
++from app.device_fingerprint.control_plane_store import (
++    ControlPlaneOperationError, DeviceFingerprintControlPlaneStore,
++)
++from app.device_fingerprint.ff5_runtime_profile_atomicity import (
++    _Fixture, execute_ff5_runtime_profile_atomicity_scenarios,
++    run_ff5_runtime_profile_atomicity_gate,
++)
++from app.device_fingerprint.gate_proof_artifacts import PROOF_KINDS, make_gate_proof_artifact
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++
++_SHA = "a" * 40
++_TREE = "b" * 40
++_LABELS = (
++    "runtime_profile_switch_pinning_trace",
++    "runtime_profile_transaction_crash_point_trace",
++    "runtime_profile_rollback_trace",
++    "runtime_profile_cas_race_trace",
++    "runtime_profile_restart_recovery_trace",
++    "runtime_profile_compatibility_test_fixtures",
++)
++
++
++def _evidence():
++    return [
++        {"evidence_label": label, "file_sha256": f"{index:x}" * 64,
++         "media_type": "application/json", "path_or_reference": "synthetic://ff5-proof"}
++        for index, label in enumerate(_LABELS, start=1)
++    ]
++
++
++def _execution(tmp_path):
++    return execute_ff5_runtime_profile_atomicity_scenarios(
++        working_directory=tmp_path,
++        candidate_repository_commit_sha=_SHA,
++        candidate_repository_tree_sha=_TREE,
++    )
++
++
++def _gate(execution, evidence=None):
++    return run_ff5_runtime_profile_atomicity_gate(
++        execution, candidate_repository_commit_sha=_SHA,
++        candidate_repository_tree_sha=_TREE,
++        environment_identity="synthetic-ff5-windows",
++        retained_evidence_refs=_evidence() if evidence is None else evidence,
++    )
++
++
++def test_complete_synthetic_scenarios_and_pass_gate(tmp_path):
++    execution = _execution(tmp_path)
++    assert set(execution.checks) == {
++        "fixture", "dependency", "crash", "pinning", "rollback",
++        "validity_cas", "activation_cas", "aba", "recovery",
++    }
++    assert all(execution.checks.values())
++    assert execution.failure_reasons == ()
++    assert all(execution.transaction_crash_point_trace.values())
++    assert execution.cas_race_trace["activation"] == [
++        "active_profile_precondition_mismatch", "success"]
++    assert execution.cas_race_trace["validity"] == [
++        "runtime_profile_validity_cas_conflict", "success"]
++    assert execution.compatibility_test_fixtures["synthetic_only"] is True
++    result = _gate(execution)
++    manifest = result.gate_result_manifest.semantic_payload
++    proof = result.gate_proof_artifact.semantic_payload
++    assert manifest["status"] == "PASS"
++    assert result.failure_reasons == ()
++    assert proof["proof_kind"] == "RUNTIME_PROFILE_ATOMICITY"
++    assert proof["source_gate_id"] == "F-F5"
++    assert proof["procedure_or_test_suite_id"] == "F-F5-runtime-profile-atomicity-v1"
++    assert manifest["gate_id"] == "F-F5"
++    assert manifest["gate_contract_version"] == "R14-F-F5-v1"
++    assert manifest["proof_execution_identity"]["procedure_or_test_suite_id"] == (
++        "F-F5-runtime-profile-atomicity-gate-v1")
++    assert len(manifest["input_artifact_refs"]) > 0
++    assert len(manifest["output_artifact_refs"]) == 1
++    assert manifest["output_artifact_refs"][0]["artifact_id"] == result.gate_proof_artifact.artifact_id
++    assert manifest["decision_record_refs"] == []
++    assert set(manifest["trusted_time_inputs"].values()) == {None}
++    assert [row["evidence_label"] for row in manifest["retained_evidence_refs"]] == sorted(_LABELS)
++
++
++def test_forced_scenario_failure_emits_no_gate_output(tmp_path):
++    execution = _execution(tmp_path)
++    failed = replace(execution, checks={**execution.checks, "pinning": False})
++    result = _gate(failed)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++    assert "runtime_profile_pinning_failed" in result.failure_reasons
++
++
++def test_missing_or_mismatched_execution_proof_cannot_pass(tmp_path):
++    execution = _execution(tmp_path)
++    for invalid in (replace(execution, checks={}),
++                    replace(execution, compatibility_test_fixtures={
++                        **execution.compatibility_test_fixtures, "candidate_commit": "c" * 40})):
++        result = _gate(invalid)
++        assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++        assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++        assert "runtime_profile_fixture_invalid" in result.failure_reasons
++
++
++@pytest.mark.parametrize("evidence,reason", [
++    ([], "retained_evidence_required"),
++    ([_evidence()[0]], "runtime_profile_cas_race_trace_required"),
++    (_evidence() + [_evidence()[0]], "runtime_profile_switch_pinning_trace_required"),
++])
++def test_required_retained_evidence_multiplicity_fails(tmp_path, evidence, reason):
++    execution = _execution(tmp_path)
++    result = _gate(execution, evidence)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++    assert reason in result.failure_reasons
++
++
++def test_additional_unrelated_evidence_is_permitted(tmp_path):
++    execution = _execution(tmp_path)
++    evidence = _evidence() + [{"evidence_label": "other", "file_sha256": "e" * 64,
++                              "media_type": "text/plain", "path_or_reference": None}]
++    assert _gate(execution, evidence).gate_result_manifest.semantic_payload["status"] == "PASS"
++
++
++def test_gate_proof_schema_closed_full_enum_and_generic_validation(tmp_path):
++    execution = _execution(tmp_path)
++    proof = _gate(execution).gate_proof_artifact
++    assert len(PROOF_KINDS) == 13
++    assert make_gate_proof_artifact(proof.semantic_payload).artifact_id == proof.artifact_id
++    missing = proof.semantic_payload
++    missing.pop("canonical_result_summary")
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_gate_proof_artifact(missing)
++    extra = {**proof.semantic_payload, "extra": "forbidden"}
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_gate_proof_artifact(extra)
++    wrong = {**proof.semantic_payload, "proof_kind": "USER_DEFINED"}
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_gate_proof_artifact(wrong)
++    wrong = {**proof.semantic_payload, "input_artifact_refs": [{"artifact_id": "invalid",
++                                                                  "content_sha256": "a" * 64}]}
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_gate_proof_artifact(wrong)
++
++
++def test_initial_pointer_activation_and_reopen_exact_chain(tmp_path):
++    fixture = _Fixture(tmp_path / "initial.sqlite")
++    rpm = fixture.admission("foundation", fixture.foundation_a)
++    pointer, activation, validity, _ = fixture.activate(rpm, 11)
++    assert pointer.runtime_profile_id == fixture.foundation_a.artifact_id
++    assert fixture.store.get_validity_head(pointer.activation_record_id) == validity
++    assert fixture.store.pin_active_profile("foundation").activation_record == activation
++    restarted = DeviceFingerprintControlPlaneStore(fixture.store.database_path)
++    restarted.validate_startup_integrity()
++    assert restarted.pin_active_profile("foundation").pointer == pointer
++    with restarted._connect() as conn:
++        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
++        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
++
++
++def test_immutable_artifact_cannot_be_overwritten(tmp_path):
++    fixture = _Fixture(tmp_path / "immutable.sqlite")
++    original = fixture.leaves["BindingClockPolicy"]
++    with sqlite3.connect(fixture.store.database_path) as conn:
++        conn.execute("UPDATE artifacts SET semantic_payload_json=? WHERE artifact_id=?",
++                     (b'{}', original.artifact_id))
++    with pytest.raises(ControlPlaneOperationError) as error:
++        fixture.store.persist_artifact(original)
++    assert error.value.reason_code == "artifact_immutable_conflict"
++    assert error.value.reason_code in str(error.value)
++
++
++def test_prebegin_missing_dependency_does_not_publish_activation(tmp_path):
++    fixture = _Fixture(tmp_path / "dependency.sqlite")
++    rpm = fixture.admission("foundation", fixture.foundation_a)
++    activation, validity, _ = fixture.records(rpm, 21)
++    with sqlite3.connect(fixture.store.database_path) as conn:
++        conn.execute("PRAGMA foreign_keys=OFF")
++        conn.execute("DELETE FROM artifacts WHERE artifact_id=?",
++                     (fixture.leaves["BindingClockPolicy"].artifact_id,))
++    stages = []
++    fixture.store.fault_hook = stages.append
++    with pytest.raises(ControlPlaneOperationError) as error:
++        fixture.store.activate_profile(rpm, activation, validity)
++    assert error.value.reason_code == "runtime_profile_dependency_unavailable"
++    assert stages == []
++    assert fixture.store.get_active_pointer("foundation") is None
++    with pytest.raises(ControlPlaneOperationError):
++        fixture.store.load_artifact(activation.artifact_id)
++
++
++def test_post_activation_cannot_reactivate_same_validity_chain(tmp_path):
++    fixture = _Fixture(tmp_path / "validity-reactivation.sqlite")
++    rpm = fixture.admission("foundation", fixture.foundation_a)
++    pointer, _, _, _ = fixture.activate(rpm, 31)
++    head = fixture.store.get_validity_head(pointer.activation_record_id)
++    from app.device_fingerprint.runtime_profile_artifacts import make_runtime_profile_validity_record
++    active_successor = make_runtime_profile_validity_record({
++        **head.semantic_payload,
++        "validity_record_id": "00000000-0000-4000-8000-000000000099",
++        "previous_validity_record_id": head.semantic_payload["validity_record_id"],
++    })
++    with pytest.raises(ControlPlaneOperationError) as error:
++        fixture.store.transition_validity(
++            active_successor,
++            expected_head_validity_record_id=head.semantic_payload["validity_record_id"])
++    assert error.value.reason_code == "runtime_profile_validity_cas_conflict"
++    assert fixture.store.get_validity_head(pointer.activation_record_id) == head
++
++
++def test_classification_foundation_admission_must_match_pinned_foundation(tmp_path):
++    fixture = _Fixture(tmp_path / "foundation-lineage.sqlite")
++    admitted_a = fixture.admission("foundation", fixture.foundation_a)
++    wrong = fixture.admission("classification", fixture.classification_b,
++                              foundation_admission=admitted_a)
++    activation, validity, _ = fixture.records(wrong, 41)
++    with pytest.raises(ControlPlaneOperationError) as error:
++        fixture.store.activate_profile(wrong, activation, validity)
++    assert error.value.reason_code == "runtime_profile_dependency_unavailable"
++    assert fixture.store.get_active_pointer("classification") is None
++
++
++def test_foundation_enabled_tcp_requires_exact_durable_ttl_proof_before_begin(tmp_path):
++    from app.device_fingerprint.runtime_profile_artifacts import (
++        direct_artifact_refs, make_foundation_runtime_profile,
++    )
++
++    fixture = _Fixture(tmp_path / "ttl-lineage.sqlite")
++    ttl = make_artifact_content("TTLCapturePlacementProof", {"synthetic_ff5_fixture_only": "ttl"})
++    fixture.store.persist_artifact(ttl)
++    origin = make_artifact_content("OriginRuntimeAdmission", {
++        "origin_runtime_admission_contract_version": 1,
++        "tcp_state": "ENABLED", "tcp_reason_code": "TTL_PROOF_VALID",
++        "ttl_capture_placement_proof": ArtifactRef(ttl.artifact_id, ttl.content_sha256).as_dict(),
++    })
++    fixture.store.persist_artifact(origin)
++    payload = fixture.foundation_a.semantic_payload
++    payload["origin_runtime_admission"] = ArtifactRef(origin.artifact_id, origin.content_sha256).as_dict()
++    missing_ttl = make_foundation_runtime_profile(payload)
++    fixture.store.persist_artifact(missing_ttl, direct_artifact_refs(missing_ttl))
++    missing_rpm = fixture.admission("foundation", missing_ttl)
++    missing_records = fixture.records(missing_rpm, 51)
++    stages = []
++    fixture.store.fault_hook = stages.append
++    with pytest.raises(ControlPlaneOperationError) as error:
++        fixture.store.activate_profile(missing_rpm, missing_records[0], missing_records[1])
++    assert error.value.reason_code == "runtime_profile_dependency_unavailable"
++    assert stages == []
++    payload["ttl_capture_placement_proof"] = ArtifactRef(ttl.artifact_id, ttl.content_sha256).as_dict()
++    valid = make_foundation_runtime_profile(payload)
++    fixture.store.persist_artifact(valid, direct_artifact_refs(valid))
++    rpm = fixture.admission("foundation", valid)
++    pointer, _, _, _ = fixture.activate(rpm, 52)
++    assert pointer.runtime_profile_id == valid.artifact_id

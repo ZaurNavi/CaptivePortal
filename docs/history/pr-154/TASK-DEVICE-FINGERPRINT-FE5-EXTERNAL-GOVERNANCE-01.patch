@@ -1,0 +1,962 @@
+diff --git a/app/device_fingerprint/fe5_external_knowledge.py b/app/device_fingerprint/fe5_external_knowledge.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f19df02bacd21ab9db80897c7609746e3ad79b68
+--- /dev/null
++++ b/app/device_fingerprint/fe5_external_knowledge.py
+@@ -0,0 +1,363 @@
++"""R14 F-E5 external knowledge policies, provenance and admission gate."""
++
++from __future__ import annotations
++
++import hashlib
++import uuid
++from dataclasses import dataclass
++from datetime import datetime, timezone
++from typing import Any
++
++from .artifact_content import ArtifactContent, ArtifactRef
++from .foundation_gate_artifacts import make_gate_result_manifest
++from .k1_satori_import import SATORI_SOURCE_SHA256
++from .k2a_conformance_artifacts import make_source_governance_record
++from .k2b_p0f_import import verify_p0f_source_bytes
++from .k4_ieee_import import compute_ieee_k4_source_bundle_sha256
++from .knowledge_artifacts import (
++    make_external_knowledge_provenance_manifest, make_knowledge_freshness_policy,
++)
++from .models import DeviceFingerprintValidationError
++from .validation import format_utc, parse_utc
++
++_FAMILIES = {
++    "satori_dhcp": (
++        "K1", "current",
++        "direct admitted DHCP taxonomy mappings only; supporting authority; ambiguity preserved",
++        31536000000, 63072000000,
++    ),
++    "p0f3_legacy_tcp": (
++        "K2B", "legacy",
++        "platform_family only; supporting authority; legacy source; other dimensions NO_CLAIM",
++        0, 9223372036854775807,
++    ),
++    "ieee_ra_mac": (
++        "K4", "current",
++        "raw mac_assignment_org only; manufacturer_mapping remains null unless separately reviewed",
++        172800000, 604800000,
++    ),
++}
++_SOURCE_METADATA = {
++    "satori_dhcp": "xnih/satori@c5dfcfbff31620e35248aa86da0c67f2ad4982f5:fingerprints/dhcp.xml",
++    "p0f3_legacy_tcp": (
++        "peace-maker/p0f3-database@7687e779c42c256c1f36b8c48da7e1f8fe24c2d4:"
++        "p0f.fp;source_character=legacy"
++    ),
++}
++_IMPORTERS = {
++    "satori_dhcp": "captivportal.k1_satori_import",
++    "p0f3_legacy_tcp": "captivportal.k2b_p0f_import",
++    "ieee_ra_mac": "captivportal.k4_ieee_import",
++}
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _rules() -> list[dict[str, Any]]:
++    return [
++        {"freshness_state": "fresh", "claim_eligible": True,
++         "claim_strength_cap": "NO_ADDITIONAL_CAP", "required_explanation_code": None,
++         "dimension_overrides": []},
++        {"freshness_state": "stale", "claim_eligible": True,
++         "claim_strength_cap": "supporting", "required_explanation_code": "knowledge_source_stale",
++         "dimension_overrides": []},
++        {"freshness_state": "expired", "claim_eligible": False,
++         "claim_strength_cap": "NONE", "required_explanation_code": "knowledge_source_expired",
++         "dimension_overrides": []},
++    ]
++
++
++def _policy(family: str) -> ArtifactContent:
++    _slot, _character, _caveat, fresh, stale = _FAMILIES[family]
++    return make_knowledge_freshness_policy({
++        "knowledge_freshness_policy_version": 1,
++        "source_family_id": family,
++        "fresh_max_age_ms": fresh,
++        "stale_max_age_ms": stale,
++        "freshness_state_rules": _rules(),
++    })
++
++
++def build_satori_k1_freshness_policy() -> ArtifactContent:
++    return _policy("satori_dhcp")
++
++
++def build_p0f_k2b_freshness_policy() -> ArtifactContent:
++    return _policy("p0f3_legacy_tcp")
++
++
++def build_ieee_k4_freshness_policy() -> ArtifactContent:
++    return _policy("ieee_ra_mac")
++
++
++def _ref(content: ArtifactContent, expected_type: str) -> dict[str, str]:
++    if not isinstance(content, ArtifactContent):
++        _fail(f"Missing {expected_type} artifact")
++    reference = ArtifactRef(content.artifact_id, content.content_sha256)
++    reference.resolve(content, expected_type)
++    return reference.as_dict()
++
++
++def _external_provenance(
++    family: str, source_sha256: str, *, retrieved_at_utc: str,
++    governance: ArtifactContent, freshness_policy: ArtifactContent,
++) -> ArtifactContent:
++    governance_ref = _ref(governance, "SourceGovernanceRecord")
++    freshness_ref = _ref(freshness_policy, "KnowledgeFreshnessPolicy")
++    metadata = _SOURCE_METADATA.get(
++        family, f"IEEE-RA-MA-L-MA-M-MA-S:bundle-sha256={source_sha256}",
++    )
++    return make_external_knowledge_provenance_manifest({
++        "provenance_contract_version": 1,
++        "provenance_kind": "external",
++        "source_artifact_sha256": source_sha256,
++        "source_governance_record": governance_ref,
++        "retrieved_at_utc": retrieved_at_utc,
++        "source_provider_version_metadata": metadata,
++        "knowledge_freshness_policy": freshness_ref,
++        "importer_identity": _IMPORTERS[family],
++        "importer_version": "1",
++    })
++
++
++def build_satori_k1_external_provenance(
++    source_bytes: bytes, *, retrieved_at_utc: str,
++    governance: ArtifactContent, freshness_policy: ArtifactContent,
++) -> ArtifactContent:
++    if not isinstance(source_bytes, bytes) or hashlib.sha256(source_bytes).hexdigest() != SATORI_SOURCE_SHA256:
++        _fail("Pinned Satori source SHA256 mismatch")
++    return _external_provenance(
++        "satori_dhcp", SATORI_SOURCE_SHA256, retrieved_at_utc=retrieved_at_utc,
++        governance=governance, freshness_policy=freshness_policy,
++    )
++
++
++def build_p0f_k2b_external_provenance(
++    source_bytes: bytes, *, retrieved_at_utc: str,
++    governance: ArtifactContent, freshness_policy: ArtifactContent,
++) -> ArtifactContent:
++    digest = verify_p0f_source_bytes(source_bytes)
++    return _external_provenance(
++        "p0f3_legacy_tcp", digest, retrieved_at_utc=retrieved_at_utc,
++        governance=governance, freshness_policy=freshness_policy,
++    )
++
++
++def build_ieee_k4_external_provenance(
++    ma_l_bytes: bytes, ma_m_bytes: bytes, ma_s_bytes: bytes, *,
++    retrieved_at_utc: str, governance: ArtifactContent,
++    freshness_policy: ArtifactContent,
++) -> ArtifactContent:
++    digest = compute_ieee_k4_source_bundle_sha256(ma_l_bytes, ma_m_bytes, ma_s_bytes)
++    return _external_provenance(
++        "ieee_ra_mac", digest, retrieved_at_utc=retrieved_at_utc,
++        governance=governance, freshness_policy=freshness_policy,
++    )
++
++
++@dataclass(frozen=True, slots=True)
++class ExternalKnowledgeCandidate:
++    knowledge_slot: str
++    source_family_id: str
++    source_character: str
++    claim_caveat: str
++    governance: ArtifactContent
++    freshness_policy: ArtifactContent
++    provenance: ArtifactContent
++
++
++@dataclass(frozen=True, slots=True)
++class FE5GateExecution:
++    foundation_knowledge_evaluation_at_utc: str
++    per_source: tuple[dict[str, Any], ...]
++    gate_result_manifest: ArtifactContent
++    failure_reasons: tuple[str, ...]
++
++
++def _milliseconds(value: datetime) -> int:
++    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
++    delta = value - epoch
++    return delta.days * 86400000 + delta.seconds * 1000 + delta.microseconds // 1000
++
++
++def evaluate_external_knowledge_freshness(
++    provenance: ArtifactContent, freshness_policy: ArtifactContent, *,
++    knowledge_evaluation_at_utc: str,
++    dimension_name: str | None = None,
++) -> dict[str, Any]:
++    """Evaluate exact integer-ms age and generic dimension override semantics."""
++    _ref(provenance, "KnowledgeProvenanceManifest")
++    _ref(freshness_policy, "KnowledgeFreshnessPolicy")
++    source = make_external_knowledge_provenance_manifest(provenance.semantic_payload)
++    policy = make_knowledge_freshness_policy(freshness_policy.semantic_payload)
++    if source.artifact_id != provenance.artifact_id or policy.artifact_id != freshness_policy.artifact_id:
++        _fail("Noncanonical external knowledge artifact")
++    if source.semantic_payload["knowledge_freshness_policy"] != _ref(policy, "KnowledgeFreshnessPolicy"):
++        _fail("External provenance freshness reference mismatch")
++    age = _milliseconds(parse_utc(knowledge_evaluation_at_utc)) - _milliseconds(
++        parse_utc(source.semantic_payload["retrieved_at_utc"])
++    )
++    if age < 0:
++        return {
++            "age_ms": age, "freshness_state": None,
++            "claim_eligible": False, "claim_strength_cap": "NONE",
++            "required_explanation_code": "negative_knowledge_age",
++            "failure_code": "negative_knowledge_age",
++        }
++    p = policy.semantic_payload
++    state = ("fresh" if age <= p["fresh_max_age_ms"] else
++             "stale" if age <= p["stale_max_age_ms"] else "expired")
++    rule = next(row for row in p["freshness_state_rules"] if row["freshness_state"] == state)
++    selected = rule
++    if dimension_name is not None:
++        if dimension_name not in {
++            "platform_family", "device_class", "manufacturer_family", "model_family",
++        }:
++            _fail("Invalid dimension override request")
++        selected = next((row for row in rule["dimension_overrides"]
++                         if row["dimension_name"] == dimension_name), rule)
++    return {
++        "age_ms": age, "freshness_state": state,
++        "claim_eligible": selected["claim_eligible"],
++        "claim_strength_cap": selected["claim_strength_cap"],
++        "required_explanation_code": selected["required_explanation_code"],
++        "failure_code": None,
++    }
++
++
++def _trusted_utc_now() -> str:
++    return format_utc(datetime.now(timezone.utc))
++
++
++def _candidate_refs(candidates: tuple[ExternalKnowledgeCandidate | None, ...]) -> list[dict[str, str]]:
++    refs: dict[str, dict[str, str]] = {}
++    for candidate in candidates:
++        if candidate is None:
++            continue
++        if not isinstance(candidate, ExternalKnowledgeCandidate):
++            _fail("Invalid F-E5 candidate")
++        for artifact, kind in (
++            (candidate.governance, "SourceGovernanceRecord"),
++            (candidate.freshness_policy, "KnowledgeFreshnessPolicy"),
++            (candidate.provenance, "KnowledgeProvenanceManifest"),
++        ):
++            reference = _ref(artifact, kind)
++            refs[reference["artifact_id"]] = reference
++    return list(refs.values())
++
++
++def run_fe5_external_admission_gate(
++    k1_candidate: ExternalKnowledgeCandidate | None,
++    k2b_candidate: ExternalKnowledgeCandidate | None,
++    k4_candidate: ExternalKnowledgeCandidate | None,
++    *, candidate_repository_commit_sha: str,
++    candidate_repository_tree_sha: str,
++    environment_identity: str,
++    retained_evidence_refs: list[dict[str, Any]],
++    decision_record_refs: list[str],
++) -> FE5GateExecution:
++    """Capture one trusted clock and emit machine-identifiable PASS or FAIL."""
++    captured = _trusted_utc_now()
++    parse_utc(captured)
++    candidates = (k1_candidate, k2b_candidate, k4_candidate)
++    input_refs = _candidate_refs(candidates)
++    reasons: list[str] = []
++    reports: list[dict[str, Any]] = []
++    if len(input_refs) != 9:
++        reasons.append("candidate_artifact_refs_not_nine_distinct")
++    families = [candidate.source_family_id for candidate in candidates if candidate is not None]
++    if len(families) != 3 or set(families) != set(_FAMILIES) or len(set(families)) != 3:
++        reasons.append("mandatory_external_source_set_mismatch")
++    for candidate in candidates:
++        if candidate is None:
++            continue
++        family = candidate.source_family_id
++        if family not in _FAMILIES:
++            reasons.append("unexpected_external_source_family")
++            continue
++        slot, character, caveat, _fresh, _stale = _FAMILIES[family]
++        if (candidate.knowledge_slot != slot or candidate.source_character != character
++                or candidate.claim_caveat != caveat):
++            reasons.append(f"{family}:source_contract_mismatch")
++        governance = candidate.governance.semantic_payload
++        policy = candidate.freshness_policy.semantic_payload
++        provenance = candidate.provenance.semantic_payload
++        try:
++            make_source_governance_record(governance)
++            make_knowledge_freshness_policy(policy)
++            make_external_knowledge_provenance_manifest(provenance)
++        except DeviceFingerprintValidationError:
++            reasons.append(f"{family}:invalid_source_artifact")
++            continue
++        if provenance["provenance_kind"] != "external":
++            reasons.append(f"{family}:non_external_provenance")
++            continue
++        if (provenance["source_governance_record"] != _ref(candidate.governance, "SourceGovernanceRecord")
++                or provenance["knowledge_freshness_policy"] != _ref(candidate.freshness_policy, "KnowledgeFreshnessPolicy")):
++            reasons.append(f"{family}:provenance_reference_mismatch")
++            continue
++        if policy["source_family_id"] != family or candidate.freshness_policy.artifact_id != _policy(family).artifact_id:
++            reasons.append(f"{family}:freshness_policy_mismatch")
++            continue
++        expected_metadata = _SOURCE_METADATA.get(
++            family,
++            f"IEEE-RA-MA-L-MA-M-MA-S:bundle-sha256={provenance['source_artifact_sha256']}",
++        )
++        if (provenance["source_provider_version_metadata"] != expected_metadata
++                or provenance["importer_identity"] != _IMPORTERS[family]
++                or provenance["importer_version"] != "1"
++                or (family == "satori_dhcp" and provenance["source_artifact_sha256"] != SATORI_SOURCE_SHA256)):
++            reasons.append(f"{family}:source_provenance_mismatch")
++            continue
++        if (governance["unresolved_restrictions"]
++                or governance["modification_import_status"] == "NOT_ADMITTED"
++                or any(value == "UNKNOWN_NOT_ADMITTED" for value in governance.values())):
++            reasons.append(f"{family}:governance_not_admitted")
++        freshness = evaluate_external_knowledge_freshness(
++            candidate.provenance, candidate.freshness_policy,
++            knowledge_evaluation_at_utc=captured,
++        )
++        if freshness["failure_code"] is not None:
++            reasons.append(f"{family}:{freshness['failure_code']}")
++        elif not freshness["claim_eligible"]:
++            reasons.append(f"{family}:knowledge_expired_or_ineligible")
++        reports.append({
++            "source_family_id": family, "source_character": candidate.source_character,
++            "source_artifact_sha256": provenance["source_artifact_sha256"],
++            "retrieved_at_utc": provenance["retrieved_at_utc"],
++            **freshness,
++            "governance_artifact_ref": _ref(candidate.governance, "SourceGovernanceRecord"),
++            "freshness_artifact_ref": _ref(candidate.freshness_policy, "KnowledgeFreshnessPolicy"),
++            "provenance_artifact_ref": _ref(candidate.provenance, "KnowledgeProvenanceManifest"),
++        })
++    if not retained_evidence_refs:
++        reasons.append("retained_evidence_required")
++    if not decision_record_refs:
++        reasons.append("owner_decision_required")
++    status = "FAIL" if reasons else "PASS"
++    manifest = make_gate_result_manifest({
++        "gate_id": "F-E5", "gate_contract_version": "R14-F-E5-v1",
++        "status": status,
++        "candidate_repository_commit_sha": candidate_repository_commit_sha,
++        "candidate_repository_tree_sha": candidate_repository_tree_sha,
++        "input_artifact_refs": input_refs,
++        "output_artifact_refs": input_refs if status == "PASS" else [],
++        "retained_evidence_refs": retained_evidence_refs,
++        "proof_execution_identity": {
++            "execution_id": str(uuid.uuid4()), "executor_kind": "TECHLEAD_GATE_TOOL",
++            "repository_commit_sha": candidate_repository_commit_sha,
++            "repository_tree_sha": candidate_repository_tree_sha,
++            "procedure_or_test_suite_id": "F-E5-external-freshness-governance-v1",
++            "environment_identity": environment_identity,
++            "execution_artifact_sha256": None,
++        },
++        "trusted_time_inputs": {
++            "foundation_knowledge_evaluation_at_utc": captured,
++            "foundation_admission_evaluation_at_utc": None,
++            "knowledge_evaluation_at_utc": None,
++        },
++        "decision_record_refs": decision_record_refs,
++    })
++    return FE5GateExecution(captured, tuple(reports), manifest, tuple(reasons))
+diff --git a/app/device_fingerprint/foundation_gate_artifacts.py b/app/device_fingerprint/foundation_gate_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f5674f934c4f7af5a7c43e400cf3f0c8121254e
+--- /dev/null
++++ b/app/device_fingerprint/foundation_gate_artifacts.py
+@@ -0,0 +1,119 @@
++"""Exact R14 GateResultManifest V1 ArtifactContent validation."""
++
++from __future__ import annotations
++
++import re
++from typing import Any
++
++from .artifact_content import ArtifactContent, ArtifactRef, canonical_set, make_artifact_content
++from .models import DeviceFingerprintValidationError
++from .validation import parse_utc
++
++_GIT_SHA = re.compile(r"[0-9a-f]{40}")
++_SHA256 = re.compile(r"[0-9a-f]{64}")
++_UUID_V4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
++_FIELDS = frozenset({
++    "gate_id", "gate_contract_version", "status",
++    "candidate_repository_commit_sha", "candidate_repository_tree_sha",
++    "input_artifact_refs", "output_artifact_refs", "retained_evidence_refs",
++    "proof_execution_identity", "trusted_time_inputs", "decision_record_refs",
++})
++_PROOF_FIELDS = frozenset({
++    "execution_id", "executor_kind", "repository_commit_sha",
++    "repository_tree_sha", "procedure_or_test_suite_id", "environment_identity",
++    "execution_artifact_sha256",
++})
++_EVIDENCE_FIELDS = frozenset({
++    "evidence_label", "file_sha256", "media_type", "path_or_reference",
++})
++_TIME_FIELDS = frozenset({
++    "foundation_knowledge_evaluation_at_utc",
++    "foundation_admission_evaluation_at_utc", "knowledge_evaluation_at_utc",
++})
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _shape(value: Any, fields: frozenset[str], label: str) -> dict[str, Any]:
++    if not isinstance(value, dict) or set(value) != fields:
++        _fail(f"Invalid {label} shape")
++    return value
++
++
++def _text(value: Any, label: str) -> str:
++    if not isinstance(value, str) or not value:
++        _fail(f"Invalid {label}")
++    return value
++
++
++def _nullable_match(value: Any, pattern: re.Pattern[str], label: str) -> Any:
++    if value is not None and (not isinstance(value, str) or pattern.fullmatch(value) is None):
++        _fail(f"Invalid {label}")
++    return value
++
++
++def _refs(value: Any, label: str) -> list[dict[str, str]]:
++    if not isinstance(value, list):
++        _fail(f"Invalid {label}")
++    return canonical_set([ArtifactRef.from_dict(ref).as_dict() for ref in value],
++                         lambda ref: ref["artifact_id"])
++
++
++def make_gate_result_manifest(payload: dict[str, Any]) -> ArtifactContent:
++    """Materialize the closed generic V1 gate-result schema and ordered SETs."""
++    value = _shape(payload, _FIELDS, "GateResultManifest")
++    _text(value["gate_id"], "gate ID")
++    _text(value["gate_contract_version"], "gate contract version")
++    if value["status"] not in ("PASS", "FAIL"):
++        _fail("Invalid gate status")
++    _nullable_match(value["candidate_repository_commit_sha"], _GIT_SHA, "candidate commit")
++    _nullable_match(value["candidate_repository_tree_sha"], _GIT_SHA, "candidate tree")
++    inputs = _refs(value["input_artifact_refs"], "gate input refs")
++    outputs = _refs(value["output_artifact_refs"], "gate output refs")
++    evidence = value["retained_evidence_refs"]
++    if not isinstance(evidence, list):
++        _fail("Invalid retained evidence refs")
++    normalized_evidence = []
++    for raw in evidence:
++        ref = dict(_shape(raw, _EVIDENCE_FIELDS, "retained evidence ref"))
++        _text(ref["evidence_label"], "evidence label")
++        _nullable_match(ref["file_sha256"], _SHA256, "evidence SHA256")
++        if ref["file_sha256"] is None:
++            _fail("Missing evidence SHA256")
++        _text(ref["media_type"], "evidence media type")
++        if ref["path_or_reference"] is not None:
++            _text(ref["path_or_reference"], "evidence path or reference")
++        normalized_evidence.append(ref)
++    normalized_evidence = canonical_set(
++        normalized_evidence, lambda ref: (ref["evidence_label"], ref["file_sha256"]),
++    )
++    proof = dict(_shape(value["proof_execution_identity"], _PROOF_FIELDS,
++                        "proof execution identity"))
++    _nullable_match(proof["execution_id"], _UUID_V4, "execution UUIDv4")
++    if proof["execution_id"] is None:
++        _fail("Missing execution UUIDv4")
++    for key in ("executor_kind", "procedure_or_test_suite_id", "environment_identity"):
++        _text(proof[key], key)
++    for key in ("repository_commit_sha", "repository_tree_sha"):
++        _nullable_match(proof[key], _GIT_SHA, key)
++    _nullable_match(proof["execution_artifact_sha256"], _SHA256, "execution artifact SHA256")
++    times = dict(_shape(value["trusted_time_inputs"], _TIME_FIELDS, "trusted time inputs"))
++    for timestamp in times.values():
++        if timestamp is not None:
++            parse_utc(timestamp)
++    decisions = value["decision_record_refs"]
++    if not isinstance(decisions, list):
++        _fail("Invalid decision record refs")
++    for decision in decisions:
++        if not isinstance(decision, str) or _UUID_V4.fullmatch(decision) is None:
++            _fail("Invalid decision UUIDv4")
++    decisions = canonical_set(decisions, lambda decision: decision)
++    return make_artifact_content("GateResultManifest", {
++        **value,
++        "input_artifact_refs": inputs, "output_artifact_refs": outputs,
++        "retained_evidence_refs": normalized_evidence,
++        "proof_execution_identity": proof, "trusted_time_inputs": times,
++        "decision_record_refs": decisions,
++    })
+diff --git a/tests/device_fingerprint_fe5/__init__.py b/tests/device_fingerprint_fe5/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..002177b96b1805d72b12b9ab0552e50b99c604e0
+--- /dev/null
++++ b/tests/device_fingerprint_fe5/__init__.py
+@@ -0,0 +1 @@
++"""Focused F-E5 external knowledge admission tests."""
+diff --git a/tests/device_fingerprint_fe5/test_fe5_external_knowledge.py b/tests/device_fingerprint_fe5/test_fe5_external_knowledge.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1c1606ddc929986cdd1e8ffe4f9e29f7273a825
+--- /dev/null
++++ b/tests/device_fingerprint_fe5/test_fe5_external_knowledge.py
+@@ -0,0 +1,358 @@
++from datetime import datetime, timedelta, timezone
++import inspect
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef
++import app.device_fingerprint.fe5_external_knowledge as fe5
++from app.device_fingerprint.k2a_conformance_artifacts import make_source_governance_record
++from app.device_fingerprint.k4_ieee_import import compute_ieee_k4_source_bundle_sha256
++from app.device_fingerprint.knowledge_artifacts import (
++    make_external_knowledge_provenance_manifest, make_knowledge_freshness_policy,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.validation import format_utc
++
++_NOW = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
++_NOW_TEXT = "2026-09-23T12:00:00.000Z"
++_DECISION = "22222222-2222-4222-8222-222222222222"  # Synthetic test-only ref.
++_EVIDENCE = [{"evidence_label": "synthetic_source_audit", "file_sha256": "e" * 64,
++              "media_type": "application/json", "path_or_reference": "test://audit"}]
++_SPEC = {
++    "satori_dhcp": ("K1", "current",
++        "direct admitted DHCP taxonomy mappings only; supporting authority; ambiguity preserved",
++        "captivportal.k1_satori_import", fe5.SATORI_SOURCE_SHA256,
++        fe5._SOURCE_METADATA["satori_dhcp"]),
++    "p0f3_legacy_tcp": ("K2B", "legacy",
++        "platform_family only; supporting authority; legacy source; other dimensions NO_CLAIM",
++        "captivportal.k2b_p0f_import", "b" * 64,
++        fe5._SOURCE_METADATA["p0f3_legacy_tcp"]),
++    "ieee_ra_mac": ("K4", "current",
++        "raw mac_assignment_org only; manufacturer_mapping remains null unless separately reviewed",
++        "captivportal.k4_ieee_import", "c" * 64,
++        "IEEE-RA-MA-L-MA-M-MA-S:bundle-sha256=" + "c" * 64),
++}
++_POLICIES = {
++    "satori_dhcp": fe5.build_satori_k1_freshness_policy,
++    "p0f3_legacy_tcp": fe5.build_p0f_k2b_freshness_policy,
++    "ieee_ra_mac": fe5.build_ieee_k4_freshness_policy,
++}
++
++
++def _ref(artifact):
++    return ArtifactRef(artifact.artifact_id, artifact.content_sha256).as_dict()
++
++
++def _governance(family):
++    return make_source_governance_record({
++        "governance_contract_version": 1, "source_name": f"synthetic {family}",
++        "source_provenance": "synthetic retained-test fixture",
++        "license_identifier": "test-only", "license_source_reference": "test-only",
++        "license_text_sha256": None, "local_storage_status": "STORED_LOCAL",
++        "modification_import_status": "IMPORTED_NORMALIZED",
++        "redistribution_status": "ALLOWED", "attribution_requirement": "NOT_REQUIRED",
++        "commercial_use_status": "ALLOWED", "review_basis_semantics": "test-only",
++        "unresolved_restrictions": [],
++    })
++
++
++def _candidate(family, age_ms, *, governance=None, policy=None):
++    slot, character, caveat, importer, digest, metadata = _SPEC[family]
++    governance = governance or _governance(family)
++    policy = policy or _POLICIES[family]()
++    retrieved_at = format_utc(_NOW - timedelta(milliseconds=age_ms))
++    provenance = make_external_knowledge_provenance_manifest({
++        "provenance_contract_version": 1, "provenance_kind": "external",
++        "source_artifact_sha256": digest,
++        "source_governance_record": _ref(governance),
++        "retrieved_at_utc": retrieved_at,
++        "source_provider_version_metadata": metadata,
++        "knowledge_freshness_policy": _ref(policy),
++        "importer_identity": importer, "importer_version": "1",
++    })
++    return fe5.ExternalKnowledgeCandidate(
++        slot, family, character, caveat, governance, policy, provenance,
++    )
++
++
++def _run(monkeypatch, k1, k2b, k4, *, evidence=_EVIDENCE, decisions=(_DECISION,)):
++    calls = []
++    def trusted_now():
++        calls.append(True)
++        return _NOW_TEXT
++    monkeypatch.setattr(fe5, "_trusted_utc_now", trusted_now)
++    result = fe5.run_fe5_external_admission_gate(
++        k1, k2b, k4,
++        candidate_repository_commit_sha="a" * 40,
++        candidate_repository_tree_sha="b" * 40,
++        environment_identity="synthetic-fixture",
++        retained_evidence_refs=list(evidence), decision_record_refs=list(decisions),
++    )
++    assert calls == [True]
++    assert result.foundation_knowledge_evaluation_at_utc == _NOW_TEXT
++    assert result.gate_result_manifest.semantic_payload["trusted_time_inputs"] == {
++        "foundation_knowledge_evaluation_at_utc": _NOW_TEXT,
++        "foundation_admission_evaluation_at_utc": None,
++        "knowledge_evaluation_at_utc": None,
++    }
++    return result
++
++
++def test_policy_identifiers_thresholds_rules_and_no_overrides():
++    expected = {
++        "satori_dhcp": (31536000000, 63072000000),
++        "p0f3_legacy_tcp": (0, 9223372036854775807),
++        "ieee_ra_mac": (172800000, 604800000),
++    }
++    for family, (fresh, stale) in expected.items():
++        first = _POLICIES[family]()
++        assert first.artifact_id == _POLICIES[family]().artifact_id
++        payload = first.semantic_payload
++        assert payload["source_family_id"] == family
++        assert (payload["fresh_max_age_ms"], payload["stale_max_age_ms"]) == (fresh, stale)
++        assert [rule["freshness_state"] for rule in payload["freshness_state_rules"]] == [
++            "fresh", "stale", "expired",
++        ]
++        assert [(r["claim_eligible"], r["claim_strength_cap"],
++                 r["required_explanation_code"], r["dimension_overrides"])
++                for r in payload["freshness_state_rules"]] == [
++            (True, "NO_ADDITIONAL_CAP", None, []),
++            (True, "supporting", "knowledge_source_stale", []),
++            (False, "NONE", "knowledge_source_expired", []),
++        ]
++
++
++@pytest.mark.parametrize("family,age,state,eligible,cap", [
++    ("satori_dhcp", 0, "fresh", True, "NO_ADDITIONAL_CAP"),
++    ("satori_dhcp", 31536000000, "fresh", True, "NO_ADDITIONAL_CAP"),
++    ("satori_dhcp", 31536000001, "stale", True, "supporting"),
++    ("satori_dhcp", 63072000000, "stale", True, "supporting"),
++    ("satori_dhcp", 63072000001, "expired", False, "NONE"),
++    ("p0f3_legacy_tcp", 0, "fresh", True, "NO_ADDITIONAL_CAP"),
++    ("p0f3_legacy_tcp", 1, "stale", True, "supporting"),
++    ("p0f3_legacy_tcp", 315360000000, "stale", True, "supporting"),
++    ("ieee_ra_mac", 172800000, "fresh", True, "NO_ADDITIONAL_CAP"),
++    ("ieee_ra_mac", 172800001, "stale", True, "supporting"),
++    ("ieee_ra_mac", 604800000, "stale", True, "supporting"),
++    ("ieee_ra_mac", 604800001, "expired", False, "NONE"),
++])
++def test_exact_integer_millisecond_freshness_boundaries(family, age, state, eligible, cap):
++    candidate = _candidate(family, age)
++    result = fe5.evaluate_external_knowledge_freshness(
++        candidate.provenance, candidate.freshness_policy,
++        knowledge_evaluation_at_utc=_NOW_TEXT,
++    )
++    assert result["age_ms"] == age
++    assert (result["freshness_state"], result["claim_eligible"],
++            result["claim_strength_cap"]) == (state, eligible, cap)
++
++
++@pytest.mark.parametrize("family", list(_SPEC))
++def test_negative_age_has_machine_failure_code(family):
++    candidate = _candidate(family, -1)
++    result = fe5.evaluate_external_knowledge_freshness(
++        candidate.provenance, candidate.freshness_policy,
++        knowledge_evaluation_at_utc=_NOW_TEXT,
++    )
++    assert result["age_ms"] == -1
++    assert result["failure_code"] == "negative_knowledge_age"
++    assert not result["claim_eligible"]
++
++
++def test_generic_dimension_override_replaces_only_that_dimension():
++    payload = fe5.build_ieee_k4_freshness_policy().semantic_payload
++    stale = next(rule for rule in payload["freshness_state_rules"] if rule["freshness_state"] == "stale")
++    stale["dimension_overrides"] = [{
++        "dimension_name": "device_class", "claim_eligible": False,
++        "claim_strength_cap": "NONE", "required_explanation_code": "device_class_stale_disabled",
++    }]
++    policy = make_knowledge_freshness_policy(payload)
++    candidate = _candidate("ieee_ra_mac", 172800001, policy=policy)
++    general = fe5.evaluate_external_knowledge_freshness(
++        candidate.provenance, policy, knowledge_evaluation_at_utc=_NOW_TEXT,
++    )
++    device = fe5.evaluate_external_knowledge_freshness(
++        candidate.provenance, policy, knowledge_evaluation_at_utc=_NOW_TEXT,
++        dimension_name="device_class",
++    )
++    assert general["claim_eligible"] and general["claim_strength_cap"] == "supporting"
++    assert not device["claim_eligible"] and device["claim_strength_cap"] == "NONE"
++
++
++def test_provenance_builders_use_exact_source_identity_and_resolve_artifacts(monkeypatch):
++    governance = _governance("satori_dhcp")
++    policy = fe5.build_satori_k1_freshness_policy()
++    with pytest.raises(DeviceFingerprintValidationError):
++        fe5.build_satori_k1_external_provenance(
++            b"wrong pinned source", retrieved_at_utc=_NOW_TEXT,
++            governance=governance, freshness_policy=policy,
++        )
++    monkeypatch.setattr(fe5, "verify_p0f_source_bytes", lambda raw: "b" * 64 if raw == b"pinned" else None)
++    p0f = fe5.build_p0f_k2b_external_provenance(
++        b"pinned", retrieved_at_utc=_NOW_TEXT, governance=governance,
++        freshness_policy=fe5.build_p0f_k2b_freshness_policy(),
++    )
++    assert p0f.semantic_payload["source_artifact_sha256"] == "b" * 64
++    assert p0f.semantic_payload["source_provider_version_metadata"].endswith("source_character=legacy")
++    source = (b"MA-L", b"MA-M", b"MA-S")
++    ieee = fe5.build_ieee_k4_external_provenance(
++        *source, retrieved_at_utc=_NOW_TEXT, governance=governance,
++        freshness_policy=fe5.build_ieee_k4_freshness_policy(),
++    )
++    assert ieee.semantic_payload["source_artifact_sha256"] == compute_ieee_k4_source_bundle_sha256(*source)
++    assert ieee.semantic_payload["source_provider_version_metadata"].endswith(
++        ieee.semantic_payload["source_artifact_sha256"]
++    )
++    with pytest.raises(DeviceFingerprintValidationError):
++        fe5.build_ieee_k4_external_provenance(
++            *source, retrieved_at_utc="2026-09-23T12:00:00Z",
++            governance=governance, freshness_policy=fe5.build_ieee_k4_freshness_policy(),
++        )
++    with pytest.raises(DeviceFingerprintValidationError):
++        fe5.build_ieee_k4_external_provenance(
++            *source, retrieved_at_utc=_NOW_TEXT,
++            governance=fe5.build_ieee_k4_freshness_policy(),
++            freshness_policy=fe5.build_ieee_k4_freshness_policy(),
++        )
++
++
++def test_public_gate_signature_has_no_caller_controlled_time_argument():
++    parameters = inspect.signature(fe5.run_fe5_external_admission_gate).parameters
++    assert set(parameters) == {
++        "k1_candidate", "k2b_candidate", "k4_candidate",
++        "candidate_repository_commit_sha", "candidate_repository_tree_sha",
++        "environment_identity", "retained_evidence_refs", "decision_record_refs",
++    }
++    assert not any("time" in name or "now" in name for name in parameters)
++
++
++def test_gate_passes_fresh_current_and_stale_legacy_with_nine_exact_refs(monkeypatch):
++    candidates = (_candidate("satori_dhcp", 0), _candidate("p0f3_legacy_tcp", 1),
++                  _candidate("ieee_ra_mac", 0))
++    result = _run(monkeypatch, *candidates)
++    manifest = result.gate_result_manifest.semantic_payload
++    assert manifest["status"] == "PASS"
++    assert manifest["gate_id"] == "F-E5"
++    assert manifest["gate_contract_version"] == "R14-F-E5-v1"
++    assert len(manifest["input_artifact_refs"]) == len(manifest["output_artifact_refs"]) == 9
++    assert manifest["input_artifact_refs"] == manifest["output_artifact_refs"]
++    assert [row["freshness_state"] for row in result.per_source] == ["fresh", "stale", "fresh"]
++    assert not result.failure_reasons
++
++
++def test_gate_all_stale_is_usable(monkeypatch):
++    result = _run(monkeypatch, _candidate("satori_dhcp", 31536000001),
++                  _candidate("p0f3_legacy_tcp", 1),
++                  _candidate("ieee_ra_mac", 172800001))
++    assert result.gate_result_manifest.semantic_payload["status"] == "PASS"
++    assert [row["freshness_state"] for row in result.per_source] == ["stale"] * 3
++
++
++def test_gate_cannot_pass_with_fewer_than_nine_distinct_candidate_artifacts(monkeypatch):
++    shared_governance = _governance("shared")
++    result = _run(monkeypatch,
++                  _candidate("satori_dhcp", 0, governance=shared_governance),
++                  _candidate("p0f3_legacy_tcp", 1, governance=shared_governance),
++                  _candidate("ieee_ra_mac", 0, governance=shared_governance))
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++    assert "candidate_artifact_refs_not_nine_distinct" in result.failure_reasons
++
++
++@pytest.mark.parametrize("family", list(_SPEC))
++def test_gate_negative_age_is_fail_manifest(monkeypatch, family):
++    ages = {name: 0 for name in _SPEC}
++    ages[family] = -1
++    result = _run(monkeypatch, *(_candidate(name, age) for name, age in ages.items()))
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++    assert any("negative_knowledge_age" in reason for reason in result.failure_reasons)
++
++
++@pytest.mark.parametrize("family,expired_age", [
++    ("satori_dhcp", 63072000001), ("ieee_ra_mac", 604800001),
++])
++def test_gate_expired_mandatory_source_is_fail_manifest(monkeypatch, family, expired_age):
++    ages = {name: 0 for name in _SPEC}
++    ages[family] = expired_age
++    result = _run(monkeypatch, *(_candidate(name, age) for name, age in ages.items()))
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++
++
++def test_gate_governance_rejection_and_provenance_ref_mismatch_fail(monkeypatch):
++    bad_governance = _governance("satori_dhcp").semantic_payload
++    bad_governance.update(modification_import_status="NOT_ADMITTED",
++                          redistribution_status="UNKNOWN_NOT_ADMITTED")
++    rejected = _candidate("satori_dhcp", 0,
++                          governance=make_source_governance_record(bad_governance))
++    normal = (_candidate("p0f3_legacy_tcp", 1), _candidate("ieee_ra_mac", 0))
++    result = _run(monkeypatch, rejected, *normal)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert any("governance_not_admitted" in reason for reason in result.failure_reasons)
++    first = _candidate("satori_dhcp", 0)
++    wrong_provenance = make_external_knowledge_provenance_manifest({
++        **first.provenance.semantic_payload,
++        "source_governance_record": _ref(_governance("other")),
++    })
++    mismatched = fe5.ExternalKnowledgeCandidate(
++        first.knowledge_slot, first.source_family_id, first.source_character,
++        first.claim_caveat, first.governance, first.freshness_policy, wrong_provenance,
++    )
++    result = _run(monkeypatch, mismatched, *normal)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert any("provenance_reference_mismatch" in reason for reason in result.failure_reasons)
++    wrong_freshness = make_external_knowledge_provenance_manifest({
++        **first.provenance.semantic_payload,
++        "knowledge_freshness_policy": _ref(fe5.build_ieee_k4_freshness_policy()),
++    })
++    mismatched = fe5.ExternalKnowledgeCandidate(
++        first.knowledge_slot, first.source_family_id, first.source_character,
++        first.claim_caveat, first.governance, first.freshness_policy, wrong_freshness,
++    )
++    result = _run(monkeypatch, mismatched, *normal)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert any("provenance_reference_mismatch" in reason for reason in result.failure_reasons)
++
++
++@pytest.mark.parametrize("mode", ["missing", "duplicate", "extra", "wrong_slot", "wrong_character", "wrong_caveat"])
++def test_gate_exact_source_set_and_candidate_semantics_fail_machine_readably(monkeypatch, mode):
++    k1 = _candidate("satori_dhcp", 0)
++    k2b = _candidate("p0f3_legacy_tcp", 1)
++    k4 = _candidate("ieee_ra_mac", 0)
++    if mode == "missing":
++        k4 = None
++    elif mode == "duplicate":
++        k4 = k1
++    elif mode == "extra":
++        k4 = fe5.ExternalKnowledgeCandidate(
++            k4.knowledge_slot, "unexpected_source", k4.source_character,
++            k4.claim_caveat, k4.governance, k4.freshness_policy, k4.provenance,
++        )
++    elif mode == "wrong_slot":
++        k4 = fe5.ExternalKnowledgeCandidate(
++            "K1", k4.source_family_id, k4.source_character, k4.claim_caveat,
++            k4.governance, k4.freshness_policy, k4.provenance,
++        )
++    elif mode == "wrong_character":
++        k4 = fe5.ExternalKnowledgeCandidate(
++            k4.knowledge_slot, k4.source_family_id, "legacy", k4.claim_caveat,
++            k4.governance, k4.freshness_policy, k4.provenance,
++        )
++    else:
++        k4 = fe5.ExternalKnowledgeCandidate(
++            k4.knowledge_slot, k4.source_family_id, k4.source_character,
++            "manufacturer inferred", k4.governance, k4.freshness_policy, k4.provenance,
++        )
++    result = _run(monkeypatch, k1, k2b, k4)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++
++
++@pytest.mark.parametrize("evidence,decisions", [([], (_DECISION,)), (_EVIDENCE, ())])
++def test_gate_pass_requires_retained_evidence_and_owner_decision(monkeypatch, evidence, decisions):
++    result = _run(monkeypatch, _candidate("satori_dhcp", 0),
++                  _candidate("p0f3_legacy_tcp", 1), _candidate("ieee_ra_mac", 0),
++                  evidence=evidence, decisions=decisions)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
+diff --git a/tests/device_fingerprint_fe5/test_gate_result_manifest.py b/tests/device_fingerprint_fe5/test_gate_result_manifest.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6003fda05fb7d6daf291ddb333c0cba4c14196b
+--- /dev/null
++++ b/tests/device_fingerprint_fe5/test_gate_result_manifest.py
+@@ -0,0 +1,91 @@
++from copy import deepcopy
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef
++from app.device_fingerprint.foundation_gate_artifacts import make_gate_result_manifest
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++
++_EXECUTION_ID = "11111111-1111-4111-8111-111111111111"
++_DECISION_ID = "22222222-2222-4222-8222-222222222222"
++
++
++def _ref(digit):
++    digest = digit * 64
++    return ArtifactRef(f"Fixture:v1:sha256:{digest}", digest).as_dict()
++
++
++def _payload():
++    return {
++        "gate_id": "F-E5", "gate_contract_version": "R14-F-E5-v1",
++        "status": "PASS", "candidate_repository_commit_sha": "a" * 40,
++        "candidate_repository_tree_sha": "b" * 40,
++        "input_artifact_refs": [_ref("d"), _ref("c")],
++        "output_artifact_refs": [_ref("d"), _ref("c")],
++        "retained_evidence_refs": [
++            {"evidence_label": "zeta", "file_sha256": "f" * 64,
++             "media_type": "application/json", "path_or_reference": None},
++            {"evidence_label": "alpha", "file_sha256": "e" * 64,
++             "media_type": "text/plain", "path_or_reference": "retained://fixture"},
++        ],
++        "proof_execution_identity": {
++            "execution_id": _EXECUTION_ID, "executor_kind": "TECHLEAD_GATE_TOOL",
++            "repository_commit_sha": "a" * 40, "repository_tree_sha": "b" * 40,
++            "procedure_or_test_suite_id": "F-E5-external-freshness-governance-v1",
++            "environment_identity": "synthetic-test", "execution_artifact_sha256": None,
++        },
++        "trusted_time_inputs": {
++            "foundation_knowledge_evaluation_at_utc": "2026-09-23T12:00:00.000Z",
++            "foundation_admission_evaluation_at_utc": None,
++            "knowledge_evaluation_at_utc": None,
++        },
++        "decision_record_refs": [_DECISION_ID, _EXECUTION_ID],
++    }
++
++
++def test_exact_gate_manifest_ordering_and_permutation_identity():
++    payload = _payload()
++    artifact = make_gate_result_manifest(payload)
++    semantic = artifact.semantic_payload
++    assert [r["artifact_id"] for r in semantic["input_artifact_refs"]] == [
++        _ref("c")["artifact_id"], _ref("d")["artifact_id"],
++    ]
++    assert [r["evidence_label"] for r in semantic["retained_evidence_refs"]] == ["alpha", "zeta"]
++    assert semantic["decision_record_refs"] == [_EXECUTION_ID, _DECISION_ID]
++    reverse = deepcopy(payload)
++    for field in ("input_artifact_refs", "output_artifact_refs",
++                  "retained_evidence_refs", "decision_record_refs"):
++        reverse[field].reverse()
++    assert make_gate_result_manifest(reverse).artifact_id == artifact.artifact_id
++
++
++@pytest.mark.parametrize("mutate", [
++    lambda p: p.update(extra="no"),
++    lambda p: p.update(status="PENDING"),
++    lambda p: p.update(candidate_repository_commit_sha="ABC"),
++    lambda p: p["proof_execution_identity"].update(execution_id="11111111-1111-1111-8111-111111111111"),
++    lambda p: p["proof_execution_identity"].update(execution_id="11111111-1111-4111-8111-11111111111A"),
++    lambda p: p["proof_execution_identity"].update(repository_tree_sha="invalid"),
++    lambda p: p["proof_execution_identity"].update(extra="no"),
++    lambda p: p["trusted_time_inputs"].update(foundation_knowledge_evaluation_at_utc="2026-09-23T12:00:00Z"),
++    lambda p: p["trusted_time_inputs"].update(extra="no"),
++    lambda p: p["retained_evidence_refs"][0].update(file_sha256="invalid"),
++    lambda p: p["retained_evidence_refs"][0].update(extra="no"),
++    lambda p: p["decision_record_refs"].append("NOT-UUID"),
++    lambda p: p["decision_record_refs"].append(p["decision_record_refs"][0]),
++    lambda p: p["input_artifact_refs"].append(p["input_artifact_refs"][0]),
++])
++def test_gate_manifest_fails_closed_on_bad_shape_identity_or_duplicate(mutate):
++    payload = _payload()
++    mutate(payload)
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_gate_result_manifest(payload)
++
++
++def test_generic_gate_manifest_permits_empty_sets_for_fail_result():
++    payload = _payload()
++    payload.update(status="FAIL", output_artifact_refs=[],
++                   retained_evidence_refs=[], decision_record_refs=[])
++    artifact = make_gate_result_manifest(payload)
++    assert artifact.semantic_payload["status"] == "FAIL"
++    assert artifact.semantic_payload["output_artifact_refs"] == []

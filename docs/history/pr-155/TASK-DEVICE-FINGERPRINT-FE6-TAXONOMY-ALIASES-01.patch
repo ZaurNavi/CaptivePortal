@@ -1,0 +1,960 @@
+diff --git a/app/device_fingerprint/fe6_taxonomy_aliases.py b/app/device_fingerprint/fe6_taxonomy_aliases.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..db7eacd3292dd3f2ddcc33f0da0c997ad6f82fde
+--- /dev/null
++++ b/app/device_fingerprint/fe6_taxonomy_aliases.py
+@@ -0,0 +1,229 @@
++"""Deterministic F-E6 taxonomy/alias proofs and formal gate execution."""
++
++from __future__ import annotations
++
++import uuid
++from dataclasses import dataclass
++from typing import Any
++
++from .artifact_content import ArtifactContent, ArtifactRef
++from .foundation_gate_artifacts import make_gate_result_manifest
++from .models import DeviceFingerprintValidationError
++from .taxonomy_artifacts import (
++    build_alias_mapping_v1, build_classification_taxonomy_v1,
++    make_alias_mapping, make_classification_taxonomy,
++    resolve_manufacturer_alias, resolve_model_alias, resolve_source_taxonomy_mapping,
++    validate_alias_mapping_against_taxonomy,
++)
++
++
++@dataclass(frozen=True, slots=True)
++class FE6GateExecution:
++    taxonomy_artifact_id: str
++    taxonomy_content_sha256: str
++    alias_mapping_artifact_id: str
++    alias_mapping_content_sha256: str
++    fixture_results: dict[str, bool]
++    gate_result_manifest: ArtifactContent
++    failure_reasons: tuple[str, ...]
++
++
++def _mapping(source_taxon: str, dimension: str, kind: str, target: str | None) -> dict[str, Any]:
++    return {
++        "source_id": "synthetic_fe6", "dimension_name": dimension,
++        "source_taxon": source_taxon, "mapping_kind": kind,
++        "target_id_or_ref": target,
++    }
++
++
++def _synthetic_alias_mapping(
++    mappings: list[dict[str, Any]], *, manufacturers: list[dict[str, str]] | None = None,
++    models: list[dict[str, str]] | None = None,
++) -> ArtifactContent:
++    return make_alias_mapping({
++        "alias_mapping_version": "alias_mapping_v1",
++        "manufacturer_aliases": manufacturers or [], "model_aliases": models or [],
++        "source_taxonomy_mappings": mappings,
++    })
++
++
++def run_fe6_fixture_proofs() -> dict[str, bool]:
++    """Run retained, entirely synthetic F-E6 semantic fixtures."""
++    taxonomy = build_classification_taxonomy_v1()
++    tax = taxonomy.semantic_payload
++    ios_umbrella = (
++        "ios" in tax["platform_family_values"]
++        and "ipados" not in tax["platform_family_values"]
++        and "smartphone" in tax["device_class_values"]
++        and "tablet" in tax["device_class_values"]
++    )
++
++    broad = _synthetic_alias_mapping([
++        _mapping(raw, "device_class", "BROAD_UNRESOLVED", "synthetic-broad:" + raw)
++        for raw in ("Phone", "Mobile", "Desktop")
++    ])
++    broad_values = validate_alias_mapping_against_taxonomy(taxonomy, broad) and all(
++        (row := resolve_source_taxonomy_mapping(
++            broad, source_id="synthetic_fe6", dimension_name="device_class", source_taxon=raw,
++        )) is not None and row["mapping_kind"] == "BROAD_UNRESOLVED"
++        and row["target_id_or_ref"] not in tax["device_class_values"]
++        for raw in ("Phone", "Mobile", "Desktop")
++    )
++
++    out_of_scope_rows = [
++        _mapping(raw, "device_class", "RECOGNIZED_OUT_OF_SCOPE", "synthetic-oos:" + raw)
++        for raw in ("TV", "printer", "camera", "watch/wearable", "desktop workstation", "IoT class")
++    ] + [_mapping("unsupported platform family", "platform_family",
++                  "RECOGNIZED_OUT_OF_SCOPE", "synthetic-oos:platform")]
++    out_of_scope = _synthetic_alias_mapping(out_of_scope_rows)
++    recognized_out_of_scope = validate_alias_mapping_against_taxonomy(taxonomy, out_of_scope) and all(
++        row["mapping_kind"] == "RECOGNIZED_OUT_OF_SCOPE"
++        for row in out_of_scope.semantic_payload["source_taxonomy_mappings"]
++    )
++    for forbidden in ("manufacturer_family", "model_family"):
++        try:
++            _synthetic_alias_mapping([_mapping("synthetic", forbidden,
++                                              "RECOGNIZED_OUT_OF_SCOPE", "synthetic-oos")])
++        except DeviceFingerprintValidationError:
++            pass
++        else:
++            recognized_out_of_scope = False
++
++    unmapped = _synthetic_alias_mapping([
++        _mapping("unknown manufacturer", "manufacturer_family", "UNMAPPED", None),
++        _mapping("unknown model", "model_family", "UNMAPPED", None),
++    ])
++    unmapped_manufacturer_model = validate_alias_mapping_against_taxonomy(taxonomy, unmapped) and all(
++        row["target_id_or_ref"] is None and row["mapping_kind"] == "UNMAPPED"
++        for row in unmapped.semantic_payload["source_taxonomy_mappings"]
++    )
++
++    fixture_tax = make_classification_taxonomy({
++        **tax,
++        "manufacturer_records": [{"manufacturer_id": "fixture-maker", "display_label": "Fixture Maker"}],
++        "model_family_records": [{"model_family_id": "fixture-model",
++                                  "manufacturer_id": "fixture-maker", "display_label": "Fixture Model"}],
++    })
++    explicit = _synthetic_alias_mapping([], manufacturers=[
++        {"source_id": "synthetic_fe6", "source_value": raw, "manufacturer_id": "fixture-maker"}
++        for raw in ("Apple Inc.", "Apple Corporation")
++    ], models=[
++        {"source_id": "synthetic_fe6", "source_value": raw, "model_family_id": "fixture-model"}
++        for raw in ("Model A", "Model A (2026)")
++    ])
++    multiple_explicit_aliases = validate_alias_mapping_against_taxonomy(fixture_tax, explicit) and all(
++        resolve_manufacturer_alias(explicit, source_id="synthetic_fe6", source_value=raw)["manufacturer_id"]
++        == "fixture-maker" for raw in ("Apple Inc.", "Apple Corporation")
++    ) and all(
++        resolve_model_alias(explicit, source_id="synthetic_fe6", source_value=raw)["model_family_id"]
++        == "fixture-model" for raw in ("Model A", "Model A (2026)")
++    )
++    no_heuristic_aliasing = all(
++        resolve_manufacturer_alias(explicit, source_id="synthetic_fe6", source_value=raw) is None
++        for raw in ("apple inc.", "Apple Inc", "Apple", "Apple Corp")
++    ) and all(
++        resolve_model_alias(explicit, source_id="synthetic_fe6", source_value=raw) is None
++        for raw in ("model a", "Model-A", "Model", "Model B")
++    ) and resolve_source_taxonomy_mapping(
++        broad, source_id="synthetic_fe6", dimension_name="device_class", source_taxon="phone",
++    ) is None
++    return {
++        "ios_umbrella": bool(ios_umbrella),
++        "broad_values": bool(broad_values),
++        "recognized_out_of_scope": bool(recognized_out_of_scope),
++        "unmapped_manufacturer_model": bool(unmapped_manufacturer_model),
++        "multiple_explicit_aliases": bool(multiple_explicit_aliases),
++        "no_heuristic_aliasing": bool(no_heuristic_aliasing),
++    }
++
++
++def _ref(content: ArtifactContent) -> dict[str, str]:
++    if not isinstance(content, ArtifactContent):
++        raise DeviceFingerprintValidationError("Invalid F-E6 input artifact")
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++def run_fe6_taxonomy_alias_gate(
++    taxonomy: ArtifactContent,
++    alias_mapping: ArtifactContent,
++    *,
++    candidate_repository_commit_sha: str,
++    candidate_repository_tree_sha: str,
++    environment_identity: str,
++    retained_evidence_refs: list[dict[str, Any]],
++    decision_record_refs: list[str],
++) -> FE6GateExecution:
++    """Evaluate the frozen V1 production candidate and emit PASS/FAIL manifest."""
++    input_refs = [_ref(taxonomy), _ref(alias_mapping)]
++    reasons: list[str] = []
++    try:
++        if taxonomy.artifact_type != "ClassificationTaxonomy":
++            raise DeviceFingerprintValidationError("Wrong taxonomy artifact type")
++        expected = make_classification_taxonomy(taxonomy.semantic_payload)
++        if expected.artifact_id != taxonomy.artifact_id:
++            raise DeviceFingerprintValidationError("Noncanonical taxonomy")
++    except DeviceFingerprintValidationError:
++        reasons.append("taxonomy_invalid")
++    try:
++        if alias_mapping.artifact_type != "AliasMapping":
++            raise DeviceFingerprintValidationError("Wrong alias artifact type")
++        expected = make_alias_mapping(alias_mapping.semantic_payload)
++        if expected.artifact_id != alias_mapping.artifact_id:
++            raise DeviceFingerprintValidationError("Noncanonical aliases")
++    except DeviceFingerprintValidationError:
++        reasons.append("alias_mapping_invalid")
++    if "taxonomy_invalid" not in reasons:
++        tax = taxonomy.semantic_payload
++        if tax["manufacturer_records"] or tax["model_family_records"]:
++            reasons.append("production_manufacturer_model_records_not_empty")
++    if "alias_mapping_invalid" not in reasons:
++        aliases = alias_mapping.semantic_payload
++        if aliases["manufacturer_aliases"] or aliases["model_aliases"]:
++            reasons.append("production_aliases_not_empty")
++        if aliases["source_taxonomy_mappings"] != build_alias_mapping_v1().semantic_payload["source_taxonomy_mappings"]:
++            reasons.append("satori_mapping_set_mismatch")
++    if not ("taxonomy_invalid" in reasons or "alias_mapping_invalid" in reasons):
++        try:
++            validate_alias_mapping_against_taxonomy(taxonomy, alias_mapping)
++        except DeviceFingerprintValidationError:
++            reasons.append("alias_taxonomy_incompatible")
++    try:
++        fixtures = run_fe6_fixture_proofs()
++    except DeviceFingerprintValidationError:
++        fixtures = {name: False for name in (
++            "ios_umbrella", "broad_values", "recognized_out_of_scope",
++            "unmapped_manufacturer_model", "multiple_explicit_aliases", "no_heuristic_aliasing",
++        )}
++    reasons.extend(f"fixture_{name}_failed" for name, passed in fixtures.items() if not passed)
++    if not retained_evidence_refs:
++        reasons.append("retained_evidence_required")
++    if not decision_record_refs:
++        reasons.append("owner_decision_required")
++    status = "FAIL" if reasons else "PASS"
++    manifest = make_gate_result_manifest({
++        "gate_id": "F-E6", "gate_contract_version": "R14-F-E6-v1", "status": status,
++        "candidate_repository_commit_sha": candidate_repository_commit_sha,
++        "candidate_repository_tree_sha": candidate_repository_tree_sha,
++        "input_artifact_refs": input_refs,
++        "output_artifact_refs": input_refs if status == "PASS" else [],
++        "retained_evidence_refs": retained_evidence_refs,
++        "proof_execution_identity": {
++            "execution_id": str(uuid.uuid4()), "executor_kind": "TECHLEAD_GATE_TOOL",
++            "repository_commit_sha": candidate_repository_commit_sha,
++            "repository_tree_sha": candidate_repository_tree_sha,
++            "procedure_or_test_suite_id": "F-E6-taxonomy-alias-v1",
++            "environment_identity": environment_identity,
++            "execution_artifact_sha256": None,
++        },
++        "trusted_time_inputs": {
++            "foundation_knowledge_evaluation_at_utc": None,
++            "foundation_admission_evaluation_at_utc": None,
++            "knowledge_evaluation_at_utc": None,
++        },
++        "decision_record_refs": decision_record_refs,
++    })
++    return FE6GateExecution(
++        taxonomy.artifact_id, taxonomy.content_sha256,
++        alias_mapping.artifact_id, alias_mapping.content_sha256,
++        fixtures, manifest, tuple(reasons),
++    )
+diff --git a/app/device_fingerprint/k1_satori_import.py b/app/device_fingerprint/k1_satori_import.py
+index dd6780851a822fc312364c485e184015683a20be..59fd4f515e8e7637e43eee5791d99b157cca4377 100644
+--- a/app/device_fingerprint/k1_satori_import.py
++++ b/app/device_fingerprint/k1_satori_import.py
+@@ -30,7 +30,7 @@ _MESSAGE_TYPES = {
+     "Any": "ANY",
+ }
+ _REJECTED_MESSAGE_TYPES = frozenset({"ACK", "Offer", "NAK"})
+-_PLATFORM_MAPPING = {
++SATORI_PLATFORM_TAXONOMY_MAPPING = {
+     "Android": "android",
+     "iOS": "ios",
+     "Windows": "windows",
+@@ -38,7 +38,7 @@ _PLATFORM_MAPPING = {
+     "ChromeOS": "chromeos",
+     "Linux": "linux",
+ }
+-_DEVICE_CLASS_MAPPING = {
++SATORI_DEVICE_CLASS_TAXONOMY_MAPPING = {
+     "Smartphone": "smartphone",
+     "Tablet": "tablet",
+     "tablet": "tablet",
+@@ -157,10 +157,10 @@ def _candidate_taxonomy(fingerprint_attributes: dict[str, str]) -> list[dict[str
+     if platform_value is None:
+         platform_value = fingerprint_attributes.get("os_name")
+     return [
+-        _taxonomy_outcome("platform_family", platform_value, _PLATFORM_MAPPING),
++        _taxonomy_outcome("platform_family", platform_value, SATORI_PLATFORM_TAXONOMY_MAPPING),
+         _taxonomy_outcome(
+             "device_class", fingerprint_attributes.get("device_type"),
+-            _DEVICE_CLASS_MAPPING,
++            SATORI_DEVICE_CLASS_TAXONOMY_MAPPING,
+         ),
+         _taxonomy_outcome("manufacturer_family", None, {}),
+         _taxonomy_outcome("model_family", None, {}),
+@@ -171,8 +171,8 @@ def _has_direct_taxonomy_mapping(fingerprint_attributes: dict[str, str]) -> bool
+     platform_value = fingerprint_attributes.get("os_class")
+     if platform_value is None:
+         platform_value = fingerprint_attributes.get("os_name")
+-    return platform_value in _PLATFORM_MAPPING or (
+-        fingerprint_attributes.get("device_type") in _DEVICE_CLASS_MAPPING
++    return platform_value in SATORI_PLATFORM_TAXONOMY_MAPPING or (
++        fingerprint_attributes.get("device_type") in SATORI_DEVICE_CLASS_TAXONOMY_MAPPING
+     )
+ 
+ 
+diff --git a/app/device_fingerprint/taxonomy_artifacts.py b/app/device_fingerprint/taxonomy_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bba8b8ccb387e2f47f81d2748c4bc705ab7bc998
+--- /dev/null
++++ b/app/device_fingerprint/taxonomy_artifacts.py
+@@ -0,0 +1,270 @@
++"""Frozen R14 F-E6 taxonomy and exact alias ArtifactContent contracts."""
++
++from __future__ import annotations
++
++import unicodedata
++from typing import Any, Callable
++
++from .artifact_content import ArtifactContent, canonical_set, make_artifact_content
++from .k1_satori_import import (
++    SATORI_DEVICE_CLASS_TAXONOMY_MAPPING,
++    SATORI_PLATFORM_TAXONOMY_MAPPING,
++)
++from .models import DeviceFingerprintValidationError
++
++PLATFORM_FAMILIES = frozenset({"android", "ios", "windows", "macos", "chromeos", "linux"})
++DEVICE_CLASSES = frozenset({"smartphone", "tablet", "laptop"})
++OUT_OF_SCOPE_DIMENSIONS = frozenset({"platform_family", "device_class"})
++DIMENSIONS = frozenset({"platform_family", "device_class", "manufacturer_family", "model_family"})
++MAPPING_KINDS = frozenset({
++    "CANONICAL_VALUE", "BROAD_UNRESOLVED", "RECOGNIZED_OUT_OF_SCOPE", "UNMAPPED",
++})
++
++_TAXONOMY_FIELDS = frozenset({
++    "taxonomy_version", "platform_family_values", "device_class_values",
++    "manufacturer_records", "model_family_records", "recognized_out_of_scope_dimensions",
++})
++_ALIAS_FIELDS = frozenset({
++    "alias_mapping_version", "manufacturer_aliases", "model_aliases", "source_taxonomy_mappings",
++})
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _shape(value: Any, fields: frozenset[str], label: str) -> dict[str, Any]:
++    if not isinstance(value, dict) or set(value) != fields:
++        _fail(f"Invalid {label} shape")
++    return value
++
++
++def _text(value: Any, label: str) -> str:
++    if not isinstance(value, str) or not value:
++        _fail(f"Invalid {label}")
++    return value
++
++
++def _set_rows(
++    values: Any, fields: frozenset[str], key: Callable[[dict[str, Any]], Any],
++    label: str,
++) -> list[dict[str, Any]]:
++    if not isinstance(values, list):
++        _fail(f"Invalid {label}")
++    rows = [dict(_shape(row, fields, label)) for row in values]
++    keys = []
++    for row in rows:
++        primary = key(row)
++        parts = primary if isinstance(primary, tuple) else (primary,)
++        if not parts or any(not isinstance(part, str) or not part for part in parts):
++            _fail(f"Invalid {label} primary key")
++        keys.append(tuple(unicodedata.normalize("NFC", part) for part in parts))
++    if len(keys) != len(set(keys)):
++        _fail(f"Duplicate {label} primary key")
++    return canonical_set(rows, key)
++
++
++def _string_set(values: Any, allowed: frozenset[str], label: str) -> list[str]:
++    if not isinstance(values, list):
++        _fail(f"Invalid {label}")
++    for value in values:
++        _text(value, label)
++        if value not in allowed:
++            _fail(f"Unknown {label}")
++    if len(values) != len(set(values)):
++        _fail(f"Duplicate {label}")
++    if set(values) != allowed:
++        _fail(f"Incomplete {label}")
++    return canonical_set(values, lambda value: value)
++
++
++def make_classification_taxonomy(payload: dict[str, Any]) -> ArtifactContent:
++    """Validate the closed classification_taxonomy_v1 schema and its SETs."""
++    value = _shape(payload, _TAXONOMY_FIELDS, "ClassificationTaxonomy")
++    if value["taxonomy_version"] != "classification_taxonomy_v1":
++        _fail("Invalid taxonomy version")
++    platforms = _string_set(value["platform_family_values"], PLATFORM_FAMILIES, "platform family")
++    classes = _string_set(value["device_class_values"], DEVICE_CLASSES, "device class")
++    out_of_scope = _string_set(
++        value["recognized_out_of_scope_dimensions"], OUT_OF_SCOPE_DIMENSIONS,
++        "recognized out-of-scope dimension",
++    )
++    manufacturers = _set_rows(
++        value["manufacturer_records"], frozenset({"manufacturer_id", "display_label"}),
++        lambda row: row["manufacturer_id"], "ManufacturerRecord",
++    )
++    for row in manufacturers:
++        _text(row["manufacturer_id"], "manufacturer ID")
++        _text(row["display_label"], "manufacturer label")
++    models = _set_rows(
++        value["model_family_records"],
++        frozenset({"model_family_id", "manufacturer_id", "display_label"}),
++        lambda row: row["model_family_id"], "ModelFamilyRecord",
++    )
++    manufacturer_ids = {row["manufacturer_id"] for row in manufacturers}
++    for row in models:
++        _text(row["model_family_id"], "model family ID")
++        _text(row["display_label"], "model family label")
++        if row["manufacturer_id"] is not None:
++            _text(row["manufacturer_id"], "model manufacturer ID")
++            if row["manufacturer_id"] not in manufacturer_ids:
++                _fail("Model manufacturer does not exist")
++    return make_artifact_content("ClassificationTaxonomy", {
++        "taxonomy_version": value["taxonomy_version"],
++        "platform_family_values": platforms,
++        "device_class_values": classes,
++        "manufacturer_records": manufacturers,
++        "model_family_records": models,
++        "recognized_out_of_scope_dimensions": out_of_scope,
++    })
++
++
++def build_classification_taxonomy_v1() -> ArtifactContent:
++    return make_classification_taxonomy({
++        "taxonomy_version": "classification_taxonomy_v1",
++        "platform_family_values": list(PLATFORM_FAMILIES),
++        "device_class_values": list(DEVICE_CLASSES),
++        "manufacturer_records": [], "model_family_records": [],
++        "recognized_out_of_scope_dimensions": list(OUT_OF_SCOPE_DIMENSIONS),
++    })
++
++
++def make_alias_mapping(payload: dict[str, Any]) -> ArtifactContent:
++    """Validate exact V1 aliases without normalizing source identity strings."""
++    value = _shape(payload, _ALIAS_FIELDS, "AliasMapping")
++    if value["alias_mapping_version"] != "alias_mapping_v1":
++        _fail("Invalid alias mapping version")
++    manufacturers = _set_rows(
++        value["manufacturer_aliases"],
++        frozenset({"source_id", "source_value", "manufacturer_id"}),
++        lambda row: (row["source_id"], row["source_value"]), "ManufacturerAlias",
++    )
++    for row in manufacturers:
++        for field in ("source_id", "source_value", "manufacturer_id"):
++            _text(row[field], field)
++    models = _set_rows(
++        value["model_aliases"],
++        frozenset({"source_id", "source_value", "model_family_id"}),
++        lambda row: (row["source_id"], row["source_value"]), "ModelAlias",
++    )
++    for row in models:
++        for field in ("source_id", "source_value", "model_family_id"):
++            _text(row[field], field)
++    mappings = _set_rows(
++        value["source_taxonomy_mappings"],
++        frozenset({"source_id", "dimension_name", "source_taxon", "mapping_kind", "target_id_or_ref"}),
++        lambda row: (row["source_id"], row["dimension_name"], row["source_taxon"]),
++        "SourceTaxonomyMapping",
++    )
++    for row in mappings:
++        _text(row["source_id"], "source ID")
++        _text(row["source_taxon"], "source taxon")
++        dimension = _text(row["dimension_name"], "mapping dimension")
++        if dimension not in DIMENSIONS:
++            _fail("Unknown mapping dimension")
++        kind = _text(row["mapping_kind"], "mapping kind")
++        if kind not in MAPPING_KINDS:
++            _fail("Unknown mapping kind")
++        target = row["target_id_or_ref"]
++        if kind == "UNMAPPED":
++            if target is not None:
++                _fail("UNMAPPED mapping cannot have a target")
++        else:
++            _text(target, "mapping target")
++        if kind == "RECOGNIZED_OUT_OF_SCOPE" and dimension not in OUT_OF_SCOPE_DIMENSIONS:
++            _fail("Invalid recognized-out-of-scope dimension")
++    return make_artifact_content("AliasMapping", {
++        "alias_mapping_version": value["alias_mapping_version"],
++        "manufacturer_aliases": manufacturers, "model_aliases": models,
++        "source_taxonomy_mappings": mappings,
++    })
++
++
++def build_alias_mapping_v1() -> ArtifactContent:
++    mappings = []
++    for dimension, accepted in (
++        ("platform_family", SATORI_PLATFORM_TAXONOMY_MAPPING),
++        ("device_class", SATORI_DEVICE_CLASS_TAXONOMY_MAPPING),
++    ):
++        mappings.extend({
++            "source_id": "satori_dhcp", "dimension_name": dimension,
++            "source_taxon": source, "mapping_kind": "CANONICAL_VALUE",
++            "target_id_or_ref": target,
++        } for source, target in accepted.items())
++    return make_alias_mapping({
++        "alias_mapping_version": "alias_mapping_v1",
++        "manufacturer_aliases": [], "model_aliases": [],
++        "source_taxonomy_mappings": mappings,
++    })
++
++
++def _payload(content: ArtifactContent, kind: str, builder: Callable[[dict[str, Any]], ArtifactContent]) -> dict[str, Any]:
++    if not isinstance(content, ArtifactContent) or content.artifact_type != kind:
++        _fail(f"Expected {kind} artifact")
++    validated = builder(content.semantic_payload)
++    if validated.artifact_id != content.artifact_id:
++        _fail(f"Noncanonical {kind} artifact")
++    return validated.semantic_payload
++
++
++def _exact_row(
++    alias_mapping: ArtifactContent, rows_name: str, fields: tuple[str, ...],
++    expected: tuple[str, ...],
++) -> dict[str, Any] | None:
++    rows = _payload(alias_mapping, "AliasMapping", make_alias_mapping)[rows_name]
++    return next((row for row in rows if tuple(row[field] for field in fields) == expected), None)
++
++
++def resolve_manufacturer_alias(
++    alias_mapping: ArtifactContent, *, source_id: str, source_value: str,
++) -> dict[str, Any] | None:
++    return _exact_row(alias_mapping, "manufacturer_aliases", ("source_id", "source_value"),
++                      (source_id, source_value))
++
++
++def resolve_model_alias(
++    alias_mapping: ArtifactContent, *, source_id: str, source_value: str,
++) -> dict[str, Any] | None:
++    return _exact_row(alias_mapping, "model_aliases", ("source_id", "source_value"),
++                      (source_id, source_value))
++
++
++def resolve_source_taxonomy_mapping(
++    alias_mapping: ArtifactContent, *, source_id: str,
++    dimension_name: str, source_taxon: str,
++) -> dict[str, Any] | None:
++    return _exact_row(
++        alias_mapping, "source_taxonomy_mappings",
++        ("source_id", "dimension_name", "source_taxon"),
++        (source_id, dimension_name, source_taxon),
++    )
++
++
++def validate_alias_mapping_against_taxonomy(
++    taxonomy: ArtifactContent, alias_mapping: ArtifactContent,
++) -> bool:
++    tax = _payload(taxonomy, "ClassificationTaxonomy", make_classification_taxonomy)
++    aliases = _payload(alias_mapping, "AliasMapping", make_alias_mapping)
++    admitted = {
++        "platform_family": set(tax["platform_family_values"]),
++        "device_class": set(tax["device_class_values"]),
++        "manufacturer_family": {row["manufacturer_id"] for row in tax["manufacturer_records"]},
++        "model_family": {row["model_family_id"] for row in tax["model_family_records"]},
++    }
++    for row in aliases["manufacturer_aliases"]:
++        if row["manufacturer_id"] not in admitted["manufacturer_family"]:
++            _fail("Manufacturer alias target is not admitted")
++    for row in aliases["model_aliases"]:
++        if row["model_family_id"] not in admitted["model_family"]:
++            _fail("Model alias target is not admitted")
++    for row in aliases["source_taxonomy_mappings"]:
++        kind, dimension, target = row["mapping_kind"], row["dimension_name"], row["target_id_or_ref"]
++        if kind == "CANONICAL_VALUE" and target not in admitted[dimension]:
++            _fail("Canonical mapping target is not admitted")
++        if kind == "BROAD_UNRESOLVED" and target in admitted[dimension]:
++            _fail("Broad mapping cannot resolve to a canonical value")
++        if kind == "RECOGNIZED_OUT_OF_SCOPE" and dimension not in OUT_OF_SCOPE_DIMENSIONS:
++            _fail("Out-of-scope mapping dimension is not admitted")
++        if kind == "UNMAPPED" and target is not None:
++            _fail("Unmapped source cannot have a target")
++    return True
+diff --git a/tests/device_fingerprint_fe6/__init__.py b/tests/device_fingerprint_fe6/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b137891791fe96927ad78e64b0aad7bded08bdc
+--- /dev/null
++++ b/tests/device_fingerprint_fe6/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/tests/device_fingerprint_fe6/test_fe6_taxonomy_aliases.py b/tests/device_fingerprint_fe6/test_fe6_taxonomy_aliases.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..dca14fc9c8d901b4430bb0b6335283bd7e0cc0ad
+--- /dev/null
++++ b/tests/device_fingerprint_fe6/test_fe6_taxonomy_aliases.py
+@@ -0,0 +1,149 @@
++from copy import deepcopy
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef, make_artifact_content
++from app.device_fingerprint.fe6_taxonomy_aliases import (
++    run_fe6_fixture_proofs, run_fe6_taxonomy_alias_gate,
++)
++from app.device_fingerprint.k2b_p0f_import import _PLATFORM_NAMES
++from app.device_fingerprint.k3_portal_rules import build_k3_portal_rule_set_v1
++from app.device_fingerprint.taxonomy_artifacts import (
++    build_alias_mapping_v1, build_classification_taxonomy_v1,
++    make_alias_mapping, make_classification_taxonomy,
++)
++
++_DECISION = "22222222-2222-4222-8222-222222222222"  # Synthetic only; never a real admission.
++_EVIDENCE = [{"evidence_label": "synthetic-fe6-proof", "file_sha256": "e" * 64,
++              "media_type": "application/json", "path_or_reference": "test://fe6"}]
++
++
++def _gate(taxonomy=None, aliases=None, *, evidence=None, decisions=None):
++    return run_fe6_taxonomy_alias_gate(
++        taxonomy or build_classification_taxonomy_v1(),
++        aliases or build_alias_mapping_v1(),
++        candidate_repository_commit_sha="a" * 40,
++        candidate_repository_tree_sha="b" * 40,
++        environment_identity="synthetic-fe6-test",
++        retained_evidence_refs=_EVIDENCE if evidence is None else evidence,
++        decision_record_refs=[_DECISION] if decisions is None else decisions,
++    )
++
++
++def test_fixture_proofs_cover_all_six_required_semantics():
++    assert run_fe6_fixture_proofs() == {
++        "ios_umbrella": True, "broad_values": True,
++        "recognized_out_of_scope": True, "unmapped_manufacturer_model": True,
++        "multiple_explicit_aliases": True, "no_heuristic_aliasing": True,
++    }
++
++
++def test_gate_pass_has_only_two_candidate_input_and_output_refs():
++    result = _gate()
++    manifest = result.gate_result_manifest.semantic_payload
++    assert result.failure_reasons == ()
++    assert manifest["status"] == "PASS"
++    assert manifest["gate_id"] == "F-E6"
++    assert manifest["gate_contract_version"] == "R14-F-E6-v1"
++    expected = [ArtifactRef(a.artifact_id, a.content_sha256).as_dict()
++                for a in (build_alias_mapping_v1(), build_classification_taxonomy_v1())]
++    assert manifest["input_artifact_refs"] == expected
++    assert manifest["output_artifact_refs"] == expected
++    assert len(manifest["input_artifact_refs"]) == 2
++    assert {ref["artifact_id"].split(":")[0] for ref in expected} == {
++        "ClassificationTaxonomy", "AliasMapping",
++    }
++    assert manifest["proof_execution_identity"]["executor_kind"] == "TECHLEAD_GATE_TOOL"
++    assert manifest["proof_execution_identity"]["procedure_or_test_suite_id"] == "F-E6-taxonomy-alias-v1"
++    assert manifest["trusted_time_inputs"] == {
++        "foundation_knowledge_evaluation_at_utc": None,
++        "foundation_admission_evaluation_at_utc": None,
++        "knowledge_evaluation_at_utc": None,
++    }
++    assert all(result.fixture_results.values())
++
++
++@pytest.mark.parametrize("kind", [
++    "missing_platform", "extra_platform", "ipados", "missing_class", "extra_class",
++    "manufacturer", "model", "manufacturer_alias", "model_alias", "satori_changed",
++    "satori_missing", "satori_extra", "tablet_collapsed", "broad_narrowed",
++    "bad_canonical_target", "wrong_taxonomy_type", "wrong_alias_type",
++])
++def test_gate_semantic_candidate_failures_return_fail_manifest(kind):
++    taxonomy = build_classification_taxonomy_v1()
++    aliases = build_alias_mapping_v1()
++    tax = taxonomy.semantic_payload
++    mapping = aliases.semantic_payload
++    if kind == "missing_platform":
++        tax["platform_family_values"].remove("ios")
++    elif kind == "extra_platform":
++        tax["platform_family_values"].append("other")
++    elif kind == "ipados":
++        tax["platform_family_values"].append("ipados")
++    elif kind == "missing_class":
++        tax["device_class_values"].remove("tablet")
++    elif kind == "extra_class":
++        tax["device_class_values"].append("desktop")
++    elif kind == "manufacturer":
++        tax["manufacturer_records"].append({"manufacturer_id": "fixture", "display_label": "Fixture"})
++    elif kind == "model":
++        tax["model_family_records"].append({"model_family_id": "fixture",
++                                             "manufacturer_id": None, "display_label": "Fixture"})
++    elif kind == "manufacturer_alias":
++        mapping["manufacturer_aliases"].append({"source_id": "fixture", "source_value": "Maker",
++                                                 "manufacturer_id": "fixture"})
++    elif kind == "model_alias":
++        mapping["model_aliases"].append({"source_id": "fixture", "source_value": "Model",
++                                          "model_family_id": "fixture"})
++    elif kind == "satori_changed":
++        mapping["source_taxonomy_mappings"][0]["target_id_or_ref"] = "different"
++    elif kind == "satori_missing":
++        mapping["source_taxonomy_mappings"].pop()
++    elif kind == "satori_extra":
++        extra = deepcopy(mapping["source_taxonomy_mappings"][0])
++        extra["source_taxon"] = "Phone"
++        mapping["source_taxonomy_mappings"].append(extra)
++    elif kind == "tablet_collapsed":
++        mapping["source_taxonomy_mappings"] = [
++            row for row in mapping["source_taxonomy_mappings"] if row["source_taxon"] != "tablet"
++        ]
++    elif kind == "broad_narrowed":
++        mapping["source_taxonomy_mappings"].append({
++            "source_id": "satori_dhcp", "dimension_name": "device_class", "source_taxon": "Phone",
++            "mapping_kind": "BROAD_UNRESOLVED", "target_id_or_ref": "smartphone",
++        })
++    elif kind == "bad_canonical_target":
++        mapping["source_taxonomy_mappings"][0]["target_id_or_ref"] = "not-admitted"
++    elif kind == "wrong_taxonomy_type":
++        taxonomy = make_artifact_content("WrongTaxonomy", tax)
++    elif kind == "wrong_alias_type":
++        aliases = make_artifact_content("WrongAlias", mapping)
++    if kind not in {"wrong_taxonomy_type", "wrong_alias_type"}:
++        taxonomy = make_artifact_content("ClassificationTaxonomy", tax)
++        aliases = make_artifact_content("AliasMapping", mapping)
++    result = _gate(taxonomy, aliases)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++    assert result.failure_reasons
++
++
++@pytest.mark.parametrize("evidence,decisions", [([], [_DECISION]), (_EVIDENCE, [])])
++def test_gate_requires_real_admission_evidence_and_owner_decision(evidence, decisions):
++    result = _gate(evidence=evidence, decisions=decisions)
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++
++
++def test_k2b_and_k3_canonical_outputs_fit_taxonomy_without_gate_dependencies():
++    tax = build_classification_taxonomy_v1().semantic_payload
++    assert set(_PLATFORM_NAMES.values()) <= set(tax["platform_family_values"])
++    rules = build_k3_portal_rule_set_v1().semantic_payload["rules"]
++    canonical = [row for row in rules if row["outcome_kind"] == "CANONICAL_VALUE"]
++    assert {row["outcome_id_or_ref"] for row in canonical if row["dimension_name"] == "platform_family"} <= set(
++        tax["platform_family_values"]
++    )
++    assert any(row["dimension_name"] == "device_class" and row["outcome_id_or_ref"] == "tablet"
++               for row in canonical)
++    manifest = _gate().gate_result_manifest.semantic_payload
++    assert all(ref["artifact_id"].split(":")[0] in {"ClassificationTaxonomy", "AliasMapping"}
++               for ref in manifest["input_artifact_refs"])
+diff --git a/tests/device_fingerprint_fe6/test_taxonomy_artifacts.py b/tests/device_fingerprint_fe6/test_taxonomy_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..63f28457e9c07466ae6d068fe82af0cbe6b488da
+--- /dev/null
++++ b/tests/device_fingerprint_fe6/test_taxonomy_artifacts.py
+@@ -0,0 +1,235 @@
++from copy import deepcopy
++
++import pytest
++
++from app.device_fingerprint.k1_satori_import import (
++    ACCEPTED_SATORI_AUDIT,
++    SATORI_DEVICE_CLASS_TAXONOMY_MAPPING,
++    SATORI_PLATFORM_TAXONOMY_MAPPING,
++    _candidate_taxonomy,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.taxonomy_artifacts import (
++    build_alias_mapping_v1, build_classification_taxonomy_v1,
++    make_alias_mapping, make_classification_taxonomy,
++    resolve_manufacturer_alias, resolve_model_alias, resolve_source_taxonomy_mapping,
++    validate_alias_mapping_against_taxonomy,
++)
++
++
++def _tax():
++    return build_classification_taxonomy_v1().semantic_payload
++
++
++def _aliases():
++    return build_alias_mapping_v1().semantic_payload
++
++
++def test_frozen_production_taxonomy_exact_sets_order_and_empty_identity_records():
++    artifact = build_classification_taxonomy_v1()
++    payload = artifact.semantic_payload
++    assert payload == {
++        "taxonomy_version": "classification_taxonomy_v1",
++        "platform_family_values": ["android", "chromeos", "ios", "linux", "macos", "windows"],
++        "device_class_values": ["laptop", "smartphone", "tablet"],
++        "manufacturer_records": [], "model_family_records": [],
++        "recognized_out_of_scope_dimensions": ["device_class", "platform_family"],
++    }
++    assert artifact.artifact_id == build_classification_taxonomy_v1().artifact_id
++    assert "ipados" not in payload["platform_family_values"]
++    reversed_payload = {**payload,
++        "platform_family_values": list(reversed(payload["platform_family_values"])),
++        "device_class_values": list(reversed(payload["device_class_values"])),
++        "recognized_out_of_scope_dimensions": list(reversed(payload["recognized_out_of_scope_dimensions"]))}
++    assert make_classification_taxonomy(reversed_payload).artifact_id == artifact.artifact_id
++
++
++@pytest.mark.parametrize("mutation", [
++    lambda p: p.update(unexpected=True),
++    lambda p: p.update(taxonomy_version="other"),
++    lambda p: p["platform_family_values"].remove("ios"),
++    lambda p: p["platform_family_values"].append("ipados"),
++    lambda p: p["platform_family_values"].append("android"),
++    lambda p: p["device_class_values"].remove("tablet"),
++    lambda p: p["device_class_values"].append("desktop"),
++    lambda p: p["recognized_out_of_scope_dimensions"].append("manufacturer_family"),
++])
++def test_taxonomy_rejects_non_frozen_shape_or_values(mutation):
++    payload = _tax()
++    mutation(payload)
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_classification_taxonomy(payload)
++
++
++def test_manufacturer_and_model_primary_keys_are_unique_and_model_parent_exists():
++    payload = _tax()
++    payload["manufacturer_records"] = [{"manufacturer_id": "maker", "display_label": "Maker"}]
++    payload["model_family_records"] = [{
++        "model_family_id": "model", "manufacturer_id": "maker", "display_label": "Model",
++    }]
++    assert make_classification_taxonomy(payload).semantic_payload["model_family_records"] == payload["model_family_records"]
++    duplicate = deepcopy(payload)
++    duplicate["manufacturer_records"].append({"manufacturer_id": "maker", "display_label": "Other"})
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_classification_taxonomy(duplicate)
++    duplicate = deepcopy(payload)
++    duplicate["model_family_records"].append({
++        "model_family_id": "model", "manufacturer_id": None, "display_label": "Other",
++    })
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_classification_taxonomy(duplicate)
++    missing_parent = deepcopy(payload)
++    missing_parent["model_family_records"][0]["manufacturer_id"] = "unknown"
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_classification_taxonomy(missing_parent)
++    nfc_duplicate = deepcopy(payload)
++    nfc_duplicate["manufacturer_records"].extend([
++        {"manufacturer_id": "caf\u00e9", "display_label": "First"},
++        {"manufacturer_id": "cafe\u0301", "display_label": "Second"},
++    ])
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_classification_taxonomy(nfc_duplicate)
++
++
++def test_production_aliases_are_ten_exact_k1_mappings_and_no_broad_rows():
++    mapping = build_alias_mapping_v1()
++    payload = mapping.semantic_payload
++    assert payload["alias_mapping_version"] == "alias_mapping_v1"
++    assert payload["manufacturer_aliases"] == payload["model_aliases"] == []
++    assert len(payload["source_taxonomy_mappings"]) == 10
++    expected = {
++        ("platform_family", source, target)
++        for source, target in SATORI_PLATFORM_TAXONOMY_MAPPING.items()
++    } | {
++        ("device_class", source, target)
++        for source, target in SATORI_DEVICE_CLASS_TAXONOMY_MAPPING.items()
++    }
++    assert {(row["dimension_name"], row["source_taxon"], row["target_id_or_ref"])
++            for row in payload["source_taxonomy_mappings"]} == expected
++    assert all(row["source_id"] == "satori_dhcp" and row["mapping_kind"] == "CANONICAL_VALUE"
++               for row in payload["source_taxonomy_mappings"])
++    assert all(row["source_taxon"] not in {"Phone", "Mobile", "Desktop"}
++               for row in payload["source_taxonomy_mappings"])
++    assert validate_alias_mapping_against_taxonomy(build_classification_taxonomy_v1(), mapping)
++
++
++def test_k1_uses_the_same_mapping_constants_and_accepted_audit_is_unchanged():
++    for source, target in SATORI_PLATFORM_TAXONOMY_MAPPING.items():
++        row = _candidate_taxonomy({"os_class": source})[0]
++        assert row["canonical_target_id"] == target
++        assert resolve_source_taxonomy_mapping(
++            build_alias_mapping_v1(), source_id="satori_dhcp",
++            dimension_name="platform_family", source_taxon=source,
++        )["target_id_or_ref"] == target
++    for source, target in SATORI_DEVICE_CLASS_TAXONOMY_MAPPING.items():
++        row = _candidate_taxonomy({"device_type": source})[1]
++        assert row["canonical_target_id"] == target
++    assert (
++        ACCEPTED_SATORI_AUDIT.fingerprints_total,
++        ACCEPTED_SATORI_AUDIT.source_tests_total,
++        ACCEPTED_SATORI_AUDIT.source_tests_accepted,
++        ACCEPTED_SATORI_AUDIT.source_tests_rejected,
++        ACCEPTED_SATORI_AUDIT.canonical_records_unique,
++        ACCEPTED_SATORI_AUDIT.predicate_groups_total,
++        ACCEPTED_SATORI_AUDIT.ambiguous_predicate_groups,
++        ACCEPTED_SATORI_AUDIT.records_in_ambiguous_groups,
++    ) == (481, 2787, 903, 1884, 903, 448, 164, 619)
++
++
++@pytest.mark.parametrize("mutation", [
++    lambda p: p.update(extra=True),
++    lambda p: p.update(alias_mapping_version="wrong"),
++    lambda p: p["source_taxonomy_mappings"].append(deepcopy(p["source_taxonomy_mappings"][0])),
++    lambda p: p["source_taxonomy_mappings"][0].update(mapping_kind="UNMAPPED"),
++    lambda p: p["source_taxonomy_mappings"][0].update(mapping_kind="BROAD_UNRESOLVED", target_id_or_ref=None),
++    lambda p: p["source_taxonomy_mappings"][0].update(mapping_kind="RECOGNIZED_OUT_OF_SCOPE", dimension_name="model_family"),
++    lambda p: p["source_taxonomy_mappings"][0].update(mapping_kind="unknown"),
++])
++def test_alias_mapping_closed_shape_keys_and_cross_field_rules(mutation):
++    payload = _aliases()
++    mutation(payload)
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_alias_mapping(payload)
++
++
++def test_exact_source_lookup_distinguishes_case_punctuation_substring_and_missing():
++    mapping = build_alias_mapping_v1()
++    assert resolve_source_taxonomy_mapping(
++        mapping, source_id="satori_dhcp", dimension_name="device_class", source_taxon="Tablet",
++    )["target_id_or_ref"] == "tablet"
++    assert resolve_source_taxonomy_mapping(
++        mapping, source_id="satori_dhcp", dimension_name="device_class", source_taxon="tablet",
++    )["target_id_or_ref"] == "tablet"
++    for wrong in ("TABLET", "Table", "Tablet!", "tablet "):
++        assert resolve_source_taxonomy_mapping(
++            mapping, source_id="satori_dhcp", dimension_name="device_class", source_taxon=wrong,
++        ) is None
++    assert resolve_source_taxonomy_mapping(
++        mapping, source_id="other", dimension_name="device_class", source_taxon="Tablet",
++    ) is None
++    assert resolve_source_taxonomy_mapping(
++        mapping, source_id="satori_dhcp", dimension_name="platform_family", source_taxon="Mac OS",
++    )["target_id_or_ref"] == "macos"
++    assert resolve_source_taxonomy_mapping(
++        mapping, source_id="satori_dhcp", dimension_name="platform_family", source_taxon="macOS",
++    ) is None
++
++
++def test_fixture_aliases_and_canonical_targets_are_explicit_only():
++    taxonomy = make_classification_taxonomy({
++        **_tax(),
++        "manufacturer_records": [{"manufacturer_id": "maker", "display_label": "Maker"}],
++        "model_family_records": [{"model_family_id": "model", "manufacturer_id": "maker",
++                                  "display_label": "Model"}],
++    })
++    payload = _aliases()
++    payload["manufacturer_aliases"] = [
++        {"source_id": "fixture", "source_value": raw, "manufacturer_id": "maker"}
++        for raw in ("Apple Inc.", "Apple Corporation")
++    ]
++    payload["model_aliases"] = [
++        {"source_id": "fixture", "source_value": raw, "model_family_id": "model"}
++        for raw in ("Model A", "Model A 2026")
++    ]
++    mapping = make_alias_mapping(payload)
++    assert validate_alias_mapping_against_taxonomy(taxonomy, mapping)
++    assert resolve_manufacturer_alias(mapping, source_id="fixture", source_value="Apple Inc.")["manufacturer_id"] == "maker"
++    assert resolve_model_alias(mapping, source_id="fixture", source_value="Model A")["model_family_id"] == "model"
++    for wrong in ("apple inc.", "Apple Inc", "Apple", "Apple Corp"):
++        assert resolve_manufacturer_alias(mapping, source_id="fixture", source_value=wrong) is None
++    for wrong in ("model a", "Model-A", "Model", "Model B"):
++        assert resolve_model_alias(mapping, source_id="fixture", source_value=wrong) is None
++    duplicate = deepcopy(payload)
++    duplicate["manufacturer_aliases"].append({
++        "source_id": "fixture", "source_value": "Apple Inc.", "manufacturer_id": "other",
++    })
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_alias_mapping(duplicate)
++    duplicate = deepcopy(payload)
++    duplicate["model_aliases"].append({
++        "source_id": "fixture", "source_value": "Model A", "model_family_id": "other",
++    })
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_alias_mapping(duplicate)
++
++
++def test_compatibility_rejects_missing_canonical_targets_and_broad_narrowing():
++    taxonomy = build_classification_taxonomy_v1()
++    payload = _aliases()
++    payload["source_taxonomy_mappings"][0]["target_id_or_ref"] = "unknown-platform"
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_alias_mapping_against_taxonomy(taxonomy, make_alias_mapping(payload))
++    payload = _aliases()
++    payload["source_taxonomy_mappings"][0].update(
++        mapping_kind="BROAD_UNRESOLVED", target_id_or_ref="tablet",
++    )
++    if payload["source_taxonomy_mappings"][0]["dimension_name"] == "platform_family":
++        payload["source_taxonomy_mappings"][0]["target_id_or_ref"] = "ios"
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_alias_mapping_against_taxonomy(taxonomy, make_alias_mapping(payload))
++    payload = _aliases()
++    payload["manufacturer_aliases"] = [{
++        "source_id": "fixture", "source_value": "Maker", "manufacturer_id": "maker",
++    }]
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_alias_mapping_against_taxonomy(taxonomy, make_alias_mapping(payload))

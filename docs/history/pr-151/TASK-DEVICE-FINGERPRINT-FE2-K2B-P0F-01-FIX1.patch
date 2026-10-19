@@ -1,0 +1,516 @@
+diff --git a/app/device_fingerprint/k2b_p0f_import.py b/app/device_fingerprint/k2b_p0f_import.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c791a68e8a1202de3267716bb745535a3c7f39d1
+--- /dev/null
++++ b/app/device_fingerprint/k2b_p0f_import.py
+@@ -0,0 +1,238 @@
++"""Offline import of the pinned legacy p0f TCP request knowledge source."""
++
++from __future__ import annotations
++
++import hashlib
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++from .artifact_content import ArtifactContent, ArtifactRef, canonical_artifact_json
++from .k2a_conformance_artifacts import make_source_governance_record
++from .knowledge_artifacts import canonical_k2b_match_rule, make_canonical_k2b_record_set
++from .models import DeviceFingerprintValidationError
++from .p0f_semantics import RUNTIME_CONTRACT
++
++P0F_SOURCE_COMMIT = "7687e779c42c256c1f36b8c48da7e1f8fe24c2d4"
++P0F_SOURCE_PATH = "p0f.fp"
++P0F_SOURCE_BLOB_SHA1 = "c4b38b7e5b5621c70df56aa49127b5aaae1ec7e8"
++P0F_SOURCE_SIZE = 36529
++
++_PLATFORM_COUNTS = (
++    ("android", 3), ("chromeos", 0), ("ios", 1),
++    ("linux", 25), ("macos", 2), ("windows", 12),
++)
++_PLATFORM_NAMES = {
++    "Windows": "windows", "Mac OS X": "macos", "iOS": "ios",
++}
++_DIMENSIONS = (
++    "platform_family", "device_class", "manufacturer_family", "model_family",
++)
++
++
++@dataclass(frozen=True, slots=True)
++class P0fK2BImportAudit:
++    tcp_request_source_signatures: int
++    admitted_canonical_records: int
++    platform_counts: tuple[tuple[str, int], ...]
++
++
++@dataclass(frozen=True, slots=True)
++class P0fK2BImportResult:
++    record_set: ArtifactContent
++    source_sha256: str
++    audit: P0fK2BImportAudit
++
++
++ACCEPTED_P0F_AUDIT = P0fK2BImportAudit(
++    tcp_request_source_signatures=94,
++    admitted_canonical_records=43,
++    platform_counts=_PLATFORM_COUNTS,
++)
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def verify_p0f_source_bytes(source_bytes: bytes) -> str:
++    """Verify the pinned Git blob and return the calculated source SHA-256."""
++    if not isinstance(source_bytes, bytes) or len(source_bytes) != P0F_SOURCE_SIZE:
++        _fail("Pinned p0f source byte length mismatch")
++    blob_input = f"blob {len(source_bytes)}\0".encode("ascii") + source_bytes
++    if hashlib.sha1(blob_input).hexdigest() != P0F_SOURCE_BLOB_SHA1:
++        _fail("Pinned p0f source Git blob mismatch")
++    return hashlib.sha256(source_bytes).hexdigest()
++
++
++def _provenance_ref(value: ArtifactRef | dict[str, Any]) -> dict[str, str]:
++    reference = value if isinstance(value, ArtifactRef) else ArtifactRef.from_dict(value)
++    if not reference.artifact_id.startswith("KnowledgeProvenanceManifest:v1:sha256:"):
++        _fail("Invalid K2B knowledge provenance reference")
++    return reference.as_dict()
++
++
++def _platform(label: str) -> str | None:
++    parts = label.split(":", 3)
++    if len(parts) != 4 or any(not part for part in parts):
++        return None
++    label_type, label_class, name, flavor = parts
++    if label_type != "s" or label_class == "!":
++        return None
++    if name == "Linux":
++        return "android" if flavor == "(Android)" else "linux"
++    # The named mixed Mac/iPhone/iPad flavor is outside the admitted V1 scope.
++    if name == "Mac OS X" and flavor == "10.9 or newer (sometimes iPhone or iPad)":
++        return None
++    return _PLATFORM_NAMES.get(name)
++
++
++def _dimension_claims(platform: str) -> list[dict[str, Any]]:
++    return [{
++        "dimension_name": dimension,
++        "outcome_kind": "CANONICAL_VALUE" if dimension == "platform_family" else "NO_CLAIM",
++        "canonical_target_id": platform if dimension == "platform_family" else None,
++        "broad_taxon_ref": None,
++        "out_of_scope_taxon_ref": None,
++        "base_claim_strength": "supporting" if dimension == "platform_family" else None,
++    } for dimension in _DIMENSIONS]
++
++
++def _record(label: str, raw_rule: str, platform: str) -> dict[str, Any]:
++    rule = canonical_k2b_match_rule(raw_rule)
++    source_material = {
++        "source_commit": P0F_SOURCE_COMMIT,
++        "source_path": P0F_SOURCE_PATH,
++        "source_blob_sha1": P0F_SOURCE_BLOB_SHA1,
++        "source_label": label,
++        "canonical_match_rule": rule,
++    }
++    source_digest = hashlib.sha256(canonical_artifact_json(source_material)).hexdigest()
++    source_identity = f"p0f-k2b-source:v1:sha256:{source_digest}"
++    claims = _dimension_claims(platform)
++    canonical_material = {
++        "source_record_identity": source_identity,
++        "canonical_match_rule": rule,
++        "dimension_claims": claims,
++        "source_character": "legacy",
++    }
++    canonical_digest = hashlib.sha256(canonical_artifact_json(canonical_material)).hexdigest()
++    return {
++        "record_type": "K2B_TCP",
++        "canonical_record_id": f"k2b-p0f:v1:sha256:{canonical_digest}",
++        "rule_representation": RUNTIME_CONTRACT,
++        "canonical_match_rule": rule,
++        "dimension_claims": claims,
++        "source_character": "legacy",
++        "source_record_identity": source_identity,
++    }
++
++
++def _parse_verified_source(
++    source_bytes: bytes,
++    knowledge_provenance: ArtifactRef | dict[str, Any],
++    source_sha256: str,
++) -> P0fK2BImportResult:
++    try:
++        text = source_bytes.decode("utf-8")
++    except UnicodeDecodeError as exc:
++        raise DeviceFingerprintValidationError("Invalid p0f source encoding") from exc
++    section = ""
++    label = ""
++    platform: str | None = None
++    signature_count = 0
++    records_by_source: dict[str, dict[str, Any]] = {}
++    for line in text.splitlines():
++        stripped = line.strip()
++        if not stripped or stripped.startswith((";", "#")):
++            continue
++        if stripped.startswith("[") and stripped.endswith("]"):
++            section = stripped[1:-1]
++            label = ""
++            platform = None
++            continue
++        if section != "tcp:request" or "=" not in stripped:
++            continue
++        key, _, raw_value = stripped.partition("=")
++        key = key.strip()
++        if key == "label":
++            label = raw_value.strip()
++            platform = _platform(label)
++        elif key == "sig":
++            signature_count += 1
++            if platform is None:
++                continue
++            record = _record(label, raw_value, platform)
++            identity = record["source_record_identity"]
++            previous = records_by_source.setdefault(identity, record)
++            if previous != record:
++                _fail("Conflicting p0f source record identity")
++    record_set = make_canonical_k2b_record_set({
++        "record_set_contract_version": 1,
++        "knowledge_slot": "K2B",
++        "knowledge_provenance": _provenance_ref(knowledge_provenance),
++        "records": list(records_by_source.values()),
++    })
++    counts = {platform: 0 for platform, _ in _PLATFORM_COUNTS}
++    for record in record_set.semantic_payload["records"]:
++        for claim in record["dimension_claims"]:
++            if claim["dimension_name"] == "platform_family":
++                counts[claim["canonical_target_id"]] += 1
++    audit = P0fK2BImportAudit(
++        tcp_request_source_signatures=signature_count,
++        admitted_canonical_records=len(records_by_source),
++        platform_counts=tuple(sorted(counts.items())),
++    )
++    return P0fK2BImportResult(record_set, source_sha256, audit)
++
++
++def import_p0f_k2b_bytes(
++    source_bytes: bytes, knowledge_provenance: ArtifactRef | dict[str, Any],
++) -> P0fK2BImportResult:
++    """Import only the exact pinned local source; never fetch or retain raw data."""
++    source_sha256 = verify_p0f_source_bytes(source_bytes)
++    result = _parse_verified_source(source_bytes, knowledge_provenance, source_sha256)
++    if result.audit != ACCEPTED_P0F_AUDIT:
++        _fail("Pinned p0f K2B import audit anchors changed")
++    return result
++
++
++def import_p0f_k2b_path(
++    source_path: str | Path, knowledge_provenance: ArtifactRef | dict[str, Any],
++) -> P0fK2BImportResult:
++    """Read an explicitly supplied local file and apply the pinned import contract."""
++    try:
++        source_bytes = Path(source_path).read_bytes()
++    except (OSError, TypeError, ValueError) as exc:
++        raise DeviceFingerprintValidationError("Pinned p0f source is unavailable") from exc
++    return import_p0f_k2b_bytes(source_bytes, knowledge_provenance)
++
++
++def build_p0f_k2b_source_governance_candidate(source_bytes: bytes) -> ArtifactContent:
++    """Build a governance candidate using the verified local source digest."""
++    source_sha256 = verify_p0f_source_bytes(source_bytes)
++    return make_source_governance_record({
++        "governance_contract_version": 1,
++        "source_name": "peace-maker p0f3 production TCP fingerprint corpus",
++        "source_provenance": (
++            "Pinned peace-maker/p0f3-database commit " + P0F_SOURCE_COMMIT
++            + ", path " + P0F_SOURCE_PATH + ", Git blob SHA-1 "
++            + P0F_SOURCE_BLOB_SHA1 + ", source SHA-256 " + source_sha256
++        ),
++        "license_identifier": "LGPL-2.0-only",
++        "license_source_reference": "Pinned p0f.fp license header and pinned repository LICENSE",
++        "license_text_sha256": None,
++        "local_storage_status": "STORED_LOCAL",
++        "modification_import_status": "IMPORTED_NORMALIZED",
++        "redistribution_status": "NOT_APPLICABLE",
++        "attribution_requirement": "REQUIRED",
++        "commercial_use_status": "ALLOWED",
++        "review_basis_semantics": (
++            "Source is used only as local/offline external knowledge input and is classified "
++            "as legacy. Raw p0f.fp is not vendored into CaptivPortal; the generated K2B "
++            "corpus is not committed into the public CaptivPortal repository. Only the "
++            "bounded specific TCP request subset is normalized. Any future redistribution "
++            "requires separate governance review."
++        ),
++        "unresolved_restrictions": [],
++    })
+diff --git a/app/device_fingerprint/knowledge_artifacts.py b/app/device_fingerprint/knowledge_artifacts.py
+index 1cc2d9819272b100b95d4cb51d23c154f5c35673..36f6a2631d90a0f50c2f5c230d0647fb1acd5e35 100644
+--- a/app/device_fingerprint/knowledge_artifacts.py
++++ b/app/device_fingerprint/knowledge_artifacts.py
+@@ -13,6 +13,7 @@ from .artifact_content import (
+     make_artifact_content,
+ )
+ from .models import DeviceFingerprintValidationError
++from .p0f_semantics import RUNTIME_CONTRACT, parse_request_signature
+ from .validation import parse_utc
+ 
+ _SHA256 = re.compile(r"[0-9a-f]{64}")
+@@ -60,6 +61,11 @@ _K1_RECORD_FIELDS = frozenset({
+     "record_type", "canonical_record_id", "dhcp_predicates",
+     "candidate_taxonomy_refs", "source_record_identity",
+ })
++_K2B_RECORD_FIELDS = frozenset({
++    "record_type", "canonical_record_id", "rule_representation",
++    "canonical_match_rule", "dimension_claims", "source_character",
++    "source_record_identity",
++})
+ _TAXONOMY_OUTCOME_FIELDS = frozenset({
+     "dimension_name", "outcome_kind", "canonical_target_id", "broad_taxon_ref",
+     "out_of_scope_taxon_ref", "base_claim_strength",
+@@ -412,6 +418,79 @@ def make_canonical_k1_record_set(payload: dict[str, Any]) -> ArtifactContent:
+     })
+ 
+ 
++def canonical_k2b_match_rule(text: str) -> str:
++    """Validate a source token with K2A's pinned request grammar and round trip."""
++    if not isinstance(text, str) or not text:
++        _fail("Invalid K2B match rule")
++    canonical = text.strip()
++    if not canonical:
++        _fail("Invalid K2B match rule")
++    try:
++        first = parse_request_signature(
++            canonical, signature_id="k2b-rule", generic=False, userland=False,
++        )
++        second = parse_request_signature(
++            canonical.strip(), signature_id="k2b-rule", generic=False, userland=False,
++        )
++    except ValueError as exc:
++        raise DeviceFingerprintValidationError("Invalid K2B match rule") from exc
++    if first != second or canonical.strip() != canonical:
++        _fail("K2B match rule does not round trip")
++    return canonical
++
++
++def _k2b_record(raw: Any) -> dict[str, Any]:
++    value = dict(_shape(raw, _K2B_RECORD_FIELDS, "K2B TCP record"))
++    if value["record_type"] != "K2B_TCP":
++        _fail("Invalid K2B record type")
++    _text(value["canonical_record_id"], "canonical record identity")
++    _text(value["source_record_identity"], "source record identity")
++    if value["rule_representation"] != RUNTIME_CONTRACT:
++        _fail("Invalid K2B rule representation")
++    rule = value["canonical_match_rule"]
++    if canonical_k2b_match_rule(rule) != rule:
++        _fail("Noncanonical K2B match rule")
++    if value["source_character"] not in {"current", "legacy"}:
++        _fail("Invalid K2B source character")
++    claims = value["dimension_claims"]
++    if not isinstance(claims, list):
++        _fail("Invalid K2B dimension claims")
++    value["dimension_claims"] = canonical_set(
++        [_taxonomy_outcome(claim) for claim in claims], _taxonomy_primary_key,
++    )
++    return value
++
++
++def make_canonical_k2b_record_set(payload: dict[str, Any]) -> ArtifactContent:
++    """Validate and materialize R14 CanonicalKnowledgeRecordSet(K2B)."""
++    value = _shape(payload, _RECORD_SET_FIELDS, "canonical K2B record set")
++    _int32_positive(value["record_set_contract_version"], "record set version")
++    if value["knowledge_slot"] != "K2B":
++        _fail("Invalid K2B knowledge slot")
++    provenance = _artifact_ref(
++        value["knowledge_provenance"], "KnowledgeProvenanceManifest",
++    )
++    records = value["records"]
++    if not isinstance(records, list):
++        _fail("Invalid K2B records")
++    normalized_records = []
++    identities: set[tuple[str, str]] = set()
++    for raw_record in records:
++        record = _k2b_record(raw_record)
++        identity = (record["record_type"], record["canonical_record_id"])
++        if identity in identities:
++            _fail("Duplicate canonical K2B record identity")
++        identities.add(identity)
++        normalized_records.append(record)
++    normalized_records = canonical_set(
++        normalized_records,
++        lambda record: (record["record_type"], record["canonical_record_id"]),
++    )
++    return make_artifact_content("CanonicalKnowledgeRecordSet", {
++        **value, "knowledge_provenance": provenance, "records": normalized_records,
++    })
++
++
+ def _validated_dhcp_evidence(raw: Any) -> dict[str, Any]:
+     value = _shape(raw, frozenset(_DHCP_FIELDS), "DHCP evidence projection")
+     if value["message_type"] not in _MESSAGE_TYPES:
+diff --git a/tests/device_fingerprint_fe2/__init__.py b/tests/device_fingerprint_fe2/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7010be54f5ce21cb974e8092b6f023064fe96145
+--- /dev/null
++++ b/tests/device_fingerprint_fe2/__init__.py
+@@ -0,0 +1 @@
++"""Focused F-E2 K2B tests using synthetic source text only."""
+diff --git a/tests/device_fingerprint_fe2/test_k2b_p0f_import.py b/tests/device_fingerprint_fe2/test_k2b_p0f_import.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c65736584841f3929cae0ba8cb703d3f74038cf2
+--- /dev/null
++++ b/tests/device_fingerprint_fe2/test_k2b_p0f_import.py
+@@ -0,0 +1,155 @@
++"""Narrow K2B contract and offline import proofs without external corpus data."""
++
++from __future__ import annotations
++
++import hashlib
++from copy import deepcopy
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef
++from app.device_fingerprint.k2b_p0f_import import (
++    P0F_SOURCE_SIZE,
++    _parse_verified_source,
++    build_p0f_k2b_source_governance_candidate,
++    import_p0f_k2b_bytes,
++    verify_p0f_source_bytes,
++)
++from app.device_fingerprint.knowledge_artifacts import (
++    canonical_k2b_match_rule,
++    make_canonical_k2b_record_set,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.p0f_semantics import RUNTIME_CONTRACT, parse_request_signature
++
++_DIGEST = "0" * 64
++_PROVENANCE = ArtifactRef(
++    artifact_id=f"KnowledgeProvenanceManifest:v1:sha256:{_DIGEST}",
++    content_sha256=_DIGEST,
++).as_dict()
++_RULE = "4:64:0:0:65535,0:::0"
++
++
++def _source(*lines: str) -> bytes:
++    return ("\n".join(lines) + "\n").encode("utf-8")
++
++
++def _synthetic_import(*lines: str):
++    source = _source("[tcp:request]", *lines)
++    return _parse_verified_source(source, _PROVENANCE, hashlib.sha256(source).hexdigest())
++
++
++def _records(result):
++    return result.record_set.semantic_payload["records"]
++
++
++def test_k2b_exact_closed_record_and_k2a_round_trip():
++    result = _synthetic_import("label = s:unix:Linux:fixture", f"sig =   {_RULE}   ")
++    record = _records(result)[0]
++    assert result.record_set.semantic_payload["knowledge_slot"] == "K2B"
++    assert set(record) == {
++        "record_type", "canonical_record_id", "rule_representation",
++        "canonical_match_rule", "dimension_claims", "source_character",
++        "source_record_identity",
++    }
++    assert record["rule_representation"] == RUNTIME_CONTRACT
++    assert record["canonical_match_rule"] == _RULE
++    assert canonical_k2b_match_rule(f"  {_RULE}  ") == _RULE
++    assert canonical_k2b_match_rule(record["canonical_match_rule"]) == _RULE
++    assert parse_request_signature(_RULE, signature_id="fixture", generic=False,
++                                   userland=False) == parse_request_signature(
++        record["canonical_match_rule"], signature_id="fixture", generic=False,
++        userland=False,
++    )
++    assert make_canonical_k2b_record_set(
++        result.record_set.semantic_payload,
++    ).artifact_id == result.record_set.artifact_id
++
++    bad = deepcopy(result.record_set.semantic_payload)
++    bad["records"][0]["extra"] = "forbidden"
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_canonical_k2b_record_set(bad)
++    bad = deepcopy(result.record_set.semantic_payload)
++    bad["records"][0]["rule_representation"] = "another-rule-language"
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_canonical_k2b_record_set(bad)
++    bad = deepcopy(result.record_set.semantic_payload)
++    bad["records"][0]["canonical_match_rule"] = f" {_RULE}"
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_canonical_k2b_record_set(bad)
++
++
++@pytest.mark.parametrize(("label", "platform"), [
++    ("s:unix:Linux:fixture", "linux"),
++    ("s:unix:Linux:(Android)", "android"),
++    ("s:win:Windows:fixture", "windows"),
++    ("s:unix:Mac OS X:fixture", "macos"),
++    ("s:unix:iOS:fixture", "ios"),
++])
++def test_only_direct_specific_platform_claim_is_supporting(label, platform):
++    result = _synthetic_import(f"label = {label}", f"sig = {_RULE}")
++    record = _records(result)[0]
++    assert record["source_character"] == "legacy"
++    claims = {claim["dimension_name"]: claim for claim in record["dimension_claims"]}
++    assert claims["platform_family"]["outcome_kind"] == "CANONICAL_VALUE"
++    assert claims["platform_family"]["canonical_target_id"] == platform
++    assert claims["platform_family"]["base_claim_strength"] == "supporting"
++    for dimension in ("device_class", "manufacturer_family", "model_family"):
++        assert claims[dimension]["outcome_kind"] == "NO_CLAIM"
++        assert claims[dimension]["base_claim_strength"] is None
++    assert all(claim["base_claim_strength"] != "strong" for claim in claims.values())
++
++
++def test_specific_linux_version_flavor_is_supporting_linux():
++    result = _synthetic_import(
++        "label = s:unix:Linux:4.x and newer", f"sig = {_RULE}",
++    )
++    platform = next(claim for claim in _records(result)[0]["dimension_claims"]
++                    if claim["dimension_name"] == "platform_family")
++    assert platform["canonical_target_id"] == "linux"
++    assert platform["base_claim_strength"] == "supporting"
++
++
++def test_non_specific_mixed_unsupported_and_other_sections_are_excluded():
++    result = _synthetic_import(
++        "label = g:unix:Linux:generic", f"sig = {_RULE}",
++        "label = s:!:NMap:userland", f"sig = {_RULE}",
++        "label = s:unix:MacOS X:10.9 or newer (sometimes iPhone or iPad)", f"sig = {_RULE}",
++        "label = s:other:UnknownOS:fixture", f"sig = {_RULE}",
++        "label = malformed", f"sig = {_RULE}",
++        "[mtu]", "label = s:win:Windows:fixture", f"sig = {_RULE}",
++        "[tcp:response]", "label = s:win:Windows:fixture", f"sig = {_RULE}",
++        "[http:request]", "label = s:win:Windows:fixture", f"sig = {_RULE}",
++        "[http:response]", "label = s:win:Windows:fixture", f"sig = {_RULE}",
++    )
++    assert result.audit.tcp_request_source_signatures == 5
++    assert _records(result) == []
++
++
++def test_admitted_malformed_rule_fails_closed():
++    with pytest.raises(DeviceFingerprintValidationError, match="Invalid K2B match rule"):
++        _synthetic_import("label = s:unix:Linux:fixture", "sig = 4:bad:signature")
++
++
++def test_source_claim_identity_is_order_independent_and_duplicates_collapse():
++    linux = ("label = s:unix:Linux:fixture", f"sig = {_RULE}")
++    windows = ("label = s:win:Windows:fixture", f"sig = {_RULE}")
++    first = _synthetic_import(*linux, *linux, *windows)
++    second = _synthetic_import(*windows, *linux, *linux)
++    assert first.audit.tcp_request_source_signatures == 3
++    assert first.audit.admitted_canonical_records == 2
++    assert first.record_set.artifact_id == second.record_set.artifact_id
++    assert first.record_set.semantic_payload == second.record_set.semantic_payload
++    assert len({row["source_record_identity"] for row in _records(first)}) == 2
++    assert len({row["canonical_match_rule"] for row in _records(first)}) == 1
++
++
++def test_pinned_source_size_and_blob_mismatch_fail_before_import():
++    with pytest.raises(DeviceFingerprintValidationError, match="byte length"):
++        verify_p0f_source_bytes(b"synthetic")
++    with pytest.raises(DeviceFingerprintValidationError, match="Git blob"):
++        verify_p0f_source_bytes(b"x" * P0F_SOURCE_SIZE)
++    with pytest.raises(DeviceFingerprintValidationError, match="byte length"):
++        import_p0f_k2b_bytes(b"synthetic", _PROVENANCE)
++    with pytest.raises(DeviceFingerprintValidationError, match="byte length"):
++        build_p0f_k2b_source_governance_candidate(b"synthetic")
