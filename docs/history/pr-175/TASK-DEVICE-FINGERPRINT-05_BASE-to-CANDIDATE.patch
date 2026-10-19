@@ -1,0 +1,1984 @@
+diff --git a/.env.example b/.env.example
+index ff520fe569543865bb2ef107f1baf296cbee7fd2..cdce5c14d682e84fe599f21976323c9b7065cc9d 100644
+--- a/.env.example
++++ b/.env.example
+@@ -234,6 +234,11 @@ WEB_ADMIN_TRAFFIC_REQUEST_TIMEOUT_SECONDS=30
+ # Passive Device Fingerprint Evidence service (separate, direct TLS, default off).
+ # Producer secrets and production mappings are provisioned outside Git.
+ DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false
++DEVICE_FINGERPRINT_INTEGRATION_ENABLED=false
++DEVICE_FINGERPRINT_INTEGRATION_DB_PATH=/opt/CaptivePortal/data/device_fingerprint_integration.sqlite3
++DEVICE_FINGERPRINT_EVIDENCE_DB_PATH=/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
++DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH=/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
++DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH=/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3
+ DEVICE_FINGERPRINT_DB_PATH=/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
+ DEVICE_FINGERPRINT_WRITER_LOCK_PATH=/opt/CaptivePortal/data/device_fingerprint_evidence.writer.lock
+ DEVICE_FINGERPRINT_BIND_ADDRESS=192.168.0.202
+diff --git a/app/auth/worker.py b/app/auth/worker.py
+index 34c7f24e34055b672fa21232832c48b14a11decf..40a5473747cf58c9228cfd27693f2e70c134abb1 100644
+--- a/app/auth/worker.py
++++ b/app/auth/worker.py
+@@ -21,6 +21,9 @@ from app.visitor_registry.snapshot_models import (
+     AuthorizedClientSnapshotRequest,
+ )
+ from app.visitor_registry.protocols import VisitorSnapshotSubmitter
++from app.device_fingerprint_integration import DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
++from app.device_fingerprint_integration.models import AuthorizedFingerprintRequest
++from app.device_fingerprint.validation import format_utc, validate_mac
+ from .manager import AuthSessionManager
+ from .health import (
+     DISABLED_AUTHORIZATION_HEALTH_TRACKER,
+@@ -117,8 +120,13 @@ class AuthWorker:
+         ] = None,
+         visit_start_submitter: Optional[VisitStartSubmitter] = None,
+         authorization_health_tracker: Any = None,
++        fingerprint_integration_submitter: Any = None,
+     ):
+         self._provider = provider
++        self._fingerprint_integration_submitter = (
++            fingerprint_integration_submitter if fingerprint_integration_submitter is not None
++            else DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
++        )
+         self._session_manager = session_manager
+         self._snapshot_collector = (
+             snapshot_collector
+@@ -1438,6 +1446,24 @@ class AuthWorker:
+         )
+         self._submit_authorized_snapshot(session, run)
+         self._submit_authorized_visit(session, run)
++        self._submit_fingerprint_integration(session, run)
++
++    def _submit_fingerprint_integration(self, session: AuthSession, run: _WorkerRun) -> None:
++        """Auth has already succeeded; no integration failure can change that outcome."""
++        if self._fingerprint_integration_submitter is DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER:
++            return
++        try:
++            state = self._session_manager.run_snapshot(session, run.run_number)
++            if state is None or state.get("final_state") != AuthStatus.AUTHORIZED.value:
++                return
++            authorized_at = datetime.fromisoformat(state["finished_at"])
++            if authorized_at.tzinfo is None:
++                raise ValueError("Authorized time is not timezone-qualified")
++            self._fingerprint_integration_submitter.submit_authorized(AuthorizedFingerprintRequest(
++                session.session_id, state["run_number"], session.site_id,
++                validate_mac(session.client_mac or ""), format_utc(authorized_at)))
++        except Exception:
++            logger.error("fingerprint.integration_submission_failed")
+ 
+     @staticmethod
+     def _health_failure_outcome(final_reason: str) -> str | None:
+diff --git a/app/config.py b/app/config.py
+index 7e1f0e6e9293e209e5a653ec8fe8f203b68dafdf..c9cf758886e0261614285115c6688f437328bfe7 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -382,6 +382,16 @@ WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED = os.getenv(
+ DEVICE_FINGERPRINT_EVIDENCE_ENABLED = os.getenv(
+     "DEVICE_FINGERPRINT_EVIDENCE_ENABLED", "false"
+ )
++DEVICE_FINGERPRINT_INTEGRATION_ENABLED = os.getenv("DEVICE_FINGERPRINT_INTEGRATION_ENABLED", "false")
++DEVICE_FINGERPRINT_INTEGRATION_DB_PATH = os.getenv(
++    "DEVICE_FINGERPRINT_INTEGRATION_DB_PATH", "/opt/CaptivePortal/data/device_fingerprint_integration.sqlite3")
++DEVICE_FINGERPRINT_EVIDENCE_DB_PATH = os.getenv(
++    "DEVICE_FINGERPRINT_EVIDENCE_DB_PATH", os.getenv("DEVICE_FINGERPRINT_DB_PATH",
++                                                  "/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3"))
++DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH = os.getenv(
++    "DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH", "/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3")
++DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH = os.getenv(
++    "DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH", "/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3")
+ DEVICE_FINGERPRINT_DB_PATH = os.getenv(
+     "DEVICE_FINGERPRINT_DB_PATH",
+     "/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3",
+diff --git a/app/device_fingerprint/classification_persistence.py b/app/device_fingerprint/classification_persistence.py
+index 8edaab8277882b9ed6d0732f25a17073aeee1831..ecde025dae03364f73b5556861f8722ea0edb8b7 100644
+--- a/app/device_fingerprint/classification_persistence.py
++++ b/app/device_fingerprint/classification_persistence.py
+@@ -443,6 +443,7 @@ class DeviceFingerprintClassificationStore:
+     def persist(
+         self, assembly: RequestAssemblyResult, *, retention_policy: ArtifactContent,
+         pre_acceptance_foundation_runtime_profile_admission_manifest: ArtifactContent | None = None,
++        classification_id: str | None = None,
+     ) -> ClassificationCoreRecord:
+         """Commit whole closure + edges + core, or nothing; never touch Task-01."""
+         try:
+@@ -461,7 +462,10 @@ class DeviceFingerprintClassificationStore:
+                 KeyError, TypeError) as exc:
+             raise ClassificationPersistenceError("persistence_unavailable") from exc
+         try:
+-            classification_id = str(self._uuid_factory())
++            classification_id = (str(self._uuid_factory()) if classification_id is None
++                                 else classification_id)
++            if not isinstance(classification_id, str):
++                raise ClassificationPersistenceError("persistence_unavailable")
+             if (str(uuid.UUID(classification_id)) != classification_id
+                     or uuid.UUID(classification_id).version != 4):
+                 raise ClassificationPersistenceError("persistence_unavailable")
+diff --git a/app/device_fingerprint/classification_read.py b/app/device_fingerprint/classification_read.py
+index 74c1164eb9874f2bb3114e773837bef3a0b12184..ad433fef5a1967dd6984d9632a6afcab2e765f47 100644
+--- a/app/device_fingerprint/classification_read.py
++++ b/app/device_fingerprint/classification_read.py
+@@ -119,6 +119,17 @@ class DeviceFingerprintClassificationReadService:
+             raise DeviceFingerprintValidationError("Classification request digest mismatch")
+         return ClassificationReadRecord(core, result)
+ 
++    def get_by_id(self, classification_id: str) -> ClassificationReadRecord | None:
++        identity = _uuid_v4(classification_id)
++
++        def select(connection: sqlite3.Connection) -> ClassificationReadRecord | None:
++            row = connection.execute(
++                "SELECT * FROM classifications WHERE classification_id=?", (identity,),
++            ).fetchone()
++            return None if row is None else self._record(connection, row)
++
++        return self._read(select)
++
+     def get_current(self, site_id: str, observed_mac: str) -> ClassificationReadRecord | None:
+         site = validate_site_id(site_id)
+         mac = validate_mac(observed_mac)
+diff --git a/app/device_fingerprint_integration/__init__.py b/app/device_fingerprint_integration/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ba89e1f289e411dfb9cd5e799a556fdd0d6b689
+--- /dev/null
++++ b/app/device_fingerprint_integration/__init__.py
+@@ -0,0 +1,7 @@
++"""Task-05 relation/orchestration boundary; import creates no runtime."""
++
++from .submitter import (
++    DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER, FingerprintIntegrationSubmitter,
++)
++
++__all__ = ["DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER", "FingerprintIntegrationSubmitter"]
+diff --git a/app/device_fingerprint_integration/cli.py b/app/device_fingerprint_integration/cli.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..843caacf309524a3aec73964c8a07f7b9bd3a91c
+--- /dev/null
++++ b/app/device_fingerprint_integration/cli.py
+@@ -0,0 +1,22 @@
++"""Authorized Task-05 auxiliary composition root; no listener or Omada provider."""
++
++import argparse
++import signal
++
++from .runtime import create_worker
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description="Fingerprint integration worker")
++    parser.add_argument("command", choices=("run",))
++    parser.parse_args(argv)
++    from app.settings import get_settings
++    worker = create_worker(get_settings())
++    for name in (signal.SIGINT, signal.SIGTERM):
++        signal.signal(name, lambda *_args: worker.stop())
++    worker.run()
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/app/device_fingerprint_integration/compatibility.py b/app/device_fingerprint_integration/compatibility.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b076a44a848d78307d58af2b09246685c344412a
+--- /dev/null
++++ b/app/device_fingerprint_integration/compatibility.py
+@@ -0,0 +1,156 @@
++"""Dynamic admitted profile/source identity checks; no historical acceptance IDs."""
++
++from dataclasses import dataclass
++from pathlib import Path, PurePosixPath
++import hashlib
++import importlib
++import inspect
++import re
++import sqlite3
++
++from app.device_fingerprint.artifact_content import ArtifactRef
++from app.device_fingerprint.control_plane_store import PinnedRuntimeProfile, ControlPlaneOperationError
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.runtime_profile_artifacts import (
++    make_classification_runtime_profile, make_foundation_runtime_profile,
++    make_runtime_profile_admission_manifest, make_runtime_profile_validity_record,
++)
++from .models import IntegrationError
++
++REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
++
++
++def same_pin(left, right):
++    return isinstance(left, PinnedRuntimeProfile) and isinstance(right, PinnedRuntimeProfile) and (
++        left.pointer.activation_generation_id, left.pointer.activation_record_id,
++        left.runtime_profile, left.admission_manifest) == (
++        right.pointer.activation_generation_id, right.pointer.activation_record_id,
++        right.runtime_profile, right.admission_manifest)
++
++
++def load_reference(store, value, kind):
++    ref = ArtifactRef.from_dict(value)
++    content = store.load_artifact(ref.artifact_id, ref.content_sha256)
++    ref.resolve(content, kind)
++    return content
++
++
++def verify_executable_identities(manifest, *, root=REPOSITORY_ROOT):
++    """Validate source-backed entries, imported origin and exact on-disk bytes."""
++    try:
++        payload = manifest.semantic_payload
++        entries = payload["adapter_implementation_identities"]
++        if not isinstance(entries, list) or not entries:
++            raise ValueError("Missing executable identities")
++        evidence = payload["evidence_canonical_json_compatibility_identity"]
++        prefix = "EvidenceCanonicalJsonV1:"
++        if not evidence.startswith(prefix):
++            raise ValueError("Invalid evidence compatibility identity")
++        identity, digest = evidence[len(prefix):].rsplit(":sha256:", 1)
++        entries = entries + [{"implementation_id": identity, "implementation_digest": digest}]
++        for entry in entries:
++            prefix, relative, qualified = entry["implementation_id"].split(":", 2)
++            digest = entry["implementation_digest"]
++            path = PurePosixPath(relative)
++            if (prefix != "python" or path.is_absolute() or ".." in path.parts
++                    or not relative.startswith("app/") or path.suffix != ".py"
++                    or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
++                raise ValueError("Invalid source identity")
++            target = (root / relative).resolve(strict=True)
++            if not target.is_relative_to(root.resolve()):
++                raise ValueError("Source identity escapes repository")
++            module = importlib.import_module(relative[:-3].replace("/", "."))
++            symbol = module
++            for component in qualified.split("."):
++                symbol = getattr(symbol, component)
++            if Path(inspect.getsourcefile(symbol)).resolve() != target:
++                raise ValueError("Loaded source origin mismatch")
++            if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
++                raise ValueError("Source digest mismatch")
++    except (KeyError, ValueError, TypeError, AttributeError, OSError, ImportError) as exc:
++        raise IntegrationError("runtime_profile_incompatible") from exc
++
++
++@dataclass(frozen=True)
++class Preflight:
++    pin: object
++    contents: tuple
++    retention: object
++
++    def hook(self, profile, foundation, bundle, knowledge, policy, adapters, classifier):
++        # Knowledge internals are validated by the normal RequestAssembly path.
++        return (profile, foundation, bundle, policy, adapters, classifier) == self.contents
++
++
++def preflight(store, *, root=REPOSITORY_ROOT):
++    try:
++        pinned = store.pin_active_profile("classification")
++        if not isinstance(pinned, PinnedRuntimeProfile):
++            raise IntegrationError("activation_lineage_unavailable")
++        profile, rpm = pinned.runtime_profile, pinned.admission_manifest
++        if (make_classification_runtime_profile(profile.semantic_payload) != profile
++                or make_runtime_profile_admission_manifest(rpm.semantic_payload) != rpm
++                or make_runtime_profile_validity_record(pinned.validity_record.semantic_payload) != pinned.validity_record
++                or pinned.validity_record.semantic_payload["state"] != "ACTIVE"):
++            raise IntegrationError("production_profile_not_admitted")
++        rp = rpm.semantic_payload
++        if (rp["profile_kind"] != "classification" or rp["candidate_profile"] !=
++                ArtifactRef(profile.artifact_id, profile.content_sha256).as_dict()
++                or rp["compatibility_validation_result"] != "PASS"):
++            raise IntegrationError("production_profile_not_admitted")
++        accepted = load_reference(store, rp["task04_acceptance_manifest"], "Task04AcceptanceManifest")
++        foundation_rpm = load_reference(store, rp["foundation_runtime_profile_admission_manifest"],
++                                        "RuntimeProfileAdmissionManifest")
++        p = profile.semantic_payload
++        foundation = load_reference(store, p["foundation_runtime_profile"], "FoundationRuntimeProfile")
++        if (make_foundation_runtime_profile(foundation.semantic_payload) != foundation
++                or make_runtime_profile_admission_manifest(foundation_rpm.semantic_payload) != foundation_rpm
++                or foundation_rpm.semantic_payload["profile_kind"] != "foundation"
++                or foundation_rpm.semantic_payload["candidate_profile"] != p["foundation_runtime_profile"]
++                or rp["foundation_admission_manifest"] != foundation_rpm.semantic_payload["foundation_admission_manifest"]
++                or accepted.semantic_payload["foundation_admission_manifest"] != rp["foundation_admission_manifest"]
++                or accepted.semantic_payload["tested_classification_runtime_profile"] != rp["candidate_profile"]
++                or accepted.semantic_payload["classifier_artifact_manifest"] != p["classifier_artifact_manifest"]):
++            raise IntegrationError("runtime_profile_incompatible")
++        bundle, policy, adapters, classifier = tuple(load_reference(store, p[field], kind) for field, kind in (
++            ("knowledge_bundle", "KnowledgeBundle"), ("classification_policy", "ClassificationPolicy"),
++            ("evidence_adapter_contract_set", "EvidenceAdapterContractSet"),
++            ("classifier_artifact_manifest", "ClassifierArtifactManifest")))
++        verify_executable_identities(classifier, root=root)
++        foundation_manifest = load_reference(store, foundation_rpm.semantic_payload["foundation_admission_manifest"],
++                                             "FoundationAdmissionManifest")
++        retention = load_reference(store, foundation_manifest.semantic_payload["classification_retention_policy"],
++                                  "ClassificationRetentionPolicy")
++        return Preflight(pinned, (profile, foundation, bundle, policy, adapters, classifier), retention)
++    except IntegrationError:
++        raise
++    except ControlPlaneOperationError as exc:
++        raise IntegrationError(exc.reason_code) from exc
++    except (ValueError, KeyError, TypeError, AttributeError, DeviceFingerprintValidationError) as exc:
++        raise IntegrationError("runtime_profile_incompatible") from exc
++
++
++class ReadOnlyControlPlaneStoreMixin:
++    """Task-05 may pin/load/check lineage, but never create or mutate control-plane DBs."""
++    def _connect(self):
++        conn = sqlite3.connect(f"{Path(self.database_path).resolve().as_uri()}?mode=ro", uri=True,
++                               timeout=10, isolation_level=None)
++        conn.row_factory = sqlite3.Row
++        conn.execute("PRAGMA query_only=ON")
++        conn.execute("PRAGMA foreign_keys=ON")
++        return conn
++
++
++class ExactPinStore:
++    """Delegate the normal assembly pin; reject generation drift, including same-profile ABA."""
++    def __init__(self, store, expected):
++        self.store, self.expected = store, expected
++
++    def pin_active_profile(self, kind):
++        pinned = self.store.pin_active_profile(kind)
++        if not same_pin(pinned, self.expected):
++            raise ControlPlaneOperationError("runtime_profile_incompatible")
++        return pinned
++
++    def load_artifact(self, *args):
++        return self.store.load_artifact(*args)
+diff --git a/app/device_fingerprint_integration/config.py b/app/device_fingerprint_integration/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c0c7224c0edc356d34fa3e35109930c974a7918
+--- /dev/null
++++ b/app/device_fingerprint_integration/config.py
+@@ -0,0 +1,43 @@
++"""Default-disabled configuration; no disabled-module validation cascade."""
++
++from dataclasses import dataclass
++from pathlib import Path
++import os
++
++
++@dataclass(frozen=True)
++class IntegrationConfig:
++    enabled: bool = False
++    db_path: str = "/opt/CaptivePortal/data/device_fingerprint_integration.sqlite3"
++    evidence_db_path: str = "/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3"
++    classification_db_path: str = "/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3"
++    control_plane_db_path: str = "/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3"
++
++
++def integration_config_from_settings(settings):
++    enabled = settings.get("device_fingerprint_integration_enabled", False)
++    if isinstance(enabled, str) and enabled.lower() in {"true", "false"}:
++        enabled = enabled.lower() == "true"
++    if type(enabled) is not bool:
++        raise ValueError("Invalid DEVICE_FINGERPRINT_INTEGRATION_ENABLED")
++    if not enabled:
++        return IntegrationConfig()
++    defaults = IntegrationConfig()
++    paths = {}
++    for field in ("db_path", "evidence_db_path", "classification_db_path", "control_plane_db_path"):
++        key = "device_fingerprint_integration_db_path" if field == "db_path" else f"device_fingerprint_{field}"
++        value = settings.get(key, getattr(defaults, field))
++        if not isinstance(value, str) or not value or not Path(value).is_absolute():
++            raise ValueError(f"Invalid {key}")
++        paths[field] = str(Path(value).resolve())
++    # Dedicated files, including symlink/hardlink aliases; never mutate other domains.
++    others = list(paths.values())[1:] + [str(Path(settings[key]).resolve()) for key in (
++        "visitor_registry_db_path", "visit_lifecycle_db_path", "current_state_db_path",
++    ) if settings.get(key)]
++    for other in others:
++        if paths["db_path"] == other or (Path(paths["db_path"]).exists() and Path(other).exists()
++                                         and os.path.samefile(paths["db_path"], other)):
++            raise ValueError("Integration database must be a dedicated file")
++    if len(set(paths.values())) != 4:
++        raise ValueError("Fingerprint database paths must be distinct")
++    return IntegrationConfig(enabled=True, **paths)
+diff --git a/app/device_fingerprint_integration/executor.py b/app/device_fingerprint_integration/executor.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0dae14c6817d877c8a81defa1e9959d5eb2b14e6
+--- /dev/null
++++ b/app/device_fingerprint_integration/executor.py
+@@ -0,0 +1,67 @@
++"""Normal Task-04 production assembly/persistence; relation-only crash recovery."""
++
++from pathlib import Path
++import os
++
++from app.device_fingerprint.request_assembly import DeviceFingerprintRequestAssembly
++from .compatibility import preflight, same_pin, ExactPinStore
++from .models import IntegrationError, plus, parse_utc
++
++
++def process_memory_guard(limit):
++    try:
++        if type(limit) is not int or limit <= 0:
++            return False
++        resident_pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[1])
++        page_size = os.sysconf("SC_PAGE_SIZE")
++        return resident_pages >= 0 and page_size > 0 and resident_pages * page_size <= limit
++    except (OSError, ValueError, IndexError, AttributeError):
++        return False
++
++
++class ClassificationExecutor:
++    def __init__(self, control, evidence_read, classification_store, classification_read, *, clock,
++                 preflight_fn=preflight, assembly_factory=DeviceFingerprintRequestAssembly,
++                 memory_guard=process_memory_guard):
++        self.control, self.evidence_read = control, evidence_read
++        self.persistence, self.read = classification_store, classification_read
++        self.clock, self.preflight = clock, preflight_fn
++        self.assembly_factory, self.memory_guard = assembly_factory, memory_guard
++
++    def execute(self, job, *, recovery_only=False):
++        previous = self.read.get_by_id(job.planned_classification_id)
++        if previous is not None:
++            core = previous.core
++            if (core.site_id, core.observed_mac, core.execution_context) != (
++                    job.site_id, job.observed_mac, "PRODUCTION"):
++                raise IntegrationError("classification_identity_conflict")
++            record = self.persistence.load_artifact(core.snapshot_record_id, core.snapshot_record_digest)
++            ref = record.semantic_payload["evidence_snapshot_content"]
++            snapshot = self.persistence.load_artifact(ref["artifact_id"], ref["content_sha256"]).semantic_payload
++            if (snapshot["site_id"], snapshot["observed_mac"], snapshot["window_end_utc"]) != (
++                    job.site_id, job.observed_mac, plus(job.authorized_at_utc, 120)):
++                raise IntegrationError("classification_identity_conflict")
++            return core, snapshot["window_start_utc"], snapshot["window_end_utc"]
++        if recovery_only:
++            raise IntegrationError(job.last_reason_code or "integration_unavailable")
++        prepared = self.preflight(self.control)
++        end = plus(job.authorized_at_utc, 120)
++        start = max(plus(job.authorized_at_utc, -300), prepared.contents[1].semantic_payload[
++            "classification_foundation_valid_from_utc"])
++        if parse_utc(start) >= parse_utc(end):
++            raise IntegrationError("integration_window_not_authoritative")
++        assembly = self.assembly_factory(
++            control_plane_store=ExactPinStore(self.control, prepared.pin), read_service=self.evidence_read,
++            compatibility_hook=prepared.hook, utc_clock=self.clock, process_memory_guard=self.memory_guard)
++        try:
++            result = assembly.assemble_production(job.site_id, job.observed_mac, start, end)
++            if not same_pin(result.pinned_runtime_profile, prepared.pin):
++                raise IntegrationError("runtime_profile_incompatible")
++        except Exception as exc:
++            if getattr(exc, "reason_code", None) == "runtime_profile_incompatible":
++                changed = not same_pin(self.control.pin_active_profile("classification"), prepared.pin)
++                raise IntegrationError("profile_changed_during_job" if changed else "runtime_profile_incompatible") from exc
++            raise
++        core = self.persistence.persist(result, retention_policy=prepared.retention,
++                                        classification_id=job.planned_classification_id)
++        return core, start, end
+diff --git a/app/device_fingerprint_integration/identity_resolver.py b/app/device_fingerprint_integration/identity_resolver.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b24e603e8c0217f68808f9bc62d8372454bd08e
+--- /dev/null
++++ b/app/device_fingerprint_integration/identity_resolver.py
+@@ -0,0 +1,58 @@
++"""Only exact Site-qualified Registry and Visit read boundaries confer identity."""
++
++from app.device_fingerprint.validation import validate_uuid
++from .models import IdentityResolution, plus
++
++
++class ExactIdentityResolver:
++    def __init__(self, registry_read, visit_read):
++        self.registry = registry_read
++        self.visits = visit_read
++
++    def resolve(self, job):
++        snapshot = self.registry.get_snapshot_by_auth_session(
++            job.auth_session_id, site_id=job.site_id, client_mac=job.observed_mac)
++        if snapshot is None:
++            # Do not downgrade a previously exact durable relation when a read is absent.
++            return IdentityResolution(job.identity_state, "identity_proof_unavailable",
++                                      job.registry_snapshot_id, job.device_id, job.visit_id)
++        if (snapshot["site_id"], snapshot["auth_session_id"], snapshot["requested_mac"]) != (
++                job.site_id, job.auth_session_id, job.observed_mac):
++            return IdentityResolution("CONFLICT", "registry_relation_mismatch",
++                                      job.registry_snapshot_id, job.device_id, job.visit_id)
++        device = validate_uuid(snapshot["device_id"])
++        snapshot_id = validate_uuid(snapshot["snapshot_id"])
++        if job.device_id is not None and job.device_id != device:
++            return IdentityResolution("CONFLICT", "identity_device_conflict",
++                                      job.registry_snapshot_id, job.device_id, job.visit_id)
++        # Preserve the original exact snapshot anchor; do not overwrite immutable facts.
++        snapshot_id = job.registry_snapshot_id or snapshot_id
++        visit = self.visits.get_open_visit(job.site_id, job.observed_mac)
++        def matches(visit):
++            return visit is not None and (visit.site_id, visit.client_mac,
++                visit.start_auth_session_id, visit.start_auth_run_number) == (
++                job.site_id, job.observed_mac, job.auth_session_id, job.auth_run_number)
++        if matches(visit):
++            candidates = [visit]
++        else:
++            # Fixed range and one bounded page; no nearest-timestamp/global scan.
++            page = self.visits.list_visits(job.site_id, plus(job.authorized_at_utc, -3600),
++                                          plus(job.authorized_at_utc, 3600),
++                                          client_mac=job.observed_mac, limit=100)
++            candidates = page.items
++        exact = {visit.visit_id: visit for visit in candidates if (
++            visit.site_id == job.site_id and visit.client_mac == job.observed_mac
++            and visit.start_auth_session_id == job.auth_session_id
++            and visit.start_auth_run_number == job.auth_run_number)}
++        if len(exact) > 1:
++            return IdentityResolution("CONFLICT", "identity_visit_conflict", snapshot_id, device, job.visit_id)
++        visit = next(iter(exact.values()), None)
++        if visit is not None:
++            validate_uuid(visit.visit_id)
++            if visit.device_id is not None and visit.device_id != device:
++                return IdentityResolution("CONFLICT", "identity_device_conflict", snapshot_id, device, job.visit_id)
++            if job.visit_id is not None and job.visit_id != visit.visit_id:
++                return IdentityResolution("CONFLICT", "identity_visit_conflict", snapshot_id, device, job.visit_id)
++            return IdentityResolution("DEVICE_AND_VISIT_RESOLVED", None, snapshot_id, device, visit.visit_id)
++        return IdentityResolution("DEVICE_AND_VISIT_RESOLVED" if job.visit_id else "DEVICE_RESOLVED",
++                                  None, snapshot_id, device, job.visit_id)
+diff --git a/app/device_fingerprint_integration/models.py b/app/device_fingerprint_integration/models.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..50f2d1610615a5947ed74f458ee9bf314d88313e
+--- /dev/null
++++ b/app/device_fingerprint_integration/models.py
+@@ -0,0 +1,164 @@
++"""Immutable relation-only Task-05 contracts."""
++
++from dataclasses import dataclass
++from typing import TYPE_CHECKING
++from datetime import datetime, timezone, timedelta
++import uuid
++from app.device_fingerprint.artifact_content import ArtifactRef
++if TYPE_CHECKING:
++    from app.device_fingerprint.classification_read import ClassificationReadRecord
++
++from app.device_fingerprint.validation import (
++    format_utc, parse_utc, validate_mac, validate_site_id, validate_uuid,
++)
++
++SCHEMA_VERSION = 1
++PRE_AUTH_LOOKBACK_SECONDS = 300
++POST_AUTH_EVIDENCE_SECONDS = 120
++INGEST_GRACE_SECONDS = 30
++LEASE_SECONDS = 300
++MAX_ATTEMPTS = 5
++RETRY_DELAYS = (30, 120, 300, 600)
++IDENTITY_RETRY_SECONDS = 30
++IDENTITY_HORIZON_SECONDS = 3600
++
++
++class IntegrationError(RuntimeError):
++    def __init__(self, reason_code):
++        self.reason_code = reason_code
++        super().__init__(reason_code)
++
++
++def uuid4(value):
++    canonical = validate_uuid(value)
++    if uuid.UUID(canonical).version != 4:
++        raise ValueError("Invalid canonical UUIDv4")
++    return canonical
++
++
++def utc_now():
++    return format_utc(datetime.now(timezone.utc))
++
++
++def plus(timestamp, seconds):
++    return format_utc(parse_utc(timestamp) + timedelta(seconds=seconds))
++
++
++@dataclass(frozen=True)
++class AuthorizedFingerprintRequest:
++    auth_session_id: str
++    auth_run_number: int
++    site_id: str
++    observed_mac: str
++    authorized_at_utc: str
++
++    def __post_init__(self):
++        validate_uuid(self.auth_session_id)
++        validate_site_id(self.site_id)
++        if validate_mac(self.observed_mac) != self.observed_mac:
++            raise ValueError("Noncanonical MAC")
++        parse_utc(self.authorized_at_utc)
++        if type(self.auth_run_number) is not int or not 1 <= self.auth_run_number < 2**63:
++            raise ValueError("Invalid AuthRun number")
++
++
++@dataclass(frozen=True)
++class IntegrationJob:
++    integration_id: str
++    auth_session_id: str
++    auth_run_number: int
++    site_id: str
++    observed_mac: str
++    authorized_at_utc: str
++    planned_classification_id: str
++    due_at_utc: str
++    classification_state: str
++    attempt_count: int
++    next_attempt_at_utc: str
++    lease_token: str | None
++    lease_until_utc: str | None
++    effective_window_start_utc: str | None
++    effective_window_end_utc: str | None
++    classification_id: str | None
++    classification_result_id: str | None
++    last_reason_code: str | None
++    registry_snapshot_id: str | None
++    device_id: str | None
++    visit_id: str | None
++    identity_state: str
++    identity_reason: str | None
++    identity_last_attempt_at_utc: str | None
++    created_at_utc: str
++    updated_at_utc: str
++
++    def __post_init__(self):
++        AuthorizedFingerprintRequest(self.auth_session_id, self.auth_run_number, self.site_id,
++                                     self.observed_mac, self.authorized_at_utc)
++        uuid4(self.integration_id)
++        uuid4(self.planned_classification_id)
++        for value in (self.due_at_utc, self.next_attempt_at_utc, self.created_at_utc,
++                      self.updated_at_utc, self.lease_until_utc, self.effective_window_start_utc,
++                      self.effective_window_end_utc, self.identity_last_attempt_at_utc):
++            if value is not None:
++                parse_utc(value)
++        if self.due_at_utc != plus(self.authorized_at_utc, 150):
++            raise ValueError("Invalid fixed due time")
++        if self.classification_state not in {"PENDING", "LEASED", "CLASSIFIED", "NO_RESULT_FINAL"}:
++            raise ValueError("Invalid job state")
++        if self.identity_state not in {"UNRESOLVED", "DEVICE_RESOLVED", "DEVICE_AND_VISIT_RESOLVED", "CONFLICT"}:
++            raise ValueError("Invalid identity state")
++        if type(self.attempt_count) is not int or not 0 <= self.attempt_count <= MAX_ATTEMPTS:
++            raise ValueError("Invalid attempt count")
++        if self.classification_id is not None and self.classification_id != self.planned_classification_id:
++            raise ValueError("Classification identity mismatch")
++        for identity in (self.registry_snapshot_id, self.device_id, self.visit_id):
++            if identity is not None:
++                validate_uuid(identity)
++        if self.classification_state == "CLASSIFIED":
++            if self.classification_id is None or self.classification_result_id is None:
++                raise ValueError("Missing retained classification link")
++            parts = self.classification_result_id.split(":")
++            if len(parts) != 4 or parts[:3] != ["ClassificationResult", "v1", "sha256"]:
++                raise ValueError("Invalid result reference")
++            ArtifactRef(self.classification_result_id, parts[3])
++            if self.effective_window_start_utc is None or self.effective_window_end_utc is None:
++                raise ValueError("Missing effective window")
++        if self.effective_window_end_utc is not None:
++            if (self.effective_window_end_utc != plus(self.authorized_at_utc, 120)
++                    or self.effective_window_start_utc is None
++                    or self.effective_window_start_utc >= self.effective_window_end_utc
++                    or self.effective_window_start_utc < plus(self.authorized_at_utc, -300)):
++                raise ValueError("Invalid fixed classification window")
++        if self.identity_state in {"DEVICE_RESOLVED", "DEVICE_AND_VISIT_RESOLVED"}:
++            if self.registry_snapshot_id is None or self.device_id is None:
++                raise ValueError("Missing exact identity anchors")
++            if self.identity_state == "DEVICE_AND_VISIT_RESOLVED" and self.visit_id is None:
++                raise ValueError("Missing exact Visit anchor")
++        if self.lease_token is not None:
++            uuid4(self.lease_token)
++        if (self.classification_state == "LEASED") != (self.lease_token is not None and self.lease_until_utc is not None):
++            raise ValueError("Invalid lease")
++
++
++@dataclass(frozen=True)
++class IdentityResolution:
++    state: str = "UNRESOLVED"
++    reason: str | None = None
++    snapshot_id: str | None = None
++    device_id: str | None = None
++    visit_id: str | None = None
++
++
++@dataclass(frozen=True)
++class IntegratedFingerprintRecord:
++    site_id: str
++    device_id: str | None
++    observed_mac: str
++    auth_session_id: str
++    auth_run_number: int
++    registry_snapshot_id: str | None
++    visit_id: str | None
++    identity_state: str
++    classification_id: str
++    classification_result: "ClassificationReadRecord"
++    authorized_at_utc: str
+diff --git a/app/device_fingerprint_integration/read_service.py b/app/device_fingerprint_integration/read_service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e28c5afdfecdfe7c1956304734a01f19f58f22b
+--- /dev/null
++++ b/app/device_fingerprint_integration/read_service.py
+@@ -0,0 +1,31 @@
++"""Internal Task-06-ready typed reads; Task-04 is the only result authority."""
++
++from app.device_fingerprint.validation import validate_site_id, validate_uuid
++from .models import IntegrationError, IntegratedFingerprintRecord
++
++
++class FingerprintIntegrationReadService:
++    def __init__(self, repository, classification_read):
++        self.repository, self.classifications = repository, classification_read
++
++    def _record(self, job):
++        if job is None or job.classification_state != "CLASSIFIED":
++            return None
++        result = self.classifications.get_by_id(job.classification_id)
++        if result is None:
++            return None  # Task-04 retention may have legitimately removed it.
++        if (result.core.site_id, result.core.observed_mac, result.core.classification_result_id) != (
++                job.site_id, job.observed_mac, job.classification_result_id):
++            raise IntegrationError("classification_identity_conflict")
++        return IntegratedFingerprintRecord(job.site_id, job.device_id, job.observed_mac,
++            job.auth_session_id, job.auth_run_number, job.registry_snapshot_id, job.visit_id,
++            job.identity_state, job.classification_id, result, job.authorized_at_utc)
++
++    def get_current_for_device(self, site_id, device_id):
++        return self._record(self.repository.current_for_device(validate_site_id(site_id), validate_uuid(device_id)))
++
++    def get_for_auth_run(self, site_id, auth_session_id, auth_run_number):
++        if type(auth_run_number) is not int or auth_run_number < 1:
++            raise ValueError("Invalid AuthRun")
++        return self._record(self.repository.for_auth_run(validate_site_id(site_id),
++                                                       validate_uuid(auth_session_id), auth_run_number))
+diff --git a/app/device_fingerprint_integration/repository.py b/app/device_fingerprint_integration/repository.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..93b41013c0d39dd24e75b23fc55fd6367cf153f8
+--- /dev/null
++++ b/app/device_fingerprint_integration/repository.py
+@@ -0,0 +1,179 @@
++"""Short FULL-sync transactions in the dedicated relation-only SQLite."""
++
++from contextlib import contextmanager
++from dataclasses import fields
++from pathlib import Path
++import os
++import sqlite3
++import uuid
++
++from .models import IntegrationError, IntegrationJob, LEASE_SECONDS, MAX_ATTEMPTS, plus, parse_utc
++
++_COLUMNS = tuple(field.name for field in fields(IntegrationJob))
++_DDL = """
++CREATE TABLE integration_jobs (
++ integration_id TEXT PRIMARY KEY,
++ auth_session_id TEXT NOT NULL, auth_run_number INTEGER NOT NULL CHECK(auth_run_number>0),
++ site_id TEXT NOT NULL, observed_mac TEXT NOT NULL, authorized_at_utc TEXT NOT NULL,
++ planned_classification_id TEXT NOT NULL UNIQUE, due_at_utc TEXT NOT NULL,
++ classification_state TEXT NOT NULL CHECK(classification_state IN ('PENDING','LEASED','CLASSIFIED','NO_RESULT_FINAL')),
++ attempt_count INTEGER NOT NULL CHECK(attempt_count BETWEEN 0 AND 5), next_attempt_at_utc TEXT NOT NULL,
++ lease_token TEXT, lease_until_utc TEXT,
++ effective_window_start_utc TEXT, effective_window_end_utc TEXT,
++ classification_id TEXT, classification_result_id TEXT, last_reason_code TEXT,
++ registry_snapshot_id TEXT, device_id TEXT, visit_id TEXT,
++ identity_state TEXT NOT NULL CHECK(identity_state IN ('UNRESOLVED','DEVICE_RESOLVED','DEVICE_AND_VISIT_RESOLVED','CONFLICT')),
++ identity_reason TEXT, identity_last_attempt_at_utc TEXT,
++ created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
++ UNIQUE(auth_session_id,auth_run_number),
++ CHECK(classification_id IS NULL OR classification_id=planned_classification_id),
++ CHECK((classification_state='LEASED' AND lease_token IS NOT NULL AND lease_until_utc IS NOT NULL)
++    OR (classification_state!='LEASED' AND lease_token IS NULL AND lease_until_utc IS NULL))
++);
++CREATE INDEX integration_due ON integration_jobs(classification_state,next_attempt_at_utc,due_at_utc);
++CREATE INDEX integration_device ON integration_jobs(site_id,device_id,authorized_at_utc DESC,integration_id DESC);
++CREATE INDEX integration_identity ON integration_jobs(identity_state,identity_last_attempt_at_utc);
++PRAGMA user_version=1;
++"""
++
++
++class IntegrationRepository:
++    def __init__(self, database_path, *, busy_timeout_ms=100):
++        self.path = Path(database_path).resolve()
++        if type(busy_timeout_ms) is not int or not 1 <= busy_timeout_ms <= 1000:
++            raise ValueError("Invalid bounded busy timeout")
++        self.timeout_ms = busy_timeout_ms
++
++    @contextmanager
++    def connection(self, *, readonly=False):
++        conn = None
++        try:
++            conn = sqlite3.connect(f"{self.path.as_uri()}?mode={'ro' if readonly else 'rw'}",
++                                  uri=True, timeout=self.timeout_ms / 1000, isolation_level=None)
++            conn.row_factory = sqlite3.Row
++            conn.execute(f"PRAGMA busy_timeout={self.timeout_ms}")
++            conn.execute("PRAGMA foreign_keys=ON")
++            if not readonly:
++                conn.execute("PRAGMA synchronous=FULL")
++            yield conn
++        except sqlite3.Error as exc:
++            reason = "retryable_sqlite_busy" if (getattr(exc, "sqlite_errorcode", 0) or 0) & 255 in (
++                5, 6) or str(exc).lower() in (  # SQLITE_BUSY/LOCKED, including Python 3.10.
++                    "database is locked", "database is busy") else "integration_unavailable"
++            raise IntegrationError(reason) from exc
++        finally:
++            if conn is not None:
++                if conn.in_transaction:
++                    conn.rollback()
++                conn.close()
++
++    def initialize(self):
++        if not self.path.parent.is_dir() or self.path.is_symlink():
++            raise IntegrationError("integration_unavailable")
++        fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600) if not self.path.exists() else None
++        if fd is not None:
++            os.close(fd)
++        with self.connection() as conn:
++            version = conn.execute("PRAGMA user_version").fetchone()[0]
++            if version == 0:
++                if conn.execute("SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchone():
++                    raise IntegrationError("integration_schema_invalid")
++                conn.executescript("BEGIN IMMEDIATE;" + _DDL + "COMMIT;")
++            elif version != 1:
++                raise IntegrationError("integration_schema_invalid")
++            columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(integration_jobs)"))
++            if columns != _COLUMNS:
++                raise IntegrationError("integration_schema_invalid")
++
++    @staticmethod
++    def _job(row):
++        return None if row is None else IntegrationJob(**dict(row))
++
++    def enqueue(self, request, now):
++        parse_utc(now)
++        integration_id, planned = str(uuid.uuid4()), str(uuid.uuid4())
++        due = plus(request.authorized_at_utc, 150)
++        with self.connection() as conn:
++            row = conn.execute("""INSERT INTO integration_jobs (
++                integration_id,auth_session_id,auth_run_number,site_id,observed_mac,authorized_at_utc,
++                planned_classification_id,due_at_utc,classification_state,attempt_count,next_attempt_at_utc,
++                identity_state,created_at_utc,updated_at_utc)
++                VALUES (?,?,?,?,?,?,?,?,'PENDING',0,?,'UNRESOLVED',?,?)
++                ON CONFLICT(auth_session_id,auth_run_number) DO UPDATE SET updated_at_utc=integration_jobs.updated_at_utc
++                WHERE integration_jobs.site_id=excluded.site_id AND integration_jobs.observed_mac=excluded.observed_mac
++                AND integration_jobs.authorized_at_utc=excluded.authorized_at_utc
++                RETURNING integration_id""", (integration_id, request.auth_session_id, request.auth_run_number,
++                    request.site_id, request.observed_mac, request.authorized_at_utc, planned, due, due, now, now)).fetchone()
++            if row is None:
++                raise IntegrationError("integration_identity_conflict")
++            return row[0], row[0] == integration_id
++
++    def get(self, integration_id):
++        with self.connection(readonly=True) as conn:
++            return self._job(conn.execute("SELECT * FROM integration_jobs WHERE integration_id=?",
++                                         (integration_id,)).fetchone())
++
++    def claim(self, now):
++        parse_utc(now)
++        with self.connection() as conn:
++            conn.execute("BEGIN IMMEDIATE")
++            row = conn.execute("""SELECT * FROM integration_jobs WHERE due_at_utc<=? AND
++                ((classification_state='PENDING' AND next_attempt_at_utc<=? AND attempt_count<5)
++                OR (classification_state='LEASED' AND lease_until_utc<=?))
++                ORDER BY due_at_utc,integration_id LIMIT 1""", (now, now, now)).fetchone()
++            if row is None:
++                return None
++            previous = self._job(row)
++            conn.execute("""UPDATE integration_jobs SET classification_state='LEASED',lease_token=?,
++                lease_until_utc=?,attempt_count=min(attempt_count+1,5),updated_at_utc=? WHERE integration_id=?""",
++                (str(uuid.uuid4()), plus(now, LEASE_SECONDS), now, previous.integration_id))
++            job = self._job(conn.execute("SELECT * FROM integration_jobs WHERE integration_id=?",
++                                        (previous.integration_id,)).fetchone())
++            conn.commit()
++            return job, previous.attempt_count >= MAX_ATTEMPTS
++
++    def finish(self, job, now, *, state, reason=None, core=None, start=None, end=None, retry_at=None,
++               identity_conflict=False):
++        parse_utc(now)
++        if state not in {"PENDING", "CLASSIFIED", "NO_RESULT_FINAL"}:
++            raise ValueError("Invalid completion state")
++        with self.connection() as conn:
++            return conn.execute("""UPDATE integration_jobs SET classification_state=?,last_reason_code=?,
++                classification_id=?,classification_result_id=?,effective_window_start_utc=?,effective_window_end_utc=?,
++                next_attempt_at_utc=?,lease_token=NULL,lease_until_utc=NULL,updated_at_utc=?,
++                identity_state=CASE WHEN ? THEN 'CONFLICT' ELSE identity_state END,
++                identity_reason=CASE WHEN ? THEN ? ELSE identity_reason END
++                WHERE integration_id=? AND classification_state='LEASED' AND lease_token=? AND lease_until_utc>?""",
++                (state, reason, None if core is None else core.classification_id,
++                 None if core is None else core.classification_result_id, start, end,
++                 retry_at or job.next_attempt_at_utc, now, identity_conflict, identity_conflict, reason,
++                 job.integration_id, job.lease_token, now)).rowcount == 1
++
++    def identity_due(self, now):
++        parse_utc(now)
++        with self.connection(readonly=True) as conn:
++            return self._job(conn.execute("""SELECT * FROM integration_jobs
++                WHERE identity_state IN ('UNRESOLVED','DEVICE_RESOLVED')
++                AND (identity_last_attempt_at_utc IS NULL OR identity_last_attempt_at_utc<=?)
++                AND (identity_last_attempt_at_utc IS NULL OR
++                     identity_last_attempt_at_utc<strftime('%Y-%m-%dT%H:%M:%fZ',authorized_at_utc,'+3600 seconds'))
++                ORDER BY coalesce(identity_last_attempt_at_utc,''),integration_id LIMIT 1""", (plus(now, -30),)).fetchone())
++
++    def save_identity(self, job, resolution, now):
++        with self.connection() as conn:
++            conn.execute("""UPDATE integration_jobs SET registry_snapshot_id=?,device_id=?,visit_id=?,
++                identity_state=?,identity_reason=?,identity_last_attempt_at_utc=?,updated_at_utc=?
++                WHERE integration_id=? AND identity_state!='CONFLICT'""",
++                (resolution.snapshot_id, resolution.device_id, resolution.visit_id,
++                 resolution.state, resolution.reason, now, now, job.integration_id))
++
++    def for_auth_run(self, site, session, number):
++        with self.connection(readonly=True) as conn:
++            return self._job(conn.execute("SELECT * FROM integration_jobs WHERE site_id=? AND auth_session_id=? AND auth_run_number=?",
++                                         (site, session, number)).fetchone())
++
++    def current_for_device(self, site, device):
++        with self.connection(readonly=True) as conn:
++            return self._job(conn.execute("""SELECT * FROM integration_jobs WHERE site_id=? AND device_id=?
++                AND classification_state='CLASSIFIED' AND identity_state IN ('DEVICE_RESOLVED','DEVICE_AND_VISIT_RESOLVED')
++                ORDER BY authorized_at_utc DESC,integration_id DESC LIMIT 1""", (site, device)).fetchone())
+diff --git a/app/device_fingerprint_integration/runtime.py b/app/device_fingerprint_integration/runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d333ee57f15d72ce5069313143de6939aeb0cb67
+--- /dev/null
++++ b/app/device_fingerprint_integration/runtime.py
+@@ -0,0 +1,62 @@
++"""Explicit composition: Portal gets enqueue only; CLI owns the classifier worker."""
++
++from .config import integration_config_from_settings
++from .repository import IntegrationRepository
++from .submitter import (
++    DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER, DurableFingerprintIntegrationSubmitter, emit,
++)
++
++
++def create_fingerprint_integration_submitter(settings):
++    try:
++        config = integration_config_from_settings(settings)
++        if not config.enabled:
++            return DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
++        repository = IntegrationRepository(config.db_path)
++        repository.initialize()
++        return DurableFingerprintIntegrationSubmitter(repository)
++    except Exception:
++        emit("fingerprint.integration_worker_health", reason_code="integration_unavailable")
++        return DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
++
++
++def create_worker(settings):
++    # These imports/composition never execute in the main Portal process.
++    from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
++    from app.device_fingerprint.classification_persistence import DeviceFingerprintClassificationStore
++    from app.device_fingerprint.control_plane_store import DeviceFingerprintControlPlaneStore
++    from app.device_fingerprint.read_service import DeviceFingerprintReadService
++    from app.visitor_registry.registry_config import registry_config_from_settings
++    from app.visitor_registry.registry_repository import VisitorRegistryRepository
++    from app.visitor_registry.registry_read_service import VisitorRegistryReadService
++    from app.visitor_registry.registry_service import VisitorRegistryService
++    from app.visit_lifecycle.config import visit_config_from_settings
++    from app.visit_lifecycle.repository import VisitRepository
++    from app.visit_lifecycle.read_service import VisitLifecycleReadService
++    from .executor import ClassificationExecutor
++    from .compatibility import ReadOnlyControlPlaneStoreMixin
++    from .identity_resolver import ExactIdentityResolver
++    from .worker import IntegrationWorker
++    from .models import utc_now
++
++    config = integration_config_from_settings(settings)
++    if not config.enabled:
++        raise ValueError("Integration worker is disabled")
++    repository = IntegrationRepository(config.db_path)
++    repository.initialize()
++    class ReadOnlyControl(ReadOnlyControlPlaneStoreMixin, DeviceFingerprintControlPlaneStore):
++        pass
++    control = ReadOnlyControl(config.control_plane_db_path)
++    classification_read = DeviceFingerprintClassificationReadService(config.classification_db_path)
++    classification_store = DeviceFingerprintClassificationStore(
++        config.classification_db_path, config.evidence_db_path, control_plane_store=control)
++    # Existing domain constructors only: do not initialize/migrate/write Registry/Visit/Task-01.
++    registry_config = registry_config_from_settings({**settings, "visitor_registry_enabled": False})
++    registry_read = VisitorRegistryReadService(VisitorRegistryRepository(registry_config),
++        VisitorRegistryService(settings.get("portal_counter_timezone", "UTC")), configured_enabled=False)
++    visit_read = VisitLifecycleReadService(VisitRepository(visit_config_from_settings(
++        {**settings, "visit_lifecycle_enabled": False})))
++    evidence_read = DeviceFingerprintReadService(config.evidence_db_path,
++                                                retention_days=int(settings.get("device_fingerprint_retention_days", 30)))
++    executor = ClassificationExecutor(control, evidence_read, classification_store, classification_read, clock=utc_now)
++    return IntegrationWorker(repository, executor, ExactIdentityResolver(registry_read, visit_read))
+diff --git a/app/device_fingerprint_integration/submitter.py b/app/device_fingerprint_integration/submitter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5399c4fd4d0a0107aca4edd44efc258a6405071
+--- /dev/null
++++ b/app/device_fingerprint_integration/submitter.py
+@@ -0,0 +1,46 @@
++"""Auth-facing enqueue only; never import or invoke classification machinery."""
++
++import logging
++import json
++from typing import Protocol
++
++from .models import utc_now
++
++logger = logging.getLogger("captivportal.fingerprint.integration")
++_TELEMETRY_FIELDS = frozenset({
++    "integration_id", "site_id", "observed_mac", "auth_session_id", "auth_run_number",
++    "classification_id", "device_id", "visit_id", "reason_code", "attempt_count",
++})
++
++
++def emit(event, **fields):
++    # No exception messages, raw controller/evidence objects or result bodies.
++    try:
++        safe = {key: value for key, value in fields.items() if key in _TELEMETRY_FIELDS}
++        logger.info(json.dumps({"event": event, **safe}, sort_keys=True, separators=(",", ":")))
++    except Exception:
++        pass
++
++
++class FingerprintIntegrationSubmitter(Protocol):
++    def submit_authorized(self, request): ...
++
++
++class _DisabledSubmitter:
++    def submit_authorized(self, request):
++        return None
++
++
++DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER = _DisabledSubmitter()
++
++
++class DurableFingerprintIntegrationSubmitter:
++    def __init__(self, repository, *, clock=utc_now):
++        self.repository, self.clock = repository, clock
++
++    def submit_authorized(self, request):
++        identity, inserted = self.repository.enqueue(request, self.clock())
++        emit("fingerprint.integration_job_queued" if inserted else "fingerprint.integration_job_duplicate",
++             integration_id=identity, site_id=request.site_id, observed_mac=request.observed_mac,
++             auth_session_id=request.auth_session_id, auth_run_number=request.auth_run_number)
++        return identity
+diff --git a/app/device_fingerprint_integration/worker.py b/app/device_fingerprint_integration/worker.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b231399e629b573c8d1fb9fbf4a5484a920aa77e
+--- /dev/null
++++ b/app/device_fingerprint_integration/worker.py
+@@ -0,0 +1,111 @@
++"""Single logical consumer, durable leases and bounded independent identity retries."""
++
++from contextlib import contextmanager
++import os
++import threading
++
++from .models import (IntegrationError, IdentityResolution, MAX_ATTEMPTS, RETRY_DELAYS,
++                     plus, utc_now)
++from .submitter import emit
++
++RETRYABLE = frozenset({"retryable_sqlite_busy", "snapshot_timeout", "snapshot_memory_pressure",
++                      "knowledge_bundle_unavailable", "activation_lineage_unavailable",
++                      "persistence_unavailable", "profile_changed_during_job", "integration_unavailable"})
++
++
++@contextmanager
++def consumer_lock(path):
++    """Kernel-released on crash; expired DB lease cannot overlap a live consumer."""
++    with open(str(path) + ".consumer.lock", "a+b") as handle:
++        acquired = False
++        try:
++            if os.name == "posix":
++                import fcntl
++                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            else:
++                import msvcrt
++                handle.seek(0)
++                if not handle.read(1):
++                    handle.write(b"0")
++                    handle.flush()
++                handle.seek(0)
++                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
++            acquired = True
++        except OSError:
++            pass
++        try:
++            yield acquired
++        finally:
++            if acquired:
++                if os.name == "posix":
++                    fcntl.flock(handle, fcntl.LOCK_UN)
++                else:
++                    handle.seek(0)
++                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
++
++
++class IntegrationWorker:
++    def __init__(self, repository, executor, identity_resolver, *, clock=utc_now):
++        self.repository, self.executor, self.resolver = repository, executor, identity_resolver
++        self.clock, self.stop_event = clock, threading.Event()
++
++    def run_once(self):
++        with consumer_lock(self.repository.path) as acquired:
++            if not acquired:
++                return False
++            claimed = self.repository.claim(self.clock())
++            if claimed is not None:
++                job, recovery_only = claimed
++                emit("fingerprint.integration_classification_started", integration_id=job.integration_id,
++                     attempt_count=job.attempt_count)
++                try:
++                    core, start, end = self.executor.execute(job, recovery_only=recovery_only)
++                except Exception as exc:
++                    reason = getattr(exc, "reason_code", None) or "integration_unavailable"
++                    completed_at = self.clock()
++                    retry = reason in RETRYABLE and job.attempt_count < MAX_ATTEMPTS
++                    conflict = reason in {"classification_identity_conflict", "integration_identity_conflict"}
++                    saved = self.repository.finish(job, completed_at, state="PENDING" if retry else "NO_RESULT_FINAL",
++                        reason=reason, retry_at=plus(completed_at, RETRY_DELAYS[job.attempt_count - 1]) if retry else None,
++                        identity_conflict=conflict)
++                    if saved:
++                        emit("fingerprint.integration_classification_retry" if retry else "fingerprint.integration_classification_no_result",
++                             integration_id=job.integration_id, reason_code=reason, attempt_count=job.attempt_count)
++                    else:
++                        emit("fingerprint.integration_worker_health", integration_id=job.integration_id,
++                             reason_code="lease_lost")
++                else:
++                    # Failure here leaves a durable lease; restart reads planned ID before assembly.
++                    if self.repository.finish(job, self.clock(), state="CLASSIFIED", core=core, start=start, end=end):
++                        emit("fingerprint.integration_classification_succeeded", integration_id=job.integration_id,
++                             classification_id=core.classification_id)
++            identity_job = self.repository.identity_due(self.clock())
++            if identity_job is not None:
++                now = self.clock()
++                if now >= plus(identity_job.authorized_at_utc, 3600):
++                    resolution = IdentityResolution(identity_job.identity_state, "identity_proof_unavailable",
++                        identity_job.registry_snapshot_id, identity_job.device_id, identity_job.visit_id)
++                else:
++                    try:
++                        resolution = self.resolver.resolve(identity_job)
++                    except Exception:
++                        resolution = IdentityResolution(identity_job.identity_state, "identity_proof_unavailable",
++                            identity_job.registry_snapshot_id, identity_job.device_id, identity_job.visit_id)
++                self.repository.save_identity(identity_job, resolution, now)
++                if resolution.state != "UNRESOLVED":
++                    emit("fingerprint.integration_identity_conflict" if resolution.state == "CONFLICT"
++                         else "fingerprint.integration_identity_resolved", integration_id=identity_job.integration_id,
++                         device_id=resolution.device_id, visit_id=resolution.visit_id, reason_code=resolution.reason)
++            return claimed is not None or identity_job is not None
++
++    def run(self):
++        while not self.stop_event.is_set():
++            try:
++                self.run_once()
++                emit("fingerprint.integration_worker_health", reason_code="ready")
++            except Exception:
++                emit("fingerprint.integration_worker_health", reason_code="integration_unavailable")
++            self.stop_event.wait(1)
++
++    def stop(self):
++        self.stop_event.set()
+diff --git a/app/settings.py b/app/settings.py
+index c02cf9d757a2224b4f39455d38f3be75ef6ffada..c40613533de1b8ab6274bc7caac803b10ccdd7f8 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -104,6 +104,9 @@ from app.config import (
+     TRAFFIC_PROJECTION_WRITER_LOCK_PATH,
+     WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED,
+     DEVICE_FINGERPRINT_EVIDENCE_ENABLED,
++    DEVICE_FINGERPRINT_INTEGRATION_ENABLED, DEVICE_FINGERPRINT_INTEGRATION_DB_PATH,
++    DEVICE_FINGERPRINT_EVIDENCE_DB_PATH, DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH,
++    DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH,
+     DEVICE_FINGERPRINT_DB_PATH, DEVICE_FINGERPRINT_WRITER_LOCK_PATH,
+     DEVICE_FINGERPRINT_BIND_ADDRESS, DEVICE_FINGERPRINT_PORT,
+     DEVICE_FINGERPRINT_TLS_CERT_PATH, DEVICE_FINGERPRINT_TLS_KEY_PATH,
+@@ -507,6 +510,11 @@ def get_settings() -> dict:
+             WEB_ADMIN_TRAFFIC_PROJECTION_READ_ENABLED
+         ),
+         "device_fingerprint_evidence_enabled": DEVICE_FINGERPRINT_EVIDENCE_ENABLED,
++        "device_fingerprint_integration_enabled": DEVICE_FINGERPRINT_INTEGRATION_ENABLED,
++        "device_fingerprint_integration_db_path": DEVICE_FINGERPRINT_INTEGRATION_DB_PATH,
++        "device_fingerprint_evidence_db_path": DEVICE_FINGERPRINT_EVIDENCE_DB_PATH,
++        "device_fingerprint_classification_db_path": DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH,
++        "device_fingerprint_control_plane_db_path": DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH,
+         "device_fingerprint_db_path": DEVICE_FINGERPRINT_DB_PATH,
+         "device_fingerprint_writer_lock_path": DEVICE_FINGERPRINT_WRITER_LOCK_PATH,
+         "device_fingerprint_bind_address": DEVICE_FINGERPRINT_BIND_ADDRESS,
+diff --git a/app/web/web.py b/app/web/web.py
+index f06766a52ca1b89272215bae66de1c5747427703..33432920e6f27f55dc4082d44bde95ddd9af4398 100644
+--- a/app/web/web.py
++++ b/app/web/web.py
+@@ -122,6 +122,7 @@ def create_app(
+     controller=None,
+     visitor_snapshot_collector=None,
+     visit_start_submitter=None,
++    fingerprint_integration_submitter=None,
+     authorization_health_tracker=None,
+     portal_evidence_sink=_AUTO_PORTAL_EVIDENCE,
+     client_hints_probe=_AUTO_CLIENT_HINTS_PROBE,
+@@ -361,6 +362,7 @@ def create_app(
+         session_manager=auth_manager,
+         snapshot_collector=visitor_snapshot_collector,
+         visit_start_submitter=visit_start_submitter,
++        fingerprint_integration_submitter=fingerprint_integration_submitter,
+         authorization_health_tracker=authorization_health_tracker,
+     )
+     portal_entry_handler = PortalEntryHandler(
+diff --git a/deploy/device-fingerprint/INTEGRATION.md b/deploy/device-fingerprint/INTEGRATION.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e3803d0b006fa6b164d02ff1c138f308c5b2e54
+--- /dev/null
++++ b/deploy/device-fingerprint/INTEGRATION.md
+@@ -0,0 +1,33 @@
++# Task-05 deployment artifact (not activated)
++
++Integration defaults to disabled. Portal composition creates only the short-write
++submitter; the separate `fingerprint-classification.service` owns classification.
++The unit follows the existing admin user, `/opt/CaptivePortal` source directory and
++`/etc/default/captive-portal` environment convention. It opens no listener and uses
++no controller/provider. Installing/enabling/restarting it requires a separate Owner
++deployment authorization.
++
++The dedicated integration database is schema v1, FULL synchronous, rollback-journal
++SQLite with a 100 ms contention budget. Its parent must already exist; only this
++database is initialized by Task-05. Other domain databases are never initialized or
++migrated. Evidence/Registry/Visit reads use their existing read-only boundaries.
++The integration database and consumer lock must be owned by the same runtime user
++as the Portal submitter and worker. Do not alias any domain database path.
++
++One successful AuthRun queues one durable job. The fixed window is Auth-300s to
++Auth+120s, due at Auth+150s; Foundation valid-from clamps only the start. Classification
++uses the dynamically pinned admitted profile and normal Task-04 production path.
++Five attempts and the 30/120/300/600s retry schedule are bounded. A kernel consumer
++lock prevents overlapping consumers even after lease expiry; DB token CAS protects
++completion. A committed planned classification ID is recovered before new assembly.
++Shutdown stops new work and permits the current synchronous request to finish; a
++forced exit leaves the lease and planned ID recoverable.
++
++Identity uses only exact Registry session/Site/MAC snapshots and exact Visit start
++session/run matches. A historical Visit read is one page of at most 100 visits in
++the fixed Auth +/-1h range; absent proof remains unresolved. Identity retries end
++at Auth+1h. No MAC/identity guessing or raw/result payload replication is permitted.
++
++The Linux snapshot memory guard measures current RSS from `/proc/self/statm` and
++`SC_PAGE_SIZE`; missing measurements fail closed for the classification job. No
++profile, timing, memory ceiling or classifier policy is tuned by this subsystem.
+diff --git a/deploy/device-fingerprint/fingerprint-classification.service b/deploy/device-fingerprint/fingerprint-classification.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..9efe00b276b67bb0b2771490df027b029ed0cbb9
+--- /dev/null
++++ b/deploy/device-fingerprint/fingerprint-classification.service
+@@ -0,0 +1,22 @@
++[Unit]
++Description=CaptivPortal durable fingerprint identity/classification integration
++After=captive-portal.service
++
++[Service]
++Type=simple
++User=admin
++Group=admin
++WorkingDirectory=/opt/CaptivePortal
++EnvironmentFile=/etc/default/captive-portal
++ExecStart=/usr/bin/python3 -m app.device_fingerprint_integration.cli run
++Restart=on-failure
++RestartSec=30
++TimeoutStopSec=330
++NoNewPrivileges=true
++PrivateTmp=true
++ProtectSystem=strict
++ProtectHome=true
++ReadWritePaths=/opt/CaptivePortal/data
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/run.py b/run.py
+index 79293b8a101cc79dccbb2c4114dcde18bbb38afe..f5ef1929024e8ac9c9537c58d07cb504d0672c87 100644
+--- a/run.py
++++ b/run.py
+@@ -40,6 +40,7 @@ from app.admin_web.home_ap_24h_telemetry import (
+ )
+ from app.web.web import create_app, auth_executor, auth_manager
+ from app.auth.health import authorization_health_tracker_from_settings
++from app.device_fingerprint_integration.runtime import create_fingerprint_integration_submitter
+ 
+ 
+ _shutdown_lock = threading.Lock()
+@@ -404,6 +405,8 @@ def main() -> None:
+         app_kwargs["visit_start_submitter"] = (
+             _visit_lifecycle.start_submitter
+         )
++    if "fingerprint_integration_submitter" in inspect.signature(create_app).parameters:
++        app_kwargs["fingerprint_integration_submitter"] = create_fingerprint_integration_submitter(settings)
+     app = create_app(**app_kwargs)
+     logger.info("Web application created")
+     _observation_foundation = create_observation_foundation(
+diff --git a/tests/device_fingerprint_integration/__init__.py b/tests/device_fingerprint_integration/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e721f2b253bfa80a58791c58b2074d8c2ad12263
+--- /dev/null
++++ b/tests/device_fingerprint_integration/__init__.py
+@@ -0,0 +1 @@
++"""Task-05 deterministic disposable integration tests."""
+diff --git a/tests/device_fingerprint_integration/test_auth_hook.py b/tests/device_fingerprint_integration/test_auth_hook.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd501ad32a9a315c0907b7801a336b63a302f352
+--- /dev/null
++++ b/tests/device_fingerprint_integration/test_auth_hook.py
+@@ -0,0 +1,54 @@
++from types import SimpleNamespace
++import sqlite3
++
++import pytest
++
++from app.auth.manager import AuthSessionManager
++from app.auth.worker import AuthWorker, _WorkerRun
++from app.auth.session import AuthStatus
++from app.models import Result
++from app.device_fingerprint_integration.submitter import DurableFingerprintIntegrationSubmitter
++from .test_repository_identity import repository, SITE, MAC
++
++
++@pytest.mark.parametrize("failure", [None, "busy", "unavailable", "unexpected"])
++def test_authorized_authrun_hook_order_and_fail_open(tmp_path, failure):
++    repo = repository(tmp_path)
++    manager = AuthSessionManager()
++    session, _ = manager.create_or_get(SITE, MAC, "192.168.8.2")
++    manager.claim_worker(session, 1, session.current_run_token)
++    calls = []
++    class Snapshot:
++        def submit(self, request):
++            calls.append("registry")
++    class Visit:
++        def submit_authorized(self, request):
++            calls.append("visit")
++    class Submission:
++        def submit_authorized(self, request):
++            assert session.status == AuthStatus.AUTHORIZED
++            assert manager.run_snapshot(session, 1)["final_state"] == AuthStatus.AUTHORIZED.value
++            calls.append("integration")
++            if failure == "busy":
++                raise sqlite3.OperationalError("database is locked")
++            if failure is not None:
++                raise RuntimeError("synthetic unavailable")
++            return DurableFingerprintIntegrationSubmitter(repo).submit_authorized(request)
++    worker = AuthWorker(None, manager, snapshot_collector=Snapshot(), visit_start_submitter=Visit(),
++                        fingerprint_integration_submitter=Submission())
++    run = _WorkerRun(session.session_id, 1, session.current_run_token)
++    worker._mark_authorized(session, Result.ok(data={"authStatus": 2}), run, final_reason="AUTHORIZED")
++    assert session.status == AuthStatus.AUTHORIZED
++    assert calls == ["registry", "visit", "integration"]
++    with repo.connection(readonly=True) as conn:
++        assert conn.execute("SELECT count(*) FROM integration_jobs").fetchone()[0] == (1 if failure is None else 0)
++
++
++def test_default_worker_noop_preserves_authorization_and_existing_submissions():
++    manager = AuthSessionManager()
++    session, _ = manager.create_or_get("legacy-site", MAC, "192.168.8.2")
++    manager.claim_worker(session, 1, session.current_run_token)
++    worker = AuthWorker(None, manager)
++    worker._mark_authorized(session, Result.ok(), _WorkerRun(session.session_id, 1, session.current_run_token),
++                            final_reason="AUTHORIZED")
++    assert session.status == AuthStatus.AUTHORIZED
+diff --git a/tests/device_fingerprint_integration/test_executor_persistence.py b/tests/device_fingerprint_integration/test_executor_persistence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a47f8c7d47728e3daf6dfe71224739bea3f2691
+--- /dev/null
++++ b/tests/device_fingerprint_integration/test_executor_persistence.py
+@@ -0,0 +1,298 @@
++from dataclasses import replace
++from pathlib import Path
++from types import SimpleNamespace
++import hashlib
++import uuid
++
++import pytest
++
++from app.device_fingerprint.artifact_content import make_artifact_content, ArtifactRef
++from app.device_fingerprint.classification_persistence import ClassificationPersistenceError
++from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
++from app.device_fingerprint.runtime_profile_artifacts import (
++    make_classification_runtime_profile, make_foundation_runtime_profile,
++    make_runtime_profile_admission_manifest, make_runtime_profile_validity_record,
++    make_runtime_profile_activation_record,
++)
++from app.device_fingerprint.control_plane_store import PinnedRuntimeProfile
++from app.device_fingerprint_integration.compatibility import preflight, verify_executable_identities, REPOSITORY_ROOT
++from app.device_fingerprint_integration.executor import ClassificationExecutor, process_memory_guard
++from app.device_fingerprint_integration.models import IntegrationError, IdentityResolution, plus
++from app.device_fingerprint_integration.worker import IntegrationWorker
++from app.device_fingerprint_integration.read_service import FingerprintIntegrationReadService
++from tests.device_fingerprint_task04_04d_persistence.test_classification_persistence import (
++    setup, production_setup, persist_candidate,
++)
++from tests.device_fingerprint_task04_04d_request.test_request_assembly import TIME, ref
++from .test_repository_identity import repository, job, resolver, SITE, MAC, A, DEVICE, SNAPSHOT
++
++
++def source_identity(relative, qualified):
++    return {"implementation_id": f"python:{relative}:{qualified}",
++            "implementation_digest": hashlib.sha256((REPOSITORY_ROOT / relative).read_bytes()).hexdigest()}
++
++
++def prepared_production(tmp_path):
++    """Fully typed local preflight fixture; never today's production IDs."""
++    store, control, assembly, retention = production_setup(tmp_path)
++    identity = source_identity("app/device_fingerprint/origin_assessment.py", "DeviceFingerprintOriginAssessmentBuilder.build")
++    evidence = source_identity("app/device_fingerprint/validation.py", "canonical_json")
++    manifest = make_artifact_content("ClassifierArtifactManifest", {
++        "adapter_implementation_identities": [{"adapter_kind": "TASK01_EVIDENCE", "source_kind": "dhcp",
++            "feature_schema_version": 1, "mode": "FUSION", **identity}],
++        "evidence_canonical_json_compatibility_identity":
++            f"EvidenceCanonicalJsonV1:{evidence['implementation_id']}:sha256:{evidence['implementation_digest']}",
++    })
++    profile = make_classification_runtime_profile({**assembly.classification_runtime_profile.semantic_payload,
++                                                  "classifier_artifact_manifest": ref(manifest)})
++    old_rpm = control.pinned.admission_manifest
++    old_foundation_rpm = control.contents[old_rpm.semantic_payload[
++        "foundation_runtime_profile_admission_manifest"]["artifact_id"]]
++    foundation_manifest = make_artifact_content("FoundationAdmissionManifest", {
++        "synthetic": True, "classification_retention_policy": ref(retention)})
++    foundation_rpm = make_runtime_profile_admission_manifest({**old_foundation_rpm.semantic_payload,
++        "foundation_admission_manifest": ref(foundation_manifest)})
++    accepted = make_artifact_content("Task04AcceptanceManifest", {
++        "fixture": "local-only", "tested_classification_runtime_profile": ref(profile),
++        "classifier_artifact_manifest": ref(manifest), "foundation_admission_manifest": ref(foundation_manifest),
++        "pre_acceptance_task04_gate_result_manifests": []})
++    rpm = make_runtime_profile_admission_manifest({**old_rpm.semantic_payload,
++        "candidate_profile": ref(profile), "task04_acceptance_manifest": ref(accepted),
++        "foundation_admission_manifest": ref(foundation_manifest),
++        "foundation_runtime_profile_admission_manifest": ref(foundation_rpm)})
++    pointer = replace(control.pinned.pointer, runtime_profile_id=profile.artifact_id,
++                      runtime_profile_digest=profile.content_sha256)
++    activation = make_runtime_profile_activation_record({
++        "activation_contract_version": 1, "activation_record_id": pointer.activation_record_id,
++        "profile_kind": "classification", "runtime_profile_id": profile.artifact_id,
++        "runtime_profile_digest": profile.content_sha256,
++        "runtime_profile_admission_manifest_id": rpm.artifact_id,
++        "runtime_profile_admission_manifest_digest": rpm.content_sha256,
++        "previous_activation_record_id": None, "previous_active_profile_id": None,
++        "previous_active_profile_digest": None, "activated_at_utc": TIME,
++        "activation_reason_update_class": "INITIAL_CLASSIFICATION", "activation_result": "ACTIVE",
++        "activation_generation_id": pointer.activation_generation_id})
++    validity = make_runtime_profile_validity_record({
++        "runtime_profile_validity_contract_version": 1, "validity_record_id": str(uuid.uuid4()),
++        "profile_kind": "classification", "runtime_profile_id": profile.artifact_id,
++        "runtime_profile_digest": profile.content_sha256, "activation_record_id": pointer.activation_record_id,
++        "state": "ACTIVE", "reason_code": "ACTIVATED", "effective_at_utc": TIME,
++        "inflight_commit_rule": "ALLOW_PINNED_INFLIGHT", "previous_validity_record_id": None})
++    control.pinned = PinnedRuntimeProfile(pointer, profile, rpm, activation, validity)
++    control.contents.update({c.artifact_id: c for c in (manifest, profile, foundation_manifest,
++        foundation_rpm, accepted, rpm, activation, validity, retention)})
++    store._test_foundation_admission = foundation_rpm
++    return store, control, assembly, retention
++
++
++def executor(store, control, read_service, **kwargs):
++    read = DeviceFingerprintClassificationReadService(store.database_path)
++    return ClassificationExecutor(control, read_service, store, read, clock=lambda: TIME, **kwargs)
++
++
++def test_normal_production_path_planned_id_and_authoritative_internal_read(tmp_path):
++    store, control, assembly, _retention = prepared_production(tmp_path)
++    # Use the existing deterministic Task-01 read fixture, not a second classifier path.
++    from tests.device_fingerprint_task04_04d_request.test_request_assembly import prepared
++    ctx, _, _, _ = prepared()
++    repo = repository(tmp_path)
++    original = job(repo)
++    leased, _ = repo.claim(plus(A, 150))
++    worker = executor(store, control, ctx.read, memory_guard=lambda _: True)
++    core, start, end = worker.execute(leased)
++    assert core.execution_context == "PRODUCTION"
++    assert core.classification_id == original.planned_classification_id
++    assert (start, end) == (plus(A, -300), plus(A, 120))
++    assert repo.finish(leased, plus(A, 151), state="CLASSIFIED", core=core, start=start, end=end)
++    reader = FingerprintIntegrationReadService(repo, worker.read)
++    integrated = reader.get_for_auth_run(SITE, original.auth_session_id, 1)
++    assert integrated.identity_state == "UNRESOLVED"
++    assert integrated.classification_result == worker.read.get_by_id(core.classification_id)
++    repo.save_identity(repo.get(original.integration_id),
++                       IdentityResolution("DEVICE_RESOLVED", None, SNAPSHOT, DEVICE), plus(A, 152))
++    assert reader.get_current_for_device(SITE, DEVICE).classification_id == core.classification_id
++    assert reader.get_current_for_device("b" * 24, DEVICE) is None
++
++
++def test_persist_commit_then_job_update_lost_recovers_without_duplicate(tmp_path):
++    store, control, _assembly, _retention = prepared_production(tmp_path)
++    from tests.device_fingerprint_task04_04d_request.test_request_assembly import prepared
++    ctx, _, _, _ = prepared()
++    repo = repository(tmp_path)
++    original = job(repo)
++    leased, _ = repo.claim(plus(A, 150))
++    first = executor(store, control, ctx.read, memory_guard=lambda _: True)
++    core, start, end = first.execute(leased)
++    # Crash after Task-04 COMMIT; durable job remains LEASED.
++    restarted, recovery_only = repo.claim(plus(A, 450))
++    class Forbidden:
++        def __call__(self, *_args, **_kwargs):
++            raise AssertionError("Duplicate classification attempted")
++    second = executor(store, control, None, assembly_factory=Forbidden(), preflight_fn=Forbidden())
++    recovered, recovered_start, recovered_end = second.execute(restarted, recovery_only=recovery_only)
++    assert (recovered.classification_id, recovered_start, recovered_end) == (core.classification_id, start, end)
++    assert repo.finish(restarted, plus(A, 451), state="CLASSIFIED", core=recovered, start=start, end=end)
++    with store._connect() as conn:
++        assert conn.execute("SELECT count(*) FROM classifications").fetchone()[0] == 1
++
++
++def test_automatic_worker_uses_normal_production_executor_and_persistence(tmp_path):
++    store, control, _assembly, _retention = prepared_production(tmp_path)
++    from tests.device_fingerprint_task04_04d_request.test_request_assembly import prepared
++    ctx, _, _, _ = prepared()
++    repo = repository(tmp_path)
++    original = job(repo)
++    classifier = executor(store, control, ctx.read, memory_guard=lambda _: True)
++    worker = IntegrationWorker(repo, classifier, resolver(), clock=lambda: plus(A, 150))
++    assert worker.run_once()
++    stored = repo.get(original.integration_id)
++    assert stored.classification_state == "CLASSIFIED" and stored.identity_state == "UNRESOLVED"
++    assert stored.classification_id == original.planned_classification_id
++    assert classifier.read.get_by_id(stored.classification_id).core.execution_context == "PRODUCTION"
++
++
++@pytest.mark.parametrize("changed", [dict(site_id="b" * 24), dict(observed_mac="02:11:22:33:44:55")])
++def test_existing_planned_classification_wrong_identity_is_conflict_not_overwritten(tmp_path, changed):
++    store, control, _assembly, _retention = prepared_production(tmp_path)
++    from tests.device_fingerprint_task04_04d_request.test_request_assembly import prepared
++    ctx, _, _, _ = prepared()
++    repo = repository(tmp_path)
++    original = job(repo)
++    classifier = executor(store, control, ctx.read, memory_guard=lambda _: True)
++    core, _, _ = classifier.execute(original)
++    with pytest.raises(IntegrationError, match="classification_identity_conflict"):
++        classifier.execute(replace(original, **changed))
++    with store._connect() as conn:
++        assert conn.execute("SELECT count(*) FROM classifications").fetchone()[0] == 1
++    assert classifier.read.get_by_id(core.classification_id).core == core
++
++
++@pytest.mark.parametrize("identifier", ["not-uuid", str(uuid.uuid1()), str(uuid.uuid4()).upper(), 42])
++def test_explicit_classification_id_rejected_without_change_to_default(tmp_path, identifier):
++    store, _, assembly, retention = setup(tmp_path)
++    with pytest.raises(ClassificationPersistenceError):
++        store.persist(assembly, retention_policy=retention, classification_id=identifier,
++            pre_acceptance_foundation_runtime_profile_admission_manifest=store._test_foundation_admission)
++    core = persist_candidate(store, assembly, retention)
++    assert uuid.UUID(core.classification_id).version == 4
++    reader = DeviceFingerprintClassificationReadService(store.database_path)
++    assert reader.get_by_id(core.classification_id) == reader.get_current(SITE, MAC)
++    assert reader.list_history(SITE, MAC, "2026-09-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z").items[0].core == core
++
++
++def test_get_by_id_retained_hash_integrity_and_missing(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    core = persist_candidate(store, assembly, retention)
++    reader = DeviceFingerprintClassificationReadService(store.database_path)
++    assert reader.get_by_id(str(uuid.uuid4())) is None
++    with store._connect() as conn:
++        conn.execute("UPDATE artifacts SET semantic_payload_json='{}' WHERE artifact_id=?", (core.classification_result_id,))
++    with pytest.raises(ClassificationPersistenceError):
++        reader.get_by_id(core.classification_id)
++
++
++@pytest.mark.parametrize("bad", ["digest", "escape", "missing"])
++def test_manifest_source_mismatch_blocks_execution(tmp_path, bad):
++    store, control, _assembly, _ = prepared_production(tmp_path)
++    assert preflight(control).pin == control.pinned
++    manifest = control.contents[control.pinned.runtime_profile.semantic_payload["classifier_artifact_manifest"]["artifact_id"]]
++    payload = manifest.semantic_payload
++    if bad == "digest":
++        payload["adapter_implementation_identities"][0]["implementation_digest"] = "0" * 64
++    elif bad == "escape":
++        payload["adapter_implementation_identities"][0]["implementation_id"] = "python:app/../secret.py:symbol"
++    else:
++        payload["adapter_implementation_identities"] = []
++    with pytest.raises(IntegrationError, match="runtime_profile_incompatible"):
++        verify_executable_identities(make_artifact_content("ClassifierArtifactManifest", payload))
++
++
++def test_profile_generation_switch_during_internal_pin_retries_not_torn_result(tmp_path):
++    store, control, _assembly, _ = prepared_production(tmp_path)
++    from tests.device_fingerprint_task04_04d_request.test_request_assembly import prepared
++    ctx, _, _, _ = prepared()
++    old = control.pinned
++    changed = replace(old, pointer=replace(old.pointer, activation_generation_id=str(uuid.uuid4())))
++    calls = []
++    def pin(_kind):
++        calls.append(_kind)
++        return old if len(calls) == 1 else changed
++    control.pin_active_profile = pin
++    repo = repository(tmp_path)
++    leased = job(repo)
++    with pytest.raises(IntegrationError, match="profile_changed_during_job"):
++        executor(store, control, ctx.read, memory_guard=lambda _: True).execute(leased)
++    assert len(calls) == 3
++    with store._connect() as conn:
++        assert conn.execute("SELECT count(*) FROM classifications").fetchone()[0] == 0
++
++
++@pytest.mark.parametrize("valid_from,expected", [(plus(A, -60), plus(A, -60)), (plus(A, 120), None)])
++def test_foundation_clamp_only_start_or_invalid_window(tmp_path, valid_from, expected):
++    store, control, assembly, retention = prepared_production(tmp_path)
++    foundation = make_foundation_runtime_profile({**assembly.foundation_runtime_profile.semantic_payload,
++                                                  "classification_foundation_valid_from_utc": valid_from})
++    prepared = SimpleNamespace(contents=(None, foundation), pin=None, hook=None, retention=retention)
++    seen = []
++    class Assembly:
++        def __init__(self, **kwargs):
++            pass
++        def assemble_production(self, site, mac, start, end):
++            seen.append((start, end))
++            raise IntegrationError("binding_unavailable")
++    original = job(repository(tmp_path))
++    execute = executor(store, control, None, preflight_fn=lambda _: prepared, assembly_factory=Assembly)
++    with pytest.raises(IntegrationError, match="integration_window_not_authoritative" if expected is None else "binding_unavailable"):
++        execute.execute(original)
++    assert seen == ([] if expected is None else [(expected, plus(A, 120))])
++
++
++def test_memory_measurement_unavailable_fails_closed(monkeypatch):
++    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()))
++    assert process_memory_guard(96 * 1024 * 1024) is False
++
++
++def test_memory_guard_reads_current_resident_pages(monkeypatch):
++    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: "100 10 0")
++    monkeypatch.setattr("os.sysconf", lambda name: 4096, raising=False)
++    assert process_memory_guard(40960) and not process_memory_guard(40959)
++
++
++def test_identity_hook_is_exact_not_constant_true(tmp_path):
++    store, control, _assembly, _ = prepared_production(tmp_path)
++    admitted = preflight(control)
++    p, f, b, policy, adapter, classifier = admitted.contents
++    assert admitted.hook(p, f, b, None, policy, adapter, classifier)
++    assert not admitted.hook(p, f, b, None, policy, adapter,
++                             make_artifact_content("ClassifierArtifactManifest", {"different": True}))
++
++
++def test_inactive_profile_and_missing_admission_fail_closed(tmp_path):
++    store, control, _assembly, _ = prepared_production(tmp_path)
++    old = control.pinned
++    inactive = make_runtime_profile_validity_record({**old.validity_record.semantic_payload,
++        "state": "INACTIVE", "reason_code": "SUPERSEDED_SAFE"})
++    control.pinned = replace(old, validity_record=inactive)
++    with pytest.raises(IntegrationError, match="production_profile_not_admitted"):
++        preflight(control)
++    control.pinned = old
++    accepted_id = old.admission_manifest.semantic_payload["task04_acceptance_manifest"]["artifact_id"]
++    del control.contents[accepted_id]
++    with pytest.raises(IntegrationError, match="runtime_profile_incompatible"):
++        preflight(control)
++
++
++def test_no_active_ids_or_other_domain_mutators_in_integration_source():
++    directory = REPOSITORY_ROOT / "app" / "device_fingerprint_integration"
++    source = "\n".join(path.read_text(encoding="utf-8") for path in directory.glob("*.py"))
++    for forbidden in ("1d3a563e7ce3a8afb", "7873028b2c3a85bf", "get_device_by_mac(",
++                      "get_current(site_id", "OmadaProvider", "@app.route", "gc.collect()"):
++        assert forbidden not in source
++    from app.device_fingerprint_integration.compatibility import ReadOnlyControlPlaneStoreMixin
++    from app.device_fingerprint.control_plane_store import DeviceFingerprintControlPlaneStore
++    class ReadOnly(ReadOnlyControlPlaneStoreMixin, DeviceFingerprintControlPlaneStore):
++        pass
++    readonly = ReadOnly(directory / "missing-never-created.sqlite")
++    with pytest.raises(Exception):
++        readonly.pin_active_profile("classification")
++    assert not Path(readonly.database_path).exists()
+diff --git a/tests/device_fingerprint_integration/test_repository_identity.py b/tests/device_fingerprint_integration/test_repository_identity.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3809728133eadb09e79785233ffe9e70d69c38e2
+--- /dev/null
++++ b/tests/device_fingerprint_integration/test_repository_identity.py
+@@ -0,0 +1,319 @@
++from dataclasses import replace
++from types import SimpleNamespace
++import sqlite3
++import uuid
++import json
++import logging
++
++import pytest
++
++from app.device_fingerprint_integration.models import (
++    AuthorizedFingerprintRequest, IntegrationError, IdentityResolution, plus,
++)
++from app.device_fingerprint_integration.repository import IntegrationRepository
++from app.device_fingerprint_integration.config import integration_config_from_settings
++from app.device_fingerprint_integration.runtime import create_fingerprint_integration_submitter, create_worker
++from app.device_fingerprint_integration.submitter import DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER, emit
++from app.device_fingerprint_integration.identity_resolver import ExactIdentityResolver
++from app.device_fingerprint_integration.worker import IntegrationWorker, consumer_lock
++from app.device_fingerprint_integration.read_service import FingerprintIntegrationReadService
++from tests.device_fingerprint import SITE
++from tests.device_fingerprint_task04_t01.test_snapshot_service import MAC
++
++A = "2026-09-15T12:00:00.000Z"
++SESSION, DEVICE, SNAPSHOT, VISIT = (str(uuid.uuid4()) for _ in range(4))
++
++
++def request(**changes):
++    return replace(AuthorizedFingerprintRequest(SESSION, 1, SITE, MAC, A), **changes)
++
++
++def repository(tmp_path):
++    repo = IntegrationRepository(tmp_path / "integration.sqlite")
++    repo.initialize()
++    return repo
++
++
++def job(repo, **changes):
++    identity, _ = repo.enqueue(request(**changes), A)
++    return repo.get(identity)
++
++
++def visit(**changes):
++    return SimpleNamespace(**{**dict(site_id=SITE, client_mac=MAC, start_auth_session_id=SESSION,
++        start_auth_run_number=1, device_id=DEVICE, visit_id=VISIT), **changes})
++
++
++def resolver(snapshot=None, opened=None, history=()):
++    class Registry:
++        def get_snapshot_by_auth_session(self, session, *, site_id, client_mac):
++            assert (session, site_id, client_mac) == (SESSION, SITE, MAC)
++            return snapshot
++
++        def get_device_by_mac(self, *_args):
++            raise AssertionError("Bare MAC lookup forbidden")
++
++    class Visits:
++        def get_open_visit(self, site, mac):
++            assert (site, mac) == (SITE, MAC)
++            return opened
++
++        def list_visits(self, site, start, end, **kwargs):
++            assert (site, start, end) == (SITE, plus(A, -3600), plus(A, 3600))
++            assert kwargs == dict(client_mac=MAC, limit=100)
++            return SimpleNamespace(items=history)
++
++    return ExactIdentityResolver(Registry(), Visits())
++
++
++def snapshot(**changes):
++    return {**dict(site_id=SITE, auth_session_id=SESSION, requested_mac=MAC,
++                   device_id=DEVICE, snapshot_id=SNAPSHOT), **changes}
++
++
++def test_disabled_and_invalid_config_never_initialize_or_break_portal(tmp_path):
++    assert integration_config_from_settings({"device_fingerprint_integration_db_path": None}).enabled is False
++    assert create_fingerprint_integration_submitter({}) is DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
++    assert create_fingerprint_integration_submitter({"device_fingerprint_integration_enabled": "bad"}) is DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
++    assert not list(tmp_path.iterdir())
++
++
++def test_config_paths_distinct_and_real_settings_path(tmp_path):
++    paths = {"device_fingerprint_integration_enabled": True,
++             "device_fingerprint_integration_db_path": str(tmp_path / "integration.sqlite"),
++             "device_fingerprint_evidence_db_path": str(tmp_path / "evidence.sqlite"),
++             "device_fingerprint_classification_db_path": str(tmp_path / "class.sqlite"),
++             "device_fingerprint_control_plane_db_path": str(tmp_path / "control.sqlite")}
++    submitter = create_fingerprint_integration_submitter(paths)
++    assert submitter is not DISABLED_FINGERPRINT_INTEGRATION_SUBMITTER
++    assert submitter.repository.path.exists()
++    with pytest.raises(ValueError):
++        integration_config_from_settings({**paths, "device_fingerprint_classification_db_path": paths["device_fingerprint_integration_db_path"]})
++
++
++def test_durable_idempotency_new_run_and_fixed_timing(tmp_path):
++    repo = repository(tmp_path)
++    first = job(repo)
++    assert repo.enqueue(request(), plus(A, 10)) == (first.integration_id, False)
++    assert repo.get(first.integration_id) == first
++    second = job(repo, auth_run_number=2)
++    assert second.integration_id != first.integration_id
++    assert second.planned_classification_id != first.planned_classification_id
++    assert uuid.UUID(first.planned_classification_id).version == 4
++    assert first.due_at_utc == plus(A, 150)
++    assert repo.claim(plus(A, 149)) is None
++
++
++@pytest.mark.parametrize("change", [dict(site_id="b" * 24), dict(observed_mac="02:11:22:33:44:55"),
++                                   dict(authorized_at_utc=plus(A, 1))])
++def test_duplicate_immutable_identity_conflict(tmp_path, change):
++    repo = repository(tmp_path)
++    original = job(repo)
++    with pytest.raises(IntegrationError, match="integration_identity_conflict"):
++        repo.enqueue(request(**change), A)
++    assert repo.get(original.integration_id) == original
++
++
++def test_lease_claim_no_steal_expiry_reclaim_and_token_cas(tmp_path):
++    repo = repository(tmp_path)
++    job(repo)
++    first, _ = repo.claim(plus(A, 150))
++    assert first.attempt_count == 1
++    assert repo.claim(plus(A, 449)) is None
++    second, _ = repo.claim(plus(A, 450))
++    assert second.attempt_count == 2 and second.lease_token != first.lease_token
++    assert not repo.finish(first, plus(A, 451), state="NO_RESULT_FINAL")
++    assert repo.finish(second, plus(A, 451), state="NO_RESULT_FINAL")
++
++
++def test_busy_is_bounded_and_never_widens_concurrency(tmp_path):
++    repo = repository(tmp_path)
++    with sqlite3.connect(repo.path, isolation_level=None) as blocker:
++        blocker.execute("BEGIN IMMEDIATE")
++        with pytest.raises(IntegrationError, match="retryable_sqlite_busy"):
++            repo.enqueue(request(), A)
++        blocker.rollback()
++    assert repo.enqueue(request(), A)[1]
++
++
++def test_single_consumer_even_if_db_lease_expired(tmp_path):
++    repo = repository(tmp_path)
++    pending = job(repo)
++    with consumer_lock(repo.path) as acquired:
++        assert acquired
++        worker = IntegrationWorker(repo, None, None, clock=lambda: plus(A, 1000))
++        assert worker.run_once() is False
++    assert repo.get(pending.integration_id).attempt_count == 0
++
++
++@pytest.mark.parametrize("changed", [dict(site_id="b" * 24), dict(requested_mac="02:11:22:33:44:55"),
++                                    dict(auth_session_id=str(uuid.uuid4()))])
++def test_registry_exact_tuple_mismatch_is_never_resolved(tmp_path, changed):
++    assert resolver(snapshot(**changed)).resolve(job(repository(tmp_path))).state == "CONFLICT"
++
++
++def test_exact_registry_and_visit_open_or_history(tmp_path):
++    candidate = job(repository(tmp_path))
++    device = resolver(snapshot()).resolve(candidate)
++    assert (device.state, device.device_id, device.snapshot_id) == ("DEVICE_RESOLVED", DEVICE, SNAPSHOT)
++    for opened, history in ((visit(), ()), (visit(start_auth_run_number=9), (visit(),))):
++        resolved = resolver(snapshot(), opened, history).resolve(candidate)
++        assert (resolved.state, resolved.visit_id) == ("DEVICE_AND_VISIT_RESOLVED", VISIT)
++
++
++@pytest.mark.parametrize("changes", [dict(start_auth_run_number=2), dict(site_id="b" * 24),
++    dict(client_mac="02:11:22:33:44:55"), dict(start_auth_session_id=str(uuid.uuid4()))])
++def test_nonmatching_visit_is_not_linked(tmp_path, changes):
++    resolved = resolver(snapshot(), visit(**changes)).resolve(job(repository(tmp_path)))
++    assert resolved.state == "DEVICE_RESOLVED" and resolved.visit_id is None
++
++
++def test_conflicting_exact_device_ids_never_choose_a_winner(tmp_path):
++    candidate = job(repository(tmp_path))
++    assert resolver(snapshot(), visit(device_id=str(uuid.uuid4()))).resolve(candidate).state == "CONFLICT"
++    candidate = replace(candidate, device_id=str(uuid.uuid4()), registry_snapshot_id=SNAPSHOT, identity_state="DEVICE_RESOLVED")
++    assert resolver(snapshot()).resolve(candidate).state == "CONFLICT"
++
++
++def test_unresolved_is_valid_and_identity_retries_stop_at_hour(tmp_path):
++    repo = repository(tmp_path)
++    pending = job(repo)
++    worker = IntegrationWorker(repo, None, resolver(), clock=lambda: A)
++    assert worker.run_once()
++    assert repo.get(pending.integration_id).identity_state == "UNRESOLVED"
++    assert repo.identity_due(plus(A, 29)) is None
++    assert repo.identity_due(plus(A, 30)) is not None
++    repo.save_identity(pending, IdentityResolution(reason="identity_proof_unavailable"), plus(A, 3600))
++    assert repo.identity_due(plus(A, 3630)) is None
++
++
++def test_relation_only_schema_and_read_refuses_unresolved_conflict(tmp_path):
++    repo = repository(tmp_path)
++    pending = job(repo)
++    reader = FingerprintIntegrationReadService(repo, None)
++    assert reader.get_current_for_device(SITE, DEVICE) is None
++    assert reader.get_for_auth_run("b" * 24, SESSION, 1) is None
++    assert reader.get_for_auth_run(SITE, SESSION, 1) is None
++    with repo.connection(readonly=True) as conn:
++        columns = {row[1] for row in conn.execute("PRAGMA table_info(integration_jobs)")}
++        assert not columns & {"payload_json", "platform", "device_class", "manufacturer", "model", "raw_evidence"}
++    repo.save_identity(pending, IdentityResolution("CONFLICT", "identity_device_conflict"), A)
++    assert reader.get_current_for_device(SITE, DEVICE) is None
++
++
++def test_worker_composition_does_not_mutate_other_domain_databases(tmp_path):
++    paths = {}
++    for key in ("evidence", "classification", "control_plane"):
++        path = tmp_path / (key + ".sqlite")
++        with sqlite3.connect(path) as conn:
++            conn.execute("CREATE TABLE untouched(value)")
++        paths[f"device_fingerprint_{key}_db_path"] = str(path)
++    original = {path: path.read_bytes() for path in tmp_path.glob("*.sqlite")}
++    worker = create_worker({**paths, "device_fingerprint_integration_enabled": True,
++        "device_fingerprint_integration_db_path": str(tmp_path / "integration.sqlite"),
++        "visitor_registry_db_path": str(tmp_path / "registry.sqlite"),
++        "visit_lifecycle_db_path": str(tmp_path / "visits.sqlite"), "portal_counter_timezone": "UTC"})
++    worker.stop()
++    assert all(path.read_bytes() == data for path, data in original.items())
++    assert not (tmp_path / "registry.sqlite").exists() and not (tmp_path / "visits.sqlite").exists()
++
++
++@pytest.mark.parametrize("reason", ["snapshot_timeout", "snapshot_memory_pressure", "persistence_unavailable",
++                                   "integration_unavailable", "binding_unavailable"])
++def test_bounded_retry_schedule_and_shutdown_restart(tmp_path, reason):
++    repo = repository(tmp_path)
++    original = job(repo)
++    class Executor:
++        def execute(self, *_args, **_kwargs):
++            raise IntegrationError(reason)
++    now = plus(A, 150)
++    worker = IntegrationWorker(repo, Executor(), resolver(), clock=lambda: now)
++    for attempt, delay in enumerate((30, 120, 300, 600, None), 1):
++        worker.run_once()
++        stored = repo.get(original.integration_id)
++        assert stored.attempt_count == attempt
++        assert stored.last_reason_code == reason
++        if reason == "binding_unavailable" or delay is None:
++            assert stored.classification_state == "NO_RESULT_FINAL"
++            break
++        assert stored.classification_state == "PENDING" and stored.next_attempt_at_utc == plus(now, delay)
++        assert repo.claim(plus(now, delay - 1)) is None
++        worker.stop()
++        now = plus(now, delay)
++        worker = IntegrationWorker(IntegrationRepository(repo.path), Executor(), resolver(), clock=lambda: now)
++
++
++@pytest.mark.parametrize("mac", ["02:11:22:33:44:55", "AA:BB:CC:DD:EE:FF"])
++def test_randomized_mac_and_same_mac_cross_site_have_no_identity_shortcut(tmp_path, mac):
++    repo = repository(tmp_path)
++    a = job(repo, observed_mac=mac)
++    b = job(repo, auth_session_id=str(uuid.uuid4()), site_id="b" * 24, observed_mac=mac)
++    assert a.observed_mac == b.observed_mac
++    assert a.site_id != b.site_id
++    assert a.integration_id != b.integration_id
++    reader = FingerprintIntegrationReadService(repo, None)
++    assert reader.get_current_for_device(a.site_id, DEVICE) is None
++    assert reader.get_current_for_device(b.site_id, DEVICE) is None
++
++
++def test_expired_last_attempt_is_recovery_only_not_a_sixth_classification(tmp_path):
++    repo = repository(tmp_path)
++    original = job(repo)
++    with repo.connection() as conn:
++        conn.execute("UPDATE integration_jobs SET classification_state='LEASED', attempt_count=5, lease_token=?, lease_until_utc=?",
++                     (str(uuid.uuid4()), plus(A, 150)))
++    leased, recovery_only = repo.claim(plus(A, 150))
++    assert recovery_only and leased.attempt_count == 5
++    assert repo.finish(leased, plus(A, 151), state="NO_RESULT_FINAL", reason="snapshot_timeout")
++    assert repo.claim(plus(A, 10000)) is None
++
++
++def test_expired_lease_token_cannot_finalize_even_without_reclaim(tmp_path):
++    repo = repository(tmp_path)
++    original = job(repo)
++    leased, _ = repo.claim(plus(A, 150))
++    assert not repo.finish(leased, plus(A, 450), state="NO_RESULT_FINAL")
++    assert repo.get(original.integration_id).classification_state == "LEASED"
++
++
++def test_conflict_preserves_previously_proven_immutable_anchors(tmp_path):
++    candidate = replace(job(repository(tmp_path)), identity_state="DEVICE_AND_VISIT_RESOLVED",
++                        registry_snapshot_id=SNAPSHOT, device_id=DEVICE, visit_id=VISIT)
++    for exact in (resolver(snapshot(site_id="b" * 24)),
++                  resolver(snapshot(), visit(device_id=str(uuid.uuid4()))),
++                  resolver(snapshot(), None, (visit(), visit(visit_id=str(uuid.uuid4()))))):
++        conflict = exact.resolve(candidate)
++        assert conflict.state == "CONFLICT"
++        assert (conflict.snapshot_id, conflict.device_id, conflict.visit_id) == (SNAPSHOT, DEVICE, VISIT)
++
++
++def test_structured_telemetry_excludes_unapproved_payload_fields(caplog):
++    with caplog.at_level(logging.INFO, logger="captivportal.fingerprint.integration"):
++        emit("fingerprint.integration_worker_health", reason_code="ready", raw_evidence="secret")
++    payload = json.loads(caplog.records[-1].getMessage())
++    assert payload == {"event": "fingerprint.integration_worker_health", "reason_code": "ready"}
++
++
++def test_expired_failure_cas_does_not_claim_terminal_success_in_telemetry(tmp_path, caplog):
++    repo = repository(tmp_path)
++    original = job(repo)
++    now = plus(A, 150)
++    class Executor:
++        def execute(self, *_args, **_kwargs):
++            nonlocal now
++            now = plus(A, 450)
++            raise IntegrationError("binding_unavailable")
++    with caplog.at_level(logging.INFO, logger="captivportal.fingerprint.integration"):
++        IntegrationWorker(repo, Executor(), resolver(), clock=lambda: now).run_once()
++    assert repo.get(original.integration_id).classification_state == "LEASED"
++    events = [json.loads(record.getMessage())["event"] for record in caplog.records]
++    assert "fingerprint.integration_classification_no_result" not in events
++    assert any(json.loads(record.getMessage()).get("reason_code") == "lease_lost" for record in caplog.records)
++
++
++def test_worker_telemetry_inherits_existing_application_logger_configuration():
++    from app.logger import logger as application_logger
++    from app.device_fingerprint_integration.submitter import logger as integration_logger
++    assert integration_logger.parent is application_logger
++    assert integration_logger.getEffectiveLevel() == application_logger.getEffectiveLevel()
++    assert integration_logger.propagate and application_logger.handlers

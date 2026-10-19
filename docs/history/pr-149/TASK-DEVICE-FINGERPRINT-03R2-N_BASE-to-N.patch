@@ -1,0 +1,767 @@
+diff --git a/app/device_fingerprint/foundation_schema_artifacts.py b/app/device_fingerprint/foundation_schema_artifacts.py
+index a632ff4da6711db6e9fe47f6f51a0822e8ccd3b8..5a83da2f04fd8ad2282a851229175c90297adc52 100644
+--- a/app/device_fingerprint/foundation_schema_artifacts.py
++++ b/app/device_fingerprint/foundation_schema_artifacts.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++from copy import deepcopy
+ from typing import Any
+ 
+ from .artifact_content import (
+@@ -64,15 +65,22 @@ _PROVENANCE = {
+     "form_factor_tablet": ("form_factors_source", "sec_ch_ua_form_factors"),
+     "form_factor_desktop": ("form_factors_source", "sec_ch_ua_form_factors"),
+ }
+-_RUNTIME_VALIDATORS = {
++_PRE_LIVE_RUNTIME_VALIDATORS = {
+     ("dhcp", 1): validate_dhcp_v1,
+     ("tcp_syn", 1): validate_tcp_syn_v1,
+     ("tcp_syn", 2): validate_tcp_syn_v2,
+     ("tls_client", 1): validate_tls_v1,
+     ("quic_client", 1): validate_quic_v1,
+     ("portal_headers", 1): validate_portal_headers_v1,
++}
++_ADMITTED_CANDIDATE_VALIDATORS = {
++    **_PRE_LIVE_RUNTIME_VALIDATORS,
+     ("portal_headers", 2): validate_portal_headers_v2,
+ }
++_DISPOSITION_KEYS = frozenset({
++    "capability_id", "status", "reason_codes", "fallback_source_kind",
++    "fallback_feature_schema_version",
++})
+ 
+ 
+ def _fail() -> None:
+@@ -80,9 +88,9 @@ def _fail() -> None:
+ 
+ 
+ def assert_runtime_registry_coherence() -> None:
+-    """Pin both exact keys and executable validator identity."""
++    """Pin the safe pre-live runtime keys and executable validator identity."""
+     registry = build_production_schema_registry()
+-    if not registry.frozen or registry._validators != _RUNTIME_VALIDATORS:
++    if not registry.frozen or registry._validators != _PRE_LIVE_RUNTIME_VALIDATORS:
+         _fail()
+     if (set(_TCP_TYPES) != _TCP_V2_KEYS
+             or _TCP_BOOLEAN_FIELDS != _TCP_V2_BOOLEAN_KEYS
+@@ -147,14 +155,56 @@ def _portal_payload() -> dict[str, Any]:
+     }
+ 
+ 
+-def _disposition_payload() -> dict[str, Any]:
++def _validate_disposition_payload(payload: dict[str, Any]) -> dict[str, Any]:
++    if not isinstance(payload, dict) or set(payload) != _DISPOSITION_KEYS:
++        _fail()
++    if payload["capability_id"] != "portal_headers/2":
++        _fail()
++    status = payload["status"]
++    if status not in {"ADMITTED", "NOT_ADMITTED"}:
++        _fail()
++    reasons = payload["reason_codes"]
++    if (not isinstance(reasons, list)
++            or any(not isinstance(reason, str) or not reason for reason in reasons)):
++        _fail()
++    reasons = canonical_set(reasons, lambda item: item)
++    fallback = (payload["fallback_source_kind"],
++                payload["fallback_feature_schema_version"])
++    if (status == "ADMITTED" and fallback != (None, None)):
++        _fail()
++    if (status == "NOT_ADMITTED" and (
++        fallback[0] != "portal_headers"
++        or type(fallback[1]) is not int
++        or fallback[1] != 1
++    )):
++        _fail()
+     return {
+-        "capability_id": "portal_headers/2", "status": "ADMITTED",
+-        "reason_codes": [], "fallback_source_kind": None,
+-        "fallback_feature_schema_version": None,
++        "capability_id": "portal_headers/2", "status": status,
++        "reason_codes": reasons, "fallback_source_kind": fallback[0],
++        "fallback_feature_schema_version": fallback[1],
+     }
+ 
+ 
++def make_portal_headers_v2_capability_disposition(
++    status: str, *, reason_codes: list[str] | None = None,
++) -> ArtifactContent:
++    """Build one explicit F-D1 candidate outcome; no outcome is the default."""
++    reasons = [] if reason_codes is None else reason_codes
++    if status == "ADMITTED":
++        fallback_source_kind, fallback_version = None, None
++    elif status == "NOT_ADMITTED":
++        fallback_source_kind, fallback_version = "portal_headers", 1
++    else:
++        _fail()
++    payload = _validate_disposition_payload({
++        "capability_id": "portal_headers/2", "status": status,
++        "reason_codes": reasons,
++        "fallback_source_kind": fallback_source_kind,
++        "fallback_feature_schema_version": fallback_version,
++    })
++    return make_artifact_content("CapabilityDisposition", payload)
++
++
+ def _ref(content: ArtifactContent) -> dict[str, str]:
+     return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
+ 
+@@ -162,11 +212,16 @@ def _ref(content: ArtifactContent) -> dict[str, str]:
+ def _registry_payload(tcp: ArtifactContent, portal: ArtifactContent,
+                       disposition: ArtifactContent) -> dict[str, Any]:
+     ArtifactRef.from_dict(_ref(tcp)).resolve(tcp, "TcpSynV2SchemaContract")
+-    ArtifactRef.from_dict(_ref(portal)).resolve(portal, "PortalHeadersV2SchemaContract")
+     ArtifactRef.from_dict(_ref(disposition)).resolve(disposition, "CapabilityDisposition")
++    disposition_payload = _validate_disposition_payload(disposition.semantic_payload)
++    admitted = disposition_payload["status"] == "ADMITTED"
++    if admitted:
++        ArtifactRef.from_dict(_ref(portal)).resolve(portal, "PortalHeadersV2SchemaContract")
+     assert_runtime_registry_coherence()
+     entries = []
+-    for (source_kind, version) in _RUNTIME_VALIDATORS:
++    validators = (_ADMITTED_CANDIDATE_VALIDATORS if admitted
++                  else _PRE_LIVE_RUNTIME_VALIDATORS)
++    for (source_kind, version) in validators:
+         status = "KNOWN_NON_FUSION" if (source_kind, version) == ("tcp_syn", 1) else "SUPPORTED"
+         contract_ref = None
+         if (source_kind, version) == ("tcp_syn", 2):
+@@ -190,7 +245,7 @@ def _registry_payload(tcp: ArtifactContent, portal: ArtifactContent,
+ 
+ def _ordered_payload(artifact_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+     """Canonicalize only the SET fields declared by these four contracts."""
+-    value = dict(payload)
++    value = deepcopy(payload)
+     if artifact_type == "TcpSynV2SchemaContract":
+         for field, key in (("top_level_field_contracts", "field_name"),
+                            ("tcp_option_record_variant_contracts", "variant_id")):
+@@ -207,7 +262,7 @@ def _ordered_payload(artifact_type: str, payload: dict[str, Any]) -> dict[str, A
+         for row in value["normalized_provenance_contracts"]:
+             row["allowed_source_values"] = canonical_set(row["allowed_source_values"], lambda item: item)
+     elif artifact_type == "CapabilityDisposition":
+-        value["reason_codes"] = canonical_set(value["reason_codes"], lambda item: item)
++        value = _validate_disposition_payload(value)
+     elif artifact_type == "EvidenceSchemaRegistryContract":
+         value["schema_entries"] = canonical_set(value["schema_entries"], lambda row: (
+             row["source_kind"], row["feature_schema_version"]))
+@@ -216,27 +271,44 @@ def _ordered_payload(artifact_type: str, payload: dict[str, Any]) -> dict[str, A
+     return value
+ 
+ 
+-def build_foundation_schema_artifacts() -> dict[str, ArtifactContent]:
++def build_foundation_schema_artifacts(
++    *, disposition: ArtifactContent,
++) -> dict[str, ArtifactContent]:
++    """Build one explicit ADMITTED or NOT_ADMITTED F-D1 candidate lineage."""
++    if not isinstance(disposition, ArtifactContent):
++        _fail()
++    ArtifactRef.from_dict(_ref(disposition)).resolve(disposition, "CapabilityDisposition")
++    disposition = make_artifact_content(
++        "CapabilityDisposition",
++        _validate_disposition_payload(disposition.semantic_payload),
++    )
+     tcp = make_artifact_content("TcpSynV2SchemaContract", _tcp_payload())
+     portal = make_artifact_content("PortalHeadersV2SchemaContract", _portal_payload())
+-    disposition = make_artifact_content("CapabilityDisposition", _disposition_payload())
+     registry = make_artifact_content(
+         "EvidenceSchemaRegistryContract", _registry_payload(tcp, portal, disposition))
+     return {item.artifact_type: item for item in (tcp, portal, disposition, registry)}
+ 
+ 
+ def validate_foundation_payload(artifact_type: str, payload: dict[str, Any]) -> ArtifactContent:
+-    """Reject all fields and semantics outside the four frozen F-A5 payloads."""
++    """Validate one exact F-A5 contract or legal F-D1 candidate outcome."""
+     if not isinstance(payload, dict):
+         _fail()
+-    expected = build_foundation_schema_artifacts().get(artifact_type)
+-    if expected is None:
+-        _fail()
+     try:
+         ordered = _ordered_payload(artifact_type, payload)
+         actual = make_artifact_content(artifact_type, ordered)
+     except (KeyError, TypeError, AttributeError) as exc:
+         raise DeviceFingerprintValidationError("Invalid foundation schema artifact") from exc
+-    if actual.semantic_payload_json != expected.semantic_payload_json:
++    if artifact_type == "CapabilityDisposition":
++        return actual
++    admitted = make_portal_headers_v2_capability_disposition("ADMITTED")
++    not_admitted = make_portal_headers_v2_capability_disposition("NOT_ADMITTED")
++    expected_candidates = [
++        build_foundation_schema_artifacts(disposition=admitted),
++        build_foundation_schema_artifacts(disposition=not_admitted),
++    ]
++    expected = [candidate.get(artifact_type) for candidate in expected_candidates]
++    if not any(item is not None and
++               actual.semantic_payload_json == item.semantic_payload_json
++               for item in expected):
+         _fail()
+     return actual
+diff --git a/app/device_fingerprint/portal_schemas.py b/app/device_fingerprint/portal_schemas.py
+index cf26ca1ac6bf06e0aa0f76c9c0af098be61ad23a..da1fc1724336aad908455d04b934ffeb986dd331 100644
+--- a/app/device_fingerprint/portal_schemas.py
++++ b/app/device_fingerprint/portal_schemas.py
+@@ -96,9 +96,9 @@ def validate_portal_headers_v1(value: Mapping[str, Any]) -> Mapping[str, Any]:
+ 
+ 
+ def validate_portal_headers_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
+-    """Validate only the admitted normalized Client-Hints semantic payload.
++    """Validate the candidate normalized Client-Hints semantic payload.
+ 
+-    This standalone contract does not register or emit ``portal_headers/2``.
++    This standalone contract does not admit, register, or emit ``portal_headers/2``.
+     Raw headers are parsed by the separate acquisition boundary, not here.
+     """
+     if not isinstance(value, Mapping) or set(value) != PORTAL_HEADER_V2_KEYS:
+diff --git a/app/device_fingerprint/schema_registry.py b/app/device_fingerprint/schema_registry.py
+index dcf77ffefd5f2dda06999e297e297e203c10aff4..931cc8efe8169c641bf7ed00d597572eb291afde 100644
+--- a/app/device_fingerprint/schema_registry.py
++++ b/app/device_fingerprint/schema_registry.py
+@@ -14,7 +14,7 @@ from .network_schemas import (
+     validate_tcp_syn_v2,
+     validate_tls_v1,
+ )
+-from .portal_schemas import validate_portal_headers_v1, validate_portal_headers_v2
++from .portal_schemas import validate_portal_headers_v1
+ 
+ Validator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+ 
+@@ -62,6 +62,12 @@ class EvidenceSchemaRegistry:
+ 
+ 
+ def build_production_schema_registry() -> EvidenceSchemaRegistry:
++    """Build the pre-live registry without claiming ``portal_headers/2``.
++
++    The V2 validator exists as a candidate contract, but F-D1 has not selected
++    an ADMITTED or NOT_ADMITTED disposition yet.  Runtime support therefore
++    remains limited to the already admitted schemas.
++    """
+     registry = EvidenceSchemaRegistry()
+     registry.register("dhcp", 1, validate_dhcp_v1)
+     registry.register("tcp_syn", 1, validate_tcp_syn_v1)
+@@ -69,5 +75,4 @@ def build_production_schema_registry() -> EvidenceSchemaRegistry:
+     registry.register("tls_client", 1, validate_tls_v1)
+     registry.register("quic_client", 1, validate_quic_v1)
+     registry.register("portal_headers", 1, validate_portal_headers_v1)
+-    registry.register("portal_headers", 2, validate_portal_headers_v2)
+     return registry.freeze()
+diff --git a/app/device_fingerprint_portal/client_hints_projector.py b/app/device_fingerprint_portal/client_hints_projector.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8085b42e1762fe8352995f3115d94a65b665c5f8
+--- /dev/null
++++ b/app/device_fingerprint_portal/client_hints_projector.py
+@@ -0,0 +1,68 @@
++"""Pure pre-live Client Hints observation to portal_headers/2 projection."""
++
++from __future__ import annotations
++
++from typing import Any
++
++from app.device_fingerprint.portal_schemas import validate_portal_headers_v2
++
++from .client_hints_probe import PortalClientHintsProbeObservation
++
++
++def project_portal_headers_v2_candidate(
++    observation: PortalClientHintsProbeObservation,
++) -> dict[str, Any] | None:
++    """Project one sanitized observation without I/O or runtime mutation."""
++    if not isinstance(observation, PortalClientHintsProbeObservation):
++        raise ValueError("Sanitized Client Hints observation required")
++
++    groups = (
++        (observation.model_normalization_state,
++         observation.normalized_model_family_candidate,
++         observation.model_header_present),
++        (observation.platform_version_normalization_state,
++         observation.normalized_platform_version_major_candidate,
++         observation.platform_version_header_present),
++        (observation.form_factors_normalization_state,
++         observation.normalized_form_factors_candidate,
++         observation.form_factors_header_present),
++    )
++    for state, candidate, present in groups:
++        if state not in {"ABSENT", "UNUSABLE", "NORMALIZED"}:
++            raise ValueError("Invalid sanitized normalization state")
++        if ((state == "ABSENT") != (present is False)
++                or (state == "NORMALIZED") != (candidate is not None)):
++            raise ValueError("Inconsistent sanitized observation")
++
++    payload: dict[str, Any] = {
++        "model_family": None,
++        "os_major": None,
++        "form_factor_mobile": None,
++        "form_factor_tablet": None,
++        "form_factor_desktop": None,
++        "model_source": None,
++        "os_major_source": None,
++        "form_factors_source": None,
++    }
++    if observation.model_normalization_state == "NORMALIZED":
++        payload["model_family"] = observation.normalized_model_family_candidate
++        payload["model_source"] = "sec_ch_ua_model"
++    if observation.platform_version_normalization_state == "NORMALIZED":
++        payload["os_major"] = observation.normalized_platform_version_major_candidate
++        payload["os_major_source"] = "sec_ch_ua_platform_version"
++    if observation.form_factors_normalization_state == "NORMALIZED":
++        factors = observation.normalized_form_factors_candidate
++        if (not isinstance(factors, tuple) or not factors
++                or factors != tuple(sorted(set(factors)))
++                or not set(factors) <= {"mobile", "tablet", "desktop"}):
++            raise ValueError("Invalid sanitized form-factor candidate")
++        payload["form_factor_mobile"] = "mobile" in factors
++        payload["form_factor_tablet"] = "tablet" in factors
++        payload["form_factor_desktop"] = "desktop" in factors
++        payload["form_factors_source"] = "sec_ch_ua_form_factors"
++
++    if all(payload[key] is None for key in (
++        "model_source", "os_major_source", "form_factors_source",
++    )):
++        return None
++    return dict(validate_portal_headers_v2(payload))
+diff --git a/tests/device_fingerprint/test_foundation_schema_artifacts.py b/tests/device_fingerprint/test_foundation_schema_artifacts.py
+index 541d6dce50a61c71f6e2d6997d7a0f956ccc65a5..dc2c985fbd4fcd97506e35c8974c348e69fd7ff8 100644
+--- a/tests/device_fingerprint/test_foundation_schema_artifacts.py
++++ b/tests/device_fingerprint/test_foundation_schema_artifacts.py
+@@ -3,7 +3,9 @@ from copy import deepcopy
+ import pytest
+ 
+ from app.device_fingerprint.foundation_schema_artifacts import (
+-    assert_runtime_registry_coherence, build_foundation_schema_artifacts,
++    assert_runtime_registry_coherence,
++    build_foundation_schema_artifacts,
++    make_portal_headers_v2_capability_disposition,
+     validate_foundation_payload,
+ )
+ from app.device_fingerprint.models import DeviceFingerprintValidationError
+@@ -11,30 +13,51 @@ from app.device_fingerprint.network_schemas import _TCP_V2_KEYS
+ from app.device_fingerprint.portal_schemas import PORTAL_HEADER_V2_KEYS
+ 
+ 
+-def test_four_frozen_artifacts_have_stable_identity_and_exact_dependency_refs():
+-    first = build_foundation_schema_artifacts()
+-    again = build_foundation_schema_artifacts()
+-    assert set(first) == {
++def disposition(status, reasons=None):
++    return make_portal_headers_v2_capability_disposition(
++        status, reason_codes=[] if reasons is None else reasons,
++    )
++
++
++def artifacts(status="ADMITTED", reasons=None):
++    return build_foundation_schema_artifacts(
++        disposition=disposition(status, reasons),
++    )
++
++
++def entries(candidate):
++    payload = candidate["EvidenceSchemaRegistryContract"].semantic_payload
++    return {
++        (row["source_kind"], row["feature_schema_version"]): row
++        for row in payload["schema_entries"]
++    }
++
++
++def test_candidate_artifacts_have_stable_identity_and_exact_dependency_refs():
++    admitted = artifacts("ADMITTED")
++    again = artifacts("ADMITTED")
++    assert set(admitted) == {
+         "TcpSynV2SchemaContract", "PortalHeadersV2SchemaContract",
+         "CapabilityDisposition", "EvidenceSchemaRegistryContract",
+     }
+-    assert {key: value.content_sha256 for key, value in first.items()} == {
++    assert {key: value.content_sha256 for key, value in admitted.items()} == {
+         "TcpSynV2SchemaContract": "7d15812e100f7b7c2e3f3549a685db2a241042a61ae25bdece122916a4026e98",
+         "PortalHeadersV2SchemaContract": "4fb5782b1c042e470dafb52c9db456b0639495be44f0c18dee7a20d2db7bd89d",
+         "CapabilityDisposition": "53ae5181e5a1fc8aa371214ded51c2ca719aafc21ba27c745b3cfafe5a77ae50",
+         "EvidenceSchemaRegistryContract": "090d763e99247ca3b10be34976069e4e7e708be0899e21a15c6e103a015f7814",
+     }
+-    assert [(key, value.artifact_id) for key, value in first.items()] == [
++    assert [(key, value.artifact_id) for key, value in admitted.items()] == [
+         (key, value.artifact_id) for key, value in again.items()
+     ]
+-    for key, value in first.items():
++    for key, value in admitted.items():
+         assert value.semantic_payload_json == again[key].semantic_payload_json
+         assert value.digest_input_json == again[key].digest_input_json
+         assert validate_foundation_payload(key, value.semantic_payload).artifact_id == value.artifact_id
+-    registry = first["EvidenceSchemaRegistryContract"].semantic_payload
++
++    registry = admitted["EvidenceSchemaRegistryContract"].semantic_payload
+     for source, version, contract_kind, target in (
+-        ("tcp_syn", 2, "TCP_SYN_V2", first["TcpSynV2SchemaContract"]),
+-        ("portal_headers", 2, "PORTAL_HEADERS_V2", first["PortalHeadersV2SchemaContract"]),
++        ("tcp_syn", 2, "TCP_SYN_V2", admitted["TcpSynV2SchemaContract"]),
++        ("portal_headers", 2, "PORTAL_HEADERS_V2", admitted["PortalHeadersV2SchemaContract"]),
+     ):
+         row = next(row for row in registry["schema_entries"]
+                    if (row["source_kind"], row["feature_schema_version"]) == (source, version))
+@@ -42,15 +65,14 @@ def test_four_frozen_artifacts_have_stable_identity_and_exact_dependency_refs():
+             "contract_kind": contract_kind,
+             "ref": {"artifact_id": target.artifact_id, "content_sha256": target.content_sha256},
+         }
+-    disposition = first["CapabilityDisposition"]
+     assert registry["portal_headers_v2_disposition"] == {
+-        "artifact_id": disposition.artifact_id,
+-        "content_sha256": disposition.content_sha256,
++        "artifact_id": admitted["CapabilityDisposition"].artifact_id,
++        "content_sha256": admitted["CapabilityDisposition"].content_sha256,
+     }
+ 
+ 
+ def test_tcp_syn_v2_contract_matches_frozen_schema_and_repaired_unknown():
+-    payload = build_foundation_schema_artifacts()["TcpSynV2SchemaContract"].semantic_payload
++    payload = artifacts()["TcpSynV2SchemaContract"].semantic_payload
+     assert set(payload) == {
+         "schema_family", "feature_schema_version", "source_kind", "supported_scope_identity",
+         "top_level_field_contracts", "tcp_option_record_variant_contracts",
+@@ -70,9 +92,9 @@ def test_tcp_syn_v2_contract_matches_frozen_schema_and_repaired_unknown():
+     assert variants["UNKNOWN"]["excluded_kind_values"] == [0, 1, 2, 3, 4, 8]
+ 
+ 
+-def test_portal_contract_and_admitted_disposition_are_exact():
+-    artifacts = build_foundation_schema_artifacts()
+-    portal = artifacts["PortalHeadersV2SchemaContract"].semantic_payload
++def test_portal_candidate_contract_and_both_dispositions_are_exact():
++    candidate = artifacts()
++    portal = candidate["PortalHeadersV2SchemaContract"].semantic_payload
+     fields = {row["field_id"]: row for row in portal["normalized_field_contracts"]}
+     provenance = {row["normalized_field_id"]: row for row in portal["normalized_provenance_contracts"]}
+     assert set(fields) | {"model_source", "os_major_source", "form_factors_source"} == PORTAL_HEADER_V2_KEYS
+@@ -85,46 +107,110 @@ def test_portal_contract_and_admitted_disposition_are_exact():
+         "normalized_field_id": "model_family", "provenance_field_id": "model_source",
+         "allowed_source_values": ["sec_ch_ua_model"],
+     }
+-    assert artifacts["CapabilityDisposition"].semantic_payload == {
++    assert disposition("ADMITTED").semantic_payload == {
+         "capability_id": "portal_headers/2", "status": "ADMITTED", "reason_codes": [],
+         "fallback_source_kind": None, "fallback_feature_schema_version": None,
+     }
++    assert disposition("NOT_ADMITTED").semantic_payload == {
++        "capability_id": "portal_headers/2", "status": "NOT_ADMITTED", "reason_codes": [],
++        "fallback_source_kind": "portal_headers", "fallback_feature_schema_version": 1,
++    }
++    assert disposition("NOT_ADMITTED").content_sha256 == (
++        "5962c8a08430bba6cbb7957f1fa7771a2c6a2baf2db984ccf8163ab7a23938d1"
++    )
+ 
+ 
+-def test_final_registry_exact_entries_and_runtime_binding():
++@pytest.mark.parametrize("status,mutation", [
++    ("ADMITTED", lambda value: value.update(fallback_source_kind="portal_headers",
++                                             fallback_feature_schema_version=1)),
++    ("NOT_ADMITTED", lambda value: value.update(fallback_source_kind=None,
++                                                 fallback_feature_schema_version=None)),
++    ("NOT_ADMITTED", lambda value: value.update(fallback_source_kind="dhcp")),
++    ("NOT_ADMITTED", lambda value: value.update(fallback_feature_schema_version=2)),
++    ("NOT_ADMITTED", lambda value: value.update(fallback_feature_schema_version=True)),
++    ("ADMITTED", lambda value: value.update(status="UNKNOWN")),
++    ("ADMITTED", lambda value: value.update(capability_id="")),
++    ("ADMITTED", lambda value: value.update(extra=True)),
++])
++def test_disposition_invalid_cross_field_and_closed_world_shapes_fail(status, mutation):
++    payload = disposition(status).semantic_payload
++    mutation(payload)
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_foundation_payload("CapabilityDisposition", payload)
++
++
++def test_disposition_reason_codes_are_canonical_open_set():
++    first = disposition("NOT_ADMITTED", ["z_reason", "a_reason"])
++    again = disposition("NOT_ADMITTED", ["a_reason", "z_reason"])
++    assert first.artifact_id == again.artifact_id
++    assert first.semantic_payload["reason_codes"] == ["a_reason", "z_reason"]
++    assert validate_foundation_payload(
++        "CapabilityDisposition", first.semantic_payload,
++    ).artifact_id == first.artifact_id
++    with pytest.raises(DeviceFingerprintValidationError):
++        disposition("NOT_ADMITTED", ["same", "same"])
++    with pytest.raises(DeviceFingerprintValidationError):
++        disposition("NOT_ADMITTED", [""])
++
++
++def test_registry_candidate_entries_follow_explicit_disposition_only():
+     assert_runtime_registry_coherence()
+-    payload = build_foundation_schema_artifacts()["EvidenceSchemaRegistryContract"].semantic_payload
+-    entries = {(row["source_kind"], row["feature_schema_version"]): row
+-               for row in payload["schema_entries"]}
+-    assert set(entries) == {
++    admitted = artifacts("ADMITTED")
++    rejected = artifacts("NOT_ADMITTED")
++    admitted_entries = entries(admitted)
++    rejected_entries = entries(rejected)
++    common = {
+         ("dhcp", 1), ("tcp_syn", 1), ("tcp_syn", 2),
+-        ("tls_client", 1), ("quic_client", 1),
+-        ("portal_headers", 1), ("portal_headers", 2),
++        ("tls_client", 1), ("quic_client", 1), ("portal_headers", 1),
+     }
+-    assert entries[("tcp_syn", 1)]["schema_status"] == "KNOWN_NON_FUSION"
+-    assert entries[("tcp_syn", 2)]["schema_status"] == "SUPPORTED"
+-    assert entries[("portal_headers", 2)]["schema_status"] == "SUPPORTED"
+-    assert all(row["schema_contract_ref"] is None for key, row in entries.items()
+-               if key not in {("tcp_syn", 2), ("portal_headers", 2)})
+-    assert "GateResultManifest" not in str(payload)
++    assert set(admitted_entries) == common | {("portal_headers", 2)}
++    assert set(rejected_entries) == common
++    assert rejected["EvidenceSchemaRegistryContract"].content_sha256 == (
++        "ce593309c6ebdc8479eacbf3ab1b34d28bc742bbed9f03ca0021c229b010c51e"
++    )
++    assert rejected_entries[("portal_headers", 1)]["schema_status"] == "SUPPORTED"
++    assert all(row["schema_contract_ref"] is None for key, row in rejected_entries.items()
++               if key != ("tcp_syn", 2))
++    assert "PortalHeadersV2SchemaContract" not in str(
++        rejected["EvidenceSchemaRegistryContract"].semantic_payload
++    )
++    for candidate in (admitted, rejected):
++        registry = candidate["EvidenceSchemaRegistryContract"].semantic_payload
++        selected = candidate["CapabilityDisposition"]
++        assert registry["portal_headers_v2_disposition"] == {
++            "artifact_id": selected.artifact_id,
++            "content_sha256": selected.content_sha256,
++        }
++        assert entries(candidate)[("tcp_syn", 2)]["schema_contract_ref"] == {
++            "contract_kind": "TCP_SYN_V2",
++            "ref": {
++                "artifact_id": candidate["TcpSynV2SchemaContract"].artifact_id,
++                "content_sha256": candidate["TcpSynV2SchemaContract"].content_sha256,
++            },
++        }
++        assert validate_foundation_payload(
++            "EvidenceSchemaRegistryContract",
++            candidate["EvidenceSchemaRegistryContract"].semantic_payload,
++        ).artifact_id == candidate["EvidenceSchemaRegistryContract"].artifact_id
++    assert "future" not in str(admitted_entries)
++    with pytest.raises(TypeError):
++        build_foundation_schema_artifacts()
+ 
+ 
+ @pytest.mark.parametrize("artifact_type,field", [
+     ("TcpSynV2SchemaContract", "top_level_field_contracts"),
+     ("PortalHeadersV2SchemaContract", "normalized_field_contracts"),
+-    ("CapabilityDisposition", "reason_codes"),
+     ("EvidenceSchemaRegistryContract", "schema_entries"),
+ ])
+ def test_extra_semantic_fields_are_closed_world(artifact_type, field):
+-    payload = build_foundation_schema_artifacts()[artifact_type].semantic_payload
++    payload = artifacts()[artifact_type].semantic_payload
+     payload["extra"] = True
+     with pytest.raises(DeviceFingerprintValidationError):
+         validate_foundation_payload(artifact_type, payload)
+     payload.pop("extra")
+-    if payload[field]:
+-        payload[field][0]["extra"] = True
+-        with pytest.raises(DeviceFingerprintValidationError):
+-            validate_foundation_payload(artifact_type, payload)
++    payload[field][0]["extra"] = True
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_foundation_payload(artifact_type, payload)
+ 
+ 
+ @pytest.mark.parametrize("artifact_type,field", [
+@@ -132,8 +218,8 @@ def test_extra_semantic_fields_are_closed_world(artifact_type, field):
+     ("PortalHeadersV2SchemaContract", "normalized_field_contracts"),
+     ("EvidenceSchemaRegistryContract", "schema_entries"),
+ ])
+-def test_set_permutation_identity_and_duplicate_primary_rejection(artifact_type, field):
+-    content = build_foundation_schema_artifacts()[artifact_type]
++def test_set_permutation_identity_and_exact_duplicate_rejection(artifact_type, field):
++    content = artifacts()[artifact_type]
+     payload = content.semantic_payload
+     payload[field] = list(reversed(payload[field]))
+     assert validate_foundation_payload(artifact_type, payload).artifact_id == content.artifact_id
+diff --git a/tests/device_fingerprint/test_payload_integrity.py b/tests/device_fingerprint/test_payload_integrity.py
+index 819994c513a5463416cfee8e2ffaaa9744c587ab..780de268fae7a7b994c42268797a7551db25a183 100644
+--- a/tests/device_fingerprint/test_payload_integrity.py
++++ b/tests/device_fingerprint/test_payload_integrity.py
+@@ -4,6 +4,7 @@ import pytest
+ 
+ from app.device_fingerprint.models import DeviceFingerprintUnsupportedSchema, DeviceFingerprintValidationError
+ from app.device_fingerprint.payload_integrity import verify_persisted_payload
++from app.device_fingerprint.portal_schemas import validate_portal_headers_v2
+ from app.device_fingerprint.schema_registry import EvidenceSchemaRegistry, build_production_schema_registry
+ from app.device_fingerprint.validation import canonical_json, canonical_sha256
+ from .test_portal_schema import payload_v2
+@@ -17,10 +18,19 @@ def verify(source_kind="portal_headers", version=2, value=None, *, encoded=None,
+     if digest is None:
+         digest = canonical_sha256(encoded)
+     if registry is None:
+-        registry = build_production_schema_registry()
++        registry = EvidenceSchemaRegistry()
++        registry.register("portal_headers", 2, lambda candidate: validate_portal_headers_v2(candidate))
++        registry.freeze()
+     return verify_persisted_payload(source_kind, version, encoded, digest, registry)
+ 
+ 
++def test_pre_live_production_registry_does_not_claim_v2_support():
++    result = verify(registry=build_production_schema_registry())
++    assert result.schema_supported is False
++    assert result.materialized_payload is None
++    assert result.reason_code == "unsupported_evidence_contract"
++
++
+ def test_known_nokia_g21_payload_materializes_with_verified_bytes():
+     value = payload_v2()
+     result = verify(value=value)
+diff --git a/tests/device_fingerprint/test_portal_schema.py b/tests/device_fingerprint/test_portal_schema.py
+index 07e2ed7b4cc26f6b7d1defcbbf35fcbc16ebd819..911072e83f66963cac7b4fe42fd5e61cd10490aa 100644
+--- a/tests/device_fingerprint/test_portal_schema.py
++++ b/tests/device_fingerprint/test_portal_schema.py
+@@ -66,11 +66,12 @@ def payload_v2():
+     }
+ 
+ 
+-def test_exact_normalized_v2_contract_is_production_registered():
++def test_exact_normalized_v2_contract_is_candidate_only_before_live_admission():
+     value = payload_v2()
+     assert set(value) == PORTAL_HEADER_V2_KEYS
+     assert validate_portal_headers_v2(value) == value
+-    assert build_production_schema_registry().validate("portal_headers", 2, value) == value
++    with pytest.raises(DeviceFingerprintUnsupportedSchema):
++        build_production_schema_registry().validate("portal_headers", 2, value)
+     with pytest.raises(DeviceFingerprintUnsupportedSchema):
+         build_production_schema_registry().validate("portal_headers", 3, value)
+ 
+diff --git a/tests/device_fingerprint/test_schema_registry.py b/tests/device_fingerprint/test_schema_registry.py
+index 76b12f71fedcc9b28febe29cb2b06b92e4adb4a5..e6e5602643e8a029000d5a0c0980e705a2d5daea 100644
+--- a/tests/device_fingerprint/test_schema_registry.py
++++ b/tests/device_fingerprint/test_schema_registry.py
+@@ -3,7 +3,7 @@ import pytest
+ from app.device_fingerprint.models import DeviceFingerprintUnsupportedSchema, DeviceFingerprintValidationError
+ from app.device_fingerprint.schema_registry import EvidenceSchemaRegistry, build_production_schema_registry
+ from .test_network_schemas import quic, tcp_v2, tls
+-from .test_portal_schema import payload as portal_v1, payload_v2 as portal_v2
++from .test_portal_schema import payload as portal_v1
+ 
+ 
+ def test_production_registry_is_frozen_and_contains_task02_schemas():
+@@ -40,7 +40,7 @@ def test_validator_output_must_be_safe_json_mapping():
+             registry.validate("dhcp", 1, {})
+ 
+ 
+-def test_production_registry_has_exactly_seven_executable_contracts():
++def test_pre_live_production_registry_has_exactly_six_executable_contracts():
+     registry = build_production_schema_registry()
+     fixtures = {
+         ("dhcp", 1): {
+@@ -59,11 +59,13 @@ def test_production_registry_has_exactly_seven_executable_contracts():
+         ("tls_client", 1): tls(),
+         ("quic_client", 1): quic(),
+         ("portal_headers", 1): portal_v1(),
+-        ("portal_headers", 2): portal_v2(),
+     }
+     assert set(registry._validators) == set(fixtures)
+     for (source_kind, version), value in fixtures.items():
+         assert registry.validate(source_kind, version, value) == value
+-    for source_kind, version in (("portal_headers", 3), ("tcp_syn", 3), ("future_source", 1)):
++    for source_kind, version in (
++        ("portal_headers", 2), ("portal_headers", 3),
++        ("tcp_syn", 3), ("future_source", 1),
++    ):
+         with pytest.raises(DeviceFingerprintUnsupportedSchema):
+             registry.validate(source_kind, version, {})
+diff --git a/tests/device_fingerprint_portal/test_client_hints_probe.py b/tests/device_fingerprint_portal/test_client_hints_probe.py
+index ee6b95a789a84b8fc68914b7b3f8e9af245aa568..689a367d0bda97c5190040d9d799052cc599644d 100644
+--- a/tests/device_fingerprint_portal/test_client_hints_probe.py
++++ b/tests/device_fingerprint_portal/test_client_hints_probe.py
+@@ -1,5 +1,6 @@
+ """Narrow proof for the default-off, one-shot portal Client Hints probe."""
+ 
++from copy import deepcopy
+ import json
+ from datetime import datetime, timezone
+ from pathlib import Path
+@@ -16,6 +17,10 @@ from app.device_fingerprint_portal.client_hints_probe import (
+     normalize_candidate_headers,
+     probe_config_from_env,
+ )
++from app.device_fingerprint.portal_schemas import validate_portal_headers_v2
++from app.device_fingerprint_portal.client_hints_projector import (
++    project_portal_headers_v2_candidate,
++)
+ from app.device_fingerprint_portal.extractor import extract_portal_evidence_candidate
+ 
+ 
+@@ -229,6 +234,83 @@ def test_normalization_preserves_only_bounded_semantic_candidates():
+         normalize_candidate_headers({}, source_subtype="not_an_entry")
+ 
+ 
++@pytest.mark.parametrize("headers,expected", [
++    ({"Sec-CH-UA-Model": '"Pixel 8"'}, {
++        "model_family": "Pixel 8", "model_source": "sec_ch_ua_model",
++    }),
++    ({"Sec-CH-UA-Platform-Version": '"14.2"'}, {
++        "os_major": 14, "os_major_source": "sec_ch_ua_platform_version",
++    }),
++    ({"Sec-CH-UA-Form-Factors": '"Mobile"'}, {
++        "form_factor_mobile": True, "form_factor_tablet": False,
++        "form_factor_desktop": False,
++        "form_factors_source": "sec_ch_ua_form_factors",
++    }),
++    ({"Sec-CH-UA-Form-Factors": '"Tablet"'}, {
++        "form_factor_mobile": False, "form_factor_tablet": True,
++        "form_factor_desktop": False,
++        "form_factors_source": "sec_ch_ua_form_factors",
++    }),
++    ({"Sec-CH-UA-Form-Factors": '"Desktop"'}, {
++        "form_factor_mobile": False, "form_factor_tablet": False,
++        "form_factor_desktop": True,
++        "form_factors_source": "sec_ch_ua_form_factors",
++    }),
++    ({"Sec-CH-UA-Form-Factors": '"Tablet", "Mobile"'}, {
++        "form_factor_mobile": True, "form_factor_tablet": True,
++        "form_factor_desktop": False,
++        "form_factors_source": "sec_ch_ua_form_factors",
++    }),
++])
++def test_sanitized_observation_projects_independent_v2_groups(headers, expected):
++    observation = normalize_candidate_headers(headers, source_subtype="capport_login")
++    before = deepcopy(observation)
++    result = project_portal_headers_v2_candidate(observation)
++    assert result is not None
++    assert observation == before
++    assert validate_portal_headers_v2(result) == result
++    for key, value in expected.items():
++        assert result[key] == value
++
++
++def test_projector_handles_all_mixed_and_no_normalized_candidates_without_raw_values():
++    raw_canary = "Build/PRIVATE_RAW_CH_PROJECTOR_CANARY"
++    all_fields = normalize_candidate_headers({
++        "Sec-CH-UA-Model": '"Pixel 8"',
++        "Sec-CH-UA-Platform-Version": '"15.2.1"',
++        "Sec-CH-UA-Form-Factors": '"Desktop", "Mobile"',
++    }, source_subtype="omada_external_portal")
++    expected = project_portal_headers_v2_candidate(all_fields)
++    assert expected == project_portal_headers_v2_candidate(all_fields)
++    assert expected == {
++        "model_family": "Pixel 8", "os_major": 15,
++        "form_factor_mobile": True, "form_factor_tablet": False,
++        "form_factor_desktop": True,
++        "model_source": "sec_ch_ua_model",
++        "os_major_source": "sec_ch_ua_platform_version",
++        "form_factors_source": "sec_ch_ua_form_factors",
++    }
++
++    mixed = normalize_candidate_headers({
++        "Sec-CH-UA-Model": f'"{raw_canary}"',
++        "Sec-CH-UA-Platform-Version": '"13.1"',
++    }, source_subtype="capport_login")
++    mixed_payload = project_portal_headers_v2_candidate(mixed)
++    assert mixed_payload["model_family"] is None
++    assert mixed_payload["model_source"] is None
++    assert mixed_payload["os_major"] == 13
++    assert raw_canary not in repr(mixed_payload)
++
++    absent = normalize_candidate_headers({}, source_subtype="capport_login")
++    unusable = normalize_candidate_headers({
++        "Sec-CH-UA-Model": f'"{raw_canary}"',
++        "Sec-CH-UA-Platform-Version": '"bad"',
++        "Sec-CH-UA-Form-Factors": '"Car"',
++    }, source_subtype="capport_login")
++    assert project_portal_headers_v2_candidate(absent) is None
++    assert project_portal_headers_v2_candidate(unusable) is None
++
++
+ def test_recorder_writes_only_sanitized_event_with_private_file_mode(tmp_path):
+     path = tmp_path / "safe.jsonl"
+     clock = Clock()

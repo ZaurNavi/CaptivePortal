@@ -1,0 +1,652 @@
+diff --git a/app/device_fingerprint/source_health_policy.py b/app/device_fingerprint/source_health_policy.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..45f00762b82e949e2531dccd46f255d4c290126c
+--- /dev/null
++++ b/app/device_fingerprint/source_health_policy.py
+@@ -0,0 +1,304 @@
++"""Immutable F-B2 source-health policy and pure conservative evaluation."""
++
++from __future__ import annotations
++
++from datetime import datetime, timezone
++from typing import Any, Iterable
++
++from .artifact_content import ArtifactContent, ArtifactRef, canonical_set, make_artifact_content
++from .models import DeviceFingerprintValidationError
++from .source_health_emitter_contracts import (
++    build_network_sensor_source_health_emitter_contract,
++    build_periodic_portal_source_health_emitter_contract,
++    build_portal_source_health_emitter_contract,
++)
++from .validation import parse_utc
++
++TASK01_TIMESTAMP_SKEW_REF = "Task01TimestampSkewContract:v1:max_future_source_event_skew_seconds=120"
++TASK01_DELAYED_EVENT_REF = "Task01DelayedEventContract:v1:max_delayed_event_age_seconds=86400"
++
++_COVERAGE = frozenset({
++    "covered_available", "acquisition_unavailable", "delivery_unavailable_loss_possible",
++    "delivery_loss_confirmed", "unsupported", "unknown",
++})
++_STATUSES = frozenset({"available", "unavailable", "unsupported"})
++_DOMAINS = frozenset({"ACQUISITION", "DELIVERY", "CAPABILITY", "RECOVERY", "OTHER"})
++_DOMAIN_COVERAGE = {
++    "ACQUISITION": "acquisition_unavailable",
++    "DELIVERY": "delivery_unavailable_loss_possible",
++    "CAPABILITY": "unsupported",
++}
++_TOP = frozenset({
++    "source_health_policy_version", "accepted_source_health_emitter_contracts",
++    "emitter_source_family_rules", "task01_timestamp_skew_contract_ref",
++    "task01_delayed_event_contract_ref", "health_anchor_margin_seconds",
++})
++_RULE = frozenset({
++    "source_health_emitter_contract", "source_kind", "expected_heartbeat", "freshness",
++    "status_reason_failure_domain_mappings", "coverage_class_mapping", "backfill",
++})
++_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _shape(value: Any, fields: frozenset[str] | set[str], label: str) -> dict[str, Any]:
++    if not isinstance(value, dict) or set(value) != fields:
++        _fail(f"Invalid {label} shape")
++    return value
++
++
++def _integer(value: Any, label: str, *, minimum: int = 0) -> int:
++    if type(value) is not int or not minimum <= value <= 2**63 - 1:
++        _fail(f"Invalid {label}")
++    return value
++
++
++def _ref(value: Any, emitters: dict[str, ArtifactContent]) -> dict[str, str]:
++    reference = ArtifactRef.from_dict(value)
++    emitter = emitters.get(reference.artifact_id)
++    if emitter is None:
++        _fail("Unknown SourceHealthEmitterContract")
++    reference.resolve(emitter, "SourceHealthEmitterContract")
++    return reference.as_dict()
++
++
++def _millis(value: str) -> int:
++    delta = parse_utc(value) - _EPOCH
++    return (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
++
++
++def _current_emitters() -> tuple[ArtifactContent, ArtifactContent, ArtifactContent]:
++    return (
++        build_network_sensor_source_health_emitter_contract(),
++        build_portal_source_health_emitter_contract(),
++        build_periodic_portal_source_health_emitter_contract(),
++    )
++
++
++def _freshness_for(emitter: ArtifactContent) -> int:
++    current = _current_emitters()
++    values = {current[0].artifact_id: 600_000, current[1].artifact_id: 0,
++              current[2].artifact_id: 180_000}
++    if emitter.artifact_id not in values:
++        _fail("No frozen freshness rule for emitter")
++    return values[emitter.artifact_id]
++
++
++def _expected_mappings(emitter: ArtifactContent) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
++    payload = emitter.semantic_payload
++    statuses = payload["persisted_status_emission_semantics"]["allowed_statuses"]
++    mappings: list[dict[str, Any]] = []
++    domains: dict[str, str] = {}
++    if "available" in statuses:
++        mappings.append({"status": "available", "reason_code": None,
++                         "failure_domain": "OTHER", "coverage_class": "covered_available"})
++    if "unsupported" in statuses:
++        mappings.append({"status": "unsupported", "reason_code": None,
++                         "failure_domain": "CAPABILITY", "coverage_class": "unsupported"})
++        domains["CAPABILITY"] = "unsupported"
++    for reason in payload["reason_code_definitions"]:
++        domain = reason["failure_domain_semantics"]
++        coverage = _DOMAIN_COVERAGE.get(domain)
++        if coverage is None:
++            _fail("No admitted coverage mapping for reason domain")
++        domains[domain] = coverage
++        for status in reason["status_compatibility"]:
++            mappings.append({"status": status, "reason_code": reason["reason_code"],
++                             "failure_domain": domain, "coverage_class": coverage})
++    coverage_mappings = [{"failure_domain": domain, "coverage_class": coverage}
++                         for domain, coverage in domains.items()]
++    return mappings, coverage_mappings
++
++
++def make_source_health_policy(
++        payload: dict[str, Any], emitter_contracts: Iterable[ArtifactContent],
++) -> ArtifactContent:
++    """Validate exact V1 shape, frozen current mappings, and declared SET ordering."""
++    value = _shape(payload, _TOP, "SourceHealthPolicy")
++    if _integer(value["source_health_policy_version"], "policy version", minimum=1) != 1:
++        _fail("Unsupported policy version")
++    _integer(value["health_anchor_margin_seconds"], "health anchor margin")
++    if (value["task01_timestamp_skew_contract_ref"] != TASK01_TIMESTAMP_SKEW_REF
++            or value["task01_delayed_event_contract_ref"] != TASK01_DELAYED_EVENT_REF):
++        _fail("Task-01 contract reference mismatch")
++    emitters: dict[str, ArtifactContent] = {}
++    for emitter in emitter_contracts:
++        if not isinstance(emitter, ArtifactContent) or emitter.artifact_type != "SourceHealthEmitterContract":
++            _fail("Invalid emitter collection")
++        if emitter.artifact_id in emitters:
++            _fail("Duplicate emitter contract")
++        emitters[emitter.artifact_id] = emitter
++    expected = {emitter.artifact_id for emitter in _current_emitters()}
++    if set(emitters) != expected:
++        _fail("Current policy requires exactly three admitted emitter contracts")
++    raw_refs = value["accepted_source_health_emitter_contracts"]
++    if not isinstance(raw_refs, list):
++        _fail("Invalid accepted emitter refs")
++    refs = canonical_set([_ref(item, emitters) for item in raw_refs],
++                         lambda item: item["artifact_id"])
++    if {item["artifact_id"] for item in refs} != expected:
++        _fail("Accepted emitter refs are incomplete")
++    raw_rules = value["emitter_source_family_rules"]
++    if not isinstance(raw_rules, list):
++        _fail("Invalid emitter family rules")
++    rules = []
++    for raw in raw_rules:
++        rule = _shape(raw, _RULE, "emitter family rule")
++        reference = _ref(rule["source_health_emitter_contract"], emitters)
++        emitter = emitters[reference["artifact_id"]]
++        kind = rule["source_kind"]
++        if not isinstance(kind, str) or kind not in emitter.semantic_payload["source_kinds"]:
++            _fail("Emitter source kind mismatch")
++        heartbeat = _shape(rule["expected_heartbeat"], {"mode", "nominal_interval_ms"},
++                           "expected heartbeat")
++        declared = emitter.semantic_payload["heartbeat_behavior_cadence_semantics"]
++        if heartbeat != {"mode": declared["mode"], "nominal_interval_ms": declared["nominal_interval_ms"]}:
++            _fail("Expected heartbeat does not match emitter")
++        if heartbeat["mode"] not in {"PERIODIC", "EVENT_DRIVEN", "NONE"}:
++            _fail("Invalid heartbeat mode")
++        if heartbeat["mode"] == "PERIODIC":
++            _integer(heartbeat["nominal_interval_ms"], "nominal interval", minimum=1)
++        elif heartbeat["nominal_interval_ms"] is not None:
++            _fail("Non-periodic heartbeat cannot declare an interval")
++        freshness = _shape(rule["freshness"], {"freshness_timeout_ms", "when_timeout_exceeded"},
++                           "freshness")
++        _integer(freshness["freshness_timeout_ms"], "freshness timeout")
++        if (freshness["when_timeout_exceeded"] != "unknown"
++                or freshness["freshness_timeout_ms"] != _freshness_for(emitter)):
++            _fail("Freshness rule differs from frozen value")
++        backfill = _shape(rule["backfill"], {
++            "must_obey_task01_delayed_event_contract", "arrived_backfill_present_evidence_usable",
++            "recovery_never_upgrades_interval_to_complete",
++        }, "backfill")
++        if any(backfill[key] is not True for key in backfill):
++            _fail("Invalid backfill rule")
++        expected_mappings, expected_coverage = _expected_mappings(emitter)
++        raw_mappings = rule["status_reason_failure_domain_mappings"]
++        if not isinstance(raw_mappings, list):
++            _fail("Invalid status/reason mappings")
++        mappings = []
++        for entry in raw_mappings:
++            mapping = _shape(entry, {"status", "reason_code", "failure_domain", "coverage_class"},
++                             "status/reason mapping")
++            if (mapping["status"] not in _STATUSES
++                    or mapping["failure_domain"] not in _DOMAINS
++                    or mapping["coverage_class"] not in _COVERAGE
++                    or (mapping["reason_code"] is not None
++                        and (not isinstance(mapping["reason_code"], str) or not mapping["reason_code"].strip()))):
++                _fail("Invalid status/reason mapping")
++            mappings.append(mapping)
++        mappings = canonical_set(mappings, lambda item: (item["status"], item["reason_code"] or ""))
++        if mappings != canonical_set(expected_mappings,
++                                     lambda item: (item["status"], item["reason_code"] or "")):
++            _fail("Status/reason mappings differ from admitted emitter semantics")
++        raw_coverage = rule["coverage_class_mapping"]
++        if not isinstance(raw_coverage, list):
++            _fail("Invalid coverage mappings")
++        coverage = []
++        for entry in raw_coverage:
++            mapping = _shape(entry, {"failure_domain", "coverage_class"}, "coverage mapping")
++            if mapping["failure_domain"] not in _DOMAINS or mapping["coverage_class"] not in _COVERAGE:
++                _fail("Invalid coverage mapping")
++            coverage.append(mapping)
++        coverage = canonical_set(coverage, lambda item: item["failure_domain"])
++        if coverage != canonical_set(expected_coverage, lambda item: item["failure_domain"]):
++            _fail("Coverage mappings differ from admitted emitter semantics")
++        rules.append({**rule, "source_health_emitter_contract": reference,
++                      "status_reason_failure_domain_mappings": mappings,
++                      "coverage_class_mapping": coverage})
++    rules = canonical_set(rules, lambda item: (
++        item["source_health_emitter_contract"]["artifact_id"], item["source_kind"]))
++    expected_pairs = {(emitter.artifact_id, kind) for emitter in emitters.values()
++                      for kind in emitter.semantic_payload["source_kinds"]}
++    if {(rule["source_health_emitter_contract"]["artifact_id"], rule["source_kind"])
++            for rule in rules} != expected_pairs:
++        _fail("Emitter family rules are incomplete")
++    return make_artifact_content("SourceHealthPolicy", {
++        **value, "accepted_source_health_emitter_contracts": refs,
++        "emitter_source_family_rules": rules,
++    })
++
++
++def build_current_source_health_policy(*, health_anchor_margin_seconds: int) -> ArtifactContent:
++    """Build a candidate only; the explicit margin is not F-B3 admission."""
++    emitters = _current_emitters()
++    rules = []
++    for emitter in emitters:
++        payload = emitter.semantic_payload
++        heartbeat = payload["heartbeat_behavior_cadence_semantics"]
++        mappings, coverage = _expected_mappings(emitter)
++        for kind in payload["source_kinds"]:
++            rules.append({
++                "source_health_emitter_contract": ArtifactRef(
++                    emitter.artifact_id, emitter.content_sha256).as_dict(),
++                "source_kind": kind,
++                "expected_heartbeat": {"mode": heartbeat["mode"],
++                                       "nominal_interval_ms": heartbeat["nominal_interval_ms"]},
++                "freshness": {"freshness_timeout_ms": _freshness_for(emitter),
++                              "when_timeout_exceeded": "unknown"},
++                "status_reason_failure_domain_mappings": mappings,
++                "coverage_class_mapping": coverage,
++                "backfill": {
++                    "must_obey_task01_delayed_event_contract": True,
++                    "arrived_backfill_present_evidence_usable": True,
++                    "recovery_never_upgrades_interval_to_complete": True,
++                },
++            })
++    return make_source_health_policy({
++        "source_health_policy_version": 1,
++        "accepted_source_health_emitter_contracts": [ArtifactRef(
++            emitter.artifact_id, emitter.content_sha256).as_dict() for emitter in emitters],
++        "emitter_source_family_rules": rules,
++        "task01_timestamp_skew_contract_ref": TASK01_TIMESTAMP_SKEW_REF,
++        "task01_delayed_event_contract_ref": TASK01_DELAYED_EVENT_REF,
++        "health_anchor_margin_seconds": health_anchor_margin_seconds,
++    }, emitters)
++
++
++def evaluate_source_health(
++        policy: ArtifactContent, bound_emitter_ref: dict[str, str], source_kind: str,
++        latest_event: dict[str, Any] | None, evaluation_time_utc: str,
++) -> dict[str, Any]:
++    """Interpret one explicitly compatible event; never infer interval completeness."""
++    evaluation_ms = _millis(evaluation_time_utc)
++
++    def unknown(disposition: str, *, age_ms: int | None = None) -> dict[str, Any]:
++        return {"coverage_class": "unknown", "freshness": disposition, "age_ms": age_ms,
++                "interval_complete": False}
++
++    if not isinstance(policy, ArtifactContent) or policy.artifact_type != "SourceHealthPolicy":
++        return unknown("policy_mismatch")
++    try:
++        reference = ArtifactRef.from_dict(bound_emitter_ref)
++    except DeviceFingerprintValidationError:
++        return unknown("emitter_mismatch")
++    rules = [rule for rule in policy.semantic_payload["emitter_source_family_rules"]
++             if rule["source_health_emitter_contract"] == reference.as_dict()
++             and rule["source_kind"] == source_kind]
++    if len(rules) != 1:
++        return unknown("emitter_mismatch")
++    if latest_event is None:
++        return unknown("no_event")
++    if (not isinstance(latest_event, dict)
++            or set(latest_event) != {"source_health_emitter_contract", "source_kind",
++                                       "status", "reason_code", "observed_at"}
++            or latest_event["source_health_emitter_contract"] != reference.as_dict()
++            or latest_event["source_kind"] != source_kind):
++        return unknown("event_mismatch")
++    observed_ms = _millis(latest_event["observed_at"])
++    age_ms = evaluation_ms - observed_ms
++    if age_ms < 0:
++        _fail("Negative source-health age")
++    rule = rules[0]
++    if age_ms > rule["freshness"]["freshness_timeout_ms"]:
++        return unknown("stale", age_ms=age_ms)
++    match = [mapping for mapping in rule["status_reason_failure_domain_mappings"]
++             if mapping["status"] == latest_event["status"]
++             and mapping["reason_code"] == latest_event["reason_code"]]
++    if len(match) != 1:
++        return unknown("unrecognized_status_reason", age_ms=age_ms)
++    return {"coverage_class": match[0]["coverage_class"], "freshness": "fresh",
++            "age_ms": age_ms, "interval_complete": False}
+diff --git a/research/device_fingerprint_fb2/__init__.py b/research/device_fingerprint_fb2/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2c313739b4aa081e907a7143e4eddb3d33e781a
+--- /dev/null
++++ b/research/device_fingerprint_fb2/__init__.py
+@@ -0,0 +1 @@
++"""Offline deterministic F-B2 source-health proofs."""
+diff --git a/research/device_fingerprint_fb2/proof.py b/research/device_fingerprint_fb2/proof.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..829f009741cba585ad141e90159e2b23c851f5ff
+--- /dev/null
++++ b/research/device_fingerprint_fb2/proof.py
+@@ -0,0 +1,96 @@
++"""Bounded synthetic proofs for the frozen SourceHealthPolicy candidate."""
++
++from __future__ import annotations
++
++from datetime import datetime, timedelta, timezone
++
++from app.device_fingerprint.artifact_content import ArtifactRef
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.source_health_emitter_contracts import (
++    build_network_sensor_source_health_emitter_contract,
++    build_periodic_portal_source_health_emitter_contract,
++    build_portal_source_health_emitter_contract,
++)
++from app.device_fingerprint.source_health_policy import evaluate_source_health
++
++_START = datetime(2026, 9, 18, 12, tzinfo=timezone.utc)
++
++
++def _timestamp(offset_ms: int) -> str:
++    return (_START + timedelta(milliseconds=offset_ms)).isoformat(
++        timespec="milliseconds").replace("+00:00", "Z")
++
++
++def _ref(emitter) -> dict[str, str]:
++    return ArtifactRef(emitter.artifact_id, emitter.content_sha256).as_dict()
++
++
++def _event(emitter, source_kind: str, status: str = "available", reason_code: str | None = None):
++    return {"source_health_emitter_contract": _ref(emitter),
++            "source_kind": source_kind, "status": status,
++            "reason_code": reason_code, "observed_at": _timestamp(0)}
++
++
++def run_f_b2_proof(policy) -> dict[str, object]:
++    """Run fixed vectors; return deterministic outcomes, never inspect live state."""
++    sensor = build_network_sensor_source_health_emitter_contract()
++    historical = build_portal_source_health_emitter_contract()
++    periodic = build_periodic_portal_source_health_emitter_contract()
++    outcomes: dict[str, str] = {}
++
++    def check(name: str, emitter, source_kind: str, age_ms: int,
++              expected: str, event=None) -> None:
++        actual = evaluate_source_health(
++            policy, _ref(emitter), source_kind,
++            _event(emitter, source_kind) if event is None else event,
++            _timestamp(age_ms),
++        )
++        if actual["coverage_class"] != expected or actual["interval_complete"] is not False:
++            raise AssertionError(f"{name}: {actual!r}")
++        outcomes[name] = actual["coverage_class"]
++
++    check("healthy_periodic_sensor", sensor, "dhcp", 0, "covered_available")
++    check("sensor_freshness_boundary", sensor, "dhcp", 600_000, "covered_available")
++    check("sensor_transport_silence", sensor, "dhcp", 600_001, "unknown")
++    check("portal_freshness_boundary", periodic, "portal_headers", 180_000,
++          "covered_available")
++    check("portal_transport_silence", periodic, "portal_headers", 180_001, "unknown")
++    check("acquisition_failure", sensor, "dhcp", 0, "acquisition_unavailable",
++          _event(sensor, "dhcp", "unavailable", "capture_interface_unavailable"))
++    check("delivery_failure", periodic, "portal_headers", 0,
++          "delivery_unavailable_loss_possible",
++          _event(periodic, "portal_headers", "unavailable", "ingest_delivery_unavailable"))
++    check("unknown_reason", periodic, "portal_headers", 0, "unknown",
++          _event(periodic, "portal_headers", "unavailable", "unrecognized"))
++    check("historical_event_at_timestamp", historical, "portal_headers", 0,
++          "covered_available")
++    check("historical_event_after_timestamp", historical, "portal_headers", 1, "unknown")
++    check("periodic_event_after_timestamp", periodic, "portal_headers", 1,
++          "covered_available")
++    check("epoch_emitter_mismatch", periodic, "portal_headers", 0, "unknown",
++          _event(historical, "portal_headers"))
++    recovery = evaluate_source_health(policy, _ref(periodic), "portal_headers",
++                                      _event(periodic, "portal_headers"), _timestamp(0))
++    if recovery != {"coverage_class": "covered_available", "freshness": "fresh",
++                    "age_ms": 0, "interval_complete": False}:
++        raise AssertionError("Recovery cannot prove prior interval complete")
++    outcomes["recovery_no_interval_completion"] = recovery["coverage_class"]
++    rules = policy.semantic_payload["emitter_source_family_rules"]
++    if not all(rule["backfill"]["must_obey_task01_delayed_event_contract"]
++               and rule["backfill"]["arrived_backfill_present_evidence_usable"]
++               and rule["backfill"]["recovery_never_upgrades_interval_to_complete"]
++               for rule in rules):
++        raise AssertionError("Arrived evidence/backfill contract changed")
++    outcomes["arrived_backfill_evidence_usable"] = "present_evidence_usable"
++    if "covered_delayed" in policy.semantic_payload_json.decode("utf-8"):
++        raise AssertionError("Forbidden coverage class")
++    outcomes["no_covered_delayed"] = "confirmed"
++    try:
++        evaluate_source_health(policy, _ref(historical), "portal_headers",
++                               _event(historical, "portal_headers"), _timestamp(-1))
++    except DeviceFingerprintValidationError:
++        outcomes["negative_age_invalid"] = "confirmed"
++    else:
++        raise AssertionError("Negative event age was accepted")
++    return {"result": "PASS", "policy_artifact_id": policy.artifact_id,
++            "outcomes": outcomes}
+diff --git a/tests/device_fingerprint/test_source_health_policy.py b/tests/device_fingerprint/test_source_health_policy.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d825bc7b9b0a85a6a780ab322109e02f5a68ded0
+--- /dev/null
++++ b/tests/device_fingerprint/test_source_health_policy.py
+@@ -0,0 +1,185 @@
++"""Frozen F-B2 policy content and pure source-health interpretation."""
++
++from copy import deepcopy
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.source_health_emitter_contracts import (
++    build_network_sensor_source_health_emitter_contract,
++    build_periodic_portal_source_health_emitter_contract,
++    build_portal_source_health_emitter_contract,
++)
++from app.device_fingerprint.source_health_policy import (
++    TASK01_DELAYED_EVENT_REF, TASK01_TIMESTAMP_SKEW_REF,
++    build_current_source_health_policy, evaluate_source_health, make_source_health_policy,
++)
++
++T = "2026-09-18T12:00:00.000Z"
++
++
++def _emitters():
++    return (build_network_sensor_source_health_emitter_contract(),
++            build_portal_source_health_emitter_contract(),
++            build_periodic_portal_source_health_emitter_contract())
++
++
++def _ref(emitter):
++    return ArtifactRef(emitter.artifact_id, emitter.content_sha256).as_dict()
++
++
++def _event(emitter, *, kind="portal_headers", status="available", reason=None):
++    return {"source_health_emitter_contract": _ref(emitter), "source_kind": kind,
++            "status": status, "reason_code": reason, "observed_at": T}
++
++
++def _evaluate(policy, emitter, age_ms, event=None, *, kind="portal_headers"):
++    from datetime import datetime, timedelta, timezone
++    base = datetime(2026, 9, 18, 12, tzinfo=timezone.utc)
++    evaluation = (base + timedelta(milliseconds=age_ms)).isoformat(
++        timespec="milliseconds").replace("+00:00", "Z")
++    return evaluate_source_health(policy, _ref(emitter), kind,
++                                  event if event is not None else _event(emitter, kind=kind),
++                                  evaluation)
++
++
++def test_candidate_uses_exact_immutable_emitters_task01_refs_and_frozen_rules():
++    sensor, old_portal, new_portal = _emitters()
++    assert sensor.content_sha256 == "45fb264bca5acd33e2202ea3048038cf59218c3c802610ed95d36c5d35022e56"
++    assert old_portal.content_sha256 == "568c6738c30c6d3c3ba8ddecea937b6289e37479c8d453810cc4b0884b2f8ee8"
++    assert new_portal.content_sha256 == "c5813a1955c847f1b81a90b8a92ff911b2bb0b3067e82f80ab6ba46b9c9b9ffa"
++    policy = build_current_source_health_policy(health_anchor_margin_seconds=0)
++    payload = policy.semantic_payload
++    assert payload["task01_timestamp_skew_contract_ref"] == (
++        "Task01TimestampSkewContract:v1:max_future_source_event_skew_seconds=120"
++    ) == TASK01_TIMESTAMP_SKEW_REF
++    assert payload["task01_delayed_event_contract_ref"] == (
++        "Task01DelayedEventContract:v1:max_delayed_event_age_seconds=86400"
++    ) == TASK01_DELAYED_EVENT_REF
++    assert payload["health_anchor_margin_seconds"] == 0  # Explicit test input; F-B3 not admitted.
++    assert len(payload["accepted_source_health_emitter_contracts"]) == 3
++    assert len(payload["emitter_source_family_rules"]) == 6
++    assert {ref["artifact_id"] for ref in payload["accepted_source_health_emitter_contracts"]} == {
++        emitter.artifact_id for emitter in _emitters()
++    }
++    for emitter, mode, interval, timeout in (
++            (sensor, "PERIODIC", 300_000, 600_000),
++            (old_portal, "EVENT_DRIVEN", None, 0),
++            (new_portal, "PERIODIC", 60_000, 180_000)):
++        rules = [row for row in payload["emitter_source_family_rules"]
++                 if row["source_health_emitter_contract"] == _ref(emitter)]
++        assert {row["source_kind"] for row in rules} == set(emitter.semantic_payload["source_kinds"])
++        for rule in rules:
++            assert rule["expected_heartbeat"] == {"mode": mode, "nominal_interval_ms": interval}
++            assert rule["freshness"] == {"freshness_timeout_ms": timeout,
++                                         "when_timeout_exceeded": "unknown"}
++            assert rule["backfill"] == {
++                "must_obey_task01_delayed_event_contract": True,
++                "arrived_backfill_present_evidence_usable": True,
++                "recovery_never_upgrades_interval_to_complete": True,
++            }
++            assert all(mapping["coverage_class"] != "delivery_loss_confirmed"
++                       for mapping in rule["status_reason_failure_domain_mappings"])
++    assert b"covered_delayed" not in policy.semantic_payload_json
++
++
++def test_policy_set_order_is_deterministic_and_invalid_shapes_fail_closed():
++    policy = build_current_source_health_policy(health_anchor_margin_seconds=0)
++    payload = deepcopy(policy.semantic_payload)
++    payload["accepted_source_health_emitter_contracts"].reverse()
++    payload["emitter_source_family_rules"].reverse()
++    for rule in payload["emitter_source_family_rules"]:
++        rule["status_reason_failure_domain_mappings"].reverse()
++        rule["coverage_class_mapping"].reverse()
++    assert make_source_health_policy(payload, _emitters()).artifact_id == policy.artifact_id
++    for mutate in (
++            lambda p: p.update(extra=True),
++            lambda p: p.update(health_anchor_margin_seconds=-1),
++            lambda p: p.update(health_anchor_margin_seconds=True),
++            lambda p: p.update(task01_timestamp_skew_contract_ref="wrong"),
++            lambda p: p.update(task01_delayed_event_contract_ref="wrong"),
++            lambda p: p["accepted_source_health_emitter_contracts"].append(
++                deepcopy(p["accepted_source_health_emitter_contracts"][0])),
++            lambda p: p["emitter_source_family_rules"].append(
++                deepcopy(p["emitter_source_family_rules"][0])),
++            lambda p: p["emitter_source_family_rules"][0]["freshness"].update(
++                freshness_timeout_ms=123),
++            lambda p: p["emitter_source_family_rules"][0]["expected_heartbeat"].update(
++                mode="NONE"),
++            lambda p: p["emitter_source_family_rules"][0]["backfill"].update(
++                recovery_never_upgrades_interval_to_complete=False),
++            lambda p: p["emitter_source_family_rules"][0]["status_reason_failure_domain_mappings"][0].update(
++                coverage_class="delivery_loss_confirmed"),
++            lambda p: p["emitter_source_family_rules"][0]["coverage_class_mapping"].append(
++                deepcopy(p["emitter_source_family_rules"][0]["coverage_class_mapping"][0])),
++    ):
++        changed = deepcopy(policy.semantic_payload)
++        mutate(changed)
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_source_health_policy(changed, _emitters())
++    with pytest.raises(DeviceFingerprintValidationError):
++        build_current_source_health_policy(health_anchor_margin_seconds=None)
++
++
++@pytest.mark.parametrize("index,kind,boundary", [
++    (0, "dhcp", 600_000),
++    (1, "portal_headers", 0),
++    (2, "portal_headers", 180_000),
++])
++def test_exact_freshness_boundaries_and_negative_age(index, kind, boundary):
++    policy = build_current_source_health_policy(health_anchor_margin_seconds=0)
++    emitter = _emitters()[index]
++    assert _evaluate(policy, emitter, 0, kind=kind)["coverage_class"] == "covered_available"
++    if boundary:
++        assert _evaluate(policy, emitter, boundary - 1, kind=kind)["freshness"] == "fresh"
++    assert _evaluate(policy, emitter, boundary, kind=kind)["coverage_class"] == "covered_available"
++    stale = _evaluate(policy, emitter, boundary + 1, kind=kind)
++    assert (stale["coverage_class"], stale["freshness"]) == ("unknown", "stale")
++    with pytest.raises(DeviceFingerprintValidationError, match="Negative"):
++        _evaluate(policy, emitter, -1, kind=kind)
++
++
++def test_failure_mappings_unknown_inputs_and_transport_silence():
++    policy = build_current_source_health_policy(health_anchor_margin_seconds=0)
++    sensor, old_portal, new_portal = _emitters()
++    for reason in ("capture_interface_unavailable", "raw_parser_unavailable",
++                   "suricata_unavailable", "eve_datagram_truncated"):
++        result = _evaluate(policy, sensor, 1, kind="dhcp", event=_event(
++            sensor, kind="dhcp", status="unavailable", reason=reason))
++        assert result["coverage_class"] == "acquisition_unavailable"
++    for emitter, kind in ((sensor, "dhcp"), (old_portal, "portal_headers"),
++                          (new_portal, "portal_headers")):
++        result = _evaluate(policy, emitter, 0, kind=kind, event=_event(
++            emitter, kind=kind, status="unavailable", reason="ingest_delivery_unavailable"))
++        assert result["coverage_class"] == "delivery_unavailable_loss_possible"
++    assert _evaluate(policy, sensor, 0, kind="dhcp", event=_event(
++        sensor, kind="dhcp", status="unsupported"))["coverage_class"] == "unsupported"
++    for status, reason in (("unavailable", "unrecognized"), ("other", None),
++                           ("available", "ingest_delivery_unavailable")):
++        assert _evaluate(policy, new_portal, 0, event=_event(
++            new_portal, status=status, reason=reason))["coverage_class"] == "unknown"
++    assert evaluate_source_health(policy, _ref(new_portal), "portal_headers", None, T)[
++        "coverage_class"] == "unknown"
++    assert _evaluate(policy, new_portal, 180_001)["coverage_class"] == "unknown"
++    assert _evaluate(policy, new_portal, 0, event=_event(old_portal))[
++        "coverage_class"] == "unknown"
++    unknown_ref = {"artifact_id": "SourceHealthEmitterContract:v1:sha256:" + "0" * 64,
++                   "content_sha256": "0" * 64}
++    assert evaluate_source_health(policy, unknown_ref, "portal_headers", _event(new_portal), T)[
++        "coverage_class"] == "unknown"
++
++
++def test_recovery_does_not_upgrade_missing_interval_and_historical_isolation():
++    policy = build_current_source_health_policy(health_anchor_margin_seconds=0)
++    _sensor, old_portal, new_portal = _emitters()
++    assert _evaluate(policy, old_portal, 0)["coverage_class"] == "covered_available"
++    assert _evaluate(policy, old_portal, 1)["coverage_class"] == "unknown"
++    assert _evaluate(policy, new_portal, 0, event=_event(old_portal))[
++        "coverage_class"] == "unknown"
++    current = _evaluate(policy, new_portal, 0)
++    assert current["coverage_class"] == "covered_available"
++    assert current["interval_complete"] is False
++    assert all(rule["backfill"]["arrived_backfill_present_evidence_usable"] is True
++               and rule["backfill"]["recovery_never_upgrades_interval_to_complete"] is True
++               for rule in policy.semantic_payload["emitter_source_family_rules"])
+diff --git a/tests/device_fingerprint_fb2/__init__.py b/tests/device_fingerprint_fb2/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5dc2a98a8d5ef2abf906f62c73e2d7f12d44bb65
+--- /dev/null
++++ b/tests/device_fingerprint_fb2/__init__.py
+@@ -0,0 +1 @@
++"""Offline F-B2 proof tests."""
+diff --git a/tests/device_fingerprint_fb2/test_proof.py b/tests/device_fingerprint_fb2/test_proof.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6fa9d6eebe0a92fa5ba4833f279a8ca269603e4
+--- /dev/null
++++ b/tests/device_fingerprint_fb2/test_proof.py
+@@ -0,0 +1,29 @@
++"""Deterministic F-B2 synthetic proof vectors."""
++
++from app.device_fingerprint.source_health_policy import build_current_source_health_policy
++from research.device_fingerprint_fb2.proof import run_f_b2_proof
++
++
++def test_offline_proof_covers_frozen_boundaries_and_failure_isolation():
++    policy = build_current_source_health_policy(health_anchor_margin_seconds=0)
++    proof = run_f_b2_proof(policy)
++    assert proof["result"] == "PASS"
++    assert proof["policy_artifact_id"] == policy.artifact_id
++    assert proof["outcomes"] == {
++        "healthy_periodic_sensor": "covered_available",
++        "sensor_freshness_boundary": "covered_available",
++        "sensor_transport_silence": "unknown",
++        "portal_freshness_boundary": "covered_available",
++        "portal_transport_silence": "unknown",
++        "acquisition_failure": "acquisition_unavailable",
++        "delivery_failure": "delivery_unavailable_loss_possible",
++        "unknown_reason": "unknown",
++        "historical_event_at_timestamp": "covered_available",
++        "historical_event_after_timestamp": "unknown",
++        "periodic_event_after_timestamp": "covered_available",
++        "epoch_emitter_mismatch": "unknown",
++        "recovery_no_interval_completion": "covered_available",
++        "arrived_backfill_evidence_usable": "present_evidence_usable",
++        "no_covered_delayed": "confirmed",
++        "negative_age_invalid": "confirmed",
++    }

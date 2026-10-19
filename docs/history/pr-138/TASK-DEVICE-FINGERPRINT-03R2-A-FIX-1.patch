@@ -1,0 +1,440 @@
+diff --git a/app/device_fingerprint_portal/client_hints_probe.py b/app/device_fingerprint_portal/client_hints_probe.py
+index 376e7eb352e1d94568aa52961517ea9cdea33f61..f1668bfed42d5cd23285a5b1edb7c7a9a650965d 100644
+--- a/app/device_fingerprint_portal/client_hints_probe.py
++++ b/app/device_fingerprint_portal/client_hints_probe.py
+@@ -32,14 +32,6 @@ _VERSION = re.compile(r'"(0|[1-9][0-9]{0,2})(?:\.[0-9]{1,3}){1,3}"')
+ _FACTOR = re.compile(r'[ \t]*"([A-Za-z]{1,16})"[ \t]*')
+ _MAC_LIKE = re.compile(r'(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}')
+ _UUID_LIKE = re.compile(r'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}')
+-_MODEL_FAMILIES = (
+-    (re.compile(r'Pixel(?: [0-9]+(?: Pro|a| XL| Fold)?)?', re.I), "pixel"),
+-    (re.compile(r'(?:Samsung )?Galaxy(?: [A-Za-z0-9 +\-]+)?', re.I), "samsung_galaxy"),
+-    (re.compile(r'SM-[A-Za-z0-9]+', re.I), "samsung_galaxy"),
+-    (re.compile(r'(?:Redmi|Xiaomi)(?: [A-Za-z0-9 +\-]+)?', re.I), "xiaomi"),
+-    (re.compile(r'OnePlus(?: [A-Za-z0-9 +\-]+)?', re.I), "oneplus"),
+-    (re.compile(r'(?:Moto|Motorola)(?: [A-Za-z0-9 +\-]+)?', re.I), "motorola"),
+-)
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -100,12 +92,9 @@ def _model(value: str | None) -> tuple[str, str | None]:
+     if (not candidate or len(candidate) > 64 or _MAC_LIKE.search(candidate)
+             or _UUID_LIKE.search(candidate) or re.search(r"\bBuild[/ _-]", candidate, re.I)):
+         return "UNUSABLE", None
+-    # Only bounded coarse families leave request memory; never an arbitrary
+-    # device name or an uncontrolled raw model fragment.
+-    for pattern, family in _MODEL_FAMILIES:
+-        if pattern.fullmatch(candidate):
+-            return "NORMALIZED", family
+-    return "UNUSABLE", None
++    # Preserve the complete bounded semantic candidate. No taxonomy or
++    # manufacturer knowledge is applied in the acquisition probe.
++    return "NORMALIZED", candidate
+ 
+ 
+ def _platform_version(value: str | None) -> tuple[str, int | None]:
+@@ -193,9 +182,6 @@ class PortalClientHintsProbe:
+         self._now = now
+         self._lock = threading.Lock()
+         self._pending: dict[tuple[str, str, str], float] = {}
+-        # Terminal tombstones prevent an absent-hints result from immediately
+-        # starting a new negotiation on the next natural portal visit.
+-        self._terminal: dict[tuple[str, str, str], float] = {}
+ 
+     @property
+     def pending_count(self) -> int:
+@@ -205,7 +191,7 @@ class PortalClientHintsProbe:
+     @property
+     def lifecycle_entry_count(self) -> int:
+         with self._lock:
+-            return len(self._pending) + len(self._terminal)
++            return len(self._pending)
+ 
+     def _record(self, event_type: str, source_subtype: str,
+                 observation: PortalClientHintsProbeObservation | None,
+@@ -250,26 +236,20 @@ class PortalClientHintsProbe:
+             expired = [item for item, deadline in self._pending.items() if instant >= deadline]
+             for item in expired:
+                 del self._pending[item]
+-            for item, deadline in tuple(self._terminal.items()):
+-                if instant >= deadline:
+-                    del self._terminal[item]
+-            if key in expired:
+-                action = "EXPIRED"
+-            elif key in self._pending:
++            expired_current = key in expired
++            if key in self._pending:
+                 del self._pending[key]
+-                self._terminal[key] = instant + self._config.ttl_seconds
+                 action = "CONSUMED"
+             elif any(name in headers for name in _HEADERS):
+-                if key in self._terminal or len(self._pending) + len(self._terminal) < self._config.max_entries:
+-                    self._terminal[key] = instant + self._config.ttl_seconds
+                 action = "UNSOLICITED"
+-            elif key in self._terminal:
+-                action = "TERMINAL"
+-            elif len(self._pending) + len(self._terminal) < self._config.max_entries:
++            elif len(self._pending) < self._config.max_entries:
+                 self._pending[key] = instant + self._config.ttl_seconds
+                 action = "REQUESTED"
+             else:
+                 action = "CAPACITY_REJECTED"
++        if expired_current:
++            safe_emit(self._telemetry, "probe_expired")
++            self._record("probe_expired", source_subtype, None)
+         if action == "REQUESTED":
+             response.headers["Accept-CH"] = ACCEPT_CH
+             safe_emit(self._telemetry, "probe_requested")
+@@ -277,9 +257,6 @@ class PortalClientHintsProbe:
+         if action == "CAPACITY_REJECTED":
+             safe_emit(self._telemetry, "probe_capacity_rejected")
+             return
+-        if action == "EXPIRED":
+-            safe_emit(self._telemetry, "probe_expired")
+-            self._record("probe_expired", source_subtype, None)
+         if action == "CONSUMED":
+             if any(name in headers for name in _HEADERS):
+                 observed = normalize_candidate_headers(headers, source_subtype=source_subtype)
+@@ -297,6 +274,6 @@ class PortalClientHintsProbe:
+                     False, "ABSENT", None, "MISSING",
+                 )
+                 self._record("probe_missing", source_subtype, missing, v1_candidate)
+-        if action in {"EXPIRED", "CONSUMED", "UNSOLICITED"}:
++        if action in {"CONSUMED", "UNSOLICITED"}:
+             response.headers["Clear-Site-Data"] = CLEAR_CLIENT_HINTS
+             safe_emit(self._telemetry, "probe_teardown_emitted")
+diff --git a/tests/device_fingerprint_portal/test_client_hints_probe.py b/tests/device_fingerprint_portal/test_client_hints_probe.py
+index d92d0013b64375f79a714b4cbcbc15f680485ae6..ee6b95a789a84b8fc68914b7b3f8e9af245aa568 100644
+--- a/tests/device_fingerprint_portal/test_client_hints_probe.py
++++ b/tests/device_fingerprint_portal/test_client_hints_probe.py
+@@ -85,7 +85,7 @@ def test_one_shot_request_observation_and_teardown_are_bounded_and_sanitized():
+     assert "Clear-Site-Data" not in first.headers
+     assert candidate.pending_count == 1
+ 
+-    raw_canary = "PRIVATE_UNCONTROLLED_MODEL_8291"
++    raw_canary = "Build/PRIVATE_UNCONTROLLED_MODEL_8291"
+     second = apply(candidate, {
+         "Sec-CH-UA-Model": f'"{raw_canary}"',
+         "Sec-CH-UA-Platform-Version": '"15.2.1"',
+@@ -94,6 +94,7 @@ def test_one_shot_request_observation_and_teardown_are_bounded_and_sanitized():
+     assert second.headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
+     assert "Accept-CH" not in second.headers
+     assert candidate.pending_count == 0
++    assert candidate.lifecycle_entry_count == 0
+     assert len(recorder.events) == 1
+     event = recorder.events[0]
+     assert event["observation"]["model_normalization_state"] == "UNUSABLE"
+@@ -102,10 +103,13 @@ def test_one_shot_request_observation_and_teardown_are_bounded_and_sanitized():
+     assert raw_canary not in json.dumps(event)
+     assert "AA:BB:CC:DD:EE:FF" not in json.dumps(event)
+     assert "site-1" not in json.dumps(event)
++    before = len(recorder.events)
+     assert apply(candidate, {"Sec-CH-UA-Model": '"Pixel 8"'}).headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
+     assert candidate.pending_count == 0
+-    assert "Accept-CH" not in apply(candidate).headers
+-    assert candidate.lifecycle_entry_count <= 2
++    assert candidate.lifecycle_entry_count == 0
++    assert len(recorder.events) == before
++    assert apply(candidate).headers["Accept-CH"] == ACCEPT_CH
++    assert candidate.lifecycle_entry_count == 1
+ 
+ 
+ def test_missing_expired_capacity_and_insecure_paths_do_not_force_requests():
+@@ -116,14 +120,15 @@ def test_missing_expired_capacity_and_insecure_paths_do_not_force_requests():
+     assert "Accept-CH" not in apply(candidate, mac="AA:BB:CC:DD:EE:01").headers
+     assert apply(candidate).headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
+     assert recorder.events[-1]["observation"]["lifecycle_result"] == "MISSING"
+-    assert "Accept-CH" not in apply(candidate).headers
++    assert candidate.lifecycle_entry_count == 0
++    assert apply(candidate).headers["Accept-CH"] == ACCEPT_CH
+     clock.value = 3.0
+     assert apply(candidate).headers["Accept-CH"] == ACCEPT_CH
+-    clock.value = 6.0
+-    assert apply(candidate).headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
+     assert recorder.events[-1]["event_type"] == "probe_expired"
++    assert candidate.pending_count == 1
++    clock.value = 6.0
++    apply(candidate, {"Sec-CH-UA-Model": '"Pixel 8"'})
+     assert candidate.pending_count == 0
+-    assert candidate.lifecycle_entry_count == 0
+ 
+ 
+ def test_site_mac_and_source_subtype_are_independent_lifecycle_keys():
+@@ -132,15 +137,31 @@ def test_site_mac_and_source_subtype_are_independent_lifecycle_keys():
+     apply(candidate)
+     for kwargs in ({"site": "other-site"}, {"mac": "AA:BB:CC:DD:EE:02"},
+                    {"subtype": "capport_login"}):
+-        assert "Clear-Site-Data" not in apply(candidate, **kwargs).headers
+-    assert candidate.pending_count == 4
++        response = apply(candidate, {"Sec-CH-UA-Model": '"Pixel 8"'}, **kwargs)
++        assert response.headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
++        assert "Accept-CH" not in response.headers
++        assert candidate.pending_count == 1
++        assert not recorder.events
+     assert apply(candidate, {"Sec-CH-UA-Model": '"Pixel 8"'}).headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
+-    assert recorder.events[-1]["observation"]["normalized_model_family_candidate"] == "pixel"
+-    assert candidate.pending_count == 3
++    assert recorder.events[-1]["observation"]["normalized_model_family_candidate"] == "Pixel 8"
++    assert candidate.pending_count == 0
++
++
++def test_unsolicited_hints_have_no_state_or_research_record():
++    clock = Clock()
++    candidate, recorder = probe(clock)
++    result = apply(candidate, {"Sec-CH-UA-Model": '"SM-S918B"'})
++    assert result.headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
++    assert "Accept-CH" not in result.headers
++    assert candidate.lifecycle_entry_count == 0
++    assert recorder.events == []
+ 
+ 
+ @pytest.mark.parametrize("raw,state,family", [
+-    ('"Pixel  8"', "NORMALIZED", "pixel"),
++    ('"Pixel  8"', "NORMALIZED", "Pixel 8"),
++    ('"SM-S918B"', "NORMALIZED", "SM-S918B"),
++    ('"moto g85 5G"', "NORMALIZED", "moto g85 5G"),
++    ('"NovelModel X9"', "NORMALIZED", "NovelModel X9"),
+     ('""', "UNUSABLE", None),
+     ('"' + "A" * 65 + '"', "UNUSABLE", None),
+     ('"Pixel\n8"', "UNUSABLE", None),
+@@ -153,7 +174,8 @@ def test_model_candidate_shapes(raw, state, family):
+     result = normalize_candidate_headers({"Sec-CH-UA-Model": raw}, source_subtype="capport_login")
+     assert result.model_normalization_state == state
+     assert result.normalized_model_family_candidate == family
+-    assert raw not in repr(result)
++    if state == "UNUSABLE":
++        assert raw not in repr(result)
+ 
+ 
+ @pytest.mark.parametrize("raw,state,major", [
+@@ -186,13 +208,13 @@ def test_form_factor_candidate_shapes(raw, state, factors):
+     assert result.normalized_form_factors_candidate == factors
+ 
+ 
+-def test_normalization_is_closed_world_and_never_returns_raw_header_values():
++def test_normalization_preserves_only_bounded_semantic_candidates():
+     observed = normalize_candidate_headers({
+         "Sec-CH-UA-Model": '"Pixel 8"',
+         "Sec-CH-UA-Platform-Version": '"14.0"',
+         "Sec-CH-UA-Form-Factors": '"Mobile"',
+     }, source_subtype="capport_login")
+-    assert observed.normalized_model_family_candidate == "pixel"
++    assert observed.normalized_model_family_candidate == "Pixel 8"
+     assert observed.normalized_platform_version_major_candidate == 14
+     assert observed.normalized_form_factors_candidate == ("mobile",)
+     invalid = normalize_candidate_headers({
+@@ -217,7 +239,7 @@ def test_recorder_writes_only_sanitized_event_with_private_file_mode(tmp_path):
+         now=lambda: datetime(2026, 9, 17, tzinfo=timezone.utc),
+     )
+     apply(candidate)
+-    apply(candidate, {"Sec-CH-UA-Model": '"unknown-secret-model"'})
++    apply(candidate, {"Sec-CH-UA-Model": '"Build/unknown-secret-model"'})
+     content = path.read_text(encoding="ascii")
+     assert len(content.splitlines()) == 1
+     assert "unknown-secret-model" not in content
+@@ -243,7 +265,7 @@ def test_privacy_canaries_never_enter_observation_lifecycle_telemetry_or_output(
+     )
+     request_headers = {
+         "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/PRIVATE_UA_CANARY_8901; wv) Chrome/120 Mobile",
+-        "Sec-CH-UA-Model": '"PRIVATE_MODEL_CANARY_8902"',
++        "Sec-CH-UA-Model": '"Build/PRIVATE_MODEL_CANARY_8902"',
+         "Sec-CH-UA-Platform-Version": '"PRIVATE_VERSION_CANARY_8903"',
+         "Sec-CH-UA-Form-Factors": '"PRIVATE_FACTOR_CANARY_8904"',
+     }
+@@ -262,7 +284,7 @@ def test_privacy_canaries_never_enter_observation_lifecycle_telemetry_or_output(
+     )
+     assert response.headers["Clear-Site-Data"] == CLEAR_CLIENT_HINTS
+     assert candidate.pending_count == 0
+-    retained = repr(recorder.events) + repr(telemetry.events) + repr(candidate._pending) + repr(candidate._terminal)
++    retained = repr(recorder.events) + repr(telemetry.events) + repr(candidate._pending)
+     assert "PRIVATE_" not in retained
+     assert len(recorder.events[0]["v1_semantic_digest"]) == 64
+     assert "AA:BB:CC:DD:EE:FF" not in repr(recorder.events)
+diff --git a/tests/test_capport_routes.py b/tests/test_capport_routes.py
+index 620491cb366c8aa39cf2cad0774136606d905df2..20d53b7c9468f1a77b1ca8781bbee10b04252f52 100644
+--- a/tests/test_capport_routes.py
++++ b/tests/test_capport_routes.py
+@@ -20,6 +20,8 @@ from app.capport.service import CapportService
+ from app.controllers.omada import OmadaProvider
+ from app.models import Result
+ from app.web.portal_entry import PortalClientContext, PortalEntryResult
++from app.web.portal_entry import PortalEntryHandler
++from app.auth.manager import AuthSessionManager
+ from app.device_fingerprint_portal.client_hints_probe import PortalClientHintsProbe, ProbeConfig
+ 
+ 
+@@ -145,6 +147,61 @@ def test_capport_probe_only_on_secure_resolved_html_login_not_json_or_discovery(
+     assert service.resolve_for_login.call_count == 4
+ 
+ 
++def test_capport_real_session_submission_and_reuse_are_probe_invariant():
++    class Executor:
++        def __init__(self):
++            self.submissions = []
++
++        def submit(self, function, session_id):
++            self.submissions.append((function, session_id))
++            return object()
++
++    def run(enabled):
++        manager = AuthSessionManager()
++        executor = Executor()
++        handler = PortalEntryHandler(
++            session_manager=manager, auth_worker=Mock(), executor=executor,
++            auth_telemetry=Mock(),
++        )
++        recorder = Mock()
++        probe = (PortalClientHintsProbe(
++            ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
++            recorder=recorder, monotonic=lambda: 0.0,
++        ) if enabled else None)
++        service = Mock()
++        service.resolve_for_login.return_value = state(found=True)
++        app, _ = app_for(service, handler, client_hints_probe=probe)
++        kwargs = {"base_url": "https://portal.example", "environ_base": {"REMOTE_ADDR": "192.168.1.10"}}
++        client = app.test_client()
++        first = client.get("/capport/login", **kwargs)
++        second = client.get("/capport/login", headers={"Sec-CH-UA-Model": '"Pixel 8"'}, **kwargs)
++        session = manager.get_by_client("site-1", "AA:BB:CC:DD:EE:FF")
++        assert session is not None
++        assert len(executor.submissions) == 1
++        assert service.resolve_for_login.call_count == 2
++        return first, second, session, executor
++
++    off = run(False)
++    on = run(True)
++    assert [item.status_code for item in off[:2]] == [200, 200]
++    assert [item.status_code for item in on[:2]] == [200, 200]
++    assert on[0].headers["Accept-CH"] == "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors"
++    assert on[1].headers["Clear-Site-Data"] == '"clientHints"'
++    for before, after in zip(off[:2], on[:2]):
++        off_headers = dict(before.headers)
++        on_headers = dict(after.headers)
++        on_headers.pop("Accept-CH", None)
++        on_headers.pop("Clear-Site-Data", None)
++        assert on_headers == off_headers
++        def scrub(body):
++            body = re.sub(rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", b"UUID", body)
++            return re.sub(rb"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", b"TIMESTAMP", body)
++        assert scrub(before.data) == scrub(after.data)
++    assert off[2].status == on[2].status
++    assert off[2].current_run_number == on[2].current_run_number == 1
++    assert len(off[3].submissions) == len(on[3].submissions) == 1
++
++
+ def test_capport_fingerprint_extraction_requires_resolved_client_and_is_contained():
+     candidate = object()
+     extractor = Mock(return_value=candidate)
+diff --git a/tests/test_proxy_headers.py b/tests/test_proxy_headers.py
+index 272e24e15ed53a1c2c2dfc3a38c901787714cb21..b771c60e5c31d2b9576aa495b9a8ff5af2cada02 100644
+--- a/tests/test_proxy_headers.py
++++ b/tests/test_proxy_headers.py
+@@ -1,4 +1,5 @@
+ import threading
++import re
+ from unittest.mock import Mock, patch
+ 
+ from flask import jsonify, request
+@@ -8,6 +9,7 @@ from app.device_fingerprint_portal.config import portal_config_from_env
+ from app.device_fingerprint_portal.models import DeliveryResult
+ from app.device_fingerprint_portal.runtime import PortalEvidenceRuntime
+ from app.device_fingerprint_portal.client_hints_probe import PortalClientHintsProbe, ProbeConfig
++from app.auth.manager import AuthSessionManager
+ 
+ 
+ class NoopExecutor:
+@@ -15,7 +17,17 @@ class NoopExecutor:
+         return None
+ 
+ 
+-def create_test_app(portal_evidence_sink=None, *, automatic=False, client_hints_probe=None):
++class CapturingExecutor:
++    def __init__(self):
++        self.submissions = []
++
++    def submit(self, function, session_id):
++        self.submissions.append((function, session_id))
++        return object()
++
++
++def create_test_app(portal_evidence_sink=None, *, automatic=False, client_hints_probe=None,
++                    manager=None, executor=None):
+     settings = {
+         "portal_counter_enabled": False,
+         "portal_counter_db_path": "unused.db",
+@@ -38,8 +50,9 @@ def create_test_app(portal_evidence_sink=None, *, automatic=False, client_hints_
+         patch.object(
+             web_module,
+             "auth_executor",
+-            NoopExecutor(),
++            executor if executor is not None else NoopExecutor(),
+         ),
++        patch.object(web_module, "auth_manager", manager if manager is not None else web_module.auth_manager),
+     ):
+         arguments = {"portal_counter_service": None, "client_hints_probe": client_hints_probe}
+         if not automatic:
+@@ -104,6 +117,64 @@ def test_external_portal_probe_disabled_keeps_response_unchanged():
+     assert "Clear-Site-Data" not in response.headers
+ 
+ 
++def test_external_portal_real_session_submission_and_v1_queue_are_probe_invariant():
++    class Sink:
++        def __init__(self):
++            self.candidates = []
++
++        def try_submit(self, _session, candidate):
++            self.candidates.append(candidate)
++
++    def run(enabled):
++        manager = AuthSessionManager()
++        executor = CapturingExecutor()
++        sink = Sink()
++        recorder = Mock()
++        probe = (PortalClientHintsProbe(
++            ProbeConfig(True, 3, 2, "C:/explicit/probe.jsonl"),
++            recorder=recorder, monotonic=lambda: 0.0,
++        ) if enabled else None)
++        app = create_test_app(sink, client_hints_probe=probe, manager=manager, executor=executor)
++        client = app.test_client()
++        uri = "/?site=site-1&clientMac=AA:BB:CC:DD:EE:77&clientIp=192.168.1.10"
++        base = "https://portal.example"
++        ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/PRIVATE_UA_CANARY_901; wv) Chrome/120 Mobile"
++        first = client.get(uri, base_url=base, headers={"User-Agent": ua})
++        second = client.get(uri, base_url=base, headers={
++            "User-Agent": ua,
++            "Sec-CH-UA-Model": '"Build/PRIVATE_MODEL_CANARY_902"',
++            "Sec-CH-UA-Platform-Version": '"PRIVATE_VERSION_CANARY_903"',
++            "Sec-CH-UA-Form-Factors": '"PRIVATE_FACTOR_CANARY_904"',
++        })
++        session = manager.get_by_client("site-1", "AA:BB:CC:DD:EE:77")
++        assert session is not None
++        assert len(executor.submissions) == 1
++        assert len(sink.candidates) == 2
++        assert all("PRIVATE_" not in repr(value) for value in sink.candidates)
++        assert all("PRIVATE_" not in repr(call) for call in recorder.record.call_args_list)
++        return first, second, session, executor, sink, recorder
++
++    off = run(False)
++    on = run(True)
++    assert [response.status_code for response in off[:2]] == [200, 200]
++    assert [response.status_code for response in on[:2]] == [200, 200]
++    assert on[0].headers["Accept-CH"] == "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Form-Factors"
++    assert on[1].headers["Clear-Site-Data"] == '"clientHints"'
++    for before, after in zip(off[:2], on[:2]):
++        off_headers = dict(before.headers)
++        on_headers = dict(after.headers)
++        on_headers.pop("Accept-CH", None)
++        on_headers.pop("Clear-Site-Data", None)
++        assert on_headers == off_headers
++        def scrub(body):
++            body = re.sub(rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", b"UUID", body)
++            return re.sub(rb"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", b"TIMESTAMP", body)
++        assert scrub(before.data) == scrub(after.data)
++    assert off[2].status == on[2].status
++    assert off[2].current_run_number == on[2].current_run_number == 1
++    assert len(off[3].submissions) == len(on[3].submissions) == 1
++
++
+ def test_external_portal_guard_precedes_extractor_and_valid_request_plumbs_candidate():
+     sink = object()
+     app = create_test_app(sink)

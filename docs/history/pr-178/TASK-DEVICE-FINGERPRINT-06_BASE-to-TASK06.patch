@@ -1,0 +1,1140 @@
+diff --git a/app/admin_web/device_fingerprint_presentation.py b/app/admin_web/device_fingerprint_presentation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa3711d4e9d99a565b653af8fca6d177fe54a29b
+--- /dev/null
++++ b/app/admin_web/device_fingerprint_presentation.py
+@@ -0,0 +1,137 @@
++"""Advisory Admin projection of retained PRODUCTION results; never classifies."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any
++
++from app.device_fingerprint.classification_read import (
++    ClassificationReadRecord, DeviceFingerprintClassificationReadService, MAX_PRODUCTION_READ_MACS,
++)
++from app.device_fingerprint.validation import parse_utc, validate_mac, validate_site_id
++
++_DIMENSIONS = {
++    "device_class_result": "device_class", "platform_result": "platform_family",
++    "manufacturer_result": "manufacturer_family", "model_result": "model_family",
++}
++_TEXT_SETS = (
++    "supporting_origin_groups", "contradicting_origin_groups", "not_evaluable_origin_groups",
++    "out_of_scope_taxon_references", "explanation_codes",
++)
++_LABELS = {"ios": "iOS", "macos": "macOS", "chromeos": "ChromeOS"}
++
++
++@dataclass(frozen=True, slots=True)
++class FingerprintDimensionPresentation:
++    canonical_value_id: str | None
++    status: str
++    support_level: str
++    supporting_origin_groups: tuple[str, ...]
++    contradicting_origin_groups: tuple[str, ...]
++    not_evaluable_origin_groups: tuple[str, ...]
++    out_of_scope_taxon_references: tuple[str, ...]
++    explanation_codes: tuple[str, ...]
++    knowledge_references: tuple[dict[str, str], ...]
++    value: str
++
++    def as_dict(self) -> dict[str, Any]:
++        return {"canonical_value_id": self.canonical_value_id, "status": self.status,
++                "support_level": self.support_level, "value": self.value,
++                **{name: list(getattr(self, name)) for name in _TEXT_SETS},
++                "knowledge_references": [dict(ref) for ref in self.knowledge_references]}
++
++
++@dataclass(frozen=True, slots=True)
++class FingerprintPresentation:
++    state: str
++    global_classification_status: str | None = None
++    classified_at_utc: str | None = None
++    device_class_result: FingerprintDimensionPresentation | None = None
++    platform_result: FingerprintDimensionPresentation | None = None
++    manufacturer_result: FingerprintDimensionPresentation | None = None
++    model_result: FingerprintDimensionPresentation | None = None
++
++    def compact_type(self) -> dict[str, str]:
++        return {"state": self.state,
++                "value": self.device_class_result.value if self.device_class_result else "—"}
++
++    def as_dict(self) -> dict[str, Any]:
++        return {"state": self.state, "global_classification_status": self.global_classification_status,
++                "classified_at_utc": self.classified_at_utc,
++                **{name: getattr(self, name).as_dict() if getattr(self, name) else None
++                   for name in _DIMENSIONS}}
++
++
++def present_classification(record: ClassificationReadRecord | None) -> FingerprintPresentation:
++    if record is None:
++        return FingerprintPresentation("no_result")
++    if record.core.execution_context != "PRODUCTION" or record.result.artifact_type != "ClassificationResult":
++        raise ValueError("Fingerprint presentation requires a production result")
++    parse_utc(record.core.classified_at_utc)
++    payload = record.result.semantic_payload
++    global_status = payload["global_classification_status"]
++    if global_status not in {"classified", "partial", "recognized_out_of_scope", "insufficient_evidence", "conflicting_evidence"}:
++        raise ValueError("Invalid fingerprint global status")
++    dimensions = {}
++    for name, dimension in _DIMENSIONS.items():
++        row = payload[name]
++        if (not isinstance(row, dict) or set(row) != {
++                "dimension_name", "display_label_ref", "canonical_value_id", "status", "support_level",
++                *_TEXT_SETS, "knowledge_references"} or row["dimension_name"] != dimension):
++            raise ValueError("Invalid fingerprint dimension")
++        status, canonical = row["status"], row["canonical_value_id"]
++        if status not in {"resolved", "unknown", "insufficient_evidence", "conflicting_evidence", "recognized_out_of_scope"}:
++            raise ValueError("Invalid fingerprint dimension status")
++        if (canonical is not None and (not isinstance(canonical, str) or not canonical)
++                or status == "resolved" and canonical is None
++                or status != "resolved" and canonical is not None
++                or row["support_level"] not in {"none", "low", "medium", "high"}):
++            raise ValueError("Invalid fingerprint dimension value/support")
++        for key in _TEXT_SETS:
++            if not isinstance(row[key], list) or any(not isinstance(item, str) or not item for item in row[key]):
++                raise ValueError("Invalid fingerprint diagnostic metadata")
++        refs = row["knowledge_references"]
++        if not isinstance(refs, list) or any(
++                not isinstance(ref, dict) or set(ref) != {
++                    "knowledge_provenance_id", "knowledge_provenance_digest",
++                    "knowledge_bundle_id", "knowledge_bundle_digest",
++                    "canonical_knowledge_record_id", "rule_or_source_record_identity"}
++                or any(not isinstance(value, str) or not value for value in ref.values()) for ref in refs):
++            raise ValueError("Invalid fingerprint knowledge references")
++        dimensions[name] = FingerprintDimensionPresentation(
++            canonical, status, row["support_level"],
++            *(tuple(row[key]) for key in _TEXT_SETS), tuple(dict(ref) for ref in refs),
++            _LABELS.get(canonical, canonical.replace("_", " ").title()) if status == "resolved" else "Unknown")
++    return FingerprintPresentation("classified", global_status, record.core.classified_at_utc, **dimensions)
++
++
++class DeviceFingerprintPresentationService:
++    def __init__(self, reader: DeviceFingerprintClassificationReadService | None) -> None:
++        self._reader = reader
++
++    def get_many(self, site_id: str, macs: list[str] | tuple[str, ...]) -> dict[str, FingerprintPresentation]:
++        site = validate_site_id(site_id)
++        if not isinstance(macs, (list, tuple)) or len(macs) > MAX_PRODUCTION_READ_MACS:
++            raise ValueError("Invalid fingerprint presentation batch")
++        canonical = tuple(sorted({validate_mac(mac) for mac in macs}))
++        if not canonical:
++            return {}
++        try:
++            if self._reader is None:
++                raise ValueError("Fingerprint read service unavailable")
++            records = self._reader.get_current_production_many(site, canonical)
++            if set(records) != set(canonical):
++                raise ValueError("Fingerprint batch scope mismatch")
++            projections = {}
++            for mac, record in records.items():
++                if record is not None and (record.core.site_id != site or record.core.observed_mac != mac):
++                    raise ValueError("Fingerprint record scope mismatch")
++                projections[mac] = present_classification(record)
++            return projections
++        except Exception:
++            # Fingerprint is optional. Never substitute controller values or fail the core page.
++            return {mac: FingerprintPresentation("unavailable") for mac in canonical}
++
++    def get(self, site_id: str, mac: str) -> FingerprintPresentation:
++        canonical = validate_mac(mac)
++        return self.get_many(site_id, (canonical,))[canonical]
+diff --git a/app/admin_web/query_service.py b/app/admin_web/query_service.py
+index d149378fc9d7872b0c93c42c927ca8993c4be96a..52971665f0f39bc2ba846c2e3a27164d7135fb51 100644
+--- a/app/admin_web/query_service.py
++++ b/app/admin_web/query_service.py
+@@ -39,6 +39,7 @@ from app.analytics import (
+ from app.analytics.validation import format_utc
+ from app.common.mac import format_mac_colon
+ from app.common.device_type import normalize_device_type_key
++from .device_fingerprint_presentation import DeviceFingerprintPresentationService
+ from app.current_state import (
+     CurrentStateSchemaError,
+     CurrentStateStorageError,
+@@ -263,6 +264,7 @@ class AdminQueryService:
+         execution_controls: AdminQueryExecutionControls | None = None,
+         device_list_context_state: str = "disabled",
+         device_list_context_cursor_codec: Any | None = None,
++        fingerprint_presentation_service: DeviceFingerprintPresentationService | None = None,
+     ):
+         self._config = config
+         self._policy = policy
+@@ -281,6 +283,7 @@ class AdminQueryService:
+         self._home_ap_24h = home_ap_24h_read_service
+         self._device_list_context_state = device_list_context_state
+         self._device_list_context_cursor_codec = device_list_context_cursor_codec
++        self._fingerprint = fingerprint_presentation_service or DeviceFingerprintPresentationService(None)
+         self._execution_controls = execution_controls or (
+             AdminQueryExecutionControls(
+                 max_concurrent_queries=config.max_concurrent_queries,
+@@ -571,6 +574,9 @@ class AdminQueryService:
+                 raise AdminQueryUnavailable() from exc
+             except ValueError as exc:
+                 raise AdminQueryValidationError() from exc
++            fingerprints = self._fingerprint.get_many(site_id, tuple(item["client_mac"] for item in result["items"]))
++            for item in result["items"]:
++                item["fingerprint_type"] = fingerprints[item["client_mac"]].compact_type()
+             return AdminQueryResponse(result, page)
+ 
+         return self._run(query)
+@@ -1424,6 +1430,7 @@ class AdminQueryService:
+                     "latest_snapshot": device.latest_snapshot,
+                     "recent_visits": list(visits),
+                     "latest_client_observation": observation,
++                    "fingerprint": self._fingerprint.get(site_id, device.canonical_mac).as_dict(),
+                 }
+             )
+ 
+diff --git a/app/admin_web/runtime.py b/app/admin_web/runtime.py
+index b73eb573b66d9c86475b0296ed86c8f902d657ba..ae2d873d5124ac5de8be41eca3f3ae1f0a3e1c9c 100644
+--- a/app/admin_web/runtime.py
++++ b/app/admin_web/runtime.py
+@@ -334,6 +334,16 @@ def create_admin_web_runtime(
+         else None
+     )
+     query_service = None
++    fingerprint_presentation_service = None
++    try:
++        from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
++        from .device_fingerprint_presentation import DeviceFingerprintPresentationService
++        fingerprint_presentation_service = DeviceFingerprintPresentationService(
++            DeviceFingerprintClassificationReadService(settings.get(
++                "device_fingerprint_classification_db_path",
++                "/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3")))
++    except Exception:
++        logger.error("admin.fingerprint_read_composition_failed")
+     current_state_db_path = None
+     if config.device_list_context_enabled:
+         current_repository = getattr(
+@@ -373,6 +383,7 @@ def create_admin_web_runtime(
+             device_list_context_state,
+             device_list_context_cursor_codec,
+             current_state_db_path,
++            fingerprint_presentation_service,
+         )
+     evidence_state = "active" if config.traffic_evidence_enabled else "disabled"
+     evidence_aggregator = None
+@@ -449,6 +460,7 @@ def _query_service(
+     device_list_context_state: str = "disabled",
+     device_list_context_cursor_codec: Any | None = None,
+     current_state_db_path: Any | None = None,
++    fingerprint_presentation_service: Any | None = None,
+ ):
+     """Build 01B only when concrete read boundaries expose local paths."""
+     try:
+@@ -474,6 +486,7 @@ def _query_service(
+                 observation_repository.db_path,
+             ),
+             visit_analytics_service=analytics_service,
++            fingerprint_presentation_service=fingerprint_presentation_service,
+             current_state_read_service=current_state_read_service,
+             current_traffic_read_service=getattr(
+                 analytics_runtime, "current_traffic_service", None
+diff --git a/app/admin_web/static/admin.css b/app/admin_web/static/admin.css
+index 6552ae9221eb390cef54a4fcd13207dd3bc29fc6..f195125f98a56b310cb91742d02fa8dccf5321f0 100644
+--- a/app/admin_web/static/admin.css
++++ b/app/admin_web/static/admin.css
+@@ -217,6 +217,12 @@ input[type="radio"] { width: auto; min-height: 0; }
+ .live-bar-fill { display: block; height: 100%; background: var(--accent); }
+ .table-scroll { max-width: 100%; overflow-x: auto; }
+ .live-table { width: 100%; min-width: 920px; border-collapse: collapse; }
++[aria-labelledby="devices-now-title"] .live-table { min-width: 1020px; }
++.live-fingerprint-type-cell, .live-fingerprint-type-header { min-width: 96px; text-align: center; }
++.fingerprint-support { display: inline-block; margin-left: .5rem; padding: .15rem .45rem; border: 1px solid var(--line); border-radius: .4rem; font-size: .75rem; text-transform: capitalize; }
++.fingerprint-details { margin-top: 1rem; }
++.fingerprint-details summary { cursor: pointer; }
++.fingerprint-details dd { overflow-wrap: anywhere; }
+ .live-table caption { padding: .4rem 0; text-align: left; color: var(--muted); }
+ .live-table th, .live-table td { padding: .7rem .55rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+ .live-table th { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+diff --git a/app/admin_web/static/admin.js b/app/admin_web/static/admin.js
+index 564e2a3d59d99dd02570ec6a0239720e51e460f1..ba3833d129a870e4cbaa22562191db420585a339 100644
+--- a/app/admin_web/static/admin.js
++++ b/app/admin_web/static/admin.js
+@@ -86,7 +86,7 @@
+ 
+   function detailEntry(key, field) {
+     const label = key.replaceAll("_", " ");
+-    return key === "device_type" ? [label, field, "device-type"] : [label, field];
++    return key === "device_type" ? ["Controller Platform", field, "device-type"] : [label, field];
+   }
+ 
+   function deviceDetailEntries(value, explicitDeviceTypeKey) {
+@@ -100,7 +100,7 @@
+         if (key === "traffic_up") return ["Traffic up", formatDeviceBytes(field)];
+         if (key === "traffic_total") return ["Traffic total", formatDeviceBytes(field)];
+         if (key === "uptime") return ["Uptime", formatDeviceDurationSeconds(field)];
+-        if (key === "device_type") return ["device type", field, "device-type", deviceTypeKey];
++        if (key === "device_type") return ["Controller Platform", field, "device-type", deviceTypeKey];
+         return detailEntry(key, field);
+       });
+   }
+@@ -108,7 +108,7 @@
+   function deviceIdentityEntries(identity) {
+     return [
+       ["MAC", identity.canonical_mac],
+-      ["Type", identity.device_type, "device-type", identity.device_type_key],
++      ["Controller Platform", identity.device_type, "device-type", identity.device_type_key],
+       ["First seen", identity.site_first_seen_at], ["Last seen", identity.site_last_seen_at],
+       ["Snapshot count", identity.site_snapshot_count], ["Visit count", identity.site_visit_count],
+     ];
+@@ -120,6 +120,50 @@
+       + `T${pad(value.getHours())}:${pad(value.getMinutes())}`;
+   }
+ 
++  const FINGERPRINT_DIMENSIONS = [
++    ["Type", "device_class_result"], ["Fingerprint Platform", "platform_result"],
++    ["Manufacturer", "manufacturer_result"], ["Model Family", "model_result"],
++  ];
++
++  function fingerprintSummaryEntries(fingerprint) {
++    const data = fingerprint || {};
++    const status = data.state === "unavailable" ? "Unavailable" : data.global_classification_status;
++    return [["Status", status], ["Classified at", data.classified_at_utc],
++      ...FINGERPRINT_DIMENSIONS.map(([label, field]) => {
++        const dimension = data[field];
++        return [label, dimension ? dimension.value : "—", "fingerprint-value",
++          dimension && dimension.status === "resolved" ? dimension.support_level : null];
++      })];
++  }
++
++  function fingerprintDetailEntries(dimension) {
++    if (!dimension) return [];
++    return [["Canonical value", dimension.canonical_value_id], ["Status", dimension.status],
++      ["Support level", dimension.support_level],
++      ["Supporting sources", (dimension.supporting_origin_groups || []).join(", ")],
++      ["Contradicting sources", (dimension.contradicting_origin_groups || []).join(", ")],
++      ["Not-evaluable sources", (dimension.not_evaluable_origin_groups || []).join(", ")],
++      ["Out-of-scope references", (dimension.out_of_scope_taxon_references || []).join(", ")],
++      ["Explanation codes", (dimension.explanation_codes || []).join(", ")],
++      ["Knowledge references", (dimension.knowledge_references || []).map((reference) =>
++        `${reference.canonical_knowledge_record_id} · ${reference.rule_or_source_record_identity} · ${reference.knowledge_provenance_id} · ${reference.knowledge_provenance_digest} · ${reference.knowledge_bundle_id} · ${reference.knowledge_bundle_digest}`).join("; ")]];
++  }
++
++  function fingerprintCard(fingerprint) {
++    const value = card("Fingerprint Information", fingerprintSummaryEntries(fingerprint));
++    value.className += " fingerprint-card";
++    value.append(node("p", "live-detail", "Advisory fingerprint. Values come from a persisted production classification."));
++    if (fingerprint && FINGERPRINT_DIMENSIONS.some(([, field]) => fingerprint[field])) {
++      const details = node("details", "fingerprint-details");
++      details.append(node("summary", null, "Fingerprint details"));
++      FINGERPRINT_DIMENSIONS.forEach(([label, field]) => {
++        if (fingerprint[field]) details.append(node("h3", null, label), definitionList(fingerprintDetailEntries(fingerprint[field])));
++      });
++      value.append(details);
++    }
++    return value;
++  }
++
+   function parseVisitFilters(fromValue, toValue, statusValue) {
+     const hasFrom = typeof fromValue === "string" && fromValue !== "";
+     const hasTo = typeof toValue === "string" && toValue !== "";
+@@ -179,6 +223,8 @@
+       detailEntry,
+       deviceDetailEntries,
+       deviceIdentityEntries,
++      fingerprintSummaryEntries,
++      fingerprintDetailEntries,
+       display,
+       isAndroidDeviceType,
+       localDatetimeValue,
+@@ -254,6 +300,10 @@
+     entries.forEach(([label, value, presentation, presentationKey]) => {
+       const detail = node("dd");
+       if (presentation === "device-type") detail.append(deviceTypeValue(value, presentationKey));
++      else if (presentation === "fingerprint-value") {
++        detail.append(node("span", null, display(value)));
++        if (presentationKey) detail.append(node("span", "fingerprint-support", presentationKey));
++      }
+       else detail.textContent = display(value);
+       list.append(node("dt", null, label), detail);
+     });
+@@ -500,6 +550,7 @@
+     if (!result || typeof result !== "object" || !result.identity) throw {uiFailure: classifyHttp(500, null, null)};
+     const identity = result.identity;
+     content.append(card("Identity", deviceIdentityEntries(identity)));
++    content.append(fingerprintCard(result.fingerprint));
+     content.append(card("Latest Site snapshot", deviceDetailEntries(result.latest_snapshot, identity.device_type_key)));
+     content.append(card("Latest client observation", deviceDetailEntries(result.latest_client_observation)));
+     const visits = Array.isArray(result.recent_visits) ? result.recent_visits : [];
+@@ -4939,14 +4990,21 @@
+   function prepareClientTableHeader(table) {
+     const row = table && table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : null;
+     if (!row) return;
++    if (row.cells.length === 11 && row.cells[1].classList.contains("live-fingerprint-type-header")) return;
+     if (row.cells.length === 10
+         && row.cells[1].classList.contains("live-device-type-header")
+         && row.cells[8].textContent === "Uptime"
+-        && row.cells[9].textContent === "Traffic") return;
++        && row.cells[9].textContent === "Traffic") {
++      row.cells[1].textContent = "Platform";
++      row.cells[1].setAttribute("aria-label", "Controller platform");
++      prepareFingerprintTypeHeader(row);
++      return;
++    }
+     if (row.cells.length === 9
+         && row.cells[7].textContent === "Uptime"
+         && row.cells[8].textContent === "Traffic") {
+       prepareClientTypeHeader(row);
++      prepareFingerprintTypeHeader(row);
+       return;
+     }
+     if (row.cells.length !== 8) return;
+@@ -4958,6 +5016,7 @@
+     traffic.textContent = "Traffic";
+     row.append(traffic);
+     prepareClientTypeHeader(row);
++    prepareFingerprintTypeHeader(row);
+   }
+ 
+   function prepareClientTypeHeader(row) {
+@@ -4967,12 +5026,24 @@
+     const type = document.createElement("th");
+     type.scope = "col";
+     type.className = "live-device-type-header";
+-    type.setAttribute("aria-label", "Device type");
++    type.setAttribute("aria-label", "Controller platform");
++    type.textContent = "Platform";
++    row.insertBefore(type, row.cells[1]);
++  }
++
++  function prepareFingerprintTypeHeader(row) {
++    if (!row || row.cells.length !== 10) return;
++    const type = document.createElement("th");
++    type.scope = "col";
++    type.className = "live-fingerprint-type-header";
++    type.setAttribute("aria-label", "Fingerprint device type");
+     type.textContent = "Type";
+     row.insertBefore(type, row.cells[1]);
+   }
+ 
+   function clientPresentationCells(createNode, item) {
++    const fingerprintType = createNode("td", "live-fingerprint-type-cell",
++      item.fingerprint_type && typeof item.fingerprint_type.value === "string" ? item.fingerprint_type.value : "—");
+     const deviceType = createNode("td", "live-device-type-cell");
+     if (item.device_type_key === "android") {
+       const icon = createNode("img", "device-type-icon");
+@@ -5028,7 +5099,7 @@
+ 
+     const uptime = createNode("td", "live-controller-value", controllerDuration(item.controller_uptime));
+     const traffic = createNode("td", "live-controller-value", controllerBytes(item.controller_traffic_total));
+-    return {deviceType, auth, band, rssi, snr, uptime, traffic};
++    return {fingerprintType, deviceType, auth, band, rssi, snr, uptime, traffic};
+   }
+ 
+   if (typeof window !== "undefined") {
+@@ -5267,7 +5338,7 @@
+     const identity = node("td");
+     identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
+     const presentation = clientPresentationCells(node, item);
+-    [identity, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
++    [identity, presentation.fingerprintType, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
+     return row;
+   }
+   function renderClients(append) {
+@@ -5920,7 +5991,7 @@
+       const row = node("tr"); const identity = node("td");
+       identity.append(node("strong", null, item.name || item.hostname || item.client_mac), node("br"), node("span", "mono", item.client_mac));
+       const presentation = live.clientPresentationCells(node, item);
+-      [identity, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
++      [identity, presentation.fingerprintType, presentation.deviceType, presentation.auth, node("td", null, item.ip), node("td", null, item.ap_name || item.ap_mac || "AP Unknown"), presentation.band, presentation.rssi, presentation.snr, presentation.uptime, presentation.traffic].forEach((cell) => row.append(cell));
+       clientRows.append(row);
+     });
+     clientMore.hidden = !sources.client.cursor;
+diff --git a/app/device_fingerprint/classification_read.py b/app/device_fingerprint/classification_read.py
+index ad433fef5a1967dd6984d9632a6afcab2e765f47..58ff215ea5f7fc4b98d730b6c719f8036173dd5e 100644
+--- a/app/device_fingerprint/classification_read.py
++++ b/app/device_fingerprint/classification_read.py
+@@ -6,7 +6,7 @@ import sqlite3
+ import uuid
+ from dataclasses import dataclass
+ from pathlib import Path
+-from typing import Callable, TypeVar
++from typing import Callable, Mapping, TypeVar
+ 
+ from .artifact_content import ArtifactContent, ArtifactRef
+ from .classification_persistence import ClassificationCoreRecord, ClassificationPersistenceError
+@@ -33,6 +33,7 @@ class ClassificationHistoryPage:
+ 
+ 
+ _T = TypeVar("_T")
++MAX_PRODUCTION_READ_MACS = 250
+ 
+ 
+ def _uuid_v4(value: object) -> str:
+@@ -74,7 +75,8 @@ class DeviceFingerprintClassificationReadService:
+                     connection.close()
+ 
+     @staticmethod
+-    def _record(connection: sqlite3.Connection, row: sqlite3.Row) -> ClassificationReadRecord:
++    def _record(connection: sqlite3.Connection, row: sqlite3.Row, *,
++                retained_results: Mapping[str, sqlite3.Row] | None = None) -> ClassificationReadRecord:
+         core = ClassificationCoreRecord(**dict(row))
+         _uuid_v4(core.classification_id)
+         if validate_site_id(core.site_id) != core.site_id:
+@@ -103,10 +105,11 @@ class DeviceFingerprintClassificationReadService:
+             _reference(artifact_id, digest, artifact_type)
+         result_ref = _reference(core.classification_result_id, core.classification_result_digest,
+                                 "ClassificationResult")
+-        stored = connection.execute(
+-            "SELECT artifact_id, artifact_type, content_sha256, semantic_payload_json "
+-            "FROM artifacts WHERE artifact_id=?", (result_ref.artifact_id,),
+-        ).fetchone()
++        stored = (retained_results.get(result_ref.artifact_id) if retained_results is not None
++                  else connection.execute(
++                      "SELECT artifact_id, artifact_type, content_sha256, semantic_payload_json "
++                      "FROM artifacts WHERE artifact_id=?", (result_ref.artifact_id,),
++                  ).fetchone())
+         if stored is None or stored["artifact_type"] != "ClassificationResult":
+             raise ClassificationPersistenceError("persistence_unavailable")
+         result = ArtifactContent(
+@@ -144,6 +147,54 @@ class DeviceFingerprintClassificationReadService:
+ 
+         return self._read(select)
+ 
++    def get_current_production(self, site_id: str, observed_mac: str) -> ClassificationReadRecord | None:
++        mac = validate_mac(observed_mac)
++        return self.get_current_production_many(site_id, (mac,))[mac]
++
++    def get_current_production_many(
++        self, site_id: str, observed_macs: list[str] | tuple[str, ...],
++    ) -> dict[str, ClassificationReadRecord | None]:
++        """Two bounded SELECTs in one readonly snapshot; candidate runs never shadow production."""
++        site = validate_site_id(site_id)
++        if (not isinstance(observed_macs, (list, tuple))
++                or len(observed_macs) > MAX_PRODUCTION_READ_MACS):
++            raise DeviceFingerprintValidationError("Invalid production classification batch")
++        macs = tuple(sorted({validate_mac(mac) for mac in observed_macs}))
++        if not macs:
++            return {}
++
++        def select(connection: sqlite3.Connection) -> dict[str, ClassificationReadRecord | None]:
++            slots = ','.join('?' for _ in macs)
++            rows = connection.execute(
++                "SELECT * FROM classifications AS current WHERE site_id=? "
++                "AND execution_context='PRODUCTION' AND observed_mac IN (" + slots + ") "
++                "AND NOT EXISTS (SELECT 1 FROM classifications AS newer "
++                "WHERE newer.site_id=current.site_id AND newer.observed_mac=current.observed_mac "
++                "AND newer.execution_context='PRODUCTION' AND "
++                "(newer.classified_at_utc>current.classified_at_utc OR "
++                "(newer.classified_at_utc=current.classified_at_utc "
++                "AND newer.classification_id>current.classification_id))) "
++                "ORDER BY observed_mac", (site, *macs),
++            ).fetchall()
++            results: dict[str, ClassificationReadRecord | None] = dict.fromkeys(macs)
++            if not rows:
++                return results
++            artifact_ids = tuple(sorted({row['classification_result_id'] for row in rows}))
++            artifacts = connection.execute(
++                "SELECT artifact_id, artifact_type, content_sha256, semantic_payload_json "
++                "FROM artifacts WHERE artifact_id IN (" + ','.join('?' for _ in artifact_ids) + ")",
++                artifact_ids,
++            ).fetchall()
++            retained = {row['artifact_id']: row for row in artifacts}
++            for row in rows:
++                record = self._record(connection, row, retained_results=retained)
++                if record.core.site_id != site or record.core.execution_context != "PRODUCTION":
++                    raise DeviceFingerprintValidationError("Invalid production classification scope")
++                results[record.core.observed_mac] = record
++            return results
++
++        return self._read(select)
++
+     def list_history(
+         self, site_id: str, observed_mac: str, from_utc: str, to_utc: str, *,
+         limit: int = 100, cursor: ClassificationHistoryCursor | None = None,
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index bbcd8e446b71f0dd8a836d911e4cca80a5392ca3..406cb0fd5e6fb6f507d44c811511943cc8a41cd8 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -33,6 +33,37 @@ secure cookies, CSP/security headers and no-store.
+ `AdminQueryService` owns Site authorization, bounded concurrency/deadline and safe
+ error mapping.
+ 
++## Task-06 — advisory Device Fingerprint presentation
++
++Home Online Devices keeps the existing controller/source `device_type` and
++`device_type_key` normalization and Android icon, now labeled **Platform**.
++The separate **Type** column comes only from persisted PRODUCTION fingerprint
++`device_class_result`. Controller Platform never backfills fingerprint Type.
++Home exposes only the compact fingerprint state/value, not diagnostics.
++
++Device Card labels controller/source data **Controller Platform** and adds a
++separate **Fingerprint Information** card: Status, Classified at, Type,
++Fingerprint Platform, Manufacturer and Model Family. Resolved dimensions show
++their unchanged support level. Expandable Fingerprint details preserve canonical
++values, real dimension status/support, supporting/contradicting/not-evaluable
++origin groups, out-of-scope references, explanation codes and knowledge refs.
++Controller Platform and Fingerprint Platform may disagree; no reconciliation is
++performed and no raw JSON/internal runtime identifiers appear in the summary.
++
++The authoritative source is persisted PRODUCTION `ClassificationResult`, read
++through `DeviceFingerprintClassificationReadService` and the shared typed
++presentation adapter. A newer PRE_ACCEPTANCE_CANDIDATE cannot shadow production.
++Home uses one bounded batch (at most 250 input MACs), one read-only connection
++and transaction, and two bounded SELECTs rather than individual device reads.
++All access remains within existing Site-authorized Admin APIs.
++
++No authoritative result is shown as `—`; a completed unresolved dimension is
++shown as `Unknown`, with its exact status retained in details. Fingerprint is
++advisory: an unavailable/corrupt classification DB yields Home Type `—` and
++Device Card fingerprint Status `Unavailable`, without failing core page data.
++The UI does not classify, query integration jobs, mutate persistence or trigger
++production activation.
++
+ ## Device Detail — Historical vs Current
+ 
+ Device Detail keeps two independent evidence domains.
+diff --git a/docs/modules/device-fingerprint.md b/docs/modules/device-fingerprint.md
+index 8788dac4b8ab6bc11168b43916bb912c64a481b8..d99d4c2466f46ad4e95aa70153136f069addf648 100644
+--- a/docs/modules/device-fingerprint.md
++++ b/docs/modules/device-fingerprint.md
+@@ -77,3 +77,23 @@ Task-02 extends only the reserved schema-registry boundary and is governed by
+ Task-03 reuses the same API/DB boundary through the isolated asynchronous portal
+ producer described in `docs/modules/device-fingerprint-portal.md`; it adds no
+ second database or classifier.
++
++## Current Task-06 presentation and operational policy
++
++The current canonical `SnapshotExecutionPolicy.process_memory_guard_bytes` is
++`1073741824` (1024 MiB / 1 GiB), converged to the Owner-accepted production
++operational value. Current deterministic policy identity is
++`SnapshotExecutionPolicy:v1:sha256:36074993bb86daca8c43268c19ce0efab7e0e3ef5d644e07b9b6e65f5fff7f77`.
++Historical acceptance/measurement evidence remains unchanged; changing this
++current builder does not recreate Task-04 semantic acceptance or activate a
++production profile.
++
++Task-06 consumes only persisted PRODUCTION `ClassificationResult` through the
++existing read-only classification service and one typed Admin presentation
++adapter. It does not classify on page/API reads or write classification data.
++Home Platform is the existing controller/source value; Home Type is fingerprint
++device_class. Device Card Controller Platform remains separate from Fingerprint
++Platform. Fingerprint is advisory: no completed result is `—`, unresolved
++dimensions are `Unknown`, and unavailable persistence does not fail core Admin
++pages. See `docs/modules/admin-web.md` for the compact Home and diagnostic Device
++Card surfaces.
+diff --git a/research/device_fingerprint_fa4/finalization.py b/research/device_fingerprint_fa4/finalization.py
+index 349b98a1c082a13e0a658f5e3da2d58348a42e7f..85ad94ed13d07673614dcec170a3d8ea207ec5a6 100644
+--- a/research/device_fingerprint_fa4/finalization.py
++++ b/research/device_fingerprint_fa4/finalization.py
+@@ -46,7 +46,7 @@ _EXECUTION_POLICY_PAYLOAD = {
+     "max_read_transaction_duration_ms": 240000,
+     "sqlite_busy_timeout_ms": 500,
+     "max_retry_count": 0,
+-    "process_memory_guard_bytes": 100663296,
++    "process_memory_guard_bytes": 1073741824,
+ }
+ _CANONICAL_RESULT_SUMMARY = (
+     "PASS; production COMPLETE: evidence_rows=7091, health_rows=5340, "
+diff --git a/tests/admin_web/test_admin_ui_frontend.py b/tests/admin_web/test_admin_ui_frontend.py
+index 6c4026f1398b4cd9541aff36f13ffef96231babf..4e6f4b923b646e112029f11ea0badbe1930c3715 100644
+--- a/tests/admin_web/test_admin_ui_frontend.py
++++ b/tests/admin_web/test_admin_ui_frontend.py
+@@ -59,10 +59,10 @@ const identityEntries = api.deviceIdentityEntries({
+   site_snapshot_count: 1,
+   site_visit_count: 2,
+ });
+-const identityType = identityEntries.find((entry) => entry[0] === "Type");
++const identityType = identityEntries.find((entry) => entry[0] === "Controller Platform");
+ assert(identityType[1] === " Android " && identityType[2] === "device-type" && identityType[3] === "android", "identity preserves raw Type and carries canonical key");
+ const snapshotType = api.deviceDetailEntries({device_type: " Android "}, "android")[0];
+-assert(snapshotType[0] === "device type" && snapshotType[1] === " Android " && snapshotType[2] === "device-type" && snapshotType[3] === "android", "latest snapshot preserves raw Type with explicit canonical key");
++assert(snapshotType[0] === "Controller Platform" && snapshotType[1] === " Android " && snapshotType[2] === "device-type" && snapshotType[3] === "android", "latest snapshot preserves raw controller platform with explicit canonical key");
+ const ownKeyType = api.deviceDetailEntries({device_type: "phone", device_type_key: "phone"}, "android")[0];
+ assert(ownKeyType[1] === "phone" && ownKeyType[3] === "phone", "object canonical key takes precedence over external key");
+ const missingType = api.deviceDetailEntries({device_type: null, device_type_key: null})[0];
+@@ -208,12 +208,18 @@ headerRow.cells[7].textContent = "Uptime";
+ headerRow.cells[8].textContent = "Traffic";
+ global.document = {createElement: headerNode};
+ api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
+-assert(headerRow.cells.length === 10 && headerRow.cells[1].textContent === "Type", "Home Type header is visible after Device / MAC");
+-assert(headerRow.cells[1].className === "live-device-type-header", "Home Type header uses the narrow presentation column");
++assert(headerRow.cells.length === 11 && headerRow.cells[1].textContent === "Type", "Home fingerprint Type header is visible after Device / MAC");
++assert(headerRow.cells[1].className === "live-fingerprint-type-header", "Home fingerprint Type has its own column");
++assert(headerRow.cells[2].textContent === "Platform" && headerRow.cells[2].className === "live-device-type-header", "Home controller Platform stays separate");
+ api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
+-assert(headerRow.cells.length === 10, "Home Type header preparation is idempotent");
++assert(headerRow.cells.length === 11, "Home Type/Platform header preparation is idempotent");
+ const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null};
+ const androidPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: " Android ", device_type_key: "android"});
++assert(androidPresentation.fingerprintType.textContent === "—", "controller platform cannot backfill missing fingerprint Type");
++const resolvedFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", value: "Laptop"}});
++assert(resolvedFingerprint.fingerprintType.textContent === "Laptop", "Home Type displays only the server fingerprint projection");
++const unknownFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", value: "Unknown"}});
++assert(unknownFingerprint.fingerprintType.textContent === "Unknown", "completed unresolved Type differs from missing value");
+ assert(androidPresentation.deviceType.children.length === 1 && androidPresentation.deviceType.children[0].tag === "img", "Home Android canonical key renders SVG");
+ assert(androidPresentation.deviceType.attributes["aria-label"] === " Android ", "Home Android presentation preserves raw label");
+ const missingPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null});
+diff --git a/tests/admin_web/test_device_fingerprint_frontend.py b/tests/admin_web/test_device_fingerprint_frontend.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf754c98362774e4da00ed43db223edfb6894c24
+--- /dev/null
++++ b/tests/admin_web/test_device_fingerprint_frontend.py
+@@ -0,0 +1,141 @@
++"""Task-06 keeps controller facts separate from the advisory fingerprint UI."""
++
++import subprocess
++import json
++from pathlib import Path
++
++import pytest
++
++from .test_admin_ui_frontend import NODE
++
++
++@pytest.mark.skipif(NODE is None, reason="Node is required for frontend checks")
++def test_fingerprint_summary_details_and_separate_controller_surface():
++    script = Path(__file__).parents[2] / "app/admin_web/static/admin.js"
++    program = r'''
++const fs = require("fs");
++const vm = require("vm");
++const assert = require("assert");
++global.window = {};
++vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"));
++const ui = window.CaptivPortalAdminTest;
++const missing = ui.fingerprintSummaryEntries({state: "no_result"});
++assert.strictEqual(missing.length, 6);
++assert.strictEqual(ui.display(missing[0][1]), "—");
++assert(missing.slice(2).every(row => row[1] === "—"));
++assert.strictEqual(ui.fingerprintSummaryEntries({state: "unavailable"})[0][1], "Unavailable");
++const dimension = {value: "Smartphone", canonical_value_id: "smartphone", status: "resolved",
++  support_level: "medium", supporting_origin_groups: ["dhcp"], contradicting_origin_groups: ["portal"],
++  not_evaluable_origin_groups: ["tcp"], out_of_scope_taxon_references: ["outside"],
++  explanation_codes: ["exact_code"], knowledge_references: [{canonical_knowledge_record_id: "record-1",
++    rule_or_source_record_identity: "source-1", knowledge_provenance_id: "provenance-1",
++    knowledge_provenance_digest: "digest-1", knowledge_bundle_id: "bundle-1", knowledge_bundle_digest: "bundle-digest-1"}]};
++const fingerprint = {state: "classified", global_classification_status: "partial",
++  classified_at_utc: "2026-10-04T00:00:00.000Z", device_class_result: dimension,
++  platform_result: {...dimension, value: "ChromeOS", canonical_value_id: "chromeos"},
++  manufacturer_result: {...dimension, value: "Unknown", status: "insufficient_evidence", canonical_value_id: null},
++  model_result: {...dimension, value: "Unknown", status: "recognized_out_of_scope", canonical_value_id: null}};
++const summary = ui.fingerprintSummaryEntries(fingerprint);
++assert.deepStrictEqual(summary.map(row => row[0]),
++  ["Status", "Classified at", "Type", "Fingerprint Platform", "Manufacturer", "Model Family"]);
++assert.strictEqual(summary[2][1], "Smartphone");
++assert.strictEqual(summary[2][3], "medium");
++assert.strictEqual(summary[3][1], "ChromeOS");
++assert.strictEqual(summary[4][1], "Unknown");
++assert.strictEqual(summary[4][3], null);
++assert.strictEqual(summary[5][3], null);
++const diagnostics = Object.fromEntries(ui.fingerprintDetailEntries(dimension));
++assert.strictEqual(Object.keys(diagnostics).length, 9);
++assert.strictEqual(diagnostics["Canonical value"], "smartphone");
++assert.strictEqual(diagnostics["Status"], "resolved");
++assert.strictEqual(diagnostics["Support level"], "medium");
++assert.strictEqual(diagnostics["Supporting sources"], "dhcp");
++assert.strictEqual(diagnostics["Contradicting sources"], "portal");
++assert.strictEqual(diagnostics["Not-evaluable sources"], "tcp");
++assert.strictEqual(diagnostics["Out-of-scope references"], "outside");
++assert.strictEqual(diagnostics["Explanation codes"], "exact_code");
++assert(diagnostics["Knowledge references"].includes("record-1"));
++assert(diagnostics["Knowledge references"].includes("bundle-digest-1"));
++const controller = ui.deviceIdentityEntries({device_type: "Android", device_type_key: "android"});
++assert.strictEqual(controller.find(row => row[0] === "Controller Platform")[1], "Android");
++'''
++    completed = subprocess.run([NODE, "-e", program, str(script)], capture_output=True, text=True)
++    assert completed.returncode == 0, completed.stderr
++    source = script.read_text(encoding="utf-8")
++    assert 'card("Fingerprint Information", fingerprintSummaryEntries(fingerprint))' in source
++    assert 'node("summary", null, "Fingerprint details")' in source
++    assert "fingerprintCard(result.fingerprint)" in source
++    assert source.count("[identity, presentation.fingerprintType, presentation.deviceType") == 2
++    css = script.with_name("admin.css").read_text(encoding="utf-8")
++    assert "overflow-x: auto" in css
++    assert ".fingerprint-details dd { overflow-wrap: anywhere; }" in css
++
++
++@pytest.mark.skipif(NODE is None, reason="Node is required for frontend checks")
++@pytest.mark.parametrize("state", ["no_result", "unavailable", "classified"])
++def test_device_card_safe_dom_renders_summary_and_optional_diagnostics(state, tmp_path):
++    from .test_device_current_context_frontend import _legacy_admin_source
++
++    dimension = {"value": "Smartphone", "canonical_value_id": "smartphone", "status": "resolved",
++                 "support_level": "medium", "supporting_origin_groups": ["dhcp"],
++                 "contradicting_origin_groups": [], "not_evaluable_origin_groups": [],
++                 "out_of_scope_taxon_references": [], "explanation_codes": ["exact_code"],
++                 "knowledge_references": []}
++    fingerprint = {"state": state}
++    if state == "classified":
++        fingerprint.update(global_classification_status="partial", classified_at_utc="2026-10-04T00:00:00.000Z",
++                           device_class_result=dimension,
++                           platform_result={**dimension, "value": "ChromeOS", "canonical_value_id": "chromeos"},
++                           manufacturer_result={**dimension, "value": "Unknown", "status": "unknown", "canonical_value_id": None},
++                           model_result={**dimension, "value": "Unknown", "status": "insufficient_evidence", "canonical_value_id": None})
++    harness = r'''
++const assert = require("assert");
++class Element {
++  constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.listeners = {}; this.className = ""; this.textContent = ""; }
++  addEventListener(kind, callback) { this.listeners[kind] = callback; }
++  append(...items) { this.children.push(...items); }
++  replaceChildren(...items) { this.children = items; }
++  setAttribute() {}
++  querySelector() { return null; }
++}
++const ids = ["admin-page", "page-content", "page-state", "state-title", "state-message", "refresh-button", "pagination", "load-more-button"];
++const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
++elements["admin-page"].dataset = {page: "device", siteId: "0123456789abcdef01234567",
++  apiBase: "/admin/api/v1/sites/0123456789abcdef01234567", deviceId: "10000000-0000-4000-8000-000000000001"};
++global.document = {getElementById: id => elements[id] || null, createElement: tag => new Element(tag)};
++global.window = {location: {pathname: "/admin/device", search: ""}, addEventListener() {}};
++const fingerprint = JSON.parse(process.argv[2]);
++global.fetch = async () => ({ok: true, status: 200, headers: {get: () => null}, json: async () => ({result: {
++  identity: {canonical_mac: "02:00:00:00:00:01", device_type: "Android", device_type_key: "android"},
++  latest_snapshot: {}, latest_client_observation: {}, recent_visits: [], fingerprint}})});
++'''
++    assertions = r'''
++setImmediate(() => {
++  const cards = elements["page-content"].children;
++  assert(cards.some(card => card.children[0].textContent === "Identity"));
++  const card = cards.find(card => card.children[0].textContent === "Fingerprint Information");
++  assert(card);
++  assert(card.className.includes("fingerprint-card"));
++  const list = card.children[1].children;
++  assert.strictEqual(list.length, 12);
++  const status = list[1].textContent;
++  if (fingerprint.state === "unavailable") assert.strictEqual(status, "Unavailable");
++  if (fingerprint.state === "no_result") assert.strictEqual(status, "—");
++  if (fingerprint.state === "classified") {
++    assert.strictEqual(status, "partial");
++    assert.strictEqual(list[5].children[0].textContent, "Smartphone");
++    assert.strictEqual(list[5].children[1].textContent, "medium");
++    assert.strictEqual(list[7].children[0].textContent, "ChromeOS");
++    assert.strictEqual(list[9].children[0].textContent, "Unknown");
++    assert.strictEqual(list[9].children.length, 1);
++    const details = card.children.find(child => child.tag === "details");
++    assert.strictEqual(details.children[0].textContent, "Fingerprint details");
++    assert.strictEqual(details.children.filter(child => child.tag === "h3").length, 4);
++  } else assert(!card.children.some(child => child.tag === "details"));
++});
++'''
++    probe = tmp_path / "task06-device-card.js"
++    probe.write_text(harness + _legacy_admin_source() + assertions, encoding="utf-8")
++    completed = subprocess.run([NODE, str(probe),
++                                json.dumps(fingerprint)], capture_output=True, text=True)
++    assert completed.returncode == 0, completed.stderr
+diff --git a/tests/admin_web/test_device_fingerprint_presentation.py b/tests/admin_web/test_device_fingerprint_presentation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b56c08ad97f5b1b6cce0940dbd832aba327746e
+--- /dev/null
++++ b/tests/admin_web/test_device_fingerprint_presentation.py
+@@ -0,0 +1,188 @@
++"""Task-06: advisory production-only projections without classification or writes."""
++
++from dataclasses import replace
++from types import SimpleNamespace
++
++import pytest
++
++from app.admin_web.device_fingerprint_presentation import (
++    DeviceFingerprintPresentationService, present_classification,
++)
++from app.admin_web.models import AdminPrincipal
++from app.admin_web.query_service import AdminQueryForbidden
++from app.device_fingerprint.artifact_content import make_artifact_content
++from app.device_fingerprint.classification_read import ClassificationReadRecord
++from app.current_state import CurrentClientPage
++from tests.device_fingerprint_task04_04e_read.test_classification_read import _persisted
++from .conftest import SITE_ID
++from .test_home_live import service, CurrentSource, client_item, snapshot
++from .test_query_service import _service, DEVICE_ID
++
++_DIMENSIONS = ("device_class_result", "platform_result", "manufacturer_result", "model_result")
++_CANONICAL = ("smartphone", "android", "synthetic_manufacturer", "synthetic_model")
++
++
++@pytest.fixture(scope="module")
++def retained(tmp_path_factory):
++    _, _, _, reader = _persisted(tmp_path_factory.mktemp("task06-retained"))
++    from tests.device_fingerprint import SITE
++    from tests.device_fingerprint_task04_t01.test_snapshot_service import MAC
++    record = reader.get_current(SITE, MAC)
++    return ClassificationReadRecord(replace(record.core, execution_context="PRODUCTION",
++                                            runtime_profile_activation_record_id="11111111-1111-4111-8111-111111111111"),
++                                    record.result)
++
++
++def shaped(retained, status="resolved", *, platform="android"):
++    payload = retained.result.semantic_payload
++    payload["global_classification_status"] = "partial"
++    for field, canonical in zip(_DIMENSIONS, _CANONICAL):
++        row = payload[field]
++        row.update(canonical_value_id=(platform if field == "platform_result" else canonical)
++                   if status == "resolved" else None, status=status,
++                   support_level="medium" if status in {"resolved", "recognized_out_of_scope"} else "none",
++                   supporting_origin_groups=["dhcp"], contradicting_origin_groups=["portal"],
++                   not_evaluable_origin_groups=["tcp"], out_of_scope_taxon_references=["fixture-outside"],
++                   explanation_codes=["fixture_explanation"], knowledge_references=[{
++                       "knowledge_bundle_id": "KnowledgeBundle:v1:sha256:" + "a" * 64,
++                       "knowledge_bundle_digest": "a" * 64,
++                       "knowledge_provenance_id": "KnowledgeProvenanceManifest:v1:sha256:" + "b" * 64,
++                       "knowledge_provenance_digest": "b" * 64,
++                       "canonical_knowledge_record_id": "fixture-record",
++                       "rule_or_source_record_identity": "fixture-source",
++                   }])
++    result = make_artifact_content("ClassificationResult", payload)
++    return ClassificationReadRecord(replace(retained.core, classification_result_id=result.artifact_id,
++                                             classification_result_digest=result.content_sha256), result)
++
++
++@pytest.mark.parametrize("status", ["resolved", "unknown", "insufficient_evidence",
++                                    "conflicting_evidence", "recognized_out_of_scope"])
++def test_all_dimensions_preserve_metadata_and_only_resolved_values_are_named(retained, status):
++    record = shaped(retained, status)
++    projection = present_classification(record).as_dict()
++    assert projection["global_classification_status"] == "partial"
++    assert projection["classified_at_utc"] == record.core.classified_at_utc
++    for field in _DIMENSIONS:
++        original = record.result.semantic_payload[field]
++        shown = projection[field]
++        assert shown == {key: value for key, value in original.items()
++                         if key not in {"dimension_name", "display_label_ref"}} | {"value": shown["value"]}
++        assert shown["value"] == (original["canonical_value_id"].replace("_", " ").title()
++                                   if status == "resolved" else "Unknown")
++    assert record.result.semantic_payload_json == shaped(retained, status).result.semantic_payload_json
++
++
++def test_no_result_has_no_diagnostic_or_semantic_value():
++    projection = present_classification(None)
++    assert projection.compact_type() == {"state": "no_result", "value": "—"}
++    assert projection.as_dict() == {"state": "no_result", "global_classification_status": None,
++                                   "classified_at_utc": None, **dict.fromkeys(_DIMENSIONS)}
++
++
++def test_adapter_rejects_unbounded_input_and_deduplicates_canonical_macs():
++    reader = ProductionReader(None)
++    adapter = DeviceFingerprintPresentationService(reader)
++    mac = "AA:BB:CC:DD:EE:FF"
++    with pytest.raises(ValueError):
++        adapter.get_many(SITE_ID, [mac] * 251)
++    assert reader.calls == []
++    assert list(adapter.get_many(SITE_ID, [mac, mac.lower().replace(":", "-")])) == [mac]
++    assert reader.calls == [(SITE_ID, (mac,))]
++
++
++class ProductionReader:
++    def __init__(self, record):
++        self.record = record
++        self.calls = []
++    def get_current_production_many(self, site, macs):
++        self.calls.append((site, macs))
++        if self.record is None:
++            return dict.fromkeys(macs)
++        return {mac: ClassificationReadRecord(replace(self.record.core, site_id=site, observed_mac=mac),
++                                               self.record.result) for mac in macs}
++    def get_current(self, *_args):
++        pytest.fail("Presentation used unrestricted current result")
++    def get_current_production(self, *_args):
++        pytest.fail("Presentation used N individual reads")
++
++
++@pytest.mark.parametrize("status,expected", [(None, "—"), ("resolved", "Smartphone"), ("unknown", "Unknown")])
++def test_home_type_is_batched_separate_from_unchanged_controller(retained, status, expected):
++    class MultipleClients(CurrentSource):
++        def list_current_clients(self, site, **kwargs):
++            return CurrentClientPage(snapshot(), (
++                client_item(device_type=" Android "),
++                client_item(client_mac="AA:BB:CC:DD:EE:02", device_type="Windows")), None)
++    query = service(MultipleClients())
++    reader = ProductionReader(shaped(retained, status) if status else None)
++    query._fingerprint = DeviceFingerprintPresentationService(reader)
++    result = query.list_current_clients(AdminPrincipal("operator"), SITE_ID).result
++    assert len(reader.calls) == 1 and len(reader.calls[0][1]) == 2
++    assert result["items"][0]["device_type"] == " Android "
++    assert result["items"][0]["device_type_key"] == "android"
++    assert result["items"][1]["device_type"] == "Windows"
++    assert [item["fingerprint_type"]["value"] for item in result["items"]] == [expected, expected]
++    assert all(set(item["fingerprint_type"]) == {"state", "value"} for item in result["items"])
++
++
++@pytest.mark.parametrize("failure", ["storage", "candidate", "site", "malformed", "missing_db"])
++def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_path, failure):
++    class BadReader(ProductionReader):
++        def get_current_production_many(self, site, macs):
++            if failure == "storage":
++                raise OSError("unreadable classification database")
++            result = super().get_current_production_many(site, macs)
++            for mac, record in result.items():
++                if failure == "candidate":
++                    result[mac] = ClassificationReadRecord(replace(record.core, execution_context="PRE_ACCEPTANCE_CANDIDATE"), record.result)
++                elif failure == "site":
++                    result[mac] = ClassificationReadRecord(replace(record.core, site_id="f" * 24), record.result)
++                elif failure == "malformed":
++                    result[mac] = ClassificationReadRecord(record.core, make_artifact_content("ClassificationResult", {"extra": True}))
++            return result
++    reader = BadReader(shaped(retained))
++    if failure == "missing_db":
++        from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
++        reader = DeviceFingerprintClassificationReadService(tmp_path / "absent.sqlite")
++    adapter = DeviceFingerprintPresentationService(reader)
++    home = service(CurrentSource())
++    home._fingerprint = adapter
++    item = home.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
++    assert item["name"] == "Phone" and item["fingerprint_type"] == {"state": "unavailable", "value": "—"}
++    device, _, _, _ = _service()
++    device._fingerprint = adapter
++    result = device.device_detail(AdminPrincipal("operator"), SITE_ID, DEVICE_ID).result
++    assert result["identity"]["device_type"] == "phone"
++    assert result["latest_snapshot"]["captured_at"]
++    assert result["fingerprint"]["state"] == "unavailable"
++
++
++def test_device_card_can_disagree_and_keeps_admin_site_policy(retained):
++    reader = ProductionReader(shaped(retained, platform="chromeos"))
++    query, devices, _, _ = _service()
++    query._fingerprint = DeviceFingerprintPresentationService(reader)
++    result = query.device_detail(AdminPrincipal("operator"), SITE_ID, DEVICE_ID).result
++    assert result["identity"]["device_type"] == "phone"
++    assert result["fingerprint"]["platform_result"]["value"] == "ChromeOS"
++    assert result["fingerprint"]["device_class_result"]["support_level"] == "medium"
++    assert len(reader.calls) == 1 and reader.calls[0][0] == SITE_ID
++    with pytest.raises(AdminQueryForbidden):
++        query.device_detail(AdminPrincipal("operator"), "f" * 24, DEVICE_ID)
++    assert len(reader.calls) == 1
++
++
++def test_read_service_composed_from_existing_setting_without_db_creation(tmp_path):
++    import logging
++    from app.admin_web import create_admin_web_runtime
++    from .conftest import enabled_settings
++    path = tmp_path / "readonly-not-created.sqlite"
++    runtime = create_admin_web_runtime(
++        enabled_settings(device_fingerprint_classification_db_path=str(path)),
++        SimpleNamespace(state="active", visit_service=object()),
++        SimpleNamespace(repository=SimpleNamespace(config=SimpleNamespace(db_path=tmp_path / "r"))),
++        SimpleNamespace(repository=SimpleNamespace(db_path=tmp_path / "v")),
++        SimpleNamespace(_repository=SimpleNamespace(db_path=tmp_path / "o")), logging.getLogger("task06"))
++    assert runtime.state == "active"
++    assert runtime.query_service._fingerprint.get(SITE_ID, "00:11:22:33:44:55").state == "unavailable"
++    assert not path.exists()
+diff --git a/tests/device_fingerprint_fa4/test_finalization.py b/tests/device_fingerprint_fa4/test_finalization.py
+index dff87f3e5098771ec2c347b8e19bfb14c6e19b14..81c69586f3050503b1d6672216cd159600e836c8 100644
+--- a/tests/device_fingerprint_fa4/test_finalization.py
++++ b/tests/device_fingerprint_fa4/test_finalization.py
+@@ -38,6 +38,8 @@ def test_final_snapshot_policies_are_exact_deterministic_and_recomputable():
+     execution_second = build_snapshot_execution_policy()
+     assert content_first == content_second
+     assert execution_first == execution_second
++    assert execution_first.artifact_id == (
++        "SnapshotExecutionPolicy:v1:sha256:36074993bb86daca8c43268c19ce0efab7e0e3ef5d644e07b9b6e65f5fff7f77")
+     assert content_first.semantic_payload == {
+         "snapshot_content_policy_version": 1,
+         "max_authorized_evidence_rows": 40000,
+@@ -51,7 +53,7 @@ def test_final_snapshot_policies_are_exact_deterministic_and_recomputable():
+         "max_read_transaction_duration_ms": 240000,
+         "sqlite_busy_timeout_ms": 500,
+         "max_retry_count": 0,
+-        "process_memory_guard_bytes": 100663296,
++        "process_memory_guard_bytes": 1073741824,
+     }
+     _assert_identity_recomputes(content_first)
+     _assert_identity_recomputes(execution_first)
+@@ -61,6 +63,8 @@ def test_snapshot_performance_proof_is_exact_deterministic_and_private():
+     first = build_snapshot_performance_gate_proof(_CANDIDATE_COMMIT, _CANDIDATE_TREE)
+     second = build_snapshot_performance_gate_proof(_CANDIDATE_COMMIT, _CANDIDATE_TREE)
+     assert first == second
++    assert first.artifact_id == (
++        "GateProofArtifact:v1:sha256:45849de269245e96b8076abd16929cd15330e2e6e58bef6d6c749a28b612e3ee")
+     payload = first.semantic_payload
+     assert payload["proof_kind"] == "SNAPSHOT_PERFORMANCE"
+     assert payload["source_gate_id"] == "F-A4"
+diff --git a/tests/device_fingerprint_task04_04e_read/test_classification_read.py b/tests/device_fingerprint_task04_04e_read/test_classification_read.py
+index 518bd0cb9cbdec2bbce46a03c2c682813f3d2500..093ac7225ef26d81a2434625a6aceb10839b27da 100644
+--- a/tests/device_fingerprint_task04_04e_read/test_classification_read.py
++++ b/tests/device_fingerprint_task04_04e_read/test_classification_read.py
+@@ -279,6 +279,94 @@ def test_missing_database_is_not_created(tmp_path):
+     assert not missing.exists()
+ 
+ 
++def _clone_core(store, original, **changes):
++    with sqlite3.connect(store.database_path) as connection:
++        connection.row_factory = sqlite3.Row
++        row = dict(connection.execute("SELECT * FROM classifications WHERE classification_id=?",
++                                      (original.classification_id,)).fetchone())
++        row.update(classification_id=str(uuid.uuid4()), **changes)
++        connection.execute(f"INSERT INTO classifications ({','.join(_CORE_FIELDS)}) "
++                           f"VALUES ({','.join('?' for _ in _CORE_FIELDS)})",
++                           tuple(row[field] for field in _CORE_FIELDS))
++    return row
++
++
++def test_production_batch_filters_candidates_orders_latest_and_is_site_scoped(tmp_path, monkeypatch):
++    import hashlib
++    store, _, assembly, retention, _, _ = real_production_setup(tmp_path)
++    first = store.persist(assembly, retention_policy=retention)
++    same_time = [_clone_core(store, first, classified_at_utc=_time(1)) for _ in range(2)]
++    candidate = _clone_core(store, first, execution_context="PRE_ACCEPTANCE_CANDIDATE",
++                           runtime_profile_activation_record_id=None, classified_at_utc=_time(2))
++    other_mac = "00:11:22:33:44:55"
++    other = _clone_core(store, first, observed_mac=other_mac)
++    site_b = "f" * 24
++    other_site = _clone_core(store, first, site_id=site_b, classified_at_utc=_time(5))
++    reader = _read(store)
++    expected = max(same_time, key=lambda row: row["classification_id"])
++    assert reader.get_current(SITE, MAC).core.classification_id == candidate["classification_id"]
++    assert reader.get_current_production(SITE, MAC).core.classification_id == expected["classification_id"]
++    assert reader.get_current_production(site_b, MAC).core.classification_id == other_site["classification_id"]
++    before = hashlib.sha256(store.database_path.read_bytes()).hexdigest()
++    connect = sqlite3.connect
++    opens, statements = [], []
++    def counted(*args, **kwargs):
++        opens.append((args, kwargs))
++        connection = connect(*args, **kwargs)
++        connection.set_trace_callback(statements.append)
++        return connection
++    monkeypatch.setattr(sqlite3, "connect", counted)
++    def forbidden(*_args, **_kwargs):
++        pytest.fail("Batch used an individual current read")
++    monkeypatch.setattr(reader, "get_current", forbidden)
++    monkeypatch.setattr(reader, "get_current_production", forbidden)
++    result = reader.get_current_production_many(SITE, (MAC, MAC.lower().replace(":", "-"), other_mac,
++                                                       "00:00:00:00:00:00"))
++    assert len(result) == 3
++    assert result[MAC].core.classification_id == expected["classification_id"]
++    assert result[other_mac].core.classification_id == other["classification_id"]
++    assert result["00:00:00:00:00:00"] is None
++    assert len(opens) == 1 and "mode=ro" in opens[0][0][0]
++    assert statements.count("BEGIN") == 1
++    assert len([statement for statement in statements if statement.startswith("SELECT")]) == 2
++    assert hashlib.sha256(store.database_path.read_bytes()).hexdigest() == before
++
++
++@pytest.mark.parametrize("macs", ["AA:BB:CC:DD:EE:FF", ["bad"], [MAC] * 251, None])
++def test_production_batch_rejects_invalid_or_unbounded_input_before_open(tmp_path, macs, monkeypatch):
++    reader = DeviceFingerprintClassificationReadService(tmp_path / "never-created.sqlite")
++    monkeypatch.setattr(reader, "_read", lambda _operation: pytest.fail("Invalid batch opened DB"))
++    with pytest.raises(DeviceFingerprintValidationError):
++        reader.get_current_production_many(SITE, macs)
++    with pytest.raises(DeviceFingerprintValidationError):
++        reader.get_current_production_many("invalid-site", (MAC,))
++    assert reader.get_current_production_many(SITE, ()) == {}
++
++
++def test_candidate_only_is_no_production_and_corrupt_production_fails_closed(tmp_path):
++    store, _, core, reader = _persisted(tmp_path)
++    assert reader.get_current_production(SITE, MAC) is None
++    assert reader.get_current_production_many(SITE, (MAC,)) == {MAC: None}
++    _mutate(store, "UPDATE classifications SET execution_context='PRODUCTION', "
++            "runtime_profile_activation_record_id=?", (str(uuid.uuid4()),))
++    assert reader.get_current_production(SITE, MAC).core.execution_context == "PRODUCTION"
++    _mutate(store, "DELETE FROM artifacts WHERE artifact_id=?", (core.classification_result_id,))
++    _expect_unavailable(lambda: reader.get_current_production_many(SITE, (MAC,)))
++    _expect_unavailable(lambda: DeviceFingerprintClassificationReadService(tmp_path / "missing-production.sqlite")
++                        .get_current_production(SITE, MAC))
++
++
++@pytest.mark.parametrize("column,value", [
++    ("semantic_payload_json", b'{"corrupt":true}'), ("artifact_type", "Other"),
++])
++def test_production_batch_retains_exact_artifact_integrity_checks(tmp_path, column, value):
++    store, _, assembly, retention, _, _ = real_production_setup(tmp_path)
++    core = store.persist(assembly, retention_policy=retention)
++    _mutate(store, f"UPDATE artifacts SET {column}=? WHERE artifact_id=?",
++            (value, core.classification_result_id))
++    _expect_unavailable(lambda: _read(store).get_current_production_many(SITE, (MAC,)))
++
++
+ def test_required_history_index_columns_and_read_only_source_boundary(tmp_path):
+     store, _, _, _ = setup(tmp_path)
+     with sqlite3.connect(store.database_path) as connection:
