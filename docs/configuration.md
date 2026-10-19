@@ -95,11 +95,49 @@ Sensor interface must be a 1..15-byte ASCII Linux name with alphanumeric first
 character and only letters/digits/underscore/dot/hyphen, not `lo`/`any`/wildcard/path.
 Preflight remains interface-relative: UP, no master/L3/default routes/forwarding,
 DHCP disabled and no active DHCP client/NetworkManager profile. All runtime checks
-and frozen BPF/selected-interface AF_PACKET binding remain; parser checks no NIC.
+and fixed-grammar BPF/selected-interface AF_PACKET binding remain; parser checks no NIC.
 Readiness host is canonical private IPv4 or exact `127.0.0.1`, port canonical
 ASCII decimal `1024..65535`. DHCP authorities are independently configured
 canonical IPv4 unicast, not implicitly forced equal or RFC1918-only; actual DHCP
 evidence and directed-broadcast/topology facts require separate operational proof.
+
+### Sensor raw-capture BPF scope (Issue #244)
+
+`DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS` is the sole raw-capture guest-scope
+setting; there is no BPF override or second CIDR setting. The enabled startup
+parser freezes 1..16 canonical, disjoint IPv4 networks (no `/0`, aliases, host
+bits, duplicates, overlaps or whitespace). Explicit public IPv4 networks remain
+valid. Disabled Sensor startup does not parse deployment overrides. Scope order
+is preserved in the configuration; only rendering sorts by address/prefix.
+
+Offline commands accept explicit scope, without enabling Sensor or reading its
+environment. `render` emits ASCII and exactly one LF, including on Windows:
+
+```sh
+python -m app.device_fingerprint_sensor.bpf_cli render --guest-cidrs 10.50.0.0/19
+python -m app.device_fingerprint_sensor.bpf_cli verify --guest-cidrs 10.50.0.0/19 --artifact /absolute/disposable/raw-capture.bpf
+```
+
+Verification is read-only; it does not install or authorize an artifact. Runtime
+only accepts `/etc/captive-portal/device-fingerprint/raw-capture.bpf`, owned by
+root under trusted root-owned, non-group/world-writable, nonsymlink ancestors.
+The regular single-link artifact must contain exactly the renderer's ASCII
+expression, optionally followed by one LF; CRLF/BOM/extra whitespace is rejected.
+Missing, stale or untrusted bytes prevent capture. Runtime never rewrites it.
+
+The checked-in `deploy/device-fingerprint/raw-capture.bpf` remains the unchanged
+legacy `192.168.8.0/22` example. It is not universal site configuration. A separately
+authorized operator must install the rendered artifact matching the startup tuple.
+DHCP UDP ports 67/68 remain globally eligible; only TCP SYN-without-ACK is limited
+to configured source networks. This does not change downstream evidence validation.
+RawCapture starts with protocol zero, attaches the verified filter, then binds the
+selected interface with Python AF_PACKET tuple protocol `3` (ETH_P_ALL).
+No receive-capable socket is published before both operations succeed.
+
+Suricata HOME_NET/BPF/interface alignment is a separate Issue #243 deployment
+gate; this raw-capture change does not configure or admit Suricata on another site.
+Existing nonempty-spool identity/scope restrictions still apply: never relabel or
+clear a spool to adopt a new scope without its independently approved procedure.
 
 | Portal suffix (`DEVICE_FINGERPRINT_PORTAL_`) | Exact legacy default |
 | --- | --- |

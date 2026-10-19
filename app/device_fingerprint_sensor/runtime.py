@@ -33,7 +33,7 @@ class SensorRuntime:
         self.state = "initializing"
         self.reason: str | None = None
         self.preflight = preflight or InterfacePreflight(config.interface)
-        self.capture = capture or RawCapture(config.interface)
+        self.capture = capture if capture is not None else RawCapture(config.interface, config.guest_cidrs)
         self.eve = eve or EveReceiver(config.eve_socket_path, max_datagram_bytes=config.eve_max_datagram_bytes)
         self.spool = spool or SensorSpool(
             config.spool_path, total_budget_bytes=config.spool_total_budget_bytes,
