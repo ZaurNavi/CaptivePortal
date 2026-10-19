@@ -130,7 +130,7 @@ def test_repository_bpf_artifact_is_exact_frozen_expression():
 
 
 @pytest.mark.parametrize("interface", ["enp8s0", "enp1s0"])
-def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(monkeypatch, interface):
+def test_raw_socket_protocol_zero_then_filter_before_eth_p_all_configured_bind(monkeypatch, interface):
     from app.device_fingerprint_sensor import capture as module
     calls = []
     class Socket:
@@ -138,15 +138,16 @@ def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(m
         def setsockopt(self, *_args): calls.append("timestamp")
         def bind(self, value): calls.append(("bind", value))
         def close(self): calls.append("close")
-    monkeypatch.setattr(module, "attach_frozen_filter", lambda _socket: calls.append("filter"))
+    monkeypatch.setattr(module, "load_deployed_filter", lambda networks: module.render_raw_capture_filter(networks))
+    monkeypatch.setattr(module, "attach_frozen_filter", lambda _socket, networks: calls.append("filter"))
     monkeypatch.setattr(module.socket, "AF_PACKET", 17, raising=False)
     raw = module.RawCapture(interface, socket_factory=lambda *args: (calls.append(("socket", args)) or Socket()))
     raw.open()
     assert calls[0] == (
         "socket",
-        (module.socket.AF_PACKET, module.socket.SOCK_RAW, module.socket.htons(0x0003)),
+        (module.socket.AF_PACKET, module.socket.SOCK_RAW, 0),
     )
-    assert ("bind", (interface, 0)) in calls
+    assert ("bind", (interface, 0x0003)) in calls
     assert calls.index("filter") < next(index for index, item in enumerate(calls) if isinstance(item, tuple) and item[0] == "bind")
 
 

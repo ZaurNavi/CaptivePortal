@@ -1086,6 +1086,29 @@ Foundation accepted/admitted
 
 ## 36. Current source-of-truth map
 
+Issue #244 makes the raw Sensor filter site-independent using the already parsed
+immutable `SensorConfig.guest_cidrs`, not another source of scope. Runtime passes
+that same tuple to RawCapture; opening/reopening capture never rereads environment.
+The renderer preserves the legacy expression for `192.168.8.0/22`, canonicalizes
+render order for multiple networks, and changes only the TCP source-net arm.
+Global DHCP ports 67/68 and downstream evidence/health/spool semantics are unchanged.
+
+The installed fixed-path root-trusted BPF must exactly match that tuple. It is
+verified before socket construction and independently before compilation/attach.
+The packet socket is created with protocol zero and activated only after filter
+attachment, by binding the configured interface with Python tuple protocol `3`.
+Linux [packet(7)](https://man7.org/linux/man-pages/man7/packet.7.html) specifies
+that protocol zero receives no packets; the isolated-netns kernel regression
+checks the Python tuple ABI and real packet admission, not just call order.
+Any setup failure closes the socket without publishing capture availability.
+No generic expression/path override, unfiltered fallback or runtime artifact
+generation is supported. See [configuration](../configuration.md#sensor-raw-capture-bpf-scope-issue-244).
+
+This is only the raw capture boundary. Suricata's independent HOME_NET/BPF and
+interface agreement remains an explicit #243 prerequisite for another deployment.
+No classification, Evidence, Source Health, NI or guest authorization semantics
+are changed; no spool scope/identity migration is implicit.
+
 | Topic | Current owner/reference |
 |---|---|
 | normalized evidence/store | `app/device_fingerprint/` Task-01 code |
