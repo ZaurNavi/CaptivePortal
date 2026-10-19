@@ -1123,3 +1123,34 @@ are changed; no spool scope/identity migration is implicit.
 | production worker | `fingerprint-classification.service` deployment artifact |
 | Admin projection | `app/admin_web/device_fingerprint_presentation.py`, `docs/modules/admin-web.md` |
 | R14 normative semantics | registered FINAL R14 architecture decision |
+
+## 37. Explicit empty Evidence v2 provisioning — Issue #245 Part A
+
+The offline `python3 -m app.device_fingerprint.cli provision-empty-v2` command is
+first-install authority only after separate operator approval. It never changes
+the existing-store-only repository initialize contract, migrations, recovery,
+runtime WAL/NORMAL, schema or ingest lifecycle. It reads strictly validated DB/lock
+paths and configured storage cap from effective application settings while the
+service may remain disabled, without requiring Site/producers/TLS configuration.
+
+The existing protected writer lock is retained through transactional creation of
+the authoritative `SCHEMA_SQL` and fresh UUIDv4/sequence-zero singleton, verification
+of two empty event tables, bounded new-file integrity checks, file fsync,
+no-clobber same-directory publication, directory fsync and final verification.
+There is no copy/migration of historical events and no overwrite, automatic repair,
+extra marker DB or runtime auto-bootstrap. Every preexisting target is refused
+without a content/generation rewrite. Unknown sidecars, unsafe parents, lock
+contention and ambiguous publication failures require reconciliation. Quarantined
+private stages cannot be automatically promoted into the authoritative path.
+
+Only the Linux local filesystem implementation is admitted by the command;
+Windows returns a typed unsupported-platform HOLD. Existing run/migrate/recover
+behavior is unchanged. Installation needs a clean source artifact and intended
+writer identity; result includes the exact Git artifact SHA/tree for provenance.
+
+The .99 nested-path exception is not full consumer compatibility: Admin Inventory
+admission and privileged manifest, Integration/Observed Hints/Network Metadata
+effective path parity, actual role ACLs, WAL/SHM lifecycle and #243 first-start
+approval remain independent HOLDs. This command does not configure them. Disposable
+test UID/GID and ACL evidence does not attest installed service identities.
+See [configuration](../configuration.md#explicit-empty-v2-first-installation-issue-245-part-a).

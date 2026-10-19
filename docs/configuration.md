@@ -71,6 +71,58 @@ See [CAPPORT](modules/capport.md) and [deployment](deployment.md).
 
 ## Device Fingerprint Evidence (default disabled)
 
+### Explicit empty-v2 first installation (Issue #245 Part A)
+
+`python3 -m app.device_fingerprint.cli provision-empty-v2` is a separate offline
+operator command for an independently authorized stopped-writer installation.
+It is not called by `run`, migration, recovery, Sensor or Admin. Ordinary startup
+still refuses a missing database. No path/force/schema/SQL/UUID command-line
+options exist; effective `get_settings()` supplies the sole DB path, writer lock
+path and configured max DB bytes. These three inputs are independently strictly
+validated even when Evidence is disabled; TLS and producer credentials are not
+needed and are not synthesized. A clean Git artifact identity is required before
+CLI side effects; success reports the source SHA/tree and new generation.
+
+Legacy defaults remain the flat Evidence DB and its writer lock. The explicitly
+architect-approved **conditional .99 layout** is configured, not a symlink or fork:
+
+```ini
+DEVICE_FINGERPRINT_DB_PATH=/opt/CaptivePortal/data/evidence/evidence.sqlite3
+DEVICE_FINGERPRINT_WRITER_LOCK_PATH=/opt/CaptivePortal/data/evidence/evidence.writer.lock
+DEVICE_FINGERPRINT_EVIDENCE_DB_PATH=/opt/CaptivePortal/data/evidence/evidence.sqlite3
+```
+
+Run under the intended writer identity, with existing writer-owned protected
+parent directories (no automatic mkdir, path normalization or symlink traversal).
+Other principals must not have directory write. Runtime writer lock semantics are
+unchanged: an existing lock must already be trusted, mode 0640, one NUL byte and
+single-link; a missing lock is securely established once, never reset or removed.
+The command holds that same writer lock, builds exact schema v2 and empty state
+in a private 0600 stage, validates/fsyncs it, publishes with no-clobber link and
+directory fsync, removes only its own staging link, and verifies the final file.
+No original DB or existing sidecar is opened for mutation. Published DB remains
+0600; normal writer startup's existing 0640 enforcement and WAL/NORMAL remain
+unchanged. Provisioning never grants reader ACLs or alters service configuration.
+
+`PROVISIONED` is the only success (exit 0). `ALREADY_EXISTS_NO_CHANGE` and all
+`HOLD_*` outcomes exit nonzero: reconcile explicitly, never use force/reset.
+Private stages left by failure/crash are quarantined, not automatically promoted
+or removed. `HOLD_PUBLISHED_RECONCILE` may mean a complete target exists but final
+durability/validation was not confirmed; never delete it or retry destructively.
+This Linux-local-filesystem procedure is fail-closed on native Windows; Windows
+tests do not represent Unix permissions/directory-fsync acceptance.
+The current filesystem admission is bounded to Linux ext, XFS, Btrfs and overlay;
+tmpfs, remote/FUSE/9p and unrecognized filesystems are refused, not silently copied
+elsewhere. A successful fsync is not a new hardware power-loss certification.
+
+**This source change does not authorize .99 provisioning or startup.** Issue #243
+still requires effective writer/reader identity and path parity, approved Admin
+Inventory admission/manifest, safe ACL/WAL sidecar lifecycle, and Owner first-start
+GO. All readers need the same real DB inode; receiver-only environment settings
+are insufficient. Read-only WAL access can depend on writer-created readable
+sidecars; never grant reader directory write, use live `immutable=1`, or hand-create
+WAL/SHM as a workaround. See [SQLite WAL read-only rules](https://www.sqlite.org/wal.html#read_only_databases).
+
 ## Sensor/Portal producer deployment configuration
 
 DEPLOY-CONFIG-02 affects only startup parsers and the Sensor's fixed-name

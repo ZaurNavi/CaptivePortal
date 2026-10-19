@@ -76,3 +76,40 @@ No systemd or Suricata template is changed here. Suricata HOME_NET/BPF/interface
 alignment remains separate Issue #243 work; raw-capture success alone is not a
 complete cross-site deployment gate. Preserve nonempty-spool scope/identity rules.
 No .202/.99 service, source copy, restart or activation is authorized by this task.
+
+## Issue #245 Part A: explicit first-install Evidence v2 command
+
+The upstream `python3 -m app.device_fingerprint.cli provision-empty-v2` is an
+offline one-shot, not a service-start fallback. It must run from a clean reviewed
+Git release, under the intended writer UID, with protected effective application
+settings and an existing writer-owned local directory. Do not run it on either
+installed site without its separate operator GO. Legacy flat defaults are not
+changed; a reviewed nested .99 DB/lock override is not proof of consumer parity.
+
+The command takes no path, force, SQL, schema or generation options. It does not
+enable Evidence, create directories, import old data, install credentials, alter
+units/ACLs or start anything. It establishes or validates the intended runtime
+writer lock (0640, single NUL byte); it never deletes/repurposes an unknown lock.
+It creates a private 0600 candidate using current schema v2 and the existing
+schema validator, with fresh UUIDv4, sequence zero and zero evidence/health rows.
+Only a standalone validated/fsynced candidate is published by same-directory
+no-clobber hard link; final directory durability and validation precede success.
+Normal writer WAL/NORMAL and existing 0640 enforcement are unchanged. The initial
+0600 file is deliberately not a claim that reader access is installed.
+
+Any existing authoritative path or orphan WAL/SHM/journal is refused. Repeated
+execution never changes the existing generation. A crash may leave a private
+`.evidence-v2-stage-*` file for operator reconciliation, never automatic promotion.
+A failure after publication preserves the possibly authoritative target and reports
+`HOLD_PUBLISHED_RECONCILE`. Do not unlink it, reset it, force a new generation or
+manually move SQLite sidecars. Native Windows provisioning is explicitly refused;
+no Unix permission/directory-fsync guarantees are inferred from Windows tests.
+
+Before separately authorized #243 provisioning/start, independently attest actual
+writer/reader unit identities, filesystem/parent trust, all effective path consumers
+and approved privileged Admin Inventory manifest. Test reader-only WAL/SHM access,
+including missing-sidecar fail-closed and controlled writer reopen, without reader
+directory write, copying old numeric IDs, changing runtime durability or using
+`immutable=1`. Inventory's nested-path admission is separate pending architecture
+scope; Part A does not silently fix or waive it. Seven Portal units and
+Sensor/Suricata remain subject to their unchanged independent start gates.
