@@ -1,0 +1,887 @@
+diff --git a/app/device_fingerprint/fusion.py b/app/device_fingerprint/fusion.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ecefc175adceff9358dcfc57c1291455df2019a
+--- /dev/null
++++ b/app/device_fingerprint/fusion.py
+@@ -0,0 +1,375 @@
++"""Pure R14 T-04 cross-origin fusion over six immutable OriginAssessments."""
++
++from __future__ import annotations
++
++import re
++from dataclasses import dataclass
++from typing import Any
++
++from .artifact_content import (
++    ArtifactContent, ArtifactRef, canonical_artifact_json, canonical_set,
++    make_artifact_content,
++)
++from .classification_policy import (
++    make_classification_policy, validate_classification_policy_dependencies,
++)
++from .evidence_adapter_contracts import DIMENSIONS
++from .knowledge_bundle import KnowledgeBundleCandidate, validate_knowledge_bundle_dependencies
++from .models import DeviceFingerprintValidationError
++from .origin_assessment import ORIGINS, make_origin_assessment
++
++_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
++_FUSION_KEYS = (
++    "strong_clean_present", "strong_clean_disagree", "strong_internal_conflict_present",
++    "supporting_clean_present", "supporting_clean_disagree",
++    "supporting_internal_conflict_present",
++    "supporting_vs_selected_strong_incompatible_present",
++)
++_DIMENSION_FIELDS = frozenset({
++    "dimension_name", "canonical_value_id", "display_label_ref", "status",
++    "support_level", "supporting_origin_groups", "contradicting_origin_groups",
++    "not_evaluable_origin_groups", "out_of_scope_taxon_references",
++    "explanation_codes", "knowledge_references",
++})
++_UNRESOLVED_CODES = frozenset({
++    "unsupported_evidence_contract", "degraded_evidence_no_claim",
++    "legacy_tcp_schema_insufficient_for_exact_k2a_contract",
++})
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _ref(content: ArtifactContent, kind: str) -> dict[str, str]:
++    if not isinstance(content, ArtifactContent) or content.artifact_type != kind:
++        _fail(f"Invalid {kind} artifact")
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++def _primitive_set(values: list[str]) -> list[str]:
++    return canonical_set(list(set(values)), lambda value: value)
++
++
++def _knowledge_set(values: list[dict[str, str]]) -> list[dict[str, str]]:
++    unique = {canonical_artifact_json(value): value for value in values}
++    return canonical_set(list(unique.values()), lambda value: (
++        value["knowledge_provenance_id"], value["canonical_knowledge_record_id"],
++        value["rule_or_source_record_identity"],
++    ))
++
++
++def _target(row: dict[str, Any]) -> tuple[str, str] | None:
++    if row["internal_state"] == "resolved":
++        return ("CANONICAL_VALUE", row["selected_canonical_value_id"])
++    if row["internal_state"] == "recognized_out_of_scope":
++        return ("OUT_OF_SCOPE_TAXON", row["selected_out_of_scope_taxon_ref"])
++    return None
++
++
++def _fusion_cell(policy: dict[str, Any], bits: tuple[bool, ...]) -> dict[str, Any]:
++    """Lookup, rather than recompute, exactly one frozen policy matrix row."""
++    if len(bits) != len(_FUSION_KEYS) or any(type(bit) is not bool for bit in bits):
++        _fail("Invalid cross-origin fusion key")
++    rows = [row for row in policy["cross_origin_fusion_matrix"]
++            if tuple(row[key] for key in _FUSION_KEYS) == bits]
++    if len(rows) != 1:
++        _fail("Cross-origin fusion cell missing or duplicated")
++    return rows[0]
++
++
++def _first_rule(rows: list[dict[str, Any]], conditions: dict[str, bool]) -> str:
++    """Execute the validated policy's ordered rules, not a parallel result table."""
++    for row in rows:
++        if conditions.get(row["condition"], False):
++            return row["result"]
++    _fail("No matching policy rule")
++
++
++def _validate_dimension_result(result: dict[str, Any], out_scope: set[str]) -> None:
++    if set(result) != _DIMENSION_FIELDS or result["dimension_name"] not in DIMENSIONS:
++        _fail("Invalid DimensionResult shape")
++    if result["display_label_ref"] is not None:
++        _fail("R1 display label must be null")
++    status = result["status"]
++    selected = status in {"resolved", "recognized_out_of_scope"}
++    if selected:
++        if result["support_level"] not in {"low", "medium", "high"} or not result["supporting_origin_groups"]:
++            _fail("Invalid selected DimensionResult support")
++        if status == "resolved" and not result["canonical_value_id"]:
++            _fail("Resolved DimensionResult lacks canonical value")
++        if status == "recognized_out_of_scope" and (
++                result["dimension_name"] not in out_scope or result["canonical_value_id"] is not None
++                or not result["out_of_scope_taxon_references"]):
++            _fail("Invalid out-of-scope DimensionResult")
++    elif status not in {"unknown", "insufficient_evidence", "conflicting_evidence"} or (
++            result["canonical_value_id"] is not None or result["support_level"] != "none"):
++        _fail("Invalid unselected DimensionResult")
++    if status == "conflicting_evidence" and not result["contradicting_origin_groups"]:
++        _fail("Conflicting DimensionResult lacks contradicting origin")
++    for field in ("supporting_origin_groups", "contradicting_origin_groups",
++                  "not_evaluable_origin_groups", "out_of_scope_taxon_references", "explanation_codes"):
++        if result[field] != canonical_set(result[field], lambda value: value):
++            _fail(f"Noncanonical DimensionResult {field}")
++    if result["knowledge_references"] != _knowledge_set(result["knowledge_references"]):
++        _fail("Noncanonical DimensionResult knowledge references")
++
++
++@dataclass(frozen=True, slots=True)
++class FusionInputs:
++    classification_request_digest: str
++    classification_policy: ArtifactContent
++    classification_taxonomy: ArtifactContent
++    alias_mapping: ArtifactContent
++    evidence_adapter_contract_set: ArtifactContent
++    knowledge_bundle: ArtifactContent
++    knowledge: KnowledgeBundleCandidate
++    classifier_artifact_manifest: ArtifactContent
++    evidence_snapshot_content: ArtifactContent
++    source_evaluability: ArtifactContent
++    origin_assessments: tuple[ArtifactContent, ...]
++
++
++class DeviceFingerprintFusionCore:
++    def __init__(self, inputs: FusionInputs) -> None:
++        if not isinstance(inputs, FusionInputs):
++            _fail("Invalid fusion inputs")
++        self._inputs = inputs
++        try:
++            self._validate()
++        except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
++            raise DeviceFingerprintValidationError("Malformed fusion input") from exc
++
++    def _validate(self) -> None:
++        value = self._inputs
++        if not isinstance(value.classification_request_digest, str) or not _DIGEST.fullmatch(
++                value.classification_request_digest):
++            _fail("Invalid classification request digest")
++        _ref(value.classification_policy, "ClassificationPolicy")
++        if make_classification_policy(value.classification_policy.semantic_payload) != value.classification_policy:
++            _fail("Noncanonical ClassificationPolicy")
++        validate_classification_policy_dependencies(
++            value.classification_policy, classification_taxonomy=value.classification_taxonomy,
++            alias_mapping=value.alias_mapping,
++            evidence_adapter_contract_set=value.evidence_adapter_contract_set)
++        validate_knowledge_bundle_dependencies(value.knowledge_bundle, value.knowledge)
++        bundle = value.knowledge_bundle.semantic_payload
++        if bundle["classification_taxonomy"] != _ref(value.classification_taxonomy, "ClassificationTaxonomy") or (
++                bundle["alias_mapping"] != _ref(value.alias_mapping, "AliasMapping")):
++            _fail("KnowledgeBundle/ClassificationPolicy dependency mismatch")
++        _ref(value.classifier_artifact_manifest, "ClassifierArtifactManifest")
++        snapshot = _ref(value.evidence_snapshot_content, "EvidenceSnapshotContent")
++        _ref(value.source_evaluability, "SourceEvaluability")
++        if value.source_evaluability.semantic_payload["evidence_snapshot_content"] != snapshot:
++            _fail("SourceEvaluability/snapshot mismatch")
++        if not isinstance(value.origin_assessments, tuple) or len(value.origin_assessments) != len(ORIGINS):
++            _fail("Exactly six OriginAssessments are required")
++        by_origin: dict[str, ArtifactContent] = {}
++        for assessment in value.origin_assessments:
++            _ref(assessment, "OriginAssessment")
++            payload = assessment.semantic_payload
++            rebuilt = make_origin_assessment(
++                payload, evidence_snapshot_content=value.evidence_snapshot_content,
++                source_evaluability=value.source_evaluability,
++                evidence_adapter_contract_set=value.evidence_adapter_contract_set,
++                knowledge_bundle=value.knowledge_bundle, knowledge=value.knowledge)
++            if rebuilt != assessment:
++                _fail("Noncanonical OriginAssessment")
++            origin = payload["origin_group"]
++            if origin in by_origin:
++                _fail("Duplicate origin")
++            by_origin[origin] = assessment
++        if set(by_origin) != set(ORIGINS):
++            _fail("Missing or extra origin")
++        self._origins = by_origin
++        self._policy = value.classification_policy.semantic_payload
++        self._adapters = value.evidence_adapter_contract_set.semantic_payload["adapter_entries"]
++        self._descriptors = value.evidence_snapshot_content.semantic_payload["evidence_descriptors"]
++
++    def _applicable_path(self, dimension: str, origin: str, row: dict[str, Any]) -> bool:
++        """A no-claim path counts only when the admitted adapter supports that dimension."""
++        if row["internal_state"] != "no_claim":
++            return False
++        reasons = set(row["explanation_codes"])
++        if origin == "mac_registry":
++            return dimension == "manufacturer_family" and bool(
++                reasons & {"no_ieee_assignment_claim", "knowledge_source_expired"})
++        if origin == "tcp" and "origin_runtime_disabled" in reasons:
++            return False
++        refs = {ref["evidence_id"] for ref in self._origins[origin].semantic_payload["evidence_refs"]}
++        if origin in {"tls", "quic"}:
++            return dimension == "platform_family" and "ja4_no_semantic_claim" in reasons and bool(refs)
++        for descriptor in self._descriptors:
++            if descriptor["evidence_id"] not in refs:
++                continue
++            for adapter in self._adapters:
++                if (adapter["adapter_kind"] == "TASK01_EVIDENCE"
++                        and adapter["origin_group"] == origin
++                        and adapter["source_kind"] == descriptor["source_kind"]
++                        and adapter["feature_schema_version"] == descriptor["feature_schema_version"]
++                        and adapter["legacy_current_role"] != "LEGACY_NON_FUSION"
++                        and not adapter["quality_valid_behavior"].startswith("AUDIT_ONLY_")
++                        and adapter["required_fields_by_dimension"][dimension]):
++                    return True
++        return False
++
++    def _dimension(self, dimension: str) -> dict[str, Any]:
++        rows = {origin: next(row for row in assessment.semantic_payload["dimension_assessments"]
++                             if row["dimension_name"] == dimension)
++                for origin, assessment in self._origins.items()}
++        clean = {origin: (_target(row), row["effective_claim_strength"])
++                 for origin, row in rows.items() if _target(row) is not None}
++        strong = {origin: target for origin, (target, strength) in clean.items() if strength == "strong"}
++        supporting = {origin: target for origin, (target, strength) in clean.items() if strength == "supporting"}
++        strong_conflicts = {origin for origin, row in rows.items()
++                            if row["internal_state"] == "conflicting" and row["conflict_strength"] == "strong"}
++        supporting_conflicts = {origin for origin, row in rows.items()
++                                if row["internal_state"] == "conflicting" and row["conflict_strength"] == "supporting"}
++        unique_strong = next(iter(set(strong.values()))) if strong and len(set(strong.values())) == 1 else None
++        same_origin_contradictions = {origin for origin, row in rows.items()
++                                      if origin in strong and strong[origin] == unique_strong and any(
++                                          item["conflict_strength"] == "supporting"
++                                          for item in row["same_origin_contradiction_records"])}
++        # The frozen matrix requires a clean supporting input before its opposed
++        # bit may be set. A retained same-origin contradiction with no such
++        # input is still recorded below and independently prevents HIGH.
++        incompatible = bool(unique_strong and not strong_conflicts and supporting and (
++            any(target != unique_strong for target in supporting.values())
++            or same_origin_contradictions))
++        bits = (bool(strong), len(set(strong.values())) > 1, bool(strong_conflicts),
++                bool(supporting), len(set(supporting.values())) > 1,
++                bool(supporting_conflicts), incompatible)
++        cell = _fusion_cell(self._policy, bits)
++        outcome = cell["outcome"]
++        if outcome == "SELECT_STRONG":
++            selected = unique_strong
++        elif outcome == "SELECT_SUPPORTING":
++            selected = next(iter(set(supporting.values())))
++        elif outcome in {"CONFLICTING_EVIDENCE", "NO_CONCRETE_SELECTION"}:
++            selected = None
++        else:
++            _fail("Invalid fusion outcome")
++        if outcome.startswith("SELECT_") and selected is None:
++            _fail("Fusion cell selected no target")
++        support_origins = {origin for origin, (target, _) in clean.items() if target == selected} if selected else set()
++        if selected:
++            contradiction_origins = {origin for origin, (target, _) in clean.items() if target != selected}
++            contradiction_origins.update(supporting_conflicts)
++            contradiction_origins.update(same_origin_contradictions)
++        elif outcome == "CONFLICTING_EVIDENCE":
++            contradiction_origins = strong_conflicts | (set(strong) if bits[1] else set())
++            if not strong and not strong_conflicts:
++                contradiction_origins |= supporting_conflicts | (set(supporting) if bits[4] else set())
++        else:
++            contradiction_origins = set()
++        explanations: list[str] = []
++        knowledge: list[dict[str, str]] = []
++        out_scope: list[str] = []
++        for row in rows.values():
++            explanations.extend(row["explanation_codes"])
++            knowledge.extend(row["knowledge_refs"])
++            for candidate in row["candidate_set"]:
++                knowledge.extend(candidate["knowledge_refs"])
++                if candidate["candidate_kind"] == "OUT_OF_SCOPE_TAXON":
++                    out_scope.append(candidate["out_of_scope_taxon_ref"])
++            for record in row["same_origin_contradiction_records"]:
++                explanations.append(record["explanation_code"])
++                knowledge.extend(record["knowledge_refs"])
++            for broad in row["broad_unresolved_taxon_refs"]:
++                explanations.append(broad["explanation_code"])
++                knowledge.extend(broad["knowledge_refs"])
++        if outcome == "CONFLICTING_EVIDENCE":
++            explanations.append("cross_origin_conflicting_evidence")
++        if selected and cell["record_supporting_contradiction"]:
++            explanations.append("cross_origin_supporting_contradiction")
++        unresolved = any(row["internal_state"] == "ambiguous" or row["broad_unresolved_taxon_refs"]
++                         or (set(row["explanation_codes"]) & _UNRESOLVED_CODES)
++                         or (dimension in {"manufacturer_family", "model_family"}
++                             and "mac_assignment_org_not_manufacturer" in row["explanation_codes"])
++                         for row in rows.values())
++        no_usable = any(self._applicable_path(dimension, origin, row)
++                        for origin, row in rows.items())
++        conditions = {
++            "DECISIVE_CONFLICT": outcome == "CONFLICTING_EVIDENCE",
++            "SELECTABLE_IN_SCOPE": selected is not None and selected[0] == "CANONICAL_VALUE",
++            "SELECTABLE_OUT_OF_SCOPE_WHERE_ALLOWED": selected is not None and selected[0] == "OUT_OF_SCOPE_TAXON"
++            and dimension in self._policy["recognized_out_of_scope_applicability"],
++            "SEMANTIC_INFO_UNRESOLVED": selected is None and unresolved,
++            "SUPPORTED_EVIDENCE_NO_USABLE_SEMANTIC_KNOWLEDGE": selected is None and not unresolved and no_usable,
++            "NO_ADEQUATE_SUPPORTED_EVIDENCE_PATH": selected is None and not unresolved and not no_usable,
++        }
++        if selected is not None and selected[0] == "OUT_OF_SCOPE_TAXON" and dimension not in (
++                self._policy["recognized_out_of_scope_applicability"]):
++            _fail("Out-of-scope target for inapplicable dimension")
++        status = _first_rule(self._policy["dimension_result_rules"], conditions)
++        if outcome == "NO_CONCRETE_SELECTION":
++            explanations.append({
++                "SEMANTIC_INFO_UNRESOLVED": "fusion_semantic_information_unresolved",
++                "SUPPORTED_EVIDENCE_NO_USABLE_SEMANTIC_KNOWLEDGE": "fusion_no_usable_semantic_knowledge",
++                "NO_ADEQUATE_SUPPORTED_EVIDENCE_PATH": "fusion_no_adequate_supported_evidence_path",
++            }[next(name for name in (
++                "SEMANTIC_INFO_UNRESOLVED", "SUPPORTED_EVIDENCE_NO_USABLE_SEMANTIC_KNOWLEDGE",
++                "NO_ADEQUATE_SUPPORTED_EVIDENCE_PATH") if conditions[name])])
++        high = (selected is not None and len(strong) >= 2
++                and len({target for target in strong.values()}) == 1
++                and len(support_origins) >= 2 and not contradiction_origins
++                and not supporting_conflicts and not same_origin_contradictions
++                and cell["support_cap"] != "MEDIUM")
++        support = _first_rule(self._policy["support_level_rules"], {
++            "HIGH_ALL_REQUIREMENTS": high,
++            "MEDIUM_STRONG_NO_DECISIVE_CONFLICT": selected is not None and bool(set(strong) & support_origins),
++            "LOW_SUPPORTING_ONLY_ALL_AGREE": selected is not None and not strong and bool(support_origins),
++            "NONE_UNRESOLVED": selected is None,
++        })
++        result = {
++            "dimension_name": dimension,
++            "canonical_value_id": selected[1] if status == "resolved" else None,
++            "display_label_ref": None,
++            "status": status,
++            "support_level": support,
++            "supporting_origin_groups": _primitive_set(list(support_origins)),
++            "contradicting_origin_groups": _primitive_set(list(contradiction_origins)),
++            "not_evaluable_origin_groups": _primitive_set([
++                origin for origin, row in rows.items() if row["internal_state"] == "not_evaluable"]),
++            "out_of_scope_taxon_references": _primitive_set(out_scope),
++            "explanation_codes": _primitive_set(explanations),
++            "knowledge_references": _knowledge_set(knowledge),
++        }
++        _validate_dimension_result(result, set(self._policy["recognized_out_of_scope_applicability"]))
++        return result
++
++    def fuse(self) -> ArtifactContent:
++        dimensions = {dimension: self._dimension(dimension) for dimension in DIMENSIONS}
++        statuses = {dimension: row["status"] for dimension, row in dimensions.items()}
++        global_status = _first_rule(self._policy["global_status_derivation"], {
++            "ANY_DIMENSION_CONFLICTING": "conflicting_evidence" in statuses.values(),
++            "ALL_FOUR_DIMENSIONS_RESOLVED": all(status == "resolved" for status in statuses.values()),
++            "ANY_DIMENSION_RESOLVED": "resolved" in statuses.values(),
++            "ANY_PLATFORM_OR_DEVICE_CLASS_OUT_OF_SCOPE": any(
++                statuses[dimension] == "recognized_out_of_scope"
++                for dimension in ("platform_family", "device_class")),
++            "ANY_DIMENSION_INSUFFICIENT": "insufficient_evidence" in statuses.values(),
++            "OTHERWISE": True,
++        })
++        value = self._inputs
++        return make_artifact_content("ClassificationResult", {
++            "classification_request_digest": value.classification_request_digest,
++            "classification_policy": _ref(value.classification_policy, "ClassificationPolicy"),
++            "knowledge_bundle": _ref(value.knowledge_bundle, "KnowledgeBundle"),
++            "classifier_artifact_manifest": _ref(value.classifier_artifact_manifest, "ClassifierArtifactManifest"),
++            "evidence_snapshot_content": _ref(value.evidence_snapshot_content, "EvidenceSnapshotContent"),
++            "source_evaluability": _ref(value.source_evaluability, "SourceEvaluability"),
++            "platform_result": dimensions["platform_family"],
++            "device_class_result": dimensions["device_class"],
++            "manufacturer_result": dimensions["manufacturer_family"],
++            "model_result": dimensions["model_family"],
++            "global_classification_status": global_status,
++            "origin_assessments": canonical_set([
++                _ref(assessment, "OriginAssessment") for assessment in value.origin_assessments],
++                lambda reference: reference["artifact_id"]),
++        })
++
++
++def fuse_classification(inputs: FusionInputs) -> ArtifactContent:
++    """Build the same deterministic artifact as DeviceFingerprintFusionCore.fuse."""
++    return DeviceFingerprintFusionCore(inputs).fuse()
+diff --git a/tests/device_fingerprint_task04_t04/__init__.py b/tests/device_fingerprint_task04_t04/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..17fabf9d068ef7744065dafb4465c2aa821a6b01
+--- /dev/null
++++ b/tests/device_fingerprint_task04_t04/__init__.py
+@@ -0,0 +1 @@
++"""Focused pure T-04 fusion contract tests."""
+diff --git a/tests/device_fingerprint_task04_t04/test_fusion.py b/tests/device_fingerprint_task04_t04/test_fusion.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c6dedbbff48aebdcf73e9e2aa53a9ca54964b35
+--- /dev/null
++++ b/tests/device_fingerprint_task04_t04/test_fusion.py
+@@ -0,0 +1,493 @@
++"""R14 pure cross-origin fusion and ClassificationResult regression matrix."""
++
++from __future__ import annotations
++
++import ast
++import inspect
++from dataclasses import replace
++
++import pytest
++
++from app.device_fingerprint.artifact_content import make_artifact_content
++from app.device_fingerprint.classification_policy import build_initial_classification_policy_v1
++import app.device_fingerprint.fusion as fusion_module
++from app.device_fingerprint.fusion import (
++    DeviceFingerprintFusionCore, FusionInputs, _fusion_cell, _validate_dimension_result,
++    _first_rule, fuse_classification,
++)
++from app.device_fingerprint.knowledge_artifacts import make_canonical_k1_record_set
++from app.device_fingerprint.knowledge_bundle import build_initial_knowledge_bundle_v1
++from app.device_fingerprint.taxonomy_artifacts import make_classification_taxonomy
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.origin_assessment import (
++    DeviceFingerprintOriginAssessmentBuilder, _reduce_claims, make_origin_assessment,
++)
++from tests.device_fingerprint_task04_t03.test_origin_assessment import _dhcp_row, _inputs, _portal_row
++from tests.device_fingerprint_task04_t03.test_origin_assessment import _network_row
++from tests.device_fingerprint.test_network_schemas import tcp_v2
++from app.device_fingerprint.validation import canonical_json, canonical_sha256
++from research.device_fingerprint_fe1.fixtures import build_k1_fixture_definitions
++
++
++def _base_from_source(source):
++    policy = build_initial_classification_policy_v1(
++        source.knowledge.classification_taxonomy, source.knowledge.alias_mapping,
++        source.evidence_adapter_contract_set)
++    return FusionInputs(
++        classification_request_digest="a" * 64,
++        classification_policy=policy,
++        classification_taxonomy=source.knowledge.classification_taxonomy,
++        alias_mapping=source.knowledge.alias_mapping,
++        evidence_adapter_contract_set=source.evidence_adapter_contract_set,
++        knowledge_bundle=source.knowledge_bundle,
++        knowledge=source.knowledge,
++        classifier_artifact_manifest=make_artifact_content("ClassifierArtifactManifest", {"synthetic": True}),
++        evidence_snapshot_content=source.evidence_snapshot_content,
++        source_evaluability=source.source_evaluability,
++        origin_assessments=DeviceFingerprintOriginAssessmentBuilder(source).build_all(),
++    )
++
++
++@pytest.fixture(scope="module")
++def baseline():
++    return _base_from_source(_inputs())
++
++
++def _candidate(value: str, strength: str = "strong", *, outside: bool = False,
++               derivation: str = "fingerprint_match") -> dict:
++    return {
++        "candidate_kind": "OUT_OF_SCOPE_TAXON" if outside else "CANONICAL_VALUE",
++        "candidate_value_id": None if outside else value,
++        "out_of_scope_taxon_ref": value if outside else None,
++        "claim_strength": strength, "claim_derivation": derivation,
++        "knowledge_refs": [], "evidence_refs": [],
++    }
++
++
++def _change(base: FusionInputs, origin: str, dimension: str, *, candidates=(),
++            explanation=(), broad=(), state: str | None = None) -> FusionInputs:
++    """Reconstruct a canonical synthetic T-03 output, never bypass its validator."""
++    updated = []
++    for artifact in base.origin_assessments:
++        if artifact.semantic_payload["origin_group"] != origin:
++            updated.append(artifact)
++            continue
++        payload = artifact.semantic_payload
++        for index, row in enumerate(payload["dimension_assessments"]):
++            if row["dimension_name"] != dimension:
++                continue
++            if candidates or state == "no_claim" or broad:
++                new = _reduce_claims(dimension, list(candidates), broad=list(broad),
++                                     explanations=list(explanation), k1_ambiguous=origin == "dhcp")
++            else:
++                new = {**row, "explanation_codes": sorted(set(explanation)),
++                       "broad_unresolved_taxon_refs": list(broad)}
++                if state is not None:
++                    new["internal_state"] = state
++            payload["dimension_assessments"][index] = new
++            break
++        updated.append(make_origin_assessment(
++            payload, evidence_snapshot_content=base.evidence_snapshot_content,
++            source_evaluability=base.source_evaluability,
++            evidence_adapter_contract_set=base.evidence_adapter_contract_set,
++            knowledge_bundle=base.knowledge_bundle, knowledge=base.knowledge))
++    return replace(base, origin_assessments=tuple(updated))
++
++
++def _platform(inputs: FusionInputs) -> dict:
++    return fuse_classification(inputs).semantic_payload["platform_result"]
++
++
++def test_exact_six_origins_permutation_and_stable_result(baseline):
++    first = fuse_classification(baseline)
++    reverse = fuse_classification(replace(baseline, origin_assessments=tuple(reversed(baseline.origin_assessments))))
++    assert first == reverse == DeviceFingerprintFusionCore(baseline).fuse()
++    assert first.artifact_type == "ClassificationResult"
++    assert len(first.semantic_payload["origin_assessments"]) == 6
++
++
++@pytest.mark.parametrize("mutation", [
++    lambda b: replace(b, origin_assessments=b.origin_assessments[:-1]),
++    lambda b: replace(b, origin_assessments=b.origin_assessments[:-1] + (b.origin_assessments[0],)),
++    lambda b: replace(b, origin_assessments=b.origin_assessments + (b.origin_assessments[0],)),
++    lambda b: replace(b, classification_request_digest="A" * 64),
++    lambda b: replace(b, classifier_artifact_manifest=b.classification_policy),
++    lambda b: replace(b, classification_taxonomy=b.alias_mapping),
++    lambda b: replace(b, alias_mapping=b.classification_taxonomy),
++    lambda b: replace(b, evidence_adapter_contract_set=b.classification_taxonomy),
++    lambda b: replace(b, knowledge_bundle=b.classification_policy),
++    lambda b: replace(b, origin_assessments=(b.classification_policy, *b.origin_assessments[1:])),
++])
++def test_malformed_lineage_rejected_with_typed_error(baseline, mutation):
++    with pytest.raises(DeviceFingerprintValidationError):
++        DeviceFingerprintFusionCore(mutation(baseline))
++
++
++def test_origin_snapshot_evaluability_and_noncanonical_mismatch_rejected(baseline):
++    artifact = baseline.origin_assessments[0]
++    for field, reference in (
++        ("evidence_snapshot_content", baseline.source_evaluability),
++        ("source_evaluability", baseline.evidence_snapshot_content),
++    ):
++        payload = artifact.semantic_payload
++        payload[field] = {"artifact_id": reference.artifact_id,
++                          "content_sha256": reference.content_sha256}
++        changed = make_artifact_content("OriginAssessment", payload)
++        with pytest.raises(DeviceFingerprintValidationError):
++            DeviceFingerprintFusionCore(replace(
++                baseline, origin_assessments=(changed, *baseline.origin_assessments[1:])))
++    payload = artifact.semantic_payload
++    payload["dimension_assessments"].reverse()
++    changed = make_artifact_content("OriginAssessment", payload)
++    with pytest.raises(DeviceFingerprintValidationError):
++        DeviceFingerprintFusionCore(replace(
++            baseline, origin_assessments=(changed, *baseline.origin_assessments[1:])))
++
++
++def test_valid_policy_taxonomy_must_equal_valid_knowledge_bundle_taxonomy(baseline):
++    taxonomy_payload = baseline.classification_taxonomy.semantic_payload
++    taxonomy_payload["manufacturer_records"].append({
++        "manufacturer_id": "synthetic-vendor", "display_label": "Synthetic Vendor",
++    })
++    alternate_taxonomy = make_classification_taxonomy(taxonomy_payload)
++    alternate_policy = build_initial_classification_policy_v1(
++        alternate_taxonomy, baseline.alias_mapping, baseline.evidence_adapter_contract_set)
++    with pytest.raises(DeviceFingerprintValidationError, match="KnowledgeBundle/ClassificationPolicy"):
++        DeviceFingerprintFusionCore(replace(
++            baseline, classification_policy=alternate_policy,
++            classification_taxonomy=alternate_taxonomy))
++
++
++def test_all_forty_policy_cells_are_looked_up_without_alternate_matrix(baseline):
++    payload = baseline.classification_policy.semantic_payload
++    rows = payload["cross_origin_fusion_matrix"]
++    assert len(rows) == 40
++    keys = (
++        "strong_clean_present", "strong_clean_disagree", "strong_internal_conflict_present",
++        "supporting_clean_present", "supporting_clean_disagree",
++        "supporting_internal_conflict_present",
++        "supporting_vs_selected_strong_incompatible_present",
++    )
++    for row in rows:
++        assert _fusion_cell(payload, tuple(row[key] for key in keys)) == row
++    with pytest.raises(DeviceFingerprintValidationError):
++        _fusion_cell(payload, (False, True, False, False, False, False, False))
++    with pytest.raises(DeviceFingerprintValidationError):
++        _fusion_cell(payload, (0,) * 7)
++
++
++def test_strong_selection_and_independent_high_support(baseline):
++    one = _change(baseline, "dhcp", "platform_family", candidates=[_candidate("android")])
++    assert (_platform(one)["status"], _platform(one)["support_level"]) == ("resolved", "medium")
++    two = _change(one, "portal", "platform_family", candidates=[_candidate("android")])
++    assert (_platform(two)["status"], _platform(two)["support_level"]) == ("resolved", "high")
++    assert _platform(two)["supporting_origin_groups"] == ["dhcp", "portal"]
++    assert fuse_classification(two).semantic_payload["global_classification_status"] == "partial"
++
++
++def test_derivation_never_changes_outcome(baseline):
++    outputs = []
++    for derivation in ("declared", "deterministic_mapping", "fingerprint_match", "registry_mapping"):
++        changed = _change(baseline, "portal", "platform_family",
++                          candidates=[_candidate("android", derivation=derivation)])
++        outputs.append((_platform(changed)["status"], _platform(changed)["support_level"]))
++    assert outputs == [("resolved", "medium")] * 4
++
++
++def test_strong_disagreement_and_strong_internal_conflict(baseline):
++    first = _change(baseline, "portal", "platform_family", candidates=[_candidate("android")])
++    disagree = _change(first, "tcp", "platform_family", candidates=[_candidate("ios")])
++    assert _platform(disagree)["status"] == "conflicting_evidence"
++    assert _platform(disagree)["contradicting_origin_groups"] == ["portal", "tcp"]
++    conflict = _change(first, "tcp", "platform_family",
++                       candidates=[_candidate("android"), _candidate("ios")])
++    assert _platform(conflict)["status"] == "conflicting_evidence"
++    assert "tcp" in _platform(conflict)["contradicting_origin_groups"]
++
++
++def test_strong_supporting_contradiction_and_cap(baseline):
++    first = _change(baseline, "portal", "platform_family", candidates=[_candidate("android")])
++    agree = _change(first, "dhcp", "platform_family", candidates=[_candidate("android", "supporting")])
++    assert _platform(agree)["support_level"] == "medium"
++    disagree = _change(first, "dhcp", "platform_family", candidates=[_candidate("ios", "supporting")])
++    result = _platform(disagree)
++    assert result["canonical_value_id"] == "android"
++    assert result["support_level"] == "medium"
++    assert result["contradicting_origin_groups"] == ["dhcp"]
++    assert "cross_origin_supporting_contradiction" in result["explanation_codes"]
++    two_strong = _change(first, "tcp", "platform_family", candidates=[_candidate("android")])
++    capped = _change(two_strong, "dhcp", "platform_family", candidates=[_candidate("ios", "supporting")])
++    assert _platform(capped)["support_level"] == "medium"
++
++
++def test_supporting_internal_conflict_and_same_origin_retention(baseline):
++    first = _change(baseline, "portal", "platform_family", candidates=[_candidate("android")])
++    conflict = _change(first, "dhcp", "platform_family",
++                       candidates=[_candidate("android", "supporting"), _candidate("ios", "supporting")])
++    assert (_platform(conflict)["status"], _platform(conflict)["support_level"]) == ("resolved", "medium")
++    without_strong = _change(baseline, "dhcp", "platform_family",
++                             candidates=[_candidate("android", "supporting"), _candidate("ios", "supporting")])
++    assert _platform(without_strong)["status"] == "conflicting_evidence"
++    retained = _change(baseline, "portal", "platform_family",
++                       candidates=[_candidate("android"), _candidate("ios", "supporting")])
++    result = _platform(retained)
++    assert result["status"] == "resolved" and result["support_level"] == "medium"
++    assert result["supporting_origin_groups"] == ["portal"]
++    assert result["contradicting_origin_groups"] == ["portal"]
++    two_strong = _change(retained, "tcp", "platform_family", candidates=[_candidate("android")])
++    assert _platform(two_strong)["support_level"] == "medium"
++    assert "portal" in _platform(two_strong)["contradicting_origin_groups"]
++    with_supporting_conflict = _change(
++        _change(first, "tcp", "platform_family", candidates=[_candidate("android")]),
++        "dhcp", "platform_family",
++        candidates=[_candidate("android", "supporting"), _candidate("ios", "supporting")])
++    assert _platform(with_supporting_conflict)["support_level"] == "medium"
++
++
++def test_supporting_agreement_disagreement_and_origin_unit(baseline):
++    one = _change(baseline, "portal", "platform_family", candidates=[_candidate("android", "supporting")])
++    assert (_platform(one)["status"], _platform(one)["support_level"]) == ("resolved", "low")
++    same = _change(one, "dhcp", "platform_family", candidates=[_candidate("android", "supporting")])
++    assert _platform(same)["support_level"] == "low"
++    different = _change(one, "dhcp", "platform_family", candidates=[_candidate("ios", "supporting")])
++    assert _platform(different)["status"] == "conflicting_evidence"
++    repeated = _change(baseline, "portal", "platform_family", candidates=[
++        _candidate("android", "strong", derivation="declared"),
++        _candidate("android", "strong", derivation="fingerprint_match")])
++    assert _platform(repeated)["support_level"] == "medium"
++
++
++def test_one_hundred_portal_rows_remain_one_independent_origin():
++    source = _inputs(evidence_rows=[_portal_row(number) for number in range(1, 101)], origin="portal")
++    result = _platform(_base_from_source(source))
++    assert result["canonical_value_id"] == "android"
++    assert result["supporting_origin_groups"] == ["portal"]
++    assert result["support_level"] == "low"
++
++
++@pytest.mark.parametrize("dimension,outside,strength,expected", [
++    ("platform_family", "unmapped-platform", "supporting", "low"),
++    ("device_class", "unmapped-device", "strong", "medium"),
++])
++def test_out_of_scope_supported_only_for_frozen_dimensions(baseline, dimension, outside, strength, expected):
++    changed = _change(baseline, "portal", dimension,
++                      candidates=[_candidate(outside, strength, outside=True)])
++    key = "platform_result" if dimension == "platform_family" else "device_class_result"
++    result = fuse_classification(changed).semantic_payload[key]
++    assert result["status"] == "recognized_out_of_scope"
++    assert result["support_level"] == expected
++    assert result["out_of_scope_taxon_references"] == [outside]
++    assert result["display_label_ref"] is None
++    with pytest.raises(DeviceFingerprintValidationError):
++        _change(baseline, "portal", "manufacturer_family",
++                candidates=[_candidate("outside", outside=True)])
++
++
++def test_two_independent_strong_out_of_scope_origins_reach_high(baseline):
++    one = _change(baseline, "portal", "platform_family",
++                  candidates=[_candidate("unmapped-platform", outside=True)])
++    two = _change(one, "tcp", "platform_family",
++                  candidates=[_candidate("unmapped-platform", outside=True)])
++    result = _platform(two)
++    assert result["status"] == "recognized_out_of_scope"
++    assert result["support_level"] == "high"
++    assert result["out_of_scope_taxon_references"] == ["unmapped-platform"]
++
++
++def test_out_of_scope_reference_set_deduplicates_across_origins(baseline):
++    one = _change(baseline, "portal", "platform_family",
++                  candidates=[_candidate("unmapped-platform", "supporting", outside=True)])
++    two = _change(one, "tcp", "platform_family",
++                  candidates=[_candidate("unmapped-platform", "supporting", outside=True)])
++    assert _platform(two)["out_of_scope_taxon_references"] == ["unmapped-platform"]
++
++
++def test_canonical_reference_and_explanation_unions(baseline):
++    rule = baseline.knowledge.k3_portal_rule_set.semantic_payload["rules"][0]
++    provenance = baseline.knowledge.k3_provenance
++    kref = {
++        "knowledge_bundle_id": baseline.knowledge_bundle.artifact_id,
++        "knowledge_bundle_digest": baseline.knowledge_bundle.content_sha256,
++        "canonical_knowledge_record_id": rule["rule_id"],
++        "knowledge_provenance_id": provenance.artifact_id,
++        "knowledge_provenance_digest": provenance.content_sha256,
++        "rule_or_source_record_identity": rule["rule_id"],
++    }
++    candidate = _candidate("android")
++    candidate["knowledge_refs"] = [kref]
++    changed = _change(baseline, "portal", "platform_family", candidates=[candidate],
++                      explanation=["fixture_reason"])
++    changed = _change(changed, "dhcp", "platform_family", explanation=["fixture_reason"])
++    result = _platform(changed)
++    assert result["knowledge_references"] == [kref]
++    assert result["explanation_codes"].count("fixture_reason") == 1
++    assert result["supporting_origin_groups"] == ["portal"]
++
++
++@pytest.mark.parametrize("reason", [
++    "unsupported_evidence_contract", "degraded_evidence_no_claim",
++    "legacy_tcp_schema_insufficient_for_exact_k2a_contract",
++])
++def test_unresolved_no_claim_precedes_unknown(baseline, reason):
++    changed = _change(baseline, "tcp", "platform_family", explanation=[reason])
++    result = _platform(changed)
++    assert result["status"] == "insufficient_evidence"
++    assert "fusion_semantic_information_unresolved" in result["explanation_codes"]
++
++
++def test_only_not_evaluable_and_disabled_tcp_are_insufficient(baseline):
++    disabled = _change(baseline, "tcp", "platform_family", explanation=["origin_runtime_disabled"])
++    assert _platform(disabled)["status"] == _platform(baseline)["status"] == "insufficient_evidence"
++    not_evaluable = _change(baseline, "tls", "platform_family", state="not_evaluable")
++    assert _platform(not_evaluable)["not_evaluable_origin_groups"] == ["tls"]
++    assert _platform(not_evaluable)["status"] == "insufficient_evidence"
++
++
++def test_broad_unresolved_is_not_conflict_and_does_not_override_selection(baseline):
++    broad = {
++        "reference_kind": "BROAD_TAXON", "canonical_taxon_or_source_ref": "unknown-platform",
++        "evidence_refs": [], "knowledge_refs": [], "explanation_code": "k1_broad_unresolved",
++    }
++    only = _change(baseline, "dhcp", "platform_family", broad=[broad])
++    result = _platform(only)
++    assert result["status"] == "insufficient_evidence"
++    assert "fusion_semantic_information_unresolved" in result["explanation_codes"]
++    selected = _change(only, "portal", "platform_family", candidates=[_candidate("android")])
++    assert _platform(selected)["status"] == "resolved"
++    assert _platform(selected)["contradicting_origin_groups"] == []
++    assert _platform(selected)["out_of_scope_taxon_references"] == []
++
++
++def test_only_ambiguous_k1_candidate_information_is_insufficient():
++    fixture = build_k1_fixture_definitions()["all_non_any_multi_candidate"]
++    source = _inputs(evidence_rows=[_dhcp_row(payload=fixture["evidence"])])
++    payload = fixture["record_set"].semantic_payload
++    payload["knowledge_provenance"] = {
++        "artifact_id": source.knowledge.k1_provenance.artifact_id,
++        "content_sha256": source.knowledge.k1_provenance.content_sha256,
++    }
++    knowledge = replace(source.knowledge, k1_record_set=make_canonical_k1_record_set(payload))
++    source = replace(source, knowledge=knowledge,
++                     knowledge_bundle=build_initial_knowledge_bundle_v1(knowledge))
++    result = fuse_classification(_base_from_source(source)).semantic_payload["device_class_result"]
++    assert result["status"] == "insufficient_evidence"
++    assert "fusion_semantic_information_unresolved" in result["explanation_codes"]
++
++
++def test_present_supported_dhcp_path_without_k1_claim_is_unknown_only_where_applicable():
++    base = _base_from_source(_inputs(evidence_rows=[_dhcp_row()]))
++    for dimension in ("platform_family", "device_class"):
++        base = _change(base, "dhcp", dimension, state="no_claim", explanation=["k1_empty_candidate_set"])
++    payload = fuse_classification(base).semantic_payload
++    assert payload["platform_result"]["status"] == "unknown"
++    assert payload["device_class_result"]["status"] == "unknown"
++    assert payload["model_result"]["status"] == "insufficient_evidence"
++    assert payload["platform_result"]["knowledge_references"] == []
++
++
++def test_portal_v1_does_not_become_device_class_path():
++    base = _base_from_source(_inputs(evidence_rows=[_portal_row(version=1)], origin="portal"))
++    base = _change(base, "portal", "platform_family", state="no_claim", explanation=["k3_no_claim"])
++    payload = fuse_classification(base).semantic_payload
++    assert payload["platform_result"]["status"] == "unknown"
++    assert payload["device_class_result"]["status"] == "insufficient_evidence"
++
++
++def test_present_tcp_v2_k2_no_match_is_unknown_for_platform_only():
++    normalized = tcp_v2(ip_df=False, ip_id_zero=False, tcp_sequence_zero=False,
++                        tcp_header_length_bytes=20, tcp_option_records=[])
++    row = _network_row("tcp", version=2)
++    row["payload_json"] = canonical_json(normalized)
++    row["payload_sha256"] = canonical_sha256(row["payload_json"])
++    row["extractor_version"] = "2.0.0"
++    base = _base_from_source(_inputs(evidence_rows=[row], origin="tcp"))
++    base = _change(base, "tcp", "platform_family", state="no_claim", explanation=["k2a_no_match"])
++    payload = fuse_classification(base).semantic_payload
++    assert payload["platform_result"]["status"] == "unknown"
++    assert payload["device_class_result"]["status"] == "insufficient_evidence"
++
++
++@pytest.mark.parametrize("origin", ["tls", "quic"])
++def test_present_ja4_no_knowledge_path_is_unknown_without_a_claim(origin):
++    base = _base_from_source(_inputs(evidence_rows=[_network_row(origin)], origin=origin))
++    payload = fuse_classification(base).semantic_payload
++    assert payload["platform_result"]["status"] == "unknown"
++    assert payload["platform_result"]["support_level"] == "none"
++    assert payload["model_result"]["status"] == "insufficient_evidence"
++
++
++def test_expired_knowledge_on_present_supported_path_is_unknown():
++    base = _base_from_source(_inputs(evidence_rows=[_dhcp_row()], knowledge_time="2030-01-01T00:00:00.000Z"))
++    payload = fuse_classification(base).semantic_payload
++    assert payload["platform_result"]["status"] == "unknown"
++    assert payload["device_class_result"]["status"] == "unknown"
++
++
++def test_mac_registry_no_assignment_unknown_and_unmapped_org_insufficient(baseline):
++    payload = fuse_classification(baseline).semantic_payload
++    assert payload["manufacturer_result"]["status"] == "unknown"
++    assert "fusion_no_usable_semantic_knowledge" in payload["manufacturer_result"]["explanation_codes"]
++    unmapped = _change(baseline, "mac_registry", "manufacturer_family",
++                       explanation=["mac_assignment_org_not_manufacturer", "no_ieee_assignment_claim"])
++    assert fuse_classification(unmapped).semantic_payload["manufacturer_result"]["status"] == "insufficient_evidence"
++
++
++def test_expired_k4_with_supported_registry_path_is_unknown():
++    base = _base_from_source(_inputs(mac="00:11:22:33:44:55",
++                                    knowledge_time="2030-01-01T00:00:00.000Z"))
++    result = fuse_classification(base).semantic_payload["manufacturer_result"]
++    assert result["status"] == "unknown"
++    assert "knowledge_source_expired" in result["explanation_codes"]
++
++
++def test_global_policy_statuses_from_constructed_dimensions(baseline):
++    all_resolved = baseline
++    for dimension, value in (("platform_family", "android"), ("device_class", "smartphone"),
++                             ("manufacturer_family", "vendor"), ("model_family", "model")):
++        all_resolved = _change(all_resolved, "portal", dimension, candidates=[_candidate(value)])
++    assert fuse_classification(all_resolved).semantic_payload["global_classification_status"] == "classified"
++    conflicted = _change(all_resolved, "tcp", "platform_family", candidates=[_candidate("ios")])
++    assert fuse_classification(conflicted).semantic_payload["global_classification_status"] == "conflicting_evidence"
++    outside = _change(baseline, "portal", "platform_family",
++                      candidates=[_candidate("other-platform", "supporting", outside=True)])
++    assert fuse_classification(outside).semantic_payload["global_classification_status"] == "recognized_out_of_scope"
++    assert _first_rule(baseline.classification_policy.semantic_payload["global_status_derivation"],
++                       {"OTHERWISE": True}) == "unknown"
++
++
++def test_result_exact_closed_shapes_and_global_policy(baseline):
++    result = fuse_classification(baseline).semantic_payload
++    assert set(result) == {
++        "classification_request_digest", "classification_policy", "knowledge_bundle",
++        "classifier_artifact_manifest", "evidence_snapshot_content", "source_evaluability",
++        "platform_result", "device_class_result", "manufacturer_result", "model_result",
++        "global_classification_status", "origin_assessments",
++    }
++    expected_dimension_fields = {
++        "dimension_name", "canonical_value_id", "display_label_ref", "status", "support_level",
++        "supporting_origin_groups", "contradicting_origin_groups", "not_evaluable_origin_groups",
++        "out_of_scope_taxon_references", "explanation_codes", "knowledge_references",
++    }
++    for field in ("platform_result", "device_class_result", "manufacturer_result", "model_result"):
++        assert set(result[field]) == expected_dimension_fields
++        assert result[field]["display_label_ref"] is None
++    assert result["global_classification_status"] == "insufficient_evidence"
++    bad = dict(result["platform_result"], status="conflicting_evidence")
++    with pytest.raises(DeviceFingerprintValidationError):
++        _validate_dimension_result(bad, {"platform_family", "device_class"})
++
++
++def test_fusion_module_has_no_runtime_io_clock_or_environment_imports():
++    source = ast.parse(inspect.getsource(fusion_module))
++    imported = {
++        alias.name.split(".")[0]
++        for node in ast.walk(source) if isinstance(node, ast.Import)
++        for alias in node.names
++    } | {
++        (node.module or "").split(".")[0]
++        for node in ast.walk(source) if isinstance(node, ast.ImportFrom)
++    }
++    assert imported.isdisjoint({"os", "pathlib", "socket", "time", "datetime", "sqlite3", "requests"})
++    called = {node.func.id for node in ast.walk(source)
++              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
++    assert called.isdisjoint({"open", "connect", "getenv", "now", "utcnow"})

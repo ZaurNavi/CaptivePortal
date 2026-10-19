@@ -1,0 +1,1344 @@
+diff --git a/app/device_fingerprint/classification_persistence.py b/app/device_fingerprint/classification_persistence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9d77ff4f565c5b2f71299a475de5c9817ebbd95
+--- /dev/null
++++ b/app/device_fingerprint/classification_persistence.py
+@@ -0,0 +1,484 @@
++"""Dedicated, atomic Task-04 classification audit storage and Level-B replay."""
++
++from __future__ import annotations
++
++import os
++import sqlite3
++import uuid
++from dataclasses import dataclass, fields
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++from typing import Callable
++
++from .artifact_content import ArtifactContent, ArtifactRef
++from .artifact_dependency_graph import ArtifactDependencyGraphError, extract_direct_artifact_refs
++from .classification_request import make_classification_request_manifest
++from .classification_retention_policy import make_classification_retention_policy
++from .control_plane_store import ControlPlaneOperationError, DeviceFingerprintControlPlaneStore
++from .fusion import FusionInputs, fuse_classification
++from .models import DeviceFingerprintValidationError
++from .request_assembly import DeviceFingerprintRequestAssembly, RequestAssemblyResult
++from .runtime_profile_artifacts import make_classification_runtime_profile
++from .validation import format_utc, parse_utc
++
++
++class ClassificationPersistenceError(RuntimeError):
++    def __init__(self, reason_code: str):
++        self.reason_code = reason_code
++        super().__init__(reason_code)
++
++
++@dataclass(frozen=True, slots=True)
++class ClassificationCoreRecord:
++    classification_id: str
++    site_id: str
++    observed_mac: str
++    classified_at_utc: str
++    execution_context: str
++    classification_runtime_profile_id: str
++    classification_runtime_profile_digest: str
++    foundation_runtime_profile_id: str
++    foundation_runtime_profile_digest: str
++    runtime_profile_activation_record_id: str | None
++    classification_request_manifest_id: str
++    classification_request_manifest_digest: str
++    classification_result_id: str
++    classification_result_digest: str
++    snapshot_record_id: str
++    snapshot_record_digest: str
++    classification_retention_policy_id: str
++    classification_retention_policy_digest: str
++
++
++_CORE_FIELDS = tuple(field.name for field in fields(ClassificationCoreRecord))
++
++
++class DeviceFingerprintClassificationStore:
++    def __init__(
++        self, classification_database_path: str | Path, task01_database_path: str | Path,
++        *, control_plane_store: DeviceFingerprintControlPlaneStore,
++        utc_clock: Callable[[], str] = lambda: format_utc(datetime.now(timezone.utc)),
++        uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4,
++        fault_hook: Callable[[str], None] | None = None,
++    ) -> None:
++        classification = Path(classification_database_path).resolve(strict=False)
++        task01 = Path(task01_database_path).resolve(strict=False)
++        if (os.path.normcase(str(classification)) == os.path.normcase(str(task01))
++                or (classification.exists() and task01.exists()
++                    and os.path.samefile(classification, task01))):
++            raise ClassificationPersistenceError("persistence_unavailable")
++        self.database_path = classification
++        self._control = control_plane_store
++        self._clock = utc_clock
++        self._uuid_factory = uuid_factory
++        self._fault = fault_hook
++
++    def _connect(self) -> sqlite3.Connection:
++        conn = None
++        try:
++            conn = sqlite3.connect(self.database_path, timeout=10, isolation_level=None)
++            conn.row_factory = sqlite3.Row
++            conn.execute("PRAGMA foreign_keys=ON")
++            conn.execute("PRAGMA synchronous=FULL")
++            return conn
++        except sqlite3.Error as exc:
++            if conn is not None:
++                conn.close()
++            raise ClassificationPersistenceError("persistence_unavailable") from exc
++
++    def initialize(self) -> None:
++        with self._connect() as conn:
++            conn.executescript("""
++                CREATE TABLE IF NOT EXISTS artifacts (
++                    artifact_id TEXT PRIMARY KEY,
++                    artifact_type TEXT NOT NULL,
++                    content_sha256 TEXT NOT NULL,
++                    semantic_payload_json BLOB NOT NULL
++                );
++                CREATE TABLE IF NOT EXISTS artifact_dependencies (
++                    owner_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
++                    dependency_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
++                    dependency_digest TEXT NOT NULL,
++                    PRIMARY KEY (owner_id, dependency_id)
++                );
++                CREATE TABLE IF NOT EXISTS classifications (
++                    classification_id TEXT PRIMARY KEY,
++                    site_id TEXT NOT NULL, observed_mac TEXT NOT NULL,
++                    classified_at_utc TEXT NOT NULL, execution_context TEXT NOT NULL,
++                    classification_runtime_profile_id TEXT NOT NULL,
++                    classification_runtime_profile_digest TEXT NOT NULL,
++                    foundation_runtime_profile_id TEXT NOT NULL,
++                    foundation_runtime_profile_digest TEXT NOT NULL,
++                    runtime_profile_activation_record_id TEXT,
++                    classification_request_manifest_id TEXT NOT NULL,
++                    classification_request_manifest_digest TEXT NOT NULL,
++                    classification_result_id TEXT NOT NULL,
++                    classification_result_digest TEXT NOT NULL,
++                    snapshot_record_id TEXT NOT NULL,
++                    snapshot_record_digest TEXT NOT NULL,
++                    classification_retention_policy_id TEXT NOT NULL,
++                    classification_retention_policy_digest TEXT NOT NULL,
++                    CHECK ((execution_context='PRODUCTION' AND runtime_profile_activation_record_id IS NOT NULL)
++                        OR (execution_context='PRE_ACCEPTANCE_CANDIDATE'
++                            AND runtime_profile_activation_record_id IS NULL))
++                );
++                CREATE TABLE IF NOT EXISTS classification_roots (
++                    classification_id TEXT NOT NULL REFERENCES classifications(classification_id)
++                        ON DELETE CASCADE,
++                    artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
++                    content_sha256 TEXT NOT NULL,
++                    PRIMARY KEY (classification_id, artifact_id)
++                );
++            """)
++
++    @staticmethod
++    def _ref(content: ArtifactContent) -> ArtifactRef:
++        return ArtifactRef(content.artifact_id, content.content_sha256)
++
++    def _validity_chain(self, assembly: RequestAssemblyResult) -> tuple[ArtifactContent, ...]:
++        pinned = assembly.pinned_runtime_profile
++        if pinned is None:
++            return ()
++        chain = []
++        seen = set()
++        current = pinned.validity_record
++        try:
++            with self._control._connect() as conn:
++                while True:
++                    payload = current.semantic_payload
++                    identifier = payload["validity_record_id"]
++                    if (identifier in seen or payload["activation_record_id"] !=
++                            pinned.pointer.activation_record_id):
++                        raise ClassificationPersistenceError("activation_lineage_unavailable")
++                    seen.add(identifier)
++                    chain.append(current)
++                    previous = payload["previous_validity_record_id"]
++                    if previous is None:
++                        break
++                    row = conn.execute("SELECT artifact_id FROM validities WHERE validity_record_id=? "
++                                       "AND activation_record_id=?",
++                                       (previous, pinned.pointer.activation_record_id)).fetchone()
++                    if row is None:
++                        raise ClassificationPersistenceError("activation_lineage_unavailable")
++                    current = self._control.load_artifact(row[0])
++        except (sqlite3.Error, ControlPlaneOperationError, KeyError, TypeError) as exc:
++            raise ClassificationPersistenceError("activation_lineage_unavailable") from exc
++        return tuple(chain)
++
++    def _roots(self, assembly: RequestAssemblyResult,
++               retention_policy: ArtifactContent) -> dict[str, ArtifactContent]:
++        seeds = [
++            assembly.evidence_snapshot_content, assembly.snapshot_record,
++            assembly.source_evaluability, *assembly.origin_assessments,
++            assembly.classification_request_manifest, assembly.classification_result,
++            assembly.foundation_runtime_profile, assembly.classification_runtime_profile,
++            assembly.knowledge_bundle, assembly.classification_policy,
++            assembly.evidence_adapter_contract_set, assembly.classifier_artifact_manifest,
++            retention_policy, *(getattr(assembly.knowledge_candidate, field.name)
++                                for field in fields(assembly.knowledge_candidate)),
++        ]
++        if assembly.pinned_runtime_profile is not None:
++            pinned = assembly.pinned_runtime_profile
++            seeds.extend((pinned.admission_manifest, pinned.activation_record,
++                          *self._validity_chain(assembly)))
++        contents: dict[str, ArtifactContent] = {}
++        for content in seeds:
++            if not isinstance(content, ArtifactContent):
++                raise ClassificationPersistenceError("persistence_unavailable")
++            old = contents.get(content.artifact_id)
++            if old is not None and old != content:
++                raise ClassificationPersistenceError("persistence_unavailable")
++            contents[content.artifact_id] = content
++        pending = list(contents.values())
++        while pending:
++            content = pending.pop()
++            for reference in extract_direct_artifact_refs(content):
++                dependent = contents.get(reference.artifact_id)
++                if dependent is None:
++                    try:
++                        dependent = self._control.load_artifact(
++                            reference.artifact_id, reference.content_sha256)
++                    except ControlPlaneOperationError as exc:
++                        raise ClassificationPersistenceError("persistence_unavailable") from exc
++                    contents[dependent.artifact_id] = dependent
++                    pending.append(dependent)
++                reference.resolve(dependent, dependent.artifact_type)
++        return contents
++
++    def _validate_assembly(self, assembly: RequestAssemblyResult,
++                           retention_policy: ArtifactContent) -> None:
++        if not isinstance(assembly, RequestAssemblyResult):
++            raise ClassificationPersistenceError("persistence_unavailable")
++        profile = assembly.classification_runtime_profile
++        if (make_classification_runtime_profile(profile.semantic_payload) != profile
++                or profile.semantic_payload["foundation_runtime_profile"] !=
++                DeviceFingerprintClassificationStore._ref(
++                    assembly.foundation_runtime_profile).as_dict()):
++            raise ClassificationPersistenceError("persistence_unavailable")
++        if (retention_policy.artifact_type != "ClassificationRetentionPolicy"
++                or make_classification_retention_policy(retention_policy.semantic_payload) != retention_policy
++                or retention_policy.semantic_payload["classification_history_retention_seconds"] != 7_776_000):
++            raise ClassificationPersistenceError("persistence_unavailable")
++        if assembly.execution_context == "PRODUCTION":
++            pinned = assembly.pinned_runtime_profile
++            if (pinned is None or assembly.runtime_profile_activation_record is None
++                    or pinned.runtime_profile != profile
++                    or pinned.activation_record != assembly.runtime_profile_activation_record):
++                raise ClassificationPersistenceError("production_profile_not_admitted")
++            admission = pinned.admission_manifest
++            ap = admission.semantic_payload
++            if (admission.artifact_type != "RuntimeProfileAdmissionManifest"
++                    or ap["profile_kind"] != "classification"
++                    or ap["candidate_profile"] != DeviceFingerprintClassificationStore._ref(profile).as_dict()
++                    or ap["task04_acceptance_manifest"] is None
++                    or ap["foundation_runtime_profile_admission_manifest"] is None):
++                raise ClassificationPersistenceError("production_profile_not_admitted")
++            try:
++                stored_admission = self._control.load_artifact(
++                    admission.artifact_id, admission.content_sha256)
++                stored_activation = self._control.load_artifact(
++                    pinned.activation_record.artifact_id,
++                    pinned.activation_record.content_sha256)
++            except (ControlPlaneOperationError, LookupError) as exc:
++                raise ClassificationPersistenceError("production_profile_not_admitted") from exc
++            if (stored_admission != admission or stored_activation != pinned.activation_record
++                    or pinned.activation_record.semantic_payload.get("activation_record_id") !=
++                    pinned.pointer.activation_record_id
++                    or pinned.activation_record.semantic_payload.get(
++                        "runtime_profile_admission_manifest_id") != admission.artifact_id):
++                raise ClassificationPersistenceError("production_profile_not_admitted")
++        elif assembly.execution_context == "PRE_ACCEPTANCE_CANDIDATE":
++            if assembly.pinned_runtime_profile is not None or assembly.runtime_profile_activation_record is not None:
++                raise ClassificationPersistenceError("persistence_unavailable")
++        else:
++            raise ClassificationPersistenceError("persistence_unavailable")
++        if assembly.evidence_snapshot_materialization is None:
++            raise ClassificationPersistenceError("persistence_unavailable")
++        if assembly.snapshot_record.semantic_payload.get("evidence_snapshot_content") != (
++                DeviceFingerprintClassificationStore._ref(assembly.evidence_snapshot_content).as_dict()):
++            raise ClassificationPersistenceError("persistence_unavailable")
++        if assembly.classification_result.semantic_payload.get("classification_request_digest") != (
++                assembly.classification_request_manifest.content_sha256):
++            raise ClassificationPersistenceError("persistence_unavailable")
++        request = assembly.classification_request_manifest
++        verified = make_classification_request_manifest(
++            request.semantic_payload,
++            evidence_snapshot_content=assembly.evidence_snapshot_content,
++            source_evaluability=assembly.source_evaluability,
++            knowledge_bundle=assembly.knowledge_bundle,
++            classification_policy=assembly.classification_policy,
++            evidence_adapter_contract_set=assembly.evidence_adapter_contract_set,
++            classifier_artifact_manifest=assembly.classifier_artifact_manifest)
++        if verified != request or request.semantic_payload["knowledge_evaluation_at_utc"] != (
++                assembly.knowledge_evaluation_at_utc):
++            raise ClassificationPersistenceError("persistence_unavailable")
++        replayed = fuse_classification(FusionInputs(
++            request.content_sha256, assembly.classification_policy,
++            assembly.knowledge_candidate.classification_taxonomy,
++            assembly.knowledge_candidate.alias_mapping,
++            assembly.evidence_adapter_contract_set, assembly.knowledge_bundle,
++            assembly.knowledge_candidate, assembly.classifier_artifact_manifest,
++            assembly.evidence_snapshot_content, assembly.source_evaluability,
++            assembly.origin_assessments))
++        if replayed != assembly.classification_result:
++            raise ClassificationPersistenceError("persistence_unavailable")
++
++    def persist(
++        self, assembly: RequestAssemblyResult, *, retention_policy: ArtifactContent,
++    ) -> ClassificationCoreRecord:
++        """Commit whole closure + edges + core, or nothing; never touch Task-01."""
++        try:
++            self._validate_assembly(assembly, retention_policy)
++        except ClassificationPersistenceError:
++            raise
++        except (DeviceFingerprintValidationError, KeyError, TypeError, AttributeError) as exc:
++            raise ClassificationPersistenceError("persistence_unavailable") from exc
++        try:
++            contents = self._roots(assembly, retention_policy)
++        except (ArtifactDependencyGraphError, DeviceFingerprintValidationError,
++                KeyError, TypeError) as exc:
++            raise ClassificationPersistenceError("persistence_unavailable") from exc
++        try:
++            classification_id = str(self._uuid_factory())
++            if (str(uuid.UUID(classification_id)) != classification_id
++                    or uuid.UUID(classification_id).version != 4):
++                raise ClassificationPersistenceError("persistence_unavailable")
++            classified_at = self._clock()
++            parse_utc(classified_at)
++        except (ValueError, TypeError, DeviceFingerprintValidationError) as exc:
++            raise ClassificationPersistenceError("persistence_unavailable") from exc
++        snapshot = assembly.evidence_snapshot_content.semantic_payload
++        activation_id = (assembly.pinned_runtime_profile.pointer.activation_record_id
++                         if assembly.pinned_runtime_profile is not None else None)
++        core = ClassificationCoreRecord(
++            classification_id, snapshot["site_id"], snapshot["observed_mac"], classified_at,
++            assembly.execution_context,
++            assembly.classification_runtime_profile.artifact_id,
++            assembly.classification_runtime_profile.content_sha256,
++            assembly.foundation_runtime_profile.artifact_id,
++            assembly.foundation_runtime_profile.content_sha256,
++            activation_id, assembly.classification_request_manifest.artifact_id,
++            assembly.classification_request_manifest.content_sha256,
++            assembly.classification_result.artifact_id,
++            assembly.classification_result.content_sha256,
++            assembly.snapshot_record.artifact_id, assembly.snapshot_record.content_sha256,
++            retention_policy.artifact_id, retention_policy.content_sha256,
++        )
++        conn = self._connect()
++        try:
++            conn.execute("BEGIN IMMEDIATE")
++            for content in contents.values():
++                old = conn.execute("SELECT content_sha256, semantic_payload_json FROM artifacts "
++                                   "WHERE artifact_id=?", (content.artifact_id,)).fetchone()
++                if old is not None and tuple(old) != (content.content_sha256, content.semantic_payload_json):
++                    raise ClassificationPersistenceError("persistence_unavailable")
++                conn.execute("INSERT OR IGNORE INTO artifacts VALUES (?,?,?,?)", (
++                    content.artifact_id, content.artifact_type, content.content_sha256,
++                    content.semantic_payload_json))
++            for content in contents.values():
++                for reference in extract_direct_artifact_refs(content):
++                    target = contents[reference.artifact_id]
++                    reference.resolve(target, target.artifact_type)
++                    conn.execute("INSERT OR IGNORE INTO artifact_dependencies VALUES (?,?,?)", (
++                        content.artifact_id, reference.artifact_id, reference.content_sha256))
++            conn.execute(
++                f"INSERT INTO classifications ({','.join(_CORE_FIELDS)}) "
++                f"VALUES ({','.join('?' for _ in _CORE_FIELDS)})",
++                tuple(getattr(core, name) for name in _CORE_FIELDS))
++            for content in contents.values():
++                conn.execute("INSERT INTO classification_roots VALUES (?,?,?)", (
++                    classification_id, content.artifact_id, content.content_sha256))
++            if self._fault is not None:
++                self._fault("before_commit")
++            if assembly.execution_context == "PRODUCTION":
++                try:
++                    if self._control.check_pinned_commit_allowed(
++                            assembly.pinned_runtime_profile) is not True:
++                        raise ControlPlaneOperationError("runtime_profile_invalidated")
++                except ControlPlaneOperationError as exc:
++                    raise ClassificationPersistenceError("runtime_profile_invalidated") from exc
++            conn.commit()
++            return core
++        except Exception as exc:
++            if conn.in_transaction:
++                conn.rollback()
++            if isinstance(exc, ClassificationPersistenceError):
++                raise
++            raise ClassificationPersistenceError("persistence_unavailable") from exc
++        finally:
++            conn.close()
++
++    @staticmethod
++    def _load(conn: sqlite3.Connection, reference: ArtifactRef) -> ArtifactContent:
++        row = conn.execute("SELECT * FROM artifacts WHERE artifact_id=?", (reference.artifact_id,)).fetchone()
++        if row is None:
++            raise ClassificationPersistenceError("persistence_unavailable")
++        content = ArtifactContent(row["artifact_type"], 1, row["semantic_payload_json"],
++                                  row["content_sha256"], row["artifact_id"])
++        reference.resolve(content, content.artifact_type)
++        return content
++
++    def load_artifact(self, artifact_id: str, content_sha256: str) -> ArtifactContent:
++        with self._connect() as conn:
++            return self._load(conn, ArtifactRef(artifact_id, content_sha256))
++
++    def load_core(self, classification_id: str) -> ClassificationCoreRecord:
++        with self._connect() as conn:
++            row = conn.execute("SELECT * FROM classifications WHERE classification_id=?",
++                               (classification_id,)).fetchone()
++            if row is None:
++                raise ClassificationPersistenceError("persistence_unavailable")
++            return ClassificationCoreRecord(**dict(row))
++
++    def replay_level_b(self, classification_id: str) -> ArtifactContent:
++        """Verify the retained semantic result without Task-01 or a current clock."""
++        try:
++            with self._connect() as conn:
++                row = conn.execute("SELECT * FROM classifications WHERE classification_id=?",
++                                   (classification_id,)).fetchone()
++                if row is None:
++                    raise ClassificationPersistenceError("persistence_unavailable")
++                core = ClassificationCoreRecord(**dict(row))
++
++                def load(value: dict[str, str]) -> ArtifactContent:
++                    return self._load(conn, ArtifactRef.from_dict(value))
++
++                profile = self._load(conn, ArtifactRef(
++                    core.classification_runtime_profile_id,
++                    core.classification_runtime_profile_digest))
++                foundation = self._load(conn, ArtifactRef(
++                    core.foundation_runtime_profile_id, core.foundation_runtime_profile_digest))
++                if (make_classification_runtime_profile(profile.semantic_payload) != profile
++                        or profile.semantic_payload["foundation_runtime_profile"] !=
++                        self._ref(foundation).as_dict()):
++                    raise ClassificationPersistenceError("replay_mismatch")
++                request = self._load(conn, ArtifactRef(
++                    core.classification_request_manifest_id, core.classification_request_manifest_digest))
++                rp = request.semantic_payload
++                named = {name: load(rp[name]) for name in (
++                    "evidence_snapshot_content", "source_evaluability", "knowledge_bundle",
++                    "classification_policy", "evidence_adapter_contract_set",
++                    "classifier_artifact_manifest")}
++                if make_classification_request_manifest(rp, **named) != request:
++                    raise ClassificationPersistenceError("replay_mismatch")
++                snapshot_record = self._load(conn, ArtifactRef(
++                    core.snapshot_record_id, core.snapshot_record_digest))
++                if snapshot_record.semantic_payload.get("evidence_snapshot_content") != (
++                        self._ref(named["evidence_snapshot_content"]).as_dict()):
++                    raise ClassificationPersistenceError("replay_mismatch")
++                knowledge = DeviceFingerprintRequestAssembly.reconstruct_knowledge_bundle(
++                    named["knowledge_bundle"], lambda ref: self._load(conn, ref))
++                persisted = self._load(conn, ArtifactRef(
++                    core.classification_result_id, core.classification_result_digest))
++                origins = tuple(load(ref) for ref in persisted.semantic_payload["origin_assessments"])
++                replayed = fuse_classification(FusionInputs(
++                    request.content_sha256, named["classification_policy"],
++                    knowledge.classification_taxonomy, knowledge.alias_mapping,
++                    named["evidence_adapter_contract_set"], named["knowledge_bundle"],
++                    knowledge, named["classifier_artifact_manifest"],
++                    named["evidence_snapshot_content"], named["source_evaluability"], origins))
++                if (replayed.artifact_id != persisted.artifact_id
++                        or replayed.content_sha256 != persisted.content_sha256
++                        or replayed.semantic_payload_json != persisted.semantic_payload_json):
++                    raise ClassificationPersistenceError("replay_mismatch")
++                return replayed
++        except ClassificationPersistenceError:
++            raise
++        except (sqlite3.Error, DeviceFingerprintValidationError, KeyError, TypeError,
++                ValueError, ControlPlaneOperationError) as exc:
++            raise ClassificationPersistenceError("replay_mismatch") from exc
++
++    def expire_and_gc(self, *, now_utc: str) -> int:
++        """Delete eligible roots, then only artifacts unreferenced by any remaining root."""
++        now = parse_utc(now_utc)
++        conn = self._connect()
++        try:
++            conn.execute("BEGIN IMMEDIATE")
++            expired = []
++            for row in conn.execute("SELECT classification_id, classified_at_utc, "
++                                    "classification_retention_policy_id, "
++                                    "classification_retention_policy_digest FROM classifications"):
++                policy = self._load(conn, ArtifactRef(
++                    row["classification_retention_policy_id"],
++                    row["classification_retention_policy_digest"]))
++                payload = make_classification_retention_policy(policy.semantic_payload).semantic_payload
++                if (payload["expiry_behavior"] == "DELETE_CLASSIFICATION_WHEN_ELIGIBLE"
++                        and now >= parse_utc(row["classified_at_utc"]) + timedelta(
++                            seconds=payload["classification_history_retention_seconds"])):
++                    expired.append(row["classification_id"])
++            for identifier in expired:
++                conn.execute("DELETE FROM classifications WHERE classification_id=?", (identifier,))
++            conn.execute("DELETE FROM artifact_dependencies WHERE owner_id NOT IN "
++                         "(SELECT artifact_id FROM classification_roots)")
++            conn.execute("DELETE FROM artifacts WHERE artifact_id NOT IN "
++                         "(SELECT artifact_id FROM classification_roots)")
++            conn.commit()
++            return len(expired)
++        except Exception as exc:
++            if conn.in_transaction:
++                conn.rollback()
++            if isinstance(exc, ClassificationPersistenceError):
++                raise
++            raise ClassificationPersistenceError("persistence_unavailable") from exc
++        finally:
++            conn.close()
+diff --git a/app/device_fingerprint/classification_request.py b/app/device_fingerprint/classification_request.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b44013de811a6b3d646d838e0e951166458f246
+--- /dev/null
++++ b/app/device_fingerprint/classification_request.py
+@@ -0,0 +1,49 @@
++"""Closed, purely semantic R14 ClassificationRequestManifest."""
++
++from __future__ import annotations
++
++from typing import Any
++
++from .artifact_content import ArtifactContent, ArtifactRef, make_artifact_content
++from .models import DeviceFingerprintValidationError
++from .validation import parse_utc
++
++
++_FIELDS = {
++    "evidence_snapshot_content": "EvidenceSnapshotContent",
++    "source_evaluability": "SourceEvaluability",
++    "knowledge_bundle": "KnowledgeBundle",
++    "classification_policy": "ClassificationPolicy",
++    "evidence_adapter_contract_set": "EvidenceAdapterContractSet",
++    "classifier_artifact_manifest": "ClassifierArtifactManifest",
++}
++
++
++def make_classification_request_manifest(
++    payload: dict[str, Any], *,
++    evidence_snapshot_content: ArtifactContent,
++    source_evaluability: ArtifactContent,
++    knowledge_bundle: ArtifactContent,
++    classification_policy: ArtifactContent,
++    evidence_adapter_contract_set: ArtifactContent,
++    classifier_artifact_manifest: ArtifactContent,
++) -> ArtifactContent:
++    """Resolve every exact typed input; never incorporate execution lineage."""
++    if not isinstance(payload, dict) or set(payload) != set(_FIELDS) | {"knowledge_evaluation_at_utc"}:
++        raise DeviceFingerprintValidationError("Invalid ClassificationRequestManifest shape")
++    supplied = locals()
++    normalized: dict[str, Any] = {}
++    for field, kind in _FIELDS.items():
++        ref = ArtifactRef.from_dict(payload[field])
++        ref.resolve(supplied[field], kind)
++        normalized[field] = ref.as_dict()
++    instant = payload["knowledge_evaluation_at_utc"]
++    parse_utc(instant)
++    normalized["knowledge_evaluation_at_utc"] = instant
++    if source_evaluability.semantic_payload.get("evidence_snapshot_content") != normalized[
++            "evidence_snapshot_content"]:
++        raise DeviceFingerprintValidationError("SourceEvaluability/snapshot mismatch")
++    if classification_policy.semantic_payload.get("evidence_adapter_contract_set") != normalized[
++            "evidence_adapter_contract_set"]:
++        raise DeviceFingerprintValidationError("ClassificationPolicy/adapter mismatch")
++    return make_artifact_content("ClassificationRequestManifest", normalized)
+diff --git a/app/device_fingerprint/request_assembly.py b/app/device_fingerprint/request_assembly.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d353d5ba90cd0802212302c07f10e15ea4e73bba
+--- /dev/null
++++ b/app/device_fingerprint/request_assembly.py
+@@ -0,0 +1,233 @@
++"""Pin-once Task-04 RequestAssembly; operational lineage stays outside the request."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import datetime, timezone
++from typing import Callable
++
++from .artifact_content import ArtifactContent, ArtifactRef
++from .classification_request import make_classification_request_manifest
++from .control_plane_store import (
++    ControlPlaneOperationError, DeviceFingerprintControlPlaneStore, PinnedRuntimeProfile,
++)
++from .fe5_external_knowledge import evaluate_external_knowledge_freshness
++from .fusion import FusionInputs, fuse_classification
++from .knowledge_bundle import (
++    KnowledgeBundleCandidate, make_knowledge_bundle, validate_knowledge_bundle_dependencies,
++)
++from .models import DeviceFingerprintValidationError
++from .origin_assessment import DeviceFingerprintOriginAssessmentBuilder, OriginAssessmentInputs
++from .snapshot_service import (
++    DeviceFingerprintSnapshotService, EvidenceSnapshotMaterialization, SnapshotBuildResult,
++)
++from .source_evaluability import DeviceFingerprintSourceEvaluabilityBuilder
++from .runtime_profile_artifacts import make_classification_runtime_profile, make_foundation_runtime_profile
++from .validation import format_utc, parse_utc
++
++
++class RequestAssemblyError(RuntimeError):
++    def __init__(self, reason_code: str):
++        self.reason_code = reason_code
++        super().__init__(reason_code)
++
++
++@dataclass(frozen=True, slots=True)
++class RequestAssemblyResult:
++    execution_context: str
++    classification_runtime_profile: ArtifactContent
++    foundation_runtime_profile: ArtifactContent
++    pinned_runtime_profile: PinnedRuntimeProfile | None
++    runtime_profile_activation_record: ArtifactContent | None
++    evidence_snapshot_content: ArtifactContent
++    evidence_snapshot_materialization: EvidenceSnapshotMaterialization
++    snapshot_record: ArtifactContent
++    source_evaluability: ArtifactContent
++    knowledge_bundle: ArtifactContent
++    knowledge_candidate: KnowledgeBundleCandidate
++    classification_policy: ArtifactContent
++    evidence_adapter_contract_set: ArtifactContent
++    classifier_artifact_manifest: ArtifactContent
++    knowledge_evaluation_at_utc: str
++    classification_request_manifest: ArtifactContent
++    origin_assessments: tuple[ArtifactContent, ...]
++    classification_result: ArtifactContent
++
++
++class DeviceFingerprintRequestAssembly:
++    """Production selects no profile from its caller; candidate mode is explicit."""
++
++    def __init__(
++        self, *, control_plane_store: DeviceFingerprintControlPlaneStore,
++        read_service: object,
++        compatibility_hook: Callable[..., bool] | None = None,
++        utc_clock: Callable[[], str] = lambda: format_utc(datetime.now(timezone.utc)),
++        process_memory_guard: Callable[[int], bool] | None = None,
++    ) -> None:
++        self._store = control_plane_store
++        self._read_service = read_service
++        self._compatibility_hook = compatibility_hook
++        self._clock = utc_clock
++        self._memory_guard = process_memory_guard
++
++    def _resolve(self, reference: ArtifactRef) -> ArtifactContent:
++        return self._store.load_artifact(reference.artifact_id, reference.content_sha256)
++
++    def _dependency(self, value: dict[str, str], kind: str) -> ArtifactContent:
++        reference = ArtifactRef.from_dict(value)
++        if not reference.artifact_id.startswith(f"{kind}:v1:sha256:"):
++            raise RequestAssemblyError("runtime_profile_incompatible")
++        content = self._resolve(reference)
++        reference.resolve(content, kind)
++        return content
++
++    @staticmethod
++    def reconstruct_knowledge_bundle(
++        bundle: ArtifactContent, resolver: Callable[[ArtifactRef], ArtifactContent],
++    ) -> KnowledgeBundleCandidate:
++        """Follow record-set provenance, never positional inventory assignment."""
++        def dependency(value: dict[str, str], kind: str) -> ArtifactContent:
++            reference = ArtifactRef.from_dict(value)
++            if not reference.artifact_id.startswith(f"{kind}:v1:sha256:"):
++                raise DeviceFingerprintValidationError("Wrong knowledge dependency type")
++            content = resolver(reference)
++            reference.resolve(content, kind)
++            return content
++
++        try:
++            if make_knowledge_bundle(bundle.semantic_payload) != bundle:
++                raise DeviceFingerprintValidationError("Noncanonical KnowledgeBundle")
++            payload = bundle.semantic_payload
++            taxonomy = dependency(payload["classification_taxonomy"], "ClassificationTaxonomy")
++            aliases = dependency(payload["alias_mapping"], "AliasMapping")
++            k3 = dependency(payload["k3_portal_rule_set"], "K3PortalRuleSet")
++            records = {slot: dependency(payload[f"{slot}_record_set"],
++                                              "CanonicalKnowledgeRecordSet")
++                       for slot in ("k1", "k2b", "k4")}
++            external = {}
++            for slot, record_set in records.items():
++                provenance = dependency(record_set.semantic_payload["knowledge_provenance"],
++                                              "KnowledgeProvenanceManifest")
++                provenance_payload = provenance.semantic_payload
++                external[slot] = (
++                    provenance,
++                    dependency(provenance_payload["source_governance_record"],
++                                     "SourceGovernanceRecord"),
++                    dependency(provenance_payload["knowledge_freshness_policy"],
++                                     "KnowledgeFreshnessPolicy"),
++                )
++            provenance_refs = payload["knowledge_provenance_manifests"]
++            external_ids = {triple[0].artifact_id for triple in external.values()}
++            internal_refs = [ref for ref in provenance_refs if ref["artifact_id"] not in external_ids]
++            if len(internal_refs) != 1:
++                raise DeviceFingerprintValidationError("K3 provenance is not unique")
++            k3_provenance = dependency(internal_refs[0], "KnowledgeProvenanceManifest")
++            candidate = KnowledgeBundleCandidate(
++                classification_taxonomy=taxonomy, alias_mapping=aliases,
++                k1_record_set=records["k1"], k1_provenance=external["k1"][0],
++                k1_governance=external["k1"][1], k1_freshness_policy=external["k1"][2],
++                k2b_record_set=records["k2b"], k2b_provenance=external["k2b"][0],
++                k2b_governance=external["k2b"][1], k2b_freshness_policy=external["k2b"][2],
++                k3_portal_rule_set=k3, k3_provenance=k3_provenance,
++                k4_record_set=records["k4"], k4_provenance=external["k4"][0],
++                k4_governance=external["k4"][1], k4_freshness_policy=external["k4"][2],
++            )
++            validate_knowledge_bundle_dependencies(bundle, candidate)
++            return candidate
++        except (ControlPlaneOperationError, DeviceFingerprintValidationError,
++                KeyError, TypeError, AttributeError) as exc:
++            raise RequestAssemblyError("knowledge_bundle_unavailable") from exc
++
++    def assemble_production(self, site_id: str, observed_mac: str,
++                            window_start_utc: str, window_end_utc: str) -> RequestAssemblyResult:
++        try:
++            pinned = self._store.pin_active_profile("classification")
++        except ControlPlaneOperationError as exc:
++            raise RequestAssemblyError(exc.reason_code) from exc
++        if not isinstance(pinned, PinnedRuntimeProfile):
++            raise RequestAssemblyError("activation_lineage_unavailable")
++        return self._assemble("PRODUCTION", pinned.runtime_profile, pinned, site_id,
++                              observed_mac, window_start_utc, window_end_utc)
++
++    def assemble_pre_acceptance_candidate(
++        self, candidate_classification_runtime_profile: ArtifactContent,
++        site_id: str, observed_mac: str, window_start_utc: str, window_end_utc: str,
++    ) -> RequestAssemblyResult:
++        """Acceptance-only exact candidate; no active pointer read or fake admission."""
++        return self._assemble("PRE_ACCEPTANCE_CANDIDATE", candidate_classification_runtime_profile,
++                              None, site_id, observed_mac, window_start_utc, window_end_utc)
++
++    def _assemble(
++        self, context: str, profile: ArtifactContent, pinned: PinnedRuntimeProfile | None,
++        site_id: str, observed_mac: str, start: str, end: str,
++    ) -> RequestAssemblyResult:
++        try:
++            if (profile.artifact_type != "ClassificationRuntimeProfile"
++                    or make_classification_runtime_profile(profile.semantic_payload) != profile):
++                raise RequestAssemblyError("runtime_profile_incompatible")
++            p = profile.semantic_payload
++            foundation = self._dependency(p["foundation_runtime_profile"], "FoundationRuntimeProfile")
++            if make_foundation_runtime_profile(foundation.semantic_payload) != foundation:
++                raise RequestAssemblyError("runtime_profile_incompatible")
++            snapshot: SnapshotBuildResult = DeviceFingerprintSnapshotService(
++                self._read_service, foundation_runtime_profile=foundation,
++                artifact_resolver=self._resolve, utc_clock=self._clock,
++                process_memory_guard=self._memory_guard,
++            ).build(site_id, observed_mac, start, end)
++            evaluability = DeviceFingerprintSourceEvaluabilityBuilder(
++                foundation_runtime_profile=foundation, artifact_resolver=self._resolve,
++            ).build(snapshot.evidence_snapshot_content)
++            bundle = self._dependency(p["knowledge_bundle"], "KnowledgeBundle")
++            knowledge = self.reconstruct_knowledge_bundle(bundle, self._resolve)
++            policy = self._dependency(p["classification_policy"], "ClassificationPolicy")
++            adapters = self._dependency(p["evidence_adapter_contract_set"], "EvidenceAdapterContractSet")
++            classifier = self._dependency(p["classifier_artifact_manifest"], "ClassifierArtifactManifest")
++            if self._compatibility_hook is None or not callable(self._compatibility_hook):
++                raise RequestAssemblyError("runtime_profile_incompatible")
++            try:
++                compatible = self._compatibility_hook(
++                    profile, foundation, bundle, knowledge, policy, adapters, classifier)
++            except Exception as exc:
++                raise RequestAssemblyError("runtime_profile_incompatible") from exc
++            if compatible is not True:
++                raise RequestAssemblyError("runtime_profile_incompatible")
++            knowledge_time = self._clock()
++            parse_utc(knowledge_time)
++            for slot in ("k1", "k2b", "k4"):
++                freshness = evaluate_external_knowledge_freshness(
++                    getattr(knowledge, f"{slot}_provenance"),
++                    getattr(knowledge, f"{slot}_freshness_policy"),
++                    knowledge_evaluation_at_utc=knowledge_time)
++                if freshness["failure_code"] == "negative_knowledge_age":
++                    raise RequestAssemblyError("negative_knowledge_age")
++            contents = {
++                "evidence_snapshot_content": snapshot.evidence_snapshot_content,
++                "source_evaluability": evaluability, "knowledge_bundle": bundle,
++                "classification_policy": policy, "evidence_adapter_contract_set": adapters,
++                "classifier_artifact_manifest": classifier,
++            }
++            request = make_classification_request_manifest({
++                name: ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++                for name, content in contents.items()
++            } | {"knowledge_evaluation_at_utc": knowledge_time}, **contents)
++            origins = DeviceFingerprintOriginAssessmentBuilder(OriginAssessmentInputs(
++                snapshot.evidence_snapshot_content, snapshot.materialization,
++                evaluability, adapters, bundle, knowledge, knowledge_time)).build_all()
++            result = fuse_classification(FusionInputs(
++                request.content_sha256, policy, knowledge.classification_taxonomy,
++                knowledge.alias_mapping, adapters, bundle, knowledge, classifier,
++                snapshot.evidence_snapshot_content, evaluability, origins))
++            if result.semantic_payload["classification_request_digest"] != request.content_sha256:
++                raise RequestAssemblyError("classifier_internal_error")
++            return RequestAssemblyResult(
++                context, profile, foundation, pinned,
++                pinned.activation_record if pinned is not None else None,
++                snapshot.evidence_snapshot_content, snapshot.materialization,
++                snapshot.snapshot_record, evaluability, bundle, knowledge,
++                policy, adapters, classifier, knowledge_time, request, origins, result)
++        except RequestAssemblyError:
++            raise
++        except ControlPlaneOperationError as exc:
++            raise RequestAssemblyError("runtime_profile_incompatible") from exc
++        except (DeviceFingerprintValidationError, KeyError, TypeError, AttributeError) as exc:
++            raise RequestAssemblyError("classifier_internal_error") from exc
+diff --git a/tests/device_fingerprint_task04_04d_persistence/__init__.py b/tests/device_fingerprint_task04_04d_persistence/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4fce307a678958e9343677dd57dcf914303ad9bf
+--- /dev/null
++++ b/tests/device_fingerprint_task04_04d_persistence/__init__.py
+@@ -0,0 +1 @@
++"""Task-04D classification persistence focused tests."""
+diff --git a/tests/device_fingerprint_task04_04d_persistence/test_classification_persistence.py b/tests/device_fingerprint_task04_04d_persistence/test_classification_persistence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..adefcd6d60612651fb32f4506b198e863eb76022
+--- /dev/null
++++ b/tests/device_fingerprint_task04_04d_persistence/test_classification_persistence.py
+@@ -0,0 +1,269 @@
++"""Atomic immutable closure, replay and reference-aware retention tests."""
++
++from __future__ import annotations
++
++import sqlite3
++import uuid
++from dataclasses import replace
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef, make_artifact_content
++from app.device_fingerprint.classification_persistence import (
++    ClassificationPersistenceError, DeviceFingerprintClassificationStore, _CORE_FIELDS,
++)
++from app.device_fingerprint.classification_retention_policy import build_initial_classification_retention_policy_v1
++from app.device_fingerprint.control_plane_store import ActiveProfilePointerV1, PinnedRuntimeProfile
++from tests.device_fingerprint_task04_04d_request.test_request_assembly import (
++    TIME, candidate_run, prepared, ref,
++)
++from tests.device_fingerprint_task04_t01.test_snapshot_service import MAC, START, END
++from tests.device_fingerprint import SITE
++
++
++def setup(tmp_path, *, clock=lambda: TIME, fault_hook=None):
++    context, control, service, profile = prepared()
++    assembly = candidate_run(service, profile)
++    retention = build_initial_classification_retention_policy_v1()
++    task01 = tmp_path / "task01.sqlite"
++    task01.touch()
++    store = DeviceFingerprintClassificationStore(
++        tmp_path / "classification.sqlite", task01,
++        control_plane_store=control, utc_clock=clock, fault_hook=fault_hook)
++    store.initialize()
++    return store, control, assembly, retention
++
++
++def production_setup(tmp_path):
++    store, control, candidate, retention = setup(tmp_path)
++    profile = candidate.classification_runtime_profile
++    accepted = make_artifact_content("Task04AcceptanceManifest", {"fixture": "accepted"})
++    foundation_admission = make_artifact_content("RuntimeProfileAdmissionManifest", {"fixture": "foundation"})
++    admission = make_artifact_content("RuntimeProfileAdmissionManifest", {
++        "profile_kind": "classification", "candidate_profile": ref(profile),
++        "task04_acceptance_manifest": ref(accepted),
++        "foundation_runtime_profile_admission_manifest": ref(foundation_admission),
++    })
++    activation_id = "11111111-1111-4111-8111-111111111111"
++    activation = make_artifact_content("RuntimeProfileActivationRecord", {
++        "activation_record_id": activation_id, "runtime_profile_id": profile.artifact_id,
++        "runtime_profile_digest": profile.content_sha256,
++        "runtime_profile_admission_manifest_id": admission.artifact_id,
++        "runtime_profile_admission_manifest_digest": admission.content_sha256,
++        "previous_active_profile_id": None,
++        "previous_active_profile_digest": None,
++    })
++    validity = make_artifact_content("RuntimeProfileValidityRecord", {
++        "validity_record_id": "33333333-3333-4333-8333-333333333333",
++        "activation_record_id": activation_id, "previous_validity_record_id": None,
++        "runtime_profile_id": profile.artifact_id,
++        "runtime_profile_digest": profile.content_sha256,
++    })
++    pointer = ActiveProfilePointerV1(
++        "classification", profile.artifact_id, profile.content_sha256,
++        activation_id, "22222222-2222-4222-8222-222222222222", TIME)
++    control.contents.update({item.artifact_id: item for item in (
++        accepted, foundation_admission, admission, activation, validity)})
++    control.pinned = PinnedRuntimeProfile(pointer, profile, admission, activation, validity)
++    assembly = replace(candidate, execution_context="PRODUCTION",
++                       pinned_runtime_profile=control.pinned,
++                       runtime_profile_activation_record=activation)
++    store._validity_chain = lambda _assembly: (validity,)
++    return store, control, assembly, retention
++
++
++def test_same_task01_database_path_is_rejected(tmp_path):
++    path = tmp_path / "task01.sqlite"
++    with pytest.raises(ClassificationPersistenceError):
++        DeviceFingerprintClassificationStore(path, path, control_plane_store=object())
++
++
++def test_pre_acceptance_core_exact_and_no_future_placeholders(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    core = store.persist(assembly, retention_policy=retention)
++    assert uuid.UUID(core.classification_id).version == 4
++    assert core.classification_id == str(uuid.UUID(core.classification_id))
++    assert core.classified_at_utc == TIME
++    assert core.execution_context == "PRE_ACCEPTANCE_CANDIDATE"
++    assert core.runtime_profile_activation_record_id is None
++    assert core.foundation_runtime_profile_id == assembly.foundation_runtime_profile.artifact_id
++    assert core.classification_runtime_profile_id == assembly.classification_runtime_profile.artifact_id
++    with store._connect() as conn:
++        columns = {row[1] for row in conn.execute("PRAGMA table_info(classifications)")}
++    assert columns == set(_CORE_FIELDS)
++    assert not columns.intersection({
++        "task04_acceptance_manifest_id", "runtime_profile_admission_manifest_id",
++        "decision_record_id", "gate_result_manifest_id"})
++    assert store.load_core(core.classification_id) == core
++
++
++def test_exact_artifact_bytes_roundtrip_and_transient_not_persisted(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    core = store.persist(assembly, retention_policy=retention)
++    for artifact in (assembly.classification_result, assembly.classification_request_manifest,
++                     assembly.snapshot_record, assembly.evidence_snapshot_content):
++        loaded = store.load_artifact(artifact.artifact_id, artifact.content_sha256)
++        assert loaded.semantic_payload_json == artifact.semantic_payload_json
++    with store._connect() as conn:
++        kinds = {row[0] for row in conn.execute("SELECT artifact_type FROM artifacts")}
++    assert "EvidenceSnapshotMaterialization" not in kinds
++    assert store.load_artifact(core.snapshot_record_id, core.snapshot_record_digest) == (
++        assembly.snapshot_record)
++
++
++def test_atomic_fault_rolls_back_core_and_new_artifacts(tmp_path):
++    def fault(stage):
++        assert stage == "before_commit"
++        raise sqlite3.OperationalError("injected")
++
++    store, _, assembly, retention = setup(tmp_path, fault_hook=fault)
++    with pytest.raises(ClassificationPersistenceError) as caught:
++        store.persist(assembly, retention_policy=retention)
++    assert caught.value.reason_code == "persistence_unavailable"
++    with store._connect() as conn:
++        assert conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0] == 0
++        assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
++
++
++def test_level_b_replays_without_task01_and_no_current_clock(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    core = store.persist(assembly, retention_policy=retention)
++    (tmp_path / "task01.sqlite").unlink()
++    with store._connect() as conn:
++        before = conn.execute("SELECT semantic_payload_json FROM artifacts WHERE artifact_id=?",
++                              (assembly.classification_result.artifact_id,)).fetchone()[0]
++    store._clock = lambda: (_ for _ in ()).throw(AssertionError("clock read on replay"))
++    replayed = store.replay_level_b(core.classification_id)
++    assert replayed == assembly.classification_result
++    assert replayed.semantic_payload_json == assembly.classification_result.semantic_payload_json
++    assert store.load_core(core.classification_id) == core
++    assert store.load_artifact(core.classification_request_manifest_id,
++                               core.classification_request_manifest_digest).semantic_payload[
++        "knowledge_evaluation_at_utc"] == assembly.knowledge_evaluation_at_utc
++    with store._connect() as conn:
++        after = conn.execute("SELECT semantic_payload_json FROM artifacts WHERE artifact_id=?",
++                             (assembly.classification_result.artifact_id,)).fetchone()[0]
++    assert after == before
++
++
++def test_frozen_ninety_day_expiry_and_shared_artifact_protection(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    a = store.persist(assembly, retention_policy=retention)
++    b = store.persist(assembly, retention_policy=retention)
++    assert store.expire_and_gc(now_utc="2026-12-21T22:30:34.463Z") == 0
++    assert store.load_artifact(assembly.classification_policy.artifact_id,
++                               assembly.classification_policy.content_sha256)
++    with store._connect() as conn:
++        conn.execute("UPDATE classifications SET classified_at_utc=? WHERE classification_id=?",
++                     ("2026-09-01T00:00:00.000Z", a.classification_id))
++    assert store.expire_and_gc(now_utc="2026-12-01T22:30:34.464Z") == 1
++    assert store.load_artifact(assembly.classification_policy.artifact_id,
++                               assembly.classification_policy.content_sha256)
++    assert store.replay_level_b(b.classification_id) == assembly.classification_result
++    assert store.expire_and_gc(now_utc="2027-01-01T00:00:00.000Z") == 1
++    with store._connect() as conn:
++        assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
++
++
++def test_exact_ninety_day_boundary(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    core = store.persist(assembly, retention_policy=retention)
++    assert retention.semantic_payload["classification_history_retention_seconds"] == 7_776_000
++    assert store.expire_and_gc(now_utc="2026-12-21T22:30:34.463Z") == 0
++    assert store.load_core(core.classification_id) == core
++    assert store.expire_and_gc(now_utc="2026-12-21T22:30:34.464Z") == 1
++    with store._connect() as conn:
++        assert conn.execute("SELECT COUNT(*) FROM classification_roots").fetchone()[0] == 0
++
++
++def test_cross_field_profile_and_activation_rules(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    other = make_artifact_content("FoundationRuntimeProfile", {"synthetic": True})
++    with pytest.raises(ClassificationPersistenceError):
++        store.persist(replace(assembly, foundation_runtime_profile=other), retention_policy=retention)
++    with pytest.raises(ClassificationPersistenceError) as caught:
++        store.persist(replace(assembly, execution_context="PRODUCTION"), retention_policy=retention)
++    assert caught.value.reason_code == "production_profile_not_admitted"
++
++
++def test_immutable_artifact_conflict_rejected(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    store.persist(assembly, retention_policy=retention)
++    with store._connect() as conn:
++        conn.execute("UPDATE artifacts SET semantic_payload_json=? WHERE artifact_id=?",
++                     (b"{}", assembly.classification_policy.artifact_id))
++    with pytest.raises(ClassificationPersistenceError):
++        store.persist(assembly, retention_policy=retention)
++
++
++def test_dependency_edges_are_complete_and_no_dangling_digest(tmp_path):
++    store, _, assembly, retention = setup(tmp_path)
++    store.persist(assembly, retention_policy=retention)
++    with store._connect() as conn:
++        total = conn.execute("SELECT COUNT(*) FROM artifact_dependencies").fetchone()[0]
++        dangling = conn.execute("SELECT COUNT(*) FROM artifact_dependencies d "
++                                "LEFT JOIN artifacts a ON a.artifact_id=d.dependency_id "
++                                "WHERE a.artifact_id IS NULL OR a.content_sha256<>d.dependency_digest"
++                                ).fetchone()[0]
++        roots = conn.execute("SELECT COUNT(*) FROM classification_roots").fetchone()[0]
++    assert total > 0
++    assert roots > 0
++    assert dangling == 0
++
++
++def test_missing_exact_dependency_fails_before_classification_commit(tmp_path):
++    store, control, assembly, retention = setup(tmp_path)
++    missing_id = assembly.foundation_runtime_profile.semantic_payload[
++        "source_health_policy"]["artifact_id"]
++    del control.contents[missing_id]
++    with pytest.raises(ClassificationPersistenceError) as caught:
++        store.persist(assembly, retention_policy=retention)
++    assert caught.value.reason_code == "persistence_unavailable"
++    with store._connect() as conn:
++        assert conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0] == 0
++
++
++def test_production_commit_checks_exact_pin_immediately_before_commit(tmp_path):
++    store, control, assembly, retention = production_setup(tmp_path)
++    core = store.persist(assembly, retention_policy=retention)
++    assert core.execution_context == "PRODUCTION"
++    assert core.runtime_profile_activation_record_id == control.pinned.pointer.activation_record_id
++    assert control.commit_checks == [control.pinned]
++    assert store.replay_level_b(core.classification_id) == assembly.classification_result
++
++
++def test_unadmitted_production_profile_fails_without_commit(tmp_path):
++    store, control, assembly, retention = production_setup(tmp_path)
++    bad_admission = make_artifact_content("RuntimeProfileAdmissionManifest", {
++        **control.pinned.admission_manifest.semantic_payload,
++        "task04_acceptance_manifest": None,
++    })
++    bad_pin = replace(control.pinned, admission_manifest=bad_admission)
++    with pytest.raises(ClassificationPersistenceError) as caught:
++        store.persist(replace(assembly, pinned_runtime_profile=bad_pin), retention_policy=retention)
++    assert caught.value.reason_code == "production_profile_not_admitted"
++    with store._connect() as conn:
++        assert conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0] == 0
++
++
++def test_missing_durable_production_admission_is_not_accepted(tmp_path):
++    store, control, assembly, retention = production_setup(tmp_path)
++    del control.contents[control.pinned.admission_manifest.artifact_id]
++    with pytest.raises(ClassificationPersistenceError) as caught:
++        store.persist(assembly, retention_policy=retention)
++    assert caught.value.reason_code == "production_profile_not_admitted"
++    with store._connect() as conn:
++        assert conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0] == 0
++
++
++@pytest.mark.parametrize("failure", ["runtime_profile_invalidated", "ttl_capture_proof_invalidated"])
++def test_inflight_invalidated_or_ttl_suspension_rolls_back(tmp_path, failure):
++    store, control, assembly, retention = production_setup(tmp_path)
++    control.commit_failure = failure
++    with pytest.raises(ClassificationPersistenceError) as caught:
++        store.persist(assembly, retention_policy=retention)
++    assert caught.value.reason_code == "runtime_profile_invalidated"
++    assert control.commit_checks == [control.pinned]
++    with store._connect() as conn:
++        assert conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0] == 0
++        assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+diff --git a/tests/device_fingerprint_task04_04d_request/__init__.py b/tests/device_fingerprint_task04_04d_request/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ddb2484ffe8fde4c71ecd962fa07392e31d3d238
+--- /dev/null
++++ b/tests/device_fingerprint_task04_04d_request/__init__.py
+@@ -0,0 +1 @@
++"""Task-04D RequestAssembly focused tests."""
+diff --git a/tests/device_fingerprint_task04_04d_request/test_request_assembly.py b/tests/device_fingerprint_task04_04d_request/test_request_assembly.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..39e1848b31d1350ca831411f7950c3bf5e3c0323
+--- /dev/null
++++ b/tests/device_fingerprint_task04_04d_request/test_request_assembly.py
+@@ -0,0 +1,265 @@
++"""Pinned profile, pure request identity, and acceptance-only assembly tests."""
++
++from __future__ import annotations
++
++from inspect import signature
++
++import pytest
++
++from app.device_fingerprint.artifact_content import ArtifactRef, make_artifact_content
++from app.device_fingerprint.classification_policy import build_initial_classification_policy_v1
++from app.device_fingerprint.classification_request import make_classification_request_manifest
++from app.device_fingerprint.control_plane_store import (
++    ActiveProfilePointerV1, ControlPlaneOperationError, PinnedRuntimeProfile,
++)
++from app.device_fingerprint.evidence_adapter_contracts import build_initial_evidence_adapter_contract_set_v1
++from app.device_fingerprint.knowledge_bundle import build_initial_knowledge_bundle_v1
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.request_assembly import DeviceFingerprintRequestAssembly, RequestAssemblyError
++from app.device_fingerprint.runtime_profile_artifacts import make_classification_runtime_profile
++from tests.device_fingerprint import SITE
++from tests.device_fingerprint_fe7.test_knowledge_bundle import candidate
++from tests.device_fingerprint_task04_t01.test_snapshot_service import MAC, START, END, context
++from tests.device_fingerprint_task04_t03.test_origin_assessment import _dhcp_row
++
++TIME = "2026-09-22T22:30:34.464Z"
++
++
++def ref(content):
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++class FakeControl:
++    def __init__(self, contents, profile, *, pinned=None):
++        self.contents = contents
++        self.profile = profile
++        self.pinned = pinned
++        self.pins = []
++        self.loads = []
++        self.commit_checks = []
++        self.commit_failure = None
++
++    def load_artifact(self, artifact_id, digest=None):
++        self.loads.append(artifact_id)
++        item = self.contents[artifact_id]
++        assert digest is None or item.content_sha256 == digest
++        return item
++
++    def pin_active_profile(self, kind):
++        self.pins.append(kind)
++        return self.pinned
++
++    def check_pinned_commit_allowed(self, pinned):
++        self.commit_checks.append(pinned)
++        if self.commit_failure is not None:
++            raise ControlPlaneOperationError(self.commit_failure)
++        return True
++
++
++def prepared(*, clock=lambda: TIME, hook=lambda *_: True, evidence_rows=()):
++    ctx = context(evidence_rows)
++    knowledge = candidate()
++    bundle = build_initial_knowledge_bundle_v1(knowledge)
++    registry_ref = ctx.profile.semantic_payload["evidence_schema_registry_contract"]
++    adapter = build_initial_evidence_adapter_contract_set_v1(ctx.contents[registry_ref["artifact_id"]])
++    policy = build_initial_classification_policy_v1(
++        knowledge.classification_taxonomy, knowledge.alias_mapping, adapter)
++    classifier = make_artifact_content("ClassifierArtifactManifest", {"synthetic": True})
++    profile = make_classification_runtime_profile({
++        "classification_runtime_profile_contract_version": 1,
++        "foundation_runtime_profile": ref(ctx.profile),
++        "knowledge_bundle": ref(bundle), "classification_policy": ref(policy),
++        "evidence_adapter_contract_set": ref(adapter),
++        "classifier_artifact_manifest": ref(classifier),
++    })
++    contents = dict(ctx.contents)
++    contents.update({item.artifact_id: item for item in (
++        ctx.profile, bundle, adapter, policy, classifier, profile,
++        *(getattr(knowledge, field) for field in knowledge.__dataclass_fields__),
++    )})
++    store = FakeControl(contents, profile)
++    service = DeviceFingerprintRequestAssembly(
++        control_plane_store=store, read_service=ctx.read,
++        compatibility_hook=hook, utc_clock=clock,
++        process_memory_guard=lambda _limit: True)
++    return ctx, store, service, profile
++
++
++def candidate_run(service, profile):
++    return service.assemble_pre_acceptance_candidate(profile, SITE, MAC, START, END)
++
++
++def test_request_exact_seven_fields_digest_and_no_runtime_lineage():
++    _, _, service, profile = prepared()
++    result = candidate_run(service, profile)
++    request = result.classification_request_manifest
++    assert set(request.semantic_payload) == {
++        "evidence_snapshot_content", "source_evaluability", "knowledge_bundle",
++        "classification_policy", "evidence_adapter_contract_set",
++        "classifier_artifact_manifest", "knowledge_evaluation_at_utc"}
++    assert result.classification_result.semantic_payload["classification_request_digest"] == request.content_sha256
++    assert profile.artifact_id.encode() not in request.semantic_payload_json
++    assert b"RuntimeProfileActivationRecord" not in request.semantic_payload_json
++    assert b"PRE_ACCEPTANCE_CANDIDATE" not in request.semantic_payload_json
++    assert result.runtime_profile_activation_record is None
++    assert result.pinned_runtime_profile is None
++
++
++def test_request_constructor_rejects_extra_field_and_mismatched_refs():
++    _, _, service, profile = prepared()
++    result = candidate_run(service, profile)
++    request = result.classification_request_manifest.semantic_payload
++    contents = {name: getattr(result, name) for name in (
++        "evidence_snapshot_content", "source_evaluability", "knowledge_bundle",
++        "classification_policy", "evidence_adapter_contract_set",
++        "classifier_artifact_manifest")}
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_classification_request_manifest({**request, "site_id": SITE}, **contents)
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_classification_request_manifest({**request, "knowledge_bundle": ref(result.classification_policy)},
++                                             **contents)
++
++
++def test_candidate_path_never_pins_and_profile_selection_is_not_product_api():
++    _, store, service, profile = prepared()
++    result = candidate_run(service, profile)
++    assert result.classification_runtime_profile == profile
++    assert result.foundation_runtime_profile == store.contents[
++        profile.semantic_payload["foundation_runtime_profile"]["artifact_id"]]
++    assert store.pins == []
++    assert "candidate_classification_runtime_profile" not in signature(
++        service.assemble_production).parameters
++
++
++def test_negative_age_fails_before_request_and_result():
++    _, _, service, profile = prepared(clock=lambda: "2026-09-16T12:00:00.000Z")
++    with pytest.raises(RequestAssemblyError) as caught:
++        candidate_run(service, profile)
++    assert caught.value.reason_code == "negative_knowledge_age"
++
++
++@pytest.mark.parametrize("hook", [None, lambda *_: False,
++                                  lambda *_: (_ for _ in ()).throw(ValueError("blocked"))])
++def test_compatibility_hook_fail_closed(hook):
++    _, _, service, profile = prepared(hook=hook)
++    with pytest.raises(RequestAssemblyError) as caught:
++        candidate_run(service, profile)
++    assert caught.value.reason_code == "runtime_profile_incompatible"
++
++
++def test_knowledge_bundle_closure_and_six_origins_share_one_lineage():
++    _, _, service, profile = prepared()
++    result = candidate_run(service, profile)
++    assert len(result.origin_assessments) == 6
++    assert {item.semantic_payload["origin_group"] for item in result.origin_assessments} == {
++        "dhcp", "portal", "tcp", "tls", "quic", "mac_registry"}
++    for item in result.origin_assessments:
++        payload = item.semantic_payload
++        assert payload["evidence_snapshot_content"] == ref(result.evidence_snapshot_content)
++        assert payload["source_evaluability"] == ref(result.source_evaluability)
++    assert result.classification_request_manifest.semantic_payload["knowledge_bundle"] == ref(
++        result.knowledge_bundle)
++    assert result.classification_result.semantic_payload["knowledge_bundle"] == ref(result.knowledge_bundle)
++
++
++def test_same_semantic_inputs_ignore_activation_and_later_wall_clock():
++    _, _, service, profile = prepared()
++    first = candidate_run(service, profile)
++    _, _, second_service, second_profile = prepared()
++    second = candidate_run(second_service, second_profile)
++    assert first.classification_request_manifest == second.classification_request_manifest
++    assert first.classification_result == second.classification_result
++
++
++def test_production_pins_classification_once_and_never_reads_foundation_pointer():
++    _, store, service, profile = prepared()
++    pointer = ActiveProfilePointerV1(
++        "classification", profile.artifact_id, profile.content_sha256,
++        "11111111-1111-4111-8111-111111111111",
++        "22222222-2222-4222-8222-222222222222", TIME)
++    store.pinned = PinnedRuntimeProfile(
++        pointer, profile, make_artifact_content("RuntimeProfileAdmissionManifest", {}),
++        make_artifact_content("RuntimeProfileActivationRecord", {}),
++        make_artifact_content("RuntimeProfileValidityRecord", {}))
++    result = service.assemble_production(SITE, MAC, START, END)
++    assert store.pins == ["classification"]
++    assert result.pinned_runtime_profile is store.pinned
++    assert result.foundation_runtime_profile == store.contents[
++        profile.semantic_payload["foundation_runtime_profile"]["artifact_id"]]
++    assert result.classification_runtime_profile == profile
++    assert store.pinned.activation_record.artifact_id.encode() not in (
++        result.classification_request_manifest.semantic_payload_json)
++    _, _, candidate_service, candidate_profile = prepared()
++    candidate_result = candidate_run(candidate_service, candidate_profile)
++    assert result.classification_request_manifest == candidate_result.classification_request_manifest
++    assert result.classification_result == candidate_result.classification_result
++
++
++def test_expired_external_source_does_not_fail_request():
++    _, _, service, profile = prepared(clock=lambda: "2028-09-22T22:30:34.464Z",
++                                     evidence_rows=[_dhcp_row()])
++    result = candidate_run(service, profile)
++    assert result.classification_request_manifest.semantic_payload[
++        "knowledge_evaluation_at_utc"] == "2028-09-22T22:30:34.464Z"
++    dhcp = next(row for row in result.origin_assessments
++                if row.semantic_payload["origin_group"] == "dhcp")
++    platform = next(row for row in dhcp.semantic_payload["dimension_assessments"]
++                    if row["dimension_name"] == "platform_family")
++    assert platform["internal_state"] == "no_claim"
++    assert "knowledge_source_expired" in platform["explanation_codes"]
++
++
++def test_hook_receives_exact_resolved_semantic_set():
++    calls = []
++
++    def hook(*items):
++        calls.append(items)
++        return True
++
++    _, _, service, profile = prepared(hook=hook)
++    result = candidate_run(service, profile)
++    assert len(calls) == 1
++    assert calls[0] == (
++        result.classification_runtime_profile, result.foundation_runtime_profile,
++        result.knowledge_bundle, result.knowledge_candidate, result.classification_policy,
++        result.evidence_adapter_contract_set, result.classifier_artifact_manifest)
++
++
++def test_production_caller_cannot_supply_profile_or_knowledge_time():
++    _, _, service, profile = prepared()
++    parameters = signature(service.assemble_production).parameters
++    assert set(parameters) == {"site_id", "observed_mac", "window_start_utc", "window_end_utc"}
++    with pytest.raises(TypeError):
++        service.assemble_production(SITE, MAC, START, END,
++                                    candidate_classification_runtime_profile=profile)
++    with pytest.raises(TypeError):
++        service.assemble_production(SITE, MAC, START, END,
++                                    knowledge_evaluation_at_utc="2020-01-01T00:00:00.000Z")
++
++
++def test_active_pointer_switch_after_pin_does_not_change_inflight_semantics():
++    _, store, service, profile = prepared()
++    pointer = ActiveProfilePointerV1(
++        "classification", profile.artifact_id, profile.content_sha256,
++        "11111111-1111-4111-8111-111111111111",
++        "22222222-2222-4222-8222-222222222222", TIME)
++    store.pinned = PinnedRuntimeProfile(
++        pointer, profile, make_artifact_content("RuntimeProfileAdmissionManifest", {}),
++        make_artifact_content("RuntimeProfileActivationRecord", {}),
++        make_artifact_content("RuntimeProfileValidityRecord", {}))
++    original_pin = store.pin_active_profile
++
++    def switch_after_pin(kind):
++        pinned = original_pin(kind)
++        store.profile = make_artifact_content("ClassificationRuntimeProfile", {"new": True})
++        store.foundation_active = make_artifact_content("FoundationRuntimeProfile", {"new": True})
++        return pinned
++
++    store.pin_active_profile = switch_after_pin
++    result = service.assemble_production(SITE, MAC, START, END)
++    assert store.pins == ["classification"]
++    assert result.classification_runtime_profile == profile
++    assert result.foundation_runtime_profile.artifact_id == (
++        profile.semantic_payload["foundation_runtime_profile"]["artifact_id"])
++    assert result.classification_result.semantic_payload["classification_request_digest"] == (
++        result.classification_request_manifest.content_sha256)
