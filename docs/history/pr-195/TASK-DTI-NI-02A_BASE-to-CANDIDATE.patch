@@ -1,0 +1,1611 @@
+diff --git a/app/device_fingerprint_sensor/cli.py b/app/device_fingerprint_sensor/cli.py
+index 320c46acc0bc7fc057143330ca43f28ce3de5c3b..b8601a4f00c1a3e2add25454a567f2adaedaf9d9 100644
+--- a/app/device_fingerprint_sensor/cli.py
++++ b/app/device_fingerprint_sensor/cli.py
+@@ -8,6 +8,7 @@ import socket
+ import time
+ 
+ from app.artifact_identity import ArtifactIdentityError, capture_loaded_artifact_identity
++from app.network_attribution.config import network_attribution_config_from_env
+ 
+ from .config import sensor_config_from_env
+ from .runtime import SensorRuntime
+@@ -53,7 +54,13 @@ def main(argv: list[str] | None = None) -> int:
+     ):
+         telemetry.emit("fingerprint_sensor_startup_failed", runtime_state="unavailable", error_category="core_listener_unavailable")
+         return 1
+-    runtime = SensorRuntime(config, telemetry=telemetry)
++    try:
++        attribution_config = network_attribution_config_from_env()
++    except Exception:
++        # Bad optional NI configuration is not a Fingerprint startup failure.
++        telemetry.emit("network_attribution_unavailable", status="unavailable", reason="invalid_attribution_config")
++        attribution_config = None
++    runtime = SensorRuntime(config, telemetry=telemetry, attribution_config=attribution_config)
+     try:
+         runtime.initialize_transport()
+         runtime.producer.read_credential()
+diff --git a/app/device_fingerprint_sensor/runtime.py b/app/device_fingerprint_sensor/runtime.py
+index 8f11c9c53f0c760d06f1528ef08369023a67d78d..5d4cb64e9558ab9df2543c417aa54f24e51b9cb3 100644
+--- a/app/device_fingerprint_sensor/runtime.py
++++ b/app/device_fingerprint_sensor/runtime.py
+@@ -24,7 +24,8 @@ SURICATA_HEARTBEAT_TIMEOUT_SECONDS = 30.0
+ class SensorRuntime:
+     def __init__(self, config: SensorConfig, *, telemetry: SensorTelemetry,
+                  monotonic=time.monotonic, now=None, preflight=None, capture=None,
+-                 eve=None, spool=None, producer=None) -> None:
++                 eve=None, spool=None, producer=None, attribution_config=None,
++                 attribution_recorder=None) -> None:
+         self.config = config
+         self.telemetry = telemetry
+         self.monotonic = monotonic
+@@ -58,6 +59,26 @@ class SensorRuntime:
+         }
+         self._delivery_available = True
+         self._delivery_permanent_fault = False
++        self._attribution = None
++        self._capture_preflight_passed = False
++        if attribution_config is not None and attribution_config.enabled:
++            from app.network_attribution.dhcp_authority import DhcpAuthorityRecorder
++            options = {"clock": now} if now is not None else {}
++            self._attribution = attribution_recorder or DhcpAuthorityRecorder(
++                attribution_config, config, telemetry=telemetry, **options,
++            )
++
++    def _attribution_call(self, method, *args) -> None:
++        if self._attribution is None:
++            return
++        try:
++            getattr(self._attribution, method)(*args)
++        except Exception:
++            # Even failure reporting must never escape into Fingerprint lifecycle.
++            try:
++                self._attribution.fault("attribution_recorder_unavailable")
++            except Exception:
++                pass
+ 
+     def initialize_transport(self) -> None:
+         self.spool.initialize()
+@@ -66,15 +87,23 @@ class SensorRuntime:
+         try:
+             self.preflight.validate()
+         except Exception:
++            self._attribution_call("fault", "capture_interface_unavailable")
+             self.state, self.reason = "unavailable", "capture_interface_unavailable"
+             self.spool.enqueue(self.health.all("unavailable", "capture_interface_unavailable"))
+             self.telemetry.emit("fingerprint_sensor_unavailable", runtime_state=self.state, reason=self.reason)
+             return False
++        self._capture_preflight_passed = True
+         return True
+ 
+     def start(self) -> None:
+         self.eve.open()
+-        self.capture.open()
++        try:
++            self.capture.open()
++        except Exception:
++            self._attribution_call("fault", "raw_capture_unavailable")
++            raise
++        if self._capture_preflight_passed:
++            self._attribution_call("start")
+         self._set_local(("dhcp", "tcp_syn"), "available", None)
+         self._set_local(("tls_client", "quic_client"), "unavailable", "suricata_unavailable")
+         self.state, self.reason = "degraded", "suricata_unavailable"
+@@ -93,12 +122,15 @@ class SensorRuntime:
+             while not self.stop_event.is_set():
+                 received = self.capture.receive()
+                 if received is None:
++                    self._attribution_call("poll")
+                     continue
+                 frame, received_ns, observed_at = received
+                 if self.dedup.is_duplicate(frame, received_ns):
+                     continue
+                 self.spool.enqueue(self.normalizer.raw(frame, observed_at))
++                self._attribution_call("record_frame", frame, observed_at)
+         except Exception:
++            self._attribution_call("fault", "raw_capture_unavailable")
+             if not self.stop_event.is_set():
+                 self.state, self.reason = "degraded", "raw_parser_unavailable"
+                 self._set_local(("dhcp", "tcp_syn"), "unavailable", "raw_parser_unavailable")
+@@ -245,12 +277,14 @@ class SensorRuntime:
+     def shutdown(self) -> bool:
+         self.state, self.reason = "stopping", "stopping"
+         self.stop_event.set()
++        self._attribution_call("fault", "sensor_shutdown")
+         self.capture.close()
+         self.eve.close()
+         deadline = self.monotonic() + 20.0
+         for thread in self.threads:
+             thread.join(max(0.0, deadline - self.monotonic()))
+         clean = all(not thread.is_alive() for thread in self.threads)
++        self._attribution_call("shutdown")
+         self.spool.close()
+         self.telemetry.emit("fingerprint_sensor_stopped", runtime_state="stopping")
+         return clean
+diff --git a/app/network_attribution/__init__.py b/app/network_attribution/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1cbee99d6ce8bf1f766b8c8f93e27e3e45390944
+--- /dev/null
++++ b/app/network_attribution/__init__.py
+@@ -0,0 +1 @@
++"""Independent IPv4 DHCP temporal authority; no Device-relative projection."""
+diff --git a/app/network_attribution/config.py b/app/network_attribution/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..46b13592e85192e6ab88f1575998c5962fff5ef8
+--- /dev/null
++++ b/app/network_attribution/config.py
+@@ -0,0 +1,26 @@
++"""Independent default-OFF NI-02A configuration, not SensorConfig fields."""
++
++import os
++import re
++from pathlib import Path
++
++from .models import NetworkAttributionConfig, NetworkAttributionValidationError
++
++MAX_DB_BYTES = 2147483648
++
++
++def network_attribution_config_from_env(environ=None):
++    env = os.environ if environ is None else environ
++    enabled = env.get("NETWORK_ATTRIBUTION_ENABLED", "false")
++    if not isinstance(enabled, str) or enabled not in {"true", "false"}:
++        raise NetworkAttributionValidationError("invalid_attribution_config")
++    if enabled == "false":
++        return NetworkAttributionConfig()
++    path = env.get("NETWORK_ATTRIBUTION_DB_PATH", NetworkAttributionConfig().db_path)
++    budget = env.get("NETWORK_ATTRIBUTION_MAX_DB_BYTES", "536870912")
++    if (not isinstance(path, str) or not path or "\0" in path
++            or not (path.startswith("/") or Path(path).is_absolute())
++            or not isinstance(budget, str) or re.fullmatch(r"[0-9]{1,10}", budget) is None
++            or not 1 <= int(budget) <= MAX_DB_BYTES):
++        raise NetworkAttributionValidationError("invalid_attribution_config")
++    return NetworkAttributionConfig(True, path, int(budget))
+diff --git a/app/network_attribution/dhcp_authority.py b/app/network_attribution/dhcp_authority.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a9e20c4478ee3de049ea74a49789ad77df9f92e
+--- /dev/null
++++ b/app/network_attribution/dhcp_authority.py
+@@ -0,0 +1,180 @@
++"""Independent bounded DHCP authority parsing of an already received frame."""
++
++import ipaddress
++import struct
++from datetime import datetime, timezone
++
++from app.device_fingerprint.validation import format_utc
++
++from .models import NetworkAttributionConflict, NetworkAttributionValidationError
++from .repository import NetworkAttributionRepository
++from .validation import canonical_mac, make_fact
++
++
++def _packet(frame):
++    if not isinstance(frame, bytes) or not 14 <= len(frame) <= 65535:
++        return None
++    offset, kind = 14, int.from_bytes(frame[12:14], "big")
++    while kind in {0x8100, 0x88A8}:
++        if len(frame) < offset + 4:
++            return None
++        kind = int.from_bytes(frame[offset + 2:offset + 4], "big")
++        offset += 4
++    if kind != 0x0800 or len(frame) < offset + 20:
++        return None
++    ihl = (frame[offset] & 15) * 4
++    total = int.from_bytes(frame[offset + 2:offset + 4], "big")
++    # No fragmented UDP is an admitted complete DHCP lifecycle observation.
++    if (frame[offset] >> 4 != 4 or ihl < 20 or total < ihl + 8 + 240
++            or len(frame) < offset + total or frame[offset + 9] != 17
++            or int.from_bytes(frame[offset + 6:offset + 8], "big") & 0x3FFF):
++        return None
++    udp = offset + ihl
++    src_port, dst_port, length = struct.unpack_from("!HHH", frame, udp)
++    if length < 248 or udp + length > offset + total:
++        return None
++    data = frame[udp + 8:udp + length]
++    if data[:3] not in {b"\x01\x01\x06", b"\x02\x01\x06"} or data[236:240] != b"\x63\x82\x53\x63":
++        return None
++    selected = {}
++    cursor, ended = 240, False
++    while cursor < len(data):
++        code = data[cursor]
++        cursor += 1
++        if code == 255:
++            ended = True
++            break
++        if code == 0:
++            continue
++        if cursor >= len(data):
++            return None
++        size = data[cursor]
++        cursor += 1
++        if cursor + size > len(data):
++            return None
++        if code in {50, 51, 53, 54}:
++            if code in selected or size != (1 if code == 53 else 4):
++                return None
++            selected[code] = data[cursor:cursor + size]
++        cursor += size
++    message = {b"\x05": "ack", b"\x07": "release", b"\x04": "decline"}.get(selected.get(53))
++    if not ended or message is None:
++        return None
++    if message == "ack":
++        if data[0] != 2 or (src_port, dst_port) not in {(67, 68), (67, 67)}:
++            return None
++    elif data[0] != 1 or (src_port, dst_port) != (68, 67) or data[28:34] != frame[6:12]:
++        return None
++    return data, selected, message, str(ipaddress.IPv4Address(frame[offset + 12:offset + 16]))
++
++
++def authority_fact_from_frame(frame, event_at, ingested_at, sensor_config):
++    parsed = _packet(frame)
++    if parsed is None:
++        return None
++    data, options, message, source_ip = parsed
++    try:
++        mac = canonical_mac(":".join(f"{part:02X}" for part in data[28:34]))
++        if message == "ack":
++            address = ipaddress.IPv4Address(data[16:20])
++            server = source_ip
++            option54 = str(ipaddress.IPv4Address(options[54])) if 54 in options else None
++            lease = int.from_bytes(options[51], "big") if 51 in options else None
++            if (server != sensor_config.dhcp_server_authority
++                    or option54 != sensor_config.dhcp_option54_authority
++                    or lease is None or not 1 <= lease <= 86400):
++                return None
++            authority = "trusted_dhcp_ack"
++        else:
++            # RELEASE declares ciaddr; DECLINE declares requested-address option 50.
++            if message == "decline" and 50 not in options:
++                return None
++            address = ipaddress.IPv4Address(data[12:16] if message == "release" else options[50])
++            server = option54 = lease = None
++            authority = "validated_client_" + message
++        if not any(address in network for network in sensor_config.guest_cidrs):
++            return None
++        return make_fact(site_id=sensor_config.site_id, capture_source_id=sensor_config.capture_source_id,
++                         event_at=event_at, ingested_at=ingested_at, message_type=message, client_mac=mac,
++                         ipv4=str(address), xid=int.from_bytes(data[4:8], "big"), server_ipv4=server,
++                         option54_ipv4=option54, lease_seconds=lease, authority_class=authority)
++    except (ValueError, NetworkAttributionValidationError):
++        return None
++
++
++class DhcpAuthorityRecorder:
++    def __init__(self, config, sensor_config, *, telemetry, clock=lambda: datetime.now(timezone.utc), repository=None):
++        self.config, self.sensor_config, self.telemetry, self.clock = config, sensor_config, telemetry, clock
++        self.repository = repository or NetworkAttributionRepository(config, clock=clock)
++        self.permanent_fault = False
++        self._reported = False
++        self._last_retention = None
++        self._last_poll = None
++        self._activated_at = None
++
++    def start(self):
++        """Called only after capture preflight PASS and raw capture open."""
++        try:
++            self.repository.initialize()
++            self._activated_at = format_utc(self.clock())
++            self.repository.capture_started(self.sensor_config.site_id, self.sensor_config.capture_source_id,
++                                            self._activated_at)
++        except Exception:
++            self.fault("attribution_store_unavailable")
++
++    def record_frame(self, frame, event_at):
++        if self.permanent_fault:
++            return
++        try:
++            now = self.clock()
++            self.poll()
++            if self.permanent_fault:
++                return
++            # Frames already queued before the first persisted usable coverage
++            # are not an authoritative pre-activation backfill.
++            if self._activated_at is None or event_at < self._activated_at:
++                return
++            fact = authority_fact_from_frame(frame, event_at, format_utc(now), self.sensor_config)
++            if fact is not None:
++                # An actual authority frame confirms this live capture even
++                # between the bounded idle-poll watermark updates.
++                self.repository.confirm_capture(self.sensor_config.site_id, self.sensor_config.capture_source_id,
++                                                format_utc(self.clock()))
++                self.repository.record(fact)
++        except NetworkAttributionConflict:
++            self.fault("authority_event_conflict")
++        except Exception:
++            self.fault("attribution_recorder_unavailable")
++
++    def poll(self):
++        if self.permanent_fault:
++            return
++        try:
++            now = self.clock()
++            if self._last_poll is None or (now - self._last_poll).total_seconds() >= 1:
++                self.repository.confirm_capture(self.sensor_config.site_id, self.sensor_config.capture_source_id, format_utc(now))
++                self._last_poll = now
++            if self._last_retention is None or (now - self._last_retention).total_seconds() >= 60:
++                self.repository.retain(at=format_utc(now))
++                self._last_retention = now
++        except Exception:
++            self.fault("attribution_store_unavailable")
++
++    def fault(self, reason):
++        self.permanent_fault = True
++        try:
++            self.repository.coverage(self.sensor_config.site_id, self.sensor_config.capture_source_id,
++                                     "unavailable", format_utc(self.clock()), reason)
++        except Exception:
++            pass
++        if not self._reported:
++            self._reported = True
++            self.telemetry.emit("network_attribution_unavailable", status="unavailable", reason=reason)
++
++    def shutdown(self):
++        try:
++            if self.repository.connection is not None:
++                self.repository.coverage(self.sensor_config.site_id, self.sensor_config.capture_source_id,
++                                         "unavailable", format_utc(self.clock()), "sensor_shutdown")
++        finally:
++            self.repository.close()
+diff --git a/app/network_attribution/models.py b/app/network_attribution/models.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..efb4f926780ff86514f691ee8b0aae0a13a8d43c
+--- /dev/null
++++ b/app/network_attribution/models.py
+@@ -0,0 +1,86 @@
++"""Immutable NI-02A facts, finite intervals and read results."""
++
++from dataclasses import dataclass
++
++
++class NetworkAttributionError(RuntimeError):
++    """Safe error categories only; never retain a raw frame."""
++
++
++class NetworkAttributionValidationError(NetworkAttributionError):
++    pass
++
++
++class NetworkAttributionStorageUnavailable(NetworkAttributionError):
++    pass
++
++
++class NetworkAttributionConflict(NetworkAttributionError):
++    pass
++
++
++@dataclass(frozen=True, slots=True)
++class NetworkAttributionConfig:
++    enabled: bool = False
++    db_path: str = "/opt/CaptivePortal/data/network_attribution.sqlite3"
++    max_db_bytes: int = 536870912
++
++
++@dataclass(frozen=True, slots=True)
++class NetworkAddressBindingFactV1:
++    fact_id: str
++    schema_version: int
++    site_id: str
++    capture_source_id: str
++    event_at: str
++    ingested_at: str
++    message_type: str
++    client_mac: str
++    ipv4: str
++    xid: int
++    server_ipv4: str | None
++    option54_ipv4: str | None
++    lease_seconds: int | None
++    authority_class: str
++
++
++@dataclass(frozen=True, slots=True)
++class IPv4BindingIntervalV1:
++    binding_id: str
++    site_id: str
++    capture_source_id: str
++    client_mac: str
++    ipv4: str
++    valid_from: str
++    valid_until: str
++    last_confirmed_at: str
++    lease_expires_at: str
++    start_fact_id: str
++    last_fact_id: str
++    end_reason: str | None
++
++
++@dataclass(frozen=True, slots=True)
++class SourceCoverageIntervalV1:
++    coverage_id: str
++    coverage_from: str
++    coverage_until: str | None
++    site_id: str
++    capture_source_id: str
++    state: str
++    reason_code: str | None
++    verified_through: str
++
++
++@dataclass(frozen=True, slots=True)
++class NetworkMetadataAttributionResultV1:
++    state: str
++    reason: str | None = None
++    site_id: str | None = None
++    client_mac: str | None = None
++    ipv4: str | None = None
++    event_at: str | None = None
++    binding_id: str | None = None
++    valid_from: str | None = None
++    valid_until: str | None = None
++    attribution_source: str | None = None
+diff --git a/app/network_attribution/read_service.py b/app/network_attribution/read_service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f82e465704570b4c8417a7a1fed05fb6cf040827
+--- /dev/null
++++ b/app/network_attribution/read_service.py
+@@ -0,0 +1,92 @@
++"""Read-only Site/IP/event-time resolution with coverage-first precedence."""
++
++import sqlite3
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++from app.device_fingerprint.validation import format_utc
++
++from .models import NetworkMetadataAttributionResultV1, NetworkAttributionError
++from .repository import RETENTION_SECONDS, coverage_is_continuous
++from .schema import validate_schema
++from .validation import query_values
++
++
++class NetworkAttributionReadService:
++    def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc)):
++        self.config, self.clock = config, clock
++
++    def resolve_ipv4(self, site_id, ipv4, event_at):
++        result = NetworkMetadataAttributionResultV1
++        try:
++            query_values(site_id, ipv4, event_at)
++        except NetworkAttributionError:
++            return result("invalid", "invalid_query")
++        if not self.config.enabled:
++            return result("unavailable", "attribution_disabled")
++        connection = None
++        try:
++            paths = (Path(self.config.db_path), Path(self.config.db_path + "-wal"), Path(self.config.db_path + "-shm"))
++            if sum(path.stat().st_size for path in paths if path.exists()) > self.config.max_db_bytes:
++                return result("unavailable", "attribution_store_unavailable")
++            connection = sqlite3.connect(Path(self.config.db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=.5, isolation_level=None)
++            connection.row_factory = sqlite3.Row
++            connection.execute("PRAGMA foreign_keys=ON")
++            connection.execute("PRAGMA query_only=ON")
++            connection.execute("PRAGMA busy_timeout=500")
++            connection.execute("BEGIN")
++            validate_schema(connection)
++            horizon = connection.execute("SELECT retained_from FROM authority_horizon WHERE site_id=?", (site_id,)).fetchone()
++            if horizon is None:
++                return result("unavailable", "authority_horizon_unavailable")
++            retention = format_utc(self.clock() - timedelta(seconds=RETENTION_SECONDS))
++            if event_at < max(horizon[0], retention):
++                return result("outside_historical_horizon", "outside_historical_horizon")
++            coverage = connection.execute(
++                "SELECT * FROM source_coverage WHERE site_id=? AND coverage_from<=? "
++                "AND (coverage_until IS NULL OR ?<coverage_until)", (site_id, event_at, event_at)).fetchall()
++            if not coverage or any(row["state"] != "usable" or
++                                   (row["coverage_until"] is None and event_at > row["verified_through"])
++                                   for row in coverage):
++                return result("unavailable", "source_coverage_unavailable")
++            sources = {row["capture_source_id"] for row in coverage}
++            candidates = connection.execute(
++                "SELECT * FROM binding_intervals WHERE site_id=? AND ipv4=? AND valid_from<=? AND ?<valid_until",
++                (site_id, ipv4, event_at, event_at)).fetchall()
++            for binding in candidates:
++                if binding["capture_source_id"] not in sources:
++                    return result("unavailable", "source_coverage_unavailable")
++                # Mutable last_confirmed_at can be later than a historical query.
++                # Consult immutable confirmations relevant at/before the event time.
++                confirmation = connection.execute(
++                    "SELECT max(f.event_at) FROM binding_fact_links l JOIN authority_facts f USING(fact_id) "
++                    "WHERE l.binding_id=? AND f.message_type='ack' AND f.event_at<=?",
++                    (binding["binding_id"], event_at)).fetchone()[0]
++                if confirmation is None or not coverage_is_continuous(connection, site_id, binding["capture_source_id"], confirmation, event_at):
++                    return result("unavailable", "source_coverage_gap")
++            if len(candidates) > 1:
++                return result("ambiguous", "multiple_authoritative_bindings")
++            if not candidates:
++                # A recovered source alone cannot prove an absence that crosses a
++                # missed lifecycle gap. Use exact prior facts, never a nearest row.
++                for source in sources:
++                    boundary = connection.execute(
++                        "SELECT max(event_at) FROM authority_facts WHERE site_id=? AND capture_source_id=? "
++                        "AND event_at<=? AND (ipv4=? OR fact_id IN (SELECT last_fact_id FROM binding_intervals "
++                        "WHERE site_id=? AND ipv4=?))", (site_id, source, event_at, ipv4, site_id, ipv4)).fetchone()[0]
++                    if boundary is None:
++                        boundary = connection.execute("SELECT min(coverage_from) FROM source_coverage WHERE site_id=? "
++                                                      "AND capture_source_id=? AND state='usable'", (site_id, source)).fetchone()[0]
++                        boundary = max(boundary, horizon[0], retention) if boundary is not None else None
++                    if boundary is None or not coverage_is_continuous(connection, site_id, source, boundary, event_at):
++                        return result("unavailable", "source_coverage_gap")
++                return result("unattributed", "no_authoritative_binding")
++            binding = candidates[0]
++            return result("resolved", site_id=site_id, client_mac=binding["client_mac"], ipv4=ipv4,
++                          event_at=event_at, binding_id=binding["binding_id"], valid_from=binding["valid_from"],
++                          valid_until=binding["valid_until"], attribution_source="trusted_dhcp_v4")
++        except (sqlite3.Error, OSError, ValueError, NetworkAttributionError):
++            return result("unavailable", "attribution_store_unavailable")
++        finally:
++            if connection is not None:
++                connection.close()
+diff --git a/app/network_attribution/repository.py b/app/network_attribution/repository.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e47f008e77b79ee19066574bcdef83e1ec65ba8f
+--- /dev/null
++++ b/app/network_attribution/repository.py
+@@ -0,0 +1,295 @@
++"""Sensor-owned single writer, atomic facts/intervals and separate coverage."""
++
++import os
++import sqlite3
++import threading
++import uuid
++from contextlib import contextmanager
++from dataclasses import asdict
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++from app.device_fingerprint.validation import format_utc, parse_utc
++
++from .models import (
++    IPv4BindingIntervalV1, NetworkAttributionConflict,
++    NetworkAttributionStorageUnavailable, NetworkAttributionValidationError,
++)
++from .schema import create_schema, validate_schema
++from .validation import source_values, validate_fact
++
++RETENTION_SECONDS = 30 * 86400
++RETENTION_BATCH_SIZE = 100
++
++
++def coverage_is_continuous(connection, site, source, start, end):
++    rows = connection.execute(
++        "SELECT * FROM source_coverage WHERE site_id=? AND capture_source_id=? AND coverage_from<=? "
++        "AND (coverage_until IS NULL OR coverage_until>?) ORDER BY coverage_from,coverage_id",
++        (site, source, end, start)).fetchall()
++    through = start
++    for row in rows:
++        until = row["coverage_until"]
++        if until is not None and until <= row["coverage_from"]:
++            continue
++        if (row["coverage_from"] > through or row["state"] != "usable"
++                or (until is None and row["verified_through"] < end)):
++            return False
++        if until is None or until > end:
++            return True
++        through = max(through, until)
++    return False
++
++
++class NetworkAttributionRepository:
++    def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc)):
++        self.config, self.clock = config, clock
++        self.connection = None
++        self._writer_fd = None
++        self._mutex = threading.RLock()
++
++    def _acquire_writer(self):
++        self._writer_fd = os.open(self.config.db_path + ".writer.lock", os.O_CREAT | os.O_RDWR, 0o600)
++        if os.name == "nt":
++            import msvcrt
++            os.lseek(self._writer_fd, 0, os.SEEK_SET)
++            msvcrt.locking(self._writer_fd, msvcrt.LK_NBLCK, 1)
++        else:
++            import fcntl
++            fcntl.flock(self._writer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++
++    def initialize(self):
++        if not self.config.enabled:
++            raise NetworkAttributionStorageUnavailable("attribution_disabled")
++        try:
++            self._acquire_writer()
++            if Path(self.config.db_path).exists() and Path(self.config.db_path).stat().st_size:
++                # Reject a foreign/corrupt DB before changing its journaling configuration.
++                probe = sqlite3.connect(Path(self.config.db_path).resolve().as_uri() + "?mode=ro", uri=True)
++                try:
++                    probe.execute("PRAGMA foreign_keys=ON")
++                    validate_schema(probe)
++                finally:
++                    probe.close()
++            self.connection = sqlite3.connect(self.config.db_path, timeout=.5,
++                                             isolation_level=None, check_same_thread=False)
++            self.connection.row_factory = sqlite3.Row
++            for pragma in ("foreign_keys=ON", "journal_mode=WAL", "synchronous=FULL", "busy_timeout=500"):
++                self.connection.execute("PRAGMA " + pragma)
++            # Reserve WAL/shm space inside the total configured DB footprint.
++            self._check_capacity()
++            page_size = self.connection.execute("PRAGMA page_size").fetchone()[0]
++            pages = (self.config.max_db_bytes - 32800) // (page_size * 2 + 24)
++            if pages < 1 or self.connection.execute(f"PRAGMA max_page_count={pages}").fetchone()[0] > pages:
++                raise NetworkAttributionStorageUnavailable("attribution_capacity_exhausted")
++            objects = self.connection.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
++            if objects == 0 and self.connection.execute("PRAGMA user_version").fetchone()[0] == 0:
++                with self.transaction():
++                    create_schema(self.connection)
++            validate_schema(self.connection)
++            return self
++        except (sqlite3.Error, OSError, NetworkAttributionStorageUnavailable):
++            self.close()
++            raise NetworkAttributionStorageUnavailable("attribution_store_unavailable") from None
++
++    def _check_capacity(self):
++        total = sum(path.stat().st_size for path in (
++            Path(self.config.db_path), Path(self.config.db_path + "-wal"),
++            Path(self.config.db_path + "-shm")) if path.exists())
++        if total > self.config.max_db_bytes:
++            raise NetworkAttributionStorageUnavailable("attribution_capacity_exhausted")
++
++    @contextmanager
++    def transaction(self):
++        with self._mutex:
++            if self.connection is None:
++                raise NetworkAttributionStorageUnavailable("attribution_store_unavailable")
++            try:
++                self._check_capacity()
++                # Keep the WAL bounded. A pinned reader prevents new writes rather than unbounded growth.
++                if self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] != 0:
++                    raise NetworkAttributionStorageUnavailable("attribution_checkpoint_busy")
++                self.connection.execute("BEGIN IMMEDIATE")
++                yield
++                self._check_capacity()
++                self.connection.execute("COMMIT")
++            except BaseException as error:
++                if self.connection.in_transaction:
++                    self.connection.execute("ROLLBACK")
++                if isinstance(error, (sqlite3.Error, OSError)):
++                    raise NetworkAttributionStorageUnavailable("attribution_store_unavailable") from None
++                raise
++
++    def _insert(self, table, values):
++        columns = ",".join(values)
++        self.connection.execute(f"INSERT INTO {table} ({columns}) VALUES ({','.join('?' for _ in values)})",
++                                tuple(values.values()))
++
++    def coverage(self, site_id, capture_source_id, state, event_at, reason_code=None):
++        source_values(site_id, capture_source_id, event_at)
++        if state not in {"usable", "unavailable"} or (state == "usable" and reason_code is not None):
++            raise NetworkAttributionValidationError("invalid_coverage")
++        if state == "unavailable":
++            source_values(site_id, reason_code, event_at)
++        with self.transaction():
++            self._coverage(site_id, capture_source_id, state, event_at, reason_code)
++
++    def _coverage(self, site, source, state, timestamp, reason):
++        row = self.connection.execute(
++            "SELECT * FROM source_coverage WHERE site_id=? AND capture_source_id=? AND coverage_until IS NULL",
++            (site, source)).fetchone()
++        if row is not None:
++            if timestamp < row["coverage_from"]:
++                raise NetworkAttributionConflict("coverage_clock_regression")
++            if row["state"] == state and row["reason_code"] == reason:
++                return
++            self.connection.execute("UPDATE source_coverage SET coverage_until=? WHERE coverage_id=?",
++                                    (timestamp, row["coverage_id"]))
++        self._insert("source_coverage", dict(coverage_id=str(uuid.uuid4()), coverage_from=timestamp,
++                     coverage_until=None, site_id=site, capture_source_id=source, state=state,
++                     verified_through=timestamp, reason_code=reason))
++        if state == "usable":
++            self.connection.execute("INSERT OR IGNORE INTO authority_horizon VALUES(?,?,?)", (site, timestamp, timestamp))
++
++    def capture_started(self, site, source, timestamp):
++        """Unclosed prior process coverage never proves an unobserved crash gap."""
++        source_values(site, source, timestamp)
++        with self.transaction():
++            old = self.connection.execute("SELECT * FROM source_coverage WHERE site_id=? AND capture_source_id=? AND coverage_until IS NULL",
++                                          (site, source)).fetchone()
++            if old is not None:
++                if timestamp < old["verified_through"]:
++                    raise NetworkAttributionConflict("coverage_clock_regression")
++                # Canonical timestamps have millisecond precision. Preserve the
++                # last verified instant inside the half-open completed interval.
++                boundary = min(timestamp, format_utc(parse_utc(old["verified_through"]) + timedelta(milliseconds=1))) if old["state"] == "usable" else timestamp
++                self.connection.execute("UPDATE source_coverage SET coverage_until=? WHERE coverage_id=?", (boundary, old["coverage_id"]))
++                if boundary < timestamp:
++                    self._insert("source_coverage", dict(coverage_id=str(uuid.uuid4()), coverage_from=boundary,
++                        coverage_until=timestamp, site_id=site, capture_source_id=source, state="unavailable",
++                        verified_through=boundary, reason_code="capture_restart_gap"))
++            self._coverage(site, source, "usable", timestamp, None)
++
++    def confirm_capture(self, site, source, timestamp):
++        source_values(site, source, timestamp)
++        with self.transaction():
++            row = self.connection.execute("SELECT * FROM source_coverage WHERE site_id=? AND capture_source_id=? AND coverage_until IS NULL",
++                                          (site, source)).fetchone()
++            if row is None or row["state"] != "usable" or timestamp < row["verified_through"]:
++                raise NetworkAttributionStorageUnavailable("source_coverage_unavailable")
++            self.connection.execute("UPDATE source_coverage SET verified_through=? WHERE coverage_id=?", (timestamp, row["coverage_id"]))
++
++    def record(self, fact):
++        """Return interval, or None for duplicate/unmatched client termination.
++
++        A conflicting authority event is rejected atomically and fences that source
++        unavailable; the previous facts/intervals themselves are never overwritten.
++        """
++        validate_fact(fact)
++        conflict = False
++        result = None
++        with self.transaction():
++            existing = self.connection.execute("SELECT * FROM authority_facts WHERE fact_id=?", (fact.fact_id,)).fetchone()
++            if existing is not None:
++                prior = dict(existing)
++                current = asdict(fact)
++                prior.pop("ingested_at")
++                current.pop("ingested_at")
++                if prior != current:
++                    raise NetworkAttributionConflict("fact_identity_conflict")
++                return None
++            active_coverage = self.connection.execute(
++                "SELECT state FROM source_coverage WHERE site_id=? AND capture_source_id=? AND coverage_from<=? "
++                "AND (coverage_until IS NULL OR ?<coverage_until)",
++                (fact.site_id, fact.capture_source_id, fact.event_at, fact.event_at)).fetchall()
++            if len(active_coverage) != 1 or active_coverage[0][0] != "usable":
++                raise NetworkAttributionStorageUnavailable("source_coverage_unavailable")
++            # No late event may silently rewrite already materialized authority.
++            related = self.connection.execute(
++                "SELECT * FROM authority_facts WHERE site_id=? AND event_at>=? "
++                "AND (client_mac=? OR ipv4=?)",
++                (fact.site_id, fact.event_at, fact.client_mac, fact.ipv4)).fetchall()
++            collisions = [row for row in related if row["event_at"] > fact.event_at or
++                (fact.message_type == "ack" and row["message_type"] == "ack" and
++                 (row["client_mac"] != fact.client_mac or row["ipv4"] != fact.ipv4
++                  or row["lease_seconds"] != fact.lease_seconds))]
++            if collisions:
++                self._coverage(fact.site_id, fact.capture_source_id, "unavailable", fact.event_at,
++                               "authority_event_conflict")
++                conflict = True
++            else:
++                live = self.connection.execute(
++                    "SELECT * FROM binding_intervals WHERE site_id=? AND valid_from<=? AND ?<valid_until "
++                    "AND (client_mac=? OR ipv4=?)",
++                    (fact.site_id, fact.event_at, fact.event_at, fact.client_mac, fact.ipv4)).fetchall()
++                exact = [row for row in live if row["client_mac"] == fact.client_mac and row["ipv4"] == fact.ipv4]
++                if fact.message_type != "ack" and (len(exact) != 1 or len(live) != 1):
++                    return None
++                if fact.message_type != "ack" and not coverage_is_continuous(
++                        self.connection, fact.site_id, exact[0]["capture_source_id"],
++                        exact[0]["last_confirmed_at"], fact.event_at):
++                    return None
++                if len(exact) > 1:
++                    raise NetworkAttributionConflict("overlapping_authority")
++                self._insert("authority_facts", asdict(fact))
++                if fact.message_type == "ack":
++                    expires = format_utc(parse_utc(fact.event_at) + timedelta(seconds=fact.lease_seconds))
++                    if exact and exact[0]["capture_source_id"] == fact.capture_source_id:
++                        binding_id = exact[0]["binding_id"]
++                        self.connection.execute(
++                            "UPDATE binding_intervals SET last_confirmed_at=?,lease_expires_at=?,valid_until=?,last_fact_id=? WHERE binding_id=?",
++                            (fact.event_at, expires, expires, fact.fact_id, binding_id))
++                    else:
++                        for row in live:
++                            reason = "superseded_same_mac" if row["client_mac"] == fact.client_mac else "superseded_same_ip"
++                            self.connection.execute("UPDATE binding_intervals SET valid_until=?,end_reason=?,last_fact_id=? WHERE binding_id=?",
++                                                    (fact.event_at, reason, fact.fact_id, row["binding_id"]))
++                        binding_id = str(uuid.uuid4())
++                        self._insert("binding_intervals", dict(binding_id=binding_id, site_id=fact.site_id,
++                            capture_source_id=fact.capture_source_id, client_mac=fact.client_mac, ipv4=fact.ipv4,
++                            valid_from=fact.event_at, valid_until=expires, last_confirmed_at=fact.event_at,
++                            lease_expires_at=expires, start_fact_id=fact.fact_id, last_fact_id=fact.fact_id, end_reason=None))
++                else:
++                    binding_id = exact[0]["binding_id"]
++                    self.connection.execute("UPDATE binding_intervals SET valid_until=?,end_reason=?,last_fact_id=? WHERE binding_id=?",
++                                            (fact.event_at, "client_" + fact.message_type, fact.fact_id, binding_id))
++                self.connection.execute("INSERT INTO binding_fact_links VALUES(?,?)", (binding_id, fact.fact_id))
++                row = self.connection.execute("SELECT * FROM binding_intervals WHERE binding_id=?", (binding_id,)).fetchone()
++                result = IPv4BindingIntervalV1(**dict(row))
++        if conflict:
++            raise NetworkAttributionConflict("authority_event_conflict")
++        return result
++
++    def retain(self, *, at=None):
++        """One bounded batch per call. Facts still referenced by retained rows survive."""
++        timestamp = format_utc(self.clock()) if at is None else at
++        parse_utc(timestamp)
++        cutoff = format_utc(parse_utc(timestamp) - timedelta(seconds=RETENTION_SECONDS))
++        with self.transaction():
++            self.connection.execute("UPDATE authority_horizon SET retained_from=max(retained_from,?) WHERE first_usable_at<?", (cutoff, cutoff))
++            self.connection.execute("DELETE FROM binding_intervals WHERE binding_id IN "
++                "(SELECT binding_id FROM binding_intervals WHERE valid_until<? ORDER BY valid_until LIMIT ?)", (cutoff, RETENTION_BATCH_SIZE))
++            self.connection.execute("DELETE FROM binding_fact_links WHERE rowid IN "
++                "(SELECT l.rowid FROM binding_fact_links l JOIN authority_facts f USING(fact_id) "
++                "JOIN binding_intervals b USING(binding_id) WHERE f.event_at<? AND f.fact_id<>b.start_fact_id "
++                "AND f.fact_id<>b.last_fact_id AND f.event_at<(SELECT max(a.event_at) FROM binding_fact_links x "
++                "JOIN authority_facts a USING(fact_id) WHERE x.binding_id=b.binding_id AND a.message_type='ack' "
++                "AND a.event_at<=?) LIMIT ?)", (cutoff, cutoff, RETENTION_BATCH_SIZE))
++            self.connection.execute("DELETE FROM authority_facts WHERE fact_id IN "
++                "(SELECT fact_id FROM authority_facts WHERE event_at<? AND fact_id NOT IN "
++                "(SELECT start_fact_id FROM binding_intervals UNION SELECT last_fact_id FROM binding_intervals "
++                "UNION SELECT fact_id FROM binding_fact_links) ORDER BY event_at LIMIT ?)", (cutoff, RETENTION_BATCH_SIZE))
++            # Keep the crossing coverage predecessor needed for a retained interval.
++            self.connection.execute("DELETE FROM source_coverage WHERE coverage_id IN "
++                "(SELECT c.coverage_id FROM source_coverage c WHERE c.coverage_until<? AND NOT EXISTS "
++                "(SELECT 1 FROM binding_intervals b WHERE b.site_id=c.site_id AND b.capture_source_id=c.capture_source_id "
++                "AND b.valid_from<c.coverage_until AND c.coverage_from<b.valid_until) ORDER BY c.coverage_until,c.coverage_id LIMIT ?)", (cutoff, RETENTION_BATCH_SIZE))
++
++    def close(self):
++        with self._mutex:
++            if self.connection is not None:
++                self.connection.close()
++                self.connection = None
++            if self._writer_fd is not None:
++                os.close(self._writer_fd)
++                self._writer_fd = None
+diff --git a/app/network_attribution/schema.py b/app/network_attribution/schema.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4df8f27d8b637e10f20d31d0c562a6a1804dc1f
+--- /dev/null
++++ b/app/network_attribution/schema.py
+@@ -0,0 +1,70 @@
++"""Fresh SQLite NI-02A schema V1; existing non-exact schemas fail closed."""
++
++import sqlite3
++
++from .models import NetworkAttributionStorageUnavailable
++
++TABLES = {
++    "attribution_schema": "singleton INTEGER PRIMARY KEY CHECK(singleton=1), schema_version INTEGER NOT NULL CHECK(schema_version=1)",
++    "authority_facts": """fact_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version=1),
++site_id TEXT NOT NULL, capture_source_id TEXT NOT NULL, event_at TEXT NOT NULL, ingested_at TEXT NOT NULL,
++message_type TEXT NOT NULL CHECK(message_type IN ('ack','release','decline')), client_mac TEXT NOT NULL,
++ipv4 TEXT NOT NULL, xid INTEGER NOT NULL CHECK(xid BETWEEN 0 AND 4294967295),
++server_ipv4 TEXT, option54_ipv4 TEXT, lease_seconds INTEGER, authority_class TEXT NOT NULL,
++CHECK((message_type='ack' AND authority_class='trusted_dhcp_ack' AND server_ipv4 IS NOT NULL
++AND option54_ipv4 IS NOT NULL AND lease_seconds IS NOT NULL AND lease_seconds BETWEEN 1 AND 86400) OR
++(message_type IN ('release','decline') AND authority_class='validated_client_' || message_type
++AND server_ipv4 IS NULL AND option54_ipv4 IS NULL AND lease_seconds IS NULL))""",
++    "binding_intervals": """binding_id TEXT PRIMARY KEY, site_id TEXT NOT NULL, capture_source_id TEXT NOT NULL,
++client_mac TEXT NOT NULL, ipv4 TEXT NOT NULL, valid_from TEXT NOT NULL, valid_until TEXT NOT NULL,
++last_confirmed_at TEXT NOT NULL, lease_expires_at TEXT NOT NULL,
++start_fact_id TEXT NOT NULL REFERENCES authority_facts(fact_id),
++last_fact_id TEXT NOT NULL REFERENCES authority_facts(fact_id), end_reason TEXT,
++CHECK(valid_from<=valid_until AND last_confirmed_at>=valid_from AND lease_expires_at>last_confirmed_at),
++CHECK(end_reason IS NULL OR end_reason IN ('superseded_same_mac','superseded_same_ip','client_release','client_decline'))""",
++    "binding_fact_links": "binding_id TEXT NOT NULL REFERENCES binding_intervals(binding_id) ON DELETE CASCADE, fact_id TEXT NOT NULL REFERENCES authority_facts(fact_id), PRIMARY KEY(binding_id,fact_id)",
++    "source_coverage": """coverage_id TEXT PRIMARY KEY, coverage_from TEXT NOT NULL, coverage_until TEXT,
++site_id TEXT NOT NULL, capture_source_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('usable','unavailable')),
++verified_through TEXT NOT NULL CHECK(verified_through>=coverage_from),
++reason_code TEXT, CHECK(coverage_until IS NULL OR coverage_from<=coverage_until),
++CHECK((state='usable' AND reason_code IS NULL) OR (state='unavailable' AND reason_code IS NOT NULL))""",
++    "authority_horizon": "site_id TEXT PRIMARY KEY, first_usable_at TEXT NOT NULL, retained_from TEXT NOT NULL CHECK(retained_from>=first_usable_at)",
++}
++INDEXES = {
++    "idx_na_ip_time": "binding_intervals(site_id,ipv4,valid_from,valid_until)",
++    "idx_na_mac_time": "binding_intervals(site_id,client_mac,valid_from,valid_until)",
++    "idx_na_fact_time": "authority_facts(site_id,event_at,client_mac,ipv4)",
++    "idx_na_link_fact": "binding_fact_links(fact_id)",
++    "idx_na_coverage_time": "source_coverage(site_id,capture_source_id,coverage_from,coverage_until)",
++    "idx_na_expired": "binding_intervals(valid_until,binding_id)",
++}
++
++
++def create_schema(connection):
++    for name, ddl in TABLES.items():
++        connection.execute(f"CREATE TABLE {name} ({ddl})")
++    for name, ddl in INDEXES.items():
++        connection.execute(f"CREATE INDEX {name} ON {ddl}")
++    connection.execute("CREATE UNIQUE INDEX ux_na_open_coverage ON source_coverage(site_id,capture_source_id) WHERE coverage_until IS NULL")
++    connection.execute("CREATE TRIGGER immutable_na_facts BEFORE UPDATE ON authority_facts BEGIN SELECT RAISE(ABORT,'immutable_authority_fact'); END")
++    connection.execute("INSERT INTO attribution_schema VALUES(1,1)")
++    connection.execute("PRAGMA user_version=1")
++
++
++def signature(connection):
++    return tuple((kind, name, " ".join(sql.split())) for kind, name, sql in connection.execute(
++        "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
++
++
++def validate_schema(connection):
++    with sqlite3.connect(":memory:") as reference:
++        create_schema(reference)
++        expected = signature(reference)
++    if (connection.execute("PRAGMA user_version").fetchone()[0] != 1
++            or signature(connection) != expected
++            or [tuple(row) for row in connection.execute("SELECT * FROM attribution_schema")] != [(1, 1)]
++            or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
++            or connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"
++            or connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
++            or connection.execute("PRAGMA foreign_key_check").fetchone() is not None):
++        raise NetworkAttributionStorageUnavailable("attribution_schema_unavailable")
+diff --git a/app/network_attribution/validation.py b/app/network_attribution/validation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8efc9a09c00b62b7b0d9b14c456ee46a7fa83c73
+--- /dev/null
++++ b/app/network_attribution/validation.py
+@@ -0,0 +1,85 @@
++"""NI validation reuses only existing scalar identity/time contracts."""
++
++import hashlib
++import ipaddress
++import json
++from dataclasses import asdict
++
++from app.device_fingerprint.validation import (
++    parse_utc, validate_machine_id, validate_site_id,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++
++from .models import NetworkAddressBindingFactV1, NetworkAttributionValidationError
++
++
++def query_values(site_id, ipv4, event_at):
++    try:
++        validate_site_id(site_id)
++        if not isinstance(ipv4, str) or str(ipaddress.IPv4Address(ipv4)) != ipv4:
++            raise ValueError
++        parse_utc(event_at)
++        return site_id, ipv4, event_at
++    except (ValueError, TypeError, DeviceFingerprintValidationError):
++        raise NetworkAttributionValidationError("invalid_query") from None
++
++
++def source_values(site_id, capture_source_id, event_at):
++    try:
++        validate_site_id(site_id)
++        validate_machine_id(capture_source_id)
++        parse_utc(event_at)
++    except (ValueError, TypeError, DeviceFingerprintValidationError):
++        raise NetworkAttributionValidationError("invalid_source") from None
++
++
++def canonical_mac(value):
++    if not isinstance(value, str):
++        raise NetworkAttributionValidationError("invalid_mac")
++    parts = value.split(":")
++    try:
++        raw = bytes(int(part, 16) for part in parts)
++    except (ValueError, OverflowError):
++        raise NetworkAttributionValidationError("invalid_mac") from None
++    if (len(raw) != 6 or any(len(part) != 2 for part in parts)
++            or raw == b"\0" * 6 or raw[0] & 1):
++        raise NetworkAttributionValidationError("invalid_mac")
++    return ":".join(f"{part:02X}" for part in raw)
++
++
++def fact_identity(values):
++    semantic = {key: value for key, value in values.items() if key not in {"fact_id", "ingested_at"}}
++    return hashlib.sha256(json.dumps(semantic, sort_keys=True, allow_nan=False,
++                                    separators=(",", ":")).encode("ascii")).hexdigest()
++
++
++def make_fact(**values):
++    values["schema_version"] = 1
++    values["client_mac"] = canonical_mac(values["client_mac"])
++    values["fact_id"] = fact_identity(values)
++    fact = NetworkAddressBindingFactV1(**values)
++    validate_fact(fact)
++    return fact
++
++
++def validate_fact(fact):
++    if type(fact) is not NetworkAddressBindingFactV1:
++        raise NetworkAttributionValidationError("invalid_fact")
++    query_values(fact.site_id, fact.ipv4, fact.event_at)
++    source_values(fact.site_id, fact.capture_source_id, fact.ingested_at)
++    if (type(fact.schema_version) is not int or fact.schema_version != 1
++            or canonical_mac(fact.client_mac) != fact.client_mac
++            or type(fact.xid) is not int or not 0 <= fact.xid <= 0xFFFFFFFF
++            or fact.fact_id != fact_identity(asdict(fact))):
++        raise NetworkAttributionValidationError("invalid_fact")
++    expected = {"ack": "trusted_dhcp_ack", "release": "validated_client_release",
++                "decline": "validated_client_decline"}.get(fact.message_type)
++    if expected is None or fact.authority_class != expected:
++        raise NetworkAttributionValidationError("invalid_authority")
++    if fact.message_type == "ack":
++        query_values(fact.site_id, fact.server_ipv4, fact.event_at)
++        query_values(fact.site_id, fact.option54_ipv4, fact.event_at)
++        if type(fact.lease_seconds) is not int or not 1 <= fact.lease_seconds <= 86400:
++            raise NetworkAttributionValidationError("invalid_lease")
++    elif any(value is not None for value in (fact.server_ipv4, fact.option54_ipv4, fact.lease_seconds)):
++        raise NetworkAttributionValidationError("invalid_client_fact")
+diff --git a/tests/network_attribution/__init__.py b/tests/network_attribution/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8018461ba0279cd6b50eaba562926e7e4f505969
+--- /dev/null
++++ b/tests/network_attribution/__init__.py
+@@ -0,0 +1 @@
++"""Focused offline NI-02A tests."""
+diff --git a/tests/network_attribution/test_authority.py b/tests/network_attribution/test_authority.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6382623613e499e15be7cd673a9f5e6025374bf
+--- /dev/null
++++ b/tests/network_attribution/test_authority.py
+@@ -0,0 +1,404 @@
++import ipaddress
++import sqlite3
++import struct
++from dataclasses import asdict, replace
++from datetime import datetime, timedelta, timezone
++
++import pytest
++
++from app.device_fingerprint.validation import format_utc
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.network_attribution.config import network_attribution_config_from_env
++from app.network_attribution.dhcp_authority import authority_fact_from_frame
++from app.network_attribution.models import (
++    NetworkAttributionConfig, NetworkAttributionConflict,
++    NetworkAttributionStorageUnavailable, NetworkAttributionValidationError,
++)
++from app.network_attribution.read_service import NetworkAttributionReadService
++from app.network_attribution.repository import NetworkAttributionRepository
++
++T0 = datetime(2026, 10, 9, 12, tzinfo=timezone.utc)
++SITE = "6a64f17630da7c70d232187a"
++OTHER_SITE = "6a64f17630da7c70d232187b"
++SOURCE = "zefer-span-01"
++MAC = "00:11:22:33:44:55"
++OTHER_MAC = "00:11:22:33:44:66"
++IP = "192.168.8.20"
++OTHER_IP = "192.168.8.21"
++
++
++def ts(seconds=0):
++    return format_utc(T0 + timedelta(seconds=seconds))
++
++
++def option(code, value):
++    return bytes((code, len(value))) + value
++
++
++def frame(*, message=5, mac=MAC, ip=IP, server="192.168.10.1", option54="192.168.10.1",
++          lease=3600, xid=123, extra=b""):
++    raw_mac = bytes.fromhex(mac.replace(":", ""))
++    data = bytearray(236)
++    data[:3] = bytes((2 if message == 5 else 1, 1, 6))
++    struct.pack_into("!I", data, 4, xid)
++    data[28:34] = raw_mac
++    if message == 5:
++        data[16:20] = ipaddress.IPv4Address(ip).packed
++    elif message == 7:
++        data[12:16] = ipaddress.IPv4Address(ip).packed
++    options = option(53, bytes((message,)))
++    if message == 4:
++        options += option(50, ipaddress.IPv4Address(ip).packed)
++    if option54 is not None:
++        options += option(54, ipaddress.IPv4Address(option54).packed)
++    if lease is not None:
++        options += option(51, lease.to_bytes(4, "big"))
++    payload = bytes(data) + b"\x63\x82\x53\x63" + options + extra + b"\xff"
++    udp = struct.pack("!HHHH", 67 if message == 5 else 68, 68 if message == 5 else 67, 8 + len(payload), 0) + payload
++    header = bytearray(20)
++    header[0], header[8], header[9] = 0x45, 64, 17
++    struct.pack_into("!H", header, 2, 20 + len(udp))
++    header[12:16] = ipaddress.IPv4Address(server if message == 5 else ip).packed
++    return b"\xff" * 6 + raw_mac + b"\x08\x00" + bytes(header) + udp
++
++
++def fact(seconds=0, *, sensor=None, **kwargs):
++    sensor = sensor or sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++    return authority_fact_from_frame(frame(**kwargs), ts(seconds), ts(seconds + 1), sensor)
++
++
++@pytest.fixture
++def store(tmp_path):
++    config = NetworkAttributionConfig(True, str(tmp_path / "attribution.sqlite3"))
++    repository = NetworkAttributionRepository(config, clock=lambda: T0).initialize()
++    repository.coverage(SITE, SOURCE, "usable", ts())
++    reader = NetworkAttributionReadService(config, clock=lambda: T0)
++    yield repository, reader, config
++    repository.close()
++
++
++def resolve(store, seconds, *, site=SITE, ip=IP):
++    repository, reader, _ = store
++    active = repository.connection.execute("SELECT * FROM source_coverage WHERE site_id=? AND capture_source_id=? AND coverage_until IS NULL", (site, SOURCE)).fetchone()
++    if active and active["state"] == "usable" and ts(seconds) >= active["verified_through"]:
++        repository.confirm_capture(site, SOURCE, ts(seconds))
++    return reader.resolve_ipv4(site, ip, ts(seconds))
++
++
++def test_trusted_ack_exact_finite_fact_and_interval(store):
++    repository, _, _ = store
++    value = fact()
++    interval = repository.record(value)
++    assert interval.valid_from == interval.last_confirmed_at == ts()
++    assert interval.valid_until == interval.lease_expires_at == ts(3600)
++    assert interval.start_fact_id == interval.last_fact_id == value.fact_id
++    assert value.authority_class == "trusted_dhcp_ack"
++    assert value.client_mac == MAC
++    result = resolve(store, 0)
++    assert result.state == "resolved" and result.attribution_source == "trusted_dhcp_v4"
++    assert "device_id" not in asdict(result)
++    with pytest.raises(sqlite3.IntegrityError):
++        repository.connection.execute("UPDATE authority_facts SET lease_seconds=1")
++
++
++@pytest.mark.parametrize("kwargs", [
++    {"server": "192.168.0.1"}, {"option54": "192.168.0.1"}, {"option54": None},
++    {"ip": "192.168.0.20"}, {"lease": None}, {"lease": 0}, {"lease": 86401},
++    {"mac": "00:00:00:00:00:00"}, {"mac": "FF:FF:FF:FF:FF:FF"},
++    {"message": 1}, {"message": 2}, {"message": 3},
++])
++def test_untrusted_or_non_authority_packets_are_rejected(kwargs):
++    assert fact(**kwargs) is None
++
++
++@pytest.mark.parametrize("extra", [option(51, (3600).to_bytes(4, "big")), option(54, b"\x01\x02\x03\x04"), option(53, b"\x05"), b"\x32\x04\x01"])
++def test_malformed_or_duplicate_authority_options_rejected(extra):
++    assert fact(extra=extra) is None
++
++
++def test_fragment_and_bootp_shape_rejected():
++    sensor = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++    for offset, value in ((20, 0x20), (42, 1), (43, 2)):
++        raw = bytearray(frame())
++        raw[offset] = value
++        assert authority_fact_from_frame(bytes(raw), ts(), ts(), sensor) is None
++
++
++def test_renewal_one_interval_and_historical_confirmation(store):
++    repository, _, _ = store
++    original = repository.record(fact(0, lease=1200))
++    renewed = repository.record(fact(600, lease=1800, xid=124))
++    assert original.binding_id == renewed.binding_id
++    assert renewed.valid_from == ts()
++    assert renewed.last_confirmed_at == ts(600)
++    assert renewed.valid_until == renewed.lease_expires_at == ts(2400)
++    assert repository.connection.execute("SELECT count(*) FROM binding_intervals").fetchone()[0] == 1
++    assert resolve(store, 100).state == "resolved"
++
++
++@pytest.mark.parametrize("kwargs,reason,old_ip,new_ip,new_mac", [
++    ({"ip": OTHER_IP}, "superseded_same_mac", IP, OTHER_IP, MAC),
++    ({"mac": OTHER_MAC}, "superseded_same_ip", IP, IP, OTHER_MAC),
++])
++def test_exact_reassignment_and_reuse_boundary(store, kwargs, reason, old_ip, new_ip, new_mac):
++    repository, _, _ = store
++    old = repository.record(fact())
++    new = repository.record(fact(600, **kwargs))
++    old_row = repository.connection.execute("SELECT * FROM binding_intervals WHERE binding_id=?", (old.binding_id,)).fetchone()
++    assert old_row["valid_until"] == new.valid_from == ts(600)
++    assert old_row["end_reason"] == reason
++    assert resolve(store, 599, ip=old_ip).client_mac == MAC
++    result = resolve(store, 600, ip=new_ip)
++    assert result.state == "resolved" and result.client_mac == new_mac
++    if old_ip != new_ip:
++        assert resolve(store, 600, ip=old_ip).state == "unattributed"
++
++
++def test_expiry_no_timer_mutation_half_open_boundaries(store):
++    repository, _, _ = store
++    repository.record(fact(10, lease=20))
++    assert resolve(store, 9).state == "unattributed"
++    assert resolve(store, 10).state == "resolved"
++    assert resolve(store, 29).state == "resolved"
++    assert resolve(store, 30).state == "unattributed"
++    assert repository.connection.execute("SELECT valid_until FROM binding_intervals").fetchone()[0] == ts(30)
++    next_lease = repository.record(fact(30, lease=20))
++    assert next_lease.valid_from == ts(30)
++    assert repository.connection.execute("SELECT count(*) FROM binding_intervals").fetchone()[0] == 2
++
++
++@pytest.mark.parametrize("message,reason", [(7, "client_release"), (4, "client_decline")])
++def test_valid_client_termination_and_unmatched_ignore(store, message, reason):
++    repository, _, _ = store
++    assert repository.record(fact(0, message=message)) is None
++    original = repository.record(fact(1))
++    assert repository.record(fact(10, message=message, ip=OTHER_IP)) is None
++    assert repository.record(fact(10, message=message, mac=OTHER_MAC)) is None
++    repository.confirm_capture(SITE, SOURCE, ts(20))
++    terminated = repository.record(fact(20, message=message))
++    assert terminated.binding_id == original.binding_id and terminated.end_reason == reason
++    assert terminated.valid_until == ts(20)
++    assert resolve(store, 19).state == "resolved"
++    assert resolve(store, 20).state == "unattributed"
++    stored = repository.connection.execute("SELECT * FROM authority_facts WHERE message_type<> 'ack'").fetchone()
++    assert stored["server_ipv4"] is stored["option54_ipv4"] is stored["lease_seconds"] is None
++    assert repository.record(fact(21, message=message)) is None
++
++
++@pytest.mark.parametrize("kwargs", [{"mac": OTHER_MAC}, {"ip": OTHER_IP}])
++def test_exact_time_conflict_does_not_overwrite_and_fences_source(store, kwargs):
++    repository, _, _ = store
++    original = repository.record(fact(1))
++    with pytest.raises(NetworkAttributionConflict):
++        repository.record(fact(1, **kwargs))
++    row = dict(repository.connection.execute("SELECT * FROM binding_intervals").fetchone())
++    assert row == asdict(original)
++    assert repository.connection.execute("SELECT count(*) FROM authority_facts").fetchone()[0] == 1
++    assert resolve(store, 2).state == "unavailable"
++
++
++def test_duplicate_fact_idempotent(store):
++    repository, _, _ = store
++    first = fact()
++    repository.record(first)
++    assert repository.record(replace(first, ingested_at=ts(2))) is None
++    assert repository.connection.execute("SELECT count(*) FROM authority_facts").fetchone()[0] == 1
++
++
++def test_same_pair_same_timestamp_equivalent_ack_is_not_a_primary_conflict(store):
++    repository, _, _ = store
++    original = repository.record(fact(xid=123))
++    repeated = repository.record(fact(xid=124))
++    assert repeated.binding_id == original.binding_id
++    assert repeated.valid_from == original.valid_from
++    assert repeated.valid_until == original.valid_until
++    assert resolve(store, 0).state == "resolved"
++
++
++@pytest.mark.parametrize("message", [4, 7])
++def test_same_timestamp_client_termination_uses_exact_current_binding(store, message):
++    repository, _, _ = store
++    original = repository.record(fact())
++    closed = repository.record(fact(message=message))
++    assert closed.binding_id == original.binding_id
++    assert closed.valid_from == closed.valid_until == ts()
++    assert resolve(store, 0).state == "unattributed"
++
++
++def test_coverage_horizon_and_site_isolation(store):
++    repository, _, _ = store
++    assert resolve(store, -1).state == "outside_historical_horizon"
++    assert resolve(store, 0).state == "unattributed"
++    repository.record(fact())
++    assert resolve(store, 1, site=OTHER_SITE).state == "unavailable"
++    repository.coverage(OTHER_SITE, SOURCE, "usable", ts())
++    sensor = replace(sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"}), site_id=OTHER_SITE)
++    repository.record(fact(0, sensor=sensor, mac=OTHER_MAC))
++    assert resolve(store, 1, site=OTHER_SITE).client_mac == OTHER_MAC
++    assert resolve(store, 1).client_mac == MAC
++
++
++def test_outage_recovery_new_ack_and_historical_results(store):
++    repository, _, _ = store
++    original = repository.record(fact())
++    repository.coverage(SITE, SOURCE, "unavailable", ts(600), "raw_capture_unavailable")
++    repository.coverage(SITE, SOURCE, "usable", ts(900))
++    assert resolve(store, 300).state == "resolved"
++    during = resolve(store, 700)
++    assert (during.state, during.reason) == ("unavailable", "source_coverage_unavailable")
++    after = resolve(store, 1200)
++    assert (after.state, after.reason) == ("unavailable", "source_coverage_gap")
++    assert repository.connection.execute("SELECT valid_until FROM binding_intervals").fetchone()[0] == original.valid_until
++    renewed = repository.record(fact(1500, xid=456))
++    assert renewed.binding_id == original.binding_id
++    assert resolve(store, 1500).state == "resolved"
++    # Future renewal must not erase a historical gap or prior good coverage.
++    assert resolve(store, 300).state == "resolved"
++    assert resolve(store, 1200).reason == "source_coverage_gap"
++
++
++def test_absence_is_not_guessed_across_a_recovered_gap(store):
++    repository, _, _ = store
++    repository.coverage(SITE, SOURCE, "unavailable", ts(10), "raw_capture_unavailable")
++    repository.coverage(SITE, SOURCE, "usable", ts(20))
++    assert resolve(store, 21).reason == "source_coverage_gap"
++    repository.record(fact(22, lease=10))
++    assert resolve(store, 22).state == "resolved"
++    assert resolve(store, 32).state == "unattributed"
++
++
++@pytest.mark.parametrize("message", [4, 7])
++def test_client_termination_cannot_use_a_binding_unproven_after_a_gap(store, message):
++    repository, _, _ = store
++    original = repository.record(fact())
++    repository.coverage(SITE, SOURCE, "unavailable", ts(10), "raw_capture_unavailable")
++    repository.coverage(SITE, SOURCE, "usable", ts(20))
++    repository.confirm_capture(SITE, SOURCE, ts(25))
++    assert repository.record(fact(25, message=message)) is None
++    assert dict(repository.connection.execute("SELECT * FROM binding_intervals").fetchone()) == asdict(original)
++    repository.record(fact(26))
++    repository.confirm_capture(SITE, SOURCE, ts(27))
++    assert repository.record(fact(27, message=message)).valid_until == ts(27)
++
++
++def test_ambiguity_is_never_selected_and_coverage_has_precedence(store):
++    repository, _, _ = store
++    binding = repository.record(fact())
++    # Explicit corrupted/overlapping candidate fixture, not an alternative writer path.
++    second = asdict(binding)
++    second.update(binding_id="overlapping-fixture", client_mac=OTHER_MAC)
++    repository._insert("binding_intervals", second)
++    repository.connection.execute("INSERT INTO binding_fact_links VALUES(?,?)", (second["binding_id"], binding.start_fact_id))
++    assert resolve(store, 1).state == "ambiguous"
++    repository.coverage(SITE, SOURCE, "unavailable", ts(2), "raw_capture_unavailable")
++    assert resolve(store, 3).state == "unavailable"
++
++
++def test_open_coverage_does_not_predict_past_last_durable_capture_confirmation(store):
++    repository, reader, config = store
++    repository.record(fact())
++    repository.confirm_capture(SITE, SOURCE, ts(10))
++    assert reader.resolve_ipv4(SITE, IP, ts(10)).state == "resolved"
++    assert reader.resolve_ipv4(SITE, IP, ts(11)).state == "unavailable"
++    repository.close()  # Simulated unclean process exit: no shutdown coverage event.
++    repository.initialize()
++    repository.capture_started(SITE, SOURCE, ts(20))
++    assert store[1].resolve_ipv4(SITE, IP, ts(10)).state == "resolved"
++    assert resolve(store, 21).reason == "source_coverage_gap"
++    repository.record(fact(22))
++    assert resolve(store, 22).state == "resolved"
++
++
++@pytest.mark.parametrize("site,ip,event", [("bad", IP, ts()), (SITE, "::1", ts()), (SITE, "192.168.008.20", ts()), (SITE, IP, "today"), (None, IP, ts())])
++def test_invalid_inputs(store, site, ip, event):
++    assert store[1].resolve_ipv4(site, ip, event).state == "invalid"
++
++
++def test_schema_pragmas_and_durable_reopen(store):
++    repository, _, _ = store
++    repository.record(fact())
++    for pragma, expected in (("user_version", 1), ("foreign_keys", 1), ("journal_mode", "wal"), ("synchronous", 2), ("busy_timeout", 500)):
++        assert repository.connection.execute("PRAGMA " + pragma).fetchone()[0] == expected
++    repository.close()
++    repository.initialize()
++    assert resolve(store, 1).state == "resolved"
++
++
++def test_foreign_schema_rejected_without_mutating_database(tmp_path):
++    path = tmp_path / "foreign.sqlite3"
++    with sqlite3.connect(path) as connection:
++        connection.execute("CREATE TABLE old_contract(value)")
++        connection.execute("PRAGMA user_version=7")
++    before = path.read_bytes()
++    config = NetworkAttributionConfig(True, str(path))
++    with pytest.raises(NetworkAttributionStorageUnavailable):
++        NetworkAttributionRepository(config).initialize()
++    assert path.read_bytes() == before
++    assert NetworkAttributionReadService(config).resolve_ipv4(SITE, IP, ts()).state == "unavailable"
++
++
++def test_missing_and_capacity_exhausted_store_fail_closed(tmp_path):
++    config = NetworkAttributionConfig(True, str(tmp_path / "absent-parent" / "test.sqlite3"))
++    with pytest.raises(NetworkAttributionStorageUnavailable):
++        NetworkAttributionRepository(config).initialize()
++    assert NetworkAttributionReadService(config).resolve_ipv4(SITE, IP, ts()).state == "unavailable"
++    tiny = NetworkAttributionConfig(True, str(tmp_path / "tiny.sqlite3"), 1)
++    with pytest.raises(NetworkAttributionStorageUnavailable):
++        NetworkAttributionRepository(tiny).initialize()
++
++
++def test_single_writer_lock(store):
++    with pytest.raises(NetworkAttributionStorageUnavailable):
++        NetworkAttributionRepository(store[2]).initialize()
++    assert resolve(store, 0).state == "unattributed"
++
++
++def test_retention_keeps_referenced_facts_and_explicit_horizon(store):
++    repository, reader, _ = store
++    repository.record(fact(0, lease=20))
++    repository.record(fact(21, lease=20))
++    repository.coverage(SITE, SOURCE, "unavailable", ts(60), "sensor_shutdown")
++    repository.retain(at=ts(30 * 86400 + 45))
++    assert repository.connection.execute("SELECT count(*) FROM binding_intervals").fetchone()[0] == 0
++    assert repository.connection.execute("SELECT count(*) FROM authority_facts").fetchone()[0] == 0
++    assert reader.resolve_ipv4(SITE, IP, ts(40)).state == "outside_historical_horizon"
++
++
++def test_retention_is_one_bounded_batch_and_keeps_required_start_fact(store):
++    repository, _, _ = store
++    for seconds in range(120):
++        repository.record(fact(seconds, lease=1))
++    repository.retain(at=ts(30 * 86400 + 121))
++    assert repository.connection.execute("SELECT count(*) FROM binding_intervals").fetchone()[0] == 20
++    assert repository.connection.execute("SELECT count(*) FROM authority_facts").fetchone()[0] == 20
++    assert not repository.connection.execute("PRAGMA foreign_key_check").fetchall()
++
++
++def test_long_lived_renewal_retains_start_and_pre_horizon_confirmation(store):
++    repository, reader, _ = store
++    original = repository.record(fact(0, lease=86400))
++    for day in range(1, 33):
++        # Renew before expiry to keep one interval, including a 30-day retention run.
++        repository.record(fact(day * 86000, lease=86400))
++    cutoff = 3 * 86000
++    repository.retain(at=ts(cutoff + 30 * 86400))
++    assert repository.connection.execute("SELECT count(*) FROM binding_intervals").fetchone()[0] == 1
++    assert repository.connection.execute("SELECT fact_id FROM authority_facts WHERE fact_id=?", (original.start_fact_id,)).fetchone()
++    repository.confirm_capture(SITE, SOURCE, ts(32 * 86000))
++    assert reader.resolve_ipv4(SITE, IP, ts(cutoff)).state == "resolved"
++
++
++def test_default_off_config_does_not_create_or_read_store(tmp_path):
++    config = network_attribution_config_from_env({"NETWORK_ATTRIBUTION_ENABLED": "false", "NETWORK_ATTRIBUTION_DB_PATH": "invalid"})
++    assert config == NetworkAttributionConfig()
++    assert NetworkAttributionReadService(config).resolve_ipv4(SITE, IP, ts()).reason == "attribution_disabled"
++    assert not list(tmp_path.iterdir())
++
++
++@pytest.mark.parametrize("env", [{"NETWORK_ATTRIBUTION_ENABLED": "yes"},
++    {"NETWORK_ATTRIBUTION_ENABLED": "true", "NETWORK_ATTRIBUTION_DB_PATH": "relative"},
++    {"NETWORK_ATTRIBUTION_ENABLED": "true", "NETWORK_ATTRIBUTION_MAX_DB_BYTES": "2147483649"},
++    {"NETWORK_ATTRIBUTION_ENABLED": "true", "NETWORK_ATTRIBUTION_MAX_DB_BYTES": "0"}])
++def test_config_closed_limits(env):
++    with pytest.raises(NetworkAttributionValidationError):
++        network_attribution_config_from_env(env)
+diff --git a/tests/network_attribution/test_sensor_adapter.py b/tests/network_attribution/test_sensor_adapter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6bb171000ebea7f681cf164e9305ff9423d07676
+--- /dev/null
++++ b/tests/network_attribution/test_sensor_adapter.py
+@@ -0,0 +1,181 @@
++from datetime import timedelta
++from types import SimpleNamespace
++
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.device_fingerprint_sensor.runtime import SensorRuntime
++from app.network_attribution.dhcp_authority import DhcpAuthorityRecorder
++from app.network_attribution.models import NetworkAttributionConfig
++
++from .test_authority import T0, frame, ts
++
++
++class Telemetry:
++    def __init__(self):
++        self.entries = []
++
++    def emit(self, event, **fields):
++        self.entries.append((event, fields))
++
++
++class Spool:
++    capacity_blocked = False
++
++    def __init__(self):
++        self.events = []
++
++    def enqueue(self, events):
++        self.events.extend(events)
++
++    def initialize(self):
++        pass
++
++    def close(self):
++        pass
++
++
++def runtime(*, config=None, recorder=None):
++    sensor = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++    spool, telemetry = Spool(), Telemetry()
++    instance = SensorRuntime(sensor, telemetry=telemetry, spool=spool, producer=SimpleNamespace(),
++        eve=SimpleNamespace(close=lambda: None), attribution_config=config, attribution_recorder=recorder,
++        monotonic=lambda: 0, now=lambda: T0)
++    raw = frame(message=3)
++
++    class Capture:
++        def __init__(self):
++            self.frames = iter([(raw, 0, ts()), (raw, 0, ts())])
++
++        def receive(self):
++            received = next(self.frames, None)
++            if received is None:
++                instance.stop_event.set()
++            return received
++
++        def close(self):
++            pass
++
++    instance.capture = Capture()
++    return instance, spool, telemetry
++
++
++def test_disabled_adapter_preserves_normalized_outputs_and_never_constructs_recorder(monkeypatch):
++    import app.network_attribution.dhcp_authority as module
++    monkeypatch.setattr(module, "DhcpAuthorityRecorder", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
++    baseline, baseline_spool, baseline_log = runtime()
++    disabled, disabled_spool, disabled_log = runtime(config=NetworkAttributionConfig())
++    baseline._raw_loop()
++    disabled._raw_loop()
++    assert baseline._attribution is disabled._attribution is None
++    assert len(baseline_spool.events) == len(disabled_spool.events) == 1
++    left, right = baseline_spool.events[0].document.copy(), disabled_spool.events[0].document.copy()
++    left.pop("source_event_id")
++    right.pop("source_event_id")
++    assert left == right
++    assert baseline_log.entries == disabled_log.entries == []
++
++
++def test_recorder_exception_does_not_suppress_fingerprint_output_and_dedup_precedes_both():
++    order = []
++
++    class Recorder:
++        def record_frame(self, raw, observed_at):
++            assert len(spool.events) == 1  # Existing normalization/spooling completed first.
++            order.append("record")
++            raise RuntimeError("private-frame-not-to-be-logged")
++
++        def fault(self, reason):
++            order.append(reason)
++
++        def poll(self):
++            pass
++
++    instance, spool, telemetry = runtime(config=NetworkAttributionConfig(True), recorder=Recorder())
++    instance._raw_loop()
++    assert len(spool.events) == 1 and order == ["record", "attribution_recorder_unavailable"]
++    assert instance._local_health["dhcp"][1] != "attribution_recorder_unavailable"
++    assert telemetry.entries == []
++
++
++def test_real_repository_failure_leaves_fingerprint_raw_output_usable(tmp_path):
++    sensor = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++    config = NetworkAttributionConfig(True, str(tmp_path / "missing" / "attribution.sqlite3"))
++    recorder = DhcpAuthorityRecorder(config, sensor, telemetry=Telemetry(), clock=lambda: T0)
++    recorder.start()
++    assert recorder.permanent_fault
++    instance, spool, _ = runtime(config=config, recorder=recorder)
++    instance._raw_loop()
++    assert len(spool.events) == 1
++    assert len(recorder.telemetry.entries) == 1
++
++
++def test_capture_error_fences_ni_without_using_fingerprint_health_for_ni():
++    faults = []
++    recorder = SimpleNamespace(fault=faults.append)
++    instance, _, _ = runtime(config=NetworkAttributionConfig(True), recorder=recorder)
++    instance.capture.receive = lambda: (_ for _ in ()).throw(OSError())
++    instance._raw_loop()
++    assert faults == ["raw_capture_unavailable"]
++    assert instance._local_health["dhcp"] == ("unavailable", "raw_parser_unavailable")
++
++
++def test_sidecar_start_requires_preflight_and_raw_open(monkeypatch):
++    order = []
++    recorder = SimpleNamespace(start=lambda: order.append("attribution"), shutdown=lambda: None,
++                               fault=lambda reason: order.append(reason))
++    instance, _, _ = runtime(config=NetworkAttributionConfig(True), recorder=recorder)
++    instance.preflight = SimpleNamespace(validate=lambda: order.append("preflight"))
++    instance.capture.open = lambda: order.append("raw_open")
++    instance.eve.open = lambda: order.append("eve_open")
++    import app.device_fingerprint_sensor.runtime as module
++    monkeypatch.setattr(module.threading, "Thread", lambda **_kwargs: SimpleNamespace(start=lambda: None))
++    assert instance.preflight_or_report()
++    instance.start()
++    assert order == ["preflight", "eve_open", "raw_open", "attribution"]
++
++
++def test_recorder_shutdown_poll_and_permanent_fault_are_bounded(tmp_path):
++    sensor = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++    config = NetworkAttributionConfig(True, str(tmp_path / "attribution.sqlite3"))
++    clock = [T0]
++    telemetry = Telemetry()
++    recorder = DhcpAuthorityRecorder(config, sensor, telemetry=telemetry, clock=lambda: clock[0])
++    recorder.start()
++    recorder.record_frame(frame(), ts())
++    assert not recorder.permanent_fault
++    clock[0] += timedelta(seconds=1)
++    recorder.poll()
++    assert recorder.repository.connection.execute("SELECT verified_through FROM source_coverage").fetchone()[0] == ts(1)
++    recorder.fault("attribution_recorder_unavailable")
++    recorder.fault("attribution_recorder_unavailable")
++    assert len(telemetry.entries) == 1
++    recorder.record_frame(frame(), ts(1))
++    recorder.shutdown()
++    assert recorder.repository.connection is None
++
++
++def test_queued_pre_activation_ack_is_not_backfilled_or_a_permanent_fault(tmp_path):
++    sensor = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++    config = NetworkAttributionConfig(True, str(tmp_path / "attribution.sqlite3"))
++    recorder = DhcpAuthorityRecorder(config, sensor, telemetry=Telemetry(), clock=lambda: T0 + timedelta(seconds=10))
++    recorder.start()
++    recorder.record_frame(frame(), ts(9))
++    assert not recorder.permanent_fault
++    assert recorder.repository.connection.execute("SELECT count(*) FROM authority_facts").fetchone()[0] == 0
++    recorder.record_frame(frame(), ts(10))
++    assert recorder.repository.connection.execute("SELECT count(*) FROM authority_facts").fetchone()[0] == 1
++    recorder.shutdown()
++
++
++def test_live_client_termination_between_idle_polls_is_recorded(tmp_path):
++    sensor = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
++    config = NetworkAttributionConfig(True, str(tmp_path / "attribution.sqlite3"))
++    clock = [T0]
++    recorder = DhcpAuthorityRecorder(config, sensor, telemetry=Telemetry(), clock=lambda: clock[0])
++    recorder.start()
++    recorder.record_frame(frame(), ts())
++    clock[0] += timedelta(milliseconds=500)
++    recorder.record_frame(frame(message=7), ts(.5))
++    assert not recorder.permanent_fault
++    row = recorder.repository.connection.execute("SELECT * FROM binding_intervals").fetchone()
++    assert row["end_reason"] == "client_release" and row["valid_until"] == ts(.5)
++    recorder.shutdown()

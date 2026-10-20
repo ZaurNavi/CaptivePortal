@@ -1,0 +1,1715 @@
+diff --git a/.env.example b/.env.example
+index ecf44a203263666ce602f748fff7a0aa92109b12..139d7f2bef3f85673c37b47120572fc0330c0f94 100644
+--- a/.env.example
++++ b/.env.example
+@@ -201,6 +201,7 @@ WEB_ADMIN_DEVICE_PAGE_SIZE=100
+ WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED=false
+ WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET=
+ WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED=false
++WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED=false
+ WEB_ADMIN_VISIT_PAGE_SIZE=100
+ WEB_ADMIN_OBSERVATION_PAGE_SIZE=100
+ WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS=24
+diff --git a/app/admin_web/config.py b/app/admin_web/config.py
+index b17eaf0db9ac1f3c1b74f09b9da5fea54d41d649..66826c7c0b73c0e5ee893832bb1302185694c2cd 100644
+--- a/app/admin_web/config.py
++++ b/app/admin_web/config.py
+@@ -91,6 +91,7 @@ class AdminWebConfig:
+     traffic_refresh_seconds: int
+     traffic_request_timeout_seconds: int
+     global_capabilities: frozenset[str] = frozenset()
++    device_protocol_intelligence_enabled: bool = False
+ 
+     def __repr__(self) -> str:
+         return (
+@@ -127,6 +128,10 @@ def admin_web_config_from_settings(
+         settings.get("web_admin_require_https", "true"),
+         "WEB_ADMIN_REQUIRE_HTTPS",
+     )
++    device_protocol_intelligence_enabled = _exact_bool(
++        settings.get("web_admin_device_protocol_intelligence_enabled", "false"),
++        "WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED",
++    )
+     home_live_enabled = _exact_bool(
+         settings.get("web_admin_home_live_enabled", "false"),
+         "WEB_ADMIN_HOME_LIVE_ENABLED",
+@@ -278,6 +283,7 @@ def admin_web_config_from_settings(
+     return AdminWebConfig(
+         enabled=enabled,
+         global_capabilities=global_capabilities,
++        device_protocol_intelligence_enabled=device_protocol_intelligence_enabled,
+         username=username,
+         password_hash=password_hash,
+         allowed_networks=networks,
+diff --git a/app/admin_web/device_protocol_intelligence_serialization.py b/app/admin_web/device_protocol_intelligence_serialization.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..918540771acc5ba7a0764de82fee12a9a05ebd61
+--- /dev/null
++++ b/app/admin_web/device_protocol_intelligence_serialization.py
+@@ -0,0 +1,6 @@
++"""Exact NI-03 publication boundary; no implicit/private field serialization."""
++from app.network_protocol_intelligence.models import public_summary
++
++
++def serialize_device_protocol_intelligence(value):
++    return public_summary(value)
+diff --git a/app/admin_web/pages.py b/app/admin_web/pages.py
+index 7f6dd9ae18244c10b010c794bfa806c5bf2f0373..f95fbfdab70b0d295ead742c8a09bb38110301fe 100644
+--- a/app/admin_web/pages.py
++++ b/app/admin_web/pages.py
+@@ -34,6 +34,7 @@ def render_admin_page(
+     runtime_state: str,
+     device_id: str | None = None,
+     device_current_context_enabled: bool = False,
++    device_protocol_intelligence_enabled: bool = False,
+     home_live_enabled: bool = False,
+     home_live_refresh_seconds: int = 60,
+     home_live_request_timeout_seconds: int = 30,
+@@ -75,6 +76,7 @@ def render_admin_page(
+             runtime_state=runtime_state,
+             device_id=device_id,
+             device_current_context_enabled=device_current_context_enabled,
++            device_protocol_intelligence_enabled=device_protocol_intelligence_enabled,
+             home_live_enabled=home_live_enabled,
+             home_live_refresh_seconds=home_live_refresh_seconds,
+             home_live_request_timeout_seconds=home_live_request_timeout_seconds,
+diff --git a/app/admin_web/query_service.py b/app/admin_web/query_service.py
+index 1d263a70b7d6f285365043731e94d4dd2cb10c41..3592ea19a431093a687b87d8233f45fddf09e147 100644
+--- a/app/admin_web/query_service.py
++++ b/app/admin_web/query_service.py
+@@ -269,8 +269,10 @@ class AdminQueryService:
+         device_list_context_cursor_codec: Any | None = None,
+         fingerprint_presentation_service: DeviceFingerprintPresentationService | None = None,
+         inventory_timezone_name: str | None = None,
++        protocol_intelligence_service: Any | None = None,
+     ):
+         self._config = config
++        self._protocol_intelligence = protocol_intelligence_service
+         self._policy = policy
+         self._devices = device_gateway
+         self._reads = read_gateway
+@@ -1486,6 +1488,45 @@ class AdminQueryService:
+ 
+         return self._run(query)
+ 
++    def device_protocol_intelligence(self, principal, site_id, device_id, *, query_parameters_present=False):
++        self._authorize(principal, "admin.read.device", site_id)
++        selected_id = self._uuid(device_id, "device_id")
++        if query_parameters_present:
++            raise AdminQueryValidationError()
++        if not self._config.device_protocol_intelligence_enabled:
++            raise AdminQueryNotFound()
++
++        def query(deadline):
++            from app.network_protocol_intelligence.models import (
++                ProtocolValidationError, ProtocolBusy, ProtocolDeadline, ProtocolUnavailable,
++            )
++            from app.network_metadata.validation import ni_format_utc
++            from .device_protocol_intelligence_serialization import serialize_device_protocol_intelligence
++
++            device = self._devices.get_device(site_id=site_id, device_id=selected_id, deadline=deadline)
++            if device is None:
++                raise AdminQueryNotFound()
++            if self._protocol_intelligence is None:
++                raise AdminQueryUnavailable()
++            try:
++                value = self._protocol_intelligence.get_device_protocol_summary(
++                    site_id, selected_id, device.canonical_mac,
++                    evaluated_at_utc=ni_format_utc(datetime.now(timezone.utc)), deadline=deadline)
++                result = serialize_device_protocol_intelligence(value)
++                if result["site_id"] != site_id or result["device_id"] != selected_id:
++                    raise ProtocolUnavailable()
++                return AdminQueryResponse(result)
++            except ProtocolValidationError:
++                raise AdminQueryValidationError() from None
++            except ProtocolBusy:
++                raise AdminQueryBusy() from None
++            except ProtocolDeadline:
++                raise AdminQueryDeadline() from None
++            except ProtocolUnavailable:
++                raise AdminQueryUnavailable() from None
++
++        return self._run(query)
++
+     def device_current_context(
+         self,
+         principal,
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index a5e5ee357de92f5d4636b9a51f01a1bc49fbe63f..da03a252528d4fe9a5f0d1e38bd71aa08a8f6c14 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -656,6 +656,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+                 page.key == "device"
+                 and config.device_current_context_enabled
+             ),
++            device_protocol_intelligence_enabled=(
++                page.key == "device" and config.device_protocol_intelligence_enabled
++                and policy.authorize(g.admin_principal, "admin.read.device", selected)
++            ),
+             home_live_enabled=config.home_live_enabled,
+             home_live_refresh_seconds=config.home_live_refresh_seconds,
+             home_live_request_timeout_seconds=config.home_live_request_timeout_seconds,
+@@ -984,6 +988,47 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             return _error("internal_error", 500)
+         return _success(selected, response.result, enforce_size=True)
+ 
++    @blueprint.get("/admin/api/v1/sites/<site_id>/devices/<device_id>/protocol-intelligence")
++    @authenticated
++    def api_device_protocol_intelligence(site_id: str, device_id: str) -> Response:
++        if not config.device_protocol_intelligence_enabled:
++            return _error("not_found", 404)
++        try:
++            selected = resolver.resolve(site_id)
++        except AdminSiteContextError:
++            return _error("invalid_request", 400)
++        except AdminAccessDenied:
++            return _error("site_forbidden", 403)
++        try:
++            if not policy.authorize(g.admin_principal, "admin.read.device", selected):
++                return _error("site_forbidden", 403)
++            if request.args or request.get_data(cache=False):
++                return _error("invalid_request", 400)
++            if runtime.query_service is None:
++                return _error("source_unavailable", 503)
++            response = runtime.query_service.device_protocol_intelligence(
++                g.admin_principal, selected, device_id, query_parameters_present=False)
++            return _success(selected, response.result, enforce_size=True,
++                            response_limit_bytes=16384, api_version="admin.device.protocol-intelligence.v1")
++        except AdminQueryValidationError:
++            return _error("invalid_request", 400)
++        except AdminQueryForbidden:
++            return _error("site_forbidden", 403)
++        except AdminQueryNotFound:
++            return _error("not_found", 404)
++        except AdminQueryBusy:
++            response = make_response(_error("concurrency_limit", 429))
++            response.headers["Retry-After"] = "1"
++            return response
++        except AdminQueryDeadline:
++            return _error("query_deadline", 503)
++        except AdminQueryUnavailable:
++            return _error("source_unavailable", 503)
++        except Exception:
++            # Never emit exception bodies/tracebacks that can contain Device data.
++            logger.error("admin.protocol_intelligence_query_failed")
++            return _error("internal_error", 500)
++
+     @blueprint.get("/admin/api/v1/sites/<site_id>/visits")
+     @authenticated
+     def api_visits(site_id: str) -> Response:
+@@ -2299,9 +2344,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+         page: dict[str, Any] | None = None,
+         enforce_size: bool = False,
+         response_limit_bytes: int | None = None,
++        api_version: str = API_VERSION,
+     ) -> Response:
+         payload = {
+-            "api_version": API_VERSION,
++            "api_version": api_version,
+             "request_id": g.admin_request_id,
+             "site_id": site_id,
+             "result": result,
+@@ -2333,7 +2379,8 @@ def _error(code: str, status_code: int) -> Response:
+     if _is_api_path(request.path):
+         return jsonify(
+             {
+-                "api_version": ("admin.settings.features.mutation.v1" if request.path == "/admin/api/v1/settings/features/generations"
++                "api_version": ("admin.device.protocol-intelligence.v1" if _is_protocol_intelligence_path(request.path)
++                    else "admin.settings.features.mutation.v1" if request.path == "/admin/api/v1/settings/features/generations"
+                     else "admin.settings.features.v1" if request.path == "/admin/api/v1/settings/features"
+                     else "admin.settings.portal.mutation.v1" if request.path == "/admin/api/v1/settings/portal/generations"
+                     else "admin.settings.portal.v1" if request.path == "/admin/api/v1/settings/portal"
+@@ -2354,6 +2401,10 @@ def _error(code: str, status_code: int) -> Response:
+     return make_response("The request could not be completed.", status_code)
+ 
+ 
++def _is_protocol_intelligence_path(path: str) -> bool:
++    return path.startswith(ADMIN_API_PREFIX + "/sites/") and "/devices/" in path and path.endswith("/protocol-intelligence")
++
++
+ def _is_admin_path(path: str) -> bool:
+     return path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
+ 
+diff --git a/app/admin_web/runtime.py b/app/admin_web/runtime.py
+index 0b4a5d422c257e92da701bf06a7dd428e0324762..5526bb2eebf5decc681630be0823f78fa60a0817 100644
+--- a/app/admin_web/runtime.py
++++ b/app/admin_web/runtime.py
+@@ -353,6 +353,22 @@ def create_admin_web_runtime(
+         else None
+     )
+     query_service = None
++    protocol_intelligence_service = None
++    if config.device_protocol_intelligence_enabled:
++        try:
++            from app.network_metadata_projection.config import projection_config_from_env
++            from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
++            from app.network_protocol_intelligence import DeviceProtocolIntelligenceReadService
++
++            projection_config = projection_config_from_env()
++            protocol_intelligence_service = DeviceProtocolIntelligenceReadService(
++                DeviceNetworkMetadataReadService(
++                    db_path=projection_config.db_path,
++                    enabled=projection_config.enabled,
++                    max_db_bytes=projection_config.max_db_bytes))
++        except Exception:
++            # Optional dependency failure never changes existing Admin readiness.
++            logger.error("admin.protocol_intelligence_composition_failed")
+     fingerprint_presentation_service = None
+     try:
+         from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
+@@ -403,6 +419,7 @@ def create_admin_web_runtime(
+             device_list_context_cursor_codec,
+             current_state_db_path,
+             fingerprint_presentation_service,
++            protocol_intelligence_service,
+         )
+     evidence_state = "active" if config.traffic_evidence_enabled else "disabled"
+     evidence_aggregator = None
+@@ -506,6 +523,7 @@ def _query_service(
+     device_list_context_cursor_codec: Any | None = None,
+     current_state_db_path: Any | None = None,
+     fingerprint_presentation_service: Any | None = None,
++    protocol_intelligence_service: Any | None = None,
+ ):
+     """Build 01B only when concrete read boundaries expose local paths."""
+     try:
+@@ -532,6 +550,7 @@ def _query_service(
+             ),
+             visit_analytics_service=analytics_service,
+             fingerprint_presentation_service=fingerprint_presentation_service,
++            protocol_intelligence_service=protocol_intelligence_service,
+             inventory_timezone_name=getattr(getattr(registry_read_service, "service", None), "timezone_name", None),
+             current_state_read_service=current_state_read_service,
+             current_traffic_read_service=getattr(
+diff --git a/app/admin_web/static/device_protocol_intelligence.js b/app/admin_web/static/device_protocol_intelligence.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8be4a92f35f226c1dcb64c3502f07636990bcc5
+--- /dev/null
++++ b/app/admin_web/static/device_protocol_intelligence.js
+@@ -0,0 +1,170 @@
++/* NI-03: independent, privacy-safe Device Card read coordinator. */
++(function () {
++  "use strict";
++  const section = document.getElementById("device-protocol-intelligence");
++  const page = document.getElementById("admin-page");
++  if (!section || !page || page.dataset.page !== "device") return;
++  const site = page.dataset.siteId, device = page.dataset.deviceId;
++  const content = document.getElementById("device-protocol-content");
++  const title = document.getElementById("device-protocol-state-title");
++  const message = document.getElementById("device-protocol-state-message");
++  const protocolLabels = {dns: "DNS", tls: "TLS", quic: "QUIC"};
++  const rank = {dns: 0, tls: 1, quic: 2};
++  const coverageLabels = {usable: "Available", degraded: "Degraded", unavailable: "Unavailable", unknown: "Unknown"};
++  const freshnessLabels = {fresh: "Fresh", recent: "Recent", stale: "Stale", unavailable: "Unavailable"};
++  let stopped = false, terminal = false, active = null, pending = false;
++  let timer = null, expiryTimer = null, lastStart = null, failures = 0, lastGood = null;
++
++  function exact(value, fields) {
++    return value !== null && typeof value === "object" && !Array.isArray(value) &&
++      Object.keys(value).length === fields.length && fields.every((key) => Object.hasOwn(value, key));
++  }
++  function utc(value) {
++    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value)) throw new Error("shape");
++    const short = value.slice(0, 23) + "Z", time = Date.parse(short);
++    if (!Number.isFinite(time) || new Date(time).toISOString() !== short) throw new Error("shape");
++    return time;
++  }
++  function validate(payload) {
++    if (!exact(payload, ["api_version", "request_id", "site_id", "result", "page"]) ||
++        payload.api_version !== "admin.device.protocol-intelligence.v1" || payload.site_id !== site || payload.page !== null ||
++        typeof payload.request_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(payload.request_id)) throw new Error("shape");
++    const v = payload.result;
++    if (!exact(v, ["schema_version", "site_id", "device_id", "evaluated_at_utc", "window", "availability_state", "evidence_state", "identity_binding_state", "recent_protocols", "last_protocol_observation", "freshness_state", "coverage"]) ||
++        v.schema_version !== 1 || v.site_id !== site || v.device_id !== device ||
++        !["usable", "degraded"].includes(v.availability_state) ||
++        !["present", "empty", "identity_pending"].includes(v.evidence_state) ||
++        !["authoritative", "pending", "unavailable", "absent"].includes(v.identity_binding_state) ||
++        !Object.hasOwn(freshnessLabels, v.freshness_state)) throw new Error("shape");
++    const at = utc(v.evaluated_at_utc), w = v.window, c = v.coverage;
++    if (!exact(w, ["from_utc", "to_utc", "duration_seconds", "recent_from_utc", "recent_duration_seconds"]) ||
++        w.to_utc !== v.evaluated_at_utc || w.duration_seconds !== 86400 || w.recent_duration_seconds !== 3600 ||
++        utc(w.from_utc) !== at - 86400000 || utc(w.recent_from_utc) !== at - 3600000 ||
++        w.from_utc.slice(23) !== v.evaluated_at_utc.slice(23) || w.recent_from_utc.slice(23) !== v.evaluated_at_utc.slice(23) ||
++        !exact(c, ["scope", "source_state", "attribution_state", "projection_state", "historical_window_completeness_claimed"]) ||
++        c.scope !== "current_pipeline" || c.historical_window_completeness_claimed !== false ||
++        !Object.hasOwn(coverageLabels, c.source_state) || !Object.hasOwn(coverageLabels, c.attribution_state) ||
++        c.projection_state !== v.availability_state) throw new Error("shape");
++    if (!["usable/usable/usable", "degraded/usable/usable", "degraded/usable/degraded", "degraded/unavailable/unknown",
++      "degraded/degraded/degraded", "degraded/unknown/unknown"].includes(
++        `${c.projection_state}/${c.source_state}/${c.attribution_state}`)) throw new Error("shape");
++    const seen = new Set();
++    let previous = null;
++    if (!Array.isArray(v.recent_protocols) || v.recent_protocols.length > 3) throw new Error("shape");
++    function protocol(item, field) {
++      if (!exact(item, ["protocol_id", "display_label", field]) || !Object.hasOwn(protocolLabels, item.protocol_id) ||
++          item.display_label !== protocolLabels[item.protocol_id]) throw new Error("shape");
++      utc(item[field]);
++    }
++    for (const item of v.recent_protocols) {
++      protocol(item, "last_observed_at");
++      if (seen.has(item.protocol_id) || item.last_observed_at < w.recent_from_utc || item.last_observed_at >= w.to_utc ||
++          (previous && (previous.last_observed_at < item.last_observed_at ||
++            (previous.last_observed_at === item.last_observed_at && rank[previous.protocol_id] >= rank[item.protocol_id])))) throw new Error("shape");
++      seen.add(item.protocol_id); previous = item;
++    }
++    const last = v.last_protocol_observation;
++    if (last !== null) {
++      protocol(last, "observed_at");
++      if (last.observed_at < w.from_utc || last.observed_at >= w.to_utc || v.evidence_state !== "present" || v.freshness_state === "unavailable") throw new Error("shape");
++      if (last.observed_at >= w.recent_from_utc) {
++        const first = v.recent_protocols[0];
++        if (!first || first.protocol_id !== last.protocol_id || first.last_observed_at !== last.observed_at) throw new Error("shape");
++      } else if (v.recent_protocols.length) throw new Error("shape");
++    } else if (v.recent_protocols.length || v.evidence_state === "present" || v.freshness_state !== "unavailable") throw new Error("shape");
++    if ((v.identity_binding_state === "authoritative") !== (v.evidence_state !== "identity_pending")) throw new Error("shape");
++    return v;
++  }
++  function state(heading, detail) { title.textContent = heading; message.textContent = detail; }
++  function field(label, value) {
++    const card = document.createElement("div"), name = document.createElement("strong"), text = document.createElement("p");
++    card.className = "section-card"; name.textContent = label; text.textContent = value;
++    card.append(name, text); return card;
++  }
++  function render(v) {
++    const recent = v.recent_protocols.map((p) => p.display_label + " · " + p.last_observed_at).join("; ") || "—";
++    const last = v.last_protocol_observation;
++    content.replaceChildren(
++      field("Recent Protocols", recent),
++      field("Last Protocol Observation", last ? last.display_label + " · " + last.observed_at : "—"),
++      field("Freshness", freshnessLabels[v.freshness_state]),
++      field("Source coverage", coverageLabels[v.coverage.source_state]),
++      field("Attribution coverage", coverageLabels[v.coverage.attribution_state]),
++      field("Last evaluated", v.evaluated_at_utc));
++    if (v.evidence_state === "identity_pending") {
++      state("Device network identity binding pending", "Device-relative protocol evidence is not yet authoritatively linked to this Device for the current Site.");
++    } else if (v.evidence_state === "empty") {
++      if (v.coverage.source_state === "usable" && v.coverage.attribution_state === "usable") {
++        state("No recent protocol evidence", "No DNS, TLS or QUIC evidence is retained for this Device in the last 24 hours. This does not prove there was no network activity.");
++      } else state("Insufficient coverage", "Recent protocol evidence cannot be determined reliably from the currently available Network Intelligence coverage.");
++    } else if (v.freshness_state === "stale") state("Stale evidence", "Last evaluated " + v.evaluated_at_utc);
++    else state("Protocol evidence", "Recent device-relative protocol evidence; historical completeness is not claimed.");
++  }
++  function clearTimer() { if (timer !== null) window.clearTimeout(timer); timer = null; }
++  function eligible() { return !stopped && !terminal && !document.hidden; }
++  function schedule(delay) {
++    clearTimer();
++    if (eligible()) timer = window.setTimeout(() => { timer = null; refresh(false); }, delay);
++  }
++  function discardExpired() {
++    if (lastGood && Date.now() - utc(lastGood.evaluated_at_utc) >= 900000) {
++      lastGood = null; content.replaceChildren();
++      state("Protocol intelligence temporarily unavailable", "Refresh to request current protocol evidence.");
++    }
++  }
++  function retainUntilBound() {
++    if (expiryTimer !== null) window.clearTimeout(expiryTimer);
++    expiryTimer = null;
++    discardExpired();
++    if (lastGood) expiryTimer = window.setTimeout(discardExpired,
++      Math.max(0, 900000 - (Date.now() - utc(lastGood.evaluated_at_utc))));
++  }
++  async function refresh(manual) {
++    if (!eligible()) return;
++    if (active) { if (manual) pending = true; return; }
++    clearTimer();
++    const controller = new AbortController(); active = controller; lastStart = Date.now();
++    const timeout = window.setTimeout(() => controller.abort(), 10000);
++    let success = false;
++    try {
++      const response = await fetch(`/admin/api/v1/sites/${site}/devices/${device}/protocol-intelligence`, {
++        method: "GET", credentials: "same-origin", cache: "no-store", signal: controller.signal,
++        headers: {Accept: "application/json"}
++      });
++      if ([401, 403, 404].includes(response.status)) { terminal = true; throw new Error("terminal"); }
++      if (!response.ok) throw new Error("unavailable");
++      const value = validate(await response.json());
++      if (stopped || terminal || controller.signal.aborted) return;
++      lastGood = value; render(value); retainUntilBound(); failures = 0; success = true;
++    } catch (_) {
++      if (!stopped) {
++        failures += 1; discardExpired();
++        if (terminal) { lastGood = null; content.replaceChildren(); }
++        state("Protocol intelligence temporarily unavailable", lastGood ?
++          "Showing the last successful response; the current request is unavailable." : "Protocol evidence is currently unavailable.");
++      }
++    } finally {
++      window.clearTimeout(timeout); active = null;
++      if (pending && eligible()) { pending = false; refresh(true); }
++      else { pending = false; schedule(success ? 60000 : failures <= 1 ? 60000 : failures === 2 ? 120000 : 300000); }
++    }
++  }
++  for (const id of ["device-protocol-refresh", "refresh-button"]) {
++    const button = document.getElementById(id);
++    if (button) button.addEventListener("click", () => refresh(true));
++  }
++  document.addEventListener("visibilitychange", () => {
++    clearTimer(); discardExpired();
++    if (eligible()) {
++      const elapsed = lastStart === null ? 60000 : Date.now() - lastStart;
++      if (elapsed >= 60000) refresh(false); else schedule(60000 - elapsed);
++    }
++  });
++  window.addEventListener("pagehide", () => {
++    stopped = true; pending = false; clearTimer();
++    if (expiryTimer !== null) window.clearTimeout(expiryTimer);
++    if (active) active.abort();
++    lastGood = null;
++  });
++  refresh(false);
++}());
+diff --git a/app/admin_web/templates/admin/base.html b/app/admin_web/templates/admin/base.html
+index 4074f27613361c48235918b37f312d92f169ea8c..0773e2fc6daee33ef1a859bc522f1f228390e68b 100644
+--- a/app/admin_web/templates/admin/base.html
++++ b/app/admin_web/templates/admin/base.html
+@@ -17,6 +17,9 @@
+   {% else %}
+   <script defer src="{{ url_for('admin_web_v1.static', filename='admin.js') }}"></script>
+   {% endif %}
++  {% if page.key == 'device' and device_protocol_intelligence_enabled %}
++  <script defer src="{{ url_for('admin_web_v1.static', filename='device_protocol_intelligence.js') }}"></script>
++  {% endif %}
+ </head>
+ <body>
+   <a class="skip-link" href="#main-content">Skip to content</a>
+diff --git a/app/admin_web/templates/admin/device.html b/app/admin_web/templates/admin/device.html
+index 06494c1e4b28deec83bcdf55804e72bb58af9c21..af0bcadc26ae915b169b1dbd553a3cfee30ba110 100644
+--- a/app/admin_web/templates/admin/device.html
++++ b/app/admin_web/templates/admin/device.html
+@@ -2,6 +2,24 @@
+ {% block subtitle %}<p>Site-local identity, recent visits and latest safe observation.</p>{% endblock %}
+ {% block page_body %}
+   {{ super() }}
++  {% if device_protocol_intelligence_enabled %}
++  <section id="device-protocol-intelligence" class="section-card" aria-labelledby="device-protocol-title">
++    <div class="section-heading">
++      <div>
++        <h2 id="device-protocol-title">Network / Protocol Intelligence</h2>
++        <p>Recent protocol evidence derived from device-relative network metadata.</p>
++      </div>
++      <button id="device-protocol-refresh" class="button button-secondary" type="button">Refresh</button>
++    </div>
++    <div id="device-protocol-state" class="state-panel" role="status" aria-live="polite">
++      <div>
++        <strong id="device-protocol-state-title">Loading</strong>
++        <p id="device-protocol-state-message">Requesting protocol evidence…</p>
++      </div>
++    </div>
++    <div id="device-protocol-content" class="content-grid" aria-live="polite"></div>
++  </section>
++  {% endif %}
+   {% if device_current_context_enabled %}
+   <section id="device-current-context" class="section-card" aria-labelledby="device-current-context-title">
+     <div class="section-heading">
+diff --git a/app/config.py b/app/config.py
+index fc3d387a7c2d01865f5aff27ee504fc28fd5dc96..52647480c0762247f5545b1aa6da8874eab195eb 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -601,6 +601,9 @@ WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET = os.getenv(
+ WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED = os.getenv(
+     "WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED", "false"
+ )
++WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED = os.getenv(
++    "WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED", "false"
++)
+ WEB_ADMIN_VISIT_PAGE_SIZE = os.getenv("WEB_ADMIN_VISIT_PAGE_SIZE", str(DEFAULT_WEB_ADMIN_VISIT_PAGE_SIZE))
+ WEB_ADMIN_OBSERVATION_PAGE_SIZE = os.getenv(
+     "WEB_ADMIN_OBSERVATION_PAGE_SIZE", str(DEFAULT_WEB_ADMIN_OBSERVATION_PAGE_SIZE)
+diff --git a/app/network_metadata_projection/read_service.py b/app/network_metadata_projection/read_service.py
+index 0189aa48e3d9b53668b54295a37dda017b0885eb..7f0b5676b421b12cc4af3cf3cba7bd70be434404 100644
+--- a/app/network_metadata_projection/read_service.py
++++ b/app/network_metadata_projection/read_service.py
+@@ -9,6 +9,8 @@ from .models import ALGORITHM, ProjectionUnavailable, ProjectionValidationError,
+ from dataclasses import asdict
+ from .schema import validate_schema
+ from .validation import read_window
++from app.analytics.source_gateway import AnalyticsQueryDeadlineExceeded
++from app.network_metadata.validation import ni_timestamp
+ 
+ JOIN = " FROM device_network_metadata_edges e LEFT JOIN projection_site_mac_bindings b ON b.site_id=e.site_id AND b.client_mac=e.client_mac"
+ COLUMNS = "SELECT e.*,b.site_id AS joined_site,b.device_id,b.binding_state,b.last_evaluated_at,b.authoritative_bound_at"
+@@ -19,24 +21,73 @@ class DeviceNetworkMetadataReadService:
+         self.db_path, self.enabled, self.max_db_bytes = db_path, enabled, max_db_bytes
+ 
+     @contextmanager
+-    def _snapshot(self):
++    def _snapshot(self, *, deadline=None):
+         connection = None
+         try:
+             if not self.enabled:
+                 raise ProjectionUnavailable("projection_disabled")
+             connection = sqlite3.connect(Path(self.db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=.5, isolation_level=None)
+             connection.row_factory = sqlite3.Row
++            if deadline is not None:
++                deadline.require_remaining()
++                connection.set_progress_handler(lambda: int(deadline.expired()), 100)
+             for pragma in ("query_only=ON", "foreign_keys=ON", "busy_timeout=500"):
+                 connection.execute("PRAGMA " + pragma)
+             connection.execute("BEGIN")
+             validate_schema(connection)
+             yield connection
+-        except (sqlite3.Error, OSError, ValueError):
++            if deadline is not None:
++                deadline.require_remaining()
++        except (sqlite3.Error, OSError, ValueError, ProjectionUnavailable):
++            if deadline is not None and deadline.expired():
++                raise AnalyticsQueryDeadlineExceeded("Projection read deadline exceeded") from None
+             raise ProjectionUnavailable() from None
+         finally:
+             if connection is not None:
+                 connection.close()
+ 
++    def read_protocol_evidence_snapshot(self, site_id, device_id, client_mac, from_utc, to_utc, *, max_rows, deadline):
++        """NI-03 narrow read: runtime, identity and facts in the same snapshot."""
++        try:
++            validate_site_id(site_id)
++            canonical_uuid(device_id)
++            if canonical_mac(client_mac) != client_mac or type(max_rows) is not int or max_rows != 20000:
++                raise ValueError
++            first, last = ni_timestamp(from_utc, canonical=True), ni_timestamp(to_utc, canonical=True)
++            if (last - first).total_seconds() != 86400:
++                raise ValueError
++        except Exception:
++            raise ProjectionValidationError() from None
++        with self._snapshot(deadline=deadline) as connection:
++            state = connection.execute("SELECT runtime_state FROM projection_runtime_state WHERE singleton_id=1").fetchone()
++            if state is None:
++                raise ProjectionUnavailable()
++            binding = connection.execute(
++                "SELECT binding_state,device_id FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?",
++                (site_id, client_mac)).fetchone()
++            result = dict(runtime_state=state[0], binding_state=binding[0] if binding else None,
++                          bound_device_id=binding[1] if binding else None, facts=())
++            if binding is None or binding[0] in {"not_yet_registry_resolved", "registry_unavailable"}:
++                return result
++            if binding[0] != "authoritative" or binding[1] != device_id:
++                raise ProjectionUnavailable()
++            # The upper half-open bound excludes future data from aggregation,
++            # but its presence in this exact identity scope is an integrity failure.
++            if connection.execute(
++                "SELECT 1 FROM device_network_metadata_edges INDEXED BY idx_projection_mac_event "
++                "WHERE site_id=? AND client_mac=? AND event_at>=? LIMIT 1",
++                (site_id, client_mac, to_utc)).fetchone() is not None:
++                raise ProjectionUnavailable()
++            rows = connection.execute(
++                "SELECT edge_id,event_at,source_event_family FROM device_network_metadata_edges "
++                "INDEXED BY idx_projection_mac_event WHERE site_id=? AND client_mac=? "
++                "AND event_at>=? AND event_at<? ORDER BY event_at,edge_id LIMIT ?",
++                (site_id, client_mac, from_utc, to_utc, max_rows + 1)).fetchall()
++            if len(rows) > max_rows:
++                raise ProjectionUnavailable()
++            result["facts"] = tuple(dict(row) for row in rows)
++            return result
++
+     @staticmethod
+     def _logical(row):
+         if row["joined_site"] is None:
+diff --git a/app/network_protocol_intelligence/__init__.py b/app/network_protocol_intelligence/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e268f615f9555f5dd7f9a751947837df19ba6357
+--- /dev/null
++++ b/app/network_protocol_intelligence/__init__.py
+@@ -0,0 +1,6 @@
++"""Bounded, read-only Device Protocol Intelligence V1."""
++
++from .models import DeviceProtocolSummaryV1
++from .read_service import DeviceProtocolIntelligenceReadService
++
++__all__ = ["DeviceProtocolSummaryV1", "DeviceProtocolIntelligenceReadService"]
+diff --git a/app/network_protocol_intelligence/models.py b/app/network_protocol_intelligence/models.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf24fe99066e3502736ae48d07fc8a9a1bebaf7d
+--- /dev/null
++++ b/app/network_protocol_intelligence/models.py
+@@ -0,0 +1,153 @@
++"""Closed public NI-03 DTOs. No endpoint or source identity payloads."""
++from dataclasses import asdict, dataclass
++from datetime import timedelta
++
++from app.device_fingerprint.validation import validate_site_id
++from app.network_metadata.validation import canonical_uuid, ni_timestamp
++
++PROTOCOLS = {"dns": "DNS", "tls": "TLS", "quic": "QUIC"}
++
++
++class ProtocolValidationError(ValueError):
++    pass
++
++
++class ProtocolUnavailable(RuntimeError):
++    pass
++
++
++class ProtocolBusy(RuntimeError):
++    pass
++
++
++class ProtocolDeadline(RuntimeError):
++    pass
++
++
++@dataclass(frozen=True, slots=True)
++class ProtocolWindowV1:
++    from_utc: str
++    to_utc: str
++    duration_seconds: int
++    recent_from_utc: str
++    recent_duration_seconds: int
++
++
++@dataclass(frozen=True, slots=True)
++class ProtocolCoverageV1:
++    scope: str
++    source_state: str
++    attribution_state: str
++    projection_state: str
++    historical_window_completeness_claimed: bool
++
++
++@dataclass(frozen=True, slots=True)
++class RecentProtocolV1:
++    protocol_id: str
++    display_label: str
++    last_observed_at: str
++
++
++@dataclass(frozen=True, slots=True)
++class LastProtocolObservationV1:
++    protocol_id: str
++    display_label: str
++    observed_at: str
++
++
++@dataclass(frozen=True, slots=True)
++class DeviceProtocolSummaryV1:
++    schema_version: int
++    site_id: str
++    device_id: str
++    evaluated_at_utc: str
++    window: ProtocolWindowV1
++    availability_state: str
++    evidence_state: str
++    identity_binding_state: str
++    recent_protocols: tuple[RecentProtocolV1, ...]
++    last_protocol_observation: LastProtocolObservationV1 | None
++    freshness_state: str
++    coverage: ProtocolCoverageV1
++
++
++def public_summary(value):
++    """Validate exact typed fields and cross-field invariants before publication."""
++    try:
++        if type(value) is not DeviceProtocolSummaryV1:
++            raise ValueError
++        if type(value.window) is not ProtocolWindowV1 or type(value.coverage) is not ProtocolCoverageV1:
++            raise ValueError
++        validate_site_id(value.site_id)
++        canonical_uuid(value.device_id)
++        at = ni_timestamp(value.evaluated_at_utc, canonical=True)
++        window, coverage = value.window, value.coverage
++        start = ni_timestamp(window.from_utc, canonical=True)
++        recent = ni_timestamp(window.recent_from_utc, canonical=True)
++        if (type(value.schema_version) is not int or value.schema_version != 1
++                or window.to_utc != value.evaluated_at_utc
++                or type(window.duration_seconds) is not int or window.duration_seconds != 86400
++                or type(window.recent_duration_seconds) is not int or window.recent_duration_seconds != 3600
++                or at - start != timedelta(days=1) or at - recent != timedelta(hours=1)
++                or coverage.scope != "current_pipeline"
++                or coverage.historical_window_completeness_claimed is not False
++                or coverage.projection_state not in {"usable", "degraded"}
++                or coverage.source_state not in {"usable", "degraded", "unavailable", "unknown"}
++                or coverage.attribution_state not in {"usable", "degraded", "unavailable", "unknown"}
++                or (coverage.projection_state, coverage.source_state, coverage.attribution_state) not in {
++                    ("usable", "usable", "usable"), ("degraded", "usable", "usable"),
++                    ("degraded", "usable", "degraded"), ("degraded", "unavailable", "unknown"),
++                    ("degraded", "degraded", "degraded"), ("degraded", "unknown", "unknown")}
++                or value.availability_state != coverage.projection_state
++                or value.evidence_state not in {"present", "empty", "identity_pending"}
++                or value.identity_binding_state not in {"authoritative", "pending", "unavailable", "absent"}
++                or type(value.recent_protocols) is not tuple):
++            raise ValueError
++        ordered = []
++        seen = set()
++        for item in value.recent_protocols:
++            if type(item) is not RecentProtocolV1 or item.protocol_id not in PROTOCOLS:
++                raise ValueError
++            event = ni_timestamp(item.last_observed_at, canonical=True)
++            if item.display_label != PROTOCOLS[item.protocol_id] or item.protocol_id in seen or not recent <= event < at:
++                raise ValueError
++            seen.add(item.protocol_id)
++            ordered.append((at - event, tuple(PROTOCOLS).index(item.protocol_id)))
++        if ordered != sorted(ordered):
++            raise ValueError
++        last = value.last_protocol_observation
++        if last is not None:
++            if type(last) is not LastProtocolObservationV1 or last.protocol_id not in PROTOCOLS:
++                raise ValueError
++            event = ni_timestamp(last.observed_at, canonical=True)
++            if last.display_label != PROTOCOLS[last.protocol_id] or not start <= event < at:
++                raise ValueError
++            expected = freshness((at - event).total_seconds(), coverage)
++            if value.evidence_state != "present" or value.freshness_state != expected:
++                raise ValueError
++            if event >= recent:
++                if not value.recent_protocols or value.recent_protocols[0] != RecentProtocolV1(last.protocol_id, last.display_label, last.observed_at):
++                    raise ValueError
++            elif value.recent_protocols:
++                raise ValueError
++        elif value.recent_protocols or value.evidence_state == "present" or value.freshness_state != "unavailable":
++            raise ValueError
++        if (value.identity_binding_state == "authoritative") != (value.evidence_state != "identity_pending"):
++            raise ValueError
++        result = asdict(value)
++        result["recent_protocols"] = list(result["recent_protocols"])
++        return result
++    except Exception:
++        raise ProtocolUnavailable() from None
++
++
++def freshness(age, coverage):
++    if age < 0 or age > 86400:
++        raise ProtocolUnavailable()
++    base = "fresh" if age <= 300 else "recent" if age <= 3600 else "stale"
++    if coverage.source_state in {"unavailable", "unknown"}:
++        return "stale"
++    if base == "fresh" and (coverage.source_state == "degraded" or coverage.attribution_state != "usable"):
++        return "recent"
++    return base
+diff --git a/app/network_protocol_intelligence/read_service.py b/app/network_protocol_intelligence/read_service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..316c0b544f3705c3c5f2cb6dff1481e207eec282
+--- /dev/null
++++ b/app/network_protocol_intelligence/read_service.py
+@@ -0,0 +1,107 @@
++"""One request, one bounded projection snapshot, no upstream queries/cache."""
++import threading
++from datetime import timedelta
++
++from app.analytics.source_gateway import QueryDeadline, AnalyticsQueryDeadlineExceeded
++from app.device_fingerprint.validation import validate_site_id
++from app.network_attribution.validation import canonical_mac
++from app.network_metadata.validation import canonical_uuid, ni_timestamp, ni_format_utc
++from app.network_metadata.models import NetworkMetadataValidationError
++from app.network_metadata_projection.models import ProjectionUnavailable, ProjectionValidationError
++from .models import (
++    PROTOCOLS, DeviceProtocolSummaryV1, ProtocolWindowV1, ProtocolCoverageV1,
++    RecentProtocolV1, LastProtocolObservationV1, ProtocolValidationError,
++    ProtocolUnavailable, ProtocolBusy, ProtocolDeadline, freshness, public_summary,
++)
++
++# Shared by all NI-03 service instances within this process, not a cache.
++_READ_SLOTS = threading.BoundedSemaphore(2)
++_COVERAGE = {
++    "usable": ("usable", "usable", "usable"),
++    "registry_degraded": ("degraded", "usable", "usable"),
++    "attribution_unavailable": ("degraded", "usable", "degraded"),
++    "source_unavailable": ("degraded", "unavailable", "unknown"),
++    **{state: ("degraded", "degraded", "degraded") for state in
++       ("capacity_waiting_reader", "capacity_halted", "blocked_conflict", "degraded")},
++    **{state: ("degraded", "unknown", "unknown") for state in ("initializing", "stopping")},
++}
++
++
++class DeviceProtocolIntelligenceReadService:
++    def __init__(self, projection_reader):
++        self._reader = projection_reader
++
++    def get_device_protocol_summary(self, site_id, device_id, client_mac, *, evaluated_at_utc, deadline):
++        try:
++            validate_site_id(site_id)
++            canonical_uuid(device_id)
++            if canonical_mac(client_mac) != client_mac:
++                raise ValueError
++            at = ni_timestamp(evaluated_at_utc, canonical=True)
++        except Exception:
++            raise ProtocolValidationError() from None
++        if not _READ_SLOTS.acquire(blocking=False):
++            raise ProtocolBusy()
++        try:
++            # The shared deadline's clock also owns the local five-second cap.
++            bounded = QueryDeadline(min(deadline.expires_at, deadline.monotonic() + 5), deadline.monotonic)
++            bounded.require_remaining()
++            start, recent = at - timedelta(days=1), at - timedelta(hours=1)
++            snapshot = self._reader.read_protocol_evidence_snapshot(
++                site_id, device_id, client_mac, ni_format_utc(start), evaluated_at_utc,
++                max_rows=20000, deadline=bounded)
++            bounded.require_remaining()
++            if set(snapshot) != {"runtime_state", "binding_state", "bound_device_id", "facts"}:
++                raise ProtocolUnavailable()
++            try:
++                projection, source, attribution = _COVERAGE[snapshot["runtime_state"]]
++                identity = {"authoritative": "authoritative", "not_yet_registry_resolved": "pending",
++                            "registry_unavailable": "unavailable", None: "absent"}[snapshot["binding_state"]]
++            except (KeyError, TypeError):
++                raise ProtocolUnavailable() from None
++            coverage = ProtocolCoverageV1("current_pipeline", source, attribution, projection, False)
++            facts = snapshot["facts"]
++            if len(facts) > 20000 or (identity != "authoritative" and facts):
++                raise ProtocolUnavailable()
++            if identity == "authoritative" and snapshot["bound_device_id"] != device_id:
++                raise ProtocolUnavailable()
++            if identity != "authoritative" and snapshot["bound_device_id"] is not None:
++                raise ProtocolUnavailable()
++            latest = {}
++            ordered = []
++            for row in facts:
++                bounded.require_remaining()
++                if set(row) != {"edge_id", "event_at", "source_event_family"}:
++                    raise ProtocolUnavailable()
++                protocol = row["source_event_family"]
++                if protocol not in PROTOCOLS or not isinstance(row["edge_id"], str):
++                    raise ProtocolUnavailable()
++                event = ni_timestamp(row["event_at"], canonical=True)
++                if not start <= event < at:
++                    raise ProtocolUnavailable()
++                rank = tuple(PROTOCOLS).index(protocol)
++                ordered.append((event, rank, row["edge_id"], protocol))
++                if event >= recent and (protocol not in latest or event > latest[protocol]):
++                    latest[protocol] = event
++            ordered.sort(key=lambda item: (at - item[0], item[1], item[2]))
++            last = None if not ordered else LastProtocolObservationV1(
++                ordered[0][3], PROTOCOLS[ordered[0][3]], ni_format_utc(ordered[0][0]))
++            result = DeviceProtocolSummaryV1(
++                1, site_id, device_id, evaluated_at_utc,
++                ProtocolWindowV1(ni_format_utc(start), evaluated_at_utc, 86400, ni_format_utc(recent), 3600),
++                projection, "identity_pending" if identity != "authoritative" else "present" if last else "empty",
++                identity, tuple(RecentProtocolV1(p, PROTOCOLS[p], ni_format_utc(t)) for p, t in
++                    sorted(latest.items(), key=lambda item: (at - item[1], tuple(PROTOCOLS).index(item[0])))),
++                last, "unavailable" if last is None else freshness((at - ordered[0][0]).total_seconds(), coverage), coverage)
++            public_summary(result)
++            return result
++        except AnalyticsQueryDeadlineExceeded:
++            raise ProtocolDeadline() from None
++        except ProjectionValidationError:
++            raise ProtocolValidationError() from None
++        except ProjectionUnavailable:
++            raise ProtocolUnavailable() from None
++        except NetworkMetadataValidationError:
++            raise ProtocolUnavailable() from None
++        finally:
++            _READ_SLOTS.release()
+diff --git a/app/settings.py b/app/settings.py
+index bee077c5a3bd29219d09e205cff95e164fe2ae75..910bc1f3cc5924be8fee847ffb2acc3f3776f26c 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -159,6 +159,7 @@ from app.config import (
+     WEB_ADMIN_DEVICE_PAGE_SIZE, WEB_ADMIN_DEVICE_LIST_CONTEXT_ENABLED,
+     WEB_ADMIN_DEVICE_LIST_CONTEXT_CURSOR_SECRET,
+     WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED,
++    WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED,
+     WEB_ADMIN_VISIT_PAGE_SIZE,
+     WEB_ADMIN_OBSERVATION_PAGE_SIZE,
+     WEB_ADMIN_OBSERVATION_MAX_WINDOW_HOURS,
+@@ -635,6 +636,7 @@ def get_settings() -> dict:
+         "web_admin_device_current_context_enabled": (
+             WEB_ADMIN_DEVICE_CURRENT_CONTEXT_ENABLED
+         ),
++        "web_admin_device_protocol_intelligence_enabled": WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED,
+         "web_admin_visit_page_size": WEB_ADMIN_VISIT_PAGE_SIZE,
+         "web_admin_observation_page_size": (
+             WEB_ADMIN_OBSERVATION_PAGE_SIZE
+diff --git a/deploy/network-metadata-projection/README.md b/deploy/network-metadata-projection/README.md
+index bc392be70cea210f3aec7940ef92207242230860..e1a32fb1de92a7710d34020cc28d0936158e1175 100644
+--- a/deploy/network-metadata-projection/README.md
++++ b/deploy/network-metadata-projection/README.md
+@@ -25,3 +25,32 @@ Copy the example environment only through an approved deployment procedure;
+ there is no automated install/start action in this package. Required upstream
+ configuration names are reused, not aliased. The service has ordering-only
+ After dependencies, never Requires/BindsTo/PartOf relationships.
++
++# NI-03 main-process read configuration (separate activation authorization)
++
++The optional NI-03 Device Card reader is default-OFF:
++`WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED=false`.
++It is deployment-owned, not a writable Settings → Features preference.
++The main process uses only `projection_config_from_env()` and the existing
++`NETWORK_METADATA_PROJECTION_*` authority. Disabled projection configuration
++does not open an old projection DB. Invalid configuration isolates NI-03;
++the existing Portal/Admin core remains available.
++
++For a separately authorized deployment, install the supplied
++`captive-portal-network-metadata-projection-read.conf` as
++`/etc/systemd/system/captive-portal.service.d/20-network-metadata-projection-read.conf`.
++It contains only `[Service]` and
++`EnvironmentFile=-/etc/captive-portal/network-metadata-projection.env`.
++The application does not install this file or restart services.
++
++Activation collision gate:
++
++1. `/etc/default/captive-portal` MUST NOT independently define
++   `NETWORK_METADATA_PROJECTION_*`.
++2. Every other key shared by `/etc/default/captive-portal` and
++   `/etc/captive-portal/network-metadata-projection.env` MUST have semantically
++   identical effective values.
++3. Any mismatch means `ACTIVATION=HOLD`.
++
++Do not introduce another projection environment file. Install/reload/restart
++and production smoke checks remain Tech Lead/Owner actions, not Coder actions.
+diff --git a/deploy/network-metadata-projection/captive-portal-network-metadata-projection-read.conf b/deploy/network-metadata-projection/captive-portal-network-metadata-projection-read.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..18883085301fa6f4b4b56ab780ba93f620ea520a
+--- /dev/null
++++ b/deploy/network-metadata-projection/captive-portal-network-metadata-projection-read.conf
+@@ -0,0 +1,2 @@
++[Service]
++EnvironmentFile=-/etc/captive-portal/network-metadata-projection.env
+diff --git a/tests/admin_web/device_protocol_intelligence.cjs b/tests/admin_web/device_protocol_intelligence.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8f30bcec04f0681254fb0eeeda187426d98d7af
+--- /dev/null
++++ b/tests/admin_web/device_protocol_intelligence.cjs
+@@ -0,0 +1,115 @@
++"use strict";
++const assert = require("node:assert/strict");
++const fs = require("node:fs");
++const vm = require("node:vm");
++const source = fs.readFileSync(process.argv[2], "utf8");
++const site = "0123456789abcdef01234567", device = "10000000-0000-4000-8000-000000000001";
++const at = "2026-10-09T12:00:00.000000Z";
++const base = {
++  api_version: "admin.device.protocol-intelligence.v1", request_id: device, site_id: site, page: null,
++  result: {schema_version: 1, site_id: site, device_id: device, evaluated_at_utc: at,
++    window: {from_utc: "2026-10-08T12:00:00.000000Z", to_utc: at, duration_seconds: 86400,
++      recent_from_utc: "2026-10-09T11:00:00.000000Z", recent_duration_seconds: 3600},
++    availability_state: "usable", evidence_state: "present", identity_binding_state: "authoritative",
++    recent_protocols: [{protocol_id: "dns", display_label: "DNS", last_observed_at: "2026-10-09T11:59:59.000000Z"}],
++    last_protocol_observation: {protocol_id: "dns", display_label: "DNS", observed_at: "2026-10-09T11:59:59.000000Z"},
++    freshness_state: "fresh", coverage: {scope: "current_pipeline", source_state: "usable", attribution_state: "usable",
++      projection_state: "usable", historical_window_completeness_claimed: false}}
++};
++const settle = () => new Promise((resolve) => setImmediate(resolve));
++class Element {
++  constructor() {this.dataset = {}; this.listeners = {}; this.children = []; this.textContent = "";}
++  addEventListener(type, fn) {(this.listeners[type] ??= []).push(fn);}
++  append(...items) {this.children.push(...items);}
++  replaceChildren(...items) {this.children = items;}
++  click() {for (const fn of this.listeners.click || []) fn();}
++}
++function fixture(enabled = true, hidden = false) {
++  let now = Date.parse(at), next = 0, calls = [], payload = structuredClone(base), status = 200, hold = false, resolve = null;
++  const timers = new Map(), events = {};
++  const ids = Object.fromEntries(["admin-page", "device-protocol-intelligence", "device-protocol-content", "device-protocol-state-title", "device-protocol-state-message", "device-protocol-refresh", "refresh-button"].map((key) => [key, new Element()]));
++  ids["admin-page"].dataset = {page: "device", siteId: site, deviceId: device};
++  if (!enabled) delete ids["device-protocol-intelligence"];
++  const document = {hidden, getElementById: (id) => ids[id] || null, createElement: () => new Element(),
++    addEventListener: (type, fn) => {events[type] = fn;}};
++  class TestDate extends Date {static now() {return now;}}
++  const context = {document, Date: TestDate, AbortController, Set, Object, Array, Number, Error,
++    window: {setTimeout: (fn, ms) => {const id = ++next; timers.set(id, {fn, ms}); return id;},
++      clearTimeout: (id) => timers.delete(id), addEventListener: (type, fn) => {events[type] = fn;}},
++    fetch: async (url, options) => {
++      calls.push({url, options});
++      if (hold) await new Promise((done, reject) => {resolve = done; options.signal.addEventListener("abort", () => reject(new Error("abort")));});
++      return {ok: status === 200, status, json: async () => payload};
++    }};
++  vm.runInNewContext(source, context);
++  return {ids, calls, timers, events, document, context,
++    setPayload: (value) => {payload = value;}, setStatus: (value) => {status = value;},
++    setHold: (value) => {hold = value;}, release: () => {hold = false; resolve();},
++    advance: (ms) => {now += ms;},
++    fire: (ms) => {const entry = [...timers].find(([, timer]) => timer.ms === ms); assert.ok(entry, `timer ${ms}`); timers.delete(entry[0]); entry[1].fn();}};
++}
++(async () => {
++  const off = fixture(false); await settle(); assert.equal(off.calls.length, 0);
++  const hidden = fixture(true, true); await settle(); assert.equal(hidden.calls.length, 0);
++  hidden.document.hidden = false; hidden.events.visibilitychange(); await settle(); assert.equal(hidden.calls.length, 1);
++  const f = fixture(); await settle(); await settle();
++  assert.equal(f.calls.length, 1); assert.equal(f.ids["device-protocol-content"].children.length, 6);
++  assert.equal(f.ids["device-protocol-content"].children[2].children[1].textContent, "Fresh");
++  assert.ok(f.calls[0].url.endsWith("/protocol-intelligence")); assert.equal(f.calls[0].options.cache, "no-store");
++  f.setHold(true); f.ids["device-protocol-refresh"].click(); await settle();
++  for (let i = 0; i < 5; i++) f.ids["refresh-button"].click();
++  assert.equal(f.calls.length, 2); f.release(); await settle(); await settle(); assert.equal(f.calls.length, 3);
++  f.document.hidden = true; f.events.visibilitychange(); assert.ok(![...f.timers.values()].some((t) => t.ms === 60000));
++  f.advance(30000); f.document.hidden = false; f.events.visibilitychange();
++  assert.equal(f.calls.length, 3); assert.ok([...f.timers.values()].some((t) => t.ms === 30000));
++  f.advance(30000); f.fire(30000); await settle(); assert.equal(f.calls.length, 4);
++  f.setStatus(503); f.ids["device-protocol-refresh"].click(); await settle();
++  assert.equal(f.ids["device-protocol-content"].children.length, 6); assert.match(f.ids["device-protocol-state-message"].textContent, /last successful/);
++  f.fire(60000); await settle(); assert.ok([...f.timers.values()].some((t) => t.ms === 120000));
++  f.fire(120000); await settle(); assert.ok([...f.timers.values()].some((t) => t.ms === 300000));
++  f.setStatus(200); f.ids["device-protocol-refresh"].click(); await settle(); assert.ok([...f.timers.values()].some((t) => t.ms === 60000));
++  f.setStatus(503); f.advance(840000); f.ids["device-protocol-refresh"].click(); await settle();
++  assert.equal(f.ids["device-protocol-content"].children.length, 0);
++  f.events.pagehide(); const stopped = f.calls.length; f.ids["device-protocol-refresh"].click(); await settle(); assert.equal(f.calls.length, stopped);
++  for (const status of [401, 403, 404]) {
++    const t = fixture(); await settle(); t.setStatus(status); t.ids["device-protocol-refresh"].click(); await settle();
++    const before = t.calls.length; t.ids["refresh-button"].click(); await settle(); assert.equal(t.calls.length, before);
++  }
++  const timeout = fixture(); await settle(); timeout.setHold(true); timeout.ids["refresh-button"].click(); await settle();
++  timeout.fire(10000); await settle(); assert.ok(timeout.calls.at(-1).options.signal.aborted);
++  for (const mutate of [
++    (v) => {v.result.peer_ip = "private";}, (v) => {v.result.schema_version = 2;},
++    (v) => {v.result.recent_protocols[0].protocol_id = "tcp";},
++    (v) => {v.result.recent_protocols[0].display_label = "private";},
++    (v) => {v.result.recent_protocols.push(v.result.recent_protocols[0]);},
++    (v) => {v.result.coverage.historical_window_completeness_claimed = true;},
++    (v) => {v.result.evaluated_at_utc = "2026-02-30T12:00:00.000000Z";},
++    (v) => {v.result.device_id = "other";}, (v) => {v.result.window.duration_seconds = NaN;}
++  ]) {
++    const t = fixture(true, true), value = structuredClone(base); mutate(value); t.setPayload(value);
++    t.document.hidden = false; t.events.visibilitychange(); await settle();
++    assert.equal(t.ids["device-protocol-content"].children.length, 0); assert.match(t.ids["device-protocol-state-title"].textContent, /unavailable/);
++  }
++  for (const state of ["empty", "identity_pending"]) {
++    const t = fixture(true, true), value = structuredClone(base);
++    Object.assign(value.result, {evidence_state: state, freshness_state: "unavailable", recent_protocols: [], last_protocol_observation: null,
++      identity_binding_state: state === "empty" ? "authoritative" : "pending"});
++    t.setPayload(value); t.document.hidden = false; t.events.visibilitychange(); await settle();
++    assert.equal(t.ids["device-protocol-content"].children.length, 6);
++    assert.match(t.ids["device-protocol-state-title"].textContent, state === "empty" ? /No recent/ : /binding pending/);
++  }
++  for (const freshness of ["recent", "stale"]) {
++    const t = fixture(true, true), value = structuredClone(base);
++    value.result.freshness_state = freshness;
++    value.result.availability_state = "degraded";
++    Object.assign(value.result.coverage, {projection_state: "degraded", attribution_state: freshness === "stale" ? "unknown" : "degraded", source_state: freshness === "stale" ? "unavailable" : "usable"});
++    t.setPayload(value); t.document.hidden = false; t.events.visibilitychange(); await settle();
++    assert.equal(t.ids["device-protocol-content"].children[2].children[1].textContent, freshness === "stale" ? "Stale" : "Recent");
++  }
++  const empty = fixture(true, true), emptyValue = structuredClone(base);
++  Object.assign(emptyValue.result, {evidence_state: "empty", freshness_state: "unavailable", recent_protocols: [], last_protocol_observation: null, availability_state: "degraded"});
++  Object.assign(emptyValue.result.coverage, {projection_state: "degraded", attribution_state: "degraded"});
++  empty.setPayload(emptyValue); empty.document.hidden = false; empty.events.visibilitychange(); await settle();
++  assert.equal(empty.ids["device-protocol-state-title"].textContent, "Insufficient coverage");
++  console.log("NI03_FRONTEND_PASS");
++})().catch((error) => {console.error(error); process.exitCode = 1;});
+diff --git a/tests/admin_web/test_device_protocol_intelligence.py b/tests/admin_web/test_device_protocol_intelligence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..30fe6ef71204fd4a466559501cb9b62e681a7611
+--- /dev/null
++++ b/tests/admin_web/test_device_protocol_intelligence.py
+@@ -0,0 +1,243 @@
++import logging
++from dataclasses import replace
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++from flask import Flask
++
++from app.admin_web.config import admin_web_config_from_settings, AdminWebConfigError
++from app.admin_web.models import AdminPrincipal
++from app.admin_web.query_service import (
++    AdminQueryService, AdminQueryResponse, AdminQueryValidationError, AdminQueryForbidden,
++    AdminQueryNotFound, AdminQueryUnavailable, AdminQueryDeadline, AdminQueryBusy,
++)
++from app.admin_web.routes import create_admin_web_blueprint
++from app.admin_web.runtime import create_admin_web_runtime
++from app.network_metadata_projection.models import ProjectionConfig
++from app.network_protocol_intelligence.read_service import DeviceProtocolIntelligenceReadService
++from app.network_protocol_intelligence.models import ProtocolUnavailable, ProtocolDeadline, ProtocolBusy, public_summary
++from app.settings_control.features import AdminFeaturePlanV1
++from app.settings_control.models import ResolvedSettingsSnapshot
++from tests.network_protocol_intelligence.test_read_service import Reader, fact, summary, DEVICE, MAC
++from .conftest import SITE_ID, enabled_settings, login
++
++PATH = f"/admin/api/v1/sites/{SITE_ID}/devices/{DEVICE}/protocol-intelligence"
++
++
++@pytest.fixture
++def product_app(admin_app):
++    runtime = admin_app.extensions["admin_web_runtime"]
++    runtime.config = replace(runtime.config, device_protocol_intelligence_enabled=True)
++    query = runtime.query_service
++    query._config = runtime.config
++    query._devices = SimpleNamespace(get_device=lambda **kwargs: SimpleNamespace(canonical_mac=MAC))
++    query._protocol_intelligence = DeviceProtocolIntelligenceReadService(Reader())
++    # Fixed narrow snapshot carries no time-dependent facts for API routing tests.
++    app = Flask(__name__)
++    app.config["TESTING"] = True
++    app.register_blueprint(create_admin_web_blueprint(runtime, logger=logging.getLogger("ni03-test")))
++    app.extensions["admin_web_runtime"] = runtime
++    return app
++
++
++def test_exact_api_success_headers_and_privacy(product_app):
++    client = product_app.test_client(); login(client)
++    response = client.get(PATH, base_url="https://localhost")
++    assert response.status_code == 200
++    value = response.json
++    assert set(value) == {"api_version", "request_id", "site_id", "result", "page"}
++    assert value["api_version"] == "admin.device.protocol-intelligence.v1"
++    assert value["result"]["evidence_state"] == "empty"
++    assert value["page"] is None
++    assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
++    for private in ("client_mac", "peer_ip", "edge_id", "safe_reason", "attribution_binding_id", "sni"):
++        assert private not in response.get_data(as_text=True)
++
++
++@pytest.mark.parametrize("suffix,body,status", [("?extra=1", None, 400), ("?a=1&a=2", None, 400), ("", b"{}", 400)])
++def test_forbidden_request_inputs(product_app, suffix, body, status):
++    client = product_app.test_client(); login(client)
++    response = client.get(PATH + suffix, data=body, base_url="https://localhost")
++    assert response.status_code == status and response.json["error"]["code"] == "invalid_request"
++    assert response.json["api_version"] == "admin.device.protocol-intelligence.v1"
++
++
++def test_authentication_and_site_boundary(product_app):
++    client = product_app.test_client()
++    assert client.get(PATH, base_url="https://localhost").status_code == 401
++    login(client)
++    query = product_app.extensions["admin_web_runtime"].query_service
++    query._devices = SimpleNamespace(get_device=lambda **kwargs: (_ for _ in ()).throw(AssertionError("no cross-Site lookup")))
++    assert client.get(PATH.replace(SITE_ID, "f" * 24), base_url="https://localhost").status_code == 403
++    assert client.get(PATH.replace(SITE_ID, "invalid"), base_url="https://localhost").status_code == 400
++
++
++@pytest.mark.parametrize("exc,status,code", [(AdminQueryBusy, 429, "concurrency_limit"),
++    (AdminQueryDeadline, 503, "query_deadline"), (AdminQueryUnavailable, 503, "source_unavailable"),
++    (AdminQueryNotFound, 404, "not_found"), (AdminQueryForbidden, 403, "site_forbidden"),
++    (RuntimeError, 500, "internal_error")])
++def test_api_safe_failure_mapping(product_app, monkeypatch, caplog, exc, status, code):
++    query = product_app.extensions["admin_web_runtime"].query_service
++    def fail(*args, **kwargs): raise exc("private-device-sentinel")
++    monkeypatch.setattr(query, "device_protocol_intelligence", fail)
++    client = product_app.test_client(); login(client)
++    response = client.get(PATH, base_url="https://localhost")
++    assert response.status_code == status and response.json["error"]["code"] == code
++    assert response.json["api_version"] == "admin.device.protocol-intelligence.v1"
++    if status == 429: assert response.headers["Retry-After"] == "1"
++    assert "private-device-sentinel" not in response.get_data(as_text=True) + caplog.text
++    assert DEVICE not in caplog.text
++
++
++def test_response_cap(product_app, monkeypatch):
++    query = product_app.extensions["admin_web_runtime"].query_service
++    monkeypatch.setattr(query, "device_protocol_intelligence", lambda *a, **k: AdminQueryResponse("a" * 16385))
++    client = product_app.test_client(); login(client)
++    response = client.get(PATH, base_url="https://localhost")
++    assert response.status_code == 503 and response.json["error"]["code"] == "response_too_large"
++
++
++def test_device_lookup_precedes_optional_dependency_and_no_fallback(product_app):
++    query = product_app.extensions["admin_web_runtime"].query_service
++    principal = AdminPrincipal("operator")
++    query._protocol_intelligence = None
++    query._devices = SimpleNamespace(get_device=lambda **kwargs: None)
++    with pytest.raises(AdminQueryNotFound): query.device_protocol_intelligence(principal, SITE_ID, DEVICE)
++    query._devices = SimpleNamespace(get_device=lambda **kwargs: SimpleNamespace(canonical_mac=MAC))
++    with pytest.raises(AdminQueryUnavailable): query.device_protocol_intelligence(principal, SITE_ID, DEVICE)
++    with pytest.raises(AdminQueryValidationError): query.device_protocol_intelligence(principal, SITE_ID, DEVICE.upper().replace("1000", "ABCD", 1))
++
++
++@pytest.mark.parametrize("error,mapped", [(ProtocolBusy, AdminQueryBusy), (ProtocolDeadline, AdminQueryDeadline),
++    (ProtocolUnavailable, AdminQueryUnavailable)])
++def test_real_query_translates_semantic_failures(product_app, error, mapped):
++    query = product_app.extensions["admin_web_runtime"].query_service
++    def fail(*a, **k): raise error()
++    query._protocol_intelligence = SimpleNamespace(get_device_protocol_summary=fail)
++    with pytest.raises(mapped): query.device_protocol_intelligence(AdminPrincipal("operator"), SITE_ID, DEVICE)
++
++
++def test_page_section_and_script_only_enabled(product_app, admin_app):
++    for app, enabled in [(product_app, True), (admin_app, False)]:
++        client = app.test_client(); login(client)
++        response = client.get(f"/admin/sites/{SITE_ID}/devices/{DEVICE}", base_url="https://localhost")
++        assert response.status_code == 200
++        html = response.get_data(as_text=True)
++        assert ('id="device-protocol-intelligence"' in html) is enabled
++        assert ('filename=\"device_protocol_intelligence.js\"' in html or 'device_protocol_intelligence.js' in html) is enabled
++        if enabled:
++            for label in ("Network / Protocol Intelligence", "Recent protocol evidence derived from device-relative network metadata.", "device-protocol-refresh"):
++                assert label in html
++        else:
++            response = client.get(PATH, base_url="https://localhost")
++            assert response.status_code == 404
++
++
++def test_flag_default_outer_gate_and_registry_independence():
++    assert not admin_web_config_from_settings({}).device_protocol_intelligence_enabled
++    settings = {"web_admin_enabled": "false", "web_admin_device_protocol_intelligence_enabled": "true"}
++    config = admin_web_config_from_settings(settings)
++    assert not config.enabled and config.device_protocol_intelligence_enabled
++    plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
++    assert plan.composition_settings(settings)["web_admin_device_protocol_intelligence_enabled"] == "true"
++    from app.settings_control.definitions import SettingsDefinitionRegistry
++    registry = SettingsDefinitionRegistry()
++    assert all(item.settings_dict_key != "web_admin_device_protocol_intelligence_enabled" for item in registry)
++    assert len(registry.for_domain("features")) == 17
++    assert all(item.settings_dict_key != "web_admin_device_protocol_intelligence_enabled" for item in plan.registry)
++    with pytest.raises(AdminWebConfigError):
++        admin_web_config_from_settings({"web_admin_device_protocol_intelligence_enabled": "TRUE"})
++
++
++@pytest.mark.parametrize("enabled,projection", [(False, "unused"), (True, "disabled"), (True, "invalid"), (True, "valid")])
++def test_composition_uses_only_canonical_projection_config(admin_app, monkeypatch, tmp_path, enabled, projection):
++    import app.network_metadata_projection.config as configuration
++    import app.network_metadata_projection.read_service as reads
++    values = enabled_settings(web_admin_device_protocol_intelligence_enabled="true" if enabled else "false")
++    plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, values, {}, {}, {}))
++    calls = []
++    path = str(tmp_path / "canonical.sqlite3")
++    def get_config():
++        calls.append("config")
++        if projection == "invalid": raise ValueError("safe config failure")
++        return ProjectionConfig(enabled=projection == "valid", db_path=path)
++    original = reads.DeviceNetworkMetadataReadService
++    def reader(**kwargs):
++        calls.append(kwargs)
++        return original(**kwargs)
++    monkeypatch.setattr(configuration, "projection_config_from_env", get_config)
++    monkeypatch.setattr(reads, "DeviceNetworkMetadataReadService", reader)
++    runtime = create_admin_web_runtime(values, SimpleNamespace(state="active", visit_service=object()),
++        SimpleNamespace(repository=SimpleNamespace(config=SimpleNamespace(db_path=tmp_path / "r"))),
++        SimpleNamespace(repository=SimpleNamespace(db_path=tmp_path / "v")),
++        SimpleNamespace(_repository=SimpleNamespace(db_path=tmp_path / "o")), logging.getLogger("ni03"), feature_plan=plan)
++    assert runtime.state == "active" and runtime.feature_plan is plan and not Path(path).exists()
++    if not enabled: assert calls == []
++    elif projection == "invalid": assert calls == ["config"] and runtime.query_service._protocol_intelligence is None
++    else:
++        assert calls[1]["db_path"] == path and calls[1]["enabled"] is (projection == "valid")
++
++
++def test_disabled_admin_never_composes_projection(monkeypatch):
++    import app.network_metadata_projection.config as configuration
++    monkeypatch.setattr(configuration, "projection_config_from_env", lambda: pytest.fail("outer gate"))
++    values = {"web_admin_enabled": "false", "web_admin_device_protocol_intelligence_enabled": "true"}
++    plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, values, {}, {}, {}))
++    runtime = create_admin_web_runtime(values, None, None, None, None, logging.getLogger("ni03"), feature_plan=plan)
++    assert runtime.state == "disabled" and runtime.feature_plan is plan
++
++
++def test_deployment_artifact_exact_and_no_settings_write_scope():
++    root = Path(__file__).parents[2]
++    assert (root / "deploy/network-metadata-projection/captive-portal-network-metadata-projection-read.conf").read_text() == "[Service]\nEnvironmentFile=-/etc/captive-portal/network-metadata-projection.env\n"
++    document = (root / "deploy/network-metadata-projection/README.md").read_text()
++    for token in ("20-network-metadata-projection-read.conf", "ACTIVATION=HOLD", "semantically", "/etc/default/captive-portal"):
++        assert token in document
++
++
++def test_denied_device_capability_hides_panel_and_forbids_api(product_app, monkeypatch):
++    policy = product_app.extensions["admin_web_runtime"].access_policy
++    original = type(policy).authorize
++    monkeypatch.setattr(type(policy), "authorize", lambda self, principal, capability, site: False if capability == "admin.read.device" else original(self, principal, capability, site))
++    client = product_app.test_client(); login(client)
++    page = client.get(f"/admin/sites/{SITE_ID}/devices/{DEVICE}", base_url="https://localhost")
++    assert page.status_code == 200 and b'device-protocol-intelligence' not in page.data
++    assert client.get(PATH, base_url="https://localhost").status_code == 403
++
++
++def test_shared_admin_slot_and_exact_device_not_found(product_app):
++    query = product_app.extensions["admin_web_runtime"].query_service
++    semaphore = query._slots
++    for _ in range(query._config.max_concurrent_queries): assert semaphore.acquire(False)
++    try:
++        client = product_app.test_client(); login(client)
++        response = client.get(PATH, base_url="https://localhost")
++        assert response.status_code == 429 and response.headers["Retry-After"] == "1"
++    finally:
++        for _ in range(query._config.max_concurrent_queries): semaphore.release()
++    requested = []
++    def missing(**kwargs):
++        requested.append(kwargs)
++        return None
++    query._devices = SimpleNamespace(get_device=missing)
++    assert client.get(PATH, base_url="https://localhost").status_code == 404
++    assert requested[0]["site_id"] == SITE_ID and requested[0]["device_id"] == DEVICE
++
++
++@pytest.mark.parametrize("state,source,attribution,expected", [("attribution_unavailable", "usable", "degraded", "recent"),
++    ("source_unavailable", "unavailable", "unknown", "stale"), ("capacity_halted", "degraded", "degraded", "recent")])
++def test_committed_evidence_degraded_returns_200(product_app, state, source, attribution, expected):
++    from datetime import datetime, timezone, timedelta
++    from app.network_metadata.validation import ni_format_utc
++    class CurrentReader:
++        def read_protocol_evidence_snapshot(self, *args, **kwargs):
++            return dict(runtime_state=state, binding_state="authoritative", bound_device_id=DEVICE,
++                facts=({"edge_id": "a" * 64, "source_event_family": "dns", "event_at": ni_format_utc(datetime.now(timezone.utc) - timedelta(seconds=1))},))
++    product_app.extensions["admin_web_runtime"].query_service._protocol_intelligence = DeviceProtocolIntelligenceReadService(CurrentReader())
++    client = product_app.test_client(); login(client)
++    response = client.get(PATH, base_url="https://localhost")
++    assert response.status_code == 200
++    value = response.json["result"]
++    assert value["availability_state"] == "degraded" and value["freshness_state"] == expected
++    assert value["coverage"]["source_state"] == source and value["coverage"]["attribution_state"] == attribution
+diff --git a/tests/admin_web/test_device_protocol_intelligence_frontend.py b/tests/admin_web/test_device_protocol_intelligence_frontend.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d3578e91d6b157a2b733b1e8f98dd6c710bfadd
+--- /dev/null
++++ b/tests/admin_web/test_device_protocol_intelligence_frontend.py
+@@ -0,0 +1,22 @@
++import os
++import shutil
++import subprocess
++from pathlib import Path
++
++
++ROOT = Path(__file__).parents[2]
++
++
++def test_real_node_protocol_frontend_contract():
++    node = shutil.which("node") or str(Path(os.environ["LOCALAPPDATA"]) / "Codex/dependencies/node/bin/node.exe")
++    result = subprocess.run([node, str(ROOT / "tests/admin_web/device_protocol_intelligence.cjs"),
++        str(ROOT / "app/admin_web/static/device_protocol_intelligence.js")], cwd=ROOT,
++        capture_output=True, text=True, timeout=25)
++    assert result.returncode == 0, result.stdout + result.stderr
++    assert "NI03_FRONTEND_PASS" in result.stdout
++
++
++def test_static_privacy_no_persistence_or_unsafe_html():
++    source = (ROOT / "app/admin_web/static/device_protocol_intelligence.js").read_text()
++    for forbidden in ("innerHTML", "localStorage", "sessionStorage", "indexedDB", "document.cookie", "pushState", "console.log"):
++        assert forbidden not in source
+diff --git a/tests/network_metadata_projection/test_protocol_evidence_snapshot.py b/tests/network_metadata_projection/test_protocol_evidence_snapshot.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..001aedcd63af89e2c706d0368af96e9cee58f462
+--- /dev/null
++++ b/tests/network_metadata_projection/test_protocol_evidence_snapshot.py
+@@ -0,0 +1,205 @@
++import sqlite3
++import threading
++from contextlib import contextmanager
++from datetime import timedelta
++
++import pytest
++
++from app.analytics.source_gateway import QueryDeadline, AnalyticsQueryDeadlineExceeded
++from app.network_metadata.validation import ni_format_utc
++from app.network_metadata_projection.models import RegistryEvaluation, ProjectionUnavailable, ProjectionValidationError
++from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
++from app.network_protocol_intelligence import DeviceProtocolIntelligenceReadService
++from .support import stack, source_record, SITE, MAC, T0
++
++DEVICE = "10000000-0000-4000-8000-000000000001"
++
++
++@pytest.fixture
++def state(tmp_path):
++    value = stack(tmp_path)
++    value.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
++    value.service.poll()
++    try:
++        yield value
++    finally:
++        value.repo.close()
++
++
++def read(state, *, reader=None, device=DEVICE, at=None):
++    at = at or T0 + timedelta(minutes=1)
++    return (reader or DeviceNetworkMetadataReadService(state.config.db_path)).read_protocol_evidence_snapshot(
++        SITE, device, MAC, ni_format_utc(at - timedelta(days=1)), ni_format_utc(at),
++        max_rows=20000, deadline=QueryDeadline.after(5))
++
++
++def test_read_only_single_snapshot_narrow_sql_and_late_binding(state, monkeypatch):
++    reader = DeviceNetworkMetadataReadService(state.config.db_path)
++    original = reader._snapshot
++    statements = []
++    @contextmanager
++    def traced(**kwargs):
++        with original(**kwargs) as c:
++            c.set_trace_callback(statements.append)
++            yield c
++    monkeypatch.setattr(reader, "_snapshot", traced)
++    value = read(state, reader=reader)
++    assert value["binding_state"] == "authoritative" and value["bound_device_id"] == DEVICE
++    assert len(value["facts"]) == 1
++    assert set(value["facts"][0]) == {"edge_id", "event_at", "source_event_family"}
++    assert any("idx_projection_mac_event" in sql for sql in statements)
++    assert not any(sql.startswith(("UPDATE", "INSERT", "DELETE", "PRAGMA wal_checkpoint")) for sql in statements)
++
++
++@pytest.mark.parametrize("binding", ["not_yet_registry_resolved", "registry_unavailable", None])
++def test_pending_identity_never_scans_edges(state, monkeypatch, binding):
++    # Separate disposable state with pending binding; no production mutation.
++    c = state.repo.connection
++    if binding is None:
++        c.execute("DELETE FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?", (SITE, MAC))
++    else:
++        c.execute("UPDATE projection_site_mac_bindings SET binding_state=?,device_id=NULL,authoritative_bound_at=NULL WHERE site_id=? AND client_mac=?", (binding, SITE, MAC))
++    reader = DeviceNetworkMetadataReadService(state.config.db_path)
++    original = reader._snapshot
++    statements = []
++    @contextmanager
++    def traced(**kwargs):
++        with original(**kwargs) as connection:
++            connection.set_trace_callback(statements.append)
++            yield connection
++    monkeypatch.setattr(reader, "_snapshot", traced)
++    value = read(state, reader=reader)
++    assert value["facts"] == ()
++    assert not any("FROM device_network_metadata_edges" in sql for sql in statements)
++    # Writer-owned next authoritative binding reveals retained facts unchanged.
++    if binding is not None:
++        c.execute("UPDATE projection_site_mac_bindings SET binding_state='authoritative',device_id=?,authoritative_bound_at=? WHERE site_id=? AND client_mac=?",
++                  (DEVICE, ni_format_utc(T0), SITE, MAC))
++        assert len(read(state)["facts"]) == 1
++
++
++def test_wrong_device_and_future_rows_rejected(state):
++    with pytest.raises(ProjectionUnavailable):
++        read(state, device="20000000-0000-4000-8000-000000000002")
++    with pytest.raises(ProjectionUnavailable):
++        read(state, at=T0)  # retained event is strictly after the evaluation instant
++    with pytest.raises(ProjectionUnavailable):
++        read(state, at=T0 + timedelta(microseconds=123456))
++
++
++def test_exact_row_bound_with_disposable_facts(state):
++    c = state.repo.connection
++    original = dict(c.execute("SELECT * FROM device_network_metadata_edges WHERE client_mac=?", (MAC,)).fetchone())
++    sql = "INSERT INTO device_network_metadata_edges (" + ",".join(original) + ") VALUES(" + ",".join("?" for _ in original) + ")"
++    with state.repo.transaction():
++        for number in range(1, 20000):
++            row = {**original, "edge_id": f"{number:064x}", "source_observation_ref": f"synthetic-{number}"}
++            c.execute(sql, tuple(row.values()))
++    assert len(read(state)["facts"]) == 20000
++    row = {**original, "edge_id": "f" * 64, "source_observation_ref": "synthetic-overflow"}
++    c.execute(sql, tuple(row.values()))
++    with pytest.raises(ProjectionUnavailable):
++        read(state)
++
++
++def test_deadline_progress_cancels_snapshot_and_disabled_never_opens(state, monkeypatch):
++    with pytest.raises(AnalyticsQueryDeadlineExceeded):
++        DeviceNetworkMetadataReadService(state.config.db_path).read_protocol_evidence_snapshot(
++            SITE, DEVICE, MAC, ni_format_utc(T0 - timedelta(days=1)), ni_format_utc(T0),
++            max_rows=20000, deadline=QueryDeadline.after(-1))
++    original = sqlite3.connect
++    def reject(*args, **kwargs):
++        raise AssertionError("disabled must not open DB")
++    monkeypatch.setattr(sqlite3, "connect", reject)
++    with pytest.raises(ProjectionUnavailable):
++        read(state, reader=DeviceNetworkMetadataReadService(state.config.db_path, enabled=False))
++    monkeypatch.setattr(sqlite3, "connect", original)
++    class Clock:
++        def __init__(self): self.n = 0
++        def __call__(self):
++            self.n += 1
++            return 0 if self.n < 5 else 6
++    with pytest.raises(AnalyticsQueryDeadlineExceeded):
++        with DeviceNetworkMetadataReadService(state.config.db_path)._snapshot(deadline=QueryDeadline(5, Clock())) as c:
++            c.execute("WITH RECURSIVE numbers(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM numbers WHERE n<1000000) SELECT sum(n) FROM numbers").fetchone()
++    assert len(read(state)["facts"]) == 1
++
++
++def test_runtime_binding_and_facts_share_snapshot_with_two_wal_readers(state, monkeypatch):
++    """Writer uses normal repository transactions/poll while two real reads hold WAL snapshots."""
++    barrier = threading.Barrier(3)
++    release = threading.Event()
++    reader = DeviceNetworkMetadataReadService(state.config.db_path)
++    original = reader._snapshot
++    @contextmanager
++    def pinned(**kwargs):
++        with original(**kwargs) as c:
++            c.execute("SELECT runtime_state FROM projection_runtime_state").fetchone()
++            barrier.wait(timeout=4)
++            assert release.wait(4)
++            yield c
++    monkeypatch.setattr(reader, "_snapshot", pinned)
++    results, failures = [], []
++    def worker():
++        try:
++            results.append(DeviceProtocolIntelligenceReadService(reader).get_device_protocol_summary(
++                SITE, DEVICE, MAC, evaluated_at_utc=ni_format_utc(T0 + timedelta(minutes=1)), deadline=QueryDeadline.after(5)))
++        except Exception as exc:
++            failures.append(type(exc).__name__)
++    threads = [threading.Thread(target=worker) for _ in range(2)]
++    for thread in threads: thread.start()
++    try:
++        barrier.wait(timeout=4)
++        state.source.records.append(source_record(1, event_at=ni_format_utc(T0 + timedelta(seconds=2))))
++        state.service.poll()
++        with state.repo.transaction():
++            state.repo.connection.execute("UPDATE projection_runtime_state SET runtime_state='attribution_unavailable'")
++        assert state.repo.live_state not in {"blocked_conflict", "capacity_halted"}
++    finally:
++        release.set()
++        for thread in threads: thread.join(5)
++    assert failures == [] and len(results) == 2
++    assert all(value.last_protocol_observation.observed_at == state.source.records[0].event_at
++               and value.coverage.attribution_state == "usable" for value in results)
++    monkeypatch.setattr(reader, "_snapshot", original)
++    after = read(state, reader=reader)
++    assert len(after["facts"]) == 2 and after["runtime_state"] == "attribution_unavailable"
++
++
++@pytest.mark.parametrize("kind", ["absent", "schema", "busy"])
++def test_store_failure_is_unavailable(tmp_path, kind):
++    path = tmp_path / "untrusted.sqlite3"
++    connection = None
++    if kind != "absent":
++        connection = sqlite3.connect(path)
++        connection.execute("CREATE TABLE invalid(value)")
++        connection.commit()
++        if kind == "busy":
++            connection.execute("BEGIN EXCLUSIVE")
++    reader = DeviceNetworkMetadataReadService(str(path))
++    try:
++        with pytest.raises(ProjectionUnavailable):
++            reader.read_protocol_evidence_snapshot(SITE, DEVICE, MAC, ni_format_utc(T0 - timedelta(days=1)),
++                ni_format_utc(T0), max_rows=20000, deadline=QueryDeadline.after(5))
++    finally:
++        if connection: connection.close()
++
++
++def test_unknown_retained_protocol_fails_semantic_integrity(state):
++    c = state.repo.connection
++    row = dict(c.execute("SELECT * FROM device_network_metadata_edges WHERE client_mac=?", (MAC,)).fetchone())
++    c.execute("PRAGMA ignore_check_constraints=ON")
++    row.update(edge_id="e" * 64, source_observation_ref="synthetic-corrupt", source_event_family="tcp")
++    c.execute("INSERT INTO device_network_metadata_edges (" + ",".join(row) + ") VALUES(" + ",".join("?" for _ in row) + ")", tuple(row.values()))
++    with pytest.raises(Exception) as error:
++        DeviceProtocolIntelligenceReadService(DeviceNetworkMetadataReadService(state.config.db_path)).get_device_protocol_summary(
++            SITE, DEVICE, MAC, evaluated_at_utc=ni_format_utc(T0 + timedelta(minutes=1)), deadline=QueryDeadline.after(5))
++    from app.network_protocol_intelligence.models import ProtocolUnavailable
++    assert type(error.value) is ProtocolUnavailable
++
++
++@pytest.mark.parametrize("max_rows", [0, 500, 20001, True])
++def test_exact_internal_row_ceiling_only(state, max_rows):
++    with pytest.raises(ProjectionValidationError):
++        DeviceNetworkMetadataReadService(state.config.db_path).read_protocol_evidence_snapshot(SITE, DEVICE, MAC,
++            ni_format_utc(T0 - timedelta(days=1)), ni_format_utc(T0), max_rows=max_rows, deadline=QueryDeadline.after(5))
+diff --git a/tests/network_protocol_intelligence/__init__.py b/tests/network_protocol_intelligence/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/tests/network_protocol_intelligence/test_read_service.py b/tests/network_protocol_intelligence/test_read_service.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d2d203390d0b75eba947afdecfbdff5ff693f59
+--- /dev/null
++++ b/tests/network_protocol_intelligence/test_read_service.py
+@@ -0,0 +1,143 @@
++from dataclasses import replace
++from datetime import datetime, timedelta, timezone
++
++import pytest
++
++from app.analytics.source_gateway import QueryDeadline
++from app.network_metadata.validation import ni_format_utc
++from app.network_protocol_intelligence.read_service import DeviceProtocolIntelligenceReadService, _READ_SLOTS, _COVERAGE
++from app.network_protocol_intelligence.models import (
++    ProtocolUnavailable, ProtocolValidationError, ProtocolBusy, ProtocolDeadline,
++    ProtocolCoverageV1, public_summary, freshness,
++)
++
++SITE = "0123456789abcdef01234567"
++DEVICE = "10000000-0000-4000-8000-000000000001"
++MAC = "02:00:00:00:00:01"
++AT = datetime(2026, 10, 9, 12, tzinfo=timezone.utc)
++
++
++class Reader:
++    def __init__(self, facts=(), state="usable", binding="authoritative", bound=DEVICE):
++        self.value = dict(runtime_state=state, binding_state=binding, bound_device_id=bound, facts=facts)
++        self.calls = []
++
++    def read_protocol_evidence_snapshot(self, *args, **kwargs):
++        self.calls.append((args, kwargs))
++        return self.value
++
++
++def fact(protocol="dns", age=1, edge="a"):
++    return dict(source_event_family=protocol, event_at=ni_format_utc(AT - timedelta(seconds=age)), edge_id=edge)
++
++
++def summary(reader, **kwargs):
++    return DeviceProtocolIntelligenceReadService(reader).get_device_protocol_summary(
++        SITE, DEVICE, MAC, evaluated_at_utc=ni_format_utc(AT), deadline=kwargs.get("deadline", QueryDeadline.after(20)))
++
++
++def test_protocol_aggregation_order_and_narrow_read_contract():
++    reader = Reader([fact("tls", 20), fact("dns", 20), fact("quic", 20), fact("dns", 30)])
++    value = public_summary(summary(reader))
++    assert [p["protocol_id"] for p in value["recent_protocols"]] == ["dns", "tls", "quic"]
++    assert value["last_protocol_observation"]["protocol_id"] == "dns"
++    assert len(reader.calls) == 1
++    args, kwargs = reader.calls[0]
++    assert args == (SITE, DEVICE, MAC, ni_format_utc(AT - timedelta(days=1)), ni_format_utc(AT))
++    assert kwargs["max_rows"] == 20000
++    assert 0 < kwargs["deadline"].expires_at - kwargs["deadline"].monotonic() <= 5
++    assert not any(key in str(value) for key in ("edge_id", "client_mac", "source_event_family"))
++
++
++@pytest.mark.parametrize("age,recent,accepted", [(3600, True, True), (3600.000001, False, True),
++    (86400, False, True), (86400.000001, False, False), (0, False, False), (-1, False, False)])
++def test_event_window_boundaries(age, recent, accepted):
++    if not accepted:
++        with pytest.raises(ProtocolUnavailable):
++            summary(Reader([fact(age=age)]))
++    else:
++        value = summary(Reader([fact(age=age)]))
++        assert bool(value.recent_protocols) is recent
++
++
++@pytest.mark.parametrize("age,expected", [(0, "fresh"), (300, "fresh"), (300.000001, "recent"),
++    (3600, "recent"), (3600.000001, "stale"), (86400, "stale")])
++def test_base_freshness_boundaries(age, expected):
++    assert freshness(age, ProtocolCoverageV1("current_pipeline", "usable", "usable", "usable", False)) == expected
++
++
++@pytest.mark.parametrize("state,expected", [("usable", "fresh"), ("registry_degraded", "fresh"),
++    ("attribution_unavailable", "recent"), ("source_unavailable", "stale"),
++    ("capacity_waiting_reader", "recent"), ("capacity_halted", "recent"), ("blocked_conflict", "recent"),
++    ("degraded", "recent"), ("initializing", "stale"), ("stopping", "stale")])
++def test_exact_coverage_caps(state, expected):
++    value = summary(Reader([fact()], state=state))
++    assert value.freshness_state == expected
++    assert (value.coverage.projection_state, value.coverage.source_state, value.coverage.attribution_state) == _COVERAGE[state]
++    assert value.coverage.historical_window_completeness_claimed is False
++
++
++@pytest.mark.parametrize("binding,identity", [(None, "absent"), ("not_yet_registry_resolved", "pending"),
++    ("registry_unavailable", "unavailable")])
++def test_identity_pending(binding, identity):
++    value = summary(Reader(binding=binding, bound=None))
++    assert value.evidence_state == "identity_pending" and value.identity_binding_state == identity
++    assert value.freshness_state == "unavailable"
++
++
++@pytest.mark.parametrize("reader", [Reader([fact("tcp")]), Reader([fact("udp")]), Reader([fact("other")]),
++    Reader(state="unexpected"), Reader(bound="20000000-0000-4000-8000-000000000002"),
++    Reader([fact()], binding="not_yet_registry_resolved", bound=None), Reader(binding="bad")])
++def test_integrity_fail_closed(reader):
++    with pytest.raises(ProtocolUnavailable):
++        summary(reader)
++
++
++def test_row_limit_no_partial_summary():
++    assert summary(Reader([fact()] * 20000)).evidence_state == "present"
++    with pytest.raises(ProtocolUnavailable):
++        summary(Reader([fact()] * 20001))
++
++
++def test_deadline_and_shared_two_slot_gate_release():
++    with pytest.raises(ProtocolDeadline):
++        summary(Reader(), deadline=QueryDeadline.after(-1))
++    assert _READ_SLOTS.acquire(False) and _READ_SLOTS.acquire(False)
++    try:
++        with pytest.raises(ProtocolBusy):
++            summary(Reader())
++    finally:
++        _READ_SLOTS.release(); _READ_SLOTS.release()
++    assert summary(Reader()).evidence_state == "empty"
++
++
++def test_serializer_refuses_malformed_and_extra_shapes():
++    value = summary(Reader([fact()]))
++    for invalid in (replace(value, schema_version=True), replace(value, freshness_state="other"),
++                    replace(value, coverage=replace(value.coverage, historical_window_completeness_claimed=True)),
++                    replace(value, window=replace(value.window, duration_seconds=1)), {**public_summary(value), "peer_ip": "private"}):
++        with pytest.raises(ProtocolUnavailable):
++            public_summary(invalid)
++
++
++def test_no_facts_has_no_last_observation():
++    value = summary(Reader(state="attribution_unavailable"))
++    assert value.evidence_state == "empty" and value.last_protocol_observation is None
++    assert value.freshness_state == "unavailable"
++
++
++def test_microsecond_order_and_bad_retained_timestamp_fail_closed():
++    value = summary(Reader([fact("dns", 1.000001), fact("tls", 1)]))
++    assert value.last_protocol_observation.protocol_id == "tls"
++    assert [item.protocol_id for item in value.recent_protocols] == ["tls", "dns"]
++    with pytest.raises(ProtocolUnavailable):
++        summary(Reader([{**fact(), "event_at": "not-a-time"}]))
++
++
++@pytest.mark.parametrize("site,device,mac,time", [("bad", DEVICE, MAC, ni_format_utc(AT)),
++    (SITE, "bad", MAC, ni_format_utc(AT)), (SITE, DEVICE, "bad", ni_format_utc(AT)),
++    (SITE, DEVICE, MAC, "2026-10-09T12:00:00Z")])
++def test_semantic_validation_safe(site, device, mac, time):
++    with pytest.raises(ProtocolValidationError):
++        DeviceProtocolIntelligenceReadService(Reader()).get_device_protocol_summary(
++            site, device, mac, evaluated_at_utc=time, deadline=QueryDeadline.after(5))
