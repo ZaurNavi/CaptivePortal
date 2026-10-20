@@ -115,7 +115,7 @@ class Leaf:
         if self.fd is not None:os.close(self.fd);self.fd=None
 
 
-def create_leaf(delegated, expected, job, cap, *, uid=0, worker_gid=None):
+def create_leaf(delegated, expected, job, cap, *, uid=0, worker_gid=None, tasks=1):
     path(delegated); require(delegated!='/' and not delegated.endswith('/system.slice'))
     mount=mountpoint(); parent=directory(mount+delegated,uid=uid,expected=expected)
     try:
@@ -134,7 +134,7 @@ def create_leaf(delegated, expected, job, cap, *, uid=0, worker_gid=None):
         leaf=Leaf(mount,delegated+'/'+name,identity(info),uid=uid)
         try:
             leaf.write('memory.max',str(integer(cap,1)))
-            leaf.write('memory.swap.max','0');leaf.write('pids.max','1')
+            leaf.write('memory.swap.max','0');leaf.write('pids.max',str(integer(tasks,1,32)))
             # Required whole-group abort primitive; no random PID kill fallback.
             require(stat.S_ISREG(os.stat('cgroup.kill',dir_fd=leaf.fd,follow_symlinks=False).st_mode))
             return leaf

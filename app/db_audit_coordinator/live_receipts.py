@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import os
+import re
 from pathlib import Path
 try:
     import resource
@@ -13,10 +14,32 @@ import stat
 import time
 
 from . import contracts as c
-from .cgroup_v2 import meminfo, pressure, vmstat, counters, EVENTS
+from .cgroup_v2 import pressure, vmstat, counters, EVENTS
 from .live_policy import integer, path, require
 
 CGROUP2_SUPER_MAGIC=0x63677270
+
+
+def meminfo(raw):
+    """Native keys include DirectMap4k/2M/1G, not only alphabetic fields.
+
+    Validate the entire bounded kernel document (duplicates, units, numeric
+    bounds), including fields not used in the admission calculation.
+    """
+    require(type(raw) is str and 0<len(raw)<=65536)
+    values={}
+    for line in raw.splitlines():
+        pieces=line.split()
+        require(len(pieces) in {2,3} and re.fullmatch(r'[A-Za-z_()][A-Za-z0-9_()]*:',pieces[0]) is not None)
+        key=pieces[0][:-1]
+        require(key not in values and pieces[1].isascii() and pieces[1].isdecimal()
+            and (len(pieces)==2 or pieces[2]=='kB'))
+        amount=integer(int(pieces[1])*(1024 if len(pieces)==3 else 1))
+        values[key]=(amount,len(pieces)==3)
+    require({'MemTotal','MemAvailable'}<=values.keys()
+        and values['MemTotal'][1] and values['MemAvailable'][1]
+        and 0<=values['MemAvailable'][0]<=values['MemTotal'][0])
+    return values['MemAvailable'][0]
 
 
 def filesystem_magic(fd):

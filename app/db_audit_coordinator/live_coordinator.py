@@ -48,7 +48,7 @@ class OperationalFilesystem:
 
 class LiveAdmission:
     def __init__(self,profile):self.profile=profile
-    def metadata(self,store):return self.profile.store(store).metadata()
+    def metadata(self,store):return self.profile.metadata(store)
 
 
 def memory_document(value, *, seal=True):
@@ -74,6 +74,7 @@ def fill_document(fd,value, *, seal=True):
 class LiveCoordinator(Coordinator):
     store_type=OperationalStateStore
     diagnostic_stage='serve'
+    _r4=None
 
     def qualify(self,profile):profile.installed()
 
@@ -91,6 +92,7 @@ class LiveCoordinator(Coordinator):
         self._batch_scope=None;self._submitted=[];self._batch=();self._stopped=False
         self._leaf=None;self._pidfd=None;self._start=None;self._result_fd=None
         self._deadline=None;self._abort_at=None;self._killed=False
+        self._r4=None;self.r4_proofs=[]
         super().__init__(root,spec('coordinator.lock',0o600),spec('heavy.lock',0o640),
             admission=LiveAdmission(profile),filesystem=OperationalFilesystem(),sync=sync)
         # No approval survives restart, even for merely queued work. Operators
@@ -166,6 +168,12 @@ class LiveCoordinator(Coordinator):
             if job is None:return False
             # Parent verifies only immutable CODE, not source geometry/SQLite.
             self.profile.artifact();policy=self.profile.store(job['store_id'])
+            from .live_policy import R4_METHOD
+            if job['method_version']==R4_METHOD:
+                from .r4_release import Session
+                self._r4=Session(self,job,current)
+                self._r4.start()
+                return True
             ar,aw=os.pipe2(os.O_CLOEXEC);cr,cw=os.pipe2(os.O_CLOEXEC);rr,rw=os.pipe2(os.O_CLOEXEC)
             claim=profile_fd=None
             try:
@@ -221,6 +229,8 @@ class LiveCoordinator(Coordinator):
                     if fd is not None:os.close(fd)
 
     def _notify_cancel(self):
+        if self._r4 is not None:
+            self._r4.cancel();return
         if self.cancel_fd is not None:
             try:os.write(self.cancel_fd,b'c')
             except BrokenPipeError:pass
@@ -252,11 +262,15 @@ class LiveCoordinator(Coordinator):
             return dict(status='stopped',controller_epoch=epoch)
 
     def timeout(self):
+        if self._r4 is not None:
+            return None if self._r4.kill_sent else max(0,(self._r4.deadline-time.monotonic_ns())/1e9)
         if self.process is None:return None  # Idle selector blocks indefinitely.
         target=self._abort_at if self._abort_at is not None else self._deadline
         return None if target is None or self._killed else max(0,target-time.monotonic())
 
     def expire(self):
+        if self._r4 is not None:
+            self._r4.expire();return
         if self.process is None or self.process.returncode is not None:return
         now=time.monotonic()
         if self._abort_at is None and self._deadline is not None and now>=self._deadline:self._notify_cancel()
@@ -266,6 +280,11 @@ class LiveCoordinator(Coordinator):
 
     def finish(self):
         with self._mutex:
+            if self._r4 is not None:
+                if not self._r4.pump():return False
+                self.r4_proofs.append(self._r4.proof)
+                self._r4=None
+                return True
             if self.process is None or self._reaped is None or self._reaped[0] is not self.process:return False
             current=self._state();job=next(j for j in current['jobs'] if j['job_id']==self.active)
             try:
@@ -306,6 +325,13 @@ class LiveCoordinator(Coordinator):
             if any(j['state'] in {'claimed','running'} for j in self._state()['jobs']):
                 self.orphan_hold=True;return False
             return not self.orphan_hold
+
+    def close(self):
+        # Shutdown is not a positive release receipt. No terminal fabrication,
+        # mount detach or next FIFO while an R4 owner may still be alive.
+        if self._r4 is not None and not self._r4.done:
+            self._r4.hold();self._r4.cancel()
+        super().close()
 
     def handle(self,value,scope_hash):
         require(type(value) is dict,'invalid_request');op=value.get('op')

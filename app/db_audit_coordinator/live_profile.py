@@ -8,13 +8,37 @@ import subprocess
 import sys
 
 from . import contracts as c
-from .live_policy import PROFILE,ROOT,SOCKET,StorePolicy,integer,path,require
+from .live_policy import PROFILE,ROOT,SOCKET,StorePolicy,integer,path,require,R4_METHOD,R4_STORES
 from .live_receipts import directory,identity
 
 LEGACY=(
     '/home/admin/CaptivePortal-Deploy/qio-evidence-fast-start-3fda7af',
     '/home/admin/CaptivePortal-Deploy/qio-ram-audit-58db905',
 )
+
+
+@dataclass(frozen=True)
+class R4Installation:
+    method: str
+    enabled: bool
+    owner_uid: int
+    owner_gid: int
+    ram_root: str
+    ram_device: int
+    ram_inode: int
+    task_limit: int
+    nr_inodes: int
+
+    def __post_init__(self):
+        require(self.method==R4_METHOD and type(self.enabled) is bool)
+        require(self.ram_root=='/run/captive-portal/db-audit/ram-jobs')
+        integer(self.owner_uid,1,2**32-1);integer(self.owner_gid,1,2**32-1)
+        integer(self.ram_device);integer(self.ram_inode,1)
+        integer(self.task_limit,8,32);integer(self.nr_inodes,32,256)
+
+    @classmethod
+    def parse(cls,value):
+        c.closed(value,cls.__dataclass_fields__);return cls(**value)
 
 
 @dataclass(frozen=True)
@@ -38,6 +62,7 @@ class PilotProfile:
     operator_uids: tuple[int,...]
     operator_gid: int
     stores: tuple[StorePolicy,...]
+    r4: R4Installation | None = None
 
     def __post_init__(self):
         require(self.schema=='db_audit_coordinator.pilot.v1' and type(self.enabled) is bool)
@@ -61,10 +86,17 @@ class PilotProfile:
         require(type(self.stores) is tuple and len(self.stores)==3 and all(type(item) is StorePolicy for item in self.stores))
         require({item.store_id for item in self.stores}=={'network_service_intelligence','public_traffic','traffic_projection'})
         for item in self.stores: require(item.uid!=self.worker_uid)
+        require(self.r4 is None or type(self.r4) is R4Installation)
+        if self.r4 is not None:
+            require(self.r4.owner_uid!=self.worker_uid
+                and all((item.uid,item.gid)==(self.r4.owner_uid,self.r4.owner_gid) for item in self.stores))
 
     @classmethod
     def parse(cls,value):
-        c.closed(value,cls.__dataclass_fields__);data=dict(value)
+        # Historical root profiles remain readable with no implicit R4 grant.
+        keys=set(cls.__dataclass_fields__)
+        c.closed(value,keys if 'r4' in value else keys-{'r4'});data=dict(value)
+        data['r4']=None if value.get('r4') is None else R4Installation.parse(value['r4'])
         for key in ('worker_groups','operator_uids'):
             require(type(data[key]) is list and len(data[key])<=8);data[key]=tuple(data[key])
         require(type(data['blobs']) is list and len(data['blobs'])<=4096)
@@ -77,6 +109,13 @@ class PilotProfile:
     def store(self,store_id):
         value=next((item for item in self.stores if item.store_id==store_id),None)
         require(value is not None);return value
+
+    def metadata(self,store_id):
+        metadata=self.store(store_id).metadata()
+        if self.r4 is not None and self.r4.enabled:
+            require(store_id in R4_STORES)
+            return R4_METHOD,metadata[1],metadata[2]
+        return metadata
 
     def artifact(self):
         """Bounded code-byte checks, not DB/source geometry or an audit."""
@@ -137,6 +176,10 @@ class PilotProfile:
         require(Path(__file__).resolve().parents[2]==Path(self.release_root) and Path.cwd()==Path(self.release_root)
             and Path(sys.executable).resolve()==Path(self.python),'not_admitted')
         self.artifact()
+        if self.r4 is not None and self.r4.enabled:
+            fd=directory(self.r4.ram_root,uid=0,expected=(self.r4.ram_device,self.r4.ram_inode))
+            try:require(os.fstat(fd).st_uid==0 and stat.S_IMODE(os.fstat(fd).st_mode)==0o711)
+            finally:os.close(fd)
         # Code verifies the two KNOWN quarantines, but the complete old-launch
         # inventory and attended external host gate are operator obligations.
         for value in LEGACY:

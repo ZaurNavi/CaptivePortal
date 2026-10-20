@@ -17,6 +17,8 @@ from . import contracts as c
 
 SCHEMA = 'db_audit_coordinator.queue.operational.v1'
 METHOD = 'sqlite_backup_memory_t3.operational.v1'
+R4_METHOD = 'sqlite_online_backup_private_tmpfs_physical_v1'
+R4_STORES = frozenset({'public_traffic','network_service_intelligence','traffic_projection'})
 VALIDATORS = {
     'fingerprint_evidence': 'fingerprint.evidence.t3.schema2.v1',
     'network_service_intelligence': 'ni04.materialization.t3.schema1.v1',
@@ -125,10 +127,59 @@ SNAPSHOT_KEYS = {'schema_version', 'generation_kind', 'lineage_sha256', 'waterma
 RESULT_KEYS = c.RESULT_KEYS | {'snapshot_metadata', 'duration_ms'}
 
 
+def r4_receipt(value, *, passed):
+    c.closed(value,{'binding_sha256','source_pre_sha256','source_post_sha256','snapshot',
+        'leaf_identity','namespace_identity','helper_reaped','gatekeeper_reaped',
+        'cleanup_complete','shmem_zero','empty_observations','scope','source_observations','memory_observations'})
+    c.digest(value['binding_sha256'])
+    for name in ('leaf_identity','namespace_identity'):
+        pair=value[name];require(type(pair) is list and len(pair)==2,'invalid_request')
+        integer(pair[0]);integer(pair[1],1)
+    require(value['scope']=='guest_vm_only' and type(value['empty_observations']) is int
+        and value['empty_observations']==2,'invalid_request')
+    for name in ('helper_reaped','gatekeeper_reaped','cleanup_complete','shmem_zero'):
+        require(value[name] is True,'invalid_request')
+    sources=value['source_observations'];c.closed(sources,{'pre','post'})
+    for source in sources.values():
+        require(type(source) is list and len(source)==2,'invalid_request')
+        main,sides=source;c.closed(sides,{'-wal','-shm','-journal'})
+        for item in [main,*sides.values()]:
+            if item is not None:
+                require(type(item) is list and len(item)==3,'invalid_request')
+                integer(item[0]);integer(item[1],1);integer(item[2])
+        require(main is not None and sides['-wal'] is not None and sides['-shm'] is not None,'invalid_request')
+    require(sources['pre'][0][:2]==sources['post'][0][:2]
+        and all(sources['pre'][1][side][:2]==sources['post'][1][side][:2] for side in ('-wal','-shm')),'invalid_request')
+    memory=value['memory_observations'];c.closed(memory,{'maximum','current_after_backup','shmem_after_backup','swap_current'})
+    for item in memory.values():integer(item)
+    require(memory['swap_current']==0 and 0<memory['current_after_backup']<=memory['maximum']
+        and memory['shmem_after_backup']<=memory['current_after_backup'],'invalid_request')
+    image=value['snapshot']
+    for name,source in (('source_pre_sha256','pre'),('source_post_sha256','post')):
+        c.digest(value[name]);require(value[name]==hashlib.sha256(c.encode(sources[source])).hexdigest(),'invalid_request')
+    if image is None:
+        require(not passed,'invalid_request')
+    else:
+        c.closed(image,{'device','inode','size','sha256'})
+        integer(image['device']);integer(image['inode'],1);integer(image['size'],1);c.digest(image['sha256'])
+        require(memory['shmem_after_backup']>=image['size'],'invalid_request')
+    return value
+
+
 def result(value):
-    c.closed(value, RESULT_KEYS)
-    require(value['fixture_only'] is False and value['method_version'] == METHOD
+    require(type(value) is dict,'invalid_request')
+    r4=value.get('method_version')==R4_METHOD
+    c.closed(value, RESULT_KEYS | ({'r4_receipt'} if r4 else set()))
+    require(value['fixture_only'] is False and value['method_version'] in {METHOD,R4_METHOD}
         and value['store_id'] in VALIDATORS and value['validator_version'] == VALIDATORS[value['store_id']], 'invalid_request')
+    if r4:
+        require(value['store_id'] in R4_STORES,'invalid_request')
+        # Root validates the complete protected receipt BEFORE durable adoption;
+        # persist its canonical commitment, not repeated kernel prose per job.
+        # This preserves the unchanged 256KiB/128-history public G1 boundary.
+        proof=value['r4_receipt'];c.closed(proof,{'version','proof_sha256'})
+        require(type(proof['version']) is int and proof['version']==1,'invalid_request')
+        c.digest(proof['proof_sha256'])
     for name in ('job_id','run_id','attempt_id','claim_epoch','source_generation'):
         c.identifier(value[name])
     c.timestamp(value['completed_at']); integer(value['duration_ms'])
@@ -168,8 +219,9 @@ def state(value):
         c.closed(job,c.JOB_KEYS)
         for key in ('job_id','source_generation'): c.identifier(job[key])
         for key in ('scope_hash','idempotency_hash'): c.digest(job[key])
-        require(job['store_id'] in VALIDATORS and job['method_version'] == METHOD
+        require(job['store_id'] in VALIDATORS and job['method_version'] in {METHOD,R4_METHOD}
             and job['validator_version'] == VALIDATORS[job['store_id']] and job['origin'] == 'manual', 'invalid_request')
+        require(job['method_version']!=R4_METHOD or job['store_id'] in R4_STORES,'invalid_request')
         require(job['job_id'] not in ids and job['idempotency_hash'] not in keys, 'invalid_request')
         ids.add(job['job_id']); keys.add(job['idempotency_hash']); integer(job['seq'],1); sequences.append(job['seq'])
         require(job['state'] in c.OUTSTANDING | c.TERMINAL and job['reason_code'] in REASONS, 'invalid_request')
@@ -211,10 +263,13 @@ def state(value):
     return value
 
 
-def make_result(job, kind, reason, *, snapshot=None, duration_ms=0):
+def make_result(job, kind, reason, *, snapshot=None, duration_ms=0, receipt=None):
     value = dict(fixture_only=False, **{name: job[name] for name in ('job_id','store_id','run_id',
         'attempt_id','claim_epoch','method_version','validator_version','source_generation')},
         completed_at=c.utc(), result=kind, reason_code=reason, snapshot_metadata=snapshot,
         snapshot_id=hashlib.sha256(c.encode(snapshot)).hexdigest() if snapshot is not None else None,
         duration_ms=duration_ms)
+    if job['method_version']==R4_METHOD:
+        r4_receipt(receipt,passed=kind=='passed')
+        value['r4_receipt']=dict(version=1,proof_sha256=hashlib.sha256(c.encode(receipt)).hexdigest())
     return result(value)

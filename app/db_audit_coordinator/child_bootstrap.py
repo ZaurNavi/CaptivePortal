@@ -11,7 +11,7 @@ import sys
 import time
 
 from . import contracts as c
-from .live_policy import Deadlines,make_result,require,state,integer,physical_generation
+from .live_policy import Deadlines,make_result,require,state,integer,physical_generation,R4_METHOD
 from .live_profile import PilotProfile
 from .live_receipts import directory,identity,guest_sample,start_ticks,membership,proc_text
 from .live_cgroup import Leaf,mountpoint
@@ -66,7 +66,8 @@ def readonly_document(fd, *, sealed=False):
 
 def authorize(fd):
     data,pipe_identity=pipe_data(fd,300);os.close(fd)
-    c.closed(data,AUTH_KEYS)
+    c.closed(data,AUTH_KEYS|({'r4_fd'} if 'r4_fd' in data else set()))
+    if 'r4_fd' in data:integer(data['r4_fd'],3,2**20)
     for key in ('job_id','attempt_id','claim_epoch'):c.identifier(data[key])
     c.digest(data['nonce'])
     for key in ('supervisor_pid','supervisor_start','leaf_inode','gate_inode'):integer(data[key],1)
@@ -74,6 +75,8 @@ def authorize(fd):
     for key in ('claim_fd','profile_fd','result_fd','cancel_fd'):integer(data[key],0,2**20)
     require(len({data[key] for key in ('claim_fd','profile_fd','result_fd','cancel_fd')})==4
         and fd not in {data[key] for key in ('claim_fd','profile_fd','result_fd','cancel_fd')},'unauthorized')
+    if 'r4_fd' in data:
+        require(data['r4_fd'] not in {fd,*(data[key] for key in ('claim_fd','profile_fd','result_fd','cancel_fd'))},'unauthorized')
     for key,access in (('result_fd',os.O_WRONLY),('cancel_fd',os.O_RDONLY)):
         require(stat.S_ISFIFO(os.fstat(data[key]).st_mode)
             and fcntl.fcntl(data[key],fcntl.F_GETFL)&os.O_ACCMODE==access,'unauthorized')
@@ -95,7 +98,8 @@ def authorize(fd):
         and Path(sys.executable).resolve()==Path(profile.python).resolve(),'unauthorized')
     policy=profile.store(job['store_id'])
     require(job['source_generation']==physical_generation(policy.store_id,policy.device,policy.inode)
-        and (job['method_version'],job['validator_version'],job['source_generation'])==policy.metadata(),'unauthorized')
+        and (job['method_version'],job['validator_version'],job['source_generation'])==profile.metadata(job['store_id']),'unauthorized')
+    require(('r4_fd' in data)==(job['method_version']==R4_METHOD),'unauthorized')
     return data,job,profile,policy
 
 
@@ -136,6 +140,7 @@ def verify_origin(profile):
 
 def execute(auth_fd):
     data,job,profile,policy=authorize(auth_fd)
+    if job['method_version']==R4_METHOD:return execute_r4(data,job,profile,policy)
     deadline=Deadlines(data['started_ns'],policy.attempt_seconds)
     leaf=Leaf(mountpoint(),data['leaf'],(data['leaf_device'],data['leaf_inode']))
     gate=Gate(profile.root+'/heavy.lock',data['gate_device'],data['gate_inode'])
@@ -189,6 +194,63 @@ def execute(auth_fd):
     os.close(data['result_fd'])
     # Never unlock/close global gate here: process exit is its release boundary.
     return 0 if result['result']=='passed' else 2
+
+
+def execute_r4(data,job,profile,policy):
+    """Nonowner holds its own gate through root cleanup/release, never source I/O."""
+    import socket
+    from . import r4_ipc,r4_snapshot
+    from .r4_sandbox import RAM_ROOT
+    from .live_policy import SNAPSHOT_KEYS
+    require(profile.r4 is not None and profile.r4.enabled,'unauthorized')
+    channel=socket.socket(fileno=data['r4_fd'])
+    leaf=Leaf(mountpoint(),data['leaf'],(data['leaf_device'],data['leaf_inode']))
+    gate=Gate(profile.root+'/heavy.lock',data['gate_device'],data['gate_inode'])
+    deadline=Deadlines(data['started_ns'],policy.attempt_seconds)
+    namespace=list(identity(os.stat('/proc/self/ns/mnt')))
+    binding=r4_ipc.claim_binding(job,profile,leaf,namespace)
+    def guard(*,cancel=True):
+        deadline.check();gate.check();leaf.check()
+        if cancel and select.select([data['cancel_fd']],[],[],0)[0]:raise c.CoordinatorError('canceled')
+        require(membership(os.getpid())==leaf.relative,'unauthorized')
+        node=leaf.samples()[-1]
+        require(node.maximum==policy.memory_max_bytes and node.swap_max==node.swap_current==0,'not_admitted')
+        sample=guest_sample(leaf.samples());sample.check()
+    def receive():
+        remaining=(data['started_ns']+policy.attempt_seconds*10**9-time.monotonic_ns())/1e9
+        require(remaining>0,'not_admitted')
+        return r4_ipc.receive(channel,binding,0,data['supervisor_pid'],seconds=remaining)
+    try:
+        verify_origin(profile);gate.acquire();guard()
+        r4_ipc.send(channel,'gate_ready',binding,dict(lock_fd=gate.fd,namespace=namespace))
+        kind,payload,image=receive()
+        outcome=dict(result='incomplete',reason_code='canceled',snapshot_metadata=None)
+        if kind=='snapshot':
+            c.closed(payload,{'image','location'})
+            expected=RAM_ROOT+'/'+job['claim_epoch']+'/'+job['attempt_id']+'/final/snapshot.sqlite3'
+            require(payload['location']==expected and image is not None,'unauthorized')
+            try:
+                snapshot=r4_snapshot.validate(image,expected,payload['image'],policy,guard)
+                c.closed(snapshot,SNAPSHOT_KEYS)
+                outcome=dict(result='passed',reason_code='audit_passed',snapshot_metadata=snapshot)
+            except Exception:
+                guard(cancel=False)  # Resource failure is NOT a corruption result.
+                if not select.select([data['cancel_fd']],[],[],0)[0]:
+                    outcome=dict(result='failed',reason_code='audit_failed',snapshot_metadata=None)
+            finally:os.close(image)
+        else:require(kind=='cancel' and payload=={} and image is None,'unauthorized')
+        guard(cancel=False);r4_ipc.send(channel,'t3_done',binding,outcome)
+        # No implicit gate close on a nominal result. Root must attest cleanup.
+        kind,payload,fd=receive()
+        require(kind=='release' and payload=={} and fd is None,'orphan_hold')
+        gate.check();r4_ipc.send(channel,'released',binding,{})
+        return 0 if outcome['result']=='passed' else 2
+    finally:
+        channel.close();leaf.close()
+        for key in ('claim_fd','profile_fd','cancel_fd','result_fd'):
+            try:os.close(data[key])
+            except OSError:pass
+        # The independent flock FD is released only by process exit.
 
 
 def main(argv=None):

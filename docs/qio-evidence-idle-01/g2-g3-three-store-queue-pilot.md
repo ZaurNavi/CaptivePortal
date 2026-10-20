@@ -381,3 +381,67 @@ Focused evidence: Linux64PASS, Windows42PASS/22native-ineligibleSKIP, paired
 exact IDs; wider/full/security acceptance belongs to TechLead. 04B source-owner
 helper, OS source view, private tmpfs, privilege/cgroup topology, method/version,
 new snapshot transport and real A/B/C are explicitly outside04A and remain HOLD.
+
+## TASK-COORD-04B-R4 — physical private tmpfs transport
+
+Authority: Issue226 comment6296204519, source EXACT accepted04A tree
+`6bc6a1ec08673f708cb009aa92ef77c9e51c6944`. This section is implementation
+documentation, NOT an operational admission or installation instruction.
+The standalone qualification/rollback checklist is
+[qio226-r4-sysadmin-lab-runbook.md](qio226-r4-sysadmin-lab-runbook.md).
+
+An explicitly enabled root-installed `r4` profile selects ONLY the three-store
+method `sqlite_online_backup_private_tmpfs_physical_v1`. Historical v1 jobs,
+old profiles (no implicit R4 permission), queue keys/epochs, file+directory fsync,
+128 retained jobs/32 outstanding and saturation remain unchanged. No code in
+the frozen public G1 contracts, coordinator, StateStore, protocol or operator
+CLI is changed by04B; no old abandoned-epoch recovery is repeated.
+
+The sole root writer durably claims before creating a finite unique leaf or
+child. Root enters the SAME leaf before private tmpfs setup. A nonowner child
+independently opens/flocks the original permanent heavy.lock. Root checks its
+live pidfd/start, SCM credentials, `/proc/locks` PID+inode and mount/leaf identities
+BEFORE inspecting or opening source files. Only then it pins main/native WAL/SHM
+and gives the source-owner helper a descriptor-bound RO remount/chroot view.
+Owner has no host /proc, escaping directory FD, original write FD, capability,
+ambient/bounding privilege or alternate writable source alias. NNP is set.
+There is no source immutable/checkpoint/DDL/DML/repair/sidecar fabrication.
+
+The bounded helper performs native SQLite Online Backup to stage on the one
+fresh nodev/nosuid/noexec tmpfs. Positive exact helper wait/pidfd and no residual
+process precede root no-clobber same-tmpfs promotion. Final is root-owned0440 in
+root:worker0750, **NOT a kernel-sealed file**. A completed Backup can retain
+WAL header02/02 while being entirely self-contained: no destination sidecars
+are allowed, and immutable reopen/full T3 applies ONLY to this isolated file.
+SCM_RIGHTS, pinned descriptor/dev:ino/size/fullSHA and protected pathname checks
+surround the nonowner canonical integrity/FK/domain T3.
+
+After T3 the child retains its flock while root closes source/image FDs, removes
+only known files and strictly unmounts. Sealed claim/profile memfds are charged
+shmem too: zero shmem is required AFTER the final-release handshake and exact
+worker reap, not prematurely while that child legitimately owns those memfds.
+Threads deliver facts only; root alone adopts the result after namespace/root
+leaf exit and two ordered empty same-leaf observations. Unknown closure or
+resource state holds the running job, never adopts PASS or starts C. A known
+reaped helper error is incomplete/worker_crashed, not a fabricated user cancel.
+Deadline holds durably before one exact cgroup.kill (root is deliberately in
+that same group); root death cannot turn the record into success.
+
+The full closed root release proof includes source pre/post inode/sidecar
+observations (NOT an exact live-MVCC instant), snapshot hash, memory.current,
+shmem/max/zero-swap and positive release facts. Root emits exactly one bounded
+receipt to its attended stderr, with no path/nonce/source payload, and retains
+the current batch's proofs in memory. The durable operational result stores
+`r4_receipt={version:1,proof_sha256:...}` committing to those complete validated
+bytes. Storing duplicated verbose proofs in all128 records would exceed the
+UNCHANGED256KiB public limit. The mixed historical/new full-history fixture
+proves the compact form fits. Operators must preserve the protected attended
+receipt log; a digest alone is not a reconstructed kernel proof or release.
+
+Local native proofs use disposable WSL kernel6.18 objects. QA uses an existing
+dependency-complete, user-owned interpreter; explicit harness seams for installed
+code qualification and temporary RAM path do NOT attest an installed release.
+UIDs are read from policy, not constants; native transport fixtures use source
+owner1003/nonowner1000, and separate charge fixtures use1000/1001. Actual LAB
+UID995/1003 and kernel5.15 remain SysAdmin qualification gates. No source-backed
+old-LAB pilot, publication, install, production or service action is implied.
