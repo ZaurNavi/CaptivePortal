@@ -1,0 +1,324 @@
+diff --git a/app/device_fingerprint/fe5_external_knowledge.py b/app/device_fingerprint/fe5_external_knowledge.py
+index 68672d6fdbe6ddeb773b82ab63d4bcea81350d0d..2750acd23fd28019663355428d6bdaaf04dd1193 100644
+--- a/app/device_fingerprint/fe5_external_knowledge.py
++++ b/app/device_fingerprint/fe5_external_knowledge.py
+@@ -10,7 +10,9 @@ from typing import Any
+ 
+ from .artifact_content import ArtifactContent, ArtifactRef
+ from .foundation_gate_artifacts import make_gate_result_manifest
+-from .k1_satori_import import SATORI_SOURCE_COMMIT, SATORI_SOURCE_PATH, SATORI_SOURCE_SHA256
++from .k1_satori_import import (
++    SATORI_IMPORTER_VERSION, SATORI_SOURCE_COMMIT, SATORI_SOURCE_PATH, SATORI_SOURCE_SHA256,
++)
+ from .k2a_conformance_artifacts import make_source_governance_record
+ from .k2b_p0f_import import verify_p0f_source_bytes
+ from .k4_ieee_import import compute_ieee_k4_source_bundle_sha256
+@@ -50,6 +52,11 @@ _IMPORTERS = {
+     "p0f3_legacy_tcp": "captivportal.k2b_p0f_import",
+     "ieee_ra_mac": "captivportal.k4_ieee_import",
+ }
++_IMPORTER_VERSIONS = {
++    "satori_dhcp": SATORI_IMPORTER_VERSION,
++    "p0f3_legacy_tcp": "1",
++    "ieee_ra_mac": "1",
++}
+ 
+ 
+ def _fail(message: str) -> None:
+@@ -119,7 +126,7 @@ def _external_provenance(
+         "source_provider_version_metadata": metadata,
+         "knowledge_freshness_policy": freshness_ref,
+         "importer_identity": _IMPORTERS[family],
+-        "importer_version": "1",
++        "importer_version": _IMPORTER_VERSIONS[family],
+     })
+ 
+ 
+@@ -308,7 +315,7 @@ def run_fe5_external_admission_gate(
+         )
+         if (provenance["source_provider_version_metadata"] != expected_metadata
+                 or provenance["importer_identity"] != _IMPORTERS[family]
+-                or provenance["importer_version"] != "1"
++                or provenance["importer_version"] != _IMPORTER_VERSIONS[family]
+                 or (family == "satori_dhcp" and provenance["source_artifact_sha256"] != SATORI_SOURCE_SHA256)):
+             reasons.append(f"{family}:source_provenance_mismatch")
+             continue
+diff --git a/app/device_fingerprint/ff1_evidence_adapter_contracts.py b/app/device_fingerprint/ff1_evidence_adapter_contracts.py
+index 9468a762a4be6e7b59fc9b24f8eed3c9e4eee9b1..1ec877bb30bb04c65e89c7e678e17e8c92db9752 100644
+--- a/app/device_fingerprint/ff1_evidence_adapter_contracts.py
++++ b/app/device_fingerprint/ff1_evidence_adapter_contracts.py
+@@ -215,12 +215,19 @@ def _a1_anchor_reasons(
+     if k1.get("knowledge_slot") != "K1":
+         reasons.append("a1_k1_contract_mismatch")
+     allowed_classes = set(SATORI_DEVICE_CLASS_TAXONOMY_MAPPING.values())
++    strong_smartphone_present = False
+     for record in k1.get("records", []):
+         if record.get("record_type") != "K1_DHCP":
+             reasons.append("a1_k1_contract_mismatch")
+         for outcome in record.get("candidate_taxonomy_refs", []):
+             dimension = outcome.get("dimension_name")
+             kind = outcome.get("outcome_kind")
++            if dimension == "device_class" and kind == "CANONICAL_VALUE":
++                if (outcome.get("canonical_target_id") not in allowed_classes
++                        or outcome.get("base_claim_strength") != "strong"):
++                    reasons.append("a1_k1_contract_mismatch")
++                elif outcome["canonical_target_id"] == "smartphone":
++                    strong_smartphone_present = True
+             if (dimension in {"manufacturer_family", "model_family"}
+                     and kind != "NO_CLAIM"):
+                 reasons.append("a1_k1_contract_mismatch")
+@@ -228,6 +235,8 @@ def _a1_anchor_reasons(
+                     and (dimension != "device_class" or kind != "CANONICAL_VALUE"
+                          or outcome.get("canonical_target_id") not in allowed_classes)):
+                 reasons.append("a1_k1_contract_mismatch")
++    if not strong_smartphone_present:
++        reasons.append("a1_k1_strong_smartphone_required")
+     expected = build_utility_repair_a1_evidence_adapter_contract_set_v1(evidence_schema_registry)
+     historical_delta = build_initial_evidence_adapter_contract_set_v1(
+         evidence_schema_registry).semantic_payload
+diff --git a/app/device_fingerprint/k1_satori_import.py b/app/device_fingerprint/k1_satori_import.py
+index 2ad9beaf786cd2ac388edc82a6eaa7a779b8b8ed..75e2be0a79d69575438167113d507e0ac06b64ba 100644
+--- a/app/device_fingerprint/k1_satori_import.py
++++ b/app/device_fingerprint/k1_satori_import.py
+@@ -13,10 +13,11 @@ from .k2a_conformance_artifacts import make_source_governance_record
+ from .knowledge_artifacts import make_canonical_k1_record_set
+ from .models import DeviceFingerprintValidationError
+ 
+-SATORI_SOURCE_COMMIT = "1c2f888238ca1e8ebb397b5cf87b240f91711a65"
++SATORI_SOURCE_COMMIT = "c5dfcfbff31620e35248aa86da0c67f2ad4982f5"
+ SATORI_SOURCE_PATH = "fingerprints/dhcp.xml"
+ SATORI_SOURCE_BLOB_SHA1 = "a82926690c28d2147534f24bdbdbeb0d1a2970fb"
+ SATORI_SOURCE_SHA256 = "4f64a405fb1debbd2e066478a7190b821424e0691399068421fdaf168da09b14"
++SATORI_IMPORTER_VERSION = "2"
+ SATORI_LICENSE_CHANGE_COMMIT = "7116da4ce7ab768b4fb0b3bcb44001f952f24d5d"
+ 
+ _SIGNAL_FIELDS = frozenset({"dhcpoption55", "dhcpoptions", "dhcpvendorcode"})
+@@ -65,7 +66,8 @@ class SatoriK1ImportResult:
+ 
+ 
+ # Recomputed from the Owner-supplied A1 source above. The XML bytes, blob and
+-# numerical audit match the historical source; the upstream commit does not.
++# numerical audit match the historical source; the current upstream binding is
++# restored without changing source bytes or historical provenance.
+ ACCEPTED_SATORI_AUDIT = SatoriK1ImportAudit(
+     fingerprints_total=481,
+     source_tests_total=2787,
+diff --git a/tests/device_fingerprint_fe1/test_satori_import.py b/tests/device_fingerprint_fe1/test_satori_import.py
+index 4c9a77ba84ad739c39760ed67238fda2846e2b9c..53d4e4ef60e08c69386a161fa9fcdab316b1cfeb 100644
+--- a/tests/device_fingerprint_fe1/test_satori_import.py
++++ b/tests/device_fingerprint_fe1/test_satori_import.py
+@@ -5,6 +5,8 @@ import pytest
+ from app.device_fingerprint.artifact_content import ArtifactRef
+ from app.device_fingerprint.k1_satori_import import (
+     ACCEPTED_SATORI_AUDIT,
++    SATORI_IMPORTER_VERSION,
++    SATORI_SOURCE_BLOB_SHA1,
+     SATORI_SOURCE_COMMIT,
+     SATORI_SOURCE_SHA256,
+     _parse_verified_source,
+@@ -119,13 +121,23 @@ def test_exact_signal_and_message_mappings_are_admitted_without_scoring():
+ 
+ 
+ def test_public_import_requires_exact_pinned_bytes_and_audit():
+-    assert SATORI_SOURCE_COMMIT == "1c2f888238ca1e8ebb397b5cf87b240f91711a65"
++    assert SATORI_SOURCE_COMMIT == "c5dfcfbff31620e35248aa86da0c67f2ad4982f5"
+     assert SATORI_SOURCE_SHA256 == "4f64a405fb1debbd2e066478a7190b821424e0691399068421fdaf168da09b14"
+     assert ACCEPTED_SATORI_AUDIT.source_tests_accepted == 903
+     with pytest.raises(DeviceFingerprintValidationError, match="digest mismatch"):
+         import_satori_dhcp_bytes(b"<root/>", _PROVENANCE)
+ 
+ 
++def test_a1_source_bytes_unchanged_and_importer_semantics_versioned():
++    # Historical byte identities stay frozen despite the corrected upstream ref.
++    assert SATORI_SOURCE_BLOB_SHA1 == "a82926690c28d2147534f24bdbdbeb0d1a2970fb"
++    assert SATORI_SOURCE_SHA256 == "4f64a405fb1debbd2e066478a7190b821424e0691399068421fdaf168da09b14"
++    assert SATORI_IMPORTER_VERSION == "2"
++    assert SATORI_IMPORTER_VERSION != "1"  # Historical supporting-only importer.
++    assert ACCEPTED_SATORI_AUDIT.source_tests_accepted == 903
++    assert ACCEPTED_SATORI_AUDIT.ambiguous_predicate_groups == 164
++
++
+ @pytest.mark.parametrize("source_class,target", [
+     ("Smartphone", "smartphone"), ("Tablet", "tablet"),
+     ("tablet", "tablet"), ("Laptop", "laptop"),
+diff --git a/tests/device_fingerprint_fe5/test_fe5_external_knowledge.py b/tests/device_fingerprint_fe5/test_fe5_external_knowledge.py
+index 53a0acb17e3973102556cdb186f2a60aa3a24b3d..6ca7c1673a64d4aee56dd2084e539fb792dc12a0 100644
+--- a/tests/device_fingerprint_fe5/test_fe5_external_knowledge.py
++++ b/tests/device_fingerprint_fe5/test_fe5_external_knowledge.py
+@@ -69,7 +69,8 @@ def _candidate(family, age_ms, *, governance=None, policy=None):
+         "retrieved_at_utc": retrieved_at,
+         "source_provider_version_metadata": metadata,
+         "knowledge_freshness_policy": _ref(policy),
+-        "importer_identity": importer, "importer_version": "1",
++        "importer_identity": importer,
++        "importer_version": "2" if family == "satori_dhcp" else "1",
+     })
+     return fe5.ExternalKnowledgeCandidate(
+         slot, family, character, caveat, governance, policy, provenance,
+@@ -194,6 +195,7 @@ def test_provenance_builders_use_exact_source_identity_and_resolve_artifacts(mon
+         freshness_policy=fe5.build_p0f_k2b_freshness_policy(),
+     )
+     assert p0f.semantic_payload["source_artifact_sha256"] == "b" * 64
++    assert p0f.semantic_payload["importer_version"] == "1"
+     assert p0f.semantic_payload["source_provider_version_metadata"].endswith("source_character=legacy")
+     source = (b"MA-L", b"MA-M", b"MA-S")
+     ieee = fe5.build_ieee_k4_external_provenance(
+@@ -201,6 +203,7 @@ def test_provenance_builders_use_exact_source_identity_and_resolve_artifacts(mon
+         freshness_policy=fe5.build_ieee_k4_freshness_policy(),
+     )
+     assert ieee.semantic_payload["source_artifact_sha256"] == compute_ieee_k4_source_bundle_sha256(*source)
++    assert ieee.semantic_payload["importer_version"] == "1"
+     assert ieee.semantic_payload["source_provider_version_metadata"].endswith(
+         ieee.semantic_payload["source_artifact_sha256"]
+     )
+@@ -227,6 +230,51 @@ def test_public_gate_signature_has_no_caller_controlled_time_argument():
+     assert not any("time" in name or "now" in name for name in parameters)
+ 
+ 
++def test_a1_satori_version_and_current_source_binding_are_exact(monkeypatch):
++    k1 = _candidate("satori_dhcp", 0)
++    assert fe5.SATORI_IMPORTER_VERSION == "2"
++    assert k1.provenance.semantic_payload["importer_version"] == "2"
++    assert k1.provenance.semantic_payload["source_provider_version_metadata"] == (
++        "xnih/satori@c5dfcfbff31620e35248aa86da0c67f2ad4982f5:fingerprints/dhcp.xml")
++    assert fe5._IMPORTER_VERSIONS == {
++        "satori_dhcp": "2", "p0f3_legacy_tcp": "1", "ieee_ra_mac": "1",
++    }
++    result = _run(monkeypatch, k1, _candidate("p0f3_legacy_tcp", 1),
++                  _candidate("ieee_ra_mac", 0))
++    assert result.gate_result_manifest.semantic_payload["status"] == "PASS"
++
++
++@pytest.mark.parametrize("family,version", [
++    ("satori_dhcp", "2"), ("p0f3_legacy_tcp", "1"), ("ieee_ra_mac", "1"),
++])
++def test_external_provenance_uses_source_specific_importer_version(family, version):
++    candidate = _candidate(family, 0)
++    provenance = fe5._external_provenance(
++        family, candidate.provenance.semantic_payload["source_artifact_sha256"],
++        retrieved_at_utc=_NOW_TEXT, governance=candidate.governance,
++        freshness_policy=candidate.freshness_policy,
++    )
++    assert provenance.semantic_payload["importer_version"] == version
++    assert provenance == candidate.provenance
++
++
++@pytest.mark.parametrize("wrong_version", ["1", "3", "1.0.0"])
++def test_a1_satori_historical_or_wrong_importer_version_rejected(monkeypatch, wrong_version):
++    first = _candidate("satori_dhcp", 0)
++    provenance = make_external_knowledge_provenance_manifest({
++        **first.provenance.semantic_payload, "importer_version": wrong_version,
++    })
++    mismatched = fe5.ExternalKnowledgeCandidate(
++        first.knowledge_slot, first.source_family_id, first.source_character,
++        first.claim_caveat, first.governance, first.freshness_policy, provenance,
++    )
++    result = _run(monkeypatch, mismatched, _candidate("p0f3_legacy_tcp", 1),
++                  _candidate("ieee_ra_mac", 0))
++    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++    assert "satori_dhcp:source_provenance_mismatch" in result.failure_reasons
++
++
+ def test_gate_passes_fresh_current_and_stale_legacy_with_nine_exact_refs(monkeypatch):
+     candidates = (_candidate("satori_dhcp", 0), _candidate("p0f3_legacy_tcp", 1),
+                   _candidate("ieee_ra_mac", 0))
+diff --git a/tests/device_fingerprint_ff1/test_a1_admission.py b/tests/device_fingerprint_ff1/test_a1_admission.py
+index 0ef7fa10161ec740b0cdad502f54c12476748a18..3af8cb3c7fd8e3258d0b15dc6f47162d57fffbfd 100644
+--- a/tests/device_fingerprint_ff1/test_a1_admission.py
++++ b/tests/device_fingerprint_ff1/test_a1_admission.py
+@@ -17,6 +17,7 @@ from app.device_fingerprint.ff1_evidence_adapter_contracts import (
+ )
+ from app.device_fingerprint.k3_portal_rules import build_k3_portal_rule_set_v1, make_k3_portal_rule_set
+ from app.device_fingerprint.knowledge_artifacts import make_canonical_k1_record_set
++from app.device_fingerprint.models import DeviceFingerprintValidationError
+ from tests.device_fingerprint_ff1.test_evidence_adapter_contracts import (
+     _COMMIT, _TREE, _EVIDENCE, _refs,
+ )
+@@ -149,6 +150,86 @@ def test_a1_rejects_unadmitted_strong_class_target():
+     _assert_fail(_gate(deps))
+ 
+ 
++def test_a1_rejects_supporting_only_k1_with_exact_a1_eacs_and_k3():
++    deps = _a1_inputs()
++    payload = deps["k1_record_set"].semantic_payload
++    for record in payload["records"]:
++        for outcome in record["candidate_taxonomy_refs"]:
++            if outcome["dimension_name"] == "device_class":
++                outcome["base_claim_strength"] = "supporting"
++    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
++    result = _gate(deps)
++    _assert_fail(result)
++    assert "a1_k1_contract_mismatch" in result.failure_reasons
++    assert "a1_k1_strong_smartphone_required" in result.failure_reasons
++
++
++def test_a1_accepts_all_reviewed_strong_classes_without_selecting_one():
++    deps = _a1_inputs()
++    payload = deps["k1_record_set"].semantic_payload
++    for target in ("tablet", "laptop"):
++        record = deepcopy(payload["records"][0])
++        record.update(canonical_record_id="synthetic-" + target,
++                      source_record_identity="synthetic-source-" + target)
++        next(row for row in record["candidate_taxonomy_refs"]
++             if row["dimension_name"] == "device_class")["canonical_target_id"] = target
++        payload["records"].append(record)
++    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
++    before = deps["k1_record_set"].semantic_payload_json
++    assert _gate(deps).gate_result_manifest.semantic_payload["status"] == "PASS"
++    assert deps["k1_record_set"].semantic_payload_json == before
++    assert len(deps["k1_record_set"].semantic_payload["records"]) == 3
++
++
++@pytest.mark.parametrize("target", ["tablet", "laptop"])
++def test_a1_requires_strong_smartphone_not_just_other_strong_class(target):
++    deps = _a1_inputs()
++    payload = deps["k1_record_set"].semantic_payload
++    for record in payload["records"]:
++        next(row for row in record["candidate_taxonomy_refs"]
++             if row["dimension_name"] == "device_class")["canonical_target_id"] = target
++    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
++    result = _gate(deps)
++    _assert_fail(result)
++    assert "a1_k1_strong_smartphone_required" in result.failure_reasons
++
++
++@pytest.mark.parametrize("target", ["smartphone", "tablet", "laptop"])
++def test_a1_every_direct_canonical_class_must_be_strong(target):
++    deps = _a1_inputs()
++    payload = deps["k1_record_set"].semantic_payload
++    supporting = deepcopy(payload["records"][0])
++    supporting.update(canonical_record_id="synthetic-supporting-class",
++                      source_record_identity="synthetic-supporting-source")
++    outcome = next(row for row in supporting["candidate_taxonomy_refs"]
++                   if row["dimension_name"] == "device_class")
++    outcome.update(canonical_target_id=target, base_claim_strength="supporting")
++    payload["records"].append(supporting)
++    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
++    result = _gate(deps)
++    _assert_fail(result)
++    assert "a1_k1_contract_mismatch" in result.failure_reasons
++
++
++@pytest.mark.parametrize("kind", ["UNMAPPED", "NO_CLAIM"])
++def test_a1_non_direct_device_class_remains_valid_without_promotion(kind):
++    deps = _a1_inputs()
++    payload = deps["k1_record_set"].semantic_payload
++    other = deepcopy(payload["records"][0])
++    other.update(canonical_record_id="synthetic-no-direct-class",
++                 source_record_identity="synthetic-no-direct-source")
++    outcome = next(row for row in other["candidate_taxonomy_refs"]
++                   if row["dimension_name"] == "device_class")
++    outcome.update(outcome_kind=kind, canonical_target_id=None, base_claim_strength=None)
++    payload["records"].append(other)
++    deps["k1_record_set"] = make_canonical_k1_record_set(payload)
++    assert _gate(deps).gate_result_manifest.semantic_payload["status"] == "PASS"
++    # An UNMAPPED/NO_CLAIM claim promoted to strong is itself schema-invalid.
++    outcome["base_claim_strength"] = "strong"
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_canonical_k1_record_set(payload)
++
++
+ @pytest.mark.parametrize("name", ["evidence_schema_registry", "capability_disposition", "k2a_conformance_package"])
+ def test_a1_keeps_unchanged_prerequisite_identities(name):
+     deps = _a1_inputs()

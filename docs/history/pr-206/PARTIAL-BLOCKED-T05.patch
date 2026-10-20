@@ -1,0 +1,1159 @@
+diff --git a/.env.example b/.env.example
+index ff26448c4e738d5ad4be1ed5f2d7ceedcc0f65ff..05340ecdcb93ecc47cdebbb450b38b14cef60b53 100644
+--- a/.env.example
++++ b/.env.example
+@@ -288,6 +288,17 @@ DEVICE_FINGERPRINT_MAX_CONCURRENT_INGEST_REQUESTS=2
+ # Portal UA / low-entropy Client-Hints evidence producer (default off).
+ # The Bearer secret is provisioned only in the external credential file.
+ DEVICE_FINGERPRINT_PORTAL_ENABLED=false
++# Remaining values are legacy defaults, not receiver registration or activation.
++# Deployment overrides are startup-only; tuning below remains exactly pinned.
++# Synthetic examples only (not admitted identities or credentials):
++# DEVICE_FINGERPRINT_PORTAL_PRODUCER_ID=lab-portal-02
++# DEVICE_FINGERPRINT_PORTAL_CAPTURE_SOURCE_ID=lab-portal-http-02
++# DEVICE_FINGERPRINT_PORTAL_SITE_ID=aaaaaaaaaaaaaaaaaaaaaaaa
++# DEVICE_FINGERPRINT_PORTAL_GUEST_CIDRS=10.20.0.0/24
++# DEVICE_FINGERPRINT_PORTAL_ALLOWED_SSIDS=Guest WiFi
++# DEVICE_FINGERPRINT_PORTAL_EVIDENCE_BASE_URL=https://evidence.example:9443/api/internal/device-fingerprint/v1
++# DEVICE_FINGERPRINT_PORTAL_CA_CERT_PATH=/lab/portal-ca.crt
++# DEVICE_FINGERPRINT_PORTAL_CREDENTIAL_PATH=/lab/protected/portal.bearer
+ DEVICE_FINGERPRINT_PORTAL_PRODUCER_ID=portal-zefer-01
+ DEVICE_FINGERPRINT_PORTAL_CAPTURE_SOURCE_ID=zefer-portal-http-01
+ DEVICE_FINGERPRINT_PORTAL_SITE_ID=6a64f17630da7c70d232187a
+@@ -330,6 +341,20 @@ PENDING_SESSION_CLEANER_ROTATION_BACKUP_COUNT=20
+ PENDING_SESSION_CLEANER_SHUTDOWN_TIMEOUT_SECONDS=20
+ # TASK-DEVICE-FINGERPRINT-02 sensor process only; ignored by the main runtime.
+ DEVICE_FINGERPRINT_SENSOR_ENABLED=false
++# Legacy defaults below remain unchanged. Synthetic startup-only examples:
++# DEVICE_FINGERPRINT_SENSOR_INTERFACE=enp1s0
++# DEVICE_FINGERPRINT_SENSOR_CORE_READY_HOST=172.18.0.1
++# DEVICE_FINGERPRINT_SENSOR_CORE_READY_PORT=18089
++# DEVICE_FINGERPRINT_SENSOR_PRODUCER_ID=lab-sensor-02
++# DEVICE_FINGERPRINT_SENSOR_CAPTURE_SOURCE_ID=lab-span-02
++# DEVICE_FINGERPRINT_SENSOR_SITE_ID=aaaaaaaaaaaaaaaaaaaaaaaa
++# DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS=10.20.0.0/24
++# DEVICE_FINGERPRINT_SENSOR_DHCP_SERVER_AUTHORITY=203.0.113.1
++# DEVICE_FINGERPRINT_SENSOR_DHCP_OPTION54_AUTHORITY=198.51.100.1
++# DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL=https://evidence.example:9443/api/internal/device-fingerprint/v1
++# Sensor bearer stays in CREDENTIALS_DIRECTORY/device-fingerprint-bearer (LoadCredential).
++# New identities need receiver + F-B1 admission and a NEW EMPTY spool before activation.
++# Changing this NIC does not change Suricata/NI. Readiness is TCP only, not HTTP health.
+ DEVICE_FINGERPRINT_SENSOR_INTERFACE=enp8s0
+ DEVICE_FINGERPRINT_SENSOR_PRODUCER_ID=sensor-zefer-01
+ DEVICE_FINGERPRINT_SENSOR_CAPTURE_SOURCE_ID=zefer-span-01
+diff --git a/app/device_fingerprint_portal/config.py b/app/device_fingerprint_portal/config.py
+index 90518f9292b1beb8d8243bd070305239044e83f2..1f498f843ff97a579293251ff2ad7c56c1fe9eb4 100644
+--- a/app/device_fingerprint_portal/config.py
++++ b/app/device_fingerprint_portal/config.py
+@@ -4,8 +4,8 @@ from __future__ import annotations
+ 
+ import ipaddress
+ import os
++import re
+ from collections.abc import Mapping
+-from pathlib import Path
+ from urllib.parse import urlsplit
+ 
+ from .models import PortalEvidenceConfig, PortalEvidenceConfigError
+@@ -50,17 +50,24 @@ def portal_config_from_env(env: Mapping[str, str] | None = None) -> PortalEviden
+             raise PortalEvidenceConfigError(f"DEVICE_FINGERPRINT_PORTAL_{name} is invalid")
+         return raw
+ 
+-    producer_id = exact("PRODUCER_ID")
+-    capture_source_id = exact("CAPTURE_SOURCE_ID")
+-    site_id = exact("SITE_ID")
+-    guest_cidrs = tuple(ipaddress.ip_network(item, strict=True) for item in exact("GUEST_CIDRS").split(","))
+-    allowed_ssids = tuple(exact("ALLOWED_SSIDS").split(","))
+-    base_url = exact("EVIDENCE_BASE_URL")
+-    parsed = urlsplit(base_url)
+-    if parsed.scheme != "https" or parsed.query or parsed.fragment:
+-        raise PortalEvidenceConfigError("Portal evidence URL is invalid")
+-    ca_cert_path = _absolute(exact("CA_CERT_PATH"), "CA_CERT_PATH")
+-    credential_path = _absolute(exact("CREDENTIAL_PATH"), "CREDENTIAL_PATH")
++    def value(name: str) -> str:
++        raw = source.get("DEVICE_FINGERPRINT_PORTAL_" + name, defaults[name])
++        if not isinstance(raw, str) or not raw or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in raw):
++            raise PortalEvidenceConfigError(f"DEVICE_FINGERPRINT_PORTAL_{name} is invalid")
++        return raw
++
++    producer_id = value("PRODUCER_ID")
++    capture_source_id = value("CAPTURE_SOURCE_ID")
++    site_id = value("SITE_ID")
++    if (re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", producer_id) is None
++            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", capture_source_id) is None
++            or re.fullmatch(r"[0-9a-f]{24}", site_id) is None):
++        raise PortalEvidenceConfigError("Portal evidence identity is invalid")
++    guest_cidrs = _cidrs(value("GUEST_CIDRS"))
++    allowed_ssids = _ssids(value("ALLOWED_SSIDS"))
++    base_url = _evidence_url(value("EVIDENCE_BASE_URL"))
++    ca_cert_path = _absolute(value("CA_CERT_PATH"), "CA_CERT_PATH")
++    credential_path = _absolute(value("CREDENTIAL_PATH"), "CREDENTIAL_PATH")
+     return PortalEvidenceConfig(
+         enabled=enabled,
+         producer_id=producer_id,
+@@ -90,6 +97,68 @@ def _boolean(value: object) -> bool:
+ 
+ 
+ def _absolute(value: str, name: str) -> str:
+-    if not (value.startswith("/") or Path(value).is_absolute()):
++    if not value.startswith("/") or value != value.strip():
+         raise PortalEvidenceConfigError(f"DEVICE_FINGERPRINT_PORTAL_{name} must be absolute")
+     return value
++
++
++def _cidrs(raw: str) -> tuple[object, ...]:
++    try:
++        items = raw.split(",")
++        if not 1 <= len(items) <= 16:
++            raise ValueError
++        result = tuple(ipaddress.IPv4Network(item, strict=True) for item in items)
++        if any("/" not in item or str(network) != item or network.prefixlen == 0
++               for item, network in zip(items, result)):
++            raise ValueError
++        if any(first.overlaps(second) for index, first in enumerate(result) for second in result[index + 1:]):
++            raise ValueError
++        return result
++    except ValueError:
++        raise PortalEvidenceConfigError("DEVICE_FINGERPRINT_PORTAL_GUEST_CIDRS is invalid") from None
++
++
++def _ssids(raw: str) -> tuple[str, ...]:
++    try:
++        values = tuple(raw.split(","))
++        if (not 1 <= len(values) <= 16 or len(set(values)) != len(values)
++                or any(not value.strip() or not 1 <= len(value.encode("utf-8")) <= 32
++                       or "*" in value for value in values)):
++            raise ValueError
++        return values
++    except (ValueError, UnicodeError):
++        raise PortalEvidenceConfigError("DEVICE_FINGERPRINT_PORTAL_ALLOWED_SSIDS is invalid") from None
++
++
++def _evidence_url(raw: str) -> str:
++    try:
++        if (not raw.isascii() or not raw.startswith("https://")
++                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw)
++                or any(char in raw for char in "%\\@?#[]")):
++            raise ValueError
++        parsed = urlsplit(raw)
++        prefix = "/api/internal/device-fingerprint/v1"
++        if parsed.scheme != "https" or parsed.path not in (prefix, prefix + "/") or not parsed.netloc:
++            raise ValueError
++        authority = parsed.netloc.split(":")
++        if len(authority) not in (1, 2):
++            raise ValueError
++        host = authority[0]
++        try:
++            address = ipaddress.IPv4Address(host)
++        except ValueError:
++            if (not 1 <= len(host) <= 253 or any(re.fullmatch(
++                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) is None for label in host.split("."))
++                    or re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)", host.rsplit(".", 1)[-1]) is not None):
++                raise ValueError
++        else:
++            if str(address) != host or (host != "127.0.0.1" and not any(address in ipaddress.IPv4Network(cidr)
++                    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))):
++                raise ValueError
++        if len(authority) == 2:
++            port = authority[1]
++            if not 1 <= len(port) <= 5 or re.fullmatch(r"[1-9][0-9]*", port) is None or not 1 <= int(port) <= 65535:
++                raise ValueError
++        return raw[:-1] if parsed.path.endswith("/") else raw
++    except ValueError:
++        raise PortalEvidenceConfigError("DEVICE_FINGERPRINT_PORTAL_EVIDENCE_BASE_URL is invalid") from None
+diff --git a/app/device_fingerprint_sensor/capture.py b/app/device_fingerprint_sensor/capture.py
+index 9275927bd922758e01cf7c5c959c03dee493bfd6..aad224de0bfceb5ce50970ce565bd523cf0916ae 100644
+--- a/app/device_fingerprint_sensor/capture.py
++++ b/app/device_fingerprint_sensor/capture.py
+@@ -37,8 +37,6 @@ class InterfacePreflight:
+             raise SensorPreflightError("capture_interface_unavailable") from exc
+ 
+     def _validate(self) -> None:
+-        if self.interface != "enp8s0":
+-            self._fail()
+         net = self.sys_root / "class" / "net" / self.interface
+         if not net.exists() or self._read(net / "operstate") != "up":
+             self._fail()
+diff --git a/app/device_fingerprint_sensor/config.py b/app/device_fingerprint_sensor/config.py
+index a036c169cc14d3095f308d474ab5525d5db2288a..3c6fbcc23314386483dfee92475c4d9b4834e0c3 100644
+--- a/app/device_fingerprint_sensor/config.py
++++ b/app/device_fingerprint_sensor/config.py
+@@ -44,29 +44,23 @@ def sensor_config_from_env(env: Mapping[str, str] | None = None) -> SensorConfig
+ def _build(enabled: bool, env: Mapping[str, str]) -> SensorConfig:
+     def value(name: str, default: str) -> str:
+         raw = env.get("DEVICE_FINGERPRINT_SENSOR_" + name, default)
+-        if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
++        if (not isinstance(raw, str) or not raw or raw != raw.strip()
++                or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in raw)):
+             raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} is invalid")
+-        return raw.strip()
++        return raw
+ 
+     interface = value("INTERFACE", INTERFACE)
+-    if interface != INTERFACE:
+-        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_INTERFACE must be enp8s0")
++    if interface in {"lo", "any"} or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,14}", interface) is None:
++        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_INTERFACE is invalid")
+     producer = value("PRODUCER_ID", PRODUCER_ID)
+     capture = value("CAPTURE_SOURCE_ID", CAPTURE_SOURCE_ID)
+     site = value("SITE_ID", SITE_ID)
+     if _MACHINE.fullmatch(producer) is None or _MACHINE.fullmatch(capture) is None or _SITE.fullmatch(site) is None:
+         raise SensorConfigError("Sensor identity is invalid")
+-    if producer != PRODUCER_ID or capture != CAPTURE_SOURCE_ID or site != SITE_ID:
+-        raise SensorConfigError("Sensor identity authority is fixed")
+     cidrs = _cidrs(value("GUEST_CIDRS", GUEST_CIDRS))
+     server = _ipv4(value("DHCP_SERVER_AUTHORITY", DHCP_SERVER_AUTHORITY))
+     option54 = _ipv4(value("DHCP_OPTION54_AUTHORITY", DHCP_OPTION54_AUTHORITY))
+-    if cidrs != (ipaddress.ip_network(GUEST_CIDRS),) or server != DHCP_SERVER_AUTHORITY or option54 != DHCP_OPTION54_AUTHORITY:
+-        raise SensorConfigError("Sensor guest scope authority is invalid")
+-    base_url = value("EVIDENCE_BASE_URL", EVIDENCE_BASE_URL).rstrip("/")
+-    parsed = urlsplit(base_url)
+-    if parsed.scheme != "https" or parsed.query or parsed.fragment or not parsed.netloc or base_url != EVIDENCE_BASE_URL:
+-        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL is invalid")
++    base_url = _evidence_url(value("EVIDENCE_BASE_URL", EVIDENCE_BASE_URL))
+     ca = _absolute(value("CA_CERT_PATH", CA_CERT_PATH), "CA_CERT_PATH")
+     spool = _absolute(value("SPOOL_PATH", SPOOL_PATH), "SPOOL_PATH")
+     socket_path = _absolute(value("EVE_SOCKET_PATH", EVE_SOCKET_PATH), "EVE_SOCKET_PATH")
+@@ -88,8 +82,8 @@ def _build(enabled: bool, env: Mapping[str, str]) -> SensorConfig:
+         http_timeout_seconds=float(_integer(env, "HTTP_TIMEOUT_SECONDS", 5, 1, 60)),
+         raw_dedup_max_entries=_integer(env, "RAW_DEDUP_MAX_ENTRIES", 65536, 1, 65536),
+         raw_dedup_horizon_ms=_exact_decimal(env, "RAW_DEDUP_HORIZON_MS", 0.25),
+-        core_ready_host=_exact(value("CORE_READY_HOST", "127.0.0.1"), "127.0.0.1", "CORE_READY_HOST"),
+-        core_ready_port=_exact_integer(env, "CORE_READY_PORT", 8088),
++        core_ready_host=_private_ipv4(value("CORE_READY_HOST", "127.0.0.1")),
++        core_ready_port=_port(value("CORE_READY_PORT", "8088"), minimum=1024),
+         core_ready_connect_timeout_seconds=float(_integer(env, "CORE_READY_CONNECT_TIMEOUT_SECONDS", 1, 1, 10)),
+         core_ready_poll_interval_seconds=float(_integer(env, "CORE_READY_POLL_INTERVAL_SECONDS", 10, 1, 60)),
+         core_ready_max_wait_seconds=float(_integer(env, "CORE_READY_MAX_WAIT_SECONDS", 1800, 1, 1800)),
+@@ -131,24 +125,74 @@ def _decimal(env: Mapping[str, str], name: str, default: float, minimum: float,
+ 
+ def _cidrs(raw: str) -> tuple[object, ...]:
+     try:
+-        result = tuple(ipaddress.ip_network(item.strip(), strict=True) for item in raw.split(","))
+-    except ValueError as exc:
+-        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid") from exc
+-    if not result or any(network.version != 4 for network in result):
+-        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid")
++        items = raw.split(",")
++        if not 1 <= len(items) <= 16:
++            raise ValueError
++        result = tuple(ipaddress.IPv4Network(item, strict=True) for item in items)
++        if any("/" not in item or str(network) != item or network.prefixlen == 0
++               for item, network in zip(items, result)):
++            raise ValueError
++        if any(first.overlaps(second) for index, first in enumerate(result) for second in result[index + 1:]):
++            raise ValueError
++    except ValueError:
++        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid") from None
+     return result
+ 
+ 
+ def _ipv4(raw: str) -> str:
+     try:
+-        parsed = ipaddress.ip_address(raw)
+-    except ValueError as exc:
+-        raise SensorConfigError("DHCP authority is invalid") from exc
+-    if parsed.version != 4:
+-        raise SensorConfigError("DHCP authority is invalid")
++        parsed = ipaddress.IPv4Address(raw)
++        if str(parsed) != raw or parsed.is_unspecified or parsed.is_multicast or parsed.is_reserved:
++            raise ValueError
++    except ValueError:
++        raise SensorConfigError("IPv4 authority is invalid") from None
+     return str(parsed)
+ 
+ 
++def _private_ipv4(raw: str) -> str:
++    parsed = ipaddress.IPv4Address(_ipv4(raw))
++    if raw != "127.0.0.1" and not any(parsed in ipaddress.IPv4Network(cidr)
++            for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
++        raise SensorConfigError("Private IPv4 endpoint is invalid")
++    return raw
++
++
++def _port(raw: str, *, minimum: int = 1) -> int:
++    if not 1 <= len(raw) <= 5 or re.fullmatch(r"[1-9][0-9]*", raw) is None or not minimum <= int(raw) <= 65535:
++        raise SensorConfigError("Endpoint port is invalid")
++    return int(raw)
++
++
++def _evidence_url(raw: str) -> str:
++    try:
++        if (not raw.isascii() or not raw.startswith("https://")
++                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw)
++                or any(char in raw for char in "%\\@?#[]")):
++            raise ValueError
++        parsed = urlsplit(raw)
++        prefix = "/api/internal/device-fingerprint/v1"
++        if parsed.scheme != "https" or parsed.path not in (prefix, prefix + "/") or not parsed.netloc:
++            raise ValueError
++        authority = parsed.netloc.split(":")
++        if len(authority) not in (1, 2):
++            raise ValueError
++        host = authority[0]
++        try:
++            ipaddress.IPv4Address(host)
++        except ValueError:
++            if (not 1 <= len(host) <= 253 or any(re.fullmatch(
++                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) is None for label in host.split("."))
++                    or re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)", host.rsplit(".", 1)[-1]) is not None):
++                raise ValueError
++        else:
++            _private_ipv4(host)
++        if len(authority) == 2:
++            _port(authority[1])
++        return raw[:-1] if parsed.path.endswith("/") else raw
++    except (ValueError, SensorConfigError):
++        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL is invalid") from None
++
++
+ def _absolute(raw: str, name: str) -> str:
+     if not (raw.startswith("/") or Path(raw).is_absolute()):
+         raise SensorConfigError(f"DEVICE_FINGERPRINT_SENSOR_{name} must be absolute")
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 440483e4abab7e89587fe54edc8c427b97a5a254..fc97f2ac00c118825e1171828a184a19e258acf1 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -71,6 +71,75 @@ See [CAPPORT](modules/capport.md) and [deployment](deployment.md).
+ 
+ ## Device Fingerprint Evidence (default disabled)
+ 
++## Sensor/Portal producer deployment configuration
++
++DEPLOY-CONFIG-02 affects only startup parsers and the Sensor's fixed-name
++preflight guard. These values are not main `app.settings`/Admin Settings,
++registration, source binding or live identity switching. Existing enable flags
++remain default **false**; absent overrides reproduce the entire typed config.
++Changing process environment requires a separately authorized restart.
++
++| Sensor suffix (`DEVICE_FINGERPRINT_SENSOR_`) | Exact legacy default |
++| --- | --- |
++| INTERFACE | `enp8s0` |
++| PRODUCER_ID / CAPTURE_SOURCE_ID | `sensor-zefer-01` / `zefer-span-01` |
++| SITE_ID / GUEST_CIDRS | `6a64f17630da7c70d232187a` / `192.168.8.0/22` |
++| DHCP_SERVER_AUTHORITY / DHCP_OPTION54_AUTHORITY | `192.168.10.1` / `192.168.10.1` |
++| EVIDENCE_BASE_URL | `https://192.168.0.202:9443/api/internal/device-fingerprint/v1` |
++| CA_CERT_PATH | `/etc/captive-portal/device-fingerprint/sensor-ca.crt` |
++| SPOOL_PATH | `/var/lib/captive-portal/fingerprint-sensor/spool.sqlite3` |
++| EVE_SOCKET_PATH | `/run/captive-portal/fingerprint-sensor/suricata-eve.sock` |
++| CORE_READY_HOST / CORE_READY_PORT | `127.0.0.1` / integer `8088` |
++
++Sensor interface must be a 1..15-byte ASCII Linux name with alphanumeric first
++character and only letters/digits/underscore/dot/hyphen, not `lo`/`any`/wildcard/path.
++Preflight remains interface-relative: UP, no master/L3/default routes/forwarding,
++DHCP disabled and no active DHCP client/NetworkManager profile. All runtime checks
++and frozen BPF/selected-interface AF_PACKET binding remain; parser checks no NIC.
++Readiness host is canonical private IPv4 or exact `127.0.0.1`, port canonical
++ASCII decimal `1024..65535`. DHCP authorities are independently configured
++canonical IPv4 unicast, not implicitly forced equal or RFC1918-only; actual DHCP
++evidence and directed-broadcast/topology facts require separate operational proof.
++
++| Portal suffix (`DEVICE_FINGERPRINT_PORTAL_`) | Exact legacy default |
++| --- | --- |
++| PRODUCER_ID / CAPTURE_SOURCE_ID | `portal-zefer-01` / `zefer-portal-http-01` |
++| SITE_ID / GUEST_CIDRS / ALLOWED_SSIDS | `6a64f17630da7c70d232187a` / `192.168.8.0/22` / `Zefer_Parki` |
++| EVIDENCE_BASE_URL | `https://192.168.0.202:9443/api/internal/device-fingerprint/v1` |
++| CA_CERT_PATH / CREDENTIAL_PATH | `/etc/captive-portal/device-fingerprint/portal-ca.crt` / `/etc/captive-portal/device-fingerprint/portal.bearer` |
++
++Both parsers require exact lowercase machine IDs and 24-hex Site, 1..16 canonical
++nonoverlapping IPv4 CIDRs with no host bits/duplicates/empty members or `/0`.
++Evidence URL: HTTPS valid ASCII DNS or canonical private IPv4/exact loopback,
++optional canonical port `1..65535`, exact `/api/internal/device-fingerprint/v1`
++path. Reject numeric IP aliases, controls/whitespace, userinfo, escapes, query,
++fragment and other paths. Only one final slash may normalize. Portal SSIDs are
++1..16 distinct case-sensitive exact strings of 1..32 UTF-8 bytes, no blank/control
++or wildcard member. Missing SSID stays optional; no guest authorization change.
++Portal queue/batch/age/coalescer/timeouts/cooldowns remain strictly pinned.
++Disabled Portal ignores bad overrides; disabled Sensor ignores deployment strings
++but retains original Wave-2 boolean validation. Sensor budgets/tuning stay unchanged.
++
++Synthetic examples (not admitted producer identities or operational recommendations):
++Sensor `enp1s0`, `172.18.0.1:18089`, `lab-sensor-02` / `lab-span-02`, Site
++`aaaaaaaaaaaaaaaaaaaaaaaa`, scope `10.20.0.0/24`; Portal `lab-portal-02` /
++`lab-portal-http-02`, same synthetic Site, SSID `Guest WiFi`, endpoint
++`https://evidence.example:9443/api/internal/device-fingerprint/v1`.
++No bearer is configured inline: Sensor uses only systemd LoadCredential
++`CREDENTIALS_DIRECTORY/device-fingerprint-bearer`; Portal uses an absolute
++protected external file. CA trust, SAN/expiry, receiver peer policy and the exact
++registered producer/token/Site/source/kinds/guest scope are independent gates.
++
++Do not relabel/replay/purge an old Sensor spool under new identity/scope. New
++installation needs its own empty spool; changes to a nonempty spool are operational
++HOLD pending lineage/cutover. Parser never opens a spool or auto-registers a source.
++Receiver acceptance is not F-B1/source-health/clock/classification admission.
++Core readiness is raw TCP only, not HTTP health; SysAdmin must prove trusted local
++Sensor-to-Core path and negative Guest/WAN reachability. NIC override does not
++change Suricata/NI/systemd/NPM. No current production activation is authorized.
++
++### Evidence service configuration (unchanged)
++
+ `DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false` is the repository default. The
+ module uses only `DEVICE_FINGERPRINT_*`: DB/lock paths, bind address/port,
+ direct-TLS certificate/key paths, API management CIDRs, external producer JSON,
+diff --git a/docs/modules/device-fingerprint-portal.md b/docs/modules/device-fingerprint-portal.md
+index 53c23e25c9252772a917256cf89c56d364667127..7ccde1f69e7bba8d296012de5b0ebe15f5e2b717 100644
+--- a/docs/modules/device-fingerprint-portal.md
++++ b/docs/modules/device-fingerprint-portal.md
+@@ -16,9 +16,11 @@ six-hour coalescer prevents portal refresh floods. The daemon worker named
+ the existing direct-TLS Task-01 API. Delivery, credential, CA, queue, parser,
+ and telemetry failures are contained and never change authorization results.
+ 
+-The producer identity is fixed to `portal-zefer-01`, capture source
++The legacy defaults are producer `portal-zefer-01`, capture source
+ `zefer-portal-http-01`, Site `6a64f17630da7c70d232187a`, guest CIDR
+-`192.168.8.0/22`, and optional corroborating SSID `Zefer_Parki`. The production
++`192.168.8.0/22`, and optional corroborating SSID `Zefer_Parki`. These claims
++may be configured at process startup under DEPLOY-CONFIG-02; they are not
++self-authorizing receiver/source registrations. The production
+ schema registry adds only `portal_headers/1`; no classifier, DB, API, collector,
+ or identity-linking model is introduced.
+ 
+@@ -26,6 +28,33 @@ Configuration is isolated under `DEVICE_FINGERPRINT_PORTAL_*`; the default is
+ `DEVICE_FINGERPRINT_PORTAL_ENABLED=false`. The Bearer credential and CA trust
+ file remain external to Git. Production activation is a separate Owner action.
+ 
++## Independent deployment configuration
++
++Only Producer ID, Capture Source ID, Site, guest CIDRs, exact SSIDs, direct-TLS
++Evidence base URL and absolute Linux CA/bearer file paths are configurable here.
++Machine IDs use `[a-z0-9][a-z0-9._-]{0,63}` and Site exactly 24 lowercase hex.
++Guest scope is CSV of 1..16 canonical nonoverlapping strict IPv4 networks, no `/0`,
++host bits, duplicate or empty item. SSIDs are 1..16 distinct exact case-sensitive
++UTF-8 strings, 1..32 bytes each, with no control/blank/wildcard members. Unicode
++and spaces in an actual SSID are not casefolded/trimmed into another identity.
++Missing session SSID remains optional corroboration, not an Auth requirement.
++
++Evidence URL is direct HTTPS DNS or canonical private IPv4/exact loopback,
++optional canonical port, and exactly `/api/internal/device-fingerprint/v1`.
++Only one terminal slash may normalize; no userinfo, query, fragment, percent
++escape, numeric IP alias or alternate path. CA/SAN/expiry are separate real TLS
++proofs; production retains `verify=<CA file>`, never `verify=False` or a Core/NPM relay.
++
++All queue/batch/age/coalescer/timeouts/cooldowns remain pinned (256 / 50 / 300 /
++21600 / 8192 / 0.5 / 2.0 / 30 / 300). Disabled ignores deployment overrides and
++composition creates no producer worker; invalid enabled config/delivery remains
++contained independently of guest Auth, Omada and CAPPORT.
++
++New deployment requires its own bearer and receiver registration admitting exact
++producer/Site/source/kinds/guest scope, peer policy and CA/SAN. HTTP 200 does not
++admit F-B1 timelines, clocks, emitters or classification profile. Source admission,
++activation and restart require separate authorization. See [configuration](../configuration.md#sensorportal-producer-deployment-configuration).
++
+ <!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
+ ## Current relationship to the production classifier
+ 
+diff --git a/docs/modules/device-fingerprint.md b/docs/modules/device-fingerprint.md
+index f9160b76aff70940746ca63324faaa262141bb17..ea425f9e08e651f57c00bc0dc072c4279ecdb562 100644
+--- a/docs/modules/device-fingerprint.md
++++ b/docs/modules/device-fingerprint.md
+@@ -16,6 +16,20 @@ The system is advisory. Fingerprint data never authorizes a guest, never changes
+ CAPPORT admission, never blocks a client, and never performs a destructive Omada
+ action.
+ 
++### Independent producer deployment inputs (DEPLOY-CONFIG-02)
++
++Sensor/optional Portal Producer accept startup-only deployment claims under their
++own namespaces; see [configuration](../configuration.md#sensorportal-producer-deployment-configuration).
++This does not modify the receiver, F-B1 binding/clock/emitter authority, classifier,
++API or storage. New receiver registration/token/guest scope/peer TLS trust and
++downstream source admission remain separate gates; parser success or HTTP 200 is
++not classification authorization. Legacy defaults and disabled behavior remain.
++Never change identity/scope against a nonempty Sensor spool: use a new empty spool
++or obtain an explicit lineage/cutover disposition; no automatic relabel/reset.
++Sensor NIC override does not rewrite Suricata, EVE/NI sources or deployment units.
++Core readiness is bounded TCP-connect only and needs a separately proven trusted
++host-Sensor path; NPM accepting HTTPS alone does not prove Core readiness.
++
+ > `TASK-DEVICE-FINGERPRINT-01` is the **Evidence Foundation layer**. Its historical
+ > statement that the foundation itself does not classify devices or link identities
+ > remains correct. It is not a description of the whole current Device Fingerprint
+diff --git a/tests/device_fingerprint_portal/test_deploy_config.py b/tests/device_fingerprint_portal/test_deploy_config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbdd4d825bc044498fe532cd77bc20b7ac1c87b5
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_deploy_config.py
+@@ -0,0 +1,69 @@
++from dataclasses import asdict
++import pytest
++
++from app.device_fingerprint_portal.config import portal_config_from_env
++from app.device_fingerprint_portal.models import PortalEvidenceConfigError
++
++P = "DEVICE_FINGERPRINT_PORTAL_"
++
++
++def test_T01_entire_portal_legacy_defaults_and_disabled_ignore():
++    expected = dict(enabled=False, producer_id="portal-zefer-01", capture_source_id="zefer-portal-http-01",
++        site_id="6a64f17630da7c70d232187a", guest_cidrs=("192.168.8.0/22",), allowed_ssids=("Zefer_Parki",),
++        evidence_base_url="https://192.168.0.202:9443/api/internal/device-fingerprint/v1",
++        ca_cert_path="/etc/captive-portal/device-fingerprint/portal-ca.crt",
++        credential_path="/etc/captive-portal/device-fingerprint/portal.bearer", queue_max_events=256,
++        batch_size=50, queue_max_age_seconds=300, coalesce_seconds=21600, coalesce_max_entries=8192,
++        connect_timeout_seconds=0.5, read_timeout_seconds=2.0, transient_cooldown_seconds=30, reject_cooldown_seconds=300)
++    def snapshot(config):
++        result = asdict(config)
++        result["guest_cidrs"] = tuple(str(net) for net in config.guest_cidrs)
++        return result
++    assert snapshot(portal_config_from_env({})) == expected
++    assert snapshot(portal_config_from_env({P + "ENABLED": "true"})) == {**expected, "enabled": True}
++    assert snapshot(portal_config_from_env({P + key: None for key in ("SITE_ID", "GUEST_CIDRS", "ALLOWED_SSIDS",
++        "CA_CERT_PATH", "CREDENTIAL_PATH", "PRODUCER_ID", "CAPTURE_SOURCE_ID", "EVIDENCE_BASE_URL", "BATCH_SIZE")})) == expected
++
++
++def test_T03_custom_portal_configuration_and_frozen_tuning():
++    config = portal_config_from_env({P + "ENABLED": "true", P + "PRODUCER_ID": "lab-portal-02",
++        P + "CAPTURE_SOURCE_ID": "lab-portal-http-02", P + "SITE_ID": "a" * 24,
++        P + "GUEST_CIDRS": "10.20.0.0/24,10.21.0.0/24", P + "ALLOWED_SSIDS": "Guest WiFi,Қонақ",
++        P + "EVIDENCE_BASE_URL": "https://evidence.example:9443/api/internal/device-fingerprint/v1/",
++        P + "CA_CERT_PATH": "/lab/portal-ca.crt", P + "CREDENTIAL_PATH": "/lab/protected/portal.bearer"})
++    assert config.producer_id == "lab-portal-02" and config.capture_source_id == "lab-portal-http-02"
++    assert config.site_id == "a" * 24 and config.allowed_ssids == ("Guest WiFi", "Қонақ")
++    assert tuple(str(net) for net in config.guest_cidrs) == ("10.20.0.0/24", "10.21.0.0/24")
++    assert config.evidence_base_url == "https://evidence.example:9443/api/internal/device-fingerprint/v1"
++    assert config.ca_cert_path == "/lab/portal-ca.crt" and config.credential_path == "/lab/protected/portal.bearer"
++    frozen = portal_config_from_env({})
++    for field in ("queue_max_events", "batch_size", "queue_max_age_seconds", "coalesce_seconds", "coalesce_max_entries",
++        "connect_timeout_seconds", "read_timeout_seconds", "transient_cooldown_seconds", "reject_cooldown_seconds"):
++        assert getattr(config, field) == getattr(frozen, field)
++
++
++@pytest.mark.parametrize("field", ["QUEUE_MAX_EVENTS", "BATCH_SIZE", "QUEUE_MAX_AGE_SECONDS", "COALESCE_SECONDS",
++    "COALESCE_MAX_ENTRIES", "CONNECT_TIMEOUT_SECONDS", "READ_TIMEOUT_SECONDS", "TRANSIENT_COOLDOWN_SECONDS", "REJECT_COOLDOWN_SECONDS"])
++def test_T03_all_portal_tuning_remains_pinned(field):
++    with pytest.raises(PortalEvidenceConfigError):
++        portal_config_from_env({P + "ENABLED": "true", P + field: "51"})
++
++
++@pytest.mark.parametrize("ssids", [" ", "one,", ",one", "one,,two", "one,one", "*", "Guest*", "a" * 33,
++    "é" * 17, "one\x00two", "one\ntwo", "one\x7ftwo", "\ud800", ",".join(str(i) for i in range(17))])
++def test_T04_ssid_closed_bounds(ssids):
++    with pytest.raises(PortalEvidenceConfigError):
++        portal_config_from_env({P + "ENABLED": "true", P + "ALLOWED_SSIDS": ssids})
++
++
++def test_T03_ssid_utf8_bytes_exact_case_and_sixteen_values():
++    for value in ("é" * 16, "Guest,guest", ",".join(f"guest{i}" for i in range(16))):
++        config = portal_config_from_env({P + "ENABLED": "true", P + "ALLOWED_SSIDS": value})
++        assert config.allowed_ssids == tuple(value.split(","))
++
++
++@pytest.mark.parametrize("field", ["CA_CERT_PATH", "CREDENTIAL_PATH"])
++@pytest.mark.parametrize("path", ["relative/file", " /lab/file", "/lab/file ", "C:\\lab\\file", "/lab/\x00file"])
++def test_T04_external_linux_paths_only(field, path):
++    with pytest.raises(PortalEvidenceConfigError):
++        portal_config_from_env({P + "ENABLED": "true", P + field: path})
+diff --git a/tests/device_fingerprint_portal/test_deploy_isolation.py b/tests/device_fingerprint_portal/test_deploy_isolation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9129a4753e12aa5847673d2308c3f4f20c379a6f
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_deploy_isolation.py
+@@ -0,0 +1,124 @@
++from dataclasses import replace
++from pathlib import Path
++from unittest.mock import Mock
++import pytest
++import requests
++
++from app.device_fingerprint_portal.config import portal_config_from_env
++from app.device_fingerprint_portal.models import PortalEvidenceConfigError
++from app.device_fingerprint_portal.producer import PortalEvidenceProducer
++from app.device_fingerprint_portal.runtime import PortalEvidenceRuntime
++from .test_runtime import Clock, candidate, session
++from .test_producer import Session, Response
++
++
++def custom():
++    p = "DEVICE_FINGERPRINT_PORTAL_"
++    return portal_config_from_env({p + "ENABLED": "true", p + "SITE_ID": "a" * 24,
++        p + "PRODUCER_ID": "lab-portal-02", p + "CAPTURE_SOURCE_ID": "lab-portal-http-02",
++        p + "GUEST_CIDRS": "10.20.0.0/24", p + "ALLOWED_SSIDS": "Guest",
++        p + "CA_CERT_PATH": "/lab/portal-ca.crt", p + "CREDENTIAL_PATH": "/lab/portal.bearer",
++        p + "EVIDENCE_BASE_URL": "https://evidence.example:9443/api/internal/device-fingerprint/v1"})
++
++
++@pytest.mark.parametrize("status", [200, 401, 403])
++def test_T07_T08_T09_portal_exact_transport_tuple_and_verified_ca_injection(monkeypatch, status):
++    import ssl
++    config = custom()
++    def read_credential(path, **_kwargs):
++        assert str(path) == config.credential_path
++        return "b" * 32
++    monkeypatch.setattr(Path, "read_text", read_credential)
++    verify_ca = Mock()
++    monkeypatch.setattr(ssl, "create_default_context", verify_ca)
++    transport = Session(Response(status))
++    producer = PortalEvidenceProducer(config, session=transport)
++    clock = Clock()
++    runtime = PortalEvidenceRuntime(config, producer=producer, now=clock.now, monotonic=clock.monotonic)
++    assert runtime.try_submit(session(site_id=config.site_id, client_ip="10.20.0.7", ssid=None), candidate(clock))
++    event = runtime.queue.get_nowait().event
++    assert event["site_id"] == config.site_id and event["capture_source_id"] == config.capture_source_id
++    result = producer.deliver_evidence([event])
++    assert result.status == ("success" if status == 200 else "permanent")
++    assert len(transport.calls) == 1
++    args, options = transport.calls[0]
++    assert args == (config.evidence_base_url + "/evidence/batch",)
++    assert options["json"] == {"producer_id": config.producer_id, "events": [event]}
++    assert options["verify"] == config.ca_cert_path and options["headers"]["Authorization"] == "Bearer " + "b" * 32
++    verify_ca.assert_called_once_with(cafile=config.ca_cert_path)
++    # Mock status proves no identity fallback, not actual receiver registration/SAN admission.
++
++
++def test_T03_T09_site_ip_ssid_filter_remains_exact_and_ssid_optional():
++    config, clock = custom(), Clock()
++    runtime = PortalEvidenceRuntime(config, producer=Mock(), now=clock.now, monotonic=clock.monotonic)
++    for changes in ({"site_id": "b" * 24}, {"client_ip": "192.168.8.10"}, {"ssid": "guest"}):
++        values = dict(site_id=config.site_id, client_ip="10.20.0.7", ssid="Guest")
++        values.update(changes)
++        assert not runtime.try_submit(session(**values), candidate(clock))
++    assert runtime.try_submit(session(site_id=config.site_id, client_ip="10.20.0.7", ssid=None), candidate(clock))
++
++
++@pytest.mark.parametrize("mode", ["disabled", "invalid", "delivery_failed"])
++@pytest.mark.parametrize("context", ["omada_external_portal", "capport_login"])
++def test_T10_optional_producer_never_changes_guest_auth(mode, context, monkeypatch):
++    import app.web.web as web
++    from app.auth.manager import AuthSessionManager
++    from app.models import Result
++    from tests.test_proxy_headers import CapturingExecutor
++    manager, executor = AuthSessionManager(), CapturingExecutor()
++    runtime = PortalEvidenceRuntime(custom(), producer=Mock())
++    runtime.start = Mock()  # No worker thread or external I/O in this Auth-isolation fixture.
++    runtime.producer.deliver_evidence.side_effect = requests.ConnectionError("synthetic unavailable")
++    monkeypatch.setattr(web, "PortalEvidenceRuntime", lambda *_a, **_k: runtime)
++    if mode == "invalid":
++        def invalid():
++            raise PortalEvidenceConfigError("synthetic invalid configuration")
++        monkeypatch.setattr(web, "portal_config_from_env", invalid)
++    else:
++        monkeypatch.setattr(web, "portal_config_from_env", lambda: portal_config_from_env({}) if mode == "disabled" else custom())
++    controller = Mock()
++    controller.get_clients.return_value = Result.ok(data={"clients": [{"client_ip": "10.20.0.7",
++        "client_mac": "AA:BB:CC:DD:EE:77", "ssid": None}]})
++    controller.get_client.return_value = Result.ok(data={"authStatus": 0, "active": True})
++    settings = dict(portal_counter_enabled=False, portal_counter_db_path="unused.db",
++        portal_counter_timezone="Asia/Baku", portal_counter_api_enabled=False, auth_telemetry_enabled=False,
++        capport_enabled=True, capport_site_id="a" * 24, capport_public_base_url="https://portal.example",
++        capport_allowed_client_networks=("10.20.0.0/24",), capport_api_path="/capport/api",
++        capport_login_path="/capport/login", capport_client_cache_ttl_seconds=2, capport_failure_cache_ttl_seconds=2)
++    monkeypatch.setattr(web, "get_settings", lambda: settings)
++    monkeypatch.setattr(web, "auth_manager", manager)
++    monkeypatch.setattr(web, "auth_executor", executor)
++    app = web.create_app(controller=controller, portal_counter_service=None)
++    uri = "/capport/login" if context == "capport_login" else (
++        "/?site=" + "a" * 24 + "&clientMac=AA:BB:CC:DD:EE:77&clientIp=10.20.0.7")
++    response = app.test_client().get(uri, environ_base={"REMOTE_ADDR": "10.20.0.7"},
++        base_url="https://portal.example", headers={"User-Agent": "Mozilla/5.0 (Android 14) Chrome/120 Mobile"})
++    assert response.status_code == 200
++    stored = manager.get_by_client("a" * 24, "AA:BB:CC:DD:EE:77")
++    assert stored is not None and stored.current_run_number == 1 and len(executor.submissions) == 1
++    if context == "capport_login":
++        controller.get_clients.assert_called_once_with("a" * 24)
++        controller.get_client.assert_called_once_with("a" * 24, "AA:BB:CC:DD:EE:77")
++    else:
++        controller.get_clients.assert_not_called()
++        controller.get_client.assert_not_called()
++    if mode == "delivery_failed":
++        runtime.start.assert_called_once()
++        assert runtime.process_once() == 1
++        assert runtime.producer.deliver_evidence.call_count == 1
++        assert manager.get_by_client("a" * 24, "AA:BB:CC:DD:EE:77") is stored
++    else:
++        runtime.start.assert_not_called()
++        assert app.extensions["portal_evidence_runtime"] is None
++
++
++def test_T08_portal_tls_failure_uses_ca_and_is_contained(monkeypatch):
++    import ssl
++    config = custom()
++    monkeypatch.setattr(Path, "read_text", lambda *_a, **_k: "b" * 32)
++    monkeypatch.setattr(ssl, "create_default_context", lambda **kwargs: None)
++    transport = Session(requests.exceptions.SSLError("synthetic peer trust failure"))
++    result = PortalEvidenceProducer(config, session=transport).deliver_evidence([{"safe": True}])
++    assert result.status == "transient"
++    assert transport.calls[0][1]["verify"] == config.ca_cert_path
+diff --git a/tests/device_fingerprint_sensor/test_cli.py b/tests/device_fingerprint_sensor/test_cli.py
+index 43c1a6286beac83020b9a5605898400976f7ad35..3f13777c3a5afb66513968d00fa1e1e9b1361c47 100644
+--- a/tests/device_fingerprint_sensor/test_cli.py
++++ b/tests/device_fingerprint_sensor/test_cli.py
+@@ -28,4 +28,24 @@ def test_readiness_timeout_fails_before_runtime(monkeypatch):
+     monkeypatch.setattr(cli, "sensor_config_from_env", lambda: config)
+     monkeypatch.setattr(cli, "capture_loaded_artifact_identity", lambda *_: identity)
+     monkeypatch.setattr(cli, "wait_for_core", lambda *_args, **_kwargs: False)
++    monkeypatch.setattr(cli, "SensorRuntime", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not capture")))
+     assert cli.main(["run"]) == 1
++
++
++def test_T06_custom_readiness_is_tcp_only_and_bounded():
++    calls, now = [], [0.0]
++    def connect(address, timeout):
++        calls.append((address, timeout))
++        raise OSError("synthetic unreachable")
++    def sleep(value):
++        now[0] += value
++    assert cli.wait_for_core("172.18.0.1", 18089, connect_timeout=1, poll_interval=2, max_wait=5,
++        monotonic=lambda: now[0], sleep=sleep, connector=connect) is False
++    assert now[0] == 5 and len(calls) == 4
++    assert all(call == (("172.18.0.1", 18089), 1) for call in calls)
++    closed = []
++    class TcpOnly:
++        def close(self): closed.append(True)
++    assert cli.wait_for_core("172.18.0.1", 18089, connect_timeout=1, poll_interval=2, max_wait=5,
++        monotonic=lambda: 0.0, connector=lambda *_args, **_kwargs: TcpOnly())
++    assert closed == [True]  # No send/recv/HTTP method exists on the synthetic socket.
+diff --git a/tests/device_fingerprint_sensor/test_config.py b/tests/device_fingerprint_sensor/test_config.py
+index 8ce085cb1156d3833ace77dd55921633b529170d..b180185d59020df39baf84030dcef863d99f09ae 100644
+--- a/tests/device_fingerprint_sensor/test_config.py
++++ b/tests/device_fingerprint_sensor/test_config.py
+@@ -21,10 +21,6 @@ def test_frozen_defaults_are_sensor_only():
+ 
+ 
+ @pytest.mark.parametrize("values", [
+-    {"DEVICE_FINGERPRINT_SENSOR_INTERFACE": "enp1s0"},
+-    {"DEVICE_FINGERPRINT_SENSOR_PRODUCER_ID": "sensor-zefer-02"},
+-    {"DEVICE_FINGERPRINT_SENSOR_CAPTURE_SOURCE_ID": "zefer-span-02"},
+-    {"DEVICE_FINGERPRINT_SENSOR_SITE_ID": "aaaaaaaaaaaaaaaaaaaaaaaa"},
+     {"DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS": "192.168.8.1/22"},
+     {"DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL": "http://192.168.0.202"},
+     {"DEVICE_FINGERPRINT_SENSOR_RAW_DEDUP_HORIZON_MS": "nan"},
+@@ -34,6 +30,13 @@ def test_invalid_sensor_configuration_fails_closed(values):
+         sensor_config_from_env(enabled(**values))
+ 
+ 
++@pytest.mark.parametrize("key,value", [("INTERFACE", "enp1s0"), ("PRODUCER_ID", "sensor-zefer-02"),
++    ("CAPTURE_SOURCE_ID", "zefer-span-02"), ("SITE_ID", "aaaaaaaaaaaaaaaaaaaaaaaa")])
++def test_former_authority_pins_are_valid_deployment_claims(key, value):
++    config = sensor_config_from_env(enabled(**{"DEVICE_FINGERPRINT_SENSOR_" + key: value}))
++    assert getattr(config, key.lower()) == value
++
++
+ def test_sensor_package_does_not_import_main_settings():
+     import app.device_fingerprint_sensor.config as module
+     source = open(module.__file__, encoding="utf-8").read()
+diff --git a/tests/device_fingerprint_sensor/test_deploy_config.py b/tests/device_fingerprint_sensor/test_deploy_config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d58e09010399b863eda42c2c1d0f90a27a02e2ac
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_deploy_config.py
+@@ -0,0 +1,160 @@
++"""DEPLOY-CONFIG-02 T01–T04: disposable syntactic claims, never admission."""
++from dataclasses import asdict
++import pytest
++
++from app.device_fingerprint_sensor.config import sensor_config_from_env
++from app.device_fingerprint_sensor.models import SensorConfigError
++from app.device_fingerprint_portal.config import portal_config_from_env
++from app.device_fingerprint_portal.models import PortalEvidenceConfigError
++
++
++PREFIX = "/api/internal/device-fingerprint/v1"
++SENSOR = "DEVICE_FINGERPRINT_SENSOR_"
++PORTAL = "DEVICE_FINGERPRINT_PORTAL_"
++
++
++def parse(kind, **values):
++    prefix, parser = (SENSOR, sensor_config_from_env) if kind == "sensor" else (PORTAL, portal_config_from_env)
++    return parser({prefix + "ENABLED": "true", **{prefix + key: value for key, value in values.items()}})
++
++
++def snapshot(config):
++    result = asdict(config)
++    result["guest_cidrs"] = tuple(str(network) for network in config.guest_cidrs)
++    return result
++
++
++def test_T01_entire_sensor_legacy_defaults_enabled_and_disabled():
++    expected = dict(enabled=False, interface="enp8s0", producer_id="sensor-zefer-01", capture_source_id="zefer-span-01",
++        site_id="6a64f17630da7c70d232187a", guest_cidrs=("192.168.8.0/22",),
++        dhcp_server_authority="192.168.10.1", dhcp_option54_authority="192.168.10.1",
++        evidence_base_url="https://192.168.0.202:9443" + PREFIX,
++        ca_cert_path="/etc/captive-portal/device-fingerprint/sensor-ca.crt", credential_path=None,
++        spool_path="/var/lib/captive-portal/fingerprint-sensor/spool.sqlite3", spool_total_budget_bytes=134217728,
++        spool_main_db_max_bytes=117440512, spool_write_headroom_bytes=16777216, spool_max_events=100000,
++        delivery_batch_size=100, http_timeout_seconds=5.0, raw_dedup_max_entries=65536, raw_dedup_horizon_ms=0.25,
++        core_ready_host="127.0.0.1", core_ready_port=8088, core_ready_connect_timeout_seconds=1.0,
++        core_ready_poll_interval_seconds=10.0, core_ready_max_wait_seconds=1800.0, eve_max_datagram_bytes=262144,
++        eve_socket_path="/run/captive-portal/fingerprint-sensor/suricata-eve.sock", eve_socket_wait_seconds=1830,
++        io_stale_purge_gate_enabled=False, io_telemetry_aggregation_enabled=False, io_ingress_coalesce_enabled=False)
++    assert snapshot(sensor_config_from_env({})) == expected
++    assert snapshot(parse("sensor")) == {**expected, "enabled": True}
++    bad = {SENSOR + key: None for key in ("INTERFACE", "SITE_ID", "PRODUCER_ID", "CAPTURE_SOURCE_ID",
++        "GUEST_CIDRS", "DHCP_SERVER_AUTHORITY", "DHCP_OPTION54_AUTHORITY", "EVIDENCE_BASE_URL",
++        "CORE_READY_HOST", "CORE_READY_PORT", "CA_CERT_PATH", "SPOOL_PATH", "EVE_SOCKET_PATH")}
++    assert snapshot(sensor_config_from_env(bad)) == expected
++
++
++@pytest.mark.parametrize("flag", ["IO_STALE_PURGE_GATE_ENABLED", "IO_TELEMETRY_AGGREGATION_ENABLED", "IO_INGRESS_COALESCE_ENABLED"])
++def test_T01_disabled_still_validates_original_wave2_booleans(flag):
++    with pytest.raises(SensorConfigError):
++        sensor_config_from_env({SENSOR + flag: "not-a-boolean"})
++    config = sensor_config_from_env({SENSOR + flag: "true", SENSOR + "SITE_ID": "bad"})
++    assert not config.enabled and getattr(config, flag.lower()) is True
++
++
++def test_T02_custom_sensor_fields_typed_and_no_io(monkeypatch):
++    import socket
++    from pathlib import Path
++    def forbidden(*_args, **_kwargs):
++        pytest.fail("configuration must never perform socket/filesystem I/O")
++    monkeypatch.setattr(socket, "create_connection", forbidden)
++    monkeypatch.setattr(Path, "open", forbidden)
++    monkeypatch.setattr(Path, "exists", forbidden)
++    values = dict(INTERFACE="enp1s0", PRODUCER_ID="lab-sensor-02", CAPTURE_SOURCE_ID="lab-span-02",
++        SITE_ID="a" * 24, GUEST_CIDRS="10.20.0.0/24,10.21.0.0/24", DHCP_SERVER_AUTHORITY="203.0.113.1",
++        DHCP_OPTION54_AUTHORITY="198.51.100.1", EVIDENCE_BASE_URL="https://evidence.example:9443" + PREFIX + "/",
++        CORE_READY_HOST="172.18.0.1", CORE_READY_PORT="18089", CA_CERT_PATH="/lab/sensor-ca.crt",
++        SPOOL_PATH="/lab/new-empty-spool.sqlite3", EVE_SOCKET_PATH="/lab/eve.sock")
++    config = parse("sensor", **values)
++    for key in ("INTERFACE", "PRODUCER_ID", "CAPTURE_SOURCE_ID", "SITE_ID", "DHCP_SERVER_AUTHORITY",
++                "DHCP_OPTION54_AUTHORITY", "CORE_READY_HOST", "CA_CERT_PATH", "SPOOL_PATH", "EVE_SOCKET_PATH"):
++        assert getattr(config, key.lower()) == values[key]
++    assert type(config.core_ready_port) is int and config.core_ready_port == 18089
++    assert tuple(str(network) for network in config.guest_cidrs) == ("10.20.0.0/24", "10.21.0.0/24")
++    assert config.evidence_base_url == values["EVIDENCE_BASE_URL"][:-1]
++    assert config.credential_path is None
++
++
++URL_BAD = ["http://evidence.example" + PREFIX, "https://evidence.example", "https://user:secret@evidence.example" + PREFIX,
++    "https://evidence.example" + PREFIX + "?", "https://evidence.example" + PREFIX + "#",
++    "https://evidence.example" + PREFIX + "//", "https://evidence.example" + PREFIX + "/extra",
++    "https://evidence.example/x/../" + PREFIX.lstrip("/"), "https://%65vidence.example" + PREFIX,
++    "https://evidence.example:0" + PREFIX, "https://evidence.example:65536" + PREFIX,
++    "https://evidence.example:0443" + PREFIX, "https://evidence.example:" + PREFIX,
++    "https://evidence_example" + PREFIX, "https://[::1]" + PREFIX, "https://evidence.example\\evil" + PREFIX,
++    "https://2130706433" + PREFIX, "https://0x7f000001" + PREFIX, "https://127.1" + PREFIX,
++    "https://0x" + PREFIX, "https://portal.123" + PREFIX, "https://127.0.0.2" + PREFIX,
++    "https://8.8.8.8" + PREFIX, "https://0.0.0.0" + PREFIX, "https://169.254.0.1" + PREFIX,
++    "https://192.168.000.1" + PREFIX, "https://evidence.example." + PREFIX,
++    "https://evidence.example\n" + PREFIX, "https://évidence.example" + PREFIX]
++CIDR_BAD = ["0.0.0.0/0", "10.20.0.1/24", "10.20.0.0/24,", ",10.20.0.0/24", "10.20.0.0/24, 10.21.0.0/24",
++    "10.20.0.0/24,10.20.0.0/24", "10.20.0.0/24,10.20.0.0/25", "2001:db8::/64", "10.20.00.0/24",
++    "10.20.0.0/255.255.255.0", "10.20.0.1", ",".join(f"10.{i}.0.0/16" for i in range(17))]
++
++
++@pytest.mark.parametrize("kind", ["sensor", "portal"])
++@pytest.mark.parametrize("url", URL_BAD)
++def test_T04_same_strict_endpoint_policy(kind, url):
++    with pytest.raises((SensorConfigError, PortalEvidenceConfigError)) as caught:
++        parse(kind, EVIDENCE_BASE_URL=url)
++    assert url not in str(caught.value) and caught.value.__cause__ is None
++
++
++@pytest.mark.parametrize("kind", ["sensor", "portal"])
++@pytest.mark.parametrize("url", ["https://evidence.example" + PREFIX, "https://127.0.0.1:9443" + PREFIX,
++    "https://172.18.0.1:1" + PREFIX + "/", "https://evidence.example:65535" + PREFIX,
++    "https://xn--example.test" + PREFIX])
++def test_T02_T03_valid_direct_tls_endpoint(kind, url):
++    assert parse(kind, EVIDENCE_BASE_URL=url).evidence_base_url == url.removesuffix("/")
++
++
++@pytest.mark.parametrize("kind", ["sensor", "portal"])
++@pytest.mark.parametrize("cidrs", CIDR_BAD)
++def test_T04_cidr_never_widens_or_overlaps(kind, cidrs):
++    with pytest.raises((SensorConfigError, PortalEvidenceConfigError)):
++        parse(kind, GUEST_CIDRS=cidrs)
++
++
++@pytest.mark.parametrize("kind", ["sensor", "portal"])
++def test_T02_T03_sixteen_canonical_nonoverlapping_networks(kind):
++    values = tuple(f"10.{i}.0.0/16" for i in range(16))
++    assert tuple(str(network) for network in parse(kind, GUEST_CIDRS=",".join(values)).guest_cidrs) == values
++
++
++SENSOR_FIELDS = ("INTERFACE", "CORE_READY_HOST", "CORE_READY_PORT", "PRODUCER_ID", "CAPTURE_SOURCE_ID", "SITE_ID",
++    "GUEST_CIDRS", "DHCP_SERVER_AUTHORITY", "DHCP_OPTION54_AUTHORITY", "EVIDENCE_BASE_URL")
++PORTAL_FIELDS = ("PRODUCER_ID", "CAPTURE_SOURCE_ID", "SITE_ID", "GUEST_CIDRS", "ALLOWED_SSIDS",
++    "EVIDENCE_BASE_URL", "CA_CERT_PATH", "CREDENTIAL_PATH")
++
++
++@pytest.mark.parametrize("kind,fields", [("sensor", SENSOR_FIELDS), ("portal", PORTAL_FIELDS)])
++@pytest.mark.parametrize("value", ["", None, True, 42, [], {}, "\n", "\x00"])
++def test_T04_enabled_empty_wrong_types_controls_fail_closed(kind, fields, value):
++    for field in fields:
++        with pytest.raises((SensorConfigError, PortalEvidenceConfigError)):
++            parse(kind, **{field: value})
++
++
++@pytest.mark.parametrize("field,values", [
++    ("INTERFACE", ["lo", "any", "*", "/dev/eth0", "../eth0", ".eth0", "-eth0", "enp 1", "enp1s0 ", "еnp1s0", "a" * 16]),
++    ("CORE_READY_HOST", ["0.0.0.0", "127.0.0.2", "8.8.8.8", "224.0.0.1", "255.255.255.255", "169.254.1.1", "core.example", "::1", "127.1", "2130706433", "0x7f000001", "172.018.0.1", "172.18.0.1 "]),
++    ("CORE_READY_PORT", ["80", "1023", "65536", "08088", "+8088", "8088 ", " 8088", "٨٠٨٨", "8088.0"]),
++    ("DHCP_SERVER_AUTHORITY", ["0.0.0.0", "255.255.255.255", "224.0.0.1", "dhcp.example", "192.168.010.1", "::1", "2130706433"]),
++    ("DHCP_OPTION54_AUTHORITY", ["0.0.0.0", "255.255.255.255", "224.0.0.1", "dhcp.example", "192.168.010.1", "::1", "2130706433"]),
++])
++def test_T04_sensor_negative_deployment_fields(field, values):
++    for value in values:
++        with pytest.raises(SensorConfigError):
++            parse("sensor", **{field: value})
++
++
++@pytest.mark.parametrize("kind", ["sensor", "portal"])
++@pytest.mark.parametrize("field", ["PRODUCER_ID", "CAPTURE_SOURCE_ID", "SITE_ID"])
++def test_T04_identity_exact_not_casefolded_or_trimmed(kind, field):
++    values = ["-bad", "Uppercase", "bad/path", "identity ", " identity", "а" * 24, "a" * 65]
++    if field == "SITE_ID":
++        values += ["a" * 23, "a" * 25, "A" * 24, "g" * 24]
++    for value in values:
++        with pytest.raises((SensorConfigError, PortalEvidenceConfigError)):
++            parse(kind, **{field: value})
+diff --git a/tests/device_fingerprint_sensor/test_deploy_preflight.py b/tests/device_fingerprint_sensor/test_deploy_preflight.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac61712932d49503f4a9de03197e827721be3841
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_deploy_preflight.py
+@@ -0,0 +1,95 @@
++import subprocess
++from pathlib import Path
++import pytest
++
++from app.device_fingerprint_sensor.capture import InterfacePreflight
++from app.device_fingerprint_sensor.models import SensorPreflightError
++from .test_runtime import make_tree, runner
++
++
++def test_T05_alternate_interface_passes_only_complete_no_l3_preflight(tmp_path):
++    roots = make_tree(tmp_path, interface="enp1s0")
++    calls = []
++    def run(command, **kwargs):
++        calls.append(command)
++        return runner(command, **kwargs)
++    InterfacePreflight("enp1s0", sys_root=roots[0], proc_root=roots[1], runner=run).validate()
++    assert ["ip", "-j", "address", "show", "dev", "enp1s0"] in calls
++    assert ["ip", "-6", "-j", "route", "show", "default", "dev", "enp1s0"] in calls
++    assert ["netplan", "get", "ethernets.enp1s0.dhcp4"] in calls
++    assert ["netplan", "get", "ethernets.enp1s0.dhcp6"] in calls
++    assert all("enp8s0" not in " ".join(command) for command in calls)
++
++
++@pytest.mark.parametrize("fault", ["missing", "missing_operstate", "down", "master", "master_symlink",
++    "inet", "inet6", "route4", "route6", "forward4", "forward6", "dhcp4", "dhcp6",
++    "dhclient", "dhcpcd", "udhcpc", "networkmanager", "ip_failed", "ip_invalid_json", "ip_missing",
++    "netplan_failed", "netplan_missing", "nmcli_failed", "nmcli_missing", "proc_unreadable", "forward_missing"])
++def test_T05_alternate_interface_preserves_every_existing_guard(tmp_path, monkeypatch, fault):
++    sys_root, proc_root = make_tree(tmp_path, interface="enp1s0")
++    net = sys_root / "class/net/enp1s0"
++    if fault in {"missing", "missing_operstate"}:
++        (net / "operstate").unlink()
++        if fault == "missing":
++            net.rmdir()
++    elif fault == "down":
++        (net / "operstate").write_text("down")
++    elif fault == "master":
++        (net / "master").mkdir()
++    elif fault == "master_symlink":
++        # A dangling master link must also fail, not just a resolvable master.
++        original = Path.is_symlink
++        monkeypatch.setattr(Path, "is_symlink", lambda path: path == net / "master" or original(path))
++    elif fault in {"forward4", "forward6", "forward_missing"}:
++        family = "ipv6" if fault == "forward6" else "ipv4"
++        path = proc_root / f"sys/net/{family}/conf/enp1s0/forwarding"
++        if fault == "forward_missing":
++            path.unlink()
++        else:
++            path.write_text("1")
++    elif fault in {"dhclient", "dhcpcd", "udhcpc"}:
++        (proc_root / "100/cmdline").write_bytes(f"/sbin/{fault}\0--interface=enp1s0\0".encode())
++    elif fault == "proc_unreadable":
++        original = Path.iterdir
++        def unreadable(path):
++            if path == proc_root:
++                raise PermissionError()
++            return original(path)
++        monkeypatch.setattr(Path, "iterdir", unreadable)
++    def run(command, **kwargs):
++        if command[0] == "ip":
++            if fault == "ip_missing":
++                raise FileNotFoundError()
++            if fault == "ip_failed":
++                return subprocess.CompletedProcess(command, 1, "", "synthetic")
++            if fault == "ip_invalid_json":
++                return subprocess.CompletedProcess(command, 0, "invalid", "")
++            if fault in {"inet", "inet6"} and "address" in command:
++                return subprocess.CompletedProcess(command, 0, '[{"addr_info":[{"family":"' + fault + '"}]}]', "")
++            if (fault == "route4" and "route" in command and "-6" not in command
++                    or fault == "route6" and "route" in command and "-6" in command):
++                return subprocess.CompletedProcess(command, 0, '[{"dst":"default"}]', "")
++        if command[0] == "netplan":
++            if fault == "netplan_missing":
++                raise FileNotFoundError()
++            if fault == "netplan_failed":
++                return subprocess.CompletedProcess(command, 1, "", "synthetic")
++            if fault in {"dhcp4", "dhcp6"} and command[-1].endswith(fault):
++                return subprocess.CompletedProcess(command, 0, "true", "")
++        if command[0] == "systemctl" and fault in {"networkmanager", "nmcli_failed", "nmcli_missing"}:
++            return subprocess.CompletedProcess(command, 0, "active", "")
++        if command[0] == "nmcli":
++            if fault == "nmcli_missing":
++                raise FileNotFoundError()
++            return subprocess.CompletedProcess(command, 1 if fault == "nmcli_failed" else 0, "wired:enp1s0", "")
++        return runner(command, **kwargs)
++    with pytest.raises(SensorPreflightError):
++        InterfacePreflight("enp1s0", sys_root=sys_root, proc_root=proc_root, runner=run).validate()
++
++
++@pytest.mark.parametrize("kind", ["bridge", "bonding"])
++def test_T05_selected_bridge_or_bond_must_be_rejected(tmp_path, kind):
++    sys_root, proc_root = make_tree(tmp_path, interface="enp1s0")
++    (sys_root / "class/net/enp1s0" / kind).mkdir()
++    with pytest.raises(SensorPreflightError):
++        InterfacePreflight("enp1s0", sys_root=sys_root, proc_root=proc_root, runner=runner).validate()
+diff --git a/tests/device_fingerprint_sensor/test_producer.py b/tests/device_fingerprint_sensor/test_producer.py
+index 4634677faa256007a4c1a1b36c3d8300e879c0c6..c1107fc8986f2131d2240af88aa2abf835b6f895 100644
+--- a/tests/device_fingerprint_sensor/test_producer.py
++++ b/tests/device_fingerprint_sensor/test_producer.py
+@@ -1,6 +1,7 @@
+ from datetime import datetime, timezone
+ 
+ import requests
++import pytest
+ 
+ from app.device_fingerprint_sensor.config import sensor_config_from_env
+ from app.device_fingerprint_sensor.models import NormalizedEvent
+@@ -80,3 +81,101 @@ def test_stale_rows_never_reach_producer_http(tmp_path, monkeypatch):
+     sent = session.calls[0][1]["json"]["events"]
+     assert sent == [{"safe": True}]
+     assert spool.metrics()["rows"] == 0
++
++
++@pytest.mark.parametrize("status", [200, 401, 403])
++def test_T07_T08_T09_configured_identity_health_and_ca_no_fallback(tmp_path, status):
++    from app.device_fingerprint_sensor.normalizer import NetworkNormalizer
++    from app.device_fingerprint_sensor.health import SourceHealthTracker
++    credential = tmp_path / "device-fingerprint-bearer"
++    credential.write_text("b" * 32, encoding="ascii")
++    config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true", "CREDENTIALS_DIRECTORY": str(tmp_path),
++        "DEVICE_FINGERPRINT_SENSOR_PRODUCER_ID": "lab-sensor-02", "DEVICE_FINGERPRINT_SENSOR_CAPTURE_SOURCE_ID": "lab-span-02",
++        "DEVICE_FINGERPRINT_SENSOR_SITE_ID": "a" * 24, "DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS": "10.20.0.0/24",
++        "DEVICE_FINGERPRINT_SENSOR_EVIDENCE_BASE_URL": "https://evidence.example:9443/api/internal/device-fingerprint/v1",
++        "DEVICE_FINGERPRINT_SENSOR_SPOOL_PATH": str(tmp_path / "fresh-spool.sqlite3"),
++        "DEVICE_FINGERPRINT_SENSOR_CA_CERT_PATH": str(tmp_path / "new-ca.crt")})
++    now = datetime(2026, 10, 15, tzinfo=timezone.utc)
++    spool = SensorSpool(config.spool_path, total_budget_bytes=1_000_000, main_db_max_bytes=500_000,
++        max_events=200, now=lambda: now)
++    spool.initialize()
++    try:
++        normalized = NetworkNormalizer(config, monotonic=lambda: 0.0).eve({
++            "event_type": "tls", "timestamp": "2026-10-15T00:00:00.000000Z", "src_ip": "10.20.0.7",
++            "ether": {"src_mac": "AA:BB:CC:DD:EE:FF"},
++            "tls": {"ja4": "t13d0203h2_0123456789ab_abcdef012345", "client_alpns": []},
++        })
++        health = SourceHealthTracker(config, monotonic=lambda: 0.0, now=lambda: now).all("available", None)
++        assert len(normalized) == 1 and len(health) == 4
++        for event in normalized + health:
++            assert event.document["site_id"] == config.site_id
++            assert event.document["capture_source_id"] == config.capture_source_id
++        spool.enqueue(normalized + health)
++        transport = Session([Response(status), Response(status)])
++        producer = EvidenceProducer(config, spool, session=transport)
++        first = producer.deliver_once()
++        if status == 200:
++            assert producer.deliver_once().status == "delivered"
++            assert spool.metrics()["rows"] == 0
++        else:
++            assert first.status == "permanent"
++            assert producer.deliver_once().status == "permanent" and len(transport.calls) == 1
++            assert spool.metrics()["rows"] == 5
++        for url, options in transport.calls:
++            assert url.startswith(config.evidence_base_url + "/")
++            assert options["verify"] == config.ca_cert_path
++            assert options["headers"]["Authorization"] == "Bearer " + "b" * 32
++            assert options["json"]["producer_id"] == "lab-sensor-02"
++            assert all(event["site_id"] == "a" * 24 and event["capture_source_id"] == "lab-span-02" for event in options["json"]["events"])
++    finally:
++        spool.close()
++
++
++def test_T08_missing_sensor_loadcredential_never_posts(tmp_path, monkeypatch):
++    from dataclasses import replace
++    from app.device_fingerprint_sensor.models import SensorError
++    config, spool, transport, _producer = setup(tmp_path, monkeypatch, [Response(200)])
++    producer = EvidenceProducer(replace(config, credential_path=str(tmp_path / "missing-bearer")), spool, session=transport)
++    try:
++        with pytest.raises(SensorError):
++            producer.deliver_once()
++        assert transport.calls == [] and spool.metrics()["rows"] == 1
++    finally:
++        spool.close()
++
++
++def test_T09_parser_never_relabels_or_opens_existing_spool(tmp_path, monkeypatch):
++    import sqlite3
++    old = sensor_config_from_env({})
++    path = tmp_path / "old-spool.sqlite3"
++    now = datetime(2026, 10, 15, tzinfo=timezone.utc)
++    spool = SensorSpool(str(path), total_budget_bytes=1_000_000, main_db_max_bytes=500_000, max_events=200, now=lambda: now)
++    spool.initialize()
++    old_payload = {"site_id": old.site_id, "capture_source_id": old.capture_source_id}
++    spool.enqueue([NormalizedEvent("evidence", "old-event", "dhcp", "2026-10-15T00:00:00.000Z", old_payload)])
++    spool.close()
++    before = path.read_bytes()
++    with monkeypatch.context() as patch:
++        patch.setattr(sqlite3, "connect", lambda *_a, **_k: pytest.fail("parser must not open old spool"))
++        config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true",
++            "DEVICE_FINGERPRINT_SENSOR_PRODUCER_ID": "lab-new-producer", "DEVICE_FINGERPRINT_SENSOR_SITE_ID": "a" * 24,
++            "DEVICE_FINGERPRINT_SENSOR_CAPTURE_SOURCE_ID": "lab-new-source", "DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS": "10.20.0.0/24",
++            "DEVICE_FINGERPRINT_SENSOR_SPOOL_PATH": str(path)})
++    assert config.site_id != old.site_id and path.read_bytes() == before
++    spool.initialize()
++    try:
++        assert spool.batch(100)[1][0][1] == old_payload
++    finally:
++        spool.close()
++    # Activating the changed identity against this nonempty spool is operational HOLD.
++
++
++def test_T08_sensor_tls_failure_never_acknowledges(tmp_path, monkeypatch):
++    config, spool, transport, producer = setup(tmp_path, monkeypatch,
++        [requests.exceptions.SSLError("synthetic peer trust failure")])
++    try:
++        assert producer.deliver_once().status == "retry"
++        assert transport.calls[0][1]["verify"] == config.ca_cert_path
++        assert spool.metrics()["rows"] == 1
++    finally:
++        spool.close()
+diff --git a/tests/device_fingerprint_sensor/test_runtime.py b/tests/device_fingerprint_sensor/test_runtime.py
+index f6eae702530eb1e62db1841c49b9376bd68fd6a8..6c2bbb6efda334982a7db8614b3d6a5a8e69adf6 100644
+--- a/tests/device_fingerprint_sensor/test_runtime.py
++++ b/tests/device_fingerprint_sensor/test_runtime.py
+@@ -17,12 +17,12 @@ from app.device_fingerprint_sensor.runtime import SensorRuntime
+ from app.device_fingerprint_sensor.telemetry import SensorTelemetry
+ 
+ 
+-def make_tree(tmp_path, *, operstate="up", ipv4="0", ipv6="0"):
++def make_tree(tmp_path, *, operstate="up", ipv4="0", ipv6="0", interface="enp8s0"):
+     sys_root = tmp_path / "sys"; proc_root = tmp_path / "proc"
+-    net = sys_root / "class/net/enp8s0"; net.mkdir(parents=True)
++    net = sys_root / "class/net" / interface; net.mkdir(parents=True)
+     (net / "operstate").write_text(operstate)
+     for family, value in (("ipv4", ipv4), ("ipv6", ipv6)):
+-        path = proc_root / f"sys/net/{family}/conf/enp8s0"; path.mkdir(parents=True)
++        path = proc_root / f"sys/net/{family}/conf/{interface}"; path.mkdir(parents=True)
+         (path / "forwarding").write_text(value)
+     (proc_root / "100").mkdir(parents=True); (proc_root / "100/cmdline").write_bytes(b"/usr/bin/python\0")
+     return sys_root, proc_root
+@@ -129,7 +129,8 @@ def test_repository_bpf_artifact_is_exact_frozen_expression():
+     assert (root / "deploy/device-fingerprint/raw-capture.bpf").read_text(encoding="ascii").strip() == RAW_CAPTURE_FILTER
+ 
+ 
+-def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(monkeypatch):
++@pytest.mark.parametrize("interface", ["enp8s0", "enp1s0"])
++def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(monkeypatch, interface):
+     from app.device_fingerprint_sensor import capture as module
+     calls = []
+     class Socket:
+@@ -139,13 +140,13 @@ def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(m
+         def close(self): calls.append("close")
+     monkeypatch.setattr(module, "attach_frozen_filter", lambda _socket: calls.append("filter"))
+     monkeypatch.setattr(module.socket, "AF_PACKET", 17, raising=False)
+-    raw = module.RawCapture("enp8s0", socket_factory=lambda *args: (calls.append(("socket", args)) or Socket()))
++    raw = module.RawCapture(interface, socket_factory=lambda *args: (calls.append(("socket", args)) or Socket()))
+     raw.open()
+     assert calls[0] == (
+         "socket",
+         (module.socket.AF_PACKET, module.socket.SOCK_RAW, module.socket.htons(0x0003)),
+     )
+-    assert ("bind", ("enp8s0", 0)) in calls
++    assert ("bind", (interface, 0)) in calls
+     assert calls.index("filter") < next(index for index, item in enumerate(calls) if isinstance(item, tuple) and item[0] == "bind")
+ 
+ 
