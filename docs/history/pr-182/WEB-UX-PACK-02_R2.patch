@@ -1,0 +1,1539 @@
+diff --git a/README.md b/README.md
+index 69ca704391ac9c9166730b3e207f1e2c547a6275..90b72839c7dff5bf451f418f490679b75b68fb0e 100644
+--- a/README.md
++++ b/README.md
+@@ -919,6 +919,15 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+ 
+ ## Home Online Devices — current presentation
+ 
++`WEB-UX-PACK-02` R2 extends this repository candidate to Home and Devices:
++six approved 22×22 Fingerprint Type SVGs, shared Controller-first Platform,
++independent Site-safe Device Inventory, and one Access Points Now roster enriched
++with client bars and per-AP traffic. Devices keeps its existing 500-row limit;
++enrichment uses at most two bounded 250-MAC production batches (TechLead refinement).
++No production deployment/activation is implied. See the
++[Admin module contract](docs/modules/admin-web.md#web-ux-pack-02--r2-repository-candidate)
++for the exact API, machine-field/icon and refresh contracts.
++
+ Current repository Home columns (deployment is separately authorized):
+ 
+ ```text
+@@ -959,7 +968,7 @@ before Traffic Now; the remaining panels keep their relative order. Only Home
+ `.live-metrics` summary cards have denser spacing and aligned values; responsive
+ breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
+ independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
+-Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
++Unavailable `—` is neutral. Per-AP traffic is now joined into Access Points Now; source/freshness/coverage and Traffic
+ page semantics are unchanged. This describes repository implementation, not a
+ new production deployment or visual-acceptance claim.
+ 
+diff --git a/app/admin_web/device_fingerprint_presentation.py b/app/admin_web/device_fingerprint_presentation.py
+index 6e93b088d1d9cbbbd81f259890137adacc4d02f7..e754abc4500cc7d151d9b7a6a00905db6a01a0b6 100644
+--- a/app/admin_web/device_fingerprint_presentation.py
++++ b/app/admin_web/device_fingerprint_presentation.py
+@@ -51,9 +51,12 @@ class FingerprintPresentation:
+     manufacturer_result: FingerprintDimensionPresentation | None = None
+     model_result: FingerprintDimensionPresentation | None = None
+ 
+-    def compact_type(self) -> dict[str, str]:
++    def compact_type(self) -> dict[str, Any]:
++        dimension = self.device_class_result
+         return {"state": self.state,
+-                "value": self.device_class_result.value if self.device_class_result else "—"}
++                "status": dimension.status if dimension else None,
++                "canonical_value_id": dimension.canonical_value_id if dimension else None,
++                "value": dimension.value if dimension else "—"}
+ 
+     def compact_platform(self) -> dict[str, Any]:
+         platform = self.platform_result
+@@ -69,11 +72,11 @@ class FingerprintPresentation:
+                    for name in _DIMENSIONS}}
+ 
+ 
+-def home_platform_presentation(
++def effective_platform_presentation(
+     controller_value: str | None, controller_key: str | None,
+     fingerprint_platform: dict[str, Any],
+ ) -> dict[str, Any]:
+-    """Home-only precedence; Device Card continues to expose separate sources."""
++    """Shared list precedence; Device Card continues to expose separate sources."""
+     if controller_key is not None and controller_key != "unknown":
+         return {"source": "controller", "value": controller_value, "key": controller_key}
+     if (fingerprint_platform["state"] == "classified"
+@@ -110,6 +113,8 @@ def present_classification(record: ClassificationReadRecord | None) -> Fingerpri
+                 or status != "resolved" and canonical is not None
+                 or row["support_level"] not in {"none", "low", "medium", "high"}):
+             raise ValueError("Invalid fingerprint dimension value/support")
++        if dimension == "device_class" and status == "resolved" and canonical not in {"smartphone", "tablet", "laptop"}:
++            raise ValueError("Invalid fingerprint device class")
+         for key in _TEXT_SETS:
+             if not isinstance(row[key], list) or any(not isinstance(item, str) or not item for item in row[key]):
+                 raise ValueError("Invalid fingerprint diagnostic metadata")
+diff --git a/app/admin_web/device_gateway.py b/app/admin_web/device_gateway.py
+index 9712850a39b0edd9acd2e86fc8cdf515e817eaaf..3623d3d74c25b4d89d2cc05c34ea556dda21dde0 100644
+--- a/app/admin_web/device_gateway.py
++++ b/app/admin_web/device_gateway.py
+@@ -12,6 +12,7 @@ from app.analytics.source_gateway import (
+     AnalyticsQueryDeadlineExceeded,
+     QueryDeadline,
+ )
++from app.analytics.validation import parse_utc
+ 
+ 
+ _REGISTRY_ALIAS = "registry_db"
+@@ -55,6 +56,12 @@ class AdminDevicePage:
+     has_more: bool
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class AdminDeviceInventorySummary:
++    total_devices: int
++    new_devices_today: int
++
++
+ @dataclass(frozen=True, slots=True)
+ class AdminDeviceListContextRow:
+     device_id: str
+@@ -297,12 +304,12 @@ ORDER BY site_last_seen_at DESC, device_id DESC
+ """
+ 
+ 
+-_DEVICE_CONTEXT_PREFIX, _DEVICE_CONTEXT_SEPARATOR, _DEVICE_CONTEXT_UNUSED = (
++_DEVICE_POPULATION_SQL, _DEVICE_CONTEXT_SEPARATOR, _DEVICE_CONTEXT_UNUSED = (
+     _DEVICE_PAGE_SQL.partition("page AS (\n")
+ )
+ if not _DEVICE_CONTEXT_SEPARATOR:  # pragma: no cover - module invariant
+     raise RuntimeError("device context SQL prefix is unavailable")
+-_DEVICE_CONTEXT_PAGE_SQL = _DEVICE_CONTEXT_PREFIX + """context_devices AS (
++_DEVICE_CONTEXT_PAGE_SQL = _DEVICE_POPULATION_SQL + """context_devices AS (
+     SELECT
+         devices.*,
+         CASE
+@@ -387,6 +394,40 @@ class AdminDeviceReadGateway:
+             else Path(current_state_db_path)
+         )
+ 
++    def device_inventory_summary(
++        self, *, site_id: str, today_start_utc: str, evaluated_at_utc: str, deadline: QueryDeadline,
++    ) -> AdminDeviceInventorySummary:
++        if not isinstance(site_id, str) or not site_id:
++            raise ValueError("site_id must be a non-empty string")
++        if parse_utc(today_start_utc, "today_start_utc") > parse_utc(evaluated_at_utc, "evaluated_at_utc"):
++            raise ValueError("inventory window is invalid")
++        mac_glob = ":".join(["[0-9A-F][0-9A-F]"] * 6)
++        sql = _DEVICE_POPULATION_SQL.rstrip().rstrip(",") + """
++        SELECT COUNT(*) AS total_devices,
++            COALESCE(SUM(site_first_seen_at >= :today_start_utc AND site_first_seen_at <= :evaluated_at_utc), 0) AS new_devices_today,
++            COALESCE(SUM(identity_conflict <> 0 OR canonical_mac IS NULL OR canonical_mac NOT GLOB :mac_glob
++                OR device_id IS NULL OR device_id = ''
++                OR strftime('%Y-%m-%dT%H:%M:%fZ', site_first_seen_at) IS NOT site_first_seen_at), 0) AS invalid_devices
++        FROM devices
++        """
++        connection = self._open(deadline)
++        try:
++            row = connection.execute(sql, {"site_id": site_id, "today_start_utc": today_start_utc,
++                                           "evaluated_at_utc": evaluated_at_utc, "mac_glob": mac_glob}).fetchone()
++        except sqlite3.Error as exc:
++            if deadline.expired() or "interrupt" in str(exc).lower():
++                raise AnalyticsQueryDeadlineExceeded("Admin device query deadline exceeded") from None
++            raise AdminDeviceSourceError("device source unavailable") from None
++        finally:
++            connection.set_progress_handler(None, 0)
++            try:
++                connection.rollback()
++            finally:
++                connection.close()
++        if row["invalid_devices"]:
++            raise AdminDeviceIntegrityError("device identity conflict")
++        return AdminDeviceInventorySummary(row["total_devices"], row["new_devices_today"])
++
+     def list_devices(
+         self,
+         *,
+diff --git a/app/admin_web/query_service.py b/app/admin_web/query_service.py
+index c69045e71d214701c579a265bbff8e2f3c43e598..1d263a70b7d6f285365043731e94d4dd2cb10c41 100644
+--- a/app/admin_web/query_service.py
++++ b/app/admin_web/query_service.py
+@@ -9,6 +9,7 @@ import json
+ from dataclasses import asdict, dataclass
+ from datetime import datetime, timedelta, timezone
+ from typing import Any, Callable, Mapping
++from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+ 
+ from app.analytics.serialization import serialize_analytics_value
+ from app.analytics.source_gateway import (
+@@ -40,7 +41,7 @@ from app.analytics.validation import format_utc
+ from app.common.mac import format_mac_colon
+ from app.common.device_type import normalize_device_type_key
+ from .device_fingerprint_presentation import (
+-    DeviceFingerprintPresentationService, home_platform_presentation,
++    DeviceFingerprintPresentationService, MAX_PRODUCTION_READ_MACS, effective_platform_presentation,
+ )
+ from app.current_state import (
+     CurrentStateSchemaError,
+@@ -267,6 +268,7 @@ class AdminQueryService:
+         device_list_context_state: str = "disabled",
+         device_list_context_cursor_codec: Any | None = None,
+         fingerprint_presentation_service: DeviceFingerprintPresentationService | None = None,
++        inventory_timezone_name: str | None = None,
+     ):
+         self._config = config
+         self._policy = policy
+@@ -286,6 +288,7 @@ class AdminQueryService:
+         self._device_list_context_state = device_list_context_state
+         self._device_list_context_cursor_codec = device_list_context_cursor_codec
+         self._fingerprint = fingerprint_presentation_service or DeviceFingerprintPresentationService(None)
++        self._inventory_timezone_name = inventory_timezone_name
+         self._execution_controls = execution_controls or (
+             AdminQueryExecutionControls(
+                 max_concurrent_queries=config.max_concurrent_queries,
+@@ -581,7 +584,7 @@ class AdminQueryService:
+                 fingerprint = fingerprints[item["client_mac"]]
+                 item["fingerprint_type"] = fingerprint.compact_type()
+                 item["fingerprint_platform"] = fingerprint.compact_platform()
+-                item["platform_presentation"] = home_platform_presentation(
++                item["platform_presentation"] = effective_platform_presentation(
+                     item["device_type"], item["device_type_key"], item["fingerprint_platform"],
+                 )
+             return AdminQueryResponse(result, page)
+@@ -932,6 +935,44 @@ class AdminQueryService:
+             )
+         )
+ 
++    def device_inventory_summary(self, principal, site_id):
++        self._authorize(principal, "admin.read.devices", site_id)
++
++        def query(deadline):
++            try:
++                zone = ZoneInfo(self._inventory_timezone_name)
++            except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
++                raise AdminQueryUnavailable() from exc
++            evaluated = datetime.now(timezone.utc)
++            local_midnight = evaluated.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0, fold=0)
++            value = self._devices.device_inventory_summary(
++                site_id=site_id, today_start_utc=format_utc(local_midnight.astimezone(timezone.utc)),
++                evaluated_at_utc=format_utc(evaluated), deadline=deadline,
++            )
++            if (type(value.total_devices) is not int or type(value.new_devices_today) is not int
++                    or not 0 <= value.new_devices_today <= value.total_devices):
++                raise AdminQueryIntegrityUnavailable()
++            return AdminQueryResponse({"total_devices": value.total_devices,
++                                       "new_devices_today": value.new_devices_today,
++                                       "timezone": self._inventory_timezone_name,
++                                       "evaluated_at_utc": format_utc(evaluated)})
++
++        return self._run(query)
++
++    def _enrich_device_fingerprints(self, site_id, items):
++        # Devices keeps its existing <=500 page limit. Production reads stay <=250.
++        macs = tuple(item["canonical_mac"] for item in items)
++        fingerprints = {}
++        for offset in range(0, len(macs), MAX_PRODUCTION_READ_MACS):
++            fingerprints.update(self._fingerprint.get_many(site_id, macs[offset:offset + MAX_PRODUCTION_READ_MACS]))
++        for item in items:
++            fingerprint = fingerprints[item["canonical_mac"]]
++            item["fingerprint_type"] = fingerprint.compact_type()
++            item["fingerprint_platform"] = fingerprint.compact_platform()
++            item["platform_presentation"] = effective_platform_presentation(
++                item["device_type"], item["device_type_key"], item["fingerprint_platform"],
++            )
++
+     def list_devices(
+         self, principal, site_id, *, limit=None, cursor=None, mac=None,
+     ):
+@@ -961,6 +1002,7 @@ class AdminQueryService:
+                     deadline=deadline,
+                 )
+                 items = [self._device_list_dto(item) for item in page.items]
++                self._enrich_device_fingerprints(site_id, items)
+                 next_cursor = None
+                 if page.has_more and page.items:
+                     last = page.items[-1]
+@@ -1359,6 +1401,7 @@ class AdminQueryService:
+             )
+         except DeviceListContextSerializationError as exc:
+             raise AdminQueryIntegrityUnavailable() from exc
++        self._enrich_device_fingerprints(site_id, result["items"])
+         next_cursor = None
+         if page.has_more:
+             if not page.items:
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index e5d1154b2e0be45621faefab5ab1f2876cef5471..22248e6f5a460e8dd4d54dd35d161b875b3bbafd 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -629,6 +629,16 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             ),
+         )
+ 
++    @blueprint.get("/admin/api/v1/sites/<site_id>/devices/inventory-summary")
++    @authenticated
++    def api_device_inventory_summary(site_id: str) -> Response:
++        if request.args:
++            return _error("invalid_request", 400)
++        return _site_query(
++            site_id,
++            lambda service, selected: service.device_inventory_summary(g.admin_principal, selected),
++        )
++
+     @blueprint.get("/admin/api/v1/sites/<site_id>/devices/<device_id>")
+     @authenticated
+     def api_device(site_id: str, device_id: str) -> Response:
+diff --git a/app/admin_web/runtime.py b/app/admin_web/runtime.py
+index ae2d873d5124ac5de8be41eca3f3ae1f0a3e1c9c..c15bf33092d6d3828e6906a24d95e7cb11751d87 100644
+--- a/app/admin_web/runtime.py
++++ b/app/admin_web/runtime.py
+@@ -487,6 +487,7 @@ def _query_service(
+             ),
+             visit_analytics_service=analytics_service,
+             fingerprint_presentation_service=fingerprint_presentation_service,
++            inventory_timezone_name=getattr(getattr(registry_read_service, "service", None), "timezone_name", None),
+             current_state_read_service=current_state_read_service,
+             current_traffic_read_service=getattr(
+                 analytics_runtime, "current_traffic_service", None
+diff --git a/app/admin_web/static/admin.css b/app/admin_web/static/admin.css
+index be39f7107ff4ebfb9151597ef6fc069e3bcd3e45..cd8280e2619ad19bb0e06c864cbff562c66d6972 100644
+--- a/app/admin_web/static/admin.css
++++ b/app/admin_web/static/admin.css
+@@ -91,7 +91,7 @@ button, input, select { font: inherit; }
+ .device-list { grid-column: 1 / -1; display: grid; gap: .55rem; }
+ .device-row {
+   display: grid;
+-  grid-template-columns: 104px minmax(220px, 1.1fr) minmax(105px, .5fr) minmax(180px, .9fr) minmax(145px, .62fr) minmax(140px, .72fr) auto;
++  grid-template-columns: 104px minmax(220px, 1.1fr) 72px minmax(105px, .5fr) minmax(180px, .9fr) minmax(145px, .62fr) minmax(140px, .72fr) auto;
+   align-items: center;
+   gap: 1rem;
+   min-width: 0;
+@@ -118,6 +118,16 @@ button, input, select { font: inherit; }
+ .device-row-label { display: block; color: var(--muted); font-size: .68rem; font-weight: 750; letter-spacing: .045em; text-transform: uppercase; }
+ .device-row-value { display: block; margin-top: .18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .85rem; }
+ .device-row-type-value, .device-type-value { display: inline-flex; align-items: center; gap: .42rem; max-width: 100%; }
++.fingerprint-type-icon { display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; vertical-align: middle; }
++.fingerprint-type-icon img { display: block; width: 22px; height: 22px; }
++.live-fingerprint-type-cell, .device-row-type-field { text-align: center; }
++.device-row-type-field .fingerprint-type-icon { margin-top: .18rem; }
++.device-inventory { margin-bottom: 1rem; padding: 1rem 1.15rem; }
++.device-inventory h2 { margin: 0 0 .75rem; font-size: 1rem; }
++.device-inventory-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
++.device-inventory .metric { display: block; font-size: 1.6rem; margin: .25rem 0 0; }
++.device-inventory #device-inventory-state:empty { display: none; }
++.ap-device-count { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: .75rem; align-items: center; margin: .65rem 0; }
+ .device-type-icon { display: block; flex: 0 0 auto; width: 18px; height: 11px; object-fit: contain; }
+ .device-row-stats { display: flex; gap: 1rem; }
+ .device-row-stat strong { display: block; font-size: .9rem; }
+@@ -297,8 +307,12 @@ input[type="radio"] { width: auto; min-height: 0; }
+   .live-bar-track { grid-column: 1 / -1; }
+ }
+ 
++@media (min-width: 961px) and (max-width: 1450px) {
++  .device-row { grid-template-columns: 96px minmax(0, 1.1fr) 72px minmax(0, .5fr) minmax(0, .9fr) minmax(0, .62fr) minmax(0, .72fr) auto; gap: .65rem; }
++  .device-row-stats { min-width: 0; gap: .5rem; }
++}
+ @media (max-width: 960px) {
+-  .device-row { grid-template-columns: 96px minmax(210px, 1fr) minmax(100px, .5fr) minmax(180px, .9fr) minmax(130px, .6fr) auto; }
++  .device-row { grid-template-columns: 96px minmax(0, 1fr) 72px minmax(0, .5fr) minmax(0, .9fr) minmax(0, .6fr) auto; }
+   .device-row-network { display: none; }
+ }
+ 
+@@ -307,6 +321,8 @@ input[type="radio"] { width: auto; min-height: 0; }
+   .device-status { grid-column: 1; }
+   .device-row-main { grid-column: 2; }
+   .device-row-chevron { grid-column: 3; grid-row: 1; }
+-  .device-row-type-field, .device-row-activity, .device-row-stats { grid-column: 2 / 4; }
++  .device-row-type-field, .device-row-platform-field, .device-row-activity, .device-row-stats { grid-column: 2 / 4; }
++  .device-row-type-field { text-align: left; }
++  .device-inventory-metrics { grid-template-columns: minmax(0, 1fr); }
+   .device-row-network { display: none; }
+ }
+diff --git a/app/admin_web/static/admin.js b/app/admin_web/static/admin.js
+index 00d8234fa93fbd2534fb4d13506a3560fefb4fd0..2a3dfafff7150f472ec48e2e6674bee89e0faa5f 100644
+--- a/app/admin_web/static/admin.js
++++ b/app/admin_web/static/admin.js
+@@ -1,5 +1,40 @@
+ (function () {
+   "use strict";
++  const resolved = {
++    smartphone: ["type-smartphone.svg", "Smartphone"],
++    tablet: ["type-tablet.svg", "Tablet"],
++    laptop: ["type-laptop.svg", "Laptop"],
++  };
++  const unresolved = new Set(["unknown", "insufficient_evidence", "conflicting_evidence", "recognized_out_of_scope"]);
++  function mapping(value) {
++    if (!value || typeof value !== "object" || Array.isArray(value)
++      || Object.keys(value).sort().join(",") !== "canonical_value_id,state,status,value") return null;
++    if (value.state === "classified") {
++      if (value.status === "resolved" && Object.prototype.hasOwnProperty.call(resolved, value.canonical_value_id)) {
++        return resolved[value.canonical_value_id];
++      }
++      if (unresolved.has(value.status) && value.canonical_value_id === null) return ["type-unresolved.svg", "Device type unresolved"];
++    }
++    if (value.status === null && value.canonical_value_id === null) {
++      if (value.state === "no_result") return ["type-no-result.svg", "No device type result"];
++      if (value.state === "unavailable") return ["type-unavailable.svg", "Device type source unavailable"];
++    }
++    return null;
++  }
++  function icon(createNode, value) {
++    const selected = mapping(value);
++    if (!selected) throw {uiFailure: {kind: "unexpected", title: "Unexpected response", message: "Invalid device Type projection."}};
++    const wrapper = createNode("span", "fingerprint-type-icon");
++    wrapper.setAttribute("aria-label", selected[1]);
++    wrapper.title = selected[1];
++    const image = createNode("img");
++    image.src = "/admin/static/icons/device-types/" + selected[0];
++    image.width = 22; image.height = 22; image.alt = "";
++    image.setAttribute("aria-hidden", "true");
++    wrapper.append(image);
++    return wrapper;
++  }
++  if (typeof window !== "undefined") window.CaptivPortalDeviceTypePresentation = Object.freeze({mapping, icon});
+ 
+   const MAC_PATTERN = /^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$/;
+   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+@@ -457,8 +492,11 @@
+     );
+ 
+     const type = node("span", "device-row-field device-row-type-field");
+-    const typeValue = deviceTypeValue(item.device_type, item.device_type_key, "device-row-value device-row-type-value");
+-    type.append(node("span", "device-row-label", "Type"), typeValue);
++    type.append(node("span", "device-row-label", "Type"),
++      window.CaptivPortalDeviceTypePresentation.icon(node, item.fingerprint_type));
++    const platform = node("span", "device-row-field device-row-platform-field");
++    platform.append(node("span", "device-row-label", "Platform"),
++      deviceTypeValue(item.platform_presentation.value, item.platform_presentation.key, "device-row-value device-row-type-value"));
+ 
+     const lastSeen = node("span", "device-row-field device-row-activity");
+     lastSeen.append(
+@@ -479,10 +517,33 @@
+       stats.append(stat);
+     });
+ 
+-    value.append(status, main, type, lastSeen, network, stats, node("span", "device-row-chevron", "›"));
++    value.append(status, main, type, platform, lastSeen, network, stats, node("span", "device-row-chevron", "›"));
+     return value;
+   }
+ 
++  let inventoryGeneration = 0;
++  async function loadDeviceInventory() {
++    const generation = ++inventoryGeneration;
++    const total = document.getElementById("device-inventory-total");
++    const today = document.getElementById("device-inventory-today");
++    const state = document.getElementById("device-inventory-state");
++    total.textContent = "—"; today.textContent = "—"; state.textContent = "";
++    try {
++      const payload = await requestJson(`${context.apiBase}/devices/inventory-summary`);
++      if (generation !== inventoryGeneration) return;
++      const value = payload.result;
++      if (!value || Object.keys(value).sort().join(",") !== "evaluated_at_utc,new_devices_today,timezone,total_devices"
++        || !Number.isSafeInteger(value.total_devices) || !Number.isSafeInteger(value.new_devices_today)
++        || value.new_devices_today < 0 || value.total_devices < value.new_devices_today
++        || typeof value.timezone !== "string" || !value.timezone
++        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.evaluated_at_utc)) throw new Error("Invalid inventory");
++      total.textContent = String(value.total_devices); today.textContent = String(value.new_devices_today);
++    } catch (_) {
++      if (generation !== inventoryGeneration) return;
++      total.textContent = "—"; today.textContent = "—"; state.textContent = "Unavailable";
++    }
++  }
++
+   async function loadDevices(append) {
+     if (!append) {
+       context.cursor = null;
+@@ -938,6 +999,7 @@
+       if (context.operation) run(context.operation);
+       else if (context.page === "observations") run(() => loadObservations(false));
+       if (context.page === "device") loadDeviceCurrent();
++      if (context.page === "devices") loadDeviceInventory();
+     });
+     loadMoreButton.addEventListener("click", () => {
+       if (context.page === "devices") run(() => loadDevices(true));
+@@ -948,6 +1010,7 @@
+     else if (context.operation) {
+       run(context.operation);
+       if (context.page === "device") loadDeviceCurrent();
++      if (context.page === "devices") loadDeviceInventory();
+     }
+   }
+ 
+@@ -5041,9 +5104,41 @@
+     row.insertBefore(type, row.cells[1]);
+   }
+ 
++  function renderAccessPointRoster(createNode, target, footer, rows, clientSummary, clientAvailable, trafficRows, trafficAvailable, trafficEnabled, formatRate) {
++    target.replaceChildren();
++    const buckets = new Map(clientAvailable ? clientSummary.devices_by_ap.map((item) => [item.ap_mac, item.client_count]) : []);
++    const max = Math.max(1, ...buckets.values());
++    const traffic = new Map(trafficAvailable ? trafficRows.map((item) => [item.ap_mac, item]) : []);
++    rows.forEach((item) => {
++      const row = createNode("article", "data-row access-point-row");
++      const header = createNode("div", "data-row-header");
++      header.append(createNode("strong", null, item.name || "Access point"), createNode("span", "badge", item.product_status_classification));
++      row.append(header, createNode("p", "mono", item.ap_mac));
++      const devices = createNode("div", "ap-device-count");
++      const count = clientAvailable ? (buckets.get(item.ap_mac) || 0) : null;
++      const track = createNode("span", "live-bar-track");
++      if (count !== null) {
++        const fill = createNode("span", "live-bar-fill");
++        fill.style.width = `${count / max * 100}%`; track.append(fill);
++      }
++      devices.append(createNode("span", "live-detail", `Devices · ${count === null ? "—" : count}`), track);
++      row.append(devices);
++      if (trafficEnabled) {
++        const rate = traffic.get(item.ap_mac);
++        if (!rate) row.append(createNode("p", "live-detail", "Traffic · —"));
++        else row.append(createNode("p", "live-detail", `Traffic · ${rate.rate_status}`),
++          createNode("p", "live-detail", `Download ${formatRate(rate.download_mbps)} · Upload ${formatRate(rate.upload_mbps)} · Total ${formatRate(rate.total_mbps)}`),
++          createNode("p", "live-detail", `Source ${rate.selected_source === "lan" ? "LAN" : "Wired"} · observed ${rate.observed_at || "—"}`));
++      }
++      target.append(row);
++    });
++    footer.textContent = clientAvailable && clientSummary.counts.ap_unknown > 0 ? `AP Unknown · ${clientSummary.counts.ap_unknown}` : "";
++    footer.hidden = !footer.textContent;
++  }
++
+   function clientPresentationCells(createNode, item) {
+-    const fingerprintType = createNode("td", "live-fingerprint-type-cell",
+-      item.fingerprint_type && typeof item.fingerprint_type.value === "string" ? item.fingerprint_type.value : "—");
++    const fingerprintType = createNode("td", "live-fingerprint-type-cell");
++    fingerprintType.append(window.CaptivPortalDeviceTypePresentation.icon(createNode, item.fingerprint_type));
+     const deviceType = createNode("td", "live-device-type-cell");
+     const platform = item.platform_presentation;
+     const platformValue = platform && typeof platform.value === "string" ? platform.value : "—";
+@@ -5107,7 +5202,7 @@
+       failureTransition, neutralAbort, releaseController, resetClientState,
+       retainedSelection, unavailableValues,
+       standaloneCoordinatorEnabled,
+-      clientPresentationCells, prepareClientTableHeader, rssiPresentation,
++      clientPresentationCells, prepareClientTableHeader, rssiPresentation, renderAccessPointRoster,
+       validateApSummary, validateClientSummary, validatePage,
+     });
+   }
+@@ -5234,7 +5329,7 @@
+     document.getElementById(kind === "client" ? "live-client-freshness" : "live-ap-freshness").textContent = label;
+     if (kind === "client") {
+       clientRows.closest(".table-scroll").hidden = status === "unavailable";
+-      document.getElementById("live-devices-by-ap").hidden = status === "unavailable";
++      renderApEnrichment();
+       if (status === "unavailable") clientMore.hidden = true;
+     } else {
+       apRows.hidden = status === "unavailable";
+@@ -5247,15 +5342,14 @@
+         document.getElementById("live-other-detail").textContent = values.detail;
+         document.getElementById("live-client-state").textContent = values.state;
+         clientRows.replaceChildren();
+-        const byAp = document.getElementById("live-devices-by-ap");
+-        byAp.replaceChildren();
++        renderApEnrichment();
+       } else {
+         document.getElementById("live-ap-total").textContent = values.primary;
+         document.getElementById("live-ap-detail").textContent = values.detail;
+         document.getElementById("live-ap-count").textContent = values.count;
+         document.getElementById("live-ap-state").textContent = values.state;
+         apRows.replaceChildren();
+-        if (sources.client.summary) renderByAp();
++        renderApEnrichment();
+       }
+     }
+   }
+@@ -5276,7 +5370,7 @@
+     if (Array.isArray(ssids)) ssids.forEach((ssid) => { const option = node("option", null, ssid); option.value = ssid; ssidSelect.append(option); });
+     ssidSelect.value = retainedSelection(ssids, selectedSsid);
+     document.getElementById("live-ssid-label").hidden = !Array.isArray(ssids) || ssids.length <= 1;
+-    if (sources.ap.rows.length) renderAps(); else renderByAp();
++    renderApEnrichment();
+     renderFreshness("client");
+   }
+   function renderApSummary() {
+@@ -5298,27 +5392,12 @@
+       : "unavailable";
+     return enrichmentState(sources.ap.rows, sources.ap.cursor, summary, mac, effectiveFreshness);
+   }
+-  function renderByAp() {
+-    const target = document.getElementById("live-devices-by-ap");
+-    target.replaceChildren();
+-    const result = sources.client.summary;
+-    const effectiveFreshness = result
+-      ? localFreshness(result.snapshot, result.freshness_policy, sources.client.acceptedAt, performance.now())
+-      : "unavailable";
+-    if (!result || effectiveFreshness === "unavailable") { target.append(node("p", "live-detail", "Unavailable")); return; }
+-    const max = Math.max(1, ...result.devices_by_ap.map((item) => item.client_count));
+-    result.devices_by_ap.forEach((item) => {
+-      const row = node("div", "live-bar");
+-      const track = node("span", "live-bar-track");
+-      const fill = node("span", "live-bar-fill");
+-      fill.style.width = `${Math.min(100, item.client_count / max * 100)}%`;
+-      track.append(fill);
+-      const label = node("span");
+-      label.append(node("strong", null, apLabel(item.ap_mac)), node("br"), node("small", "live-detail", apEnrichment(item.ap_mac)));
+-      row.append(label, track, node("strong", null, item.client_count));
+-      target.append(row);
+-    });
+-    if (result.counts.ap_unknown > 0) target.append(node("p", "live-detail", `AP Unknown · ${result.counts.ap_unknown}`));
++  function renderApEnrichment() {
++    const summary = sources.client.summary;
++    const available = summary && !sources.client.enrichmentUnavailable && localFreshness(summary.snapshot, summary.freshness_policy, sources.client.acceptedAt, performance.now()) !== "unavailable";
++    const apAvailable = sources.ap.summary && localFreshness(sources.ap.summary.snapshot, sources.ap.summary.freshness_policy, sources.ap.acceptedAt, performance.now()) !== "unavailable";
++    renderAccessPointRoster(node, apRows, document.getElementById("live-ap-unknown"),
++      apAvailable ? sources.ap.rows : [], summary, available, [], false, false);
+     rebuildApFilter();
+   }
+   function rebuildApFilter() {
+@@ -5347,23 +5426,14 @@
+     document.getElementById("live-client-state").textContent = sources.client.rows.length ? `Showing ${sources.client.rows.length} current device(s).` : "No devices in this current snapshot.";
+   }
+   function renderAps() {
+-    apRows.replaceChildren();
+-    const buckets = new Map();
+-    if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => buckets.set(item.ap_mac, item.client_count));
+-    sources.ap.rows.forEach((item) => {
+-      const row = node("article", "data-row");
+-      const header = node("div", "data-row-header");
+-      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.product_status_classification));
+-      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Current scoped clients: ${buckets.get(item.ap_mac) || 0}`));
+-      apRows.append(row);
+-    });
++    renderApEnrichment();
+     const total = sources.ap.summary && sources.ap.summary.counts.total;
+     document.getElementById("live-ap-count").textContent = total === null || total === undefined
+       ? ""
+       : (sources.ap.cursor ? `Showing ${sources.ap.rows.length} of ${total}` : `${sources.ap.rows.length} access point(s) loaded`);
+     document.getElementById("live-ap-state").textContent = sources.ap.rows.length ? "Current access points loaded." : "No access points in this current snapshot.";
+     apMore.hidden = !sources.ap.cursor;
+-    rebuildApFilter(); renderByAp();
++    rebuildApFilter();
+   }
+   function schedule(kind, delaySeconds) {
+     const source = sources[kind];
+@@ -5372,6 +5442,7 @@
+     source.timer = window.setTimeout(() => { source.timer = null; refreshGroup(kind, false); }, delaySeconds * 1000);
+   }
+   function handleFailure(kind, failure) {
++    if (kind === "client") { sources.client.enrichmentUnavailable = true; renderApEnrichment(); }
+     if (failure.global) { stop(failure.kind); return false; }
+     const source = sources[kind];
+     const transition = failureTransition(source, failure);
+@@ -5402,6 +5473,7 @@
+       if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0}};
+       if (source.generation !== generation) return;
+       source.summary = summary; source.acceptedAt = performance.now(); source.rows = []; source.cursor = null;
++      source.enrichmentUnavailable = false;
+       if (kind === "client") { renderClientSummary(); renderClients(false); } else { renderApSummary(); renderAps(); }
+       if (summary.snapshot.cycle_id !== null && summary.snapshot.freshness_status !== "unavailable") {
+         const parameters = kind === "client" ? paramsForClients(summary, null) : paramsForAps(summary, null);
+@@ -5814,10 +5886,8 @@
+   const refreshButton = document.getElementById("refresh-button");
+   const clientRows = document.getElementById("live-client-rows");
+   const apRows = document.getElementById("live-ap-rows");
+-  const trafficRows = document.getElementById("traffic-ap-rows");
+   const clientMore = document.getElementById("live-client-more");
+   const apMore = document.getElementById("live-ap-more");
+-  const trafficMore = document.getElementById("traffic-ap-more");
+   const filters = document.getElementById("live-client-filters");
+   const globalPanel = document.getElementById("home-live-global");
+   const sources = {
+@@ -5932,14 +6002,14 @@
+       document.getElementById("live-other-detail").textContent = values.detail;
+       document.getElementById("live-client-state").textContent = values.state;
+       clientRows.replaceChildren(); clientMore.hidden = true;
+-      document.getElementById("live-devices-by-ap").replaceChildren(node("p", "live-detail", "Unavailable"));
++      renderApEnrichment();
+     } else {
+       document.getElementById("live-ap-total").textContent = values.primary;
+       document.getElementById("live-ap-detail").textContent = values.detail;
+       document.getElementById("live-ap-count").textContent = values.count;
+       document.getElementById("live-ap-state").textContent = values.state;
+       apRows.replaceChildren(); apMore.hidden = true;
+-      renderByAp();
++      renderApEnrichment();
+     }
+   }
+   function renderClientSummary() {
+@@ -5958,7 +6028,7 @@
+     if (Array.isArray(ssids)) ssids.forEach((ssid) => { const option = node("option", null, ssid); option.value = ssid; select.append(option); });
+     select.value = live.retainedSelection(ssids, selected);
+     document.getElementById("live-ssid-label").hidden = !Array.isArray(ssids) || ssids.length <= 1;
+-    renderCurrentFreshness("client");
++    renderCurrentFreshness("client"); renderApEnrichment();
+   }
+   function renderApSummary() {
+     const result = sources.ap.summary; const counts = result.counts;
+@@ -5971,20 +6041,14 @@
+     const item = sources.ap.rows.find((value) => value.ap_mac === mac);
+     return item && item.name ? `${item.name} · ${mac}` : mac;
+   }
+-  function renderByAp() {
+-    const target = document.getElementById("live-devices-by-ap"); target.replaceChildren();
+-    const result = sources.client.summary;
+-    const freshness = result ? live.localFreshness(result.snapshot, result.freshness_policy, sources.client.acceptedAt, performance.now()) : "unavailable";
+-    if (!result || freshness === "unavailable") { target.append(node("p", "live-detail", "Unavailable")); return; }
+-    const apFreshness = sources.ap.summary ? live.localFreshness(sources.ap.summary.snapshot, sources.ap.summary.freshness_policy, sources.ap.acceptedAt, performance.now()) : "unavailable";
+-    const max = Math.max(1, ...result.devices_by_ap.map((item) => item.client_count));
+-    result.devices_by_ap.forEach((item) => {
+-      const row = node("div", "live-bar"); const track = node("span", "live-bar-track"); const fill = node("span", "live-bar-fill");
+-      fill.style.width = `${Math.min(100, item.client_count / max * 100)}%`; track.append(fill);
+-      const label = node("span"); label.append(node("strong", null, apLabel(item.ap_mac)), node("br"), node("small", "live-detail", live.enrichmentState(sources.ap.rows, sources.ap.cursor, sources.ap.summary, item.ap_mac, apFreshness)));
+-      row.append(label, track, node("strong", null, item.client_count)); target.append(row);
+-    });
+-    if (result.counts.ap_unknown > 0) target.append(node("p", "live-detail", `AP Unknown · ${result.counts.ap_unknown}`));
++  function renderApEnrichment() {
++    const client = sources.client.summary;
++    const available = client && !sources.client.enrichmentUnavailable && live.localFreshness(client.snapshot, client.freshness_policy, sources.client.acceptedAt, performance.now()) !== "unavailable";
++    const apAvailable = sources.ap.summary && live.localFreshness(sources.ap.summary.snapshot, sources.ap.summary.freshness_policy, sources.ap.acceptedAt, performance.now()) !== "unavailable";
++    const trafficAvailable = trafficEnabled && sources.traffic.rowsReady && sources.traffic.summary
++      && trafficFreshness(sources.traffic.summary.snapshot, sources.traffic.summary.freshness_policy, sources.traffic.acceptedAt, performance.now()) !== "unavailable";
++    live.renderAccessPointRoster(node, apRows, document.getElementById("live-ap-unknown"),
++      apAvailable ? sources.ap.rows : [], client, available, sources.traffic.rows, trafficAvailable, trafficEnabled, formatMbps);
+     rebuildApFilter();
+   }
+   function rebuildApFilter() {
+@@ -6009,17 +6073,11 @@
+     document.getElementById("live-client-state").textContent = sources.client.rows.length ? `Showing ${sources.client.rows.length} current device(s).` : "No devices in this current snapshot.";
+   }
+   function renderAps() {
+-    apRows.replaceChildren(); const buckets = new Map();
+-    if (sources.client.summary) sources.client.summary.devices_by_ap.forEach((item) => buckets.set(item.ap_mac, item.client_count));
+-    sources.ap.rows.forEach((item) => {
+-      const row = node("article", "data-row"); const header = node("div", "data-row-header");
+-      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.product_status_classification));
+-      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Current scoped clients: ${buckets.get(item.ap_mac) || 0}`)); apRows.append(row);
+-    });
++    renderApEnrichment();
+     const total = sources.ap.summary && sources.ap.summary.counts.total;
+     document.getElementById("live-ap-count").textContent = total === null || total === undefined ? "" : (sources.ap.cursor ? `Showing ${sources.ap.rows.length} of ${total}` : `${sources.ap.rows.length} access point(s) loaded`);
+     document.getElementById("live-ap-state").textContent = sources.ap.rows.length ? "Current access points loaded." : "No access points in this current snapshot.";
+-    apMore.hidden = !sources.ap.cursor; rebuildApFilter(); renderByAp();
++    apMore.hidden = !sources.ap.cursor; rebuildApFilter();
+   }
+   function setTrafficState(title, message, state) {
+     document.getElementById("traffic-state-title").textContent = title;
+@@ -6034,8 +6092,7 @@
+     document.getElementById("traffic-download-coverage").textContent = "Download —/— APs";
+     document.getElementById("traffic-upload-coverage").textContent = "Upload —/— APs";
+     document.getElementById("traffic-both-coverage").textContent = "Both —/— APs";
+-    trafficRows.replaceChildren(); trafficMore.hidden = true;
+-    document.getElementById("traffic-ap-state").textContent = message || "Traffic AP details unavailable.";
++    sources.traffic.rowsReady = false; renderApEnrichment();
+   }
+   function renderTrafficSummary() {
+     const result = sources.traffic.summary;
+@@ -6058,15 +6115,7 @@
+     setTrafficState(effective === "stale" ? "Traffic is stale" : "Traffic updated", c.coverage_status === "partial" ? "Showing persisted observed subtotals for available AP evidence." : "Persisted AP traffic evidence is available.", effective === "stale" || c.coverage_status === "partial" ? "warning" : "ready");
+   }
+   function renderTrafficRows() {
+-    trafficRows.replaceChildren();
+-    sources.traffic.rows.forEach((item) => {
+-      const row = node("article", "data-row"); const header = node("div", "data-row-header");
+-      header.append(node("strong", null, item.name || item.ap_mac), node("span", "badge", item.rate_status));
+-      row.append(header, node("p", "mono", item.ap_mac), node("p", "live-detail", `Download ${formatMbps(item.download_mbps)} · Upload ${formatMbps(item.upload_mbps)} · Total ${formatMbps(item.total_mbps)}`), node("p", "live-detail", `Source ${item.selected_source === "lan" ? "LAN" : "Wired"} · observed ${item.observed_at || "—"}`));
+-      trafficRows.append(row);
+-    });
+-    trafficMore.hidden = !sources.traffic.cursor || sources.traffic.pageForbidden;
+-    document.getElementById("traffic-ap-state").textContent = sources.traffic.pageForbidden ? "AP traffic detail access denied." : (sources.traffic.rows.length ? `Showing ${sources.traffic.rows.length} AP traffic row(s).` : "No AP traffic rows in this snapshot.");
++    renderApEnrichment();
+   }
+   function renderTrafficFreshness() {
+     if (!trafficEnabled) return;
+@@ -6076,6 +6125,7 @@
+     if (effective === "unavailable") { clearTrafficPageState(sources.traffic); renderTrafficRows(); }
+   }
+   function currentFailure(kind, failure) {
++    if (kind === "client") { sources.client.enrichmentUnavailable = true; renderApEnrichment(); }
+     if (failure.global) { stopAll(failure.kind); return false; }
+     const source = sources[kind]; const clean = markFailure(source, failure, liveRefresh);
+     document.getElementById(kind === "client" ? "live-client-state" : "live-ap-state").textContent = failure.kind === "invalid" ? "Unexpected current-state response; bounded clean refresh applied." : "Live source unavailable; retry remains bounded.";
+@@ -6091,6 +6141,7 @@
+       if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+       if (source.generation !== generation) return {cleanRefresh: false};
+       source.summary = summary; source.acceptedAt = performance.now(); source.rows = []; source.cursor = null;
++      source.enrichmentUnavailable = false;
+       if (kind === "client") { renderClientSummary(); renderClients(); } else { renderApSummary(); renderAps(); }
+       if (summary.snapshot.cycle_id !== null && summary.snapshot.freshness_status !== "unavailable") {
+         const params = currentParams(kind, summary, null);
+@@ -6115,6 +6166,7 @@
+       setTrafficState("Traffic disabled", "Reload after the feature is enabled.", "warning");
+       return false;
+     }
++    sources.traffic.rowsReady = false; renderApEnrichment();
+     const clean = markFailure(sources.traffic, failure, trafficRefresh);
+     setTrafficState("Traffic unavailable", failure.kind === "invalid" ? "Unexpected Traffic response; bounded clean refresh applied." : "Traffic retry remains bounded; Current State is unchanged.", "warning");
+     return clean;
+@@ -6128,14 +6180,29 @@
+       if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+       if (source.generation !== generation) return {cleanRefresh: false};
+       acceptTrafficSummary(source, summary, performance.now());
++      source.rowsReady = false;
+       renderTrafficSummary(); renderTrafficRows();
+       if (trafficPageEligible(summary, summary.snapshot.freshness_status, source.pageForbidden)) {
+         try {
+-          const params = trafficParams(summary, null);
+-          const pagePayload = await requestJson(`${trafficBase}/aps?${params.toString()}`, source, generation, trafficTimeout);
+-          const valid = validateTrafficPage(pagePayload, siteId, summary);
+-          if (!valid) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+-          source.rows = valid.result.items.slice(); source.cursor = valid.page.next_cursor; renderTrafficRows();
++          const rows = [];
++          const seenCursors = new Set();
++          const seenMacs = new Set();
++          let cursor = null;
++          do {
++            const params = trafficParams(summary, cursor);
++            const pagePayload = await requestJson(`${trafficBase}/aps?${params.toString()}`, source, generation, trafficTimeout);
++            if (source.generation !== generation || coordinator.pending || stopped || document.hidden) return {cleanRefresh: false};
++            const valid = validateTrafficPage(pagePayload, siteId, summary);
++            if (!valid) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
++            for (const item of valid.result.items) {
++              if (seenMacs.has(item.ap_mac)) throw {liveFailure: {global: false, kind: "unexpected", retryAfter: 0, status: 200}};
++              seenMacs.add(item.ap_mac); rows.push(item);
++            }
++            cursor = valid.page.next_cursor;
++            if (cursor && seenCursors.has(cursor)) throw {liveFailure: {global: false, kind: "unexpected", retryAfter: 0, status: 200}};
++            if (cursor) seenCursors.add(cursor);
++          } while (cursor);
++          source.rows = rows; source.cursor = null; source.rowsReady = true; renderTrafficRows();
+         } catch (error) {
+           const failure = error && error.liveFailure;
+           if (failure && pageFailureEffect(failure) === "preserve_summary_forbidden") {
+@@ -6274,18 +6341,17 @@
+     if (generation === null) return;
+     source.generation = generation;
+     try {
+-      const params = kind === "traffic" ? trafficParams(source.summary, source.cursor) : currentParams(kind, source.summary, source.cursor);
+-      const stem = kind === "traffic" ? `${trafficBase}/aps` : `${currentBase}/${kind === "client" ? "clients" : "aps"}`;
+-      const payload = await requestJson(`${stem}?${params.toString()}`, source, generation, kind === "traffic" ? trafficTimeout : liveTimeout);
+-      const valid = kind === "traffic" ? validateTrafficPage(payload, siteId, source.summary) : live.validatePage(payload, siteId, kind, source.summary.snapshot);
++      const params = currentParams(kind, source.summary, source.cursor);
++      const stem = `${currentBase}/${kind === "client" ? "clients" : "aps"}`;
++      const payload = await requestJson(`${stem}?${params.toString()}`, source, generation, liveTimeout);
++      const valid = live.validatePage(payload, siteId, kind, source.summary.snapshot);
+       if (!valid || source.generation !== generation) throw {liveFailure: {global: false, kind: "unexpected", retryAfter: 0, status: 200}};
+       source.rows.push(...valid.result.items); source.cursor = valid.page.next_cursor;
+-      if (kind === "client") renderClients(); else if (kind === "ap") renderAps(); else renderTrafficRows();
++      if (kind === "client") renderClients(); else renderAps();
+     } catch (error) {
+       if (!(error && error.neutral)) {
+         const failure = error && error.liveFailure ? error.liveFailure : {global: false, kind: "unexpected", retryAfter: 0, status: 0};
+-        if (kind === "traffic" && pageFailureEffect(failure) === "preserve_summary_forbidden") { source.pageForbidden = true; clearTrafficPageState(source); renderTrafficRows(); }
+-        else if (kind === "traffic") trafficFailure(failure); else currentFailure(kind, failure);
++        currentFailure(kind, failure);
+       }
+     } finally {
+       endCoordinator(coordinator, generation, busyView);
+@@ -6296,7 +6362,6 @@
+   refreshButton.addEventListener("click", () => requestRefresh(true));
+   clientMore.addEventListener("click", () => loadMore("client"));
+   apMore.addEventListener("click", () => loadMore("ap"));
+-  if (trafficMore) trafficMore.addEventListener("click", () => loadMore("traffic"));
+   filters.addEventListener("change", () => {
+     live.resetClientState(sources.client, {clearRows: () => clientRows.replaceChildren(), hideMore: () => { clientMore.hidden = true; }, loading: () => { document.getElementById("live-client-state").textContent = "Loading filtered current clients…"; }});
+     requestRefresh(true);
+diff --git a/app/admin_web/static/icons/device-types/type-laptop.svg b/app/admin_web/static/icons/device-types/type-laptop.svg
+new file mode 100644
+index 0000000000000000000000000000000000000000..708d8f7edbba231d82ef321c8a10e598216dc07f
+--- /dev/null
++++ b/app/admin_web/static/icons/device-types/type-laptop.svg
+@@ -0,0 +1,17 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none">
++  <defs>
++    <filter id="shadow" x="8" y="10" width="80" height="78" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
++      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.16"/>
++    </filter>
++  </defs>
++  <g filter="url(#shadow)">
++    <rect x="16" y="14" width="64" height="64" rx="18" fill="#3B82F6"/>
++    <rect x="17.5" y="15.5" width="61" height="61" rx="16.5" stroke="white" stroke-opacity="0.22" stroke-width="3"/>
++  </g>
++  
++  <rect x="27" y="26" width="42" height="28" rx="5" fill="#EFF6FF" stroke="#0F172A" stroke-width="3"/>
++  <rect x="22" y="57" width="52" height="8" rx="4" fill="#E2E8F0" stroke="#0F172A" stroke-width="3"/>
++  <path d="M32 31h32v18H32z" fill="#BFDBFE"/>
++  <path d="M44 61h8" stroke="#0F172A" stroke-width="2.5" stroke-linecap="round"/>
++
++</svg>
+\ No newline at end of file
+diff --git a/app/admin_web/static/icons/device-types/type-no-result.svg b/app/admin_web/static/icons/device-types/type-no-result.svg
+new file mode 100644
+index 0000000000000000000000000000000000000000..a50f44a61f1f87ba87209580ecdac34251b5ddfa
+--- /dev/null
++++ b/app/admin_web/static/icons/device-types/type-no-result.svg
+@@ -0,0 +1,19 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none">
++  <defs>
++    <filter id="shadow" x="8" y="10" width="80" height="78" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
++      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.16"/>
++    </filter>
++  </defs>
++  <g filter="url(#shadow)">
++    <rect x="16" y="14" width="64" height="64" rx="18" fill="#64748B"/>
++    <rect x="17.5" y="15.5" width="61" height="61" rx="16.5" stroke="white" stroke-opacity="0.22" stroke-width="3"/>
++  </g>
++  
++  <rect x="28" y="24" width="24" height="40" rx="7" fill="#F8FAFC" stroke="#0F172A" stroke-width="3"/>
++  <rect x="32" y="30" width="16" height="24" rx="3" fill="#E2E8F0"/>
++  <circle cx="40" cy="58.5" r="2.2" fill="#0F172A"/>
++  <circle cx="57" cy="54" r="12" fill="#F8FAFC" stroke="#0F172A" stroke-width="3"/>
++  <path d="M57 47v7l5 3" stroke="#0F172A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
++  <path d="M66 48a13 13 0 0 0-18-5" stroke="#22C55E" stroke-width="3" stroke-linecap="round"/>
++
++</svg>
+\ No newline at end of file
+diff --git a/app/admin_web/static/icons/device-types/type-smartphone.svg b/app/admin_web/static/icons/device-types/type-smartphone.svg
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bf2c0cad6ca0d6640c12d55d12b519efdd093b3
+--- /dev/null
++++ b/app/admin_web/static/icons/device-types/type-smartphone.svg
+@@ -0,0 +1,17 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none">
++  <defs>
++    <filter id="shadow" x="8" y="10" width="80" height="78" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
++      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.16"/>
++    </filter>
++  </defs>
++  <g filter="url(#shadow)">
++    <rect x="16" y="14" width="64" height="64" rx="18" fill="#22C55E"/>
++    <rect x="17.5" y="15.5" width="61" height="61" rx="16.5" stroke="white" stroke-opacity="0.22" stroke-width="3"/>
++  </g>
++  
++  <rect x="34" y="24" width="28" height="48" rx="8" fill="#F8FAFC" stroke="#0F172A" stroke-width="3"/>
++  <rect x="38.5" y="30" width="19" height="29" rx="4" fill="#DBEAFE"/>
++  <circle cx="48" cy="64.5" r="2.5" fill="#0F172A"/>
++  <path d="M43 27.5h10" stroke="#0F172A" stroke-width="2.5" stroke-linecap="round"/>
++
++</svg>
+\ No newline at end of file
+diff --git a/app/admin_web/static/icons/device-types/type-tablet.svg b/app/admin_web/static/icons/device-types/type-tablet.svg
+new file mode 100644
+index 0000000000000000000000000000000000000000..92a3df01a9987d1cb55782ad5365e4decea199cd
+--- /dev/null
++++ b/app/admin_web/static/icons/device-types/type-tablet.svg
+@@ -0,0 +1,16 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none">
++  <defs>
++    <filter id="shadow" x="8" y="10" width="80" height="78" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
++      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.16"/>
++    </filter>
++  </defs>
++  <g filter="url(#shadow)">
++    <rect x="16" y="14" width="64" height="64" rx="18" fill="#8B5CF6"/>
++    <rect x="17.5" y="15.5" width="61" height="61" rx="16.5" stroke="white" stroke-opacity="0.22" stroke-width="3"/>
++  </g>
++  
++  <rect x="28" y="22" width="40" height="52" rx="8" fill="#F8FAFC" stroke="#0F172A" stroke-width="3"/>
++  <rect x="33" y="28" width="30" height="36" rx="4" fill="#DDD6FE"/>
++  <circle cx="48" cy="68" r="2.2" fill="#0F172A"/>
++
++</svg>
+\ No newline at end of file
+diff --git a/app/admin_web/static/icons/device-types/type-unavailable.svg b/app/admin_web/static/icons/device-types/type-unavailable.svg
+new file mode 100644
+index 0000000000000000000000000000000000000000..04e7d49a12e47fe817d80c4080f51dfb2a8ab1a7
+--- /dev/null
++++ b/app/admin_web/static/icons/device-types/type-unavailable.svg
+@@ -0,0 +1,18 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none">
++  <defs>
++    <filter id="shadow" x="8" y="10" width="80" height="78" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
++      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.16"/>
++    </filter>
++  </defs>
++  <g filter="url(#shadow)">
++    <rect x="16" y="14" width="64" height="64" rx="18" fill="#64748B"/>
++    <rect x="17.5" y="15.5" width="61" height="61" rx="16.5" stroke="white" stroke-opacity="0.22" stroke-width="3"/>
++  </g>
++  <rect x="27" y="29" width="31" height="34" rx="7" fill="#F8FAFC" stroke="#0F172A" stroke-width="3"/>
++  <rect x="32" y="35" width="21" height="14" rx="3" fill="#E2E8F0"/>
++  <circle cx="35" cy="56" r="2.4" fill="#0F172A"/>
++  <circle cx="43" cy="56" r="2.4" fill="#0F172A"/>
++  <path d="M62 35c5 3 8 8 8 14M64 58c-3 4-7 6-12 7" stroke="#F8FAFC" stroke-width="3" stroke-linecap="round"/>
++  <path d="M26 25l45 45" stroke="#EF4444" stroke-width="6" stroke-linecap="round"/>
++  <path d="M26 25l45 45" stroke="#FEE2E2" stroke-width="2" stroke-linecap="round"/>
++</svg>
+\ No newline at end of file
+diff --git a/app/admin_web/static/icons/device-types/type-unresolved.svg b/app/admin_web/static/icons/device-types/type-unresolved.svg
+new file mode 100644
+index 0000000000000000000000000000000000000000..db7aef53ce0a5510df919ee5a9db9927c902d8c2
+--- /dev/null
++++ b/app/admin_web/static/icons/device-types/type-unresolved.svg
+@@ -0,0 +1,18 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none">
++  <defs>
++    <filter id="shadow" x="8" y="10" width="80" height="78" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
++      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.16"/>
++    </filter>
++  </defs>
++  <g filter="url(#shadow)">
++    <rect x="16" y="14" width="64" height="64" rx="18" fill="#F59E0B"/>
++    <rect x="17.5" y="15.5" width="61" height="61" rx="16.5" stroke="white" stroke-opacity="0.22" stroke-width="3"/>
++  </g>
++  
++  <path d="M34 34c1.5-5 6.5-8 12.5-8 7 0 12.5 4 12.5 10 0 7-8 8.5-8 13" stroke="#0F172A" stroke-width="4.5" stroke-linecap="round"/>
++  <circle cx="51" cy="58.5" r="2.8" fill="#0F172A"/>
++  <text x="29" y="53" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="16" fill="#0F172A">?</text>
++  <text x="58" y="48" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="14" fill="#0F172A">?</text>
++  <text x="62" y="63" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="12" fill="#0F172A">?</text>
++
++</svg>
+\ No newline at end of file
+diff --git a/app/admin_web/templates/admin/devices.html b/app/admin_web/templates/admin/devices.html
+index 64b4399ea18d4fd4e48b030c40e2375eda7c1f99..99d838e421b2c45c12bc062f6e175514152a1a3c 100644
+--- a/app/admin_web/templates/admin/devices.html
++++ b/app/admin_web/templates/admin/devices.html
+@@ -7,4 +7,12 @@
+   <button class="button button-secondary" type="submit">Search</button>
+   <button id="clear-device-search" class="button button-quiet" type="button">Clear</button>
+ </form>
++<section id="device-inventory-summary" class="card device-inventory" aria-labelledby="device-inventory-title" aria-live="polite">
++  <h2 id="device-inventory-title">Device Inventory</h2>
++  <div class="device-inventory-metrics">
++    <div><span class="device-row-label">Total Devices</span><strong id="device-inventory-total" class="metric">—</strong></div>
++    <div><span class="device-row-label">New Today</span><strong id="device-inventory-today" class="metric">—</strong></div>
++  </div>
++  <p id="device-inventory-state" class="live-detail"></p>
++</section>
+ {% endblock %}
+diff --git a/app/admin_web/templates/admin/home.html b/app/admin_web/templates/admin/home.html
+index a1c90e986471261d84a8b764382a64220aca0d85..57d01641933414662314d02ccc1436ccb15200af 100644
+--- a/app/admin_web/templates/admin/home.html
++++ b/app/admin_web/templates/admin/home.html
+@@ -73,12 +73,6 @@
+       <p id="traffic-both-coverage" class="live-detail">Both —/— APs</p>
+     </article>
+   </section>
+-  <section class="card card-wide live-section" aria-labelledby="traffic-ap-title">
+-    <h3 id="traffic-ap-title">Traffic by AP</h3>
+-    <p id="traffic-ap-state" class="live-inline-state">Waiting for an available Traffic snapshot…</p>
+-    <div id="traffic-ap-rows" class="row-list"></div>
+-    <div class="pagination"><button id="traffic-ap-more" class="button button-secondary" type="button" hidden>Load more traffic rows</button></div>
+-  </section>
+ </section>
+ {% endif %}
+ {% if home_activity_enabled %}
+@@ -159,15 +153,12 @@
+   <span class="state-dot" aria-hidden="true"></span><div><strong>AP 24-hour history unavailable</strong><p>Other Home panels remain independent.</p></div>
+ </section>
+ {% endif %}
+-<section class="card card-wide live-section" aria-labelledby="by-ap-title">
+-  <h2 id="by-ap-title">Devices by AP — Now</h2>
+-  <div id="live-devices-by-ap" class="live-bars"></div>
+-</section>
+ <section class="card card-wide live-section" aria-labelledby="aps-now-title">
+   <h2 id="aps-now-title">Access Points Now</h2>
+   <p id="live-ap-count" class="live-detail"></p>
+   <div id="live-ap-state" class="live-inline-state">Loading access points…</div>
+   <div id="live-ap-rows" class="row-list"></div>
++  <p id="live-ap-unknown" class="live-detail" hidden></p>
+   <div class="pagination"><button id="live-ap-more" class="button button-secondary" type="button" hidden>Load more access points</button></div>
+ </section>
+ {% endif %}
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index a2613230d6e5f64f03d2328162ecc718ab53f031..d11b7fc67bc89ec464aeb82b645d26f81d86bed5 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -368,6 +368,51 @@ snapshot raw type and identity raw type belong to the same Device record.
+ 
+ ## Home Online Devices — current presentation
+ 
++### WEB-UX-PACK-02 / R2 repository candidate
++
++Home and Devices share `effective_platform_presentation()` without changing
++Controller-first precedence. Devices adds Fingerprint Type before Platform;
++the original Controller fields remain unchanged. Home Android is icon-only;
++Devices Android retains its exact Platform text beside the existing Android
++asset. Device Card remains a separate, unchanged presentation surface.
++
++Compact Type has exactly `{state, status, canonical_value_id, value}`. The browser
++chooses only from machine fields: resolved smartphone/tablet/laptop, completed
++unresolved, no_result and unavailable use the six approved local v2 SVGs. Icons
++are 22×22, with wrapper-owned title/aria-label and decorative nested images.
++Malformed machine projections are rejected; Controller never backfills Type.
++
++Devices enrichment keeps the existing page/cursor/filter contract. Per the
++TechLead R2 refinement, pages of up to 250 MACs use one bounded production batch;
++pages up to the existing 500-row maximum use at most two batches of 250. The
++production read limit is unchanged; there are no individual reads or synthetic
++unavailable results caused only by page size.
++
++`GET /admin/api/v1/sites/<site_id>/devices/inventory-summary` requires
++`admin.read.devices`, accepts **no query arguments**, and uses the existing
++Admin deadline/concurrency/response controls. Its result contains exactly
++`total_devices`, `new_devices_today`, `timezone`, `evaluated_at_utc`. Population
++is the existing Site snapshot/visit union grouped by device_id, not the global
++Registry; first evidence is MIN across both sources. New Today includes first
++evidence from local midnight through evaluation, inclusively, using the existing
++validated Registry `PORTAL_COUNTER_TIMEZONE` IANA zone (including DST). Invalid
++source identity fails closed rather than producing a numeric zero.
++
++The Device Inventory card refreshes independently on page load/manual Refresh;
++search, Clear and Load more do not refetch it. Its isolated failure shows two
++neutral dashes and Unavailable, without clearing the list or changing page state.
++
++Home Access Points Now is the sole current AP identity owner. Client buckets
++and persisted per-AP traffic join by exact ap_mac. Device bars scale against all
++client buckets, not only loaded APs; missing buckets mean zero only with an
++available client summary. Unavailable sources are neutral, and AP Unknown is
++one footer above the existing AP pagination. Traffic cursor pages are drained
++sequentially into a generation-bound map; no visible Traffic pagination or
++duplicate identity card remains. Traffic-disabled Home makes no traffic request.
++Traffic Now aggregate rates, arrows, colors, coverage and freshness stay intact.
++
++This is repository candidate work only, not a deployment/production claim.
++
+ Current repository Home columns (deployment is separately authorized):
+ 
+ ```text
+@@ -408,7 +453,7 @@ before Traffic Now; the remaining panels keep their relative order. Only Home
+ `.live-metrics` summary cards have denser spacing and aligned values; responsive
+ breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
+ independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
+-Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
++Unavailable `—` is neutral. Per-AP traffic is now joined into Access Points Now; source/freshness/coverage and Traffic
+ page semantics are unchanged. This describes repository implementation, not a
+ new production deployment or visual-acceptance claim.
+ 
+diff --git a/tests/admin_web/test_admin_ui_frontend.py b/tests/admin_web/test_admin_ui_frontend.py
+index 5e6f3d90bcc23c0be70f11462555ab460e4c426d..f6007acdc56126417e7292068ab7d6383a188298 100644
+--- a/tests/admin_web/test_admin_ui_frontend.py
++++ b/tests/admin_web/test_admin_ui_frontend.py
+@@ -213,13 +213,13 @@ assert(headerRow.cells[1].className === "live-fingerprint-type-header", "Home fi
+ assert(headerRow.cells[2].textContent === "Platform" && headerRow.cells[2].className === "live-device-type-header", "Home controller Platform stays separate");
+ api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
+ assert(headerRow.cells.length === 11, "Home Type/Platform header preparation is idempotent");
+-const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null, platform_presentation: {source: "controller", value: " Android ", key: "android"}};
++const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null, fingerprint_type: {state: "no_result", status: null, canonical_value_id: null, value: "—"}, platform_presentation: {source: "controller", value: " Android ", key: "android"}};
+ const androidPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: " Android ", device_type_key: "android"});
+-assert(androidPresentation.fingerprintType.textContent === "—", "controller platform cannot backfill missing fingerprint Type");
+-const resolvedFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", value: "Laptop"}});
+-assert(resolvedFingerprint.fingerprintType.textContent === "Laptop", "Home Type displays only the server fingerprint projection");
+-const unknownFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", value: "Unknown"}});
+-assert(unknownFingerprint.fingerprintType.textContent === "Unknown", "completed unresolved Type differs from missing value");
++assert(androidPresentation.fingerprintType.children[0].children[0].src.endsWith("/type-no-result.svg"), "controller platform cannot backfill missing fingerprint Type");
++const resolvedFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", status: "resolved", canonical_value_id: "laptop", value: "Laptop"}});
++assert(resolvedFingerprint.fingerprintType.children[0].children[0].src.endsWith("/type-laptop.svg"), "Home Type displays only the server fingerprint projection");
++const unknownFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", status: "unknown", canonical_value_id: null, value: "Unknown"}});
++assert(unknownFingerprint.fingerprintType.children[0].children[0].src.endsWith("/type-unresolved.svg"), "completed unresolved Type differs from missing value");
+ assert(androidPresentation.deviceType.children.length === 1 && androidPresentation.deviceType.children[0].tag === "img", "Home Android canonical key renders SVG");
+ assert(androidPresentation.deviceType.attributes["aria-label"] === " Android ", "Home Android presentation preserves raw label");
+ const missingPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, platform_presentation: {source: "none", value: "—", key: null}});
+diff --git a/tests/admin_web/test_device_fingerprint_presentation.py b/tests/admin_web/test_device_fingerprint_presentation.py
+index 68d4704d28700da47646f421e3ea6cb844caf2e1..fddb6a4f4353fffa82752220c6c1edda6a284c22 100644
+--- a/tests/admin_web/test_device_fingerprint_presentation.py
++++ b/tests/admin_web/test_device_fingerprint_presentation.py
+@@ -75,7 +75,7 @@ def test_all_dimensions_preserve_metadata_and_only_resolved_values_are_named(ret
+ 
+ def test_no_result_has_no_diagnostic_or_semantic_value():
+     projection = present_classification(None)
+-    assert projection.compact_type() == {"state": "no_result", "value": "—"}
++    assert projection.compact_type() == {"state": "no_result", "status": None, "canonical_value_id": None, "value": "—"}
+     assert projection.as_dict() == {"state": "no_result", "global_classification_status": None,
+                                    "classified_at_utc": None, **dict.fromkeys(_DIMENSIONS)}
+ 
+@@ -174,7 +174,7 @@ def test_home_type_is_batched_separate_from_unchanged_controller(retained, statu
+     assert result["items"][0]["device_type_key"] == "android"
+     assert result["items"][1]["device_type"] == "Windows"
+     assert [item["fingerprint_type"]["value"] for item in result["items"]] == [expected, expected]
+-    assert all(set(item["fingerprint_type"]) == {"state", "value"} for item in result["items"])
++    assert all(set(item["fingerprint_type"]) == {"state", "status", "canonical_value_id", "value"} for item in result["items"])
+     assert [item["platform_presentation"] for item in result["items"]] == [
+         {"source": "controller", "value": " Android ", "key": "android"},
+         {"source": "controller", "value": "Windows", "key": "windows"}]
+@@ -191,7 +191,7 @@ def test_completed_production_global_unknown_stays_classified_on_home_and_device
+     projection = present_classification(record)
+     assert projection.state == "classified"
+     assert projection.global_classification_status == "unknown"
+-    assert projection.compact_type() == {"state": "classified", "value": "Unknown"}
++    assert projection.compact_type() == {"state": "classified", "status": "unknown", "canonical_value_id": None, "value": "Unknown"}
+ 
+     class AndroidController(CurrentSource):
+         def list_current_clients(self, site, **kwargs):
+@@ -202,7 +202,7 @@ def test_completed_production_global_unknown_stays_classified_on_home_and_device
+     home._fingerprint = adapter
+     item = home.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
+     assert item["device_type"] == "Android"
+-    assert item["fingerprint_type"] == {"state": "classified", "value": "Unknown"}
++    assert item["fingerprint_type"] == {"state": "classified", "status": "unknown", "canonical_value_id": None, "value": "Unknown"}
+     assert item["fingerprint_type"]["value"] != item["device_type"]
+ 
+     device, _, _, _ = _service()
+@@ -244,7 +244,7 @@ def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_pa
+     home = service(Controller())
+     home._fingerprint = adapter
+     item = home.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
+-    assert item["name"] == "Phone" and item["fingerprint_type"] == {"state": "unavailable", "value": "—"}
++    assert item["name"] == "Phone" and item["fingerprint_type"] == {"state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"}
+     assert item["fingerprint_platform"] == {
+         "state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"}
+     assert item["platform_presentation"] == (
+diff --git a/tests/admin_web/test_home_traffic.py b/tests/admin_web/test_home_traffic.py
+index a60e1e13b0eb6129cc8d5d4a77c929ea23a767ff..a31e6ba5422def1dad2bdd338836afd15255f58c 100644
+--- a/tests/admin_web/test_home_traffic.py
++++ b/tests/admin_web/test_home_traffic.py
+@@ -619,13 +619,13 @@ def test_home_template_delivers_traffic_only_when_enabled(tmp_path):
+         "live-client-freshness", "live-other-detail", "live-ap-detail", "live-ap-freshness",
+         "live-client-filters", "live-ssid-label", "live-client-state", "live-client-rows", "live-client-more",
+         "traffic-state", "traffic-download", "traffic-upload", "traffic-total", "traffic-freshness",
+-        "traffic-coverage", "traffic-ap-title", "traffic-ap-rows", "traffic-ap-more",
++        "traffic-coverage", "aps-now-title", "live-ap-rows", "live-ap-more", "live-ap-unknown",
+     ):
+         assert text.count(f'id="{hook}"') == 1
+-    assert text.index('id="traffic-now-title"') < text.index('id="traffic-ap-title"')
++    assert text.index('id="traffic-now-title"') < text.index('id="aps-now-title"')
+     assert 'aria-label="Online devices table" tabindex="0"' in text
+     template = (Path(__file__).parents[2] / "app/admin_web/templates/admin/home.html").read_text(encoding="utf-8")
+-    remaining = ["home-activity", "home-ap-24h", "by-ap-title", "aps-now-title"]
++    remaining = ["home-activity", "home-ap-24h", "aps-now-title"]
+     assert [template.index(f'id="{hook}"') for hook in remaining] == sorted(
+         template.index(f'id="{hook}"') for hook in remaining)
+     assert template.index('id="live-client-more"') < template.index('id="home-traffic"')
+diff --git a/tests/admin_web/test_query_service.py b/tests/admin_web/test_query_service.py
+index 794aafab1ab6cdb61a81429620cbc49332b57540..6a20a59a4320056e6014229380ee0e6f2b8e1f17 100644
+--- a/tests/admin_web/test_query_service.py
++++ b/tests/admin_web/test_query_service.py
+@@ -477,6 +477,9 @@ def test_device_list_context_feature_off_keeps_old_path_and_decoder():
+             "canonical_mac": "02:00:00:00:00:01",
+             "device_type": "phone",
+             "device_type_key": "phone",
++            "fingerprint_type": {"state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"},
++            "fingerprint_platform": {"state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"},
++            "platform_presentation": {"source": "controller", "key": "phone", "value": "phone"},
+             "site_first_seen_at": "2026-01-01T00:00:00.000Z",
+             "site_last_seen_at": "2026-01-02T00:00:00.000Z",
+             "site_snapshot_count": 2,
+diff --git a/tests/admin_web/test_web_ux_pack_02.py b/tests/admin_web/test_web_ux_pack_02.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f86af8a5a1080089cf279b7e609dcbbcdcf5facf
+--- /dev/null
++++ b/tests/admin_web/test_web_ux_pack_02.py
+@@ -0,0 +1,336 @@
++"""R2 list-only presentation and independent Site inventory contracts."""
++
++from dataclasses import replace
++from datetime import datetime, timezone
++import hashlib
++from pathlib import Path
++import sqlite3
++import subprocess
++
++import pytest
++
++from app.admin_web.device_fingerprint_presentation import DeviceFingerprintPresentationService, present_classification
++from app.admin_web.device_gateway import AdminDeviceInventorySummary, AdminDeviceIntegrityError
++from app.admin_web.models import AdminPrincipal
++from app.admin_web.query_service import AdminQueryForbidden, AdminQueryIntegrityUnavailable, AdminQueryUnavailable
++from app.common.device_type import normalize_device_type_key
++from app.device_fingerprint.artifact_content import make_artifact_content
++from app.device_fingerprint.classification_read import ClassificationReadRecord
++from .conftest import SITE_ID, login
++from .test_admin_ui_frontend import NODE
++from .test_device_fingerprint_presentation import retained, shaped, ProductionReader
++from .test_device_gateway import _databases, _gateway, _snapshot, _visit, _deadline, SITE, OTHER_SITE
++from .test_query_service import _service, _device_list_context_service, DeviceListCurrentSource
++
++ROOT = Path(__file__).parents[2]
++
++
++@pytest.mark.parametrize("canonical", ["smartphone", "tablet", "laptop"])
++def test_compact_type_resolved_exact_machine_identity(retained, canonical):
++    record = shaped(retained)
++    payload = record.result.semantic_payload
++    payload["device_class_result"]["canonical_value_id"] = canonical
++    result = make_artifact_content("ClassificationResult", payload)
++    record = ClassificationReadRecord(replace(record.core, classification_result_id=result.artifact_id,
++                                              classification_result_digest=result.content_sha256), result)
++    assert present_classification(record).compact_type() == {
++        "state": "classified", "status": "resolved", "canonical_value_id": canonical, "value": canonical.title()}
++
++
++@pytest.mark.parametrize("status", ["unknown", "insufficient_evidence", "conflicting_evidence", "recognized_out_of_scope"])
++def test_compact_type_unresolved_preserves_status(retained, status):
++    assert present_classification(shaped(retained, status)).compact_type() == {
++        "state": "classified", "status": status, "canonical_value_id": None, "value": "Unknown"}
++
++
++def test_unsupported_resolved_type_uses_fingerprint_fail_soft_path(retained):
++    record = shaped(retained)
++    payload = record.result.semantic_payload
++    payload["device_class_result"]["canonical_value_id"] = "desktop"
++    result = make_artifact_content("ClassificationResult", payload)
++    record = ClassificationReadRecord(replace(record.core, classification_result_id=result.artifact_id,
++                                              classification_result_digest=result.content_sha256), result)
++    reader = ProductionReader(record)
++    value = DeviceFingerprintPresentationService(reader).get_many(SITE_ID, ("02:00:00:00:00:01",))
++    assert value["02:00:00:00:00:01"].compact_type() == {
++        "state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"}
++
++
++@pytest.mark.parametrize("context", [False, True])
++@pytest.mark.parametrize("status", [None, "resolved", "unknown", "conflicting_evidence"])
++def test_devices_one_site_safe_batch_for_both_page_paths(retained, context, status):
++    query = (_device_list_context_service(current=DeviceListCurrentSource())[0] if context else _service()[0])
++    reader = ProductionReader(shaped(retained, status) if status else None)
++    query._fingerprint = DeviceFingerprintPresentationService(reader)
++    response = query.list_devices(AdminPrincipal("operator"), SITE_ID, limit=1, mac="02-00-00-00-00-01")
++    item = response.result["items"][0]
++    assert reader.calls == [(SITE_ID, (item["canonical_mac"],))]
++    assert item["fingerprint_type"] == present_classification(reader.record).compact_type()
++    assert item["fingerprint_platform"] == present_classification(reader.record).compact_platform()
++    assert item["platform_presentation"] == {"source": "controller", "key": "phone", "value": "phone"}
++    assert response.page["limit"] == 1
++    with pytest.raises(AdminQueryForbidden):
++        query.list_devices(AdminPrincipal("operator"), "f" * 24)
++    assert len(reader.calls) == 1
++
++
++def test_inventory_empty_and_exact_site_population(tmp_path):
++    paths = _databases(tmp_path)
++    gateway = _gateway(paths)
++    args = dict(site_id=SITE, today_start_utc="2026-10-05T20:00:00.000Z", evaluated_at_utc="2026-10-06T12:00:00.000Z", deadline=_deadline())
++    assert gateway.device_inventory_summary(**args) == AdminDeviceInventorySummary(0, 0)
++    _snapshot(paths[0], device_id="snapshot", mac="02:00:00:00:00:01", captured_at="2026-10-05T20:00:00.000Z")
++    _visit(paths[1], device_id="visit", mac="02:00:00:00:00:02", started_at="2026-10-06T12:00:00.000Z")
++    _snapshot(paths[0], device_id="both", mac="02:00:00:00:00:03", captured_at="2026-10-06T01:00:00.000Z")
++    _visit(paths[1], device_id="both", mac="02:00:00:00:00:03", started_at="2026-10-05T19:59:59.999Z")
++    _snapshot(paths[0], device_id="other-site", mac="02:00:00:00:00:04", captured_at="2026-10-06T01:00:00.000Z", site_id=OTHER_SITE)
++    _visit(paths[1], device_id="future", mac="02:00:00:00:00:05", started_at="2026-10-06T12:00:00.001Z")
++    with sqlite3.connect(paths[0]) as connection:
++        connection.execute("INSERT INTO visitor_devices VALUES ('global-only', '02:00:00:00:00:06')")
++    assert gateway.device_inventory_summary(**args) == AdminDeviceInventorySummary(4, 2)
++    assert gateway.device_inventory_summary(**(args | {"site_id": OTHER_SITE})) == AdminDeviceInventorySummary(1, 1)
++    assert gateway.list_devices(site_id=SITE, limit=1, canonical_mac="02:00:00:00:00:01", deadline=_deadline()).items[0].device_id == "snapshot"
++    assert gateway.device_inventory_summary(**args) == AdminDeviceInventorySummary(4, 2)
++
++
++@pytest.mark.parametrize("controller,status,platform,source,value,key", [
++    ("Android", "resolved", "windows", "controller", "Android", "android"),
++    ("Unknown", "resolved", "android", "fingerprint", "Android", "android"),
++    (None, "resolved", "android", "fingerprint", "Android", "android"),
++    ("Windows", "resolved", "android", "controller", "Windows", "windows"),
++    (None, "unknown", "android", "none", "Unknown", None),
++    (None, None, "android", "none", "—", None),
++    ("Unknown", None, "android", "none", "Unknown", None),
++    (" Android ", "resolved", "windows", "controller", " Android ", "android"),
++    *[(name, "resolved", "android", "controller", name, name)
++      for name in ("other", "generic", "n/a", "unavailable", "undefined", "phone", "mobile")],
++])
++def test_devices_effective_platform_preserves_controller_and_exact_precedence(retained, controller, status, platform, source, value, key):
++    query, *_ = _service()
++    reader = ProductionReader(shaped(retained, status, platform=platform) if status else None)
++    query._fingerprint = DeviceFingerprintPresentationService(reader)
++    item = {"canonical_mac": "02:00:00:00:00:01", "device_type": controller,
++            "device_type_key": normalize_device_type_key(controller)}
++    query._enrich_device_fingerprints(SITE_ID, [item])
++    assert item["device_type"] == controller
++    assert item["platform_presentation"] == {"source": source, "value": value, "key": key}
++    assert reader.calls == [(SITE_ID, (item["canonical_mac"],))]
++
++
++@pytest.mark.parametrize("count,sizes", [(0, []), (100, [100]), (250, [250]), (251, [250, 1]), (500, [250, 250])])
++def test_techlead_refined_large_page_enrichment_is_at_most_two_bounded_batches(count, sizes):
++    query, *_ = _service()
++    reader = ProductionReader(None)
++    query._fingerprint = DeviceFingerprintPresentationService(reader)
++    items = [{"canonical_mac": f"02:00:00:00:{i // 256:02X}:{i % 256:02X}", "device_type": None, "device_type_key": None} for i in range(count)]
++    query._enrich_device_fingerprints(SITE_ID, items)
++    assert [len(macs) for site, macs in reader.calls] == sizes
++    assert all(site == SITE_ID for site, macs in reader.calls)
++    assert {mac for site, macs in reader.calls for mac in macs} == {item["canonical_mac"] for item in items}
++    assert all(item["fingerprint_type"]["state"] == "no_result" for item in items)
++
++
++def test_inventory_conflicting_identity_is_not_a_numeric_zero(tmp_path):
++    paths = _databases(tmp_path)
++    _snapshot(paths[0], device_id="conflict", mac="02:00:00:00:00:01", captured_at="2026-10-06T01:00:00.000Z")
++    _visit(paths[1], device_id="conflict", mac="02:00:00:00:00:02", started_at="2026-10-06T01:00:00.000Z")
++    with pytest.raises(AdminDeviceIntegrityError):
++        _gateway(paths).device_inventory_summary(site_id=SITE, today_start_utc="2026-10-06T00:00:00.000Z", evaluated_at_utc="2026-10-06T12:00:00.000Z", deadline=_deadline())
++
++
++@pytest.mark.parametrize("zone,instant,midnight", [
++    ("Asia/Baku", "2026-10-06T00:30:00+00:00", "2026-10-05T20:00:00.000Z"),
++    ("America/New_York", "2026-03-08T12:00:00+00:00", "2026-03-08T05:00:00.000Z"),
++    ("America/New_York", "2026-11-01T12:00:00+00:00", "2026-11-01T04:00:00.000Z"),
++])
++def test_inventory_reuses_registry_iana_zone_and_one_evaluation(monkeypatch, zone, instant, midnight):
++    query, gateway, *_ = _service()
++    query._inventory_timezone_name = zone
++    calls = []
++    gateway.device_inventory_summary = lambda **kwargs: calls.append(kwargs) or AdminDeviceInventorySummary(3, 2)
++    class Clock(datetime):
++        @classmethod
++        def now(cls, tz):
++            assert tz is timezone.utc
++            return cls.fromisoformat(instant)
++    monkeypatch.setattr("app.admin_web.query_service.datetime", Clock)
++    result = query.device_inventory_summary(AdminPrincipal("operator"), SITE_ID).result
++    assert set(result) == {"total_devices", "new_devices_today", "timezone", "evaluated_at_utc"}
++    assert result["timezone"] == zone and result["total_devices"] == 3 and result["new_devices_today"] == 2
++    assert len(calls) == 1 and calls[0]["today_start_utc"] == midnight
++    assert calls[0]["evaluated_at_utc"] == result["evaluated_at_utc"] and calls[0]["deadline"] is not None
++    with pytest.raises(AdminQueryForbidden):
++        query.device_inventory_summary(AdminPrincipal("operator"), "f" * 24)
++    assert len(calls) == 1
++
++
++@pytest.mark.parametrize("value", [AdminDeviceInventorySummary(-1, 0), AdminDeviceInventorySummary(1, 2), AdminDeviceInventorySummary(True, 0)])
++def test_inventory_invalid_counter_fails_closed(value):
++    query, gateway, *_ = _service()
++    query._inventory_timezone_name = "Asia/Baku"
++    gateway.device_inventory_summary = lambda **kwargs: value
++    with pytest.raises(AdminQueryIntegrityUnavailable):
++        query.device_inventory_summary(AdminPrincipal("operator"), SITE_ID)
++
++
++def test_inventory_unknown_timezone_is_unavailable_before_database():
++    query, *_ = _service()
++    with pytest.raises(AdminQueryUnavailable):
++        query.device_inventory_summary(AdminPrincipal("operator"), SITE_ID)
++
++
++@pytest.mark.parametrize("arguments", ["mac=AA:BB:CC:DD:EE:FF", "limit=1", "cursor=x", "timezone=UTC", "unexpected="])
++def test_inventory_route_rejects_all_query_arguments(admin_app, arguments):
++    client = admin_app.test_client()
++    assert login(client).status_code == 302
++    response = client.get(f"/admin/api/v1/sites/{SITE_ID}/devices/inventory-summary?{arguments}", base_url="https://localhost")
++    assert response.status_code == 400 and response.json["error"]["code"] == "invalid_request"
++
++
++@pytest.mark.parametrize("name,digest", [
++    ("smartphone", "40fc00b7aa66ec1d548956798379cf84fb99312ff0ec4c27bb25fab275480000"),
++    ("tablet", "6ebc93d6779dfc10271e8182c858d4969c37c84b2c7c8146bce57ee88df6abb6"),
++    ("laptop", "77531c51c7e76ebe29e7e034bb230ab9490c66145ec972c4748543d4917206fb"),
++    ("unresolved", "b81ad849966c7aefe19c74ee6f616b0b24f7b2e5d28bef70087b9135cfd05d82"),
++    ("no-result", "47c7bd944686d7f70cf8d8332fbcfd7e08398e95890e92c755a6bd9d35f14b6f"),
++    ("unavailable", "18e76d5e11bb354d85fa72e2906ddce9223aa6872587c9040230fd34a9fc28b7"),
++])
++def test_approved_svg_bytes_unchanged(name, digest):
++    import xml.etree.ElementTree as ET
++    data = (ROOT / f"app/admin_web/static/icons/device-types/type-{name}.svg").read_bytes()
++    assert hashlib.sha256(data).hexdigest() == digest
++    assert ET.fromstring(data).tag == "{http://www.w3.org/2000/svg}svg"
++
++
++@pytest.mark.skipif(NODE is None, reason="Node required for frontend contracts")
++def test_machine_icons_and_single_ap_roster_dom():
++    program = r'''
++const fs=require('fs'), vm=require('vm'), assert=require('assert');
++global.window={}; vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
++function node(tag, className, text) {return {tag,className,textContent:text,children:[],attributes:{},style:{},append(...xs){this.children.push(...xs)},replaceChildren(...xs){this.children=xs},setAttribute(k,v){this.attributes[k]=v}}}
++const types=window.CaptivPortalDeviceTypePresentation;
++for (const [id,label] of [['smartphone','Smartphone'],['tablet','Tablet'],['laptop','Laptop']]) {
++  const icon=types.icon(node,{state:'classified',status:'resolved',canonical_value_id:id,value:'NOT USED'});
++  assert.equal(icon.attributes['aria-label'],label); assert.equal(icon.title,label);
++  assert.equal(icon.children[0].src,'/admin/static/icons/device-types/type-'+id+'.svg');
++  assert.equal(icon.children[0].width,22); assert.equal(icon.children[0].height,22);
++  assert.equal(icon.children[0].alt,''); assert.equal(icon.children[0].attributes['aria-hidden'],'true');
++  assert.equal(icon.textContent,undefined);
++}
++for(const status of ['unknown','insufficient_evidence','conflicting_evidence','recognized_out_of_scope'])
++  assert.equal(types.mapping({state:'classified',status,canonical_value_id:null,value:'Unknown'})[0],'type-unresolved.svg');
++for(const state of ['no_result','unavailable'])
++  assert.equal(types.mapping({state,status:null,canonical_value_id:null,value:'—'})[0], 'type-'+state.replace('_','-')+'.svg');
++for(const invalid of [null,{state:'classified',value:'Smartphone'}, {state:'classified',status:'resolved',canonical_value_id:'desktop',value:'Laptop'}]) assert.equal(types.mapping(invalid),null);
++const target=node('div'),footer=node('p'), live=window.CaptivPortalHomeLiveTest;
++const rows=[{ap_mac:'AA',name:'AP One',product_status_classification:'online'},{ap_mac:'BB',name:'AP Two',product_status_classification:'online'}];
++const client={devices_by_ap:[{ap_mac:'AA',client_count:2},{ap_mac:'UNLOADED',client_count:8}],counts:{ap_unknown:3}};
++const traffic=[{ap_mac:'AA',name:'DO NOT DUPLICATE',rate_status:'valid',download_mbps:0,upload_mbps:null,total_mbps:0,selected_source:'lan',observed_at:'NOW'}, {ap_mac:'UNLOADED',rate_status:'valid'}];
++function render(c,t,enabled=true){live.renderAccessPointRoster(node,target,footer,rows,client,c,traffic,t,enabled,x=>x===null?'—':x+' Mbps')}
++render(true,true); assert.equal(target.children.length,2); assert.equal(footer.textContent,'AP Unknown · 3');
++assert.equal(target.children[0].children[2].children[1].children[0].style.width,'25%');
++assert.equal(target.children[1].children[2].children[0].textContent,'Devices · 0');
++assert.equal(target.children[0].children[4].textContent,'Download 0 Mbps · Upload — · Total 0 Mbps');
++assert.equal(target.children[0].children[5].textContent,'Source LAN · observed NOW');
++assert.equal(target.children[1].children[3].textContent,'Traffic · —');
++render(false,false); assert.equal(target.children.length,2); assert.equal(footer.hidden,true);
++assert.equal(target.children[0].children[2].children[0].textContent,'Devices · —');
++assert.equal(target.children[0].children[2].children[1].children.length,0);
++render(true,true); render(true,true); assert.equal(target.children.length,2); assert.equal(target.children[0].children.length,6);
++render(true,true,false); assert.equal(target.children[0].children.length,3);
++'''
++    result = subprocess.run([NODE, "-e", program, str(ROOT / "app/admin_web/static/admin.js")], capture_output=True, text=True)
++    assert result.returncode == 0, result.stderr
++
++
++def test_list_and_ap_hooks_no_competing_identity_cards():
++    home = (ROOT / "app/admin_web/templates/admin/home.html").read_text(encoding="utf-8")
++    devices = (ROOT / "app/admin_web/templates/admin/devices.html").read_text(encoding="utf-8")
++    source = (ROOT / "app/admin_web/static/admin.js").read_text(encoding="utf-8")
++    css = (ROOT / "app/admin_web/static/admin.css").read_text(encoding="utf-8")
++    for obsolete in ["live-devices-by-ap", "traffic-ap-title", "traffic-ap-rows", "traffic-ap-more"]:
++        assert obsolete not in home
++    assert home.index('id="live-ap-unknown"') < home.index('id="live-ap-more"')
++    assert devices.index('id="device-search-form"') < devices.index('id="device-inventory-summary"')
++    assert "loadMore(\"traffic\")" not in source
++    assert "} while (cursor);" in source and "source.generation !== generation || coordinator.pending" in source
++    assert "width: 22px; height: 22px;" in css
++    assert "104px minmax(220px, 1.1fr) 72px minmax(105px, .5fr)" in css
++    assert ".device-row-type-field, .device-row-platform-field, .device-row-activity, .device-row-stats { grid-column: 2 / 4; }" in css
++
++
++@pytest.mark.skipif(NODE is None, reason="Node required for frontend contracts")
++def test_inventory_failure_and_superseded_response_are_card_local():
++    program = r'''
++const fs=require('fs'),vm=require('vm'),assert=require('assert');
++const source=fs.readFileSync(process.argv[1],'utf8');
++const start=source.indexOf('  let inventoryGeneration = 0;');
++const end=source.indexOf('  async function loadDevices(',start);
++const cards=Object.fromEntries(['total','today','state'].map(k=>['device-inventory-'+k,{textContent:''}]));
++global.document={getElementById:k=>cards[k]};global.context={apiBase:'/site'};
++const pending=[];global.requestJson=url=>{assert.equal(url,'/site/devices/inventory-summary');return new Promise((resolve,reject)=>pending.push({resolve,reject}))};
++vm.runInThisContext(source.slice(start,end));
++const valid={result:{total_devices:6,new_devices_today:2,timezone:'Asia/Baku',evaluated_at_utc:'2026-10-06T00:00:00.000Z'}};
++(async()=>{
++const first=loadDeviceInventory();assert.equal(cards['device-inventory-total'].textContent,'—');
++pending[0].reject(new Error('unavailable'));await first;
++assert.equal(cards['device-inventory-state'].textContent,'Unavailable');
++const old=loadDeviceInventory(),fresh=loadDeviceInventory();pending[2].resolve(valid);await fresh;
++pending[1].resolve({result:{...valid.result,total_devices:99}});await old;
++assert.equal(cards['device-inventory-total'].textContent,'6');assert.equal(cards['device-inventory-today'].textContent,'2');
++assert.equal(cards['device-inventory-state'].textContent,'');
++const invalid=loadDeviceInventory();pending[3].resolve({result:{...valid.result,new_devices_today:7}});await invalid;
++assert.equal(cards['device-inventory-state'].textContent,'Unavailable');
++})().catch(e=>{console.error(e);process.exitCode=1});
++'''
++    result = subprocess.run([NODE, "-e", program, str(ROOT / "app/admin_web/static/admin.js")], capture_output=True, text=True)
++    assert result.returncode == 0, result.stderr
++    source = (ROOT / "app/admin_web/static/admin.js").read_text(encoding="utf-8")
++    # Only initial configuration and explicit Refresh invoke inventory: filters
++    # and pagination call loadDevices only, never refresh these Site counters.
++    assert source.count('if (context.page === "devices") loadDeviceInventory();') == 2
++    search = source[source.index('const form = document.getElementById("device-search-form")'):]
++    assert 'run(() => loadDevices(false))' in search.split('if (context.page === "device")')[0]
++    assert "loadDeviceInventory" not in search.split('if (context.page === "device")')[0]
++    pagination = source[source.index('loadMoreButton.addEventListener("click"'):]
++    assert "loadDeviceInventory" not in pagination.split('if (legacyHealthCoordinatorEnabled())')[0]
++
++
++@pytest.mark.skipif(NODE is None, reason="Node required for frontend contracts")
++def test_traffic_cursor_chain_is_sequential_atomic_and_generation_owned():
++    program = r'''
++const fs=require('fs'),vm=require('vm'),assert=require('assert');
++const source=fs.readFileSync(process.argv[1],'utf8');
++const start=source.indexOf('  async function refreshTraffic(generation)');
++const end=source.indexOf('  function nextDelay()',start);
++global.document={hidden:false};global.coordinator={pending:false};global.stopped=false;
++global.trafficEnabled=true;global.trafficBase='/traffic';global.trafficTimeout=1;global.trafficRefresh=1;global.siteId='SITE';
++global.sources={traffic:{rows:['old'],generation:1}};
++const pending=[],urls=[];global.requestJson=url=>{urls.push(url);return new Promise((resolve,reject)=>pending.push({resolve,reject}))};
++global.validateTrafficSummary=x=>x;global.acceptTrafficSummary=(s,v)=>{s.summary=v};
++global.renderTrafficSummary=()=>{};global.renderTrafficRows=()=>{};global.trafficPageEligible=()=>true;
++global.trafficParams=(s,c)=>new URLSearchParams(c?{cursor:c}:{});
++global.validateTrafficPage=x=>x;global.markSuccess=()=>{};global.pageFailureEffect=()=>'';
++let failures=0;global.trafficFailure=()=>{failures++;return false};
++vm.runInThisContext(source.slice(start,end));
++const summary={snapshot:{freshness_status:'fresh'}},page=(mac,cursor)=>({result:{items:[{ap_mac:mac}]},page:{next_cursor:cursor}});
++const tick=()=>new Promise(resolve=>setImmediate(resolve));
++(async()=>{
++let run=refreshTraffic(1);pending.shift().resolve(summary);await tick();
++assert.equal(urls.length,2);pending.shift().resolve(page('AA','next'));await tick();
++assert.equal(urls.length,3);assert.equal(urls[2],'/traffic/aps?cursor=next');
++assert.deepEqual(sources.traffic.rows,['old']);assert.equal(sources.traffic.rowsReady,false);
++pending.shift().resolve(page('BB',null));await run;
++assert.deepEqual(sources.traffic.rows.map(x=>x.ap_mac),['AA','BB']);assert.equal(sources.traffic.rowsReady,true);
++const accepted=sources.traffic.rows;
++run=refreshTraffic(2);pending.shift().resolve(summary);await tick();
++pending.shift().resolve(page('CC','next'));await tick();sources.traffic.generation=3;
++pending.shift().resolve(page('DD',null));await run;assert.equal(sources.traffic.rows,accepted);
++run=refreshTraffic(4);pending.shift().resolve(summary);await tick();
++pending.shift().resolve(page('EE','next'));await tick();pending.shift().reject(new Error('page failure'));await run;
++assert.equal(sources.traffic.rows,accepted);assert.equal(sources.traffic.rowsReady,false);assert.equal(failures,1);
++const before=urls.length;trafficEnabled=false;await refreshTraffic(5);assert.equal(urls.length,before);
++})().catch(e=>{console.error(e);process.exitCode=1});
++'''
++    result = subprocess.run([NODE, "-e", program, str(ROOT / "app/admin_web/static/admin.js")], capture_output=True, text=True)
++    assert result.returncode == 0, result.stderr

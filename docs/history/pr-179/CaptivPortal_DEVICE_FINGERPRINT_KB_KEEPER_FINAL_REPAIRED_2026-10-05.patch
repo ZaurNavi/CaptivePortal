@@ -1,0 +1,2410 @@
+diff --git a/README.md b/README.md
+index a73295d..ea651df 100644
+--- a/README.md
++++ b/README.md
+@@ -1,9 +1,10 @@
+ # CaptivPortal Core Platform
+ 
+-The repository also contains a default-disabled passive Device Fingerprint
+-Evidence foundation. It runs only through the separately authorized
+-`python3 -m app.device_fingerprint.cli run` composition root and is never
+-registered in the main portal runtime. See
++The repository contains a production-active passive/advisory Device Fingerprint
++subsystem. TASK-DEVICE-FINGERPRINT-01 remains its Evidence Foundation layer and
++keeps its independently authorized evidence-service composition root; later
++accepted layers add deterministic classification, post-Auth integration and
++read-only Admin presentation. See
+ [`docs/modules/device-fingerprint.md`](docs/modules/device-fingerprint.md).
+ 
+ [Русская версия](README_RU.md)
+@@ -31,10 +32,10 @@ For exact engineering contracts, source-of-truth rules, configuration defaults,
+ 
+ | Item | Current project position |
+ |---|---|
+-| Repository implementation checkpoint | `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5` |
+-| Repository tree | `8312658be3ba272998f46212d9bad76950e3867e` |
+-| Production deployed HEAD | `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5` |
+-| Production tree | `8312658be3ba272998f46212d9bad76950e3867e` |
++| Repository implementation checkpoint | `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7` |
++| Repository tree | `dbf3e3804931d637ef1ec569128746ebce5c141a` |
++| Production deployed HEAD | `7c7c0919c3e546f499b5252ea9479d32c8f494d7` |
++| Production tree | `dbf3e3804931d637ef1ec569128746ebce5c141a` |
+ | Current Network Throughput | **Production active** |
+ | Network Traffic History | **Production active** |
+ | Period Statistics | **Production active** |
+@@ -58,6 +59,7 @@ For exact engineering contracts, source-of-truth rules, configuration defaults,
+ | Observation Foundation | Implemented, schema v1 |
+ | Current State | Implemented, schema v1 |
+ | Current Device Context | **TASK-DEVICE-CARD-01 — COMPLETE / PRODUCTION ACTIVE** |
++| Device Fingerprint | **PRODUCTION ACTIVE / ADMIN VISIBLE** |
+ | Home Online Devices presentation | **TASK-WEB-HOME-ONLINE-DEVICE-PRESENTATION-01 — CLOSED / PRODUCTION CURRENT** |
+ | Canonical Device Type foundation | **TASK-DEVICE-TYPE-NORMALIZATION-01 — CLOSED / PRODUCTION ACTIVE** |
+ | Device Type + SNR presentation | **TASK-WEB-DEVICE-TYPE-PRESENTATION-01 — CLOSED / PRODUCTION ACCEPTANCE PASS** |
+@@ -156,15 +158,60 @@ add query-time Omada, Loki, Grafana or external Analytics calls.
+ 
+ The Devices presentation follow-on is now **CLOSED / PRODUCTION ACTIVE** through PR #110. The local Admin Web asset library and Android presentation FIX are **CLOSED / PRODUCTION PASS**.
+ 
+-## Admin Web local asset library — current production
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint — current production
++
++Device Fingerprint is now a production-active passive/advisory classification
++capability, not only an evidence foundation.
++
++```text
++repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
++repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
++PR #178 = MERGED
++TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
++TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
++TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
++TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
++captive-portal.service = active
++fingerprint-classification.service = active
++```
++
++High-level flow:
++
++```mermaid
++flowchart LR
++    E[Passive normalized evidence] --> C[Deterministic Device Fingerprint]
++    C --> P[(Persisted PRODUCTION ClassificationResult)]
++    P --> A[Admin read model]
++    A --> H[Home]
++    A --> D[Device Card]
++```
++
++Current Home product terminology:
++
++```text
++Type     = fingerprint device_class
++Platform = controller / Omada device_type
++```
++
++Controller Platform never backfills fingerprint Type. Device Card keeps
++**Controller Platform** separate from **Fingerprint Information**. No-result is
++`—`, a completed unresolved dimension is `Unknown`, and a fingerprint read failure
++is `Unavailable`/`—` without failing core Admin data.
++
++Detailed architecture and all engineering diagrams:
++`docs/modules/device-fingerprint.md`.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
++
++## Admin Web local asset library — historical production provenance
+ 
+ ```text
+ TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+ TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+ PR #113=MERGED
+ PR #114=MERGED / PRODUCTION VERIFIED
+-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-current production tree=8312658be3ba272998f46212d9bad76950e3867e
++historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
++historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
+ ```
+ 
+ The repository-local Android asset remains:
+@@ -187,15 +234,15 @@ device_type_key === "android"
+ Raw `device_type` remains source/display evidence. Current Admin Web does not
+ trim/lower/casefold/Unicode-normalize or infer Device Type in the browser.
+ 
+-## Canonical Device Type contract — current production
++## Controller Platform lexical contract — current production compatibility
+ 
+ ```text
+ TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACTIVE
+ TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACCEPTANCE PASS
+ PR #119=MERGED
+ PR #120=MERGED
+-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-current production tree=8312658be3ba272998f46212d9bad76950e3867e
++historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
++historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
+ ```
+ 
+ Canonical ownership:
+@@ -233,11 +280,12 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+ 
+ ## Home Online Devices — current presentation
+ 
+-The current production Home table presents:
++Current production columns:
+ 
+ ```text
+ Device / MAC
+ Type
++Platform
+ Auth
+ IP
+ AP
+@@ -248,41 +296,22 @@ Uptime
+ Traffic
+ ```
+ 
+-The `Type` column is immediately after `Device / MAC`.
++`Type` is the compact Device Fingerprint `device_class` presentation from the
++latest authoritative PRODUCTION `ClassificationResult`.
+ 
+-Type presentation:
++`Platform` is the existing controller/Omada `device_type` presentation and keeps
++the `device_type_key`/Android-icon compatibility contract.
+ 
+ ```text
+-device_type_key == "android" -> Android SVG cue
+-device_type_key == null AND device_type == null -> NULL
+-otherwise -> raw device_type
++Type != Platform
++Controller Platform NEVER backfills Fingerprint Type
+ ```
+ 
+-No Device Type inference is performed from hostname, system name, MAC, vendor,
+-SSID, AP, IP or history.
++Fingerprint no-result is `—`; a completed unresolved device class is `Unknown`.
++A fingerprint read failure remains fail-soft and does not remove the rest of the
++Home row.
+ 
+-SNR is presentation-only:
+-
+-```text
+->=25      good    #10b956
+-15..24    warning #f2c20d
+-<15       danger  #ed3038
+-null      neutral / —
+-```
+-
+-RSSI and SNR are independent. No combined score or backend quality
+-classification exists.
+-
+-Home-specific geometry and tones are scoped to:
+-
+-```css
+-.live-section[aria-labelledby="devices-now-title"]
+-```
+-
+-and do not redefine unrelated `.live-table` surfaces.
+-
+-
+-## Device Card Device Type — current presentation
++## Device Card Controller Platform — current presentation
+ 
+ Device Card keeps raw and canonical roles separate:
+ 
+@@ -1091,9 +1120,8 @@ See [`docs/api/omada-open-api.md`](docs/api/omada-open-api.md).
+ 
+ ```mermaid
+ flowchart LR
+-    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::done --> DB[DB Baseline Sync]:::next --> T8[Traffic 0.8]:::next
++    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::done --> DB[DB Baseline Sync]:::done --> T8[Traffic-08]:::done --> T9[Traffic-09]:::done
+     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
+-    classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
+ ```
+ 
+ ## Near-term direction
+@@ -1119,6 +1147,20 @@ next Traffic TASK   NOT YET ASSIGNED
+ 
+ TASK-TRAFFIC-09 is completed and production-active. No successor Traffic TASK is canonical until separately approved by Owner / Tech Lead.
+ 
++Device Fingerprint current roadmap/status:
++
++```text
++TASK-DEVICE-FINGERPRINT-04         CLOSED / ACCEPTED
++TASK-DEVICE-FINGERPRINT-05         CLOSED / INTEGRATED
++TASK-DEVICE-FINGERPRINT-05-PERF-01 CLOSED
++TASK-DEVICE-FINGERPRINT-06         PRODUCTION PASS / ADMIN VISIBLE
++```
++
++`Device Traffic Enrichment / Device Intelligence (DTI)` is a separate future
++architecture/roadmap initiative under Owner + Tech Lead review. It is not part
++of TASK-DEVICE-FINGERPRINT-06 and this documentation sync does not present DTI
++as implemented or production-active.
++
+ ## Real second Site as a trigger
+ 
+ CaptivPortal is intentionally **Site-aware before it is Multi-Site**.
+diff --git a/README_RU.md b/README_RU.md
+index 9c10204..ae8fd50 100644
+--- a/README_RU.md
++++ b/README_RU.md
+@@ -1,9 +1,11 @@
+ # CaptivPortal Core Platform
+ 
+-В репозитории также находится по умолчанию выключенная основа пассивного сбора
+-Device Fingerprint Evidence. Она запускается только отдельным разрешённым
+-composition root `python3 -m app.device_fingerprint.cli run` и не регистрируется
+-в основном runtime портала. Контракт: `docs/modules/device-fingerprint.md`.
++В репозитории находится production-active пассивная/advisory подсистема
++Device Fingerprint. TASK-DEVICE-FINGERPRINT-01 остаётся её Evidence Foundation
++слоем со своим отдельно разрешённым evidence-service composition root; более
++поздние принятые слои добавляют deterministic classification, post-Auth
++integration и read-only Admin presentation. Контракт:
++`docs/modules/device-fingerprint.md`.
+ 
+ [English version](README.md)
+ 
+@@ -30,10 +32,10 @@ CaptivPortal начинался как внешний Captive Portal для ав
+ 
+ | Пункт | Текущее положение |
+ |---|---|
+-| Repository implementation checkpoint | `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5` |
+-| Repository tree | `8312658be3ba272998f46212d9bad76950e3867e` |
+-| Production deployed HEAD | `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5` |
+-| Production tree | `8312658be3ba272998f46212d9bad76950e3867e` |
++| Repository implementation checkpoint | `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7` |
++| Repository tree | `dbf3e3804931d637ef1ec569128746ebce5c141a` |
++| Production deployed HEAD | `7c7c0919c3e546f499b5252ea9479d32c8f494d7` |
++| Production tree | `dbf3e3804931d637ef1ec569128746ebce5c141a` |
+ | Current Network Throughput | **Production active** |
+ | Network Traffic History | **Production active** |
+ | Period Statistics | **Production active** |
+@@ -57,6 +59,7 @@ CaptivPortal начинался как внешний Captive Portal для ав
+ | Observation Foundation | Реализован, schema v1 |
+ | Current State | Реализован, schema v1 |
+ | Current Device Context | **TASK-DEVICE-CARD-01 — COMPLETE / PRODUCTION ACTIVE** |
++| Device Fingerprint | **PRODUCTION ACTIVE / ADMIN VISIBLE** |
+ | Home Online Devices presentation | **TASK-WEB-HOME-ONLINE-DEVICE-PRESENTATION-01 — CLOSED / PRODUCTION CURRENT** |
+ | Canonical Device Type foundation | **TASK-DEVICE-TYPE-NORMALIZATION-01 — CLOSED / PRODUCTION ACTIVE** |
+ | Device Type + SNR presentation | **TASK-WEB-DEVICE-TYPE-PRESENTATION-01 — CLOSED / PRODUCTION ACCEPTANCE PASS** |
+@@ -153,15 +156,58 @@ Omada, Loki, Grafana или external Analytics calls.
+ 
+ Presentation-layer задача `TASK-WEB-DEVICE-UI-01` теперь **CLOSED / PRODUCTION ACTIVE** через PR #110. Локальная библиотека Admin Web assets и Android presentation FIX также **CLOSED / PRODUCTION PASS**.
+ 
+-## Admin Web local asset library — current production
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint — текущее production-состояние
++
++Device Fingerprint теперь является production-active пассивной/advisory системой
++классификации устройств, а не только foundation для хранения evidence.
++
++```text
++repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
++repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
++PR #178 = MERGED
++TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
++TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
++TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
++TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
++captive-portal.service = active
++fingerprint-classification.service = active
++```
++
++```mermaid
++flowchart LR
++    E[Passive normalized evidence] --> C[Deterministic Device Fingerprint]
++    C --> P[(Persisted PRODUCTION ClassificationResult)]
++    P --> A[Admin read model]
++    A --> H[Home]
++    A --> D[Device Card]
++```
++
++Текущая product-терминология Home:
++
++```text
++Type     = fingerprint device_class
++Platform = controller / Omada device_type
++```
++
++Controller Platform никогда не заполняет Fingerprint Type. Device Card отдельно
++показывает **Controller Platform** и **Fingerprint Information**. `—` означает,
++что authoritative production-result ещё отсутствует; `Unknown` — завершённую,
++но не разрешённую dimension; `Unavailable` — недоступность read/persistence path.
++
++Подробный архитектурный контракт и схемы:
++`docs/modules/device-fingerprint.md`.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
++
++## Admin Web local asset library — historical production provenance
+ 
+ ```text
+ TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+ TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+ PR #113=MERGED
+ PR #114=MERGED / PRODUCTION VERIFIED
+-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-current production tree=8312658be3ba272998f46212d9bad76950e3867e
++historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
++historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
+ ```
+ 
+ The repository-local Android asset remains:
+@@ -184,15 +230,15 @@ device_type_key === "android"
+ Raw `device_type` remains source/display evidence. Current Admin Web does not
+ trim/lower/casefold/Unicode-normalize or infer Device Type in the browser.
+ 
+-## Canonical Device Type contract — current production
++## Controller Platform lexical contract — current production compatibility
+ 
+ ```text
+ TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACTIVE
+ TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACCEPTANCE PASS
+ PR #119=MERGED
+ PR #120=MERGED
+-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-current production tree=8312658be3ba272998f46212d9bad76950e3867e
++historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
++historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
+ ```
+ 
+ Canonical ownership:
+@@ -230,11 +276,12 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+ 
+ ## Home Online Devices — current presentation
+ 
+-The current production Home table presents:
++Current production columns:
+ 
+ ```text
+ Device / MAC
+ Type
++Platform
+ Auth
+ IP
+ AP
+@@ -245,41 +292,22 @@ Uptime
+ Traffic
+ ```
+ 
+-The `Type` column is immediately after `Device / MAC`.
++`Type` is the compact Device Fingerprint `device_class` presentation from the
++latest authoritative PRODUCTION `ClassificationResult`.
+ 
+-Type presentation:
++`Platform` is the existing controller/Omada `device_type` presentation and keeps
++the `device_type_key`/Android-icon compatibility contract.
+ 
+ ```text
+-device_type_key == "android" -> Android SVG cue
+-device_type_key == null AND device_type == null -> NULL
+-otherwise -> raw device_type
++Type != Platform
++Controller Platform NEVER backfills Fingerprint Type
+ ```
+ 
+-No Device Type inference is performed from hostname, system name, MAC, vendor,
+-SSID, AP, IP or history.
++Fingerprint no-result is `—`; a completed unresolved device class is `Unknown`.
++A fingerprint read failure remains fail-soft and does not remove the rest of the
++Home row.
+ 
+-SNR is presentation-only:
+-
+-```text
+->=25      good    #10b956
+-15..24    warning #f2c20d
+-<15       danger  #ed3038
+-null      neutral / —
+-```
+-
+-RSSI and SNR are independent. No combined score or backend quality
+-classification exists.
+-
+-Home-specific geometry and tones are scoped to:
+-
+-```css
+-.live-section[aria-labelledby="devices-now-title"]
+-```
+-
+-and do not redefine unrelated `.live-table` surfaces.
+-
+-
+-## Device Card Device Type — current presentation
++## Device Card Controller Platform — current presentation
+ 
+ Device Card keeps raw and canonical roles separate:
+ 
+@@ -1087,9 +1115,8 @@ Controlled research на Omada 5.14.31 подтвердил:
+ 
+ ```mermaid
+ flowchart LR
+-    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::done --> DB[DB Baseline Sync]:::next --> T8[Traffic 0.8]:::next
++    T0[Traffic Foundation]:::done --> T1[Current]:::done --> T2[History]:::done --> T3[Statistics]:::done --> T4[Peak]:::done --> T5[Traffic by AP]:::done --> R[Independent ranges]:::done --> T6[AP Traffic Share]:::done --> T7[Online Guests Traffic]:::done --> DB[DB Baseline Sync]:::done --> T8[Traffic-08]:::done --> T9[Traffic-09]:::done
+     classDef done fill:#d9f2d9,stroke:#2e7d32,color:#000;
+-    classDef next fill:#fff3cd,stroke:#b8860b,color:#000;
+ ```
+ 
+ ## Near-term direction
+@@ -1115,6 +1142,20 @@ next Traffic TASK   NOT YET ASSIGNED
+ 
+ TASK-TRAFFIC-09 завершён и production-active. Следующий Traffic TASK не считается каноническим до отдельного утверждения Owner / Tech Lead.
+ 
++Текущий roadmap/status Device Fingerprint:
++
++```text
++TASK-DEVICE-FINGERPRINT-04         CLOSED / ACCEPTED
++TASK-DEVICE-FINGERPRINT-05         CLOSED / INTEGRATED
++TASK-DEVICE-FINGERPRINT-05-PERF-01 CLOSED
++TASK-DEVICE-FINGERPRINT-06         PRODUCTION PASS / ADMIN VISIBLE
++```
++
++`Device Traffic Enrichment / Device Intelligence (DTI)` — отдельная будущая
++architecture/roadmap initiative, находящаяся на Owner + Tech Lead review. Она не
++является частью TASK-DEVICE-FINGERPRINT-06, и этот knowledge sync не выдаёт DTI
++за реализованную или production-active функцию.
++
+ ## Реальный второй Site как trigger
+ 
+ CaptivPortal намеренно **Site-aware до Multi-Site**.
+diff --git a/docs/README.md b/docs/README.md
+index 1d00980..52ebb74 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -1,14 +1,13 @@
+ # CaptivPortal knowledge base
+ 
+ Status: current
+-Updated: 2026-09-13
+-Current-state implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+-Current implementation tree: `8312658be3ba272998f46212d9bad76950e3867e`
++Updated: 2026-10-04
++Current-state implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Current implementation tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+ 
+ Эта страница — навигация. Она не дублирует архитектуру.
+ 
+-- [Device Fingerprint Evidence](modules/device-fingerprint.md) — current,
+-  default disabled passive evidence foundation and isolated auxiliary service.
++- [Device Fingerprint](modules/device-fingerprint.md) — current production passive/advisory classification subsystem; TASK-01 remains its Evidence Foundation layer.
+ 
+ ## Модели истины
+ 
+@@ -84,6 +83,8 @@ Historical reports, production acceptance и research сохраняют док
+ - `modules/observations.md`
+ - `modules/current-state.md`
+ - `modules/analytics.md`
++- `modules/device-fingerprint.md`
++- `modules/device-fingerprint-portal.md`
+ - `modules/admin-web.md`
+ - `modules/home-activity.md`
+ - `modules/traffic.md`
+@@ -178,15 +179,60 @@ TASK-WEB-DEVICE-UI-01 = CLOSED / PRODUCTION ACTIVE
+ PR #110 = MERGED / PRODUCTION VERIFIED
+ ```
+ 
+-## Admin Web local asset library — current production
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint — current production
++
++Device Fingerprint is now a production-active passive/advisory classification
++capability, not only an evidence foundation.
++
++```text
++repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
++repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
++PR #178 = MERGED
++TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
++TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
++TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
++TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
++captive-portal.service = active
++fingerprint-classification.service = active
++```
++
++High-level flow:
++
++```mermaid
++flowchart LR
++    E[Passive normalized evidence] --> C[Deterministic Device Fingerprint]
++    C --> P[(Persisted PRODUCTION ClassificationResult)]
++    P --> A[Admin read model]
++    A --> H[Home]
++    A --> D[Device Card]
++```
++
++Current Home product terminology:
++
++```text
++Type     = fingerprint device_class
++Platform = controller / Omada device_type
++```
++
++Controller Platform never backfills fingerprint Type. Device Card keeps
++**Controller Platform** separate from **Fingerprint Information**. No-result is
++`—`, a completed unresolved dimension is `Unknown`, and a fingerprint read failure
++is `Unavailable`/`—` without failing core Admin data.
++
++Detailed architecture and all engineering diagrams:
++`docs/modules/device-fingerprint.md`.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
++
++## Admin Web local asset library — historical production provenance
+ 
+ ```text
+ TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+ TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+ PR #113=MERGED
+ PR #114=MERGED / PRODUCTION VERIFIED
+-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-current production tree=8312658be3ba272998f46212d9bad76950e3867e
++historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
++historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
+ ```
+ 
+ The repository-local Android asset remains:
+@@ -209,15 +255,15 @@ device_type_key === "android"
+ Raw `device_type` remains source/display evidence. Current Admin Web does not
+ trim/lower/casefold/Unicode-normalize or infer Device Type in the browser.
+ 
+-## Canonical Device Type contract — current production
++## Controller Platform lexical contract — current production compatibility
+ 
+ ```text
+ TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACTIVE
+ TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACCEPTANCE PASS
+ PR #119=MERGED
+ PR #120=MERGED
+-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-current production tree=8312658be3ba272998f46212d9bad76950e3867e
++historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
++historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
+ ```
+ 
+ Canonical ownership:
+@@ -255,11 +301,12 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+ 
+ ## Home Online Devices — current presentation
+ 
+-The current production Home table presents:
++Current production columns:
+ 
+ ```text
+ Device / MAC
+ Type
++Platform
+ Auth
+ IP
+ AP
+@@ -270,41 +317,22 @@ Uptime
+ Traffic
+ ```
+ 
+-The `Type` column is immediately after `Device / MAC`.
+-
+-Type presentation:
+-
+-```text
+-device_type_key == "android" -> Android SVG cue
+-device_type_key == null AND device_type == null -> NULL
+-otherwise -> raw device_type
+-```
+-
+-No Device Type inference is performed from hostname, system name, MAC, vendor,
+-SSID, AP, IP or history.
++`Type` is the compact Device Fingerprint `device_class` presentation from the
++latest authoritative PRODUCTION `ClassificationResult`.
+ 
+-SNR is presentation-only:
++`Platform` is the existing controller/Omada `device_type` presentation and keeps
++the `device_type_key`/Android-icon compatibility contract.
+ 
+ ```text
+->=25      good    #10b956
+-15..24    warning #f2c20d
+-<15       danger  #ed3038
+-null      neutral / —
+-```
+-
+-RSSI and SNR are independent. No combined score or backend quality
+-classification exists.
+-
+-Home-specific geometry and tones are scoped to:
+-
+-```css
+-.live-section[aria-labelledby="devices-now-title"]
++Type != Platform
++Controller Platform NEVER backfills Fingerprint Type
+ ```
+ 
+-and do not redefine unrelated `.live-table` surfaces.
+-
++Fingerprint no-result is `—`; a completed unresolved device class is `Unknown`.
++A fingerprint read failure remains fail-soft and does not remove the rest of the
++Home row.
+ 
+-## Device Card Device Type — current presentation
++## Device Card Controller Platform — current presentation
+ 
+ Device Card keeps raw and canonical roles separate:
+ 
+diff --git a/docs/architecture.md b/docs/architecture.md
+index fe5117f..03c4027 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -1,17 +1,45 @@
+ # Архитектура CaptivPortal
+ 
+ Status: current
+-Updated: 2026-09-13
+-Runtime implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+-Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
++Updated: 2026-10-04
++Runtime implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+ 
+-## Controlled auxiliary composition root
++## Controlled auxiliary composition roots
+ 
+ `run.py` remains the lifecycle/composition root for the main
+-`captive-portal.service`. TASK-DEVICE-FINGERPRINT-01 authorizes one isolated
+-exception: `python3 -m app.device_fingerprint.cli run` for
+-`fingerprint-evidence.service`. Its Flask app, SQLite writer, TLS listener and
+-maintenance lifecycle are not registered into the main runtime.
++`captive-portal.service`. Device Fingerprint also has explicitly authorized
++auxiliary process roots: Task-01 evidence service, Task-02 sensor/Suricata
++services, and the Task-05 `fingerprint-classification.service` durable consumer.
++They are not folded into the main Flask process merely because their data is
++consumed by Admin presentation.
++
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint production architecture
++
++Device Fingerprint is a Site-scoped advisory subsystem with independent
++evidence, classification/control-plane, integration and presentation boundaries.
++
++```mermaid
++flowchart LR
++    SPAN[SPAN sensor] --> EV[Normalized Evidence]
++    PORTAL[Portal evidence] --> EV
++    EV --> SNAP[Snapshot + SourceEvaluability]
++    SNAP --> CLS[Pure deterministic classifier]
++    CLS --> CDB[(Classification SQLite)]
++    AUTH[Confirmed AuthRun] --> JOB[Task-05 integration job]
++    JOB --> CLS
++    CDB --> READ[production-only read]
++    READ --> ADMIN[Home + Device Card]
++```
++
++The classifier has no Authorization/CAPPORT authority. Current product Type is
++fingerprint `device_class`; the historical/controller `device_type` contract is
++presented as Controller Platform.
++
++Full subsystem architecture, runtime-profile/admission model and 16 focused
++Mermaid diagrams: `modules/device-fingerprint.md`.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+ 
+ ## 1. Mental model
+ 
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 45f6ddf..db5fd91 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -1,8 +1,8 @@
+ # Configuration map
+ 
+ Status: current repository contract
+-Updated: 2026-09-13
+-Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
++Updated: 2026-10-04
++Baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+ 
+ Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
+ 
+@@ -488,3 +488,30 @@ All `DEVICE_FINGERPRINT_SENSOR_*` variables are parsed exclusively by
+ does not parse them. Repository default is
+ `DEVICE_FINGERPRINT_SENSOR_ENABLED=false`. The Bearer credential is supplied
+ through systemd `LoadCredential`; it is never stored in `.env.example`.
++
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint configuration map
++
++Repository configuration exposes separate paths for the four ownership domains:
++
++```text
++DEVICE_FINGERPRINT_EVIDENCE_DB_PATH
++  /opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
++
++DEVICE_FINGERPRINT_CLASSIFICATION_DB_PATH
++  /opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
++
++DEVICE_FINGERPRINT_CONTROL_PLANE_DB_PATH
++  /opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3
++
++DEVICE_FINGERPRINT_INTEGRATION_DB_PATH
++  /opt/CaptivePortal/data/device_fingerprint_integration.sqlite3
++```
++
++`DEVICE_FINGERPRINT_INTEGRATION_ENABLED` remains repository-default false; a
++repository default is not evidence of the live production flag.
++
++The current 1-GiB `SnapshotExecutionPolicy.process_memory_guard_bytes` is a
++versioned classifier/foundation policy artifact, not a replacement environment
++variable and not a 1-GiB reservation.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+diff --git a/docs/deployment.md b/docs/deployment.md
+index 5c11992..d32f86d 100644
+--- a/docs/deployment.md
++++ b/docs/deployment.md
+@@ -1,10 +1,10 @@
+ # Deployment
+ 
+ Status: current contract; production details remain host-verified
+-Updated: 2026-09-13
+-Current repository implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+-Confirmed production deployed HEAD: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+-Confirmed production tree: `8312658be3ba272998f46212d9bad76950e3867e`
++Updated: 2026-10-04
++Current repository implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Confirmed production deployed HEAD: `7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Confirmed production tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+ 
+ ## Repository vs production
+ 
+@@ -22,6 +22,47 @@ authorized and verify the loaded SHA/tree. Never mutate the checkout while this
+ artifact-owned auxiliary process remains alive. TLS, firewall, producer secrets,
+ systemd provisioning, database creation and activation remain Owner-controlled.
+ 
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint production deployment
++
++Current production checkpoint is the document header commit/tree.
++
++Confirmed final Task-06 production state:
++
++```text
++captive-portal.service = active
++fingerprint-classification.service = active
++TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
++```
++
++Device Fingerprint domain stores:
++
++```text
++/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
++/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
++/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3
++/opt/CaptivePortal/data/device_fingerprint_integration.sqlite3
++```
++
++Current canonical SnapshotExecutionPolicy memory guard is 1 GiB
++(`process_memory_guard_bytes=1073741824`). This is a process-RSS guard, not a RAM
++reservation.
++
++`fingerprint-classification.service` is the durable Task-05 consumer. It uses
++claim/lease/retry state and the active admitted ClassificationRuntimeProfile;
++it does not open an Omada/controller listener.
++
++Permanent production rules:
++
++```text
++exact code comes from verified Git SHA/tree
++no local production source patch
++no full pytest on production
++activation is explicit and separate where applicable
++historical failed integration/classification rows remain evidence
++```
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
++
+ ## Core precondition
+ 
+ Required Omada environment:
+diff --git a/docs/module-index.md b/docs/module-index.md
+index e8caa8c..430eaf4 100644
+--- a/docs/module-index.md
++++ b/docs/module-index.md
+@@ -1,9 +1,9 @@
+ # Индекс модулей
+ 
+ Status: current
+-Updated: 2026-09-13
+-Runtime implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+-Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
++Updated: 2026-10-04
++Runtime implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+ 
+ `Repository status` describes code/defaults, not production enabled-state.
+ 
+@@ -13,7 +13,7 @@ Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
+ | Portal entry | current | `app/web/` | `modules/portal-entry.md` | process memory | via shared provider |
+ | CAPPORT | current | `app/capport/` | `modules/capport.md` | bounded caches | yes |
+ | Auth telemetry | current | `app/auth_telemetry/` | `modules/auth-telemetry.md` | JSONL | no |
+-| Device Fingerprint Evidence | current; default disabled | `app/device_fingerprint/` | `modules/device-fingerprint.md` | isolated SQLite v1 | no |
++| Device Fingerprint Evidence Foundation | current foundation layer | `app/device_fingerprint/` | `modules/device-fingerprint.md` | Evidence SQLite | no |
+ | Device Fingerprint Portal Evidence | current; default disabled | `app/device_fingerprint_portal/` | `modules/device-fingerprint-portal.md` | bounded memory; writes through Task-01 API | no |
+ | Public authorization counter | current | `app/portal_counter/` | `modules/public-authorization-counter.md` | SQLite | no |
+ | Public traffic counter | current | `app/public_traffic/` | `modules/public-traffic-counter.md` | SQLite | no |
+@@ -57,13 +57,30 @@ Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
+ | Completed Guest Session Traffic | current; default disabled | `app/admin_web/`, `app/analytics/completed_guest_traffic.py` | `modules/traffic.md`, `modules/analytics.md`, `modules/admin-web.md` | reads Visit + Observation | no |
+ | Consolidated Traffic Evidence | current; default disabled | `app/admin_web/traffic_evidence.py`, serializer/routes/UI | `modules/traffic.md`, `modules/admin-web.md` | composition only; no persistence | no |
+ 
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint current routing
++
++| Layer | Status | Owner | Persistence / output |
++|---|---|---|---|
++| Evidence Foundation | current production foundation | `app/device_fingerprint/` | Evidence SQLite |
++| Network Evidence Producer | current implementation / deployed foundation | `app/device_fingerprint_sensor/` | normalized envelopes only |
++| Portal Evidence Producer | current implementation / production foundation | `app/device_fingerprint_portal/` | normalized Portal evidence |
++| Foundation contracts / admission | accepted/current | `app/device_fingerprint/` | control-plane artifacts |
++| Classification Core | TASK-04 closed/accepted | `app/device_fingerprint/` | ClassificationResult |
++| Classification persistence/read | current production | classification persistence/read services | Classification SQLite |
++| Post-Auth integration worker | TASK-05 closed/current | `app/device_fingerprint_integration/` | Integration SQLite |
++| Admin presentation | TASK-06 production pass | `app/admin_web/device_fingerprint_presentation.py` | read-only Home / Device Card |
++
++Canonical detailed contract: `modules/device-fingerprint.md`.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
++
+ ## Current production evidence
+ 
+-Owner-provided production checkpoint 2026-09-13:
++Owner-provided production checkpoint 2026-10-04:
+ 
+ ```text
+-HEAD: 3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-tree: 8312658be3ba272998f46212d9bad76950e3867e
++HEAD: 7c7c0919c3e546f499b5252ea9479d32c8f494d7
++tree: dbf3e3804931d637ef1ec569128746ebce5c141a
+ 
+ TRAFFIC-00: DONE
+ TRAFFIC-01 Current: production active
+@@ -89,6 +106,11 @@ TASK-TEST-BASELINE-CLEANUP-01: FINAL ACCEPTED / MERGED / DEPLOYED / PRODUCTION P
+ TASK-HOME-HEALTH-01: MERGED / repository default disabled / production flag host-verified
+ TASK-HOME-AP-24H-01 + fixes: MERGED / repository default disabled / production flag host-verified
+ TASK-HOME-AP-24H-TELEMETRY-01: MERGED / repository default disabled
++TASK-DEVICE-FINGERPRINT-04: CLOSED / ACCEPTED / PRODUCTION ELIGIBLE
++TASK-DEVICE-FINGERPRINT-05: CLOSED / INTEGRATED
++TASK-DEVICE-FINGERPRINT-05-PERF-01: CLOSED
++TASK-DEVICE-FINGERPRINT-06: PRODUCTION PASS / DEPLOYED / ADMIN VISIBLE
++fingerprint-classification.service=active
+ Windows Central Lab current runner: V7 strict
+ Windows Central Lab V6 fixed: historical / audit only
+ 
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index 406cb0f..e2a24dd 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -1,8 +1,8 @@
+ # Admin Web
+ 
+ Status: current module contract
+-Updated: 2026-09-13
+-Baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
++Updated: 2026-10-04
++Baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+ 
+ ## Boundary
+ 
+@@ -220,15 +220,60 @@ PR #110 / #118 / #119 / #120=MERGED
+ 
+ Global Online-first remains backend-owned before pagination.
+ 
+-## Admin Web local asset library — current production
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint — current production
++
++Device Fingerprint is now a production-active passive/advisory classification
++capability, not only an evidence foundation.
++
++```text
++repository / production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
++repository / production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
++PR #178 = MERGED
++TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED
++TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
++TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
++TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
++captive-portal.service = active
++fingerprint-classification.service = active
++```
++
++High-level flow:
++
++```mermaid
++flowchart LR
++    E[Passive normalized evidence] --> C[Deterministic Device Fingerprint]
++    C --> P[(Persisted PRODUCTION ClassificationResult)]
++    P --> A[Admin read model]
++    A --> H[Home]
++    A --> D[Device Card]
++```
++
++Current Home product terminology:
++
++```text
++Type     = fingerprint device_class
++Platform = controller / Omada device_type
++```
++
++Controller Platform never backfills fingerprint Type. Device Card keeps
++**Controller Platform** separate from **Fingerprint Information**. No-result is
++`—`, a completed unresolved dimension is `Unknown`, and a fingerprint read failure
++is `Unavailable`/`—` without failing core Admin data.
++
++Detailed architecture and all engineering diagrams:
++`docs/modules/device-fingerprint.md`.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
++
++## Admin Web local asset library — historical production provenance
+ 
+ ```text
+ TASK-WEB-ASSET-LIBRARY-01=CLOSED / PRODUCTION PASS
+ TASK-WEB-ASSET-LIBRARY-01-FIX-ANDROID-PRESENTATION=CLOSED / PRODUCTION PASS
+ PR #113=MERGED
+ PR #114=MERGED / PRODUCTION VERIFIED
+-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-current production tree=8312658be3ba272998f46212d9bad76950e3867e
++historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
++historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
+ ```
+ 
+ The repository-local Android asset remains:
+@@ -251,15 +296,15 @@ device_type_key === "android"
+ Raw `device_type` remains source/display evidence. Current Admin Web does not
+ trim/lower/casefold/Unicode-normalize or infer Device Type in the browser.
+ 
+-## Canonical Device Type contract — current production
++## Controller Platform lexical contract — current production compatibility
+ 
+ ```text
+ TASK-DEVICE-TYPE-NORMALIZATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACTIVE
+ TASK-WEB-DEVICE-TYPE-PRESENTATION-01=CLOSED / MERGED / DEPLOYED / PRODUCTION ACCEPTANCE PASS
+ PR #119=MERGED
+ PR #120=MERGED
+-current production HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
+-current production tree=8312658be3ba272998f46212d9bad76950e3867e
++historical production checkpoint HEAD=3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5
++historical production checkpoint tree=8312658be3ba272998f46212d9bad76950e3867e
+ ```
+ 
+ Canonical ownership:
+@@ -295,7 +340,7 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+ ```
+ 
+ 
+-## Device Card Device Type — current presentation
++## Device Card Controller Platform — current presentation
+ 
+ Device Card keeps raw and canonical roles separate:
+ 
+@@ -316,11 +361,12 @@ snapshot raw type and identity raw type belong to the same Device record.
+ 
+ ## Home Online Devices — current presentation
+ 
+-The current production Home table presents:
++Current production columns:
+ 
+ ```text
+ Device / MAC
+ Type
++Platform
+ Auth
+ IP
+ AP
+@@ -331,18 +377,20 @@ Uptime
+ Traffic
+ ```
+ 
+-The `Type` column is immediately after `Device / MAC`.
++`Type` is the compact Device Fingerprint `device_class` presentation from the
++latest authoritative PRODUCTION `ClassificationResult`.
+ 
+-Type presentation:
++`Platform` is the existing controller/Omada `device_type` presentation and keeps
++the `device_type_key`/Android-icon compatibility contract.
+ 
+ ```text
+-device_type_key == "android" -> Android SVG cue
+-device_type_key == null AND device_type == null -> NULL
+-otherwise -> raw device_type
++Type != Platform
++Controller Platform NEVER backfills Fingerprint Type
+ ```
+ 
+-No Device Type inference is performed from hostname, system name, MAC, vendor,
+-SSID, AP, IP or history.
++Fingerprint no-result is `—`; a completed unresolved device class is `Unknown`.
++A fingerprint read failure remains fail-soft and does not remove the rest of the
++Home row.
+ 
+ SNR is presentation-only:
+ 
+diff --git a/docs/modules/device-fingerprint-portal.md b/docs/modules/device-fingerprint-portal.md
+index c4ee4db..53c23e2 100644
+--- a/docs/modules/device-fingerprint-portal.md
++++ b/docs/modules/device-fingerprint-portal.md
+@@ -1,6 +1,6 @@
+ # Device Fingerprint Portal Evidence
+ 
+-Status: **implemented; repository default disabled**.
++Status: **current production-foundation producer; repository default remains disabled**.
+ 
+ TASK-DEVICE-FINGERPRINT-03 adds passive normalized evidence from the existing
+ Omada External Portal and resolved CAPPORT login requests. It reads only the
+@@ -25,3 +25,26 @@ or identity-linking model is introduced.
+ Configuration is isolated under `DEVICE_FINGERPRINT_PORTAL_*`; the default is
+ `DEVICE_FINGERPRINT_PORTAL_ENABLED=false`. The Bearer credential and CA trust
+ file remain external to Git. Production activation is a separate Owner action.
++
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Current relationship to the production classifier
++
++Portal evidence is one origin in the current Device Fingerprint system; it is not
++a separate classifier. The normalized Portal evidence joins DHCP/TCP/TLS/QUIC
++evidence in snapshot/origin assessment, while MAC Registry is a knowledge-based
++sixth origin.
++
++Current source-health liveness uses the admitted PERIODIC Portal emitter:
++
++```text
++nominal same-state heartbeat = 60 seconds
++freshness timeout = 180 seconds
++timeout disposition = unknown
++```
++
++The older EVENT_DRIVEN emitter remains historical lineage and has a frozen
++freshness value of 0 seconds.
++
++Raw request headers remain non-durable. The classifier consumes normalized
++persisted evidence only.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+diff --git a/docs/modules/device-fingerprint.md b/docs/modules/device-fingerprint.md
+index d99d4c2..9937d96 100644
+--- a/docs/modules/device-fingerprint.md
++++ b/docs/modules/device-fingerprint.md
+@@ -1,99 +1,1073 @@
+-# Device Fingerprint Evidence
+-
+-Status: **current; default disabled**.
+-
+-TASK-DEVICE-FINGERPRINT-01 provides a passive, isolated foundation for storing
+-normalized mobile/personal-device fingerprint evidence. It does not ship a
+-sensor, capture packets, classify devices, link identities, call Omada, or
+-change Portal/Admin/Analytics behavior.
+-
+-## Runtime boundary
+-
+-For `TASK-DEVICE-FINGERPRINT-01`, the only authorized auxiliary entrypoint is:
+-
+-```text
+-python3 -m app.device_fingerprint.cli run
+-```
+-
+-It owns a dedicated direct-TLS Flask app at
+-`/api/internal/device-fingerprint/v1`, a schema-v2 SQLite writer and one bounded
+-retention thread. It is not registered into `run.py` or the main CaptivPortal
+-Flask app. The repository default `DEVICE_FINGERPRINT_EVIDENCE_ENABLED=false`
+-exits normally before logger, identity, lock, database, thread, app, or listener
+-creation.
+-
+-## Task-01 storage v2 readiness
+-
+-Schema v2 adds one durable database generation (canonical UUIDv4) and one
+-shared positive signed-64-bit `ingest_sequence` allocator for evidence and
+-source-health rows. The empty generation has watermark 0. Committed sequence
+-values are never reused by retention; identical duplicates consume none and
+-conflicts roll back the entire batch. The internal watermark read uses the
+-caller's existing SQLite connection and snapshot; this task does not assemble
+-Task-04 classification snapshots.
+-
+-Normal service startup rejects a v1 DB with a migration-required error and
+-does not migrate it. With the writer stopped, the explicit offline
+-`migrate-v1-to-v2 --backup-path <verified-backup-path>` command retains a
+-verified v1 backup, preserves normalized rows and IDs, and assigns sequences
+-deterministically by `(ingested_at, evidence-before-health, primary ID)`.
+-This bootstrap is **not** a reconstruction of historical commit order.
+-Known backup/VM/filesystem rollback or rebuild from older material requires
+-the stopped-writer `recover-generation --trigger <trigger>` procedure before
+-v2 ingestion resumes. It mints a new generation and rebaselines retained rows.
+-An arbitrary externally restored self-consistent old DB is not automatically
+-detectable. A pre-v2 application rollback requires restoring the verified
+-pre-migration v1 DB; old code is not presumed v2-compatible. Neither migration
+-nor recovery is automatically run by the service or by this source change.
+-
+-## Data and security
+-
+-The database contains only normalized P1 device-evidence rows and immutable
+-point-in-time source-health rows. Evidence schemas are registered locally before
+-the registry is frozen; Task-02 registers four bounded network schemas and
+-Task-03 adds normalized `portal_headers/1`. Unknown
+-schemas fail closed. Retention is based on `observed_at` (configured
+-1–90 days for evidence and fixed 30 days for source health).
+-
+-Every endpoint is protected by exact Bearer authentication and direct-peer CIDR
+-authorization. Producer identity is bound to one Site and capture source plus
+-configured guest CIDRs/source kinds. Proxy headers are ignored. Secrets, TLS
+-material, production producer records and production databases remain external
+-to Git.
+-
+-The frozen initial deployment mapping (without its external secret) is
+-`sensor-zefer-01` → capture source `zefer-span-01` → Site
+-`6a64f17630da7c70d232187a`, guest CIDR `192.168.8.0/22`, with authorized source
+-kinds `dhcp`, `tcp_syn`, `tls_client`, and `quic_client`. The Task-02 sensor
+-captures raw DHCP/TCP through an attached kernel BPF and consumes minimized
+-TLS/QUIC EVE over a Unix datagram socket. Only normalized bounded envelopes are
+-written to its DELETE-journal transport spool; raw frames and EVE are never
+-durable.
+-
+-The authoritative accepted design and verification contract is
+-`TASK-DEVICE-FINGERPRINT-01-FINAL.md`.
+-Task-02 extends only the reserved schema-registry boundary and is governed by
+-`TASK-DEVICE-FINGERPRINT-02-FINAL.md` plus FINAL ADDENDUM-1.
+-Task-03 reuses the same API/DB boundary through the isolated asynchronous portal
+-producer described in `docs/modules/device-fingerprint-portal.md`; it adds no
+-second database or classifier.
+-
+-## Current Task-06 presentation and operational policy
+-
+-The current canonical `SnapshotExecutionPolicy.process_memory_guard_bytes` is
+-`1073741824` (1024 MiB / 1 GiB), converged to the Owner-accepted production
+-operational value. Current deterministic policy identity is
+-`SnapshotExecutionPolicy:v1:sha256:36074993bb86daca8c43268c19ce0efab7e0e3ef5d644e07b9b6e65f5fff7f77`.
+-Historical acceptance/measurement evidence remains unchanged; changing this
+-current builder does not recreate Task-04 semantic acceptance or activate a
+-production profile.
+-
+-Task-06 consumes only persisted PRODUCTION `ClassificationResult` through the
+-existing read-only classification service and one typed Admin presentation
+-adapter. It does not classify on page/API reads or write classification data.
+-Home Platform is the existing controller/source value; Home Type is fingerprint
+-device_class. Device Card Controller Platform remains separate from Fingerprint
+-Platform. Fingerprint is advisory: no completed result is `—`, unresolved
+-dimensions are `Unknown`, and unavailable persistence does not fail core Admin
+-pages. See `docs/modules/admin-web.md` for the compact Home and diagnostic Device
+-Card surfaces.
++# Device Fingerprint
++
++Status: **current production capability**
++Updated: 2026-10-04
++Repository / production checkpoint: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Repository / production tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
++
++Device Fingerprint is CaptivPortal's passive, deterministic, Site-scoped device
++classification subsystem. It turns bounded normalized evidence into one
++structured, persisted `ClassificationResult`, links production classification to
++the post-authorization device/visit lifecycle where exact identity permits, and
++serves the latest authoritative **PRODUCTION** result to Admin Home and Device
++Card.
++
++The system is advisory. Fingerprint data never authorizes a guest, never changes
++CAPPORT admission, never blocks a client, and never performs a destructive Omada
++action.
++
++> `TASK-DEVICE-FINGERPRINT-01` is the **Evidence Foundation layer**. Its historical
++> statement that the foundation itself does not classify devices or link identities
++> remains correct. It is not a description of the whole current Device Fingerprint
++> system.
++
++## 1. Current production status
++
++```text
++TASK-DEVICE-FINGERPRINT-04 = CLOSED / ACCEPTED / PRODUCTION ELIGIBLE
++TASK-DEVICE-FINGERPRINT-05 = CLOSED / INTEGRATED
++TASK-DEVICE-FINGERPRINT-05-PERF-01 = CLOSED
++TASK-DEVICE-FINGERPRINT-06 = PRODUCTION PASS / DEPLOYED
++
++production HEAD = 7c7c0919c3e546f499b5252ea9479d32c8f494d7
++production tree = dbf3e3804931d637ef1ec569128746ebce5c141a
++
++captive-portal.service = active
++fingerprint-classification.service = active
++```
++
++Task-06 production acceptance includes exact-code switch, production smoke, deploy
++PASS, and Owner visual confirmation that fingerprint Type is visible in Home and
++Fingerprint Information is visible in Device Card.
++
++Current capability layers:
++
++```text
++Device Fingerprint
++├── Evidence Foundation
++├── Evidence Producers
++│   ├── Network Sensor
++│   └── Portal Producer
++├── Foundation Contracts
++│   ├── bindings / clock
++│   ├── source health
++│   ├── schema admission
++│   └── snapshot policies
++├── Knowledge / Policy
++├── Classification Core
++├── Runtime Profiles / Admission
++├── Classification Persistence
++├── Auth / Device Integration
++├── Production Worker
++└── Product Presentation
++    ├── Home → Online Devices
++    └── Device Card → Fingerprint Information
++```
++
++## 2. Product dimensions and state semantics
++
++The four product dimensions are:
++
++```text
++device_class
++platform_family
++manufacturer_family
++model_family
++```
++
++A dimension status is one of:
++
++```text
++resolved
++recognized_out_of_scope
++unknown
++insufficient_evidence
++conflicting_evidence
++```
++
++Support is one of:
++
++```text
++none
++low
++medium
++high
++```
++
++Support is not a probability.
++
++Product presentation keeps three different states distinct:
++
++| Product display | Meaning |
++|---|---|
++| `—` | no completed authoritative production result exists yet |
++| `Unknown` | classification completed, but the dimension was not resolved |
++| `Unavailable` | fingerprint persistence/read path is temporarily unavailable |
++
++`unknown != no result != unavailable`.
++
++## Architecture diagrams
++
++The detailed module uses sixteen focused GitHub-renderable diagrams. This index
++is the stable navigation map for the current Device Fingerprint architecture:
++
++```text
++DF-01 — Full end-to-end
++DF-02 — Evidence sources / origins
++DF-03 — Evidence + source health + time
++DF-04 — Snapshot assembly
++DF-05 — Pure deterministic classification core
++DF-06 — Per-dimension fusion
++DF-07 — Knowledge and policy
++DF-08 — Runtime profile / admission lifecycle
++DF-09 — Artifact / audit lineage
++DF-10 — Post-Auth integration / worker
++DF-11 — Device classification history
++DF-12 — Admin presentation read path
++DF-13 — UI state semantics
++DF-14 — Failure isolation
++DF-15 — Production components and stores
++DF-16 — Current Device Fingerprint vs future Traffic Enrichment
++```
++
++## 3. DF-01 — Full end-to-end
++
++**Purpose:** show the whole production flow in one view.
++**Inputs:** mirrored network traffic, Portal/CAPPORT request metadata, post-auth identity context.
++**Outputs:** persisted authoritative classification and Admin presentation.
++**Persistence boundary:** normalized evidence, control-plane artifacts, classifications, integration jobs. Raw frames are not durable.
++**Failure behavior:** fingerprint degrades/fails independently; Auth/CAPPORT and core Admin continue.
++**Authoritative owner/module:** `app/device_fingerprint*`, `app/admin_web/`.
++
++```mermaid
++flowchart TD
++    C[Client device] --> W[Wi-Fi / Omada]
++    W --> M[SPAN / mirrored traffic]
++    M --> NS[Network Sensor]
++    NS --> NE[Bounded normalized network evidence]
++
++    C --> P[Portal / CAPPORT request]
++    P --> PP[Portal evidence producer]
++    PP --> PE[Bounded normalized portal evidence]
++
++    NE --> EDB[(Evidence SQLite)]
++    PE --> EDB
++    EDB --> SNAP[Snapshot assembly]
++    SNAP --> SE[SourceEvaluability]
++    SE --> OA[OriginAssessments]
++    OA --> FUS[Cross-origin fusion]
++    FUS --> CR[ClassificationResult]
++    CR --> CDB[(Classification SQLite)]
++    CDB --> I[Task-05 integration / history]
++    I --> ID[Device / Visit relation]
++    CDB --> R[Task-06 production read]
++    R --> H[Home]
++    R --> D[Device Card]
++```
++
++## 4. DF-02 — Evidence sources / origins
++
++**Purpose:** distinguish independent origin families.
++**Inputs:** normalized admitted evidence plus MAC-registry knowledge.
++**Outputs:** per-origin assessments.
++**Persistence boundary:** five physical/application evidence families persist through Task-01; MAC Registry is knowledge-derived, not packet evidence.
++**Failure behavior:** unavailable/unsupported/disabled/unknown origin stays explicit and conservative.
++**Authoritative owner/module:** evidence adapters + `origin_assessment.py`.
++
++```mermaid
++flowchart LR
++    subgraph Physical["Physical / network origins"]
++      DHCP[DHCP]
++      TCP[TCP]
++      TLS[TLS]
++      QUIC[QUIC]
++    end
++    subgraph Application["Application origin"]
++      PORTAL[Portal]
++    end
++    subgraph Knowledge["Knowledge-based origin"]
++      MAC[MAC Registry]
++    end
++
++    DHCP --> SNAP[Evidence Snapshot]
++    TCP --> SNAP
++    TLS --> SNAP
++    QUIC --> SNAP
++    PORTAL --> SNAP
++    MAC --> OA[OriginAssessments]
++    SNAP --> OA
++
++    AV[available] -.status.-> OA
++    UN[unavailable] -.status.-> OA
++    US[unsupported] -.status.-> OA
++    DI[disabled] -.status.-> OA
++    UK[unknown] -.status.-> OA
++```
++
++Current classifier origin order is exactly:
++
++```text
++dhcp, portal, tcp, tls, quic, mac_registry
++```
++
++Repeated rows from one origin do not become independent votes.
++
++## 5. Evidence Foundation and producers
++
++### Evidence Foundation
++
++Task-01 owns the normalized evidence/source-health persistence boundary and its
++internal direct-TLS ingest/read service. The foundation remains separate from the
++classification SQLite.
++
++Normalized durable evidence is P1/bounded. Raw packets, raw EVE, raw User-Agent,
++raw Client Hints, cookies, credentials and full request material are not durable
++classification evidence.
++
++### Network producer
++
++Conceptual flow:
++
++```text
++SPAN / mirrored traffic
++→ sensor-side capture/parsing
++→ bounded normalization
++→ durable normalized evidence
++→ Device Fingerprint Evidence SQLite
++```
++
++Current network evidence families include admitted DHCP, TCP SYN, TLS client and
++QUIC client schemas. The deployed sensor architecture keeps raw frames in memory;
++Suricata extraction is minimized and the product persistence boundary is the
++normalized evidence envelope, not EVE/PCAP storage.
++
++### Portal producer
++
++Conceptual flow:
++
++```text
++Portal / CAPPORT request
++→ bounded request metadata
++→ portal evidence producer
++→ normalized portal evidence
++→ existing Evidence SQLite
++```
++
++Portal evidence is another origin. It is not a second classifier.
++
++Current Portal source-health uses the accepted periodic replacement emitter with a
++60-second nominal same-state heartbeat. The historical EVENT_DRIVEN Portal emitter
++remains part of lineage but is not the current liveness contract.
++
++## 6. DF-03 — Evidence + source health + time
++
++**Purpose:** explain why absence of evidence is not automatically negative evidence.
++**Inputs:** evidence rows, source-health timeline, binding timeline, clock policy.
++**Outputs:** conservative source coverage/evaluability.
++**Persistence boundary:** evidence and immutable source-health events persist; evaluability is derived classification input.
++**Failure behavior:** stale/missing/incompatible health becomes unknown or another explicit non-covered state; no optimistic backfill.
++**Authoritative owner/module:** `source_health_policy.py`, binding contracts, `source_evaluability.py`.
++
++```mermaid
++flowchart TD
++    E[Evidence rows] --> X[Time/binding evaluation]
++    H[Source Health timeline] --> X
++    B[Source binding timeline] --> X
++    C[Clock policy] --> X
++    X --> SE[SourceEvaluability]
++
++    A["absence of evidence"] --> Q{source coverage proven?}
++    Q -->|yes| COV[interpret within admitted semantics]
++    Q -->|no / unknown| N["NOT negative evidence"]
++```
++
++Current frozen source-health freshness includes:
++
++```text
++network periodic emitter = 600 seconds
++historical Portal EVENT_DRIVEN emitter = 0 seconds
++current Portal PERIODIC emitter = 180 seconds
++timeout result = unknown
++```
++
++Recovery never retroactively upgrades a missed interval to complete.
++
++## 7. Binding and time model
++
++Classification is Site-scoped and time-windowed. Snapshot membership depends on:
++
++```text
++Site
++observed MAC
++classification window
++source binding epoch
++capture/source identity
++clock policy
++source-health coverage
++Task-01 generation/watermark
++```
++
++A classifier cannot safely use “the latest row” without proving that row belongs
++to the requested Site, binding epoch and time window.
++
++## 8. DF-04 — Snapshot assembly
++
++**Purpose:** separate semantic snapshot contents from transient verified materialization and operational limits.
++**Inputs:** retained Task-01 evidence/health plus foundation contracts.
++**Outputs:** `EvidenceSnapshotContent`, verified `EvidenceSnapshotMaterialization`, `SourceEvaluability`.
++**Persistence boundary:** `EvidenceSnapshotContent`/`SnapshotRecord` are retained audit lineage; materialization is transient.
++**Failure behavior:** invalid integrity, incompatible binding, or exceeded resource policy fails closed for that classification request.
++**Authoritative owner/module:** snapshot service/artifacts + foundation runtime profile.
++
++```mermaid
++flowchart TD
++    W[classification window] --> TX[One consistent Task-01 SQLite read snapshot]
++    TX --> EV[evidence selection]
++    TX --> HL[health selection]
++    B[bindings / clock] --> EV
++    CP[SnapshotContentPolicy] --> EV
++    XP[SnapshotExecutionPolicy] --> TX
++    EV --> ESC[EvidenceSnapshotContent]
++    HL --> ESC
++    ESC --> MAT[Verified transient materialization]
++    MAT --> SE[SourceEvaluability]
++```
++
++Permanent distinction:
++
++```text
++SnapshotContentPolicy != SnapshotExecutionPolicy
++semantic content ceilings != operational execution guard
++```
++
++Current production-aligned memory guard:
++
++```text
++process_memory_guard_bytes = 1073741824
++                         = 1024 MiB
++                         = 1 GiB
++
++SnapshotExecutionPolicy:v1:sha256:
++36074993bb86daca8c43268c19ce0efab7e0e3ef5d644e07b9b6e65f5fff7f77
++```
++
++This is a guard/threshold, not a 1-GiB memory reservation. Historical 96 MiB and
++512 MiB values are not current configuration.
++
++## 9. Knowledge and policy
++
++Knowledge is pinned, versioned and auditable. Production classification cannot
++silently consult arbitrary current Internet/vendor knowledge.
++
++Current knowledge families include:
++
++| Family | Role |
++|---|---|
++| K1 | offline pinned Satori DHCP knowledge |
++| K2A | p0f parser/conformance foundation |
++| K2B | offline pinned legacy p0f TCP knowledge |
++| K3 | internal normalized Portal rule set |
++| K4 | offline admitted IEEE MAC-assignment knowledge |
++
++Other major artifacts include:
++
++```text
++ClassificationTaxonomy
++AliasMapping
++KnowledgeFreshnessPolicy
++SourceGovernanceRecord
++KnowledgeProvenanceManifest
++CanonicalKnowledgeRecordSet
++KnowledgeBundle
++ClassificationPolicy
++EvidenceAdapterContractSet
++ClassifierArtifactManifest
++```
++
++## 10. DF-07 — Knowledge and policy
++
++**Purpose:** show how admitted knowledge becomes deterministic classifier input.
++**Inputs:** taxonomy, aliases, versioned knowledge families, provenance/freshness.
++**Outputs:** pinned `KnowledgeBundle` + policy/adapter contracts.
++**Persistence boundary:** immutable artifact/control-plane content, not query-time cloud results.
++**Failure behavior:** stale/unadmitted/incompatible knowledge blocks admission or produces conservative no-claim semantics; there is no silent fallback.
++**Authoritative owner/module:** knowledge artifact builders, governance gates, runtime-profile artifacts.
++
++```mermaid
++flowchart TD
++    TAX[ClassificationTaxonomy] --> KB[KnowledgeBundle]
++    AL[AliasMapping] --> KB
++    K1[K1 Satori DHCP] --> KB
++    K2[K2A/K2B p0f] --> KB
++    K3[K3 Portal rules] --> KB
++    K4[K4 IEEE registry] --> KB
++    PROV[Provenance + freshness] --> KB
++    KB --> REQ[Classification request]
++    POL[ClassificationPolicy] --> REQ
++    AD[EvidenceAdapterContractSet] --> REQ
++```
++
++## 11. DF-05 — Pure deterministic classification core
++
++**Purpose:** show the I/O-free semantic core.
++**Inputs:** exact snapshot/evaluability + admitted knowledge/policy/adapters/classifier identity.
++**Outputs:** six `OriginAssessment`s, four `DimensionResult`s, global `ClassificationResult`.
++**Persistence boundary:** none inside the pure core. Persistence happens outside it.
++**Failure behavior:** malformed/incompatible inputs fail closed; no external fallback.
++**Authoritative owner/module:** origin assessment + fusion/classification core.
++
++```mermaid
++flowchart TD
++    subgraph PURE["PURE DETERMINISTIC CORE — NO DB / NO NETWORK / NO CURRENT CLOCK / NO PERSISTENCE"]
++      ESC[EvidenceSnapshotContent]
++      MAT[EvidenceSnapshotMaterialization]
++      SE[SourceEvaluability]
++      KB[KnowledgeBundle]
++      CP[ClassificationPolicy]
++      EA[EvidenceAdapterContractSet]
++      CAM[ClassifierArtifactManifest]
++      KT[knowledge_evaluation_at_utc]
++
++      ESC --> OA[6 OriginAssessments]
++      MAT --> OA
++      SE --> OA
++      KB --> OA
++      EA --> OA
++      KT --> OA
++
++      OA --> F[Cross-Origin Fusion]
++      CP --> F
++      CAM --> F
++      F --> DR[4 DimensionResults]
++      DR --> GS[Global classification status]
++      GS --> CR[ClassificationResult]
++    end
++```
++
++The pure core does not read DBs, network, filesystem discovery, current wall clock,
++mutable configuration or vendor schemas.
++
++## 12. OriginAssessment
++
++Every origin is evaluated independently before fusion:
++
++```text
++DHCP
++Portal
++TCP
++TLS
++QUIC
++MAC Registry
++```
++
++An origin can provide a candidate, no claim, ambiguity/conflict, or be
++unsupported/not evaluable. Documentation must not reduce this architecture to
++“User-Agent means Android” or “DHCP means Smartphone”.
++
++## 13. DF-06 — Per-dimension fusion
++
++**Purpose:** explain one dimension without pretending fusion is majority voting.
++**Inputs:** one dimension's independently constructed origin assessments.
++**Outputs:** status, canonical value when resolved, support and audit references.
++**Persistence boundary:** result persists only after the pure decision is complete.
++**Failure behavior:** ambiguity/conflict/insufficient evidence remains an explicit valid outcome.
++**Authoritative owner/module:** `fusion.py` + `ClassificationPolicy`.
++
++```mermaid
++flowchart TD
++    D[DHCP claim] --> SO[same-origin assessment]
++    P[Portal claim] --> SO
++    T[TCP claim] --> SO
++    L[TLS claim] --> SO
++    Q[QUIC claim] --> SO
++    M[MAC Registry claim] --> SO
++    SO --> XO[cross-origin comparison]
++    XO --> R{Dimension result}
++    R --> RES[resolved]
++    R --> OOS[recognized_out_of_scope]
++    R --> UNK[unknown]
++    R --> INS[insufficient_evidence]
++    R --> CON[conflicting_evidence]
++    RES --> SUP[support: low / medium / high]
++    OOS --> SUP
++    UNK --> NONE[support: none]
++    INS --> NONE
++    CON --> NONE
++```
++
++Independent-origin agreement and contradiction matter. Row counts are not votes.
++
++## 14. ClassificationResult
++
++`ClassificationResult` is the authoritative structured classifier product artifact.
++
++It includes global classification status plus:
++
++```text
++platform_result
++device_class_result
++manufacturer_result
++model_result
++```
++
++Each dimension carries:
++
++```text
++canonical value (when resolved)
++status
++support level
++supporting origins
++contradicting origins
++not-evaluable origins
++out-of-scope references
++explanation codes
++knowledge references
++```
++
++The product UI consumes this artifact through typed read/presentation boundaries;
++it does not recompute its semantics.
++
++## 15. Reproducibility and audit
++
++A result is explainable relative to exact:
++
++```text
++evidence snapshot
++source evaluability
++knowledge bundle
++classification policy
++adapter contracts
++classifier implementation identity
++runtime profile
++activation/admission lineage
++```
++
++Key retained identities include:
++
++```text
++SnapshotRecord
++ClassificationRequestManifest
++ClassifierArtifactManifest
++ClassificationResult
++FoundationRuntimeProfile
++ClassificationRuntimeProfile
++RuntimeProfileAdmissionManifest
++RuntimeProfileActivationRecord
++RuntimeProfileValidityRecord
++```
++
++`ClassifierArtifactManifest` pins the exact executable classifier implementation
++identity used by the admitted runtime profile. A semantic classifier
++implementation-byte change is therefore not merely an Admin/UI revision: it can
++require a new candidate lineage and the applicable acceptance/admission path
++before that implementation becomes production-active.
++
++Reacceptance boundary:
++
++```text
++classifier semantic implementation / admitted classifier artifacts changed
++→ new candidate identity + applicable acceptance/admission required
++
++Admin presentation-only change with unchanged classifier semantics/artifacts
++→ does not by itself require classifier reacceptance
++```
++
++## 16. DF-09 — Artifact / audit lineage
++
++**Purpose:** show why a retained result can be reproduced and explained.
++**Inputs:** exact request artifacts and activation lineage.
++**Outputs:** retained result with immutable references.
++**Persistence boundary:** control-plane + classification audit persistence.
++**Failure behavior:** missing/inconsistent lineage fails closed; random “latest settings” are not substituted.
++**Authoritative owner/module:** artifact/control-plane + classification persistence.
++
++```mermaid
++flowchart TD
++    SR[SnapshotRecord] --> CRM[ClassificationRequestManifest]
++    KB[KnowledgeBundle] --> CRM
++    POL[ClassificationPolicy] --> CRM
++    CAM[ClassifierArtifactManifest] --> CRM
++    RP[ClassificationRuntimeProfile] --> CRM
++    ACT[Admission / Activation lineage] --> RP
++    CRM --> CR[ClassificationResult]
++```
++
++## 17. Runtime profiles and admission
++
++There are two compatibility levels:
++
++```text
++FoundationRuntimeProfile
++ClassificationRuntimeProfile
++```
++
++The classification profile pins the exact Foundation profile, KnowledgeBundle,
++ClassificationPolicy, EvidenceAdapterContractSet and ClassifierArtifactManifest.
++
++A production request reads the active classification pointer once and pins one
++exact profile generation for the entire request. It does not repeatedly choose
++“current” artifacts.
++
++## 18. DF-08 — Runtime profile / admission lifecycle
++
++**Purpose:** make candidate/accepted/admitted/active states visibly different.
++**Inputs:** immutable foundation/classifier artifacts and acceptance proofs.
++**Outputs:** one active pinned runtime profile.
++**Persistence boundary:** dedicated control-plane SQLite.
++**Failure behavior:** compatibility/predecessor/validity failure blocks activation; no mixed generation.
++**Authoritative owner/module:** runtime-profile/control-plane admission code.
++
++```mermaid
++flowchart TD
++    FA[Foundation artifacts] --> FRP[FoundationRuntimeProfile candidate]
++    FRP --> FACC[Foundation acceptance/admission]
++    FACC --> FACT[Foundation profile admitted/active]
++
++    FACT --> CRPC[ClassificationRuntimeProfile candidate]
++    K[Knowledge + Policy + Adapters + Classifier] --> CRPC
++    CRPC --> TAC[Task-04 acceptance]
++    TAC --> RPM[RuntimeProfileAdmissionManifest]
++    RPM --> ACT[Activation]
++    ACT --> PIN[Pinned PRODUCTION ClassificationRuntimeProfile]
++
++    C[candidate] -.not equal.-> A[accepted]
++    A -.not equal.-> AD[admitted]
++    AD -.not equal.-> AC[active]
++```
++
++### In-flight stability
++
++```text
++request starts
++→ exact ClassificationRuntimeProfile generation pinned once
++→ entire request uses the same semantic generation
++→ commit guard validates the pinned activation lineage
++```
++
++A safe profile activation during the request does not mix the new generation into
++the already-running request.
++
++## 19. Persistence
++
++Device Fingerprint uses separate stores by ownership:
++
++```text
++/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3
++/opt/CaptivePortal/data/device_fingerprint_classification.sqlite3
++/opt/CaptivePortal/data/device_fingerprint_control_plane.sqlite3
++/opt/CaptivePortal/data/device_fingerprint_integration.sqlite3
++```
++
++The evidence, classification, control-plane and integration domains are not one
++database and must not be aliased.
++
++Classification retention is a versioned policy; current accepted V1 retention is
++90 days. A classification result is historical product/audit evidence, not a field
++that overwrites the Device row.
++
++## 20. DF-15 — Production components and stores
++
++**Purpose:** show runtime ownership.
++**Inputs:** main Auth lifecycle plus passive evidence.
++**Outputs:** classification and read-only Admin presentation.
++**Persistence boundary:** four dedicated Device Fingerprint SQLite domains.
++**Failure behavior:** independent components fail without changing Authorization semantics.
++**Authoritative owner/module:** deployment templates + integration/classification services.
++
++```mermaid
++flowchart TD
++    CP[captive-portal.service]
++    FW[fingerprint-classification.service]
++    FE[fingerprint-evidence.service]
++    FS[fingerprint-sensor.service]
++    SU[fingerprint-suricata.service]
++
++    E[(Evidence SQLite)]
++    C[(Classification SQLite)]
++    P[(Control Plane SQLite)]
++    I[(Integration SQLite)]
++
++    FS --> E
++    SU --> FS
++    FE --> E
++    CP --> I
++    FW --> I
++    FW --> E
++    FW --> P
++    FW --> C
++    C --> CP
++    CP --> ADMIN[Admin read consumers]
++```
++
++The production status explicitly confirmed for the final Task-06 checkpoint is
++`captive-portal.service=active` and `fingerprint-classification.service=active`.
++Repository component existence is not used to invent an unverified live service
++state for other auxiliary units.
++
++## 21. Task-05 — post-Auth integration
++
++One successful AuthRun creates one durable classification opportunity. Current
++code constants define:
++
++```text
++lookback before Auth      = 300 s
++post-Auth evidence window = 120 s
++due time                  = Auth + 150 s
++lease                     = 300 s
++max attempts              = 5
++retry delays              = 30 / 120 / 300 / 600 s
++identity retry interval   = 30 s
++identity horizon          = 3600 s
++```
++
++Current job states:
++
++```text
++PENDING
++LEASED
++CLASSIFIED
++NO_RESULT_FINAL
++```
++
++Identity states:
++
++```text
++UNRESOLVED
++DEVICE_RESOLVED
++DEVICE_AND_VISIT_RESOLVED
++CONFLICT
++```
++
++## 22. DF-10 — Post-Auth integration / worker
++
++**Purpose:** show the durable production classification trigger.
++**Inputs:** confirmed authorization plus exact identity/session context.
++**Outputs:** persisted production classification linked where exact identity permits.
++**Persistence boundary:** integration SQLite + classification/control-plane stores.
++**Failure behavior:** bounded retry, lease recovery and terminal no-result; Auth remains independent.
++**Authoritative owner/module:** `app/device_fingerprint_integration/`, `fingerprint-classification.service`.
++
++```mermaid
++flowchart TD
++    A[Auth success] --> J[Create Integration Job]
++    J --> P[PENDING]
++    P --> DUE[due]
++    DUE --> L[LEASED]
++    L --> W[Single durable worker]
++    W --> ID[Exact identity/session resolution]
++    ID --> RP[Pin admitted ClassificationRuntimeProfile]
++    RP --> S[Assemble snapshot]
++    S --> C[Classify]
++    C --> PS[Persist ClassificationResult]
++    PS --> OK[CLASSIFIED]
++    OK --> LINK[Device / Visit linkage where proven]
++
++    ID -->|temporary unresolved| RETRY[bounded retry]
++    S -->|typed/retryable failure| RETRY
++    C -->|typed/retryable failure| RETRY
++    RETRY --> P
++    RETRY -->|attempt/horizon exhausted| NR[NO_RESULT_FINAL]
++```
++
++Identity resolution does not guess. It uses exact Site/session/MAC Registry
++snapshots and exact Visit/session/run relation where available.
++
++## 23. Device identity and later visits
++
++Device identity and classification result are different records. Current relation
++uses Site, observed MAC, device/session anchors, integration job and
++classification ID.
++
++For the same Site + MAC, a later Visit can create another fingerprint opportunity:
++
++```text
++existing Device identity
+++ new Visit/AuthRun
+++ new ClassificationResult
++```
++
++There is no automatic cross-MAC identity merge. A randomized MAC can therefore be
++a separate Device identity unless another separately proven linking mechanism
++exists.
++
++## 24. DF-11 — Device classification history
++
++**Purpose:** distinguish Device identity from repeated classification history.
++**Inputs:** successive auth/visit opportunities for one Site+MAC.
++**Outputs:** retained classification history and one current production selection.
++**Persistence boundary:** classification SQLite retains multiple results.
++**Failure behavior:** a failed/new opportunity does not rewrite older retained evidence.
++**Authoritative owner/module:** classification persistence/read + Task-05 relation.
++
++```mermaid
++flowchart TD
++    DEV[Device — one Site + MAC]
++    DEV --> V1[Visit #1]
++    DEV --> V2[Visit #2]
++    DEV --> V3[Visit #3]
++    V1 --> R1[ClassificationResult #1]
++    V2 --> R2[ClassificationResult #2]
++    V3 --> R3[ClassificationResult #3]
++    R1 --> SEL[latest authoritative PRODUCTION result]
++    R2 --> SEL
++    R3 --> SEL
++    SEL --> UI[current Device Card / Home]
++```
++
++## 25. Task-05 performance and memory-pressure history
++
++The first successful production-shaped assembly exposed a CPU-bound performance
++problem: repeated validation/rematerialization of the same immutable knowledge
++closure. `TASK-DEVICE-FINGERPRINT-05-PERF-01` introduced request-scoped validation
++proof reuse without changing classifier semantics or artifact identities.
++
++Accepted engineering history:
++
++```text
++before: wall ≈ 248.5 s, CPU ≈ 247.9 s
++after:  wall ≈ 32.35 s
++speedup ≈ 7.68x
++reduction ≈ 86.98%
++```
++
++A later live `snapshot_memory_pressure` exposed that the historical 96-MiB process
++RSS guard was operationally too small. This was not proof of host OOM, a semantic
++classifier regression or a memory leak. The final current policy is 1 GiB.
++
++Historical failed rows remain history; a later successful Owner-device job reached
++`CLASSIFIED` in one attempt with an empty last reason.
++
++## 26. Task-06 authoritative product read
++
++The UI does not classify.
++
++```text
++persisted PRODUCTION ClassificationResult
++→ DeviceFingerprintClassificationReadService
++→ typed DeviceFingerprintPresentationService
++→ AdminQueryService/read model
++→ Home / Device Card
++```
++
++A newer `PRE_ACCEPTANCE_CANDIDATE` result cannot shadow the current production
++result.
++
++Home batch reads are bounded to at most 250 input MACs. Inputs are canonicalized
++and deduplicated. The implementation uses one read-only SQLite connection /
++transaction and bounded grouped SELECTs, not one connection/query per device row.
++
++## 27. DF-12 — Admin presentation read path
++
++**Purpose:** show the one authoritative read path shared by product surfaces.
++**Inputs:** persisted PRODUCTION ClassificationResult.
++**Outputs:** compact Home Type and detailed Device Card fingerprint information.
++**Persistence boundary:** read-only; no UI writes/classification.
++**Failure behavior:** fail-soft presentation on read failure.
++**Authoritative owner/module:** classification read + Admin fingerprint presentation service.
++
++```mermaid
++flowchart TD
++    DB[(Classification SQLite)] --> PR[production-only read]
++    PR --> PA[typed presentation adapter]
++    PA --> AQ[AdminQueryService]
++    AQ --> H[Home → Online Devices]
++    AQ --> D[Device Card]
++
++    H --> HT["Type = Fingerprint device_class"]
++    H --> HP["Platform = controller device_type"]
++
++    D --> CP["Controller Platform"]
++    D --> FI["Fingerprint Information"]
++```
++
++## 28. Home → Online Devices current UI
++
++Current Home column semantics:
++
++```text
++Device / MAC
++Type       = fingerprint device_class
++Platform   = existing controller / Omada device_type presentation
++Auth
++IP
++AP
++Band
++RSSI
++SNR
++Uptime
++Traffic
++```
++
++The old backend fields remain `device_type` / `device_type_key`; their current
++product meaning is **Controller Platform**. The existing Android icon and canonical
++lexical key still apply to that controller value.
++
++Permanent product rule:
++
++```text
++Fingerprint Type != Controller Platform
++Controller Platform NEVER backfills Fingerprint Type
++```
++
++## 29. Device Card current UI
++
++Device Card keeps controller evidence and fingerprint evidence separate:
++
++```text
++Controller information
++  Controller Platform = controller/source value
++
++Fingerprint Information
++  Status
++  Classified at
++  Type
++  Fingerprint Platform
++  Manufacturer
++  Model Family
++  support
++```
++
++Expandable fingerprint details may show exact per-dimension status, support,
++supporting/contradicting/not-evaluable origins, out-of-scope references,
++explanation codes and knowledge references.
++
++Controller Platform and Fingerprint Platform can disagree. No reconciliation,
++auto-correction, hidden override or UI-side “best guess” is performed.
++
++## 30. DF-13 — UI state semantics
++
++**Purpose:** make no-result/Unknown/Unavailable unambiguous.
++**Inputs:** production read state + dimension status.
++**Outputs:** stable human-facing presentation.
++**Persistence boundary:** none.
++**Failure behavior:** read failure maps to Unavailable/— without breaking core page data.
++**Authoritative owner/module:** Admin fingerprint presentation.
++
++```mermaid
++flowchart TD
++    Q{Fingerprint read available?}
++    Q -->|no| U[Unavailable]
++    Q -->|yes| R{PRODUCTION result exists?}
++    R -->|no| DASH[—]
++    R -->|yes| D{dimension resolved?}
++    D -->|yes| V[display resolved value]
++    D -->|no| K[Unknown]
++```
++
++A completed global classification status of `unknown` is still a completed
++classification, not read-path Unavailable.
++
++## 31. DF-14 — Failure isolation
++
++**Purpose:** show that Device Fingerprint is advisory and fail-soft to the rest of CaptivPortal.
++**Inputs:** possible sensor/store/classifier/worker/read failures.
++**Outputs:** degraded/unavailable fingerprint only.
++**Persistence boundary:** failures may be retained in domain history/telemetry; they do not mutate Auth decisions.
++**Failure behavior:** core Auth/CAPPORT/Admin/Traffic continue according to their own contracts.
++**Authoritative owner/module:** subsystem boundaries + Admin fail-soft adapter.
++
++```mermaid
++flowchart LR
++    SF[Sensor failure] --> FD[Fingerprint degraded / unavailable]
++    DBF[Fingerprint DB failure] --> FD
++    CF[Classifier unavailable] --> FD
++    WF[Worker retry/failure] --> FD
++
++    AUTH[Auth continues]
++    CAP[CAPPORT continues]
++    ADM[Admin core continues]
++    TR[Traffic/current-state continue]
++
++    FD -.does not control.-> AUTH
++    FD -.does not control.-> CAP
++    FD -.does not control.-> ADM
++    FD -.does not control.-> TR
++```
++
++## 32. Security and privacy boundaries
++
++Permanent invariants:
++
++```text
++classification is advisory
++classification never authorizes
++classification never changes CAPPORT admission
++classification is not a security credential
++no automatic client blocking
++no destructive Omada action
++no cross-MAC identity merge
++runtime classifier requires no Internet
++raw packets are non-durable
++raw User-Agent / Client Hints are non-durable
++Admin presentation is Site-authorized and read-only
++```
++
++Knowledge acquisition/import may be an offline governed process; the production
++classifier does not perform query-time external/cloud classification.
++
++## 33. Site boundary
++
++Fingerprint reads/writes are Site-scoped. Do not model:
++
++```text
++MAC → one universal global identity
++```
++
++The current product/read boundary is Site + observed MAC. This boundary must be
++preserved for future Multi-Site evolution.
++
++## 34. DF-16 — Current Device Fingerprint vs future Traffic Enrichment
++
++**Purpose:** prevent two initiatives from being conflated.
++**Inputs:** current classification data vs future traffic/activity intelligence.
++**Outputs:** richer future Device Card without changing what “fingerprint” means.
++**Persistence boundary:** future initiative requires its own approved architecture.
++**Failure behavior:** future work cannot silently expand current fingerprint semantics.
++**Authoritative owner/module:** current Device Fingerprint docs; future Architect/roadmap for enrichment.
++
++```mermaid
++flowchart TD
++    DF["CURRENT — Device Fingerprint"] --> ID["identity / classification data"]
++    TE["FUTURE — Device Traffic Enrichment"] --> TI["traffic / activity / protocol / quality / behavior / anomaly data"]
++    ID --> CARD[Richer Device Card]
++    TI --> CARD
++```
++
++Device Traffic Enrichment / Device Intelligence is future architecture work. It
++must not be described as already implemented Device Fingerprint behavior.
++
++## 35. Historical architecture and provenance
++
++The registered Device Fingerprint R14 architecture remains the normative detailed
++semantic contract for frozen artifact/admission/classification semantics. It
++contains historical lifecycle language (including periods when Task-04 was HOLD)
++that is correct for that point in the project history.
++
++Current documentation must not rewrite that history. Current-state docs instead
++record the later accepted chain:
++
++```text
++Foundation accepted/admitted
++→ Task-04 implemented and T-ACCEPT PASS
++→ Task-05 identity/session integration
++→ Task-05 PERF repair
++→ Task-06 authoritative Admin presentation
++→ production deploy/acceptance
++```
++
++## 36. Current source-of-truth map
++
++| Topic | Current owner/reference |
++|---|---|
++| normalized evidence/store | `app/device_fingerprint/` Task-01 code |
++| network sensor | `app/device_fingerprint_sensor/`, `deploy/device-fingerprint/` |
++| Portal evidence | `app/device_fingerprint_portal/`, `docs/modules/device-fingerprint-portal.md` |
++| source health/bindings/snapshot | `app/device_fingerprint/` foundation contracts |
++| knowledge/policy | `app/device_fingerprint/` knowledge/policy artifacts |
++| pure classifier/fusion | `app/device_fingerprint/origin_assessment.py`, `fusion.py` |
++| runtime profiles/control plane | `app/device_fingerprint/` runtime-profile/control-plane modules |
++| classification persistence/read | `classification_persistence.py`, `classification_read.py` |
++| Task-05 integration | `app/device_fingerprint_integration/` |
++| production worker | `fingerprint-classification.service` deployment artifact |
++| Admin projection | `app/admin_web/device_fingerprint_presentation.py`, `docs/modules/admin-web.md` |
++| R14 normative semantics | registered FINAL R14 architecture decision |
+diff --git a/docs/project-inventory.md b/docs/project-inventory.md
+index 20b4f46..1b05877 100644
+--- a/docs/project-inventory.md
++++ b/docs/project-inventory.md
+@@ -1,28 +1,54 @@
+ # Инвентаризация CaptivPortal
+ 
+ Status: current runtime snapshot
+-Updated: 2026-09-13
++Updated: 2026-10-04
+ Branch: `main`
+-Runtime commit: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+-Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
+-Commit source: merge PR #120 / Device Type and SNR presentation, 2026-09-13
++Runtime commit: `7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Runtime tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
++Commit source: merge PR #178 / Task-06 Device Fingerprint presentation, 2026-10-04
+ 
+ Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
+ 
+-## Device Fingerprint Evidence
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint — current production subsystem
+ 
+-- process: `fingerprint-evidence.service` via
+-  `python3 -m app.device_fingerprint.cli run`;
+-- persistence: isolated schema-v1 SQLite with normalized P1 evidence and
+-  point-in-time source-health events;
+-- state: current, repository default disabled;
+-- no producer schemas, credentials, TLS material, production database, packet
+-  sensor, classifier, or identity linker are shipped by Task-01.
++Current state is broader than TASK-01 Evidence Foundation.
++
++```text
++Evidence Foundation
+++ network / Portal producers
+++ source-health/binding/snapshot foundation
+++ versioned knowledge/policy
+++ Task-04 classification core + persistence/read
+++ Task-05 post-Auth integration + durable worker
+++ Task-06 Admin presentation
++= current Device Fingerprint system
++```
++
++Production checkpoint is the document header commit/tree. Task-06 is deployed and
++Owner-accepted; `captive-portal.service` and `fingerprint-classification.service`
++are active.
++
++Current owned stores:
++
++```text
++device_fingerprint_evidence.sqlite3
++device_fingerprint_classification.sqlite3
++device_fingerprint_control_plane.sqlite3
++device_fingerprint_integration.sqlite3
++```
++
++Current product read is Site-scoped and production-only. Home uses a bounded
++batch (maximum 250 input MACs) and Device Card consumes the same authoritative
++classification result.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
+ 
+ ## 1. Composition roots
+ 
+ - `run.py` — process entrypoint и верхний lifecycle/composition root основного `captive-portal.service`.
+ - `python3 -m app.device_fingerprint.cli run` — независимо разрешённый `TASK-DEVICE-FINGERPRINT-01` auxiliary composition root; в main runtime не регистрируется.
++- `fingerprint-classification.service` — Task-05 durable classification consumer / auxiliary composition root.
++- `fingerprint-sensor.service` + `fingerprint-suricata.service` — isolated passive network evidence stack.
+ - `app/web/web.py:create_app()` — Flask composition factory.
+ - configuration pipeline: process environment → `app/config.py` → `app/settings.py:get_settings()`.
+ - `run.py` создаёт один shared `OmadaProvider` и передаёт его Portal/Auth, Snapshot, Observation, Current State и Pending Cleaner.
+@@ -140,6 +166,10 @@ Current State client classification:
+ | `observations.sqlite3` | Observation Foundation | Observation read service / Analytics / Admin | authoritative historical client/AP evidence |
+ | `current_state.sqlite3` | Current State | CurrentStateReadService / Admin | current snapshots + short history |
+ | `traffic_projection.sqlite3` | Traffic Projection worker | TrafficProjectionReadService / Historical Traffic when enabled | derived/disposable Observation materialization |
++| `device_fingerprint_evidence.sqlite3` | Fingerprint Evidence Foundation | snapshot/classifier foundation | normalized evidence + source health |
++| `device_fingerprint_classification.sqlite3` | Task-04 classification persistence | classification read/Admin | ClassificationResult history |
++| `device_fingerprint_control_plane.sqlite3` | runtime-profile/control-plane owner | classifier runtime | admission/activation/validity lineage |
++| `device_fingerprint_integration.sqlite3` | Task-05 integration worker | Task-05 read/worker | durable post-Auth jobs + identity/classification links |
+ 
+ Writers own schema/migrations. Read-only consumers do not mutate source storage.
+ 
+diff --git a/docs/security.md b/docs/security.md
+index bb0ff8b..ae9a04c 100644
+--- a/docs/security.md
++++ b/docs/security.md
+@@ -1,8 +1,8 @@
+ # Security
+ 
+ Status: current
+-Updated: 2026-08-25
+-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-10-04
++Baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
+ 
+ ## Fingerprint evidence endpoint
+ 
+@@ -14,6 +14,29 @@ keys are rejected before authentication. Normalized P1 payloads are allowlisted
+ by a frozen schema registry; P2 raw packet, destination-name, header, cookie,
+ credential and full-user-agent material is rejected.
+ 
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint security / privacy boundary
++
++Current Device Fingerprint classification is passive and advisory.
++
++```text
++fingerprint result does NOT authorize users
++fingerprint result does NOT change CAPPORT admission
++fingerprint result does NOT block clients
++fingerprint result does NOT trigger destructive Omada actions
++fingerprint result is NOT a security credential
++```
++
++Production classification is Site-scoped and uses admitted normalized evidence.
++Raw packets, raw full EVE, raw User-Agent/Client Hints, cookies and credentials
++are not durable classifier evidence.
++
++The runtime classifier requires no Internet/query-time cloud classification.
++External knowledge enters through versioned/pinned/offline governance and
++admission. Admin fingerprint presentation is read-only and Site-authorized.
++Read/persistence failure is fail-soft to core Home/Device Card/Auth/CAPPORT.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->
++
+ ## Secrets
+ 
+ - Production secrets come only from process environment/approved secret handling.
+diff --git a/docs/testing.md b/docs/testing.md
+index 9815f1a..4f389e0 100644
+--- a/docs/testing.md
++++ b/docs/testing.md
+@@ -1,11 +1,11 @@
+ # Testing
+ 
+ Status: current
+-Updated: 2026-09-13
++Updated: 2026-10-04
+ Central Lab governance effective: 2026-08-27
+-Documentation/current-state implementation baseline: `main@3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+-Production deployed HEAD: `3dc85735ddf5d05dd20733d15dfe1c22c9c4fde5`
+-Production tree: `8312658be3ba272998f46212d9bad76950e3867e`
++Documentation/current-state implementation baseline: `main@7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Production deployed HEAD: `7c7c0919c3e546f499b5252ea9479d32c8f494d7`
++Production tree: `dbf3e3804931d637ef1ec569128746ebce5c141a`
+ 
+ ## Responsibility model
+ 
+@@ -1273,4 +1273,26 @@ For a pure documentation change:
+ - validate paths/links/claims against current sources;
+ - run Markdown/link tooling only if already available/relevant;
+ - run `git diff --check`;
+-- request a fresh Central Lab or Linux gate only when an owner/release contract requires exact-artifact runtime evidence.
+\ No newline at end of file
++- request a fresh Central Lab or Linux gate only when an owner/release contract requires exact-artifact runtime evidence.
++
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:BEGIN -->
++## Device Fingerprint — latest acceptance evidence
++
++Historical/current acceptance must be kept separate from production smoke.
++
++```text
++TASK-04 T-ACCEPT R6 = PASS / ACCEPTED / PRODUCTION_ELIGIBLE
++Task-05 accepted integration full-repository evidence = 5171 passed, 30 skipped
++Task-05 R1 full repository = 5184 passed, 28 skipped
++Task-05 PERF-01 full repository (2026-10-04; artifact SHA=0507a1fd66e84d00f105a53e6c36dec74ea14520; tree=439ab64697f2fcdcd5e822527f287ca5404e45ba) = 5198 passed, 28 skipped
++Task-06 focused candidate (2026-10-04; commit=bf4eba5973c6f23b8939396249fac987ae88bdf1; tree=53f8d463eab6dff413e8bbdcc6e181bd2bc25d7f) = 189 passed
++Task-06 R1 (2026-10-04; commit=596f7480c9878d95ac9056a3e9694c5942a48ef4; parent=bf4eba5973c6f23b8939396249fac987ae88bdf1; tree=dbf3e3804931d637ef1ec569128746ebce5c141a) = 22 passed
++```
++
++Task-06 publication and production deployment are separate stages. Production
++verification used exact-code switch + bounded smoke/visual acceptance; the full
++pytest suite was **not** run on production and must not be described as such.
++
++Current documentation sync is docs-only and does not require a full pytest rerun.
++Required checks are diff/Markdown/link/Mermaid sanity plus source-truth review.
++<!-- DEVICE-FINGERPRINT-PRODUCTION-KB:END -->

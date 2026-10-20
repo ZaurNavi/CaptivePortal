@@ -1,0 +1,347 @@
+diff --git a/app/device_fingerprint/repository.py b/app/device_fingerprint/repository.py
+index dbf8eb9a2c7a179a5ca0d48ec4450aea5c851a8a..12710de576c3f4d887740f73354d51b1096f0a5c 100644
+--- a/app/device_fingerprint/repository.py
++++ b/app/device_fingerprint/repository.py
+@@ -132,9 +132,15 @@ class DeviceFingerprintRepository:
+         return self._connection
+ 
+     def validate_runtime_health(self) -> None:
++        """Check bounded metadata, never scan live evidence while serializing ingest.
++
++        Full integrity/sequence validation belongs to initialize() before writes
++        are admitted, and to the existing offline migration/recovery lifecycle.
++        SQLite corruption errors from normal operations still fail closed.
++        """
+         try:
+             with self._access_lock:
+-                self._validate_connection(self.connection)
++                self._validate_runtime_connection(self.connection)
+         except sqlite3.DatabaseError as exc:
+             raise self._sqlite_error(exc) from exc
+ 
+@@ -297,14 +303,7 @@ class DeviceFingerprintRepository:
+         cls._validate_schema_signature(
+             connection, EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS,
+         )
+-        state = connection.execute(
+-            f"SELECT singleton_id,database_generation_id,last_ingest_sequence FROM {STORAGE_STATE_TABLE}"
+-        ).fetchall()
+-        if len(state) != 1 or state[0][0] != 1 or not _canonical_generation(state[0][1]):
+-            raise DeviceFingerprintStorageCorrupt("Fingerprint generation state is invalid")
+-        allocator = state[0][2]
+-        if type(allocator) is not int or not 0 <= allocator <= MAX_INGEST_SEQUENCE:
+-            raise DeviceFingerprintStorageCorrupt("Fingerprint allocator state is invalid")
++        allocator = cls._validate_storage_state(connection)
+         for table in ("device_fingerprint_evidence", "device_fingerprint_source_health_events"):
+             invalid = connection.execute(
+                 f"SELECT 1 FROM {table} WHERE typeof(ingest_sequence)!='integer' "
+@@ -321,6 +320,27 @@ class DeviceFingerprintRepository:
+         if duplicate is not None:
+             raise DeviceFingerprintStorageCorrupt("Fingerprint ingest sequence state is invalid")
+ 
++    @classmethod
++    def _validate_runtime_connection(cls, connection: sqlite3.Connection) -> None:
++        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint schema version is incompatible")
++        cls._validate_schema_signature(
++            connection, EXPECTED_COLUMNS, EXPECTED_INDEXES, REQUIRED_CHECK_FRAGMENTS,
++        )
++        cls._validate_storage_state(connection)
++
++    @staticmethod
++    def _validate_storage_state(connection: sqlite3.Connection) -> int:
++        state = connection.execute(
++            f"SELECT singleton_id,database_generation_id,last_ingest_sequence FROM {STORAGE_STATE_TABLE} LIMIT 2"
++        ).fetchall()
++        if len(state) != 1 or state[0][0] != 1 or not _canonical_generation(state[0][1]):
++            raise DeviceFingerprintStorageCorrupt("Fingerprint generation state is invalid")
++        allocator = state[0][2]
++        if type(allocator) is not int or not 0 <= allocator <= MAX_INGEST_SEQUENCE:
++            raise DeviceFingerprintStorageCorrupt("Fingerprint allocator state is invalid")
++        return allocator
++
+     @classmethod
+     def _validate_schema_signature(cls, connection: sqlite3.Connection,
+                                    columns: Mapping[str, Any], indexes: Mapping[str, Any],
+diff --git a/deploy/device-fingerprint/README.md b/deploy/device-fingerprint/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..0bf0e099fc4197bfd573bf47458d6bbcb9b1c649
+--- /dev/null
++++ b/deploy/device-fingerprint/README.md
+@@ -0,0 +1,38 @@
++# Fingerprint Suricata production output boundary
++
++The deployable `suricata.yaml` contains exactly one enabled EVE output:
++
++```text
++filetype: unix_dgram
++filename: /run/captive-portal/fingerprint-sensor/suricata-eve.sock
++```
++
++There is no admitted production diagnostic regular EVE dependency. In a separately
++authorized deployment, replace the installed configuration with this complete
++template; do not merge or append the old diagnostic `eve-log` entry. In particular,
++`/run/fingerprint-suricata/diag-eve.json` must not be an enabled output.
++
++The service's `ReadOnlyPaths=/run` is a second, fail-closed boundary: a configuration
++that attempts a regular file write there cannot exhaust host tmpfs. Sending to the
++existing sensor-owned AF_UNIX datagram socket remains allowed. This distinction is
++documented by [systemd](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml).
++Do not add a writable `/run` exception or a daemon/PID-file mode to this foreground
++service. Capture interface, BPF, socket path and TLS/QUIC output remain unchanged.
++
++No deployment, service restart, production file deletion or profile activation is
++performed by this source repair. Existing diagnostic bytes require separate Owner
++cleanup authorization; applying the boundary does not delete them. Linux service
++startup/socket delivery must be verified by Owner during the separately authorized
++deployment, not on production as a Coder test.
++
++## Task-01 integrity lifecycle
++
++Repository startup still performs full `PRAGMA quick_check`, exact schema/state
++validation and evidence/health sequence consistency checks before admitting writes.
++Offline migration/recovery retains the same full validation. Periodic runtime
++maintenance checks only schema/version and singleton generation/allocator metadata;
++it does not scan evidence data or run full integrity PRAGMAs on the ingest lock.
++Retention remains chunked, the single writer/lock and HTTP semaphore are unchanged,
++and corruption reported by SQLite operations still latches runtime unavailable.
++Periodic metadata health is not a claim that every evidence page has been scanned;
++full verification occurs at the explicit startup/offline lifecycle boundary.
+diff --git a/deploy/device-fingerprint/fingerprint-suricata.service b/deploy/device-fingerprint/fingerprint-suricata.service
+index 23fac6f10edbf5c6c1f1594dfe591115ef114404..f9bea9089bf841da9e5176824af5bf879e991f00 100644
+--- a/deploy/device-fingerprint/fingerprint-suricata.service
++++ b/deploy/device-fingerprint/fingerprint-suricata.service
+@@ -27,6 +27,9 @@ Nice=10
+ PrivateTmp=true
+ ProtectSystem=strict
+ ProtectHome=true
++# Suricata only sends to an existing UNIX datagram socket. Never write regular
++# diagnostic EVE files into the host /run tmpfs, including config drift.
++ReadOnlyPaths=/run
+ 
+ [Install]
+ WantedBy=multi-user.target
+diff --git a/deploy/device-fingerprint/suricata.yaml b/deploy/device-fingerprint/suricata.yaml
+index d0619f00f3a4f52bdac49bc8372735e64cacdfe8..b86a6a296ad22f925b36b288c7ccc6d5ce0aa8e0 100644
+--- a/deploy/device-fingerprint/suricata.yaml
++++ b/deploy/device-fingerprint/suricata.yaml
+@@ -37,6 +37,8 @@ stats:
+   interval: 10
+ 
+ outputs:
++  # Production EVE is socket-only. Do not append a regular diagnostic output.
++  # The service also makes /run read-only; the sensor creates the socket.
+   - console:
+       enabled: no
+   - eve-log:
+diff --git a/tests/device_fingerprint/test_repository.py b/tests/device_fingerprint/test_repository.py
+index 165dd1c692f432f767a098ee387e7e7743187693..217ed982237b5a5761e004c72a73f4f5200dee6b 100644
+--- a/tests/device_fingerprint/test_repository.py
++++ b/tests/device_fingerprint/test_repository.py
+@@ -112,6 +112,73 @@ def test_extra_column_is_strict_schema_error(tmp_path):
+         DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()
+ 
+ 
++def test_startup_rejects_failed_full_quick_check_before_publishing_connection(tmp_path, monkeypatch):
++    from types import SimpleNamespace
++    import app.device_fingerprint.repository as module
++
++    real_connect = sqlite3.connect
++    checks = []
++
++    class CorruptQuickCheck(sqlite3.Connection):
++        def execute(self, statement, *args, **kwargs):
++            if statement == "PRAGMA quick_check":
++                checks.append(statement)
++                return SimpleNamespace(fetchall=lambda: [("synthetic page corruption",)])
++            return super().execute(statement, *args, **kwargs)
++
++    monkeypatch.setattr(module.sqlite3, "connect", lambda *args, **kwargs: real_connect(
++        *args, factory=CorruptQuickCheck, **kwargs))
++    cfg = config(tmp_path)
++    repo = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
++    with pytest.raises(DeviceFingerprintStorageCorrupt, match="repository is corrupt"):
++        repo.initialize()
++    assert checks == ["PRAGMA quick_check"]
++    assert repo._connection is None
++
++
++def test_runtime_health_neither_checks_full_integrity_nor_reads_evidence_tables(tmp_path):
++    _cfg, repo = initialized(tmp_path)
++    statements = []
++    repo.connection.set_trace_callback(statements.append)
++
++    def bounded_authorizer(action, name, argument, *_unused):
++        if action == sqlite3.SQLITE_PRAGMA and name.lower() in {"quick_check", "integrity_check"}:
++            return sqlite3.SQLITE_DENY
++        if action == sqlite3.SQLITE_READ and name in {
++            "device_fingerprint_evidence", "device_fingerprint_source_health_events",
++        }:
++            return sqlite3.SQLITE_DENY
++        return sqlite3.SQLITE_OK
++
++    repo.connection.set_authorizer(bounded_authorizer)
++    try:
++        repo.validate_runtime_health()
++    finally:
++        repo.connection.set_authorizer(None)
++        repo.connection.set_trace_callback(None)
++        repo.close()
++    assert "PRAGMA user_version" in statements
++    assert any("FROM device_fingerprint_storage_state LIMIT 2" in query for query in statements)
++    assert not any("quick_check" in query.lower() or "integrity_check" in query.lower()
++                   for query in statements)
++
++
++@pytest.mark.parametrize("mutation", [
++    "PRAGMA user_version=3",
++    "ALTER TABLE device_fingerprint_evidence ADD COLUMN unexpected TEXT",
++    "DELETE FROM device_fingerprint_storage_state",
++    "UPDATE device_fingerprint_storage_state SET database_generation_id='111111111111111111111111111111111111'",
++])
++def test_bounded_runtime_health_still_rejects_invalid_metadata(tmp_path, mutation):
++    _cfg, repo = initialized(tmp_path)
++    try:
++        repo.connection.execute(mutation)
++        with pytest.raises(DeviceFingerprintStorageCorrupt):
++            repo.validate_runtime_health()
++    finally:
++        repo.close()
++
++
+ def test_evidence_atomic_idempotency_and_conflict(tmp_path):
+     _cfg, repo, svc = service(tmp_path)
+     root = {"producer_id": producer().producer_id, "events": [evidence_event()]}
+diff --git a/tests/device_fingerprint/test_service.py b/tests/device_fingerprint/test_service.py
+index 228cbeeef59f0dd1b470b36244002813937be2c7..20d31d0778360a408fbff5c424ce6dde8789e908 100644
+--- a/tests/device_fingerprint/test_service.py
++++ b/tests/device_fingerprint/test_service.py
+@@ -135,6 +135,56 @@ def test_retention_failure_degrades_but_keeps_ingest_then_recovers(tmp_path, mon
+     assert (value.state, value.reason, value.accepting_writes) == ("ready", None, True)
+ 
+ 
++@pytest.mark.parametrize("failure", [None, "unavailable", "unexpected"])
++def test_maintenance_and_recovery_never_call_full_validation_and_ingest_remains_usable(tmp_path, monkeypatch, failure):
++    import sqlite3
++    from app.device_fingerprint.models import DeviceFingerprintStorageUnavailable
++
++    value = runtime(tmp_path)
++    statements = []
++    value.repository.connection.set_trace_callback(statements.append)
++
++    def full_validation_forbidden(*_args):
++        raise AssertionError("Full integrity validation entered the live ingest path")
++
++    monkeypatch.setattr(value.repository, "_validate_connection", full_validation_forbidden)
++    value.repository.connection.set_authorizer(lambda action, name, *_args: (
++        sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA
++        and name.lower() in {"quick_check", "integrity_check"} else sqlite3.SQLITE_OK
++    ))
++    if failure is not None:
++        def failed_cleanup(**_kwargs):
++            if failure == "unavailable":
++                raise DeviceFingerprintStorageUnavailable()
++            raise RuntimeError("synthetic retention failure")
++        monkeypatch.setattr(value.repository, "cleanup", failed_cleanup)
++    try:
++        value.run_maintenance_once()
++        assert value.state == ("ready" if failure is None else "degraded")
++        assert value.accepting_writes
++        assert not any("quick_check" in sql.lower() or "integrity_check" in sql.lower()
++                       or "typeof(ingest_sequence)" in sql or "JOIN device_fingerprint_source_health_events" in sql
++                       for sql in statements)
++        assert value.service.evidence_batch(producer(), {
++            "producer_id": producer().producer_id, "events": [evidence_event()],
++        }).inserted == 1
++    finally:
++        value.repository.connection.set_authorizer(None)
++        value.repository.close()
++
++
++def test_periodic_metadata_corruption_latches_unavailable(tmp_path):
++    value = runtime(tmp_path)
++    value.repository.connection.execute("PRAGMA user_version=3")
++    try:
++        value.run_maintenance_once()
++        assert (value.state, value.reason, value.accepting_writes) == (
++            "unavailable", "storage_corrupt", False)
++        assert value.begin_ingest() is False
++    finally:
++        value.repository.close()
++
++
+ def test_storage_limit_recovery_requires_capacity_proof(tmp_path, monkeypatch):
+     from app.device_fingerprint.models import DeviceFingerprintStorageLimit
+     value = runtime(tmp_path)
+@@ -161,14 +211,14 @@ def test_storage_limit_recovery_orders_retention_health_then_capacity(tmp_path,
+             "device_fingerprint_source_health_events": 0,
+         }
+     ))
+-    monkeypatch.setattr(value.repository, "validate_runtime_health", lambda: calls.append("quick-check-and-schema"))
++    monkeypatch.setattr(value.repository, "validate_runtime_health", lambda: calls.append("bounded-metadata"))
+     monkeypatch.setattr(value.repository, "capacity", lambda: (
+         calls.append("capacity") or {
+             "page_count": 9, "max_page_count": 10, "freelist_count": 0,
+         }
+     ))
+     value.run_maintenance_once()
+-    assert calls == ["retention", "quick-check-and-schema", "capacity"]
++    assert calls == ["retention", "bounded-metadata", "capacity"]
+     assert value.state == "ready"
+ 
+ 
+diff --git a/tests/device_fingerprint_sensor/test_deployment_outputs.py b/tests/device_fingerprint_sensor/test_deployment_outputs.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d22119bb12043be8b2b376f13ef605a9612ba3fb
+--- /dev/null
++++ b/tests/device_fingerprint_sensor/test_deployment_outputs.py
+@@ -0,0 +1,49 @@
++"""Deployable Suricata output contract; no Linux service or capture is started."""
++
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[2]
++DEPLOYMENT = ROOT / "deploy" / "device-fingerprint"
++APPROVED_OUTPUTS = """  - console:
++      enabled: no
++  - eve-log:
++      enabled: yes
++      filetype: unix_dgram
++      filename: /run/captive-portal/fingerprint-sensor/suricata-eve.sock
++      ethernet: yes
++      types:
++        - tls:
++            extended: no
++            custom: [ja4, client_alpns, client_handshake]
++        - quic:
++            extended: no
++        - stats:
++            totals: yes
++            threads: no
++            deltas: no"""
++
++
++def test_deployable_suricata_has_only_unchanged_sensor_datagram_eve():
++    config = (DEPLOYMENT / "suricata.yaml").read_text(encoding="ascii")
++    outputs = config.split("\noutputs:\n", 1)[1].split("\nlogging:\n", 1)[0]
++    output_lines = [line for line in outputs.splitlines()
++                    if line.strip() and not line.lstrip().startswith("#")]
++    assert "\n".join(output_lines) == APPROVED_OUTPUTS
++    assert "filetype: regular" not in config
++    assert "diag-eve.json" not in config
++    assert config.count("  - eve-log:") == 1
++    assert "interface: enp8s0" in config
++    assert 'bpf-filter: "net 192.168.8.0/22"' in config
++
++
++def test_suricata_cannot_write_diagnostic_files_anywhere_in_run():
++    service = (DEPLOYMENT / "fingerprint-suricata.service").read_text(encoding="ascii")
++    assert "\nReadOnlyPaths=/run\n" in service
++    assert "ReadWritePaths=" not in service
++    assert "BindPaths=" not in service
++    assert "RuntimeDirectory=" not in service
++    assert "ExecStart=/usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers" in service
++    assert "ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0" in service
++    assert "until test -S /run/captive-portal/fingerprint-sensor/suricata-eve.sock" in service
++    assert "AmbientCapabilities=CAP_NET_RAW" in service
