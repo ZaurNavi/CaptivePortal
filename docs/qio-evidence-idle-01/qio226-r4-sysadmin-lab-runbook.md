@@ -1,13 +1,71 @@
-# QIO226 / 04B R4 — SysAdmin qualification and attended LAB runbook
+# QIO226 / 04C R4 — SysAdmin mixed-source-GID handoff and attended LAB runbook
 
-Status: CODE REVIEW / OPERATIONAL HOLD. Authority: Issue226 comment6296204519.
+Status: 04C CODE REVIEW / ORIGINAL SOURCE HOLD. Authority: Issue226 comment6301692092;
+04B architecture remains as in comment6296204519.
 This is a proposed, separate SysAdmin-owned procedure, NOT Coder permission to
 install, access192.168.0.202, open original DBs/queue, start services or run jobs.
 No production, main, timers, Admin,17-store audit or3.8GB Fingerprint re-audit.
 
+## 04C disposition — accepted native gates are frozen, not reopened
+
+SysAdmin receipts6301412656/6301508196 accept actual Linux5.15 F3 private
+PIDNS/procfs, K01(3/3), K02, K03, and qualified F2/root+UID995 canonical T3.
+Protected Python `/opt/captivportal-audit/runtime-r4-20261020/py310/bin/python3.10`
+SHA256 `a2f33a6e006989270f4340528eb61f8f97366e00a5d1b602ac8672ea44fc56ae`,
+Python3.10.12/SQLite3.37.2/Flask3.1.3, is accepted for that immutable release.
+Do NOT repeat these generic campaigns, install dependencies, revisit procfs
+architecture, rerun recovery or start a new HDD/baseline research loop for04C.
+The historical sections below describe preserved contracts, not new repeat gates.
+
+04C changes one incorrect profile invariant: global source owner UID1003 is
+shared, but main/WAL/SHM retain each store's exact original group:
+
+| Store | Source UID | Pinned source GID |
+|---|---:|---:|
+| public_traffic |1003|1004|
+| network_service_intelligence |1003|1004|
+| traffic_projection |1003|996|
+
+Never chmod/chgrp/reconstruct originals to fit policy. StorePolicy.gid is the
+authoritative per-store group, not a derived/guessed value. Helper uses only
+the authenticated job's selected policy: `drop_owner(policy.uid,policy.gid)`,
+all real/effective/saved IDs exact, supplementary groups EMPTY. Stage ownership
+already follows that same per-job UID/GID. The worker's own GID (native accepted
+UID995/GID993) is unrelated to source GIDs1004/996; do not grant it broad groups.
+
+The exact R4Installation object now has NINE closed keys (NO owner_gid):
+
+```json
+{
+  "method": "sqlite_online_backup_private_tmpfs_physical_v1",
+  "enabled": true,
+  "owner_uid": 1003,
+  "ram_root": "/run/captive-portal/db-audit/ram-jobs",
+  "ram_device": 1,
+  "ram_inode": 2,
+  "task_limit": 16,
+  "nr_inodes": 64
+}
+```
+
+All nine keys are required. Device1/inode2
+are documentation placeholders, NOT an installable approval: SysAdmin pins the
+actual preprovisioned root0711 inode. An obsolete owner_gid or any extra/missing
+key is rejected, never ignored. Existing installed pilot has r4=null and is
+NOT rewritten/migrated by Coder. Historical queue/method/result schemas stay.
+
+After independent04C review/publication, SysAdmin stages the exact immutable
+new commit, retains accepted Python/private PIDNS topology, and pins fresh R4
+profile with source groups above. Provision only the separately permitted fixed
+RAM root and delegated leaf (previously absent), preserving original queue/locks.
+Run remaining in-run preconditions and A/B/C; no repeat generic qualification.
+If safe B failure injection is unavailable, report that formal subcase unproven
+and continue ordinary successful three-store Backup+full T3; do not damage
+originals or block that ordinary proof just to manufacture a controlled failure.
+
 ## 1. Immutable source and dependency qualification (F2)
 
-1. TechLead independently reviews the exact04B patch/tree and all retained failed
+1. TechLead independently reviews the exact04C diff/tree atop accepted04B and all retained failed
    diagnostics. Publication requires a separate GO to a LAB branch only. Record
    accepted04A bridge parent/tree and04B commit/tree; never substitute main or a
    TechLead synthetic worktree. Do not touch the original dirty04A worktree.
@@ -40,10 +98,10 @@ No production, main, timers, Admin,17-store audit or3.8GB Fingerprint re-audit.
 
 ## 2. One coherent launcher topology (F3)
 
-One root supervisor, one nonowner gatekeeper/validator and one backup-only owner
-helper, all in the same PID namespace with its correctly mounted procfs. Root
-creates a fresh MOUNT namespace only; do not insert a PID remapping wrapper or
-reuse an outer procfs inside a nested PID namespace. Do not substitute host PIDs.
+Retain the accepted job-private PIDNS/private procfs launcher: one root
+supervisor, one nonowner gatekeeper/validator and one backup-only owner helper
+in that SAME coherent namespace. Once inside, root creates a fresh MOUNT
+namespace only. Do not reuse outer procfs inside it or substitute host PIDs.
 The supervisor PID/start ticks in sealed authority must match real child PPid;
 `readlink('/proc/self') == str(getpid())` and NSpid contains exactly that one PID.
 04A parent-death/wrong-start/NSpid/incorrect-proc tests must remain closed.
@@ -55,11 +113,12 @@ composition and delegated control leaf are SysAdmin launcher responsibilities;
 no systemd edits are part of this code handoff. Closed failure diagnostics only,
 no raw tracebacks/source data/nonces. Wrong proc topology ⇒ HOLD, not fallback.
 
-## 3. Disposable native preflight on the actual Linux5.15 kernel
+## 3. Preserved native Linux5.15 criteria — already PASS, no04C repeat
 
-After review, SysAdmin uses ONLY newly created disposable SQLite/WAL fixtures,
-never original stores, for these kernel tests. Preserve raw mountinfo/proc/cgroup
-and exact IDs/JUnit. Local WSL6.18 PASS is `NOT_YET_PROVEN_ON_OLD_LAB_KERNEL`.
+Preserve accepted native5.15 receipts; do NOT rerun these generic tests for04C.
+They used ONLY disposable SQLite/WAL fixtures, never originals. Retain their
+mountinfo/proc/cgroup and exact IDs/JUnit. Local Coder WSL6.18 tests are separate
+regression evidence, not a replacement or reopening of the native5.15 verdict.
 
 - Verify cgroup-v2 unified mount, trusted ancestors, finite local/ancestor caps,
   empty delegated interior, memory controller enabled, root control child and
@@ -76,8 +135,8 @@ and exact IDs/JUnit. Local WSL6.18 PASS is `NOT_YET_PROVEN_ON_OLD_LAB_KERNEL`.
   noexec. Unknown charge ⇒ `HOLD_R4_SWAP_CHARGE`; failed RO WAL opening ⇒
   `HOLD_R4_SOURCE_VIEW`. No disk/shared-dev-shm/serialize fallback.
 - A profile enables R4 explicitly: method exact
-  `sqlite_online_backup_private_tmpfs_physical_v1`, owner UID/GID1003 in each of
-  three installed StorePolicy entries, nonowner UID/GID995, RAM root fixed
+  `sqlite_online_backup_private_tmpfs_physical_v1`, common owner UID1003 with
+  per-store source GIDs1004/1004/996; worker UID995/its own GID993, RAM root fixed
   `/run/captive-portal/db-audit/ram-jobs`, its preprovisioned root0711 dev/ino,
   finite task_limit8..32 and nr_inodes32..256. Each per-store page-aligned
   image_max is justified with WAL/transient/helper/validator/margin/reserve, not
@@ -114,8 +173,9 @@ after B positive release. A worker/source corruption injection is NOT authorized
 on originals; a real pilot controlled-failure method must be independently
 approved and bounded before this step. This implementation adds no general
 fault-injection CLI/profile knob. Orphan/supervisor death is NOT controlled B:
-HOLD, no C, preserve evidence. If no safe B injection is approved, STOP this
-pilot step and obtain TechLead disposition; never damage a source to manufacture B.
+HOLD, no C, preserve evidence. Under04C disposition an unavailable safe B
+injection leaves that formal subcase unproven, NOT a blocker to ordinary
+successful A/B/C proof; never damage a source to manufacture B.
 
 Preserve the single bounded protected root `r4_release_proof` receipt per job and
 its durable SHA256 commitment. Verify source pre/post inode/sidecars, snapshot

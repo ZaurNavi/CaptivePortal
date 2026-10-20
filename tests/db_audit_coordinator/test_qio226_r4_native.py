@@ -12,6 +12,42 @@ NATIVE=pytest.mark.skipif(sys.platform!='linux' or getattr(os,'geteuid',lambda:-
     reason='R4 native disposable root mount/UID contract; not a Windows kernel PASS')
 
 
+@NATIVE
+@pytest.mark.parametrize('store',['public_traffic','network_service_intelligence','traffic_projection'])
+@pytest.mark.parametrize('fault',['none','main_uid','main_gid','wal_gid','shm_gid','other_store_policy'])
+def test_04C_disposable_native_source_main_and_sidecar_owner_pin_remains_strict(store,fault,record_property):
+    from dataclasses import replace
+    import tempfile
+    from app.db_audit_coordinator import live_sqlite,contracts as c
+    from tests.db_audit_coordinator.test_b2_live_sqlite import disposable,hashes
+    groups={'public_traffic':1004,'network_service_intelligence':1004,'traffic_projection':996}
+    with tempfile.TemporaryDirectory(prefix='qio226-04c-owner-') as temporary:
+        root=Path(temporary);root.chmod(0o711)
+        source=root/'source';source.mkdir(mode=0o700)
+        writer,policy=disposable(source,store)
+        try:
+            gid=groups[store]
+            for file in source.iterdir():os.chown(file,1003,gid);file.chmod(0o600)
+            os.chown(source,1003,gid)
+            policy=replace(policy,uid=1003,gid=gid)
+            before=hashes(policy.source)
+            if fault=='main_uid':os.chown(policy.source,1005,gid)
+            elif fault in {'main_gid','wal_gid','shm_gid'}:
+                suffix={'main_gid':'','wal_gid':'-wal','shm_gid':'-shm'}[fault]
+                os.chown(policy.source+suffix,1003,1005)
+            elif fault=='other_store_policy':
+                policy=replace(policy,gid=996 if gid==1004 else 1004)
+            if fault=='none':
+                main,sides=live_sqlite.inspect_source(policy)
+                assert main[:2]==(policy.device,policy.inode) and sides['-wal'] and sides['-shm']
+            else:
+                with pytest.raises(c.CoordinatorError):live_sqlite.inspect_source(policy)
+            assert before==hashes(policy.source)
+            record_property('04c_source_pin',json.dumps(dict(store=store,uid=1003,gid=gid,fault=fault,
+                source_hashes_unchanged=True),sort_keys=True))
+        finally:writer.close()
+
+
 SOURCE_VIEW_DRIVER=r'''
 import hashlib,json,os,sqlite3,tempfile,uuid
 from pathlib import Path
@@ -208,6 +244,16 @@ from app.db_audit_coordinator.live_profile import PilotProfile
 helper.RAM_ROOT=sys.argv[2]
 PilotProfile.artifact=lambda self:None
 helper.import_roots=lambda:None  # QA provenance exception, never installed F2 PASS.
+drop=helper.drop_owner
+def exact_owner(uid,gid):
+ drop(uid,gid)  # REAL credential change, not a test substitute.
+ assert os.getresuid()==(1003,)*3 and os.getresgid()==(gid,)*3 and gid in {1004,996}
+ assert os.getgroups()==[]
+ assert os.stat('/stage').st_uid==uid and os.stat('/stage').st_gid==gid
+ for suffix in ('','-wal','-shm'):
+  info=os.stat('/source/input.sqlite3'+suffix)
+  assert (info.st_uid,info.st_gid)==(uid,gid)
+helper.drop_owner=exact_owner
 if len(sys.argv)>3 and sys.argv[3]=='helper_death':
  import sqlite3,time
  original=sqlite3.connect
@@ -255,6 +301,7 @@ try:
   for filename,mode in (('coordinator.lock',0o600),('heavy.lock',0o640)):
    file=queue/filename;file.touch(mode=mode);os.chown(file,0,1000)
   policies=[]
+  source_gids={'public_traffic':1004,'network_service_intelligence':1004,'traffic_projection':996}
   for store in STORES:
    source=root/store;source.mkdir(mode=0o700)
    writer,policy=disposable(source,store);writers.append(writer)
@@ -262,11 +309,11 @@ try:
    # no runtime source writes, no production failure injection API.
    if store=='network_service_intelligence' and sys.argv[1]=='controlled_B':
     writer.execute("UPDATE service_materialization_generations SET ruleset_digest_sha256='bad'")
-   for file in source.iterdir():os.chown(file,1003,1003);file.chmod(0o600)
-   os.chown(source,1003,1003)
-   policies.append(replace(policy,uid=1003,gid=1003,memory_max_bytes=256*1024**2,attempt_seconds=30))
+   for file in source.iterdir():os.chown(file,1003,source_gids[store]);file.chmod(0o600)
+   os.chown(source,1003,source_gids[store])
+   policies.append(replace(policy,uid=1003,gid=source_gids[store],memory_max_bytes=256*1024**2,attempt_seconds=30))
   ram=root/'ram';ram.mkdir(mode=0o711)
-  cfg=R4Installation(R4_METHOD,True,1003,1003,r4_sandbox.RAM_ROOT,ram.stat().st_dev,ram.stat().st_ino,16,64)
+  cfg=R4Installation(R4_METHOD,True,1003,r4_sandbox.RAM_ROOT,ram.stat().st_dev,ram.stat().st_ino,16,64)
   value=profile(enabled=True,root=str(queue),release_root=os.getcwd(),python=sys.executable,
    delegated='/'+name+'/delegated',delegated_device=delegated.stat().st_dev,delegated_inode=delegated.stat().st_ino,
    worker_uid=1000,worker_gid=1000,worker_groups=(),stores=tuple(policies),r4=cfg)
@@ -291,11 +338,14 @@ try:
    old_hold(self)
   r4_release.Session.hold=diagnostic
   from app.db_audit_coordinator import r4_snapshot
-  promote=r4_snapshot.promote
+  promote=r4_snapshot.promote;stage_receipts=[]
   faults={'stage_sidecar','stage_symlink','stage_hardlink','rename_collision','source_replaced','image_tamper',
    'cap_shrunk','swap_enabled','tasks_changed'}
   def promotion(job,policy,gid,**kwargs):
    scenario=sys.argv[1];stage=job.stage/'snapshot.sqlite3'
+   assert (job.stage.stat().st_uid,job.stage.stat().st_gid)==(policy.uid,policy.gid)
+   assert (stage.stat().st_uid,stage.stat().st_gid)==(policy.uid,policy.gid)
+   stage_receipts.append(dict(store=policy.store_id,uid=stage.stat().st_uid,gid=stage.stat().st_gid))
    if scenario=='stage_sidecar':(job.stage/'snapshot.sqlite3-wal').write_bytes(b'not-a-complete-image')
    elif scenario=='stage_symlink':
     stage.rename(job.stage/'other');stage.symlink_to('other')
@@ -303,7 +353,7 @@ try:
    elif scenario=='rename_collision':(job.final/'snapshot.sqlite3').write_bytes(b'preexisting')
    elif scenario=='source_replaced':
     source=Path(policy.source);other=source.with_suffix('.replacement')
-    other.write_bytes(source.read_bytes());os.chown(other,1003,1003);other.chmod(0o600);os.replace(other,source)
+    other.write_bytes(source.read_bytes());os.chown(other,policy.uid,policy.gid);other.chmod(0o600);os.replace(other,source)
    fd,receipt=promote(job,policy,gid,**kwargs)
    if scenario=='image_tamper':
     target=job.final/'snapshot.sqlite3'
@@ -330,9 +380,12 @@ try:
   before=[hashes(policy.source) for policy in policies]
   items=[dict(store_id=store,idempotency_key=str(uuid.uuid4())) for store in STORES]
   reply=subject.submit_batch(items,c.scope(1002));assert len(reply['jobs'])==3
-  fault_killed=False
+  fault_killed=False;directory_receipts=[]
   for number in range(3):
    assert subject.dispatch_one()
+   selected=subject._r4.policy;info=subject._r4.ram.stage.stat()
+   assert (info.st_uid,info.st_gid)==(selected.uid,selected.gid)
+   directory_receipts.append(dict(store=selected.store_id,uid=info.st_uid,gid=info.st_gid))
    if sys.argv[1]=='cap_shrunk':subject._r4.leaf.write('memory.max',str(128*1024**2))
    elif sys.argv[1]=='swap_enabled':subject._r4.leaf.write('memory.swap.max','4096')
    elif sys.argv[1]=='tasks_changed':subject._r4.leaf.write('pids.max','15')
@@ -391,7 +444,8 @@ try:
    assert not subject.dispatch_one() and not subject.orphan_hold
    assert len(gate_checks)==6
    print(json.dumps(dict(states=states,source_hashes_unchanged=True,proofs=subject.r4_proofs,
-    kernel=os.uname().release,installed_qualification='NOT_CLAIMED_QA_ONLY',uids=[0,1000,1003])))
+    kernel=os.uname().release,installed_qualification='NOT_CLAIMED_QA_ONLY',uids=[0,1000,1003],
+    stages=directory_receipts,promoted_stages=stage_receipts)))
   if not subject.orphan_hold:subject.close();subject=None
   for writer in writers:writer.close()
   writers=[]
@@ -436,6 +490,10 @@ def test_K01_K05_K06_K08_native_three_store_physical_transport_and_positive_fifo
     result=json.loads(process.stdout)
     assert result['source_hashes_unchanged'] and len(result['proofs'])==3
     assert result['installed_qualification']=='NOT_CLAIMED_QA_ONLY'
+    assert result['stages']==[dict(store=store,uid=1003,gid=gid) for store,gid in
+        [('public_traffic',1004),('network_service_intelligence',1004),('traffic_projection',996)]]
+    assert result['promoted_stages']==[item for item in result['stages']
+        if scenario!='cancel_B' or item['store']!='network_service_intelligence']
     record_property('native_pipeline',json.dumps(result,sort_keys=True))
 
 

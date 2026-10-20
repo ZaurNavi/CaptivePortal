@@ -22,7 +22,6 @@ class R4Installation:
     method: str
     enabled: bool
     owner_uid: int
-    owner_gid: int
     ram_root: str
     ram_device: int
     ram_inode: int
@@ -32,7 +31,7 @@ class R4Installation:
     def __post_init__(self):
         require(self.method==R4_METHOD and type(self.enabled) is bool)
         require(self.ram_root=='/run/captive-portal/db-audit/ram-jobs')
-        integer(self.owner_uid,1,2**32-1);integer(self.owner_gid,1,2**32-1)
+        integer(self.owner_uid,1,2**32-1)
         integer(self.ram_device);integer(self.ram_inode,1)
         integer(self.task_limit,8,32);integer(self.nr_inodes,32,256)
 
@@ -89,7 +88,8 @@ class PilotProfile:
         require(self.r4 is None or type(self.r4) is R4Installation)
         if self.r4 is not None:
             require(self.r4.owner_uid!=self.worker_uid
-                and all((item.uid,item.gid)==(self.r4.owner_uid,self.r4.owner_gid) for item in self.stores))
+                and all(item.uid==self.r4.owner_uid for item in self.stores))
+            for item in self.stores:integer(item.gid,1,2**32-1)
 
     @classmethod
     def parse(cls,value):

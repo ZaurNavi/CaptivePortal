@@ -45,11 +45,110 @@ def test_K09_old_profiles_are_readable_and_do_not_implicitly_enable_r4():
     value=profile();raw=c.decode(c.encode(asdict(value)));raw.pop('r4')
     old=PilotProfile.parse(raw)
     assert old.r4 is None and old.metadata('public_traffic')[0]==p.METHOD
-    install=R4Installation(p.R4_METHOD,False,1000,1000,'/run/captive-portal/db-audit/ram-jobs',1,2,8,64)
+    install=R4Installation(p.R4_METHOD,False,1000,'/run/captive-portal/db-audit/ram-jobs',1,2,8,64)
     assert replace(value,r4=install).metadata('public_traffic')[0]==p.METHOD
     enabled=replace(value,r4=replace(install,enabled=True))
     assert all(enabled.metadata(store)[0]==p.R4_METHOD for store in STORES)
     assert PilotProfile.parse(c.decode(c.encode(asdict(enabled))))==enabled
+
+
+def mixed_profile():
+    """04C exact original topology, disposable metadata only."""
+    gids={'public_traffic':1004,'network_service_intelligence':1004,'traffic_projection':996}
+    install=R4Installation(p.R4_METHOD,True,1003,'/run/captive-portal/db-audit/ram-jobs',1,2,16,64)
+    return profile(enabled=True,stores=tuple(policy(store,uid=1003,gid=gids[store],inode=number+2)
+        for number,store in enumerate(STORES)),r4=install)
+
+
+def test_04C_strict_mixed_source_gid_roundtrip_has_one_uid_and_no_global_gid():
+    value=mixed_profile();raw=c.decode(c.encode(asdict(value)))
+    assert 'owner_gid' not in raw['r4']
+    parsed=PilotProfile.parse(raw)
+    assert parsed==value and parsed.r4.owner_uid==1003 and parsed.r4.enabled
+    assert [(item.uid,item.gid) for item in parsed.stores]==[(1003,1004),(1003,1004),(1003,996)]
+    assert parsed.worker_gid==1001 and parsed.worker_gid not in {item.gid for item in parsed.stores}
+    assert all(parsed.metadata(store)[0]==p.R4_METHOD for store in STORES)
+    assert c.encode(asdict(parsed))==c.encode(raw)
+
+
+@pytest.mark.parametrize('store',STORES)
+@pytest.mark.parametrize('fault',['wrong_uid','gid_zero','gid_negative','gid_bool','gid_overflow','gid_string'])
+def test_04C_bad_store_owner_or_gid_never_parses(store,fault):
+    raw=c.decode(c.encode(asdict(mixed_profile())))
+    item=next(item for item in raw['stores'] if item['store_id']==store)
+    if fault=='wrong_uid':item['uid']=1005
+    else:item['gid']={'gid_zero':0,'gid_negative':-1,'gid_bool':True,'gid_overflow':2**32,'gid_string':'1004'}[fault]
+    with pytest.raises(c.CoordinatorError):PilotProfile.parse(raw)
+
+
+@pytest.mark.parametrize('fault',['obsolete_gid','extra','missing_uid','missing_ram','root_owner','worker_is_owner'])
+def test_04C_r4_closed_schema_rejects_obsolete_extra_missing_and_unsafe_identity(fault):
+    raw=c.decode(c.encode(asdict(mixed_profile())))
+    if fault=='obsolete_gid':raw['r4']['owner_gid']=1004
+    elif fault=='extra':raw['r4']['supplementary_groups']=[1004,996]
+    elif fault=='missing_uid':raw['r4'].pop('owner_uid')
+    elif fault=='missing_ram':raw['r4'].pop('ram_inode')
+    elif fault=='root_owner':raw['r4']['owner_uid']=0
+    else:raw['worker_uid']=1003
+    with pytest.raises(c.CoordinatorError):PilotProfile.parse(raw)
+
+
+def test_04C_historical_null_r4_and_method_metadata_are_not_migrated():
+    raw=c.decode(c.encode(asdict(profile())));before=c.encode(raw)
+    assert raw['r4'] is None
+    parsed=PilotProfile.parse(raw)
+    assert parsed.r4 is None and c.encode(asdict(parsed))==before
+    for store in STORES:assert parsed.metadata(store)==parsed.store(store).metadata()
+
+
+@POSIX
+@pytest.mark.parametrize('args',[['1','--gid','1004'],['1','--uid','1003'],['1','--groups','1004,996']])
+def test_04C_helper_cli_has_no_untrusted_credential_or_group_override(args):
+    from app.db_audit_coordinator.r4_owner_helper import main
+    assert main(args)==2
+
+
+@pytest.mark.skipif(sys.platform!='linux' or getattr(os,'geteuid',lambda:0)()==0,
+    reason='actual nonroot Linux sealed worker-claim authorization')
+@pytest.mark.parametrize('swapped',[False,True])
+def test_04C_sealed_job_store_change_cannot_reuse_another_source_authority(swapped):
+    from app.db_audit_coordinator import child_bootstrap as worker
+    from app.db_audit_coordinator.live_coordinator import memory_document
+    from app.db_audit_coordinator.live_receipts import start_ticks
+    value=replace(mixed_profile(),release_root=str(Path(__file__).resolve().parents[2]),
+        python=sys.executable,worker_uid=os.getuid(),worker_gid=os.getgid(),worker_groups=tuple(os.getgroups()))
+    queue=p.empty_state();job=record(store='public_traffic')
+    method,validator,generation=value.metadata(job['store_id'])
+    read,write=os.pipe();pipe=os.fstat(read);nonce='1'*64;fds=[write]
+    cancel_read,cancel_write=os.pipe();result_read,result_write=os.pipe()
+    fds.extend([cancel_read,cancel_write,result_read,result_write])
+    job.update(seq=1,state='running',origin='manual',created_at=c.utc(),updated_at=c.utc(),
+        reason_code='running',scope_hash='2'*64,idempotency_hash='3'*64,claim_epoch=queue['controller_epoch'],
+        method_version=method,validator_version=validator,source_generation=generation,worker_pid=os.getpid(),
+        auth_hash=hashlib.sha256(nonce.encode()).hexdigest(),auth_device=pipe.st_dev,auth_inode=pipe.st_ino,
+        resource_envelope=dict(fixture_only=False,memory_limit_bytes=2**26,timeout_seconds=30),audit_result=None)
+    if swapped:
+        job['store_id']='traffic_projection';job['validator_version']=p.VALIDATORS[job['store_id']]
+        assert value.metadata(job['store_id'])[2]!=generation
+    queue.update(jobs=[job],next_sequence=2)
+    claim=memory_document(queue);config=memory_document(asdict(value));fds.extend([claim,config])
+    from app.db_audit_coordinator.r4_ipc import pair
+    left,right=pair()
+    data=dict(job_id=job['job_id'],attempt_id=job['attempt_id'],claim_epoch=job['claim_epoch'],nonce=nonce,
+        claim_fd=claim,profile_fd=config,result_fd=result_write,cancel_fd=cancel_read,
+        supervisor_pid=os.getppid(),supervisor_start=start_ticks(os.getppid()),leaf='/disposable/job',
+        leaf_device=1,leaf_inode=2,gate_device=1,gate_inode=3,started_ns=1,r4_fd=right.fileno())
+    try:
+        os.write(write,c.encode(data));os.close(write);fds.remove(write)
+        if swapped:
+            with pytest.raises(c.CoordinatorError):worker.authorize(read)
+        else:
+            _,selected,parsed,chosen=worker.authorize(read)
+            assert selected['store_id']=='public_traffic' and (chosen.uid,chosen.gid)==(1003,1004)
+            assert parsed==value
+    finally:
+        left.close();right.close()
+        for fd in fds:os.close(fd)
 
 
 @pytest.mark.parametrize('field',['epoch','attempt','store','source','code','leaf','namespace'])
@@ -72,7 +171,7 @@ def test_K10_one_use_binding_commits_job_code_source_and_kernel_view(field):
 @pytest.mark.parametrize('field,value',[('method',p.METHOD),('enabled',1),('ram_root','/dev/shm'),
     ('task_limit',7),('nr_inodes',True),('owner_uid',0)])
 def test_K10_profile_does_not_accept_implicit_alias_or_unbounded_authority(field,value):
-    fields=dict(method=p.R4_METHOD,enabled=True,owner_uid=1000,owner_gid=1000,
+    fields=dict(method=p.R4_METHOD,enabled=True,owner_uid=1000,
         ram_root='/run/captive-portal/db-audit/ram-jobs',ram_device=1,ram_inode=2,task_limit=8,nr_inodes=64)
     fields[field]=value
     with pytest.raises(c.CoordinatorError):R4Installation(**fields)

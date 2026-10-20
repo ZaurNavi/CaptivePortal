@@ -49,7 +49,7 @@ def run(auth_fd):
         and job['claim_epoch']==queue['controller_epoch'] and job['store_id'] in R4_STORES,'unauthorized')
     require(profile.r4 is not None and profile.r4.enabled,'unauthorized')
     policy=profile.store(job['store_id']);c.digest(document['binding'])
-    require((policy.uid,policy.gid)==(profile.r4.owner_uid,profile.r4.owner_gid),'unauthorized')
+    require(policy.uid==profile.r4.owner_uid,'unauthorized')
     verify_parent(document['parent_pid'],document['parent_start'])
     root=RAM_ROOT+'/'+job['claim_epoch']+'/'+job['attempt_id']
     require(document['root']==root and list(identity(os.stat('/proc/self/ns/mnt')))==document['namespace'],'unauthorized')
