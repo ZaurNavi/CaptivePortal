@@ -300,3 +300,84 @@ fixtures exercise actual flock, nofollow, root modes, evidence fsync, atomic
 publication, repeat refusal and injected faults. Portable contract/diagnostic
 cases also run on Windows. Wider security/crash/release acceptance is TechLead5's
 responsibility; these tests do not grant operational recovery authority.
+
+## TASK-COORD-04A v1.1 — offline ACK/import/PID stabilization
+
+Pinned base `b4cb92f498106dfb5017037652c68187ddfb2ab4`, tree
+`ff6aba5cba06b4de29ad813e0d8dcfd6bd82324b`. Authority: Issue226 comments
+6291451509 and 6292330936, Architect R4-4 comment6292067974. Implementation
+only; no publication, install, queue recovery, real source read or heavy pilot.
+
+### Ambiguous ACK is not rejection
+
+The attended `submit-batch` client now has a finite ten-second RESPONSE budget;
+other operator calls retain a one-second frame response budget. Server request
+receive/send framing, MAX_FRAME8192, SO_PEERCRED and socket trust are unchanged.
+Six serial file/directory fsyncs plus delayed response took 1.38s in the bounded
+disposable case, exceeding the historical one-second receive deadline. This
+demonstrates a concrete failure mechanism, **not the unique proven cause of
+the earlier real seq22–24 invalid_request**. A generous ten-second bound is not
+a guarantee of eventual delivery on a slow host.
+
+Static batch shape/keys are checked before the first submission. The existing
+three submissions remain SERIAL DURABLE records, **not one atomic transaction**.
+Known first-item pre-publication validation rejection is retained. If 1/2/3
+records may have committed, or encoding/socket/short/timeout response fails,
+the operator gets `coordinator_unavailable` with `ACK_OUTCOME_UNKNOWN`, never
+a fabricated queued response or definite invalid/unaccepted interpretation.
+No automatic retry or resubmit exists. The tested completed triple-duplicate
+reply is 5105bytes, below the unchanged frame limit.
+
+After a lost ACK, use the same authenticated operator UID and each ORIGINAL pair:
+`operator_cli status-by-key --store STORE --key ORIGINAL_UUID` (same approved
+Python module invocation as the existing operator CLI). The fixed-private-socket
+read-only `status_by_key` computes the unchanged authoritative store+scoped-key
+hash, checks persisted scope AND store AND hash, and returns only `public_job`.
+Existing status(job_id) is unchanged. Wrong UID/store/key cannot read another
+job. Historical terminal and full128 history are still queryable, without
+source open, job spawn, durable write, lock/epoch reset, polling or replay.
+`not_found/outcome_unresolved` is **not proof of definite non-acceptance**, and
+never grants permission to resubmit. If the daemon/queue is unavailable or a
+sync boundary is uncertain, preserve keys and ask attended SysAdmin to reconcile
+protected queue/history read-only; never rerun old abandonment or edit JSON.
+
+### Canonical dependency qualification remains a real gate
+
+Offline clean WSL `/usr/bin/python3.10 -B -E -s` reproduces missing Flask:
+Public Traffic package imports worker/reader → Omada package → webhook_receiver;
+Traffic Projection package imports read_service → Analytics → Visit Lifecycle
+→ Omada webhook_receiver. NI-04 domain validation imports Network Attribution
+validation → Device Fingerprint package → its Flask API. NI-04 DDL-only import
+success is not proof of full domain import success.
+`requirements.txt` already declares flask>=3.0.0.
+These eager owner-package entrypoints are outside the adapter allowlist.
+No owner loader bypass, shadow schema/validator, fake Flask or package install
+was introduced. **HOLD_QUALIFIED_WORKER_DEPENDENCY** remains for the actual
+installed interpreter until SysAdmin/TechLead pins and qualifies its complete
+dependency set, protected import roots and exact interpreter/profile provenance.
+The dependency-complete isolated QA interpreter runs all THREE disposable exact
+domain T3 bridges in fresh processes, rejects wrong schema/domain/generation,
+and does not initialize a real runtime. This does not qualify the installed LAB
+worker or claim that the real A/B/C domain T3 passed. Adapter source is unchanged.
+
+### Same PID namespace AND matching procfs
+
+Disposable native PID namespaces reproduced coherent child pid2/ppid1 with
+matching proc-self2, and an inherited outer procfs exposing a different proc-self
+and multi-entry NSpid. Before reading supplied parent authority the child now
+requires kernel `/proc/self` mapping, its own NSpid/PPid, actual parent PID and
+original exact parent start ticks to agree. Missing/replaced proc context returns
+closed unauthorized; no host PID mapping or fallback. Sealed running job's exact
+worker_pid, nonce/attempt/epoch, UID/group, leaf/cap, independent flock and release
+checks remain unchanged. Real root→nonowner fixture A/B/C still passes.
+
+This does not prove the unique cause of the historical child traceback. Actual
+LAB launcher and proc namespace composition still require SysAdmin/Architect
+qualification: **HOLD_PIDNS_OPERATOR_CONTRACT** for operational admission, not
+permission to edit launcher/systemd in04A. No native namespace was changed
+outside short-lived disposable fixture processes.
+
+Focused evidence: Linux64PASS, Windows42PASS/22native-ineligibleSKIP, paired
+exact IDs; wider/full/security acceptance belongs to TechLead. 04B source-owner
+helper, OS source view, private tmpfs, privilege/cgroup topology, method/version,
+new snapshot transport and real A/B/C are explicitly outside04A and remain HOLD.

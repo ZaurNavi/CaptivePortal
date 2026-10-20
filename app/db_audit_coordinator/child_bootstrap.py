@@ -13,12 +13,31 @@ import time
 from . import contracts as c
 from .live_policy import Deadlines,make_result,require,state,integer,physical_generation
 from .live_profile import PilotProfile
-from .live_receipts import directory,identity,guest_sample,start_ticks,membership
+from .live_receipts import directory,identity,guest_sample,start_ticks,membership,proc_text
 from .live_cgroup import Leaf,mountpoint
 from . import live_sqlite
 
 AUTH_KEYS={'job_id','attempt_id','claim_epoch','nonce','claim_fd','profile_fd','result_fd','cancel_fd',
     'supervisor_pid','supervisor_start','leaf','leaf_device','leaf_inode','gate_device','gate_inode','started_ns'}
+
+
+def verify_parent(supervisor_pid,supervisor_start):
+    """Require one coherent PID/proc namespace; never map to a host PID.
+
+    A procfs mounted for an ancestor namespace can resolve /proc/1 to the wrong
+    process while numeric PPid/start-tick checks accidentally appear to agree.
+    Check the kernel's own self mapping before looking up the supplied parent.
+    """
+    try:
+        own=os.getpid();parent=os.getppid()
+        require(os.readlink('/proc/self')==str(own),'unauthorized')
+        lines=proc_text(own,'status').splitlines()
+        nspid=[line.split()[1:] for line in lines if line.startswith('NSpid:')]
+        ppid=[line.split()[1:] for line in lines if line.startswith('PPid:')]
+        require(nspid==[[str(own)]] and ppid==[[str(parent)]]
+            and parent==supervisor_pid and start_ticks(parent)==supervisor_start,'unauthorized')
+    except (c.CoordinatorError,OSError,ValueError,IndexError):
+        raise c.CoordinatorError('unauthorized') from None
 
 
 def pipe_data(fd,seconds):
@@ -58,7 +77,7 @@ def authorize(fd):
     for key,access in (('result_fd',os.O_WRONLY),('cancel_fd',os.O_RDONLY)):
         require(stat.S_ISFIFO(os.fstat(data[key]).st_mode)
             and fcntl.fcntl(data[key],fcntl.F_GETFL)&os.O_ACCMODE==access,'unauthorized')
-    require(os.getppid()==data['supervisor_pid'] and start_ticks(os.getppid())==data['supervisor_start'],'unauthorized')
+    verify_parent(data['supervisor_pid'],data['supervisor_start'])
     # Sealed copy of the just-fsynced running record. The child has NO writable
     # queue descriptor and cannot open or replace the root-only JSON file.
     queue=state(readonly_document(data['claim_fd'],sealed=True))

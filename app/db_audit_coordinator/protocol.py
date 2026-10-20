@@ -47,6 +47,19 @@ def send(connection,value,*,limit=c.MAX_FRAME):
     connection.sendall(struct.pack("!I",len(raw))+raw)
 
 
+def receive_response(connection, *, seconds=1.0):
+    """A bad/lost RESPONSE cannot prove that a request was not committed.
+
+    Request-side receive() and its strict one-second frame contract are intact.
+    Only the attended batch client selects the finite ten-second reply budget.
+    """
+    if type(seconds) not in {int,float} or not 0<seconds<=10:
+        raise c.CoordinatorError('coordinator_unavailable')
+    try:return receive(connection,seconds=seconds)
+    except (c.CoordinatorError,OSError,ValueError,TypeError):
+        raise c.CoordinatorError('coordinator_unavailable') from None
+
+
 def submit_request(value, *, _socket_path=COORDINATOR_SOCKET):
     """Submit ONLY; fixed operational path, no source configuration/fallback.
 

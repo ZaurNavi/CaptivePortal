@@ -24,7 +24,7 @@ from .coordinator import Coordinator,receive_authorized
 from .locks import LockSpec,protected_parent
 from .state_store import StateStore
 from .protocol import peer_scope,receive,send
-from .live_policy import state,make_result,result,require,integer
+from .live_policy import state,make_result,result,require,integer,VALIDATORS
 from .live_receipts import directory,filesystem_magic,identity,start_ticks
 from .live_cgroup import create_leaf
 
@@ -118,11 +118,34 @@ class LiveCoordinator(Coordinator):
         for item in items:
             c.closed(item,{'store_id','idempotency_key'});self.profile.store(item['store_id']);c.identifier(item['idempotency_key'])
         require(len({item['store_id'] for item in items})==3,'invalid_request')
+        c.digest(scope_hash)
+        c.encode(dict(op='submit_batch',items=items),c.MAX_FRAME)
         with self._mutex:
             # No execution can start while this handler is durably appending all
             # three requests. A partial fsync error returns NO batch ACK and halts.
-            return dict(status='batch',jobs=[self.submit(item['store_id'],item['idempotency_key'],'manual',scope_hash)
-                for item in items])
+            replies=[]
+            try:
+                for item in items:
+                    replies.append(self.submit(item['store_id'],item['idempotency_key'],'manual',scope_hash))
+                reply=dict(status='batch',jobs=replies)
+                c.encode(reply,c.MAX_FRAME)  # Detect response failure at the acceptance boundary.
+                return reply
+            except Exception as error:
+                if not replies and isinstance(error,c.CoordinatorError) and error.code in {
+                        'invalid_request','store_busy','queue_full','not_admitted','unauthorized'}:
+                    raise  # Known pre-publication rejection of the first item.
+                # 1/2/3 durable records OR an unknown fsync may already exist.
+                raise c.CoordinatorError('coordinator_unavailable') from None
+
+    def status_by_key(self,store_id,key,scope_hash):
+        require(type(store_id) is str and store_id in VALIDATORS,'invalid_request')
+        c.identifier(key);c.digest(scope_hash)
+        hashed=hashlib.sha256((store_id+':'+c.idempotency(scope_hash,key)).encode()).hexdigest()
+        with self._mutex:
+            job=next((job for job in self._state()['jobs'] if job['idempotency_hash']==hashed
+                and job['scope_hash']==scope_hash and job['store_id']==store_id),None)
+            if job is None:return dict(status='not_found',outcome='outcome_unresolved')
+            return dict(status='found',job=c.public_job(job))
 
     def command(self,auth_fd):
         return [self.profile.python,'-B','-E','-s','-m','app.db_audit_coordinator.child_bootstrap',str(auth_fd)]
@@ -291,6 +314,9 @@ class LiveCoordinator(Coordinator):
         if op=='submit':
             c.request(value);return self.submit(value['store_id'],value['idempotency_key'],value['origin'],scope_hash)
         if op=='status':c.request(value);return self.status(value['job_id'],scope_hash)
+        if op=='status_by_key':
+            c.closed(value,{'op','store_id','idempotency_key'})
+            return self.status_by_key(value['store_id'],value['idempotency_key'],scope_hash)
         if op=='cancel':
             c.closed(value,{'op','job_id','attempt_id','controller_epoch'})
             return self.cancel_scoped(value['job_id'],value['attempt_id'],value['controller_epoch'],scope_hash)
@@ -319,9 +345,9 @@ class LiveCoordinator(Coordinator):
                                 caller=peer_scope(connection,set(self.profile.operator_uids))
                                 reply=self.handle(receive(connection),caller)
                             except c.CoordinatorError as error:reply=dict(error=error.code)
-                            except Exception:reply=dict(error='invalid_request')
+                            except Exception:reply=dict(error='coordinator_unavailable')
                             try:send(connection,reply)  # All batch ACKs after durable fsync, before dispatch.
-                            except OSError:pass  # Lost reply never erases an accepted idempotency record.
+                            except (OSError,c.CoordinatorError):pass  # Lost reply never erases durable acceptance.
                     else:self._wake_read.recv(1)
                 self.expire();self.finish()
                 if not self._closed and not self._halted:self.dispatch_one()
