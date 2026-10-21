@@ -323,6 +323,136 @@ def test_K02_native_owner_readonly_view_and_wal_backup(record_property):
     record_property('native_source_view',json.dumps(result,sort_keys=True))
 
 
+PLATEAU_DRIVER=r'''
+import hashlib,json,os,select,socket,sqlite3,sys,tempfile,uuid
+from pathlib import Path
+from app.db_audit_coordinator.r4_sandbox import MountNamespace,PrivateTmpfs,drop_owner
+mode=sys.argv[1];pinned=sys.argv[2]=='pinned'
+with tempfile.TemporaryDirectory(prefix='qio226-04g-native-') as temporary:
+ root=Path(temporary);root.chmod(0o711)
+ folder=root/'original';folder.mkdir(mode=0o700);path=folder/'source.db'
+ # Fixture construction ONLY. A writer exit with an empty native WAL leaves
+ # no DMS holder; no operator/source checkpoint is part of the implementation.
+ def build():
+  db=sqlite3.connect(path,isolation_level=None)
+  db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA synchronous=FULL')
+  db.execute('CREATE TABLE evidence(id INTEGER PRIMARY KEY,value TEXT NOT NULL)')
+  db.execute('BEGIN')
+  db.executemany('INSERT INTO evidence VALUES(?,?)',[(i,'x'*4000) for i in range(1,227)])
+  db.execute('COMMIT')
+  return db
+ writer=keeper=None
+ if mode in {'empty_wal','nonempty_wal'}:
+  pid=os.fork()
+  if pid==0:
+   db=build()
+   if mode=='empty_wal':assert db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()==(0,0,0)
+   os._exit(0)  # Native file state, no fabricated SHM/header/lock.
+  assert os.waitstatus_to_exitcode(os.waitpid(pid,0)[1])==0
+ else:
+  writer=build()
+  keeper=sqlite3.connect(path,isolation_level=None);keeper.execute('BEGIN')
+  assert keeper.execute('SELECT count(*) FROM evidence').fetchone()==(226,)
+ for file in folder.iterdir():os.chown(file,1000,1000);file.chmod(0o600)
+ os.chown(folder,1000,1000)
+ suffixes=('','-wal','-shm')
+ before={s:hashlib.sha256(Path(str(path)+s).read_bytes()).hexdigest() for s in suffixes}
+ wal_size=Path(str(path)+'-wal').stat().st_size
+ base=root/'jobs';base.mkdir(mode=0o711)
+ ns=MountNamespace().enter();job=None;fds={}
+ try:
+  fds={key:os.open(str(path)+suffix,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+       for key,suffix in (('main',''),('wal','-wal'),('shm','-shm'))}
+  job=PrivateTmpfs(ns,str(uuid.uuid4()),str(uuid.uuid4()),4*1024**2,64,1000,1000,1001,_base=str(base))
+  job.source_view(fds)
+  read,write=os.pipe();parent,child=socket.socketpair()
+  pid=os.fork()
+  if pid==0:
+   try:
+    os.close(read);parent.close()
+    for item in os.listdir('/proc/self/fd'):
+     fd=int(item)
+     if fd>2 and fd not in {write,child.fileno()}:
+      try:os.close(fd)
+      except OSError:pass
+    os.chroot(str(job.owner_root));os.chdir('/');drop_owner(1000,1000)
+    assert not Path('/proc').exists()
+    for suffix in suffixes:
+     try:fd=os.open('/source/input.sqlite3'+suffix,os.O_WRONLY)
+     except OSError:pass
+     else:os.close(fd);raise AssertionError('source_write_allowed')
+    src=sqlite3.connect('file:/source/input.sqlite3?mode=ro',uri=True,isolation_level=None,timeout=0)
+    src.execute('PRAGMA query_only=ON');src.execute('PRAGMA busy_timeout=0')
+    if pinned:src.execute('BEGIN')
+    src.execute('PRAGMA user_version').fetchone();src.execute('PRAGMA page_size').fetchone()
+    count=src.execute('PRAGMA page_count').fetchone()[0];assert count==228
+    dst=sqlite3.connect('/stage/snapshot.sqlite3',isolation_level=None,timeout=0)
+    calls=[];complete=False
+    def progress(code,remaining,total):
+     calls.append([code,remaining,total])
+     if len(calls)>=8:raise RuntimeError('finite_fixture_stop')
+     if mode=='mutating' and code==0:
+      child.sendall(b'w');assert child.recv(1)==b'a'
+    try:
+     src.backup(dst,pages=128,progress=progress,sleep=0)
+     complete=True
+     assert dst.execute('SELECT count(*),min(length(value)) FROM evidence').fetchone()==(226,4000)
+     assert dst.execute('SELECT value FROM evidence WHERE id=1').fetchone()==('x'*4000,)
+     assert dst.execute('PRAGMA integrity_check').fetchall()==[('ok',)]
+    except RuntimeError as error:assert str(error)=='finite_fixture_stop'
+    assert src.in_transaction==pinned
+    dst.close();src.close()
+    try:src.execute('SELECT 1')
+    except sqlite3.ProgrammingError:pass
+    else:raise AssertionError('connection_not_closed')
+    os.write(write,json.dumps(dict(calls=calls,complete=complete,page_count=count)).encode());os._exit(0)
+   except BaseException as error:
+    os.write(write,json.dumps(dict(error=type(error).__name__)).encode());os._exit(3)
+  os.close(write);child.close();updates=0
+  while True:
+   ready=select.select([read,parent],[],[],10)[0];assert ready
+   if parent in ready:
+    request=parent.recv(1)
+    if request:
+     assert request==b'w' and writer is not None;updates+=1
+     writer.execute('UPDATE evidence SET value=? WHERE id=1',(str(updates).ljust(4000,'!'),))
+     parent.sendall(b'a')
+   if read in ready:
+    raw=os.read(read,4096);os.close(read);break
+  parent.close();_,status=os.waitpid(pid,0);result=json.loads(raw)
+  assert os.waitstatus_to_exitcode(status)==0,result
+  result.update(mode=mode,pinned=pinned,writer_commits=updates,wal_bytes_before=wal_size,
+   python=sys.version,sqlite=sqlite3.sqlite_version,source_hashes_unchanged={s:
+    hashlib.sha256(Path(str(path)+s).read_bytes()).hexdigest()==digest for s,digest in before.items()})
+  for item in job.stage.iterdir():item.unlink()
+  print(json.dumps(result,sort_keys=True))
+ finally:
+  for fd in fds.values():os.close(fd)
+  if job is not None:job.cleanup()
+  ns.restore()
+  if keeper is not None:keeper.close()
+  if writer is not None:writer.close()
+'''
+
+
+@NATIVE
+@pytest.mark.parametrize('mode',['empty_wal','nonempty_wal','stable_writer','mutating'])
+@pytest.mark.parametrize('view',['autocommit','pinned'])
+def test_04G_native_exact_128_page_plateau_and_single_read_view(mode,view,record_property):
+    process=subprocess.run([sys.executable,'-B','-E','-s','-c',PLATEAU_DRIVER,mode,view],
+        cwd=ROOT,capture_output=True,text=True,timeout=20)
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout);calls=result['calls']
+    stalled=view=='autocommit' and mode in {'empty_wal','mutating'}
+    assert result['complete'] is not stalled
+    if stalled:assert calls==[[0,100,228]]*8  # EXACT 128-page plateau, not BUSY.
+    else:assert calls==[[0,100,228],[101,0,228]]
+    if mode=='mutating':assert result['writer_commits']==(7 if stalled else 1)
+    else:assert result['writer_commits']==0 and all(result['source_hashes_unchanged'].values())
+    if mode=='empty_wal':assert result['wal_bytes_before']==0
+    record_property('04g_native_plateau',json.dumps(result,sort_keys=True))
+
+
 CHARGE_DRIVER=r'''
 import json,os,tempfile,time,uuid
 from pathlib import Path
@@ -523,7 +653,7 @@ from app.db_audit_coordinator import contracts as c,live_coordinator as runtime,
 from app.db_audit_coordinator.live_profile import PilotProfile,R4Installation
 from app.db_audit_coordinator.live_receipts import identity
 from app.db_audit_coordinator.live_policy import R4_METHOD,empty_state
-from tests.db_audit_coordinator.test_b2_live_policy import profile,STORES
+from tests.db_audit_coordinator.test_b2_live_policy import profile,policy as fixture_policy,STORES
 from tests.db_audit_coordinator.test_b2_live_sqlite import disposable,hashes
 from tests.db_audit_coordinator.test_qio226_r4_native import WORKER_DRIVER,OWNER_DRIVER
 assert os.geteuid()==0
@@ -549,7 +679,23 @@ try:
   source_gids={'public_traffic':1004,'network_service_intelligence':1004,'traffic_projection':996}
   for store in STORES:
    source=root/store;source.mkdir(mode=0o700)
-   writer,policy=disposable(source,store);writers.append(writer)
+   if sys.argv[1]=='04g_quiescent':
+    fixture_pid=os.fork()
+    if fixture_pid==0:
+     writer,policy=disposable(source,store)
+     # Free pages enlarge the real canonical image without changing its final
+     # schema/domain. No padding table survives fixture construction.
+     writer.execute('CREATE TABLE fixture_padding(value)');writer.execute('BEGIN')
+     writer.executemany('INSERT INTO fixture_padding VALUES(?)',[('x'*4000,)]*226)
+     writer.execute('COMMIT');writer.execute('DROP TABLE fixture_padding')
+     assert writer.execute('PRAGMA page_count').fetchone()[0]>128
+     assert writer.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()==(0,0,0)
+     os._exit(0)
+    assert os.waitstatus_to_exitcode(os.waitpid(fixture_pid,0)[1])==0
+    target=source/(store+'.db');info=target.stat()
+    policy=fixture_policy(store,source=str(target),device=info.st_dev,inode=info.st_ino,uid=info.st_uid,gid=info.st_gid)
+   else:
+    writer,policy=disposable(source,store);writers.append(writer)
    # Controlled B failure: disposable original fixture is invalid from birth;
    # no runtime source writes, no production failure injection API.
    if store=='network_service_intelligence' and sys.argv[1]=='controlled_B':
@@ -860,6 +1006,27 @@ def test_04F_actual_owner_callback_abi_bounded_failure_and_positive_release(scen
             check='callback_status' if scenario=='04f_bad_status' else 'callback_page_budget'
             assert all(e['backup']['check']==check and e['coordinator_code']=='not_admitted' for e in events)
     record_property('04f_native_callback_and_release',json.dumps(dict(scenario=scenario,events=events,result=result),sort_keys=True))
+
+
+@NATIVE
+def test_04G_actual_owner_empty_wal_large_canonical_ABC_done_T3_and_positive_release(record_property):
+    process=subprocess.run([sys.executable,'-B','-E','-s','-c',PIPELINE_DRIVER,'04g_quiescent'],cwd=ROOT,
+        capture_output=True,text=True,timeout=60)
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout)
+    events=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{"event":"qio226_r4_owner_outcome"')]
+    assert result['states']==['completed']*3 and result['source_hashes_unchanged']
+    assert len(events)==len(result['proofs'])==3
+    for event,proof in zip(events,result['proofs']):
+        backup=event['backup']
+        assert backup['status']==101 and backup['remaining']==0 and backup['total']>128
+        assert backup['done']==1 and backup['busy']==backup['locked']==backup['other']==0
+        assert backup['steps']==(backup['total']+127)//128 and backup['complete']
+        assert event['owner_done_received'] and event['outcome']=='complete' and event['child_exit_code']==0
+        assert proof['snapshot'] is not None and proof['helper_reaped'] and proof['gatekeeper_reaped']
+        assert proof['cleanup_complete'] and proof['shmem_zero'] and proof['empty_observations']==2
+        assert proof['memory_observations']['swap_current']==0
+    record_property('04g_actual_owner_ABC_T3',json.dumps(dict(events=events,result=result),sort_keys=True))
 
 
 @NATIVE

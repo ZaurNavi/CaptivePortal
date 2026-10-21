@@ -132,6 +132,12 @@ def execute(document,trace):
         source=sqlite3.connect('file:/source/input.sqlite3?mode=ro',uri=True,timeout=0,isolation_level=None)
         trace.mark('source_opened');trace.mark('source_metadata')
         source.execute('PRAGMA query_only=ON');source.execute('PRAGMA busy_timeout=0')
+        # Pin ONE read view through metadata and every native backup step.
+        # Autocommit reopens it per step: SQLite 3.37.2's read-only, unreliable
+        # SHM + empty WAL path resets the pager even with no source mutation.
+        # That restarts backup at page 1 forever for images larger than 128.
+        # BEGIN is deferred/read-only; close (including failure) releases it.
+        source.execute('BEGIN');require(source.in_transaction,'not_admitted')
         require(source.execute('PRAGMA user_version').fetchone()[0]==policy.schema_version,'not_admitted')
         size=source.execute('PRAGMA page_size').fetchone()[0];count=source.execute('PRAGMA page_count').fetchone()[0]
         integer(size,512,65536);integer(count,1)
@@ -146,6 +152,7 @@ def execute(document,trace):
         progress=BackupProgress(trace,guard,wait,size,policy.image_max_bytes)
         trace.mark('backup_start');source.backup(destination,pages=128,progress=progress,sleep=0)
         progress.finish()
+        require(source.in_transaction,'not_admitted')
         trace.mark('backup_complete');trace.mark('connections_close')
         destination.close();destination=None;source.close();source=None
         trace.mark('owner_done')

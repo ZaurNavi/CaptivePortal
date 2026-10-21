@@ -385,3 +385,61 @@ do not rerun or reopen the previously accepted generic5.15 gates.
 
 NEXT=TECHLEAD_EXACT_SOURCE_REVIEW_THEN_SYSADMIN_NEW_ATTENDED_LAB_GO.
 PUSH=NO; PR=NO; MERGE=NO; INSTALL=NO; PRODUCTION=NO; OLD_QUEUE_REPLAY=NO.
+
+## 04G — one read transaction across the native backup
+
+Authority: [04F original A/B/C 128-page plateau](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6317327603).
+Source parent: accepted04F `dcc2a130342c7192ab2bbac5a8aff92d6ae923ed`.
+Those three real attempts remain deferred, snapshot=null, zero real T3 PASS.
+Their positive cleanup is not successful backup; the forced service stop is
+not graceful shutdown. Do not replay, reset or rewrite any historical result.
+
+Native CPython3.10 / SQLite3.37.2 disposable reproduction, using the unchanged
+R4 read-only file bindings, owner chroot, actual UID drop and private tmpfs:
+a valid228-page WAL-mode image, no active writer, native empty WAL and retained
+SHM yields repeated `(0,100,228)` with autocommit backup128-page steps. This
+reproduces the exact128-page plateau WITHOUT concurrent source changes, BUSY,
+LOCKED, corruption or a fake progress callback. All main/WAL/SHM SHA256 values
+remain identical. The fixture writer constructs/checkpoints its OWN disposable
+database before exiting; no implementation/operator checkpoint is added.
+Nonempty idle WAL and stable active-writer controls reach DONE. A second,
+event-coordinated synthetic writer that commits between steps independently
+reproduces the same plateau. The real04F numeric report alone does not establish
+which restart trigger occurred on the originals; no new original-source access
+is claimed by Coder.
+
+In SQLite3.37.2 [wal.c](https://github.com/sqlite/sqlite/blob/version-3.37.2/src/wal.c#L2439-L2448),
+read-only unreliable SHM with WAL shorter than its header causes `pChanged=1`
+even without writes. [pager.c](https://github.com/sqlite/sqlite/blob/version-3.37.2/src/pager.c)
+resets the pager on that new read transaction; `pager_reset` restarts attached
+backups. [backup.c](https://github.com/sqlite/sqlite/blob/version-3.37.2/src/backup.c#L325-L332)
+opens/closes a read transaction per step only when no caller-owned read view
+already exists. Thus this is native backup restart, not callback misaccounting
+or evidence that a required source write/SHM permission should be granted.
+
+04G adds one deferred `BEGIN` on the existing `mode=ro`, `query_only=ON`,
+busy_timeout0 source connection BEFORE the existing schema/page metadata reads.
+Those existing reads establish the one WAL read view. It remains open through
+all128-page steps, actual DONE, normal backup return and original post-guard;
+connection close releases it on success and every exception. No source COMMIT,
+DML, checkpoint, journal/durability PRAGMA, writable binding, new VFS, immutable
+source bypass, generic sleep or retry loop. Check that the source connection
+still owns its transaction before admitting owner_done. No destination
+transaction policy changes. Original callback status/count/image validation,
+100000 ceiling, finite deadline/cancel, closed diagnostics, UID/GID, memory and
+no-swap limits, promotion, two-FD immutable T3 and positive release stay intact.
+A pinned reader can delay WAL checkpoint/recycling until its finite attempt
+ends; this is bounded by the existing deadline, not a new lifetime allowance.
+
+Focused native tests compare autocommit/pinned callbacks in four controlled
+source states, and run actual owner backup plus canonical A/B/C T3 on large
+empty-WAL disposable images. All three must reach genuine101/DONE and exact
+ceil(page_count/128) callbacks, immutable snapshot transport, helper/worker
+positive reap, cleanup, zero shmem/swap and two empty observations. Portable
+tests cover RO write denial, external writer isolation, cancellation/deadline
+and post-DONE guard rejection/connection close; existing04F fault guards remain.
+These are Coder WSL mechanics, NOT installed/native5.15 F2/F3 qualification or
+the next original LAB A/B/C proof. TechLead owns independent exact source review;
+only then SysAdmin performs its separately authorized preserved-history run.
+
+COMMIT=HOLD; PUSH=NO; PR=NO; MERGE=NO; INSTALL=NO; PRODUCTION=NO.

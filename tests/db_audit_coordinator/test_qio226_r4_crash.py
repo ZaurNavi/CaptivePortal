@@ -25,6 +25,52 @@ class BackupTrace:
     def backup_result(self):self.results.append(copy.deepcopy(self.backup))
 
 
+@pytest.mark.parametrize('failure',['none','cancel','deadline','post_guard'])
+def test_04G_read_view_is_RO_stable_and_closed_on_success_or_guard_abort(tmp_path,failure,record_property):
+    import json
+    from app.db_audit_coordinator.r4_release import BackupProgress
+    path=tmp_path/'synthetic.db';writer=sqlite3.connect(path,isolation_level=None)
+    writer.execute('PRAGMA journal_mode=WAL');writer.execute('CREATE TABLE fixture(id INTEGER PRIMARY KEY,value)')
+    writer.execute('BEGIN')
+    writer.executemany('INSERT INTO fixture VALUES(?,?)',[(i,'x'*4000) for i in range(1,227)])
+    writer.execute('COMMIT')
+    source=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,isolation_level=None,timeout=0)
+    destination=sqlite3.connect(tmp_path/'image.db',isolation_level=None,timeout=0)
+    source.execute('PRAGMA query_only=ON');source.execute('PRAGMA busy_timeout=0')
+    sql=[];source.set_trace_callback(sql.append)
+    source.execute('BEGIN')
+    total=source.execute('PRAGMA page_count').fetchone()[0];assert total>128
+    # Even accidental application writes remain denied inside the read view.
+    with pytest.raises(sqlite3.OperationalError):source.execute('UPDATE fixture SET value=1')
+    assert source.in_transaction
+    trace=BackupTrace();guards=0;calls=[]
+    def guard():
+        nonlocal guards
+        guards+=1
+        if (failure in {'cancel','deadline'} and guards==1) or (failure=='post_guard' and guards==3):
+            raise c.CoordinatorError('canceled' if failure=='cancel' else 'not_admitted')
+    progress=BackupProgress(trace,guard,lambda:pytest.fail('unexpected transient'),4096,2**26)
+    def callback(*values):
+        calls.append(values);progress(*values)
+        if values[0]==0:writer.execute('UPDATE fixture SET value=? WHERE id=1',('y'*4000,))
+    try:
+        if failure=='none':
+            source.backup(destination,pages=128,progress=callback,sleep=0);progress.finish()
+            assert destination.execute('SELECT value FROM fixture WHERE id=1').fetchone()==('x'*4000,)
+            assert writer.execute('SELECT value FROM fixture WHERE id=1').fetchone()==('y'*4000,)
+            assert len(trace.results)==1
+        else:
+            with pytest.raises(c.CoordinatorError):
+                source.backup(destination,pages=128,progress=callback,sleep=0);progress.finish()
+            assert trace.results==[]
+            assert trace.backup['check']==('post_backup_guard' if failure=='post_guard' else 'callback_guard')
+        assert source.in_transaction
+    finally:destination.close();source.close();writer.close()
+    with pytest.raises(sqlite3.ProgrammingError):source.execute('SELECT 1')
+    assert sql[0]=='BEGIN' and not any(statement in {'COMMIT','ROLLBACK','BEGIN IMMEDIATE'} for statement in sql)
+    record_property('04g_read_view',json.dumps(dict(failure=failure,calls=calls,sql=sql,sqlite=sqlite3.sqlite_version)))
+
+
 @pytest.mark.parametrize('status',[5,6])
 def test_04F_native_transient_status_zero_counts_is_not_completion(status):
     from app.db_audit_coordinator.r4_release import BackupProgress
