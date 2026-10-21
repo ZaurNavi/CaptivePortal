@@ -1,0 +1,474 @@
+{
+  "task": "TASK-TEST-GATE-PLATFORM-COMPAT-01",
+  "base_head": "7e84bc563f1b6dd3d72da66ae25849d9a7d96540",
+  "base_tree": "ea664b1d49ace86fc8a0c4ab2fc52945531e574a",
+  "candidate_tree": "f77e48f85950ddc8f0b5962829088a6fa2a6fe5e",
+  "worktree": "/home/zaur_navi/captivportal-lab/worktrees/test-gate-platform-compat-01",
+  "branch": "task/test-gate-platform-compat-01",
+  "status": "DIRTY_UNCOMMITTED",
+  "patch": {
+    "path": "/mnt/c/CaptivPortal-Lab/handoffs/test-gate-platform-compat-01-20261015/TEST-GATE-PLATFORM-COMPAT-01-R1.patch",
+    "bytes": 61265,
+    "sha256": "28228bfe1afa7fbe759ff60e8a0094f7d0622d302656b47ab4d1edd9f7e77962"
+  },
+  "scope": {
+    "files": 19,
+    "new_repo_files": [],
+    "production_changes": 0,
+    "app_and_deploy_git_subtrees_unchanged": true,
+    "qio_worktree_unchanged_clean": true
+  },
+  "routing": {
+    "paired_cases": 237,
+    "approved_extension": 28,
+    "collection_linux_windows_ids_identical": true,
+    "collection_case_count": 386,
+    "all_446_network_metadata_ids_preserved": true,
+    "bodies_preserved": [
+      "tests/network_metadata/__init__.py::Clock",
+      "tests/network_metadata/__init__.py::Capture",
+      "tests/network_metadata/__init__.py::binding_input",
+      "tests/network_metadata/__init__.py::configuration",
+      "tests/network_metadata/__init__.py::source_event",
+      "tests/network_metadata/__init__.py::record",
+      "tests/network_metadata/__init__.py::outcome",
+      "tests/network_metadata/__init__.py::store",
+      "tests/network_metadata/__init__.py::seed_blocked",
+      "tests/network_metadata/test_capacity.py::test_io_hotpath_capacity_guard_precedes_transactional_probe",
+      "tests/network_metadata/test_capacity.py::test_3000_temporary_observation_capacity",
+      "tests/network_metadata/test_checkpoint_crash.py::test_io_hotpath_fault_flush_observation_health_checkpoint_atomicity",
+      "tests/network_metadata/test_checkpoint_crash.py::test_final_conflict_health_owns_new_prefix_and_stops_evaluation",
+      "tests/network_metadata/test_checkpoint_crash.py::test_all_five_crash_boundaries",
+      "tests/network_metadata/test_checkpoint_crash.py::test_final_partial_health_rolls_back_or_commits_with_entire_batch",
+      "tests/network_metadata/test_checkpoint_crash.py::test_block_establishment_rollback_has_no_successful_claim",
+      "tests/network_metadata/test_checkpoint_crash.py::test_expired_event_aggregate_checkpoint_and_health_commit_atomically",
+      "tests/network_metadata/test_cli.py::test_disabled_zero_operational_side_effects",
+      "tests/network_metadata/test_cli.py::test_invalid_configuration_safe",
+      "tests/network_metadata/test_cli.py::test_identity_failure_safe",
+      "tests/network_metadata/test_cli.py::test_enabled_clean_stop_and_signal_binding",
+      "tests/network_metadata/test_cli.py::test_writer_lock_failure_safe",
+      "tests/network_metadata/test_health.py::Reader",
+      "tests/network_metadata/test_health.py::test_capture_projection",
+      "tests/network_metadata/test_health.py::test_capture_acquisition_only",
+      "tests/network_metadata/test_health.py::test_capture_failure_is_safe",
+      "tests/network_metadata/test_health.py::test_capture_constructor_failure_is_unknown",
+      "tests/network_metadata/test_health.py::test_health_not_per_observation_and_heartbeat",
+      "tests/network_metadata/test_health.py::test_fault_transition_source_order_and_clean_interval_recovery",
+      "tests/network_metadata/test_health.py::test_newer_then_older_commits_never_regress_health_after_reload",
+      "tests/network_metadata/test_health.py::test_replay_output_and_ingest_separation_after_reload",
+      "tests/network_metadata/test_health.py::test_trustworthy_filtered_or_fault_output_is_monotonic_without_ingest",
+      "tests/network_metadata/test_health.py::test_untrustworthy_timestamp_does_not_update_health",
+      "tests/network_metadata/test_health.py::test_expired_filter_advances_output_without_ingested_time",
+      "tests/network_metadata/test_health.py::test_reload_scopes_capture_and_restores_state_reason_ownership",
+      "tests/network_metadata/test_health.py::test_source_recovery_clears_only_source_availability_reasons",
+      "tests/network_metadata/test_health.py::test_all_new_observations_reference_final_partial_batch_health",
+      "tests/network_metadata/test_health.py::test_clean_batch_reuses_health_ref_but_advances_in_memory_watermarks",
+      "tests/network_metadata/test_health.py::test_replayed_observation_keeps_original_health_and_all_first_ingest_provenance",
+      "tests/network_metadata/test_health.py::test_fault_only_batch_persists_one_final_transition_snapshot",
+      "tests/network_metadata/test_privacy.py::test_logs_reject_all_sensitive_and_arbitrary_dynamic_fields",
+      "tests/network_metadata/test_privacy.py::test_source_unavailable_is_health_reason_not_record_fault",
+      "tests/network_metadata/test_privacy.py::test_transient_fault_digest_never_retained_or_logged",
+      "tests/network_metadata/test_privacy.py::test_diagnostic_tables_and_fault_errors_exclude_sensitive_values",
+      "tests/network_metadata/test_privacy.py::test_fingerprint_boundary_and_read_select_allowlist",
+      "tests/network_metadata/test_read_service.py::test_keyset_order_site_isolation_and_privacy",
+      "tests/network_metadata/test_read_service.py::test_invalid_read_arguments",
+      "tests/network_metadata/test_read_service.py::test_read_window",
+      "tests/network_metadata/test_read_service.py::test_family_projection_no_sni",
+      "tests/network_metadata/test_repository.py::_a_store",
+      "tests/network_metadata/test_repository.py::_a_outcomes",
+      "tests/network_metadata/test_repository.py::_a_rewind",
+      "tests/network_metadata/test_repository.py::_a_rows",
+      "tests/network_metadata/test_repository.py::_a_sql",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_overlap_first_conflict_matches_off",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_range_gap_and_generation_isolation",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_malformed_probe_is_unavailable_not_empty",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_probe_sql_failure_never_commits",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_validated_cache_lifecycle_and_closed_insert",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_failed_initialize_never_adopts_cache",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_fault_sql_grouping_and_complete_equivalence",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_fault_epochs_stable_flush_and_invalid_category",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_fault_failure_rolls_back_entire_batch",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_external_ddl_sql_failure_is_not_schema_bypass",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_mixed_fault_duplicate_conflict_freezes_only_reached_prefix",
+      "tests/network_metadata/test_repository.py::test_io_hotpath_retention_expiry_semantics_are_preserved",
+      "tests/network_metadata/test_repository.py::test_all_complete_replay_outcomes_obey_source_identity_precedence",
+      "tests/network_metadata/test_repository.py::test_complete_ingest_requires_valid_raw_digest",
+      "tests/network_metadata/test_repository.py::test_binding_first_persist_and_identical_noop",
+      "tests/network_metadata/test_repository.py::test_binding_same_digest_mismatch_rejected_without_repair",
+      "tests/network_metadata/test_repository.py::test_exact_schema_pragmas_spine_and_provenance",
+      "tests/network_metadata/test_repository.py::test_second_posix_writer_rejected",
+      "tests/network_metadata/test_repository.py::test_schema_drift_fails_without_recreate",
+      "tests/network_metadata/test_repository.py::test_duplicate_noop_preserves_all_fields",
+      "tests/network_metadata/test_repository.py::test_conflicts_are_durable_and_atomic",
+      "tests/network_metadata/test_repository.py::test_generation_schema_rejects_invalid_block_state",
+      "tests/network_metadata/test_repository.py::test_blocked_cannot_be_closed_in_schema_or_model",
+      "tests/network_metadata/test_repository.py::test_blocked_startup_consistency_corruption",
+      "tests/network_metadata/test_repository.py::test_batch_order_rejected",
+      "tests/network_metadata/test_repository.py::test_fault_aggregation_processing_clock_bucket",
+      "tests/network_metadata/test_repository.py::test_existing_empty_newer_schema_not_reinitialized",
+      "tests/network_metadata/test_repository.py::test_headroom_halts_without_checkpoint_change",
+      "tests/network_metadata/test_repository.py::test_schema_rejects_noncanonical_block_timestamp",
+      "tests/network_metadata/test_repository.py::test_bounded_wal_maintenance_with_held_reader",
+      "tests/network_metadata/test_repository.py::test_stat_failure_not_zero_footprint",
+      "tests/network_metadata/test_retention.py::test_late_first_ingest_exact_retention_boundaries",
+      "tests/network_metadata/test_retention.py::test_late_never_observed_sensitive_stays_not_observed",
+      "tests/network_metadata/test_retention.py::test_touched_identity_retention_preserves_proven_disposition",
+      "tests/network_metadata/test_retention.py::test_sensitive_then_core_retention",
+      "tests/network_metadata/test_retention.py::test_not_observed_does_not_turn_expired",
+      "tests/network_metadata/test_retention.py::test_block_survives_46_day_diagnostic_expiry_and_restart",
+      "tests/network_metadata/test_retention.py::test_closed_lineage_90_days_and_active_preserved",
+      "tests/network_metadata/test_retention.py::test_retention_global_nonempty_batch_budget_and_priority",
+      "tests/network_metadata/test_service.py::test_io_hotpath_exact_two_probes_and_all_family_equivalence",
+      "tests/network_metadata/test_service.py::test_io_hotpath_transaction_reprobe_does_not_trust_preflight",
+      "tests/network_metadata/test_service.py::test_io_hotpath_preflight_sql_failure_pauses_storage_without_cursor_gap",
+      "tests/network_metadata/test_service.py::test_io_hotpath_partial_then_oversized_record_preserves_source_guards",
+      "tests/network_metadata/test_service.py::test_io_hotpath_generation_guards_precede_range_optimization",
+      "tests/network_metadata/test_service.py::service_for",
+      "tests/network_metadata/test_service.py::test_blocked_restart_never_opens_source_or_resolves",
+      "tests/network_metadata/test_service.py::test_source_absent_alive_then_append",
+      "tests/network_metadata/test_service.py::test_live_rotation_drains_tail_without_raw_persistence",
+      "tests/network_metadata/test_service.py::test_binding_cutover_has_no_rewind",
+      "tests/network_metadata/test_service.py::test_reboot_closes_old_generation_before_source_inspection",
+      "tests/network_metadata/test_service.py::test_source_disappears_and_same_inode_returns",
+      "tests/network_metadata/test_service.py::test_runtime_storage_rollback_then_recovery",
+      "tests/network_metadata/test_service.py::test_runnable_restart_source_transitions",
+      "tests/network_metadata/test_service.py::test_oversized_tail_closes_once_without_oversized_fault",
+      "tests/network_metadata/test_service.py::test_oversized_terminated_dedicated_checkpoint",
+      "tests/network_metadata/test_service.py::test_source_unavailable_preserves_checkpoint_and_safe_health",
+      "tests/network_metadata/test_service.py::test_pending_reboot_gap_survives_absence_and_restart",
+      "tests/network_metadata/test_service.py::test_first_source_and_clean_live_rotation_have_no_gap",
+      "tests/network_metadata/test_service.py::test_partial_restart_preserved_until_clean_heartbeat",
+      "tests/network_metadata/test_service.py::test_continuity_gap_partial_preserved_on_same_generation_restart",
+      "tests/network_metadata/test_service.py::test_100_timestamp_only_batches_then_exact_heartbeat",
+      "tests/network_metadata/test_service.py::test_source_anchor_failure_is_not_sqlite_failure",
+      "tests/network_metadata/test_service.py::test_source_failure_keeps_heartbeat_and_due_retention",
+      "tests/network_metadata/test_service.py::test_real_sqlite_transaction_failure_remains_storage_failure",
+      "tests/network_metadata/test_service.py::test_terminal_discontinuity_closes_before_failed_open_and_recovers",
+      "tests/network_metadata/test_service.py::test_same_identity_open_failure_before_anchor_preserves_authority",
+      "tests/network_metadata/test_service.py::test_reader_down_anchor_mismatch_one_open_one_atomic_transition",
+      "tests/network_metadata/test_service.py::test_close_transaction_failure_retains_owned_old_reader",
+      "tests/network_metadata/test_service.py::test_absent_path_pauses_unread_records_then_full_reappearance_decision",
+      "tests/network_metadata/test_service.py::test_canonical_absence_keeps_heartbeat_retention_and_wal",
+      "tests/network_metadata/test_source.py::test_reader_append_partial_and_crlf",
+      "tests/network_metadata/test_source.py::test_oversize_discard_and_final_tail_bounded",
+      "tests/network_metadata/test_source.py::test_prefix_before_oversize_dedicated_batch",
+      "tests/network_metadata/test_source.py::test_exact_decision_order",
+      "tests/network_metadata/test_source.py::test_reader_restart_checkpoint_and_anchor",
+      "tests/network_metadata/test_source.py::test_discard_hash_streams_across_bounded_polls_without_retaining_tail",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T01_T02_V2_01_02_external_terminal_no_dhcp_or_phantom_edge",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T03_V2_03_guest_both_exact_temporal_calls",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T05_T08_V2_04_guest_gap_only_guest_retry_and_honest_unavailable",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T04_V2_05_scope_conflict_blocks_entire_batch",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_05_06_closed_manifest_not_guessed",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_admission_deterministic_strict_json_and_restart_pin",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T04_V2_06_ipv6_absence_distinct_no_lookup",
+      "tests/network_metadata_projection/test_external_peer_v2.py::admitted_source",
+      "tests/network_metadata_projection/test_external_peer_v2.py::seed_source",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_08_consistent_read_only_tail_not_raw_length_and_empty_generation",
+      "tests/network_metadata_projection/test_external_peer_v2.py::staged",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T06_T07_V2_08_09_reset_append_restart_no_pre_reset_replay",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_10_reset_install_crash_whole_boundary_rollback",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_07_11_frozen_old_schema_rejects_terminal_and_new_core",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T06_T07_V2_12_inert_pair_verify_rejects_partial_or_changed_db",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_12_path_alias_symlink_hardlink_protected_hold",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T11_V2_14_closed_counter_and_no_raw_endpoint_logs",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_08_single_snapshot_concurrent_append_preserves_new_tail",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_09_10_post_floor_crash_and_real_restart",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_09_empty_and_new_generation_natural_beginning_retention",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_unadmitted_empty_generation_is_blocked_not_false_complete",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T08_T10_V2_15_bounded_local_load_reports_not_hdd_acceptance",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_08_core_and_floors_one_atomic_initialization",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_V2_manifest_external_hash_and_corruption_fail_closed",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T09_V2_13_fresh_pair_publishes_only_post_floor_ni03_ni04",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_bootstrap_default_inspect_no_sqlite_or_writes",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_bootstrap_verify_exact_operator_inventory",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_runtime_start_requires_discard_epoch_no_implicit_replay",
+      "tests/network_metadata_projection/test_external_peer_v2.py::test_T06_V2_12_complete_disposable_pair_discards_derived_only",
+      "tests/network_metadata_projection/test_projection_source.py::seed",
+      "tests/network_metadata_projection/test_projection_source.py::test_exact_source_record_batch_offset_zero_and_retention",
+      "tests/network_metadata_projection/test_projection_source.py::test_untrusted_source_fails_without_mutation",
+      "tests/network_metadata_projection/test_projection_source.py::test_source_connections_read_only_and_no_raw_payload_tables",
+      "tests/network_metadata_projection/test_projection_source.py::test_not_observed_does_not_reconstruct_endpoints",
+      "tests/network_metadata_projection/test_projection_source.py::test_source_generation_order_is_opened_time_then_identity"
+    ],
+    "protected_six": [
+      "tests/analytics/test_current_traffic.py::test_sql_integrity_aggregates_reject_corrupt_rate_and_null_values[wired_download_mbps-inf-bad_rate_count]",
+      "tests/test_auth_retry_frontend.py::test_lost_retry_response_reconciles_active_run",
+      "tests/visitor_registry/test_device_registry_worker.py::test_long_full_audit_runs_in_worker_and_does_not_block_start",
+      "tests/visitor_registry/test_device_registry_worker.py::test_start_exposes_initializing_until_full_audit_finishes[ready]",
+      "tests/visitor_registry/test_device_registry_worker.py::test_start_exposes_initializing_until_full_audit_finishes[stopping]",
+      "tests/admin_web/test_home_health.py::test_unavailable_analytics_is_one_component_not_health_503"
+    ],
+    "protected_six_files_byte_unchanged": true
+  },
+  "focused_unique_outcomes": {
+    "windows": {
+      "passed": 19,
+      "skipped": 237,
+      "failed": 0,
+      "errors": 0
+    },
+    "linux": {
+      "passed": 260,
+      "skipped": 0,
+      "failed": 0,
+      "errors": 0
+    }
+  },
+  "test_runs": [
+    {
+      "file": "analytics-linux.xml",
+      "cases": 8,
+      "skipped": 0
+    },
+    {
+      "file": "portable-fixes-linux.xml",
+      "cases": 3,
+      "skipped": 0
+    },
+    {
+      "file": "portable-fixes-windows.xml",
+      "cases": 11,
+      "skipped": 0
+    },
+    {
+      "file": "routing-linux.xml",
+      "cases": 245,
+      "skipped": 0
+    },
+    {
+      "file": "routing-windows.xml",
+      "cases": 245,
+      "skipped": 237
+    },
+    {
+      "file": "schedule-linux-01.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-02.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-03.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-04.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-05.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-06.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-07.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-08.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-09.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-linux-10.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-01.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-02.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-03.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-04.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-05.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-06.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-07.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-08.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-09.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "schedule-windows-10.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "sharing-linux.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "sharing-windows.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "socket-long-root-linux.xml",
+      "cases": 1,
+      "skipped": 0
+    },
+    {
+      "file": "stability-and-analytics-linux.xml",
+      "cases": 14,
+      "skipped": 0
+    }
+  ],
+  "timing_repetitions": {
+    "linux": "10/10 PASS",
+    "windows": "10/10 PASS"
+  },
+  "socket_short_and_long_basetemp": "PASS (real AF_UNIX, private /tmp directory)",
+  "compileall": "PASS both platforms",
+  "diff_check": "PASS",
+  "patch_reconstruction": "PASS",
+  "runner_sha256": "45d3b37150a2c3b3d3e95460b2a1c6cab8d97aa333c3d3e0cd3507ef1c994f77",
+  "runner_executed_or_changed": false,
+  "file_inventory": [
+    {
+      "path": "docs/testing-environments.md",
+      "bytes": 8568,
+      "sha256": "ff2cc21909af4a2df6417331c7084bc0e540c72c295c344276ad0f5cf53954ab"
+    },
+    {
+      "path": "docs/testing.md",
+      "bytes": 39198,
+      "sha256": "2b2c6c499624e9ee858d335b9b8416d43bf80503772ed3911182c14300667104"
+    },
+    {
+      "path": "tests/analytics/test_historical_traffic_peak.py",
+      "bytes": 18511,
+      "sha256": "c2e7d1a4e4eb68ffe4f3c946446654e56ef295ad7642c7ce854dbb155451c9db"
+    },
+    {
+      "path": "tests/analytics/test_historical_traffic_statistics.py",
+      "bytes": 20196,
+      "sha256": "800b346351789868645bef491049ad1fa4ba6d373e7a3aaea13e5521689ad893"
+    },
+    {
+      "path": "tests/current_state/test_workers.py",
+      "bytes": 13089,
+      "sha256": "a6d16ecd73383bec92672b9bb2ac9148a7e417be1a9de36ea4454423b29cd505"
+    },
+    {
+      "path": "tests/network_metadata/__init__.py",
+      "bytes": 5679,
+      "sha256": "d1cb567eb33c9e2974a13479e12284efd61b1653b1c9b9750cefe05a07c93e8c"
+    },
+    {
+      "path": "tests/network_metadata/test_capacity.py",
+      "bytes": 3551,
+      "sha256": "a5e4c2eef78376ef393bdcd026ce0f23c551869ee14b92e45a638687c6c86b7b"
+    },
+    {
+      "path": "tests/network_metadata/test_checkpoint_crash.py",
+      "bytes": 16384,
+      "sha256": "2de9f9c12621b25c24bf26fef8da9c0bafea1531d88a312bae97625595730648"
+    },
+    {
+      "path": "tests/network_metadata/test_cli.py",
+      "bytes": 2580,
+      "sha256": "6457b78439e2e7c79d3bb70d9583976d6763d43397bb657cdcbc3c3a1c9cf4bd"
+    },
+    {
+      "path": "tests/network_metadata/test_health.py",
+      "bytes": 24181,
+      "sha256": "c45b4e6610d704ea5a3de2ff8ef476a18563b88c7b0202634f6262ea4c881422"
+    },
+    {
+      "path": "tests/network_metadata/test_privacy.py",
+      "bytes": 4449,
+      "sha256": "5181d89c667ac17a2f3d7bd6b8da2701766c812e8d7797ec12aeebc15351dc56"
+    },
+    {
+      "path": "tests/network_metadata/test_read_service.py",
+      "bytes": 3188,
+      "sha256": "b593e8d640823c73202d321db4940d0854095e004e5497d842f11ba71b9f61ea"
+    },
+    {
+      "path": "tests/network_metadata/test_repository.py",
+      "bytes": 42125,
+      "sha256": "922cc872583806b10220346adc960918aefad9ced387765878d17e0870149b3e"
+    },
+    {
+      "path": "tests/network_metadata/test_retention.py",
+      "bytes": 14965,
+      "sha256": "87dc9b0c14aeb90ccb2c08172a70b689e9cf9e507bc553738f765d3485ec35b1"
+    },
+    {
+      "path": "tests/network_metadata/test_service.py",
+      "bytes": 55895,
+      "sha256": "c62a2f4e3ac43e3cc30a84be4ad29a3e3704babddfab3ffb00498a259a7ce254"
+    },
+    {
+      "path": "tests/network_metadata/test_source.py",
+      "bytes": 4814,
+      "sha256": "b11eb23d29ccf7e18eea5b1a646dde26e19b8b60a59c642597e71113b0ba59ca"
+    },
+    {
+      "path": "tests/network_metadata_projection/test_external_peer_v2.py",
+      "bytes": 39717,
+      "sha256": "f0b17366b76ff3a2905cb15104fa7620a320c042e72e3163d9db9aacd45ea891"
+    },
+    {
+      "path": "tests/network_metadata_projection/test_projection_source.py",
+      "bytes": 7077,
+      "sha256": "9de13f1afe5294f37ec8f148c0e60d182114eaf0ae2db6d3a638b1763d350983"
+    },
+    {
+      "path": "tests/visitor_registry/test_device_registry.py",
+      "bytes": 73501,
+      "sha256": "9043109d9a8880a54d9b3d7d496524bd15f9722d63b22112d7eaa05a89415685"
+    }
+  ],
+  "independent_full_gates": "PENDING_TECHLEAD",
+  "commit_push_pr_merge_deploy_production": "NO"
+}
