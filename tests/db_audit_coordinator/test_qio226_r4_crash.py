@@ -18,6 +18,147 @@ from tests.db_audit_coordinator.test_b2_live_policy import profile,policy,STORES
 POSIX=pytest.mark.skipif(sys.platform!='linux',reason='R4 native Unix descriptor/credentials contract')
 
 
+class BackupTrace:
+    """Portable test sink; production still uses the private OwnerTrace FIFO."""
+    def __init__(self):self.backup=None;self.stages=[];self.results=[]
+    def mark(self,stage):self.stages.append(stage)
+    def backup_result(self):self.results.append(copy.deepcopy(self.backup))
+
+
+@pytest.mark.parametrize('status',[5,6])
+def test_04F_native_transient_status_zero_counts_is_not_completion(status):
+    from app.db_audit_coordinator.r4_release import BackupProgress
+    trace=BackupTrace();guards=[];waits=[]
+    progress=BackupProgress(trace,lambda:guards.append(1),lambda:waits.append(1),4096,2**26)
+    progress(status,0,0)
+    assert not progress.complete and not trace.backup['complete'] and trace.backup['steps']==1
+    with pytest.raises(c.CoordinatorError):progress.finish()
+    progress(0,1,2);progress(101,0,2);progress.finish()
+    assert progress.complete and len(trace.results)==1 and waits==[1]
+    assert trace.backup['busy' if status==5 else 'locked']==1
+    assert trace.backup['done']==1 and trace.backup['ok']==1 and trace.backup['steps']==3
+    assert trace.stages==['backup_progress'] and len(guards)==4
+
+
+@pytest.mark.parametrize('code,remaining,total,check',[
+    (8,0,0,'callback_status'),(11,0,0,'callback_status'),(10,0,0,'callback_status'),
+    (True,0,2,'callback_types'),(0,False,2,'callback_types'),(0,1,True,'callback_types'),
+    (0,-1,2,'callback_counts'),(0,3,2,'callback_counts'),(0,0,0,'callback_page_budget'),
+    (101,1,2,'callback_counts'),(5,0,20000,'callback_page_budget'),
+    (0,1,20000,'callback_page_budget'),(0,0,2**31,'callback_counts'),
+    ('SECRET',0,2,'callback_types'),(0,'SECRET',2,'callback_types')])
+def test_04F_bad_callback_is_closed_and_has_exact_failing_check(code,remaining,total,check):
+    from app.db_audit_coordinator.r4_release import BackupProgress
+    from app.db_audit_coordinator.r4_release import validate_owner_backup
+    trace=BackupTrace();waits=[]
+    progress=BackupProgress(trace,lambda:None,lambda:waits.append(1),4096,2**26)
+    with pytest.raises(c.CoordinatorError) as error:progress(code,remaining,total)
+    assert error.value.code=='not_admitted' and trace.backup['check']==check
+    assert not progress.complete and trace.results==[] and waits==[]
+    validate_owner_backup(trace.backup)
+    assert 'SECRET' not in json_text(trace.backup)
+
+
+def json_text(value):return c.encode(value).decode('ascii')
+
+
+def test_04F_original_callback_cap_and_missing_done_cannot_fabricate_success():
+    from app.db_audit_coordinator.r4_release import BackupProgress
+    trace=BackupTrace();progress=BackupProgress(trace,lambda:None,lambda:None,4096,2**26)
+    for _ in range(100000):progress(0,1,2)
+    with pytest.raises(c.CoordinatorError):progress(5,0,0)
+    assert trace.backup['steps']==100001 and trace.backup['check']=='callback_step_budget'
+    with pytest.raises(c.CoordinatorError):progress.finish()
+    assert trace.results==[]
+
+
+@pytest.mark.parametrize('where',['callback_guard','busy_wait','post_backup_guard'])
+def test_04F_cancel_deadline_or_guard_failure_remains_a_failure(where):
+    from app.db_audit_coordinator.r4_release import BackupProgress
+    trace=BackupTrace()
+    def stop():raise c.CoordinatorError('not_admitted')
+    progress=BackupProgress(trace,stop if where=='callback_guard' else lambda:None,
+                            stop if where=='busy_wait' else lambda:None,4096,2**26)
+    with pytest.raises(c.CoordinatorError):
+        if where=='post_backup_guard':
+            progress(101,0,2);progress.guard=stop;progress.finish()
+        else:progress(5,0,0)
+    assert trace.backup['check']==where and trace.results==[]
+
+
+def test_04F_real_sqlite_abi_busy_then_done_without_source_writes(tmp_path,record_property):
+    import json
+    from app.db_audit_coordinator.r4_release import BackupProgress
+    path=tmp_path/'source.sqlite3';target=tmp_path/'image.sqlite3'
+    writer=sqlite3.connect(path,isolation_level=None)
+    writer.execute('PRAGMA journal_mode=WAL');writer.execute('CREATE TABLE synthetic(value)')
+    writer.execute("INSERT INTO synthetic VALUES('disposable')")
+    source=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,isolation_level=None,timeout=0)
+    source.execute('PRAGMA query_only=ON');source.execute('PRAGMA busy_timeout=0')
+    destination=sqlite3.connect(target,isolation_level=None,timeout=0)
+    blocker=sqlite3.connect(target,isolation_level=None,timeout=0);blocker.execute('BEGIN EXCLUSIVE')
+    before=tuple(writer.iterdump());calls=[];trace=BackupTrace()
+    def wait():blocker.execute('ROLLBACK')
+    progress=BackupProgress(trace,lambda:None,wait,4096,2**26)
+    def callback(*values):calls.append(values);progress(*values)
+    try:
+        source.backup(destination,pages=128,progress=callback,sleep=0);progress.finish()
+        assert calls[0]==(5,0,0) and calls[-1]==(101,0,2)
+        assert trace.backup['busy']==trace.backup['done']==1 and trace.backup['complete']
+        assert destination.execute('SELECT * FROM synthetic').fetchall()==[('disposable',)]
+        assert tuple(writer.iterdump())==before
+        with pytest.raises(sqlite3.OperationalError):source.execute('INSERT INTO synthetic VALUES(1)')
+        record_property('04f_real_backup_callback',json.dumps(dict(sqlite=sqlite3.sqlite_version,calls=calls)))
+    finally:blocker.close();destination.close();source.close();writer.close()
+
+
+@pytest.mark.parametrize('fault',['bool','large','negative_steps','unknown','payload','wrong_sum','false_done','extra_record'])
+def test_04F_root_rejects_untrusted_backup_numbers_and_fields(fault):
+    from app.db_audit_coordinator.r4_release import owner_trace
+    trace=BackupTrace()
+    from app.db_audit_coordinator.r4_release import BackupProgress
+    BackupProgress(trace,lambda:None,lambda:None,4096,2**26)
+    value=trace.backup
+    if fault=='bool':value['total']=True
+    elif fault=='large':value['status']=2**31
+    elif fault=='negative_steps':value['steps']=-1
+    elif fault=='unknown':value['check']='SECRET /source'
+    elif fault=='payload':value['payload']='SECRET'
+    elif fault=='wrong_sum':value['busy']=1
+    elif fault=='false_done':value['complete']=True
+    marker=c.encode(dict(stage='backup_progress'))+b'\n'
+    raw=marker+c.encode(dict(stage='backup_progress',backup=value))+b'\n'
+    if fault=='extra_record':raw+=c.encode(dict(stage='backup_progress',backup=value))+b'\n'
+    result=owner_trace(raw)
+    assert result['report_status']=='invalid' and 'backup' not in result
+    assert 'SECRET' not in json_text(result)
+
+
+@POSIX
+@pytest.mark.parametrize('failed',[False,True])
+def test_04F_closed_diagnostic_is_finite_and_emitted_only_at_failure_or_finish(failed):
+    from app.db_audit_coordinator.r4_release import OwnerTrace,OWNER_STAGES,OWNER_DIAGNOSTIC_LIMIT,owner_trace
+    from app.db_audit_coordinator.r4_release import BackupProgress
+    read,write=os.pipe2(os.O_CLOEXEC|os.O_NONBLOCK);trace=OwnerTrace(write)
+    try:
+        for stage in OWNER_STAGES[:OWNER_STAGES.index('backup_progress')]:trace.mark(stage)
+        progress=BackupProgress(trace,lambda:None,lambda:None,4096,2**26)
+        for _ in range(500):progress(5,0,0)
+        if failed:
+            with pytest.raises(c.CoordinatorError) as error:progress(8,0,0)
+            trace.failure(error.value)
+        else:
+            progress(101,0,2);progress.finish()
+            for stage in OWNER_STAGES[OWNER_STAGES.index('backup_complete'):]:trace.mark(stage)
+        raw=os.read(read,OWNER_DIAGNOSTIC_LIMIT+1)
+        assert len(raw)<OWNER_DIAGNOSTIC_LIMIT and len(raw.splitlines())<=len(OWNER_STAGES)+2
+        value=owner_trace(raw)
+        assert value['backup']['busy']==500 and value['backup']['steps']==(501)
+        assert value['report_status']==('failure' if failed else 'stage_only')
+        assert value['backup']['check']==('callback_status' if failed else 'finished')
+    finally:trace.close();os.close(read)
+
+
 @POSIX
 def test_04E_trace_budget_cloexec_first_progress_first_failure_and_no_secret_bytes():
     from app.db_audit_coordinator.r4_release import OwnerTrace,OWNER_STAGES,OWNER_DIAGNOSTIC_LIMIT,owner_trace

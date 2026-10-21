@@ -321,3 +321,67 @@ Owner/SysAdmin change control after exact resource ownership is resolved; no
 rollback source SQLite writes or schema migration is needed or permitted.
 
 MERGE=NO; PRODUCTION=NO; REAL_LAB_SOURCE_PILOT=HOLD; OLD_RECOVERY=DO_NOT_REPEAT.
+
+## 04F — bounded backup callback correction and closed differentiator
+
+Authority: [04E real A/B/C diagnostic handoff](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6313032207).
+Source parent: accepted04E `6443e00d87f4465f11a43f7be862dcbee09350dc`.
+No new original-source experiment, queue recovery or installation is granted by
+this source change. TechLead reviews exact LAB-only source first; SysAdmin needs
+the next explicit GO for one new attended queue. Preserve every previous archive
+and the original lock inodes. The04E three `deferred/worker_crashed` results are
+still **zero real T3 PASS**. The subsequent service stop timeout is not success.
+
+The accepted04E callback rejected all codes except0/101 and required a positive
+page total on every callback. A disposable CPython3.10.12 / SQLite3.37.2 probe
+reproduces native `(SQLITE_BUSY=5, remaining=0, total=0)` before the first copy
+when the disposable destination is locked; after releasing that lock the same
+native backup reaches `(SQLITE_DONE=101, 0, 2)`. Old04E rejects the first callback.
+This confirms a specific callback-contract defect, **not** the numeric cause of
+the real04E failures (their old diagnostic did not capture it).
+
+References: [SQLite backup status/locking](https://www.sqlite.org/c3ref/backup_finish.html),
+[CPython3.10.12 original callback/retry loop](https://github.com/python/cpython/blob/v3.10.12/Modules/_sqlite/connection.c#L1640-L1675).
+BUSY/LOCKED are transient; CPython itself retries those steps.04F does not add
+another backup/retry loop. It accepts only native0/101/5/6 with exact integer
+arguments (not bool); 0/0 is allowed only for5/6. Each callback still counts
+toward the original100000 ceiling, rechecks the existing deadline/cancel/source
+guard, and enforces the existing image budget whenever total is known. For5/6,
+a maximum5ms select on the existing control channel is clamped to the remaining
+attempt budget; the original guard runs again after wake. No spin, background
+retry, timeout extension or larger image allowance. Other SQLite statuses,
+bad counters/types, oversized totals and missing DONE fail closed. Completion
+requires native101 + remaining0 + positive bounded total, normal backup return
+and the original post-backup guard. `pages=128`, `sleep=0`, RO source, chroot,
+credentials, mounts, memory limits, SQLite durability and IPC are unchanged.
+
+Protected root `qio226_r4_owner_outcome` may now include one closed `backup`
+object: `check`, numeric `status`, `remaining`, `total`, `steps`, `page_size`,
+`complete` and bounded `ok/done/busy/locked/other` counters. These are the latest
+callback plus bounded aggregate counts, **not a per-call log stream**. Null means
+no callback value or a value rejected as out of the closed diagnostic range.
+`check` distinguishes backup invocation, guard, step/type/status/count/page-budget
+checks, transient wait, required completion and post-backup guard. Failure emits
+the current differentiator once; successful backup emits one summary before the
+existing completion markers. The nonblocking FIFO stays4096 bytes; a single row
+is capped at768 bytes, with at most one summary plus the existing failure row.
+Root strictly validates the enum, exact fields/types/ranges/counter sum and
+ordering; malformed/overflowed diagnostics are invalid, never echoed or adopted
+as proof. No source paths, SQL, error messages, payload, identifiers or nonce are
+added. Existing first-HOLD, positive reap, queue results and release proof remain
+unchanged. `backup.complete=true` is a SQLite callback fact only, **not T3**;
+cancel/post-guard failure can still prevent owner_done and all promotion.
+
+Focused tests use only disposable/native-ABI fixtures. Native source-owner UID1003
+and per-store GIDs1004/1004/996, RO/chroot/capability constraints and the existing
+physical A/B/C release harness stay real. Destination BUSY is induced only inside
+disposable private staging, never by writing original sources. Deadline is a
+test-only shortened helper budget; status/page-budget negatives are explicitly
+injected callback canaries, not alleged original database corruption. Tests also
+cover actual root cancellation, required DONE, original step cap, bad/unknown
+reports and all three positive reaps/cleanup/shmem-zero/double-empty releases.
+WSL fixture provenance seams are still **NOT installed F2/F3 qualification**;
+do not rerun or reopen the previously accepted generic5.15 gates.
+
+NEXT=TECHLEAD_EXACT_SOURCE_REVIEW_THEN_SYSADMIN_NEW_ATTENDED_LAB_GO.
+PUSH=NO; PR=NO; MERGE=NO; INSTALL=NO; PRODUCTION=NO; OLD_QUEUE_REPLAY=NO.

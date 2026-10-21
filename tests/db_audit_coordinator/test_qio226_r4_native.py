@@ -464,6 +464,41 @@ def exact_owner(uid,gid):
   info=os.stat('/source/input.sqlite3'+suffix)
   assert (info.st_uid,info.st_gid)==(uid,gid)
 helper.drop_owner=exact_owner
+if scenario.startswith('04f_'):
+ import sqlite3,time
+ native_connect=sqlite3.connect
+ if scenario=='04f_busy_deadline':
+  original_read=helper.readonly_document;captured={}
+  def read(*args,**kwargs):
+   document=original_read(*args,**kwargs);captured['document']=document;return document
+  helper.readonly_document=read
+  original_mark=helper.OwnerTrace.mark
+  def deadline_mark(self,name):
+   original_mark(self,name)
+   if name=='backup_start':captured['document']['deadline_ns']=time.monotonic_ns()+50_000_000
+  helper.OwnerTrace.mark=deadline_mark
+ class CallbackSource(sqlite3.Connection):
+  def backup(self,target,**kwargs):
+   progress=kwargs['progress'];blocker=None;first=True
+   if scenario in {'04f_busy_once','04f_busy_deadline','04f_busy_wait'}:
+    blocker=native_connect('/stage/snapshot.sqlite3',isolation_level=None,timeout=0)
+    blocker.execute('BEGIN EXCLUSIVE')  # Disposable destination contention; never original source writes.
+   def observed(code,remaining,total):
+    nonlocal first
+    if scenario=='04f_bad_status' and first:code=8
+    elif scenario=='04f_page_budget' and first:code,remaining,total=0,0,2**26//4096+1
+    first=False
+    progress(code,remaining,total)
+    if scenario=='04f_busy_once' and code==5:
+     blocker.execute('ROLLBACK')
+   kwargs['progress']=observed
+   try:return super().backup(target,**kwargs)
+   finally:
+    if blocker is not None:blocker.close()
+ def callback_connect(filename,*args,**kwargs):
+  if filename=='file:/source/input.sqlite3?mode=ro':kwargs['factory']=CallbackSource
+  return native_connect(filename,*args,**kwargs)
+ helper.sqlite3.connect=callback_connect
 if len(sys.argv)>3 and sys.argv[3]=='helper_death':
  import sqlite3,time
  original=sqlite3.connect
@@ -539,6 +574,7 @@ try:
    if 'app.db_audit_coordinator.r4_owner_helper' in args:
     scenario=sys.argv[1]
     if scenario=='cancel_B' and subject._r4.job['store_id']=='network_service_intelligence':scenario='helper_death'
+    if scenario=='04f_busy_cancel':scenario='04f_busy_wait' if subject._r4.job['store_id']=='network_service_intelligence' else 'positive'
     args=[sys.executable,'-B','-E','-s','-c',OWNER_DRIVER,args[-1],str(ram),scenario]
    kwargs['stderr']=log
    return popen(args,**kwargs)
@@ -612,13 +648,13 @@ try:
     if session is not None and not fault_killed:
      if sys.argv[1]=='validator_death' and 'worker' in session.children:
       session.children['worker'].process.kill();fault_killed=True
-     elif (sys.argv[1]=='helper_death' or (sys.argv[1]=='cancel_B' and number==1)) and 'owner' in session.children:
+     elif (sys.argv[1]=='helper_death' or (sys.argv[1] in {'cancel_B','04f_busy_cancel'} and number==1)) and 'owner' in session.children:
       child=session.children['owner']
       try:open_stage=any(os.readlink('/proc/'+str(child.pid)+'/fd/'+fd).endswith('/stage/snapshot.sqlite3')
           for fd in os.listdir('/proc/'+str(child.pid)+'/fd'))
       except FileNotFoundError:open_stage=False
       if open_stage:
-       if sys.argv[1]=='cancel_B':subject._notify_cancel()
+       if sys.argv[1] in {'cancel_B','04f_busy_cancel'}:subject._notify_cancel()
        else:child.process.kill()
        fault_killed=True
    if sys.argv[1] in faults:
@@ -671,9 +707,13 @@ try:
    print(json.dumps(dict(crash='helper_death',positive_release=True,source_hashes_unchanged=before==[hashes(p.source) for p in policies])))
   else:
    final=subject.store.read();states=[job['state'] for job in final['jobs']]
-   expected=['completed','failed','completed'] if sys.argv[1]=='controlled_B' else ['completed','canceled','completed'] if sys.argv[1]=='cancel_B' else ['completed']*3
+   failed_callbacks={'04f_bad_status','04f_page_budget','04f_busy_deadline'}
+   expected=['deferred']*3 if sys.argv[1] in failed_callbacks else ['completed','failed','completed'] if sys.argv[1]=='controlled_B' else ['completed','canceled','completed'] if sys.argv[1] in {'cancel_B','04f_busy_cancel'} else ['completed']*3
    assert states==expected,states
-   if sys.argv[1]=='cancel_B':assert fault_killed and final['jobs'][1]['audit_result']['result']=='incomplete'
+   if sys.argv[1] in {'cancel_B','04f_busy_cancel'}:assert fault_killed and final['jobs'][1]['audit_result']['result']=='incomplete'
+   if sys.argv[1] in failed_callbacks:
+    assert not final['last_verified_success_by_store']
+    assert all(p['snapshot'] is None for p in subject.r4_proofs)
    assert before==[hashes(policy.source) for policy in policies]
    assert not subject.dispatch_one() and not subject.orphan_hold
    assert len(gate_checks)==6
@@ -789,6 +829,37 @@ def test_04E_native_real_cancel_and_success_keep_original_three_job_release_sema
     assert [event['child_exit_code'] for event in events]==[0,3,0]
     assert [events[i]['stage'] for i in (0,2)]==['finished','finished']
     record_property('04e_cancel_and_success',json.dumps(events,sort_keys=True))
+
+
+@NATIVE
+@pytest.mark.parametrize('scenario',['04f_busy_once','04f_busy_deadline','04f_bad_status','04f_page_budget','04f_busy_cancel'])
+def test_04F_actual_owner_callback_abi_bounded_failure_and_positive_release(scenario,record_property):
+    process=subprocess.run([sys.executable,'-B','-E','-s','-c',PIPELINE_DRIVER,scenario],cwd=ROOT,
+        capture_output=True,text=True,timeout=60)
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout)
+    assert result['source_hashes_unchanged'] and len(result['proofs'])==3
+    events=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{"event":"qio226_r4_owner_outcome"')]
+    assert len(events)==3
+    assert all(p['helper_reaped'] and p['gatekeeper_reaped'] and p['cleanup_complete']
+        and p['shmem_zero'] and p['empty_observations']==2 for p in result['proofs'])
+    if scenario=='04f_busy_once':
+        assert result['states']==['completed']*3
+        assert all(e['backup']['busy']==1 and e['backup']['done']==1 and e['backup']['complete']
+            and e['outcome']=='complete' and e['child_exit_code']==0 for e in events)
+    elif scenario=='04f_busy_cancel':
+        assert result['states']==['completed','canceled','completed']
+        assert events[1]['stop_reason']=='canceled' and not events[1]['owner_done_received']
+        assert events[1]['backup']['status']==5 and events[1]['backup']['busy']>0
+    else:
+        assert result['states']==['deferred']*3
+        assert all(e['child_exit_code']==3 and not e['owner_done_received'] for e in events)
+        if scenario=='04f_busy_deadline':
+            assert all(e['stop_reason']=='deadline' and e['backup']['status']==5 for e in events)
+        else:
+            check='callback_status' if scenario=='04f_bad_status' else 'callback_page_budget'
+            assert all(e['backup']['check']==check and e['coordinator_code']=='not_admitted' for e in events)
+    record_property('04f_native_callback_and_release',json.dumps(dict(scenario=scenario,events=events,result=result),sort_keys=True))
 
 
 @NATIVE

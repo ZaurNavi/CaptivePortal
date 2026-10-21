@@ -21,7 +21,7 @@ from .live_profile import PilotProfile
 from .live_receipts import identity,directory
 from .r4_sandbox import drop_owner,RAM_ROOT,TMPFS_MAGIC
 from . import r4_ipc
-from .r4_release import OwnerTrace
+from .r4_release import OwnerTrace,BackupProgress
 
 KEYS={'profile','queue','job_id','binding','root','namespace','leaf','parent_pid','parent_start',
     'deadline_ns','channel_fd','source_identities','diagnostic_fd'}
@@ -111,7 +111,7 @@ def execute(document,trace):
     kind,payload,fd=r4_ipc.receive(channel,document['binding'],0,document['parent_pid'],seconds=left())
     require(kind=='begin' and payload=={} and fd is None,'unauthorized')
     trace.mark('begin_received')
-    source=destination=None;complete=False;steps=0
+    source=destination=None
     try:
         def guard():
             left()
@@ -139,15 +139,13 @@ def execute(document,trace):
         trace.mark('source_metadata_verified');trace.mark('destination_open')
         destination=sqlite3.connect('/stage/snapshot.sqlite3',isolation_level=None,timeout=0)
         trace.mark('destination_opened')
-        def progress(code,remaining,total):
-            nonlocal complete,steps
-            if steps==0:trace.mark('backup_progress')
-            guard();steps+=1
-            require(steps<=100000 and code in {0,101} and 0<=remaining<=total
-                and 0<total*size<=policy.image_max_bytes,'not_admitted')
-            complete=code==101 and remaining==0
+        def wait():
+            # No native busy_timeout or new loop. Wake on cancel, never sleep
+            # past the attempt's remaining budget, then recheck original guard.
+            select.select([channel],[],[],min(.005,left()));guard()
+        progress=BackupProgress(trace,guard,wait,size,policy.image_max_bytes)
         trace.mark('backup_start');source.backup(destination,pages=128,progress=progress,sleep=0)
-        require(complete,'not_admitted');guard()
+        progress.finish()
         trace.mark('backup_complete');trace.mark('connections_close')
         destination.close();destination=None;source.close();source=None
         trace.mark('owner_done')
