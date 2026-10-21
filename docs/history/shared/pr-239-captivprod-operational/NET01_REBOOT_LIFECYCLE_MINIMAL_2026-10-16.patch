@@ -1,0 +1,76 @@
+# NET01 reboot lifecycle: add-only helper + drop-in, frozen baseline unchanged
+# Boot Wants link: systemctl add-wants multi-user.target captiv-net01-watchdog.service
+--- /dev/null
++++ b/usr/local/libexec/captiv-net01/net01-watchdog-stop-post.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python3
++"""NET01 watchdog ExecStopPost lifecycle gate; fail-closed on uncertainty.
++
++Independent of app availability. Does not alter original NET01 firewall or watchdog.
++Only skip adding HOLD for a confirmed orderly system shutdown transaction.
++This does not clear an existing HOLD under any circumstances.
++"""
++import os
++import re
++import subprocess
++import sys
++
++SYSTEMCTL = '/usr/bin/systemctl'
++MARK_HOLD = '/usr/local/libexec/captiv-net01/net01-mark-hold.py'
++SHUTDOWN_TARGETS = frozenset((
++    'shutdown.target',
++    'reboot.target', 'poweroff.target', 'halt.target', 'kexec.target',
++    'soft-reboot.target',
++))
++# shutdown.target by itself is not sufficient. A specific final target is required.
++FINAL_TARGETS = SHUTDOWN_TARGETS - {'shutdown.target'}
++JOB_RE = re.compile(r'^\s*\d+\s+(\S+)\s+(\S+)\s+(\S+)\s*$')
++
++
++def confirmed_orderly_shutdown(environ=None, run=None):
++    if environ is None:
++        environ = os.environ
++    if run is None:
++        run = subprocess.run
++    if environ.get('SERVICE_RESULT') != 'success':
++        return False
++    try:
++        state = run([SYSTEMCTL, 'is-system-running'], capture_output=True,
++                    text=True, check=False, timeout=3)
++        if state.stdout.strip() != 'stopping':
++            return False
++        jobs = run([SYSTEMCTL, 'list-jobs', '--no-pager', '--no-legend'],
++                   capture_output=True, text=True, check=False, timeout=3)
++        if jobs.returncode != 0:
++            return False
++        for line in jobs.stdout.splitlines():
++            match = JOB_RE.fullmatch(line)
++            if match and match.group(1) in FINAL_TARGETS and match.group(2) == 'start' and match.group(3) in ('waiting', 'running'):
++                return True
++    except (OSError, subprocess.TimeoutExpired, ValueError):
++        pass
++    return False
++
++
++def main(environ=None, run=None):
++    if os.geteuid() != 0:
++        print('NET01_WATCHDOG_POST=HOLD_UNPRIVILEGED', file=sys.stderr)
++        return 1
++    if confirmed_orderly_shutdown(environ, run):
++        print('NET01_WATCHDOG_POST=ORDERLY_SHUTDOWN_CONFIRMED')
++        return 0
++    # Fail closed for watchdog crash, manual stop, drift, and manager unavailability.
++    # exec preserves frozen marker script exit status and avoids shell expansion.
++    os.execv('/usr/bin/python3', ['/usr/bin/python3', MARK_HOLD, 'watchdog-stopped'])
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+--- /dev/null
++++ b/etc/systemd/system/captiv-net01-watchdog.service.d/50-net01-reboot-lifecycle.conf
+@@ -0,0 +1,5 @@
++# NET01 lifecycle-only override; frozen watchdog ExecStart/guard unchanged.
++# All underlying Requires= and After= from frozen service remain in effect.
++[Service]
++ExecStopPost=
++ExecStopPost=+/usr/bin/python3 /usr/local/libexec/captiv-net01/net01-watchdog-stop-post.py
