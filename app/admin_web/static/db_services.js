@@ -11,6 +11,22 @@
   const refresh = byId("refresh-button");
   const labels = {present_unverified: "Present · unverified", not_provisioned: "Not provisioned", optional_disabled: "Optional · disabled"};
   const display = (value) => value == null ? "—" : labels[value] || String(value).replace(/^./, (c) => c.toUpperCase());
+  const reasons = {
+    probe_unavailable: "Process evidence unavailable", intent_unknown: "Deployment intent not confirmed",
+    unexpected_running: "Process running despite disabled/maintenance intent", configured_disabled: "Configured disabled",
+    unit_unavailable: "Expected unit unavailable", unit_failed: "Unit reported failure", expected_stopped: "Expected process stopped",
+    sample_timeout: "Metadata collection budget exceeded", sample_stale: "Operational snapshot is stale",
+    symlink_file: "Symbolic link rejected", nonregular_file: "Nonregular file rejected",
+    stat_unavailable: "File metadata unavailable", metadata_permission_boundary: "Metadata permission boundary; size unknown",
+    orphan_sidecar_possible: "Main file absent; sidecar present", file_missing: "Expected file missing; owner bootstrap needs investigation",
+    not_attested: "File present; verification not collected by R1", storage_collision: "File identity collision; sizes excluded"
+  };
+  const healthReasons = {source_ready:"Source-native ready; dependencies confirmed", source_degraded:"Source reports limited operation",
+    source_unavailable:"Source reports unavailable", source_initializing:"Source initializing", source_stopping:"Source stopping",
+    dependencies_unconfirmed:"Required dependencies not confirmed", pending_attribution:"Limited: confirmed pending attribution backlog",
+    registry_degraded:"Registry dependency degraded", source_poll_stale:"Source confirmation is stale", capacity_limited:"Source capacity limited",
+    blocked_conflict:"Source blocked by a conflict", report_unavailable:"Trusted health evidence unavailable", report_stale:"Health evidence expired"};
+  const reason = (value) => value == null ? "No collection failure reported" : Object.hasOwn(reasons, value) ? reasons[value] : "Evidence unavailable";
   function element(tag, text, cls) {
     const node = document.createElement(tag);
     if (text != null) node.textContent = String(text);
@@ -226,15 +242,21 @@
   }
   function render(model) {
     root.dataset.outdated = model.sample_status === "stale" ? "true" : "false";
-    const summary = model.summary;
+    const summary = model.summary, v2 = model.api_version === "admin.operations.db-services.v2";
+    // V1 already provides each app-health state. Keep these axes separate from
+    // backend process/store status counts; never add overlapping unknowns.
+    const health = {healthy:0, degraded:0, unavailable:0, unknown:0, stale:0};
+    model.services.forEach((row) => { health[Object.hasOwn(health, row.application_health) ? row.application_health : "unknown"] += 1; });
+    const unknownHealth = health.unknown + health.stale;
     byId("ops-summary").replaceChildren(
-      tile("Services", summary.services.expected_running ? `${summary.services.running} / ${summary.services.expected_running} running` : "0 expected to run",
-        `${summary.services.registered} registered · ${summary.services.unknown_or_stale} unknown/stale`),
+      tile("Services", summary.services.expected_running ? `${summary.services.running} / ${summary.services.expected_running} processes running` : "0 processes expected to run",
+        `${summary.services.registered} registered · App health: ${health.healthy} confirmed healthy · ${health.degraded} degraded · ${health.unavailable} unavailable · ${unknownHealth} unknown/stale`),
       tile("Databases", `${summary.databases.available} / ${summary.databases.registered} verified`,
-        `${summary.databases.present_unverified} present · unverified; ${summary.databases.disabled} disabled; ${summary.databases.not_provisioned} not provisioned; ${summary.databases.unknown_or_stale} unknown/stale`),
-      tile(summary.storage.total_complete ? "DB storage footprint" : "Known subtotal", bytes(summary.storage.known_footprint_bytes),
-        summary.storage.total_complete ? "File lengths · Complete" : "File lengths · Partial coverage"),
-      tile("Problems", summary.problems.established, `${summary.problems.unknown_or_stale} unknown/stale`)
+        `${v2 ? "No SQLite attestation collected" : "Verification not collected by R1"} · ${summary.databases.present_unverified} present · unverified; ${summary.databases.disabled} disabled; ${summary.databases.not_provisioned} not provisioned; ${summary.databases.unknown_or_stale} unknown/stale`),
+      tile(summary.storage.total_complete ? "Logical DB file lengths" : "Known subtotal", bytes(summary.storage.known_footprint_bytes),
+        `Main + WAL + SHM · logical lengths, not allocated disk space · ${summary.storage.total_complete ? "Complete" : "Partial coverage; unknown sizes are not zero"}`),
+      tile("Problems & coverage", `${summary.problems.established} confirmed · ${summary.problems.unknown_or_stale} unknown/stale`,
+        `Status unknowns: ${summary.services.unknown_or_stale} process · ${summary.databases.unknown_or_stale} DB. Separate axes: ${unknownHealth} app health unknown/stale · ${summary.databases.present_unverified} DBs present/unverified. Counts overlap; do not add.`)
     );
     const services = new Map(model.services.map((row) => [row.id, row.label]));
     byId("ops-services").replaceChildren(...model.services.map((row) => {
@@ -243,13 +265,19 @@
       const identity = element("div", null, "ops-identity");
       identity.append(element("h3", row.label), element("p", row.role), element("span", row.unit, "mono"));
       const states = element("div", null, "ops-state-group");
-      states.append(badge(row.operational_state, "service"), element("span", "Application health"), badge(row.application_health, "application"));
+      states.append(element("span", "Process"), badge(row.operational_state, "service"), element("span", "Application health"), badge(row.application_health, "application"));
       const process = element("div", null, "ops-process");
       process.append(field("PID", row.main_pid), field("Uptime", uptime(row.uptime_seconds)), field("Restarts", row.n_restarts));
       article.append(identity, states, process, field("Expected", display(row.expected_mode)), details([
         ["Stable ID", row.id], ["ActiveState", row.active_state], ["SubState", row.sub_state],
-        ["Started at", row.started_at_utc], ["Sampled at", row.sampled_at_utc], ["Reason", row.reason_code]
+        ["Started at", row.started_at_utc], ["Sampled at", row.sampled_at_utc], ["Reason", reason(row.reason_code)]
       ]));
+      if (v2) {
+        const evidence = row.application_health_evidence;
+        article.append(details([["Health source", evidence.source], ["Health observed", evidence.observed_at],
+          ["Health received", evidence.received_at], ["Evidence age / TTL", evidence.age == null ? "Unknown" : `${evidence.age}s / ${evidence.ttl}s`],
+          ["Health reason", healthReasons[evidence.reason]]]));
+      }
       return article;
     }));
     byId("ops-databases").replaceChildren(...model.databases.map((row) => {
@@ -258,7 +286,7 @@
       const identity = element("div", null, "ops-identity");
       identity.append(element("h3", row.label), element("p", row.purpose), element("span", row.filename, "mono"));
       const state = element("div", null, "ops-state-group");
-      state.append(badge(row.operational_state, "database"), element("span", display(row.store_kind)));
+      state.append(badge(row.operational_state, "database"), element("span", display(row.store_kind)), element("span", reason(row.reason_code)));
       const size = element("div", null, "ops-size");
       size.append(element("strong", bytes(row.total_footprint_bytes)), element("span", `DB ${bytes(row.main_file_bytes)} · WAL ${bytes(row.wal_bytes)} · SHM ${bytes(row.shm_bytes)}`));
       const owners = element("div", null, "ops-owners");
@@ -271,21 +299,45 @@
         ["Reader services", row.reader_service_ids], ["Store kind", row.store_kind],
         ["Schema expected", row.schema_expected_version], ["Schema observed", row.schema_observed_version],
         ["Health evidence", row.health_evidence], ["Health checked", row.health_checked_at_utc],
-        ["Sampled at", row.sampled_at_utc], ["Reason", row.reason_code]
+        ["Sampled at", row.sampled_at_utc], ["Reason", reason(row.reason_code)]
       ]));
+      if (v2) article.append(details([["Verification", row.store_verification.status], ["Verification scope", row.store_verification.scope],
+        ["Verified as of", row.store_verification.as_of], ["Metadata source", row.metadata_evidence.source],
+        ["Metadata age / TTL", row.metadata_evidence.age == null ? "Unknown" : `${row.metadata_evidence.age}s / ${row.metadata_evidence.ttl}s`],
+        ["DELETE journal (not included in main + WAL + SHM)", bytes(row.journal_bytes)]]));
       return article;
     }));
     renderTopology(model);
     warning.hidden = model.partial_failures.length === 0;
-    title.textContent = model.sample_status === "stale" ? "Stale data" : model.snapshot_state === "partial" ? "Partial data" : "Available";
+    title.textContent = model.sample_status === "stale" ? "Stale data" : model.snapshot_state === "partial" ? "Partial data" : "Snapshot collected";
     const age = Math.max(0, Math.floor((Date.now() - Date.parse(model.sampling_completed_at_utc)) / 1000));
     updated.textContent = Number.isFinite(age) ? `Updated ${age} sec ago` : "Sample time unavailable";
   }
   let timer = null, inFlight = false, controller = null, disposed = false, last = null;
+  let useV2 = root.dataset.apiV2 === "/admin/api/v2/operations/db-services";
+  function validV2(model) {
+    const states = new Set(["healthy","degraded","unavailable","unknown","stale"]);
+    const keys = (value, expected) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === expected;
+    return model.services.every((row) => {
+      const e = row.application_health_evidence;
+      return keys(e, "age,observed_at,reason,received_at,source,state,ttl") && states.has(e.state) && e.state === row.application_health &&
+        Object.hasOwn(healthReasons, e.reason) && ["none","sensor_native.v2","source_self_reported_shared_uid"].includes(e.source) &&
+        Number.isInteger(e.ttl) && e.ttl > 0 && e.ttl <= 180 && (e.age === null || Number.isFinite(e.age) && e.age >= 0) &&
+        (["fingerprint_sensor","network_metadata_projection"].includes(row.id) || e.state === "unknown" && e.source === "none") &&
+        (!["healthy","degraded","unavailable"].includes(e.state) || e.source !== "none" && Number.isFinite(e.age) && e.age <= e.ttl && typeof e.observed_at === "string" && typeof e.received_at === "string");
+    }) && model.databases.every((row) => keys(row.store_verification, "as_of,scope,source,status") &&
+      row.store_verification.status === "not_attested" && row.store_verification.scope === null && row.store_verification.as_of === null && row.store_verification.source === "none" &&
+      keys(row.metadata_evidence,"age,source,state,ttl") && ["sensor_metadata","sampler_lstat","none"].includes(row.metadata_evidence.source) &&
+      ["fresh","stale","unknown"].includes(row.metadata_evidence.state) &&
+      (row.journal_bytes === null || row.id === "sensor_spool" && Number.isSafeInteger(row.journal_bytes) && row.journal_bytes >= 0));
+  }
   function schedule() {
     if (timer !== null) clearTimeout(timer);
     timer = null;
     if (!disposed && !document.hidden) timer = setTimeout(load, 15000);
+  }
+  async function fetchSnapshot(url) {
+    return await fetch(url, {credentials: "same-origin", cache: "no-store", signal: controller.signal});
   }
   async function load() {
     if (disposed || inFlight || document.hidden) return;
@@ -293,7 +345,13 @@
     refresh.disabled = true;
     controller = new AbortController();
     try {
-      const response = await fetch(root.dataset.apiBase, {credentials: "same-origin", cache: "no-store", signal: controller.signal});
+      let response = await fetchSnapshot(useV2 ? root.dataset.apiV2 : root.dataset.apiBase);
+      if (useV2 && response.status === 404) {
+        // Explicit compatibility fallback: unsupported v2 never sampled; do
+        // not probe it again or turn source/authorization failures into green.
+        useV2 = false;
+        response = await fetchSnapshot(root.dataset.apiBase);
+      }
       const model = await response.json();
       if (disposed) return;
       if (!response.ok) {
@@ -302,9 +360,9 @@
         } else { title.textContent = "Unavailable"; }
         return;
       }
-      if (model.api_version !== "admin.operations.db-services.v1" || model.scope !== "global" || !model.summary ||
+      if (model.api_version !== (useV2 ? "admin.operations.db-services.v2" : "admin.operations.db-services.v1") || model.scope !== "global" || !model.summary ||
           !Array.isArray(model.services) || model.services.length !== 9 || !Array.isArray(model.databases) || model.databases.length !== 17 ||
-          !Array.isArray(model.partial_failures) || !validTopology(model)) throw new Error("invalid_snapshot");
+          !Array.isArray(model.partial_failures) || model.partial_failures.length > 32 || !validTopology(model) || (useV2 && !validV2(model))) throw new Error("invalid_snapshot");
       render(model);
       last = model;
     } catch (_error) {

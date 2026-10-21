@@ -99,7 +99,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         if source_ip is None or not _source_allowed(source_ip, config.allowed_networks):
             return _error("source_network_forbidden", 403)
         g.admin_source_ip = source_ip
-        if request.path in ("/admin/db-services", "/admin/api/v1/operations/db-services") and request.method not in ("GET", "HEAD"):
+        if request.path in ("/admin/db-services", "/admin/api/v1/operations/db-services", "/admin/api/v2/operations/db-services") and request.method not in ("GET", "HEAD"):
             # Leave unsupported methods to Flask's standard 405/OPTIONS, not
             # the legacy form-POST validator. Neither path has a mutation.
             return None
@@ -201,7 +201,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
                 and policy.authorize_global(principal, "admin.read.operations")}
 
     def operations_error(code, status):
-        return jsonify({"api_version": "admin.operations.db-services.v1", "request_id": g.admin_request_id,
+        version = "admin.operations.db-services.v2" if request.path == "/admin/api/v2/operations/db-services" else "admin.operations.db-services.v1"
+        return jsonify({"api_version": version, "request_id": g.admin_request_id,
                         "error": {"code": code, "details": []}}), status
 
     def operations_gate():
@@ -223,6 +224,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
             username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token)
 
     @blueprint.get("/admin/api/v1/operations/db-services")
+    @blueprint.get("/admin/api/v2/operations/db-services")
     @authenticated
     def db_services_snapshot():
         rejected = operations_gate()
@@ -232,7 +234,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
         try:
             if runtime.operations_state != "active" or runtime.operations_service is None:
                 return operations_error("operations_unavailable", 503)
-            model = runtime.operations_service.read(g.admin_request_id)
+            if request.path == "/admin/api/v2/operations/db-services":
+                from .operations_schema import validate_v2
+                model = validate_v2(runtime.operations_service.read(g.admin_request_id, version=2))
+            else:
+                model = runtime.operations_service.read(g.admin_request_id)
             payload = json.dumps(model, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
             if len(payload) > RESPONSE_LIMIT:
                 return operations_error("operations_unavailable", 503)
@@ -2508,8 +2514,9 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
 
 
 def _error(code: str, status_code: int) -> Response:
-    if request.path == "/admin/api/v1/operations/db-services":
-        return jsonify({"api_version": "admin.operations.db-services.v1",
+    if request.path in ("/admin/api/v1/operations/db-services", "/admin/api/v2/operations/db-services"):
+        version = "admin.operations.db-services.v2" if request.path == "/admin/api/v2/operations/db-services" else "admin.operations.db-services.v1"
+        return jsonify({"api_version": version,
                         "request_id": getattr(g, "admin_request_id", str(uuid.uuid4())),
                         "error": {"code": code, "details": []}}), status_code
     if _is_api_path(request.path):
@@ -2551,7 +2558,7 @@ def _is_admin_path(path: str) -> bool:
 
 
 def _is_api_path(path: str) -> bool:
-    return path == ADMIN_API_PREFIX or path.startswith(ADMIN_API_PREFIX + "/")
+    return path == "/admin/api/v2/operations/db-services" or path == ADMIN_API_PREFIX or path.startswith(ADMIN_API_PREFIX + "/")
 
 
 def _is_current_state_path(path: str) -> bool:

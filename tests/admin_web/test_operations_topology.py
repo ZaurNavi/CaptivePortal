@@ -10,7 +10,7 @@ import pytest
 
 from app.admin_web import operations_inventory as inventory, operations_service as ops
 from tests.admin_web.test_operations_inventory import resolved
-from tests.admin_web.test_operations_service import NOW, regular, systemd_text
+from tests.admin_web.test_operations_service import NOW, regular, systemd_text, operations_reader
 
 TRIPLES = """
 src:guest_http feeds svc:portal_core
@@ -154,7 +154,7 @@ def test_full_topology_same_snapshot_48k_bound_and_zero_extra_acquisition(partia
         if partial: raise OSError('PRIVATE_CANARY')
         return systemd_text()
     def lstat(path): calls['lstat'] += 1; return regular(path)
-    subject = ops.AdminOperationsReadService(resolved(),acquire=acquire,lstat=lstat,now=lambda:NOW)
+    subject = operations_reader(resolved(),acquire=acquire,lstat=lstat,now=lambda:NOW)
     try:
         first = subject.read('topology-1')
         counts = calls.copy()
