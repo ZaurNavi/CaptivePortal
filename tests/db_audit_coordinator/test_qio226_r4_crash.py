@@ -241,18 +241,144 @@ def test_K10_authenticated_packets_reject_forged_or_malformed_capabilities_witho
 
 
 @POSIX
-def test_K10_snapshot_rights_are_new_readonly_cloexec_descriptor(tmp_path):
+def test_K10_snapshot_rights_are_two_ordered_new_readonly_cloexec_descriptors(tmp_path):
     from app.db_audit_coordinator import r4_ipc
     left,right=r4_ipc.pair();target=tmp_path/'image';target.write_bytes(b'synthetic')
-    fd=os.open(target,os.O_RDONLY);received=None
+    fd=os.open(target,os.O_RDONLY);folder=os.open(tmp_path,os.O_RDONLY|os.O_DIRECTORY);received=None
     try:
-        r4_ipc.send(right,'snapshot','1'*64,dict(image='fixture-only'),fd=fd)
-        kind,payload,received=r4_ipc.receive(left,'1'*64,os.getuid(),os.getpid(),seconds=1)
-        assert kind=='snapshot' and received!=fd and not os.get_inheritable(received)
-        assert os.fstat(fd)==os.fstat(received) and os.read(received,9)==b'synthetic'
+        r4_ipc.send(right,'snapshot','1'*64,dict(image='fixture-only'),fds=(fd,folder))
+        kind,payload,received=r4_ipc.receive(left,'1'*64,os.getuid(),os.getpid(),seconds=1,allow_snapshot=True)
+        assert kind=='snapshot' and len(received)==2 and set(received).isdisjoint({fd,folder})
+        assert all(not os.get_inheritable(opened) for opened in received)
+        assert os.fstat(fd)==os.fstat(received[0]) and os.read(received[0],9)==b'synthetic'
+        assert os.fstat(folder)==os.fstat(received[1])
     finally:
-        if received is not None:os.close(received)
-        os.close(fd);left.close();right.close()
+        if received is not None:
+            for opened in received:os.close(opened)
+        os.close(fd);os.close(folder);left.close();right.close()
+
+
+@POSIX
+@pytest.mark.parametrize('fault',['zero','one','three','duplicate','swapped','writable','opath',
+    'anonymous','uid','pid','binding','unrequested','extra_rights','bad_credentials'])
+def test_04D_two_fd_packet_rejects_every_wrong_capability_and_closes_received_slots(fault,tmp_path):
+    import array
+    import struct
+    from app.db_audit_coordinator import r4_ipc
+    left,right=r4_ipc.pair();target=tmp_path/'image';target.write_bytes(b'synthetic')
+    image=os.open(target,os.O_RDONLY);folder=os.open(tmp_path,os.O_RDONLY|os.O_DIRECTORY)
+    writable=os.open(target,os.O_RDWR);opath=os.open(tmp_path,os.O_PATH|os.O_DIRECTORY)
+    anonymous=os.memfd_create('04d-synthetic',os.MFD_CLOEXEC)
+    slots={'zero':[],'one':[image],'three':[image,folder,folder],'duplicate':[image,image],
+        'swapped':[folder,image],'writable':[writable,folder],'opath':[image,opath],
+        'anonymous':[anonymous,folder],'extra_rights':[image,folder]*8}.get(fault,[image,folder])
+    count=len(os.listdir('/proc/self/fd'))
+    try:
+        ancillary=[] if not slots else [(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',slots))]
+        if fault=='bad_credentials':
+            # Kernel cannot forge another PID, including root: reject send or
+            # reject the packet if a future kernel ever delivered it.
+            ancillary.append((socket.SOL_SOCKET,socket.SCM_CREDENTIALS,struct.pack('3i',os.getpid()+100000,os.getuid(),os.getgid())))
+        try:right.sendmsg([c.encode(dict(kind='snapshot',binding='1'*64,payload={}))],ancillary)
+        except OSError as error:
+            import errno
+            assert fault=='bad_credentials' and error.errno in {errno.EPERM,errno.ESRCH}
+        else:
+            with pytest.raises(c.CoordinatorError):
+                r4_ipc.receive(left,'2'*64 if fault=='binding' else '1'*64,
+                    os.getuid()+1 if fault=='uid' else os.getuid(),
+                    os.getpid()+1 if fault=='pid' else os.getpid(),seconds=1,
+                    allow_snapshot=fault!='unrequested')
+        assert len(os.listdir('/proc/self/fd'))==count
+    finally:
+        for opened in (image,folder,writable,opath,anonymous):os.close(opened)
+        left.close();right.close()
+
+
+@pytest.mark.parametrize('gate,subphase',[
+    ('claim_publish','claim'),('worker_bootstrap','spawn'),('worker_reap','reap'),
+    ('gate_owner','identity'),('resource_leaf','tmpfs'),('owner_helper','source_open'),
+    ('snapshot_promotion','promote'),('snapshot_dirfd','pin_final'),('t3','ready'),
+    ('release_cleanup','unmount'),('channel_closed','wait')])
+def test_04D_every_first_root_predicate_has_one_closed_event_and_cannot_dispatch_BC(gate,subphase,monkeypatch):
+    from app.db_audit_coordinator import r4_release as release
+    class Owner:
+        orphan_hold=False
+        def __init__(self):
+            self.value=dict(jobs=[dict(job_id=job,attempt_id=attempt,seq=25,state='running',reason_code='running'),
+                dict(state='queued'),dict(state='queued')]);self.writes=0
+        def _state(self):return copy.deepcopy(self.value)
+        def _commit(self,value):self.value=value;self.writes+=1
+    job,attempt=str(uuid.uuid4()),str(uuid.uuid4())
+    subject=release.Session.__new__(release.Session);subject.owner=Owner()
+    subject.job=copy.deepcopy(subject.owner.value['jobs'][0]);subject.phase='owner'
+    subject.held=subject.done=False;subject.children={}
+    subject.source_gate_verified=True;subject.source_open_started=gate not in {'gate_owner','worker_bootstrap'}
+    events=[];monkeypatch.setattr(release,'emit_hold',events.append)
+    def predicate():
+        subject.at(gate,subphase)
+        raise PermissionError(13,'SECRET SQL /source/path nonce CANARY')
+    subject.guard=predicate
+    assert subject.pump() is False
+    assert subject.pump() is False
+    subject.hold(RuntimeError('SECOND SECRET'))
+    assert len(events)==1 and subject.owner.writes==1
+    diagnostic=events[0]
+    assert diagnostic==dict(event='qio226_r4_first_hold',version=1,job_id=job,attempt_id=attempt,seq=25,
+        phase='owner',gate_id=gate,subphase=subphase,exception_class='PermissionError',
+        coordinator_code=None,os_errno=13,child_role=None,child_exit_code=None,
+        source_gate_verified=True,source_open_started=subject.source_open_started)
+    assert not any(word in c.encode(diagnostic).decode() for word in ('SECRET','/source','nonce','SQL'))
+    assert [item['state'] for item in subject.owner.value['jobs']]==['running','queued','queued']
+    assert subject.owner.value['jobs'][0]['reason_code']=='orphan_hold'
+    assert subject.owner.orphan_hold and subject.held and not subject.done
+
+
+def test_04D_diagnostic_whitelist_never_serializes_untrusted_error_text_or_uncertain_reap():
+    from types import SimpleNamespace
+    from app.db_audit_coordinator.r4_release import hold_diagnostic
+    subject=SimpleNamespace(job=dict(job_id=str(uuid.uuid4()),attempt_id=str(uuid.uuid4()),seq=25),
+        phase='unknown-secret',gate_id='raw-path',subphase='secret',children={},
+        source_gate_verified=False,source_open_started=False)
+    class Untrusted(Exception):pass
+    error=Untrusted('SQL SECRET');error.code='secret-code';error.errno=17
+    diagnostic=hold_diagnostic(subject,error)
+    assert diagnostic['exception_class']=='unknown' and diagnostic['coordinator_code'] is None
+    assert diagnostic['os_errno'] is None and diagnostic['child_exit_code'] is None
+    assert diagnostic['phase']=='claim' and diagnostic['subphase']=='wait'
+    assert not any(word in c.encode(diagnostic).decode() for word in ('SQL','SECRET','raw-path'))
+    subject.children['worker']=SimpleNamespace(waited=False,reaped=lambda:-9)
+    assert hold_diagnostic(subject,error,'worker')['child_exit_code'] is None
+    subject.children['worker'].waited=True
+    assert hold_diagnostic(subject,c.CoordinatorError('unsafe_path'),'worker')['child_exit_code']==-9
+    assert hold_diagnostic(subject,c.CoordinatorError('unsafe_path'))['coordinator_code']=='unsafe_path'
+
+
+@POSIX
+def test_04D_start_resource_exception_is_not_a_child_exit_and_never_crosses_source_gate(monkeypatch):
+    from app.db_audit_coordinator import r4_release,live_cgroup
+    class Owner:
+        profile=mixed_profile()
+        orphan_hold=False
+        def __init__(self):
+            item=record();item.update(seq=25,state='queued',reason_code='queued')
+            self.value=dict(controller_epoch=str(uuid.uuid4()),jobs=[item,dict(state='queued'),dict(state='queued')])
+        def _state(self):return copy.deepcopy(self.value)
+        def _commit(self,value):self.value=copy.deepcopy(value)
+    owner=Owner();session=r4_release.Session(owner,owner.value['jobs'][0],owner.value)
+    events=[];monkeypatch.setattr(r4_release,'emit_hold',events.append)
+    def denied(*args,**kwargs):raise PermissionError(13,'untrusted path SECRET')
+    monkeypatch.setattr(live_cgroup,'create_leaf',denied)
+    count=len(os.listdir('/proc/self/fd'))
+    with pytest.raises(PermissionError):session.start()
+    assert len(os.listdir('/proc/self/fd'))==count
+    assert len(events)==1 and events[0]['gate_id']=='resource_leaf' and events[0]['subphase']=='leaf_create'
+    assert events[0]['child_role']=='worker' and events[0]['child_exit_code'] is None
+    assert events[0]['exception_class']=='PermissionError' and events[0]['os_errno']==13
+    assert not events[0]['source_open_started'] and not events[0]['source_gate_verified']
+    assert session.children=={} and session.held and owner.orphan_hold
+    assert [item['state'] for item in owner.value['jobs']]==['claimed','queued','queued']
+    assert owner.value['jobs'][0]['reason_code']=='orphan_hold'
 
 
 @POSIX

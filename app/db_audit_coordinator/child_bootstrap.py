@@ -200,7 +200,6 @@ def execute_r4(data,job,profile,policy):
     """Nonowner holds its own gate through root cleanup/release, never source I/O."""
     import socket
     from . import r4_ipc,r4_snapshot
-    from .r4_sandbox import RAM_ROOT
     from .live_policy import SNAPSHOT_KEYS
     require(profile.r4 is not None and profile.r4.enabled,'unauthorized')
     channel=socket.socket(fileno=data['r4_fd'])
@@ -216,29 +215,29 @@ def execute_r4(data,job,profile,policy):
         node=leaf.samples()[-1]
         require(node.maximum==policy.memory_max_bytes and node.swap_max==node.swap_current==0,'not_admitted')
         sample=guest_sample(leaf.samples());sample.check()
-    def receive():
+    def receive(*,snapshot=False):
         remaining=(data['started_ns']+policy.attempt_seconds*10**9-time.monotonic_ns())/1e9
         require(remaining>0,'not_admitted')
-        return r4_ipc.receive(channel,binding,0,data['supervisor_pid'],seconds=remaining)
+        return r4_ipc.receive(channel,binding,0,data['supervisor_pid'],seconds=remaining,allow_snapshot=snapshot)
+    received=None
     try:
         verify_origin(profile);gate.acquire();guard()
         r4_ipc.send(channel,'gate_ready',binding,dict(lock_fd=gate.fd,namespace=namespace))
-        kind,payload,image=receive()
+        kind,payload,received=receive(snapshot=True)
         outcome=dict(result='incomplete',reason_code='canceled',snapshot_metadata=None)
         if kind=='snapshot':
-            c.closed(payload,{'image','location'})
-            expected=RAM_ROOT+'/'+job['claim_epoch']+'/'+job['attempt_id']+'/final/snapshot.sqlite3'
-            require(payload['location']==expected and image is not None,'unauthorized')
+            c.closed(payload,{'image','directory'})
+            require(type(received) is tuple and len(received)==2,'unauthorized')
+            image,final=received;received=None  # validate takes ownership of BOTH.
             try:
-                snapshot=r4_snapshot.validate(image,expected,payload['image'],policy,guard)
+                snapshot=r4_snapshot.validate(image,final,payload['image'],payload['directory'],policy,guard)
                 c.closed(snapshot,SNAPSHOT_KEYS)
                 outcome=dict(result='passed',reason_code='audit_passed',snapshot_metadata=snapshot)
             except Exception:
                 guard(cancel=False)  # Resource failure is NOT a corruption result.
                 if not select.select([data['cancel_fd']],[],[],0)[0]:
                     outcome=dict(result='failed',reason_code='audit_failed',snapshot_metadata=None)
-            finally:os.close(image)
-        else:require(kind=='cancel' and payload=={} and image is None,'unauthorized')
+        else:require(kind=='cancel' and payload=={} and received is None,'unauthorized')
         guard(cancel=False);r4_ipc.send(channel,'t3_done',binding,outcome)
         # No implicit gate close on a nominal result. Root must attest cleanup.
         kind,payload,fd=receive()
@@ -246,6 +245,8 @@ def execute_r4(data,job,profile,policy):
         gate.check();r4_ipc.send(channel,'released',binding,{})
         return 0 if outcome['result']=='passed' else 2
     finally:
+        if received is not None:
+            for opened in received:os.close(opened)
         channel.close();leaf.close()
         for key in ('claim_fd','profile_fd','cancel_fd','result_fd'):
             try:os.close(data[key])

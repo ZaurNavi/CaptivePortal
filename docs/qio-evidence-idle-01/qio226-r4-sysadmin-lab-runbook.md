@@ -1,4 +1,75 @@
-# QIO226 / 04C R4 — SysAdmin mixed-source-GID handoff and attended LAB runbook
+# QIO226 / 04D R4 — pinned T3 directory capability and first-HOLD attribution
+
+## 04D superseding disposition — code review only, real queue remains held
+
+Authority: Issue226 comments6303245042 and6304411705. Parent is accepted04C
+`7f4bc354492668834ee97e5825b935110167647b`, tree
+`c6067823ea60262c2d680a4ba88e38cd3fcfb47e`. The historical04C procedure below
+does not authorize a fresh installation or a repeat original-source batch.
+
+Confirmed code bug: worker UID995/GID993 cannot traverse socket parent exactly
+0750 root:GID992. Do not chmod that parent, grant supplementary GID992, loosen
+source ownership or change the accepted private PIDNS/procfs arrangement.
+
+Root promotes only after positive owner-helper reap. The private authenticated
+snapshot packet carries exactly TWO ordered SCM_RIGHTS capabilities: image
+O_RDONLY and final-directory O_RDONLY|O_DIRECTORY (never O_PATH). The root
+derives final from the current job, seals dev/inode/GID receipt, and verifies
+root0750:worker_gid tmpfs, same device as the finalized root0440:worker_gid
+regular one-link image. All other private packet kinds carry zero FDs. Reject
+wrong credentials, PID/binding, swapped/duplicate/extra/anonymous/writable FDs.
+
+The worker independently checks both receipts and fixed `snapshot.sqlite3`
+through stat(dir_fd=final_fd, follow_symlinks=False), around native SQLite open,
+through guarded full integrity/FK/domain T3 and afterward. It rejects extra
+entries/sidecars, symlink, stage/foreign final, changes to owner/mode/inode,
+size/hash, private proc self mapping or CWD identity. SQLite is native RO,
+immutable FINALIZED IMAGE only, query_only/FK ON and temp_store MEMORY.
+
+The approved URI is derived solely from the received bounded decimal final FD:
+`file:/proc/self/fd/<final_directory_fd>/snapshot.sqlite3?mode=ro&immutable=1`.
+This is an intermediate DIRECTORY-FD magic link in the already-qualified
+private PIDNS-bound procfs, NOT the image-FD URI and NOT an arbitrary alias.
+No textual readlink-target trust, getcwd/resolve/fchdir, host procfs, new mount,
+VFS, dependency, alternate DB or memory/disk copy is introduced. Missing or
+mismatched proc self/FD identity fails closed with no alternate opening path.
+SQLite closes before both received FDs on success, rejection or cancellation;
+the worker never changes its CWD. An ordinary relative SQLite URI was proved
+to expand to a denied absolute path and is expressly not a fallback.
+
+Root emits one bounded closed JSON `qio226_r4_first_hold` event/version1 for the
+first HOLD only, on its protected stderr/journal route. Required fields:
+job_id, attempt_id, seq; closed phase/gate_id/subphase; whitelisted exception
+CLASS, closed CoordinatorError code or numeric OS errno; child_role/exit_code
+only with positive sole-reaper pidfd/wait evidence; source_gate_verified and
+source_open_started booleans. Worker channel EOF before READY is observed by
+the root's sole reaper with a finite event wait, not PID absence. An uncertain
+reap remains null, never success. No raw exception, traceback, path, payload,
+key, nonce, source data or child stderr is logged. SysAdmin must retain the
+existing root-only protected journal/evidence route; no public logging API.
+Diagnostic facts are NOT release proof, recovery permission or queue schema.
+
+The first real A exception remains UNPROVEN. Original epoch
+`a7ae3553-a7f9-4abd-9e98-9d03036a55aa`: A seq25
+`6a280e6e-cb1d-45d3-b33c-97a037e37bd2`, attempt
+`6772793c-a6ec-4aea-8fa7-64855b1cedbe` is running/orphan_hold; B seq26
+`5891c5f3-7bbe-4469-a430-4a60e9d385af` and C seq27
+`96fd3463-2269-4b7b-99bf-d4d6d9f66628` remain queued per the protected capture.
+No positive A terminal/release exists. Installing04D cannot recover old A.
+Do not restart/kill/reset, unmount uncertain resources, rewrite history, repeat
+recover_once, change locks/epoch, or resubmit old/new keys. Independent
+evidence-backed one-shot reconciliation requires separate Owner/TechLead GO.
+
+UID994 operator inside daemon private PID+mount namespace behind root-owned
+attended launcher is the accepted old-LAB arrangement. No PID0, namespace/auth
+relaxation, extra endpoint or capabilities are authorized. Existing native5.15
+F2/F3/K01/K02/K03 stay frozen PASS, not repeated generic qualification.
+
+04D disposable laptop tests prove only this code contract and canonical
+synthetic A/B/C; they are NOT original old-LAB DB PASS. Coder local commit is
+allowed only after required tests. PUSH/PR/INSTALL/REAL_RETRY/PRODUCTION=HOLD.
+
+## Historical 04C mixed-source-GID handoff and attended LAB runbook
 
 Status: 04C CODE REVIEW / ORIGINAL SOURCE HOLD. Authority: Issue226 comment6301692092;
 04B architecture remains as in comment6296204519.
