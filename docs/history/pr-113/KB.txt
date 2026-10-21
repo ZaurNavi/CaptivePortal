@@ -1,0 +1,82 @@
+# CaptivPortal — Web Designer Approved Candidate Publication Rule
+
+Зафиксировать как постоянное каноническое правило процесса для Web Designer / Admin Console UI Designer.
+
+## Новый lifecycle UI-задач
+
+Для presentation-only задач Web Designer сохраняет обычную модель работы:
+
+**Web Designer → PATCH → Tech Lead / Owner review → visual acceptance**
+
+До момента явного acceptance Web Designer не имеет права публиковать изменения в GitHub.
+
+После того как одновременно выполнены:
+
+* scope review = PASS;
+* patch/diff integrity = PASS;
+* обязательные bounded tests = PASS;
+* Owner / Tech Lead visual acceptance = PASS;
+
+Tech Lead или Owner может выдать отдельную явную команду:
+
+**PUBLISH APPROVED CANDIDATE**
+
+Только после этой команды Web Designer получает право для конкретного уже принятого кандидата:
+
+* создать отдельную feature-ветку от явно указанного baseline;
+* сделать commit только принятого UI-candidate;
+* push этой feature-ветки;
+* создать Draft Pull Request в `main`.
+
+## Ограничения права публикации
+
+Это право не является общим GitHub write-доступом.
+
+Web Designer не имеет права:
+
+* менять `main`;
+* merge PR;
+* deploy/release;
+* force-push без отдельного разрешения;
+* добавлять изменения после visual acceptance;
+* «заодно» исправлять другие CSS/JS/template-файлы;
+* изменять backend, API, DB, security, business logic;
+* расширять scope принятого TASK;
+* публиковать кандидат, отличающийся от проверенного Tech Lead / Owner артефакта.
+
+Перед публикацией Web Designer обязан доказать, что публикуемый diff соответствует принятому кандидату.
+
+Минимальный publication handoff после push:
+
+* TASK;
+* baseline SHA;
+* branch;
+* commit SHA;
+* changed files;
+* diff stat;
+* подтверждение отсутствия дополнительных изменений;
+* Draft PR number / URL;
+* `MERGE=NO`;
+* `DEPLOY=NO`.
+
+## Разделение ответственности
+
+**Web Designer**
+создаёт UI → готовит patch → после отдельной команды публикует уже принятый candidate.
+
+**Tech Lead**
+проверяет scope, baseline, patch, regression tests и соответствие опубликованного PR принятому candidate.
+
+**Owner**
+выполняет visual acceptance и принимает финальное решение о merge / production promotion.
+
+**Coder**
+не требуется для чистой presentation-only публикации, если TASK не затрагивает backend, API, данные, security или системную логику.
+
+## Переходное правило
+
+До внесения этого правила в каноническую документацию действует старый режим GitHub READ ONLY для Web Designer.
+
+`TASK-WEB-ASSET-LIBRARY-01` публикуется Tech Lead / Owner по старому процессу и является последним переходным случаем.
+
+Следующие принятые UI-кандидаты могут публиковаться самим Web Designer только после канонической фиксации данного правила и явной команды `PUBLISH APPROVED CANDIDATE`.
