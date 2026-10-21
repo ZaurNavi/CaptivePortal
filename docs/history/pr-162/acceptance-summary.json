@@ -1,0 +1,35 @@
+{
+  "task": "TASK-DEVICE-FINGERPRINT-FF6-REAL-ACCEPTANCE-FRESH-CANDIDATE-01",
+  "status": "STOP_CURRENT_TOPOLOGY_EVIDENCE_UNAVAILABLE",
+  "baseline_commit": "e1185bc1a98197ec5c9dfe61064246d0d0523fa8",
+  "baseline_tree": "fa6fa0ca63ef23bb6484c55b928597473254dd7a",
+  "lab_head": "b419ab357a267be3c62096a6ed45b67dad4889f2",
+  "lab_parent": "e1185bc1a98197ec5c9dfe61064246d0d0523fa8",
+  "lab_tree": "9a9b66cb86e2001d6bf25a2f48d787f85a804061",
+  "accepted_fix2_patch_sha256": "e345867d6148da86bc1c5aa5a8d0aabd89be727f4215934aa4167dca4f6c0296",
+  "accepted_fix2_patch_bytes": 97587,
+  "lab_changed_files": [
+    "app/device_fingerprint/artifact_dependency_graph.py",
+    "app/device_fingerprint/ff6_artifact_graph_acyclicity.py",
+    "tests/device_fingerprint_ff6/__init__.py",
+    "tests/device_fingerprint_ff6/test_artifact_dependency_graph.py",
+    "tests/device_fingerprint_ff6/test_ff6_artifact_graph_acyclicity.py"
+  ],
+  "lab_worktree_clean": true,
+  "focused_synthetic_ff6_tests": "26 passed",
+  "real_foundation_candidate_constructed": false,
+  "real_ff6_executed": false,
+  "canonical_ff6_gate_executed": false,
+  "central_lab_v7_executed": false,
+  "stop_detail": "Current read-only Catalyst mirror/RSPAN configuration, guest VLAN path, mirror destination, Cisco 3845 first-L3 placement, and no-pre-observation-L3-forwarder evidence were not available through the inspected local evidence directories or a configured production read-only connection. The retained 19 September topology material cannot be represented as a newly observed current configuration. Therefore capture_distance_l3_hops=0 cannot be freshly proven, and a real current TTLCapturePlacementProof must not be fabricated.",
+  "required_to_resume": [
+    "Current read-only Catalyst mirror/RSPAN running configuration and guest VLAN path evidence",
+    "Current sensor mirror destination and Cisco 3845 first-L3 placement evidence",
+    "Current evidence for absence of a pre-observation L3 forwarding hop"
+  ],
+  "production_mutation": false,
+  "deployment": false,
+  "activation": false,
+  "f_admit_executed": false,
+  "task04_executed": false
+}
