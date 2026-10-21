@@ -1,0 +1,409 @@
+CaptivPortal — локальная лаборатория
+
+У нас теперь есть три уровня.
+
+1. Живой эталон — GitHub origin/main
+
+Это официальный актуальный код проекта:
+
+GitHub:
+ZaurNavi/CaptivePortal
+
+Branch:
+main
+
+Это источник истины для кода. Локальные рабочие эксперименты сюда напрямую не относятся.
+
+2. Чистая локальная копия — Clean Main
+
+Путь:
+
+C:\CaptivPortal-UI-Preview
+
+Ветка:
+
+main
+
+Назначение:
+
+чистая локальная копия origin/main;
+не вносить сюда тестовые PATCH/изменения;
+здесь будем запускать полный repository test suite;
+отсюда создан рабочий Git worktree;
+здесь находится Python virtual environment.
+
+Войти:
+
+cd /d C:\CaptivPortal-UI-Preview
+
+Проверить состояние:
+
+git status -sb
+
+Нормальное состояние:
+
+## main...origin/main
+
+Проверить обновления GitHub:
+
+git fetch origin
+git status -sb
+
+Python environment:
+
+C:\CaptivPortal-UI-Preview\.venv
+
+Активировать:
+
+C:\CaptivPortal-UI-Preview\.venv\Scripts\activate
+
+Важно: локально не запускать обычный:
+
+python run.py
+
+потому что он поднимает production composition и пытается работать с Omada и остальными runtime-компонентами.
+
+3. Рабочая лабораторная копия — UI Work
+
+Путь:
+
+C:\CaptivPortal-UI-Work
+
+Ветка:
+
+ui-work
+
+Это Git worktree от того же репозитория.
+
+Назначение:
+
+сюда применять PATCH дизайнера;
+здесь менять HTML/CSS/JS;
+здесь смотреть git diff;
+здесь экспериментировать;
+эту копию показывает браузерный Preview;
+чистый main при этом остаётся нетронутым.
+
+Войти:
+
+cd /d C:\CaptivPortal-UI-Work
+
+Проверить:
+
+git status -sb
+
+Чистое состояние:
+
+## ui-work...origin/main
+Browser Preview
+
+Сам preview-launcher находится вне Git-репозитория:
+
+C:\CaptivPortal-UI-Preview-Tools\preview.py
+
+Он сейчас настроен на:
+
+REPO = C:\CaptivPortal-UI-Work
+
+То есть браузер показывает рабочую лабораторную копию, а не Clean Main.
+
+Запуск:
+
+C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe C:\CaptivPortal-UI-Preview-Tools\preview.py
+
+Открыть:
+
+http://127.0.0.1:5055/
+
+Остановить:
+
+Ctrl+C
+
+Preview работает только на:
+
+127.0.0.1:5055
+
+и не подключается к Omada или production DB.
+
+В нём уже работают:
+
+Home
+Devices
+Device Detail
+Visits
+Observations
+Traffic Now
+Current State
+
+Используются настоящие файлы из C:\CaptivPortal-UI-Work:
+
+app/admin_web/templates/...
+app/admin_web/static/admin.css
+app/admin_web/static/admin.js
+
+А данные для интерфейса подставляет preview.py.
+
+Схема лаборатории
+GitHub origin/main
+        │
+        ▼
+C:\CaptivPortal-UI-Preview
+Clean Main / эталон / полные тесты
+        │
+        │ Git worktree
+        ▼
+C:\CaptivPortal-UI-Work
+ui-work / PATCH / разработка / дизайн
+        │
+        ▼
+preview.py
+        │
+        ▼
+http://127.0.0.1:5055/
+Browser visual acceptance
+
+Главное правило очень простое:
+
+CaptivPortal-UI-Preview = не трогаем, это чистый эталон.
+CaptivPortal-UI-Work = ломать, править, применять PATCH и проверять можно.
+
+Следующим отдельным этапом мы ещё сделаем удобные команды обновления лаборатории из GitHub и затем настроим полный локальный test gate.
+
+CaptivPortal Local Lab — рабочие команды
+
+
+
+1. Быстро войти в Clean Main
+cd /d C:\CaptivPortal-UI-Preview
+
+Проверить состояние:
+
+git status -sb
+
+Нормально:
+
+## main...origin/main
+2. Обновить Clean Main с GitHub
+
+Это наша чистая локальная эталонная копия.
+
+cd /d C:\CaptivPortal-UI-Preview
+git fetch origin
+git pull --ff-only
+git status -sb
+
+После этого C:\CaptivPortal-UI-Preview соответствует актуальному origin/main.
+
+3. Войти в рабочую копию
+cd /d C:\CaptivPortal-UI-Work
+
+Проверить:
+
+git status -sb
+
+Чистое состояние:
+
+## ui-work...origin/main
+4. Обновить ui-work после обновления GitHub
+
+Сначала обязательно:
+
+cd /d C:\CaptivPortal-UI-Work
+git status --short
+
+Если вывод пустой, можно обновлять:
+
+git fetch origin
+git rebase origin/main
+
+После этого:
+
+git status -sb
+
+То есть обычный безопасный цикл обновления всей лаборатории:
+
+cd /d C:\CaptivPortal-UI-Preview
+git fetch origin
+git pull --ff-only
+
+cd /d C:\CaptivPortal-UI-Work
+git status --short
+git rebase origin/main
+
+Если git status --short в ui-work показывает изменённые файлы — rebase пока не делать, сначала разобраться с текущим PATCH.
+
+Browser Preview
+5. Запустить Admin Console Preview
+
+Из любого CMD:
+
+C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe C:\CaptivPortal-UI-Preview-Tools\preview.py
+
+Открыть:
+
+http://127.0.0.1:5055/
+
+Остановить:
+
+Ctrl+C
+
+Preview сейчас читает код отсюда:
+
+C:\CaptivPortal-UI-Work
+
+Поэтому любое изменение HTML/CSS/JS в ui-work проверяем здесь.
+
+Работа с PATCH
+6. Посмотреть, что изменилось
+cd /d C:\CaptivPortal-UI-Work
+git status --short
+git diff
+
+Краткая статистика:
+
+git diff --stat
+
+Проверить конкретный файл:
+
+git diff -- app\admin_web\static\admin.css
+7. Проверить, какие файлы затронул PATCH
+git status --short
+
+Это особенно удобно для проверки allowlist дизайнера.
+
+8. Проверить diff на технический мусор
+git diff --check
+
+Если команда ничего не вывела — проверка PASS.
+
+9. Вернуть один файл к исходному состоянию
+
+Например:
+
+git restore app\admin_web\static\admin.css
+10. Полностью выбросить все незакоммиченные изменения ui-work
+
+Осторожно: это удаляет текущий PATCH.
+
+git restore .
+
+Если появились ещё и новые untracked-файлы, сначала посмотреть:
+
+git status --short
+
+Не удалять их автоматически без проверки.
+
+Python environment
+11. Активировать виртуальную среду
+C:\CaptivPortal-UI-Preview\.venv\Scripts\activate
+
+После этого приглашение начинается с:
+
+(.venv)
+
+Выход:
+
+deactivate
+Локальные тесты
+
+Когда начнём тестирование, Clean Main используем как эталонную test-среду, а ui-work — для проверки конкретного изменённого артефакта.
+
+12. Полный repository test suite
+cd /d C:\CaptivPortal-UI-Preview
+C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe -m pytest -q -rs
+13. Compile gate
+cd /d C:\CaptivPortal-UI-Preview
+C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe -m compileall -q app
+14. Git diff gate
+
+Для Clean Main:
+
+cd /d C:\CaptivPortal-UI-Preview
+git diff --check
+
+Для рабочего PATCH:
+
+cd /d C:\CaptivPortal-UI-Work
+git diff --check
+15. Полный локальный gate одной строкой
+
+Для Clean Main:
+
+cd /d C:\CaptivPortal-UI-Preview && C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe -m pytest -q -rs && C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe -m compileall -q app && git diff --check
+
+Для ui-work:
+
+cd /d C:\CaptivPortal-UI-Work && C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe -m pytest -q -rs && C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe -m compileall -q app && git diff --check
+Полезные Git-проверки
+
+Текущий commit:
+
+git rev-parse HEAD
+
+Короткий SHA:
+
+git rev-parse --short HEAD
+
+Текущая ветка:
+
+git branch --show-current
+
+Последние commits:
+
+git log --oneline -10
+
+Проверить связь worktree:
+
+cd /d C:\CaptivPortal-UI-Preview
+git worktree list
+
+Должны присутствовать примерно:
+
+C:\CaptivPortal-UI-Preview   main
+C:\CaptivPortal-UI-Work      ui-work
+Наш обычный рабочий цикл
+GitHub main
+   ↓
+обновляем Clean Main
+   ↓
+обновляем ui-work
+   ↓
+применяем PATCH в ui-work
+   ↓
+git diff / git diff --check
+   ↓
+Browser Preview
+127.0.0.1:5055
+   ↓
+визуальное принятие
+   ↓
+targeted/full tests
+   ↓
+GitHub
+   ↓
+Server
+   ↓
+проверка на реальных данных
+
+
+CaptivPortal Local Lab command shortcuts
+
+Files:
+- lab-update.cmd  : update Clean Main, then rebase clean ui-work onto origin/main
+- lab-preview.cmd : launch local Admin Console preview at http://127.0.0.1:5055/
+- lab-test.cmd    : run full local gate on Clean Main: pytest -> compileall -> git diff --check
+
+Expected paths:
+C:\CaptivPortal-UI-Preview
+C:\CaptivPortal-UI-Work
+C:\CaptivPortal-UI-Preview-Tools\preview.py
+C:\CaptivPortal-UI-Preview\.venv
+
+Recommended location:
+C:\CaptivPortal-Lab\
+
+Then you can run:
+C:\CaptivPortal-Lab\lab-update.cmd
+C:\CaptivPortal-Lab\lab-preview.cmd
+C:\CaptivPortal-Lab\lab-test.cmd
+
