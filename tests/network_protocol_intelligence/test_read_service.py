@@ -22,7 +22,7 @@ class Reader:
         self.value = dict(runtime_state=state, binding_state=binding, bound_device_id=bound, facts=facts)
         self.calls = []
 
-    def read_protocol_evidence_snapshot(self, *args, **kwargs):
+    def read_protocol_latest_snapshot(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.value
 
@@ -37,14 +37,14 @@ def summary(reader, **kwargs):
 
 
 def test_protocol_aggregation_order_and_narrow_read_contract():
-    reader = Reader([fact("tls", 20), fact("dns", 20), fact("quic", 20), fact("dns", 30)])
+    reader = Reader([fact("tls", 20), fact("dns", 20), fact("quic", 20)])
     value = public_summary(summary(reader))
     assert [p["protocol_id"] for p in value["recent_protocols"]] == ["dns", "tls", "quic"]
     assert value["last_protocol_observation"]["protocol_id"] == "dns"
     assert len(reader.calls) == 1
     args, kwargs = reader.calls[0]
     assert args == (SITE, DEVICE, MAC, ni_format_utc(AT - timedelta(days=1)), ni_format_utc(AT))
-    assert kwargs["max_rows"] == 20000
+    assert set(kwargs) == {"deadline"}
     assert 0 < kwargs["deadline"].expires_at - kwargs["deadline"].monotonic() <= 5
     assert not any(key in str(value) for key in ("edge_id", "client_mac", "source_event_family"))
 
@@ -107,10 +107,19 @@ def test_integrity_fail_closed(reader):
         summary(reader)
 
 
-def test_row_limit_no_partial_summary():
-    assert summary(Reader([fact()] * 20000)).evidence_state == "present"
+def test_top1_shape_never_accepts_raw_enumeration_or_duplicate_family():
+    assert summary(Reader([fact("dns"), fact("tls"), fact("quic")])).evidence_state == "present"
+    with pytest.raises(ProtocolUnavailable):
+        summary(Reader([fact()] * 2))
     with pytest.raises(ProtocolUnavailable):
         summary(Reader([fact()] * 20001))
+
+
+@pytest.mark.parametrize("facts", [None, {}, [None], [dict(edge_id="a")],
+    [{**fact(), "source_event_family": []}], [{**fact(), "edge_id": 42}]])
+def test_malformed_latest_shape_fails_closed(facts):
+    with pytest.raises(ProtocolUnavailable):
+        summary(Reader(facts))
 
 
 def test_deadline_and_shared_two_slot_gate_release():
@@ -123,6 +132,21 @@ def test_deadline_and_shared_two_slot_gate_release():
     finally:
         _READ_SLOTS.release(); _READ_SLOTS.release()
     assert summary(Reader()).evidence_state == "empty"
+
+
+def test_deadline_must_still_hold_after_dto_validation(monkeypatch):
+    import app.network_protocol_intelligence.read_service as reads
+    tick = {"now": 0}
+    original = reads.public_summary
+    def validate_then_expire(value):
+        result = original(value)
+        tick["now"] = 5
+        return result
+    monkeypatch.setattr(reads, "public_summary", validate_then_expire)
+    with pytest.raises(ProtocolDeadline):
+        summary(Reader([fact()]), deadline=QueryDeadline(20, lambda: tick["now"]))
+    monkeypatch.setattr(reads, "public_summary", original)
+    assert summary(Reader()).evidence_state == "empty"  # both slots were released
 
 
 def test_serializer_refuses_malformed_and_extra_shapes():

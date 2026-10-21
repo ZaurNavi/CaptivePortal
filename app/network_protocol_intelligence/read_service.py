@@ -47,11 +47,11 @@ class DeviceProtocolIntelligenceReadService:
             bounded = QueryDeadline(min(deadline.expires_at, deadline.monotonic() + 5), deadline.monotonic)
             bounded.require_remaining()
             start, recent = at - timedelta(days=1), at - timedelta(hours=1)
-            snapshot = self._reader.read_protocol_evidence_snapshot(
+            snapshot = self._reader.read_protocol_latest_snapshot(
                 site_id, device_id, client_mac, ni_format_utc(start), evaluated_at_utc,
-                max_rows=20000, deadline=bounded)
+                deadline=bounded)
             bounded.require_remaining()
-            if set(snapshot) != {"runtime_state", "binding_state", "bound_device_id", "facts"}:
+            if type(snapshot) is not dict or set(snapshot) != {"runtime_state", "binding_state", "bound_device_id", "facts"}:
                 raise ProtocolUnavailable()
             try:
                 projection, source, attribution = _COVERAGE[snapshot["runtime_state"]]
@@ -61,7 +61,7 @@ class DeviceProtocolIntelligenceReadService:
                 raise ProtocolUnavailable() from None
             coverage = ProtocolCoverageV1("current_pipeline", source, attribution, projection, False)
             facts = snapshot["facts"]
-            if len(facts) > 20000 or (identity != "authoritative" and facts):
+            if not isinstance(facts, (tuple, list)) or len(facts) > 3 or (identity != "authoritative" and facts):
                 raise ProtocolUnavailable()
             if identity == "authoritative" and snapshot["bound_device_id"] != device_id:
                 raise ProtocolUnavailable()
@@ -69,13 +69,16 @@ class DeviceProtocolIntelligenceReadService:
                 raise ProtocolUnavailable()
             latest = {}
             ordered = []
+            seen = set()
             for row in facts:
                 bounded.require_remaining()
-                if set(row) != {"edge_id", "event_at", "source_event_family"}:
+                if type(row) is not dict or set(row) != {"edge_id", "event_at", "source_event_family"}:
                     raise ProtocolUnavailable()
                 protocol = row["source_event_family"]
-                if protocol not in PROTOCOLS or not isinstance(row["edge_id"], str):
+                if (type(protocol) is not str or protocol not in PROTOCOLS or protocol in seen
+                        or not isinstance(row["edge_id"], str)):
                     raise ProtocolUnavailable()
+                seen.add(protocol)
                 event = ni_timestamp(row["event_at"], canonical=True)
                 if not start <= event < at:
                     raise ProtocolUnavailable()
@@ -95,6 +98,7 @@ class DeviceProtocolIntelligenceReadService:
                     sorted(latest.items(), key=lambda item: (at - item[1], tuple(PROTOCOLS).index(item[0])))),
                 last, "unavailable" if last is None else freshness((at - ordered[0][0]).total_seconds(), coverage), coverage)
             public_summary(result)
+            bounded.require_remaining()
             return result
         except AnalyticsQueryDeadlineExceeded:
             raise ProtocolDeadline() from None

@@ -17,6 +17,11 @@ from .effective_runtime_state import effective_runtime_state
 
 JOIN = " FROM device_network_metadata_edges e LEFT JOIN projection_site_mac_bindings b ON b.site_id=e.site_id AND b.client_mac=e.client_mac"
 COLUMNS = "SELECT e.*,b.site_id AS joined_site,b.device_id,b.binding_state,b.last_evaluated_at,b.authoritative_bound_at"
+PROTOCOL_LATEST_SQL = (
+    "SELECT edge_id,event_at,source_event_family FROM device_network_metadata_edges "
+    "INDEXED BY idx_projection_mac_family_event_latest "
+    "WHERE site_id=? AND client_mac=? AND source_event_family=? AND event_at>=? AND event_at<? "
+    "ORDER BY event_at DESC,edge_id ASC LIMIT 1")
 
 
 class DeviceNetworkMetadataReadService:
@@ -105,6 +110,68 @@ class DeviceNetworkMetadataReadService:
             if len(rows) > max_rows:
                 raise ProjectionUnavailable()
             result["facts"] = tuple(dict(row) for row in rows)
+            return result
+
+    def read_protocol_latest_snapshot(self, site_id, device_id, client_mac, from_utc, to_utc, *, deadline):
+        """NI03 V1 only: exact latest per family, never enumerate raw history.
+
+        Runtime, authoritative identity, integrity probes and all three seeks are
+        pinned by _snapshot to the same read-only transaction. Other NI02 readers
+        (including the legacy 20k evidence reader) are deliberately unchanged.
+        """
+        try:
+            validate_site_id(site_id)
+            canonical_uuid(device_id)
+            if canonical_mac(client_mac) != client_mac:
+                raise ValueError
+            first, last = ni_timestamp(from_utc, canonical=True), ni_timestamp(to_utc, canonical=True)
+            if (last - first).total_seconds() != 86400:
+                raise ValueError
+        except Exception:
+            raise ProjectionValidationError() from None
+        with self._snapshot(deadline=deadline) as connection:
+            state = self._runtime_state(connection)
+            binding = connection.execute(
+                "SELECT binding_state,device_id FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?",
+                (site_id, client_mac)).fetchone()
+            result = dict(runtime_state=state, binding_state=binding[0] if binding else None,
+                          bound_device_id=binding[1] if binding else None, facts=())
+            if binding is None or binding[0] in {"not_yet_registry_resolved", "registry_unavailable"}:
+                return result
+            if binding[0] != "authoritative" or binding[1] != device_id:
+                raise ProjectionUnavailable()
+            deadline.require_remaining()
+            if connection.execute(
+                "SELECT 1 FROM device_network_metadata_edges INDEXED BY idx_projection_mac_event "
+                "WHERE site_id=? AND client_mac=? AND event_at>=? LIMIT 1",
+                (site_id, client_mac, to_utc)).fetchone() is not None:
+                raise ProjectionUnavailable()
+            # CHECK constrains the closed family vocabulary. Also retain the
+            # fail-closed corruption canary if a foreign writer bypassed CHECK:
+            # four disjoint index ranges, not a NOT IN scan through valid facts.
+            for condition, bounds in (("source_event_family<?", ("dns",)),
+                    ("source_event_family>? AND source_event_family<?", ("dns", "quic")),
+                    ("source_event_family>? AND source_event_family<?", ("quic", "tls")),
+                    ("source_event_family>?", ("tls",))):
+                deadline.require_remaining()
+                if connection.execute(
+                    "SELECT 1 FROM device_network_metadata_edges INDEXED BY idx_projection_mac_family_event_latest "
+                    "WHERE site_id=? AND client_mac=? AND " + condition + " LIMIT 1",
+                    (site_id, client_mac, *bounds)).fetchone() is not None:
+                    raise ProjectionUnavailable()
+            facts = []
+            for family in ("dns", "tls", "quic"):
+                deadline.require_remaining()
+                row = connection.execute(PROTOCOL_LATEST_SQL,
+                    (site_id, client_mac, family, from_utc, to_utc)).fetchone()
+                if row is not None:
+                    # Validate selected storage facts as well as the NI03 seam.
+                    event = ni_timestamp(row["event_at"], canonical=True)
+                    if (not first <= event < last or row["source_event_family"] != family
+                            or not isinstance(row["edge_id"], str)):
+                        raise ProjectionUnavailable()
+                    facts.append(dict(row))
+            result["facts"] = tuple(facts)
             return result
 
     @staticmethod

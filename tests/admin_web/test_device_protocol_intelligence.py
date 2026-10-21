@@ -88,7 +88,7 @@ def test_feature_off_preserves_route_gate_precedence_no_read(admin_app, monkeypa
         pytest.fail("feature OFF must not call query, Device lookup or semantic/projection read")
     monkeypatch.setattr(query, "device_protocol_intelligence", forbidden)
     query._devices = SimpleNamespace(get_device=forbidden)
-    query._protocol_intelligence = DeviceProtocolIntelligenceReadService(SimpleNamespace(read_protocol_evidence_snapshot=forbidden))
+    query._protocol_intelligence = DeviceProtocolIntelligenceReadService(SimpleNamespace(read_protocol_latest_snapshot=forbidden))
     client = admin_app.test_client()
     if authenticated: login(client)
     response = client.get(f"/admin/api/v1/sites/{site}/devices/{device}/protocol-intelligence" + suffix,
@@ -286,7 +286,7 @@ def test_committed_evidence_degraded_returns_200(product_app, state, source, att
     from datetime import datetime, timezone, timedelta
     from app.network_metadata.validation import ni_format_utc
     class CurrentReader:
-        def read_protocol_evidence_snapshot(self, *args, **kwargs):
+        def read_protocol_latest_snapshot(self, *args, **kwargs):
             return dict(runtime_state=state, binding_state="authoritative", bound_device_id=DEVICE,
                 facts=({"edge_id": "a" * 64, "source_event_family": "dns", "event_at": ni_format_utc(datetime.now(timezone.utc) - timedelta(seconds=1))},))
     product_app.extensions["admin_web_runtime"].query_service._protocol_intelligence = DeviceProtocolIntelligenceReadService(CurrentReader())
@@ -296,3 +296,32 @@ def test_committed_evidence_degraded_returns_200(product_app, state, source, att
     value = response.json["result"]
     assert value["availability_state"] == "degraded" and value["freshness_state"] == expected
     assert value["coverage"]["source_state"] == source and value["coverage"]["attribution_state"] == attribution
+
+
+@pytest.mark.parametrize("count", [0, 1, 20000, 20001, 28976, 30000, 100001])
+def test_issue293_real_projection_high_volume_http200(product_app, tmp_path, monkeypatch, count):
+    from datetime import datetime
+    from tests.network_metadata_projection.test_protocol_latest_snapshot import seed, AT, DEVICE as bound_device
+    from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
+    import app.admin_web.query_service as queries
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return AT
+    state = seed(tmp_path, count, site=SITE_ID, mac=MAC)
+    try:
+        assert bound_device == DEVICE
+        monkeypatch.setattr(queries, "datetime", FixedDateTime)
+        query = product_app.extensions["admin_web_runtime"].query_service
+        query._protocol_intelligence = DeviceProtocolIntelligenceReadService(DeviceNetworkMetadataReadService(state.config.db_path))
+        client = product_app.test_client(); login(client)
+        response = client.get(PATH, base_url="https://localhost")
+        assert response.status_code == 200
+        result = response.json["result"]
+        assert result["evidence_state"] == ("present" if count else "empty")
+        assert result["identity_binding_state"] == "authoritative"
+        assert result["coverage"]["historical_window_completeness_claimed"] is False
+        assert len(result["recent_protocols"]) == min(count, 3)
+        assert all(key not in response.get_data(as_text=True) for key in ("client_mac", "edge_id", "peer_ip"))
+    finally:
+        state.repo.close()
