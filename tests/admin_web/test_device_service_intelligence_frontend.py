@@ -213,6 +213,43 @@ def test_rich_hints_exception_is_limited_to_the_approved_additions():
     assert _without_rich_hints_insertions(changed_addition) == original
 
 
+def _assert_frozen_ni03_asset_unchanged(name, current):
+    # Issue #293 admits exactly two reviewed readers, not an arbitrary HEAD or
+    # a masked source span. Their entire bytes, including prior V2 admission,
+    # are frozen at the reviewed Top-1 commit. UI/model historical pins stay.
+    references = {
+        "app/admin_web/static/device_protocol_intelligence.js": "5c7b4c46afa5a57d55fe044c4326da3a10b9e145",
+        "app/network_protocol_intelligence/models.py": "5c7b4c46afa5a57d55fe044c4326da3a10b9e145",
+        "app/network_protocol_intelligence/read_service.py": "cc199c200bab71fe44b58bbd3e7d5c4b7ec44a19",
+        "app/network_metadata_projection/read_service.py": "cc199c200bab71fe44b58bbd3e7d5c4b7ec44a19",
+    }
+    assert name in references
+    accepted = subprocess.check_output(["git", "show", references[name] + ":" + name], cwd=ROOT)
+    # Preserve only the pre-existing CRLF checkout policy; no source masking.
+    assert current.replace(b"\r\n", b"\n") == accepted.replace(b"\r\n", b"\n")
+
+
+@pytest.mark.parametrize("name", [
+    "app/admin_web/static/device_protocol_intelligence.js",
+    "app/network_protocol_intelligence/models.py",
+    "app/network_protocol_intelligence/read_service.py",
+    "app/network_metadata_projection/read_service.py",
+])
+@pytest.mark.parametrize("position", ["start", "middle", "end"])
+def test_ni03_asset_freeze_rejects_changes_to_each_complete_reviewed_file(name, position):
+    current = ROOT.joinpath(name).read_bytes()
+    _assert_frozen_ni03_asset_unchanged(name, current)
+    offset = {"start": 0, "middle": len(current) // 2, "end": len(current) - 1}[position]
+    changed = current[:offset] + bytes([current[offset] ^ 1]) + current[offset + 1:]
+    with pytest.raises(AssertionError):
+        _assert_frozen_ni03_asset_unchanged(name, changed)
+
+
+def test_ni03_asset_freeze_rejects_paths_outside_the_exact_contract():
+    with pytest.raises(AssertionError):
+        _assert_frozen_ni03_asset_unchanged("app/network_service_recognition/read_service.py", b"")
+
+
 def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
     import hashlib
     import subprocess
@@ -223,23 +260,7 @@ def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
     _assert_legacy_prefix_unchanged(without_additions, original)
     for name in ("app/admin_web/static/device_protocol_intelligence.js", "app/network_protocol_intelligence/read_service.py",
                  "app/network_protocol_intelligence/models.py", "app/network_metadata_projection/read_service.py"):
-        # Recovery freezes the current accepted baseline, including the admitted
-        # Wave-1 idle-source guard in the shared projection reader.
-        accepted = subprocess.check_output(["git", "show", "5c7b4c46afa5a57d55fe044c4326da3a10b9e145:" + name], cwd=ROOT)
-        current = ROOT.joinpath(name).read_bytes().replace(b"\r\n", b"\n")
-        accepted = accepted.replace(b"\r\n", b"\n")
-        if name == "app/network_metadata_projection/read_service.py":
-            # Architecture Exception V1 explicitly authorizes only internal
-            # Core/projection V2 admission. All other shared-reader bytes and
-            # every NI-03/UI source above remain frozen.
-            for before, after in (
-                (b"schema_version=None, projection_contract_version=1,", b"schema_version=None, projection_contract_version=2,"),
-                (b"defaults.update(store_state=\"available\", schema_version=1, db_bytes=total)",
-                 b"defaults.update(store_state=\"available\", schema_version=2, db_bytes=total)"),
-            ):
-                assert accepted.count(before) == current.count(after) == 1
-                accepted = accepted.replace(before, after, 1)
-        assert current == accepted.replace(b"\r\n", b"\n")
+        _assert_frozen_ni03_asset_unchanged(name, ROOT.joinpath(name).read_bytes())
 
 
 def test_full_admin_bundle_and_ni04_initializer_without_dom():
