@@ -19,6 +19,81 @@ PHASES=frozenset({'claim','gate','owner','validating','release'})
 EXCEPTIONS=frozenset({'CoordinatorError','EvidenceError','PermissionError','FileNotFoundError','FileExistsError',
     'BrokenPipeError','TimeoutError','OSError','ValueError','TypeError','RuntimeError','AuditFailure','InterruptedError'})
 
+OWNER_STAGES=('auth_document','profile_parse','profile_parsed','parent_verify','parent_verified',
+    'namespace_view','namespace_verified','artifact','artifact_verified','imports','imports_verified',
+    'receipt_open','chroot','chroot_entered','credential_drop','credentials_dropped','credential_receipts',
+    'credentials_verified','owner_ready','owner_ready_sent','begin_wait','begin_received','source_guard',
+    'source_open','source_opened','source_metadata','source_metadata_verified','destination_open',
+    'destination_opened','backup_start','backup_progress','backup_complete','connections_close',
+    'owner_done','owner_done_sent','cleanup','finished')
+OWNER_DIAGNOSTIC_LIMIT=4096
+OWNER_EXCEPTIONS=EXCEPTIONS|{'OperationalError','DatabaseError','TimeoutExpired','CalledProcessError','MemoryError'}
+
+
+class OwnerTrace:
+    """Private inherited nonblocking FIFO; bounded enums, no arbitrary stderr.
+
+    One marker per boundary, first progress only, at most one failure record.
+    Diagnostic write refusal never changes the helper's original outcome.
+    """
+    def __init__(self,fd):
+        import fcntl
+        integer(fd,3,2**20)
+        flags=fcntl.fcntl(fd,fcntl.F_GETFL)
+        require(stat.S_ISFIFO(os.fstat(fd).st_mode) and flags&os.O_ACCMODE==os.O_WRONLY
+            and flags&os.O_NONBLOCK,'unauthorized')
+        os.set_inheritable(fd,False)
+        self.fd=fd;self.stage=None;self.failed=False;self.stop_reason=None
+    def write(self,value):
+        from . import contracts as c
+        try:os.write(self.fd,c.encode(value,512)+b'\n')
+        except OSError:pass
+    def mark(self,stage):
+        require(stage in OWNER_STAGES,'invalid_request')
+        if not self.failed and stage!=self.stage:
+            require(self.stage is None or OWNER_STAGES.index(stage)>OWNER_STAGES.index(self.stage),'invalid_request')
+            self.stage=stage;self.write(dict(stage=stage))
+    def failure(self,error):
+        from . import contracts as c
+        if self.failed:return
+        self.failed=True
+        code=getattr(error,'code',None) if isinstance(error,c.CoordinatorError) else None
+        number=getattr(error,'errno',None) if isinstance(error,OSError) else None
+        self.write(dict(stage=self.stage,exception_class=type(error).__name__ if type(error).__name__ in OWNER_EXCEPTIONS else 'unknown',
+            coordinator_code=code if type(code) is str and code in c.ERRORS else None,
+            os_errno=number if type(number) is int and 0<number<=4095 else None,stop_reason=self.stop_reason))
+    def close(self):os.close(self.fd)
+
+
+def owner_trace(raw):
+    """Root parses only the closed diagnostic surface, never adopts it as proof."""
+    from . import contracts as c
+    try:
+        require(type(raw) is bytes and 0<len(raw)<=OWNER_DIAGNOSTIC_LIMIT and raw.endswith(b'\n'),'unauthorized')
+        rows=raw.splitlines();require(len(rows)<=len(OWNER_STAGES)+1,'unauthorized')
+        last=-1;failure=None
+        for line in rows:
+            value=c.decode(line,512);require(type(value) is dict and value.get('stage') in OWNER_STAGES,'unauthorized')
+            index=OWNER_STAGES.index(value['stage'])
+            if set(value)=={'stage'}:
+                require(failure is None and index>last,'unauthorized');last=index
+            else:
+                c.closed(value,{'stage','exception_class','coordinator_code','os_errno','stop_reason'})
+                require(failure is None and index==last
+                    and value['exception_class'] in OWNER_EXCEPTIONS|{'unknown'}
+                    and (value['coordinator_code'] is None or type(value['coordinator_code']) is str and value['coordinator_code'] in c.ERRORS)
+                    and (value['os_errno'] is None or type(value['os_errno']) is int and 0<value['os_errno']<=4095)
+                    and value['stop_reason'] in {None,'canceled','deadline'},'unauthorized')
+                failure=value
+        return dict(report_status='failure' if failure else 'stage_only',stage=OWNER_STAGES[last],
+            exception_class=None if failure is None else failure['exception_class'],
+            coordinator_code=None if failure is None else failure['coordinator_code'],
+            os_errno=None if failure is None else failure['os_errno'],
+            stop_reason=None if failure is None else failure['stop_reason'])
+    except Exception:
+        return dict(report_status='unavailable' if raw==b'' else 'invalid',stage='unreported',
+            exception_class=None,coordinator_code=None,os_errno=None,stop_reason=None)
+
 
 def hold_diagnostic(session,error=None,child_name=None):
     """Closed data only; never str(error), traceback, source, paths or nonce."""
@@ -158,6 +233,7 @@ class Session:
         self.gate_id='claim_publish';self.subphase='claim'
         self.source_gate_verified=self.source_open_started=False
         self.first_hold_diagnostic=None
+        self.owner_trace_fd=None;self.owner_diagnostic=None
         self.started=time.monotonic_ns();self.deadline=self.started+self.policy.attempt_seconds*10**9
 
     def left(self):
@@ -294,21 +370,47 @@ class Session:
             require(identity(os.fstat(fd))==expected[:2],'unsafe_path');self.sources[kind]=fd
         self.at('owner_helper','source_view');self.ram.source_view(self.sources)
         parent,child=r4_ipc.pair();self.channels['owner']=parent
-        auth=memory_document(dict(profile=asdict(self.profile),queue=self.owner.store.read(),job_id=self.job['job_id'],
+        self.owner_trace_fd,diagnostic=os.pipe2(os.O_CLOEXEC|os.O_NONBLOCK)
+        auth=None
+        try:
+            auth=memory_document(dict(profile=asdict(self.profile),queue=self.owner.store.read(),job_id=self.job['job_id'],
             binding=self.binding,root=str(self.ram.root),namespace=list(self.namespace.current),leaf=self.leaf.relative,
             parent_pid=os.getpid(),parent_start=start_ticks(os.getpid()),deadline_ns=self.deadline,channel_fd=child.fileno(),
-            source_identities={kind:list(identity(os.fstat(fd))) for kind,fd in self.sources.items()}))
-        try:
+            diagnostic_fd=diagnostic,source_identities={kind:list(identity(os.fstat(fd))) for kind,fd in self.sources.items()}))
             self.at('owner_helper','spawn')
             process=subprocess.Popen([self.profile.python,'-B','-E','-s','-m',
                 'app.db_audit_coordinator.r4_owner_helper',str(auth)],cwd=self.profile.release_root,
                 env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'},
                 stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-                close_fds=True,pass_fds=(auth,child.fileno()),shell=False)
+                close_fds=True,pass_fds=(auth,child.fileno(),diagnostic),shell=False)
             helper=Child(process);self.children['owner']=helper
             require(membership(helper.pid)==self.leaf.relative,'unauthorized')
             self.phase='owner';self.watch('owner',helper,parent,self.policy.uid)
-        finally:os.close(auth);child.close()
+        finally:
+            if auth is not None:os.close(auth)
+            os.close(diagnostic);child.close()
+
+    def owner_outcome(self,helper):
+        """Exactly one root log after positive reap; never changes queue/result."""
+        from . import contracts as c
+        if self.owner_diagnostic is not None:return
+        code=helper.reaped()
+        raw=b''
+        if self.owner_trace_fd is not None:
+            try:
+                try:raw=os.read(self.owner_trace_fd,OWNER_DIAGNOSTIC_LIMIT+1)
+                except OSError:pass
+            finally:os.close(self.owner_trace_fd);self.owner_trace_fd=None
+        detail=owner_trace(raw)
+        outcome=('complete' if code==0 and self.backup_done and not self.canceled else
+            'canceled' if self.canceled or detail['stop_reason']=='canceled' else
+            'deadline' if detail['stop_reason']=='deadline' else
+            'pre_ready_exit' if not self.owner_ready else 'backup_abort')
+        self.owner_diagnostic=dict(event='qio226_r4_owner_outcome',version=1,
+            job_id=c.identifier(self.job['job_id']),attempt_id=c.identifier(self.job['attempt_id']),
+            seq=integer(self.job['seq'],1),child_exit_code=code,outcome=outcome,
+            owner_ready_received=self.owner_ready,owner_done_received=self.backup_done,**detail)
+        emit_hold(self.owner_diagnostic)  # Same protected root-only bounded sink.
 
     def cancel(self):
         from . import r4_ipc
@@ -370,6 +472,7 @@ class Session:
             if helper is not None and helper.waited and self.phase=='owner':
                 self.at('owner_helper','reap')
                 code=helper.reaped()
+                self.owner_outcome(helper)
                 require(set(self.leaf.samples()[-1].procs)=={os.getpid(),self.children['worker'].pid},'orphan_hold')
                 self.guard()
                 node=self.leaf.samples()[-1]
@@ -464,6 +567,7 @@ class Session:
             self.hold(error);return False
 
     def hold(self,error=None,*,child_name=None):
+        from . import contracts as c
         first=not self.held
         self.held=True;self.owner.orphan_hold=True
         # This is NOT terminal/reap/cleanup. Retain the entire job and locks;
@@ -476,6 +580,13 @@ class Session:
         if first:
             self.first_hold_diagnostic=hold_diagnostic(self,error,child_name)
             emit_hold(self.first_hold_diagnostic)
+            helper=getattr(self,'children',{}).get('owner')
+            if helper is not None:
+                if not helper.waited:
+                    helper.exited.wait(max(0,min(.25,(self.deadline-time.monotonic_ns())/1e9)))
+                if helper.waited:
+                    try:self.owner_outcome(helper)
+                    except c.CoordinatorError:pass  # Uncertain reap is never an exit-status receipt.
 
     def expire(self):
         if self.done:return

@@ -18,6 +18,112 @@ from tests.db_audit_coordinator.test_b2_live_policy import profile,policy,STORES
 POSIX=pytest.mark.skipif(sys.platform!='linux',reason='R4 native Unix descriptor/credentials contract')
 
 
+@POSIX
+def test_04E_trace_budget_cloexec_first_progress_first_failure_and_no_secret_bytes():
+    from app.db_audit_coordinator.r4_release import OwnerTrace,OWNER_STAGES,OWNER_DIAGNOSTIC_LIMIT,owner_trace
+    read,write=os.pipe2(os.O_CLOEXEC|os.O_NONBLOCK)
+    trace=OwnerTrace(write)
+    try:
+        assert not os.get_inheritable(write)
+        for stage in OWNER_STAGES:
+            trace.mark(stage)
+            if stage=='backup_progress':
+                for _ in range(10000):trace.mark(stage)
+        trace.failure(PermissionError(13,'SECRET /original/source SQL nonce payload'))
+        trace.failure(RuntimeError('SECOND_SECRET'))
+        raw=os.read(read,OWNER_DIAGNOSTIC_LIMIT+1)
+        assert len(raw)<OWNER_DIAGNOSTIC_LIMIT and len(raw.splitlines())==len(OWNER_STAGES)+1
+        result=owner_trace(raw)
+        assert result==dict(report_status='failure',stage='finished',exception_class='PermissionError',
+            coordinator_code=None,os_errno=13,stop_reason=None)
+        assert not any(word in raw for word in (b'SECRET',b'/original',b'nonce',b'payload',b'SQL'))
+    finally:trace.close();os.close(read)
+
+
+@POSIX
+def test_04E_broken_diagnostic_reader_cannot_change_helper_code_or_retry():
+    from app.db_audit_coordinator.r4_release import OwnerTrace
+    read,write=os.pipe2(os.O_CLOEXEC|os.O_NONBLOCK);os.close(read)
+    trace=OwnerTrace(write)
+    try:
+        trace.mark('auth_document');trace.mark('profile_parse')
+        trace.failure(c.CoordinatorError('not_admitted'))
+    finally:trace.close()
+
+
+@pytest.mark.parametrize('fault',['empty','truncated','oversize','unknown','unknown_field','duplicate_stage',
+    'backwards','unknown_exception','raw_code','bool_errno','large_errno','unknown_stop','extra_after_failure'])
+def test_04E_root_rejects_malformed_private_owner_report_without_echoing_it(fault):
+    from app.db_audit_coordinator.r4_release import owner_trace,OWNER_DIAGNOSTIC_LIMIT
+    row=dict(stage='source_open',exception_class='PermissionError',coordinator_code=None,os_errno=13,stop_reason=None)
+    marker=c.encode(dict(stage='source_open'))+b'\n'
+    if fault=='empty':raw=b''
+    elif fault=='truncated':raw=marker[:-1]
+    elif fault=='oversize':raw=b'x'*(OWNER_DIAGNOSTIC_LIMIT+1)
+    elif fault=='unknown':raw=c.encode(dict(stage='SECRET /original/path'))+b'\n'
+    elif fault=='duplicate_stage':raw=marker+marker
+    elif fault=='backwards':raw=marker+c.encode(dict(stage='auth_document'))+b'\n'
+    else:
+        if fault=='unknown_field':row['payload']='SECRET'
+        elif fault=='unknown_exception':row['exception_class']='SECRET'
+        elif fault=='raw_code':row['coordinator_code']='SECRET'
+        elif fault=='bool_errno':row['os_errno']=True
+        elif fault=='large_errno':row['os_errno']=100000
+        elif fault=='unknown_stop':row['stop_reason']='SECRET'
+        raw=marker+c.encode(row)+b'\n'
+        if fault=='extra_after_failure':raw+=c.encode(dict(stage='finished'))+b'\n'
+    result=owner_trace(raw)
+    assert result['report_status']==('unavailable' if fault=='empty' else 'invalid')
+    assert result['stage']=='unreported' and result['exception_class'] is None
+    assert not any(word in c.encode(result).decode() for word in ('SECRET','/original','payload'))
+
+
+@pytest.mark.parametrize('ready,done,code,stop,expected',[
+    (False,False,3,None,'pre_ready_exit'),(True,False,-9,None,'backup_abort'),
+    (True,False,3,'canceled','canceled'),(True,False,3,'deadline','deadline'),
+    (True,True,0,None,'complete')])
+def test_04E_one_root_event_after_positive_reap_does_not_mutate_job_result(ready,done,code,stop,expected,monkeypatch):
+    from types import SimpleNamespace
+    from app.db_audit_coordinator import r4_release as release
+    subject=release.Session.__new__(release.Session)
+    subject.job=record();subject.job['seq']=1;before=copy.deepcopy(subject.job)
+    subject.owner_trace_fd=None;subject.owner_diagnostic=None
+    subject.owner_ready=ready;subject.backup_done=done;subject.canceled=False
+    detail=dict(report_status='failure',stage='backup_progress',exception_class='CoordinatorError',
+        coordinator_code='canceled' if stop=='canceled' else 'not_admitted',os_errno=None,stop_reason=stop)
+    monkeypatch.setattr(release,'owner_trace',lambda raw:detail)
+    events=[];monkeypatch.setattr(release,'emit_hold',events.append)
+    helper=SimpleNamespace(reaped=lambda:code)
+    subject.owner_outcome(helper);subject.owner_outcome(helper)
+    assert len(events)==1 and events[0]['outcome']==expected and events[0]['child_exit_code']==code
+    assert subject.job==before and subject.owner_trace_fd is None
+
+
+def test_04E_uncertain_reap_cannot_be_logged_as_a_confirmed_exit(monkeypatch):
+    from types import SimpleNamespace
+    from app.db_audit_coordinator import r4_release as release
+    subject=release.Session.__new__(release.Session);subject.owner_diagnostic=None
+    def uncertain():raise c.CoordinatorError('orphan_hold')
+    events=[];monkeypatch.setattr(release,'emit_hold',events.append)
+    with pytest.raises(c.CoordinatorError):subject.owner_outcome(SimpleNamespace(reaped=uncertain))
+    assert events==[]
+
+
+def test_04E_diagnostic_wait_cannot_extend_expired_root_deadline(monkeypatch):
+    from types import SimpleNamespace
+    from app.db_audit_coordinator import r4_release as release
+    job=record();job.update(seq=1,reason_code='running',state='running')
+    state=dict(jobs=[copy.deepcopy(job)])
+    subject=release.Session.__new__(release.Session);subject.job=job
+    subject.owner=SimpleNamespace(_state=lambda:copy.deepcopy(state),_commit=lambda value:None)
+    subject.held=False;subject.deadline=0
+    waits=[];subject.children=dict(owner=SimpleNamespace(waited=False,exited=SimpleNamespace(wait=waits.append)))
+    events=[];monkeypatch.setattr(release,'emit_hold',events.append)
+    subject.hold(c.CoordinatorError('not_admitted'))
+    assert waits==[0] and subject.held and subject.owner.orphan_hold
+    assert len(events)==1 and events[0]['event']=='qio226_r4_first_hold'
+
+
 def proof(image=True):
     source=[[1,2,8192],{'-wal':[1,3,4096],'-shm':[1,4,32768],'-journal':None}]
     digest=hashlib.sha256(c.encode(source)).hexdigest()

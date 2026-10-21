@@ -1,5 +1,60 @@
 # QIO226 / 04D R4 — pinned T3 directory capability and first-HOLD attribution
 
+## 04E owner-helper diagnostic amendment — source review, not a retry GO
+
+Authority: Issue226 SysAdmin handoff6305336464 plus Owner Coder directive.
+Exact source parent is accepted04D86976fa0b55a6f4faf490a66743d52da6397d1f9.
+The reported R2 actual experiment ended with three deferred/worker_crashed,
+snapshot=null and positive root release, NOT three T3 PASS. Earlier original
+queues were separately archived by SysAdmin; Coder does not independently
+inspect or reconcile those captured facts. No blind repeat, installation or
+new queue is authorized by this source-only amendment.
+
+04E adds a separate root-created anonymous nonblocking diagnostic FIFO, passed
+only to the exact owner-helper through its sealed private job document. It is
+not a source/host/root-directory FD or public endpoint. No uid/pid credential
+acceptance is widened on the existing authenticated R4 socket. The write end
+is close-on-exec inside helper; no parent writer or worker writer survives.
+
+Closed marker stages cover sealed document/profile, before/after parent and
+namespace verification, artifact/import provenance, chroot, UID/GID drop and
+receipt checks, owner_ready, BEGIN, RO source open/metadata, destination,
+backup start/first progress/completion, close and owner_done/cleanup. Only the
+first progress writes a marker, never one per page/batch. The entire fixed
+trace plus one typed first-failure record fits4096 bytes; writes never wait,
+retry or log raw exception text. A broken diagnostic sink cannot repair or
+change the helper result. Missing/truncated/extra/unknown diagnostic content
+is explicitly unavailable/invalid, not proof of any particular SQLite error.
+
+Root reads/closes that FIFO only after positive existing pidfd/wait reap.
+Exactly one `qio226_r4_owner_outcome` event/version1 per helper contains job and
+attempt UUID/seq, observed child exit code, root-received ready/done booleans,
+closed outcome and last stage, whitelisted exception class/closed code/numeric
+errno and optional canceled/deadline stop_reason. No source paths, data, SQL,
+keys, nonce, payload, traceback or subprocess stderr. Root resource HOLD also
+may observe an already-exited helper through at most250ms reaper-event wait;
+it never cleans/adopts an uncertain process. Existing root-only protected
+journal/evidence routing remains required. No public/durable JSON schema change.
+
+`outcome=complete` means ONLY helper exit0 + authenticated owner_done, never T3
+PASS. Pre-ready nonzero exit is separate from ready backup abort. A signal has
+its positively observed negative exit code and last received stage, without
+invented exception. `unreported` means import/sealed-auth/diagnostic setup was
+not observed, NOT a guessed root cause. Existing canceled CoordinatorError
+normalizes to coordinator_unavailable; the separate closed stop_reason now
+identifies observed cancellation without changing that legacy error contract.
+
+Admission, RO bindings/source checks, Backup API, scopes, source UID/GIDs,
+nonowner T3/two-FD proc bridge, memory/no-swap, reaps and release/FIFO remain.
+The actual umask077→022 launcher correction is SysAdmin-owned, not a source
+chmod, group widening or cgroup-policy patch in04E. On runtime errors preserve
+the original deferred/non-success or orphan HOLD, never fabricate success.
+Native injections at READY can still hit the unchanged live-membership HOLD
+gate if the helper dies before the root checks it; diagnostic does not bypass it.
+
+PUSH/PR/INSTALL/REAL_ORIGINALS_RETRY/PRODUCTION=HOLD pending independent review
+and separate exact SysAdmin/Owner authority. No old-LAB action by Coder.
+
 ## 04D superseding disposition — code review only, real queue remains held
 
 Authority: Issue226 comments6303245042 and6304411705. Parent is accepted04C

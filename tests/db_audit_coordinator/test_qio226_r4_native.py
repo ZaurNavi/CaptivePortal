@@ -436,6 +436,24 @@ from app.db_audit_coordinator.live_profile import PilotProfile
 helper.RAM_ROOT=sys.argv[2]
 PilotProfile.artifact=lambda self:None
 helper.import_roots=lambda:None  # QA provenance exception, never installed F2 PASS.
+scenario=sys.argv[3] if len(sys.argv)>3 else ''
+if scenario.startswith('04e_'):
+ import time
+ from app.db_audit_coordinator import contracts as c
+ if scenario=='04e_unreported':time.sleep(.1);os._exit(3)
+ if scenario=='04e_expired':
+  read=helper.readonly_document
+  def document(*args,**kwargs):
+   value=read(*args,**kwargs);value['deadline_ns']=time.monotonic_ns()-1;return value
+  helper.readonly_document=document
+ else:
+  stage=scenario.removeprefix('04e_');original_mark=helper.OwnerTrace.mark
+  def mark(self,name):
+   original_mark(self,name)
+   if name==stage:
+    if stage=='begin_wait':os.kill(os.getpid(),9)  # Real abrupt death, no Python failure handler.
+    raise PermissionError(13,'SECRET /source/path SQL nonce CANARY')
+  helper.OwnerTrace.mark=mark
 drop=helper.drop_owner
 def exact_owner(uid,gid):
  drop(uid,gid)  # REAL credential change, not a test substitute.
@@ -622,12 +640,29 @@ try:
     print(json.dumps(dict(crash=sys.argv[1],orphan_hold=True,next_fifo=False,diagnostic=diagnostic,
      source_hashes_unchanged=before==[hashes(p.source) for p in policies])))
     break
+   if sys.argv[1].startswith('04e_') and subject.orphan_hold:
+    assert [job['state'] for job in subject.store.read()['jobs']]==['running','queued','queued']
+    assert subject.store.read()['jobs'][0]['audit_result'] is None
+    assert not subject.dispatch_one() and not subject.store.read()['last_verified_success_by_store']
+    print(json.dumps(dict(fault=sys.argv[1],positive_release=False,orphan_hold=True,
+     source_hashes_unchanged=before==[hashes(p.source) for p in policies])))
+    break
    if subject.orphan_hold or subject.process is not None:
     log.flush();raise AssertionError((subject._r4.phase,subject.store.read(),(root/'children.log').read_text()))
    assert len(subject.r4_proofs)==number+1
    assert subject.r4_proofs[-1]['empty_observations']==2
+   if sys.argv[1].startswith('04e_'):break
    if sys.argv[1]=='helper_death':break
-  if sys.argv[1] in {'validator_death','pre_ready_exit'} or sys.argv[1] in faults:pass
+  if sys.argv[1].startswith('04e_'):
+   final=subject.store.read()
+   if not subject.orphan_hold:
+    assert [job['state'] for job in final['jobs']]==['deferred','queued','queued']
+    assert final['jobs'][0]['reason_code']=='worker_crashed' and final['jobs'][0]['audit_result']['snapshot_id'] is None
+    assert subject.r4_proofs[-1]['helper_reaped'] and subject.r4_proofs[-1]['cleanup_complete']
+    assert subject.r4_proofs[-1]['snapshot'] is None
+    assert not final['last_verified_success_by_store']
+    print(json.dumps(dict(fault=sys.argv[1],positive_release=True,source_hashes_unchanged=before==[hashes(p.source) for p in policies])))
+  elif sys.argv[1] in {'validator_death','pre_ready_exit'} or sys.argv[1] in faults:pass
   elif sys.argv[1]=='helper_death':
    assert fault_killed and subject.store.read()['jobs'][0]['state']=='deferred'
    assert subject.store.read()['jobs'][0]['audit_result']['reason_code']=='worker_crashed'
@@ -659,6 +694,7 @@ finally:
    for thread in session.threads:thread.join(timeout=2)
    if session.image_fd is not None:os.close(session.image_fd)
    if session.final_fd is not None:os.close(session.final_fd)
+   if session.owner_trace_fd is not None:os.close(session.owner_trace_fd)
    for fd in session.sources.values():os.close(fd)
    if session.ram is not None and session.ram.mounted:
     for folder in (session.ram.stage,session.ram.final):
@@ -708,6 +744,51 @@ def test_K07_native_kill_exact_helper_or_validator_never_fabricates_success(scen
     if scenario=='validator_death':assert result['orphan_hold'] and not result['next_fifo']
     else:assert result['positive_release']
     record_property('native_fault',json.dumps(result,sort_keys=True))
+
+
+@NATIVE
+@pytest.mark.parametrize('stage',['auth_document','profile_parse','parent_verify','parent_verified',
+    'namespace_view','artifact','imports','receipt_open','chroot','chroot_entered','credential_drop',
+    'credentials_dropped','owner_ready','begin_wait','source_guard','source_open','source_opened',
+    'source_metadata','destination_open','backup_start','backup_progress','backup_complete',
+    'connections_close','owner_done','owner_done_sent','cleanup','unreported','expired'])
+def test_04E_native_actual_owner_boundary_is_reported_once_after_positive_reap(stage,record_property):
+    process=subprocess.run([sys.executable,'-B','-E','-s','-c',PIPELINE_DRIVER,'04e_'+stage],cwd=ROOT,
+        capture_output=True,text=True,timeout=30)
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout)
+    assert result['source_hashes_unchanged']
+    assert result['positive_release'] or stage in {'begin_wait','owner_ready'} and result['orphan_hold']
+    events=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{"event":"qio226_r4_owner_outcome"')]
+    assert len(events)==1
+    item=events[0]
+    assert item['stage']==('owner_ready' if stage=='expired' else stage)
+    assert item['child_exit_code']==(-9 if stage=='begin_wait' else 3)
+    if stage=='unreported':assert item['report_status']=='unavailable'
+    elif stage=='begin_wait':assert item['report_status']=='stage_only'
+    else:assert item['report_status']=='failure'
+    if stage=='expired':assert item['outcome']=='deadline' and item['stop_reason']=='deadline'
+    elif not item['owner_ready_received']:assert item['outcome']=='pre_ready_exit'
+    else:assert item['outcome']=='backup_abort'
+    assert not any(value in json.dumps(item) for value in ('SECRET','CANARY','/source','nonce','SQL'))
+    record_property('04e_owner_diagnostic',json.dumps(item,sort_keys=True))
+
+
+@NATIVE
+def test_04E_native_real_cancel_and_success_keep_original_three_job_release_semantics(record_property):
+    process=subprocess.run([sys.executable,'-B','-E','-s','-c',PIPELINE_DRIVER,'cancel_B'],cwd=ROOT,
+        capture_output=True,text=True,timeout=60)
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout)
+    assert result['states']==['completed','canceled','completed'] and result['source_hashes_unchanged']
+    events=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{"event":"qio226_r4_owner_outcome"')]
+    assert len(events)==3 and [event['outcome'] for event in events]==['complete','canceled','complete']
+    # Existing CoordinatorError normalizes canceled to this closed API code;
+    # diagnostic stop_reason disambiguates it without changing that contract.
+    assert events[1]['coordinator_code']=='coordinator_unavailable' and events[1]['stop_reason']=='canceled'
+    assert [event['child_exit_code'] for event in events]==[0,3,0]
+    assert [events[i]['stage'] for i in (0,2)]==['finished','finished']
+    record_property('04e_cancel_and_success',json.dumps(events,sort_keys=True))
 
 
 @NATIVE
