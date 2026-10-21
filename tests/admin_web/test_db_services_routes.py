@@ -17,7 +17,7 @@ from app.settings_control.features import AdminFeaturePlanV1
 from app.settings_control.models import ResolvedSettingsSnapshot
 from tests.admin_web.conftest import enabled_settings, login, SITE_ID
 from tests.admin_web.test_operations_inventory import resolved
-from tests.admin_web.test_operations_service import NOW, regular, systemd_text
+from tests.admin_web.test_operations_service import NOW, regular, systemd_text, operations_reader
 
 API = "/admin/api/v1/operations/db-services"
 HTML = "/admin/db-services"
@@ -155,7 +155,7 @@ def test_api_snapshot_partial_summary_and_exact_response_cap(monkeypatch):
     app, runtime, _ = operations_app(monkeypatch)
     # No real systemd or approved-root filesystem probes in focused fixtures.
     def failed(_cancel): raise OSError("SYNTHETIC_PRIVATE_STDERR")
-    runtime.operations_service = AdminOperationsReadService(resolved(), acquire=failed, lstat=regular, now=lambda: NOW)
+    runtime.operations_service = operations_reader(resolved(), acquire=failed, lstat=regular, now=lambda: NOW)
     response = logged_in(app).get(API, base_url="https://localhost")
     assert response.status_code == 200
     model = response.json

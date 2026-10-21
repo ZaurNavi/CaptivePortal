@@ -39,8 +39,37 @@ def regular(path):
                            st_ino=sum((i + 1) * ord(c) for i, c in enumerate(path)), st_dev=1)
 
 
+class SyntheticSensorMetadata:
+    """Explicit metadata seam for existing unit fixtures, never a production fallback."""
+    def __init__(self, bound, probe):
+        self.bound, self.probe = bound, probe
+
+    def read(self, _service, _now, *, deadline, monotonic, cancel):
+        stores = {}
+        for identity in ("network_attribution", "sensor_spool"):
+            rows = {}
+            for name, suffix in (("main", ""), ("wal", "-wal"), ("shm", "-shm")):
+                try:
+                    info = self.probe(self.bound.paths[identity] + suffix)
+                    rows[name] = dict(presence="present", bytes=info.st_size, reason=None)
+                except FileNotFoundError:
+                    rows[name] = dict(presence="absent", bytes=0, reason=None)
+                except OSError as error:
+                    rows[name] = dict(presence="unknown", bytes=None,
+                        reason="permission_denied" if isinstance(error, PermissionError) else "stat_unavailable")
+            if identity == "sensor_spool":
+                rows["journal"] = dict(presence="absent", bytes=0, reason=None)
+            stores[identity] = rows
+        return dict(status="fresh", reason=None, stores=stores, expires_boottime_ns=ops.boot_ns()+180_000_000_000)
+
+
+def operations_reader(bound, **options):
+    options.setdefault("sensor_metadata", SyntheticSensorMetadata(bound, options.get("lstat", missing)))
+    return ops.AdminOperationsReadService(bound, **options)
+
+
 def service(**kwargs):
-    return ops.AdminOperationsReadService(resolved(), acquire=lambda cancel: systemd_text(), now=lambda: NOW,
+    return operations_reader(resolved(), acquire=lambda cancel: systemd_text(), now=lambda: NOW,
                                          lstat=missing, **kwargs)
 
 
@@ -178,7 +207,7 @@ def test_full_snapshot_exact_shapes_no_sqlite_open_or_file_content_read(monkeypa
     reads, acquisitions = [], []
     def blocked(*args, **kwargs): raise AssertionError("content/SQLite open forbidden")
     def probe(path): reads.append(path); return regular(path)
-    subject = ops.AdminOperationsReadService(resolved(), acquire=lambda cancel: acquisitions.append(1) or systemd_text(),
+    subject = operations_reader(resolved(), acquire=lambda cancel: acquisitions.append(1) or systemd_text(),
         lstat=probe, now=lambda: NOW)
     with monkeypatch.context() as scoped:
         scoped.setattr(sqlite3, "connect", blocked)
@@ -207,7 +236,7 @@ def test_duplicate_inode_not_double_counted_and_storage_is_partial():
         row = regular(path)
         if path in collision: row.st_ino = 777
         return row
-    subject = ops.AdminOperationsReadService(bound, acquire=lambda c: systemd_text(), lstat=probe, now=lambda: NOW)
+    subject = operations_reader(bound, acquire=lambda c: systemd_text(), lstat=probe, now=lambda: NOW)
     model = subject.read("test")
     subject.close()
     assert all(r["operational_state"] == "unknown" and r["total_footprint_bytes"] is None for r in model["databases"][:2])
@@ -218,7 +247,7 @@ def test_duplicate_inode_not_double_counted_and_storage_is_partial():
 
 def test_subprocess_failure_retains_independent_db_evidence():
     def fail(_cancel): raise OSError("SYNTHETIC_PRIVATE_STDERR")
-    subject = ops.AdminOperationsReadService(resolved(), acquire=fail, lstat=regular, now=lambda: NOW)
+    subject = operations_reader(resolved(), acquire=fail, lstat=regular, now=lambda: NOW)
     model = subject.read("test")
     subject.close()
     assert len(model["partial_failures"]) == 9
@@ -230,7 +259,7 @@ def test_subprocess_failure_retains_independent_db_evidence():
 def test_cache_coalesces_twenty_callers_ttl_and_stale_projection():
     clock, calls = [0.0], []
     def acquire(_cancel): calls.append(1); return systemd_text()
-    subject = ops.AdminOperationsReadService(resolved(), acquire=acquire, lstat=regular, now=lambda: NOW, monotonic=lambda: clock[0])
+    subject = operations_reader(resolved(), acquire=acquire, lstat=regular, now=lambda: NOW, monotonic=lambda: clock[0])
     with ThreadPoolExecutor(max_workers=20) as pool:
         models = list(pool.map(lambda i: subject.read(str(i)), range(20)))
     assert calls == [1] and len({m["request_id"] for m in models}) == 20
@@ -260,7 +289,7 @@ def test_first_wait_hung_job_no_replacement_and_close_nonblocking():
     entered, release, calls = threading.Event(), threading.Event(), []
     clock = [0]
     def held(cancel): calls.append(1); entered.set(); release.wait(3); return systemd_text()
-    subject = ops.AdminOperationsReadService(resolved(), acquire=held, lstat=regular, now=lambda: NOW, monotonic=lambda: clock[0])
+    subject = operations_reader(resolved(), acquire=held, lstat=regular, now=lambda: NOW, monotonic=lambda: clock[0])
     started = time.monotonic()
     with pytest.raises(ops.OperationsError, match="snapshot_pending"): subject.read("first")
     assert entered.is_set() and time.monotonic() - started < .4
@@ -276,7 +305,7 @@ def test_failed_sample_throttled_no_queued_jobs_and_cap():
     clock, calls = [0], []
     def fail(cancel): calls.append(1); raise OSError()
     def denied(path): raise PermissionError()
-    subject = ops.AdminOperationsReadService(resolved(), acquire=fail, lstat=denied, now=lambda: NOW, monotonic=lambda: clock[0])
+    subject = operations_reader(resolved(), acquire=fail, lstat=denied, now=lambda: NOW, monotonic=lambda: clock[0])
     for _ in range(3):
         with pytest.raises(ops.OperationsError, match="operations_unavailable"): subject.read("test")
     assert calls == [1]
@@ -308,7 +337,7 @@ def test_slow_failure_retry_is_throttled_from_completion_not_start():
     clock, calls = [0], []
     def fail(cancel): calls.append(1); clock[0] += 10; raise OSError()
     def denied(path): raise PermissionError()
-    subject = ops.AdminOperationsReadService(resolved(), acquire=fail, lstat=denied, now=lambda: NOW, monotonic=lambda: clock[0])
+    subject = operations_reader(resolved(), acquire=fail, lstat=denied, now=lambda: NOW, monotonic=lambda: clock[0])
     with pytest.raises(ops.OperationsError): subject.read("first")
     assert calls == [1]
     clock[0] = 39
@@ -328,7 +357,7 @@ def test_component_path_alias_sampled_only_once_and_not_double_counted():
     value["databases"][1]["path"] = "/opt/CaptivePortal/data/alias.db-wal"
     paths = []
     def probe(path): paths.append(path); return regular(path)
-    subject = ops.AdminOperationsReadService(parse_inventory(json.dumps(value).encode()), acquire=lambda c: systemd_text(),
+    subject = operations_reader(parse_inventory(json.dumps(value).encode()), acquire=lambda c: systemd_text(),
                                             lstat=probe, now=lambda: NOW)
     model = subject.read("aliases")
     subject.close()
@@ -343,3 +372,89 @@ def test_oversize_read_model_cannot_be_reported_as_success():
         subject._cache[0]["services"][0]["label"] = "SYNTHETIC" * 7000
     with pytest.raises(ops.OperationsError): subject.read("oversize")
     subject.close()
+
+
+@pytest.mark.parametrize("store_id", ["network_attribution", "sensor_spool"])
+@pytest.mark.parametrize("error,expected_reason,expected_state", [
+    (PermissionError, "metadata_permission_boundary", "unknown"),
+    (OSError, "stat_unavailable", "unknown"),
+    (FileNotFoundError, "file_missing", "unavailable"),
+])
+def test_wp1_sensor_permission_reason_requires_actual_permission_failure(store_id, error, expected_reason, expected_state):
+    item = next(s for s in STORES if s.id == store_id)
+    calls = []
+    def probe(path):
+        calls.append(path)
+        raise error("/private/SYNTHETIC_NO_RAW_EXCEPTION")
+    row, identities, partial = ops.store_row(item, "expected", "/safe/owned.db", NOW, probe,
+        deadline=1, monotonic=lambda: 0, cancel=threading.Event())
+    assert len(calls) == 3 and identities == [None] * 3
+    assert row["operational_state"] == expected_state and row["reason_code"] == expected_reason
+    assert row["health_evidence"] == "none" and row["health_checked_at_utc"] is None
+    if error is not FileNotFoundError:
+        assert row["file_presence"] == "unknown" and partial is True
+        assert all(row[k] is None for k in ("main_file_bytes", "wal_bytes", "shm_bytes", "total_footprint_bytes"))
+    assert "SYNTHETIC_NO_RAW_EXCEPTION" not in json.dumps(row) and "/private/" not in json.dumps(row)
+
+
+@pytest.mark.parametrize("effective", ["true", "false", None])
+def test_wp1_settings_ambient_flag_and_absence_cannot_prove_deployment_intent(monkeypatch, effective):
+    from tests.admin_web.test_operations_inventory import manifest
+    value = manifest()
+    next(row for row in value["databases"] if row["id"] == "settings")["intent"] = "unknown"
+    if effective is None:
+        monkeypatch.delenv("WEB_ADMIN_SETTINGS_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("WEB_ADMIN_SETTINGS_ENABLED", effective)
+    subject = operations_reader(resolved(**value), acquire=lambda c: systemd_text(), lstat=missing, now=lambda: NOW)
+    try:
+        row = next(row for row in subject.read("settings-intent")["databases"] if row["id"] == "settings")
+        assert row["expected_mode"] == row["operational_state"] == "unknown"
+        assert row["file_presence"] == "absent" and row["reason_code"] == "intent_unknown"
+    finally:
+        subject.close()
+
+
+@pytest.mark.parametrize("intent,state,reason", [
+    ("unknown", "unknown", "intent_unknown"),
+    ("optional_disabled", "not_provisioned", "configured_disabled"),
+    ("expected", "unavailable", "file_missing"),
+])
+def test_wp1_settings_absence_uses_only_explicit_trusted_binding(intent, state, reason):
+    item = next(s for s in STORES if s.id == "settings")
+    row, _, _ = ops.store_row(item, intent, "/safe/settings.sqlite3", NOW, missing,
+        deadline=1, monotonic=lambda: 0, cancel=threading.Event())
+    assert (row["operational_state"], row["reason_code"]) == (state, reason)
+    assert row["file_presence"] == "absent" and row["health_evidence"] == "none"
+
+
+def test_wp1_permission_coverage_preserves_v1_counts_and_does_not_double_count_unknowns():
+    from tests.admin_web.test_operations_inventory import manifest
+    value = manifest()
+    next(row for row in value["databases"] if row["id"] == "settings")["intent"] = "unknown"
+    bound = resolved(**value)
+    calls = []
+    def probe(path):
+        calls.append(path)
+        if path.startswith(tuple(bound.paths[s] for s in ("network_attribution", "sensor_spool"))):
+            raise PermissionError("PRIVATE_PERMISSION_CANARY")
+        if path.startswith(bound.paths["settings"]):
+            raise FileNotFoundError()
+        return regular(path)
+    subject = operations_reader(bound, acquire=lambda c: systemd_text(), lstat=probe, now=lambda: NOW)
+    try:
+        model = subject.read("wp1-synthetic")
+        assert len(calls) == len(set(calls)) == 51
+        assert model["api_version"] == "admin.operations.db-services.v1"
+        assert model["summary"]["services"]["running"] == 9
+        assert all(row["application_health"] == "unknown" for row in model["services"])
+        assert model["summary"]["databases"]["present_unverified"] == 14
+        assert model["summary"]["databases"]["available"] == 0
+        assert model["summary"]["problems"] == {"established": 0, "unknown_or_stale": 3}
+        assert model["summary"]["storage"] == dict(known_footprint_bytes=14 * 128,
+            total_complete=False, unknown_store_count=2, coverage="partial")
+        assert model["partial_failures"] == [dict(source="db_stat", id=s, code="metadata_permission_boundary")
+            for s in ("network_attribution", "sensor_spool")]
+        assert "PRIVATE_PERMISSION_CANARY" not in json.dumps(model)
+    finally:
+        subject.close()
