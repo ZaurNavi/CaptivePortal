@@ -62,7 +62,7 @@ def test_v2_truthful_native_health_and_v1_identical_projection(monkeypatch,nativ
         assert sensor['operational_state']=='running' and sensor['application_health']==state
         assert all(r['application_health']=='unknown' for r in model['services'] if r['id']!='fingerprint_sensor')
         for row in model['databases']:
-            assert row['store_verification']==dict(status='not_attested',scope=None,as_of=None,source='none')
+            assert row['store_verification']==dict(status='not_attested',scope=None,as_of=None,source='none',last_result=None,binding='unknown')
             assert row['health_evidence']=='none' and row['schema_observed_version'] is None
         assert len(model['services'])==9 and len(model['databases'])==17
         assert len(model['topology']['nodes'])==31 and len(model['topology']['edges'])==45
@@ -73,7 +73,7 @@ def test_v2_truthful_native_health_and_v1_identical_projection(monkeypatch,nativ
         assert not any(x in json.dumps(model) for x in ('producer_epoch','boot_id','start_ticks','/source/','/var/lib/','/run/'))
         assert sum(model['summary']['application_health'].values())==9
         for new,previous in zip(model['databases'],old['databases']):
-            assert {k:new[k] for k in previous}==previous
+            assert {k:({field:value for field,value in new[k].items() if field not in {'last_result','binding'}} if k=='store_verification' else new[k]) for k in previous}==previous
         for new,previous in zip(model['services'],old['services']):
             assert {k:new[k] for k in previous if k!='application_health'}=={k:v for k,v in previous.items() if k!='application_health'}
         journal=next(r for r in model['databases'] if r['id']=='sensor_spool')

@@ -348,10 +348,13 @@ class AdminOperationsReadService:
             for row in result["databases"]:
                 record=check_records.get(row['id'])
                 expires=None if record is None else record['expires']
+                expired=expires is not None and boot_ns()>expires
                 row['store_verification']=project_verification(row['id'],record,
                     None if record is None else record['current_id'],intent=row['expected_mode'],
                     source_current=record is not None and record['source_current'],
-                    stale=stale or expires is not None and boot_ns()>expires)
+                    stale=stale or expired,
+                    binding_current=not stale and (row['id'] not in SENSOR_STORES or
+                        record is not None and record['source_current'] and not expired and row['file_presence']=='present'))
                 row["metadata_evidence"], row["journal_bytes"] = (
                     sensor_store_metadata(sensor_report, row["id"], boottime=boot_ns) if row["id"] in SENSOR_STORES
                     else (dict(source="sampler_lstat", state="stale" if stale else "fresh",

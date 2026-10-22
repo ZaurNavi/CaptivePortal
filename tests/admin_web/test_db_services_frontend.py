@@ -75,7 +75,7 @@ def test_static_page_has_accessible_sections_and_dedicated_controller():
     assert "site_id" not in js and "setInterval" not in js
 
 
-def test_topology_relations_are_neutral_static_and_geometry_has_no_polling():
+def test_topology_endpoint_colors_are_structural_not_live_flow_and_geometry_has_no_polling():
     root = Path(__file__).parents[2]
     css = (root / "app/admin_web/static/admin.css").read_text(encoding="utf-8")
     section = css.split("/* Operational Data Flow:",1)[1].split("#device-service-intelligence",1)[0]
@@ -83,8 +83,12 @@ def test_topology_relations_are_neutral_static_and_geometry_has_no_polling():
     assert "ops-relation-read_by" in section and "stroke-dasharray: 4 3" in section
     assert "@keyframes" not in section and "animation:" not in section
     assert 'data-state=' not in section and "active-flow" not in section
+    for state in ('operating','degraded','failed'):
+        assert f'data-condition="{state}"' in section
     js = (root / "app/admin_web/static/db_services.js").read_text(encoding="utf-8")
     assert js.count("await fetch(") == 1
     assert "requestAnimationFrame(geometry)" in js and 'addEventListener("resize", scheduleGeometry)' in js
     assert "ResizeObserver" not in js and "setInterval" not in js
     assert '"aria-hidden":"true", focusable:"false"' in js
+    assert 'not measured live data flow' in js and 'feedback loop' in js
+    assert 'localStorage' not in js and 'document.cookie' not in js
