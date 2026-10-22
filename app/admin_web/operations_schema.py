@@ -3,6 +3,7 @@ from app.operations_health import STATES, REASONS
 from app.device_fingerprint_sensor.operations_metadata import parse_stamp
 import math
 from .operations_inventory import SERVICES, STORES
+from app.operations_verification import validate_public
 
 SERVICE_KEYS = frozenset({"id", "label", "unit", "role", "expected_mode", "operational_state", "application_health",
     "active_state", "sub_state", "main_pid", "n_restarts", "started_at_utc", "uptime_seconds", "sampled_at_utc",
@@ -46,7 +47,9 @@ def validate_v2(model):
             require(type(evidence["observed_at"]) is str and type(evidence["received_at"]) is str)
     for row in model["databases"]:
         require(set(row) == STORE_KEYS)
-        require(row["store_verification"] == dict(status="not_attested", scope=None, as_of=None, source="none"))
+        try:validate_public(row['store_verification'],row['id'])
+        except (ValueError,TypeError,KeyError):require(False)
+        if row['store_verification']['status']=='not_applicable':require(row['expected_mode']=='optional_disabled')
         require(row["health_evidence"] == "none" and row["schema_observed_version"] is None)
         metadata = row["metadata_evidence"]
         require(type(metadata) is dict and set(metadata) == {"source", "state", "age", "ttl"})

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 SCHEMA = "captivprod.ops.sensor-metadata.v1"
 SCHEMA_V2 = "captivprod.ops.sensor-metadata.v2"
+SCHEMA_V3 = "captivprod.ops.sensor-metadata.v3"
 UNIT = "fingerprint-sensor.service"
 DIRECTORY = "/run/captiveportal-operations"
 CHILD = "sensor"
@@ -144,7 +145,7 @@ def unknown(reason):
     return {"presence": "unknown", "bytes": None, "reason": reason}
 
 
-def collect_components(paths, uid, *, deadline, monotonic=time.monotonic, cancel=None, lstat=os.lstat):
+def collect_components(paths, uid, *, deadline, monotonic=time.monotonic, cancel=None, lstat=os.lstat, identity_sink=None):
     require(set(paths) == set(COMPONENTS))
     stores, identities = {}, {}
     for identity, components in COMPONENTS.items():
@@ -163,6 +164,9 @@ def collect_components(paths, uid, *, deadline, monotonic=time.monotonic, cancel
                     else:
                         row = {"presence": "present", "bytes": info.st_size, "reason": None}
                         identities.setdefault((info.st_dev, info.st_ino), []).append((identity, component))
+                        if component == 'main' and identity_sink is not None:
+                            from app.operations_verification import opaque_identity
+                            identity_sink[identity] = opaque_identity(info)
                 except FileNotFoundError:
                     row = {"presence": "absent", "bytes": 0, "reason": None}
                 except PermissionError:
@@ -174,6 +178,7 @@ def collect_components(paths, uid, *, deadline, monotonic=time.monotonic, cancel
         if len(aliases) > 1:
             for identity, component in aliases:
                 stores[identity][component] = unknown("identity_collision")
+                if component == 'main' and identity_sink is not None:identity_sink.pop(identity,None)
     return stores
 
 
@@ -189,10 +194,11 @@ def decode(raw):
         raise MetadataUnavailable()
     value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
     require(type(value) is dict)
-    v2 = value.get("schema_version") == SCHEMA_V2
+    v3 = value.get('schema_version') == SCHEMA_V3
+    v2 = value.get("schema_version") in {SCHEMA_V2,SCHEMA_V3}
     require(set(value) == {"schema_version", "producer_unit", "producer", "epoch", "sequence",
-        "sample_time_utc", "sample_boottime_ns", "source_status", "stores"} | ({"application_health"} if v2 else set()))
-    require(value["schema_version"] in {SCHEMA, SCHEMA_V2} and value["producer_unit"] == UNIT)
+        "sample_time_utc", "sample_boottime_ns", "source_status", "stores"} | ({"application_health"} if v2 else set()) | ({'store_checks'} if v3 else set()))
+    require(value["schema_version"] in {SCHEMA, SCHEMA_V2,SCHEMA_V3} and value["producer_unit"] == UNIT)
     if v2:
         from app.operations_health import validate
         validate(value["application_health"], UNIT)
@@ -203,6 +209,9 @@ def decode(raw):
     require(type(value["epoch"]) is str and str(uuid.UUID(value["epoch"])) == value["epoch"])
     require(integer(value["sequence"], minimum=1) and integer(value["sample_boottime_ns"], (1 << 63)-1))
     parse_stamp(value["sample_time_utc"])
+    if v3:
+        from app.operations_verification import validate_checks
+        validate_checks(value['store_checks'],UNIT,parse_stamp(value['sample_time_utc']))
     require(type(value["stores"]) is dict and set(value["stores"]) == set(COMPONENTS))
     partial = False
     for identity, components in COMPONENTS.items():
@@ -248,8 +257,9 @@ class SensorMetadataPublisher:
             require(os.geteuid() == channel.sensor_uid)
             directory = channel.open()
             producer = self.identity(os.getpid(), channel.sensor_uid)
+            current_ids = {}
             stores = collect_components(self.paths, channel.sensor_uid, deadline=deadline,
-                monotonic=self.monotonic, cancel=cancel)
+                monotonic=self.monotonic, cancel=cancel, identity_sink=current_ids)
             self.sequence += 1
             value = dict(schema_version=SCHEMA, producer_unit=UNIT, producer=producer, epoch=self.epoch,
                 sequence=self.sequence, sample_time_utc=stamp(self.now()), sample_boottime_ns=self.boottime(),
@@ -259,6 +269,9 @@ class SensorMetadataPublisher:
                 health = self.health_provider()
             if health is not None:
                 value.update(schema_version=SCHEMA_V2, application_health=health)
+                from app.operations_verification import snapshot
+                checks=snapshot(UNIT,observed=current_ids,paths=self.paths)
+                if checks['checks']:value.update(schema_version=SCHEMA_V3,store_checks=checks)
             raw = json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("ascii")
             decode(raw)
             require(not cancel.is_set() and self.monotonic() < deadline)
@@ -330,6 +343,10 @@ class SensorMetadataReader:
             require(value["sample_boottime_ns"] >= producer["start_ticks"] * 1_000_000_000 // os.sysconf("SC_CLK_TCK"))
             sampled = parse_stamp(value["sample_time_utc"])
             require(sampled >= datetime.fromisoformat(service["started_at_utc"].replace("Z", "+00:00")))
+            checks=value.get('store_checks')
+            if checks is not None:
+                started=datetime.fromisoformat(service['started_at_utc'].replace('Z','+00:00'))
+                require(all(row['checked_at_utc'] is None or parse_stamp(row['checked_at_utc'])>=started for row in checks['checks'].values()))
             age = (now - sampled).total_seconds()
             boot_age = (self.boottime() - value["sample_boottime_ns"]) / 1_000_000_000
             require(age >= 0 and boot_age >= 0 and abs(age - boot_age) <= 5)
@@ -341,10 +358,12 @@ class SensorMetadataReader:
                     require(digest == self.last[3])
             require(monotonic() < deadline and not (cancel and cancel.is_set()))
             if max(age, boot_age) > TTL:
-                return {"status": "stale", "reason": "metadata_stale", "stores": None}
+                return {"status": "stale", "reason": "metadata_stale", "stores": None,
+                    **({'checks':checks,'producer':producer} if checks is not None else {})}
             self.last = producer, value["epoch"], value["sequence"], digest, sampled, value["sample_boottime_ns"]
             return {"status": "fresh", "reason": None, "stores": value["stores"],
                     "expires_boottime_ns": value["sample_boottime_ns"] + int(TTL * 1_000_000_000),
+                    **({'checks':checks} if checks is not None else {}),
                     **({"health": value["application_health"], "observed_at": value["sample_time_utc"],
                         "age": max(age, boot_age), "producer": producer} if "application_health" in value else {})}
         except Exception:

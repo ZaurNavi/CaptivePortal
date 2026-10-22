@@ -400,6 +400,8 @@ input[type="radio"] { width: auto; min-height: 0; }
 
 /* DB-SERVICES-01: global Operations page only. */
 #db-services-page { min-width: 0; }
+#db-services-page .ops-verification { grid-column: 1 / -1; display: grid; gap: .3rem; padding: .65rem .8rem; border-left: 3px solid var(--line); background: var(--surface-soft); border-radius: .4rem; font-size: .78rem; line-height: 1.5; }
+#db-services-page .ops-verification small { color: var(--muted); }
 #db-services-page .ops-status { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; margin-bottom: 1rem; color: var(--muted, #64748b); }
 #db-services-page .ops-status strong { color: var(--text, #172b4d); }
 #db-services-page .ops-warning { padding: .75rem 1rem; border: 1px solid #d9b96b; background: #fffbeb; border-radius: .65rem; color: #7c570d; }

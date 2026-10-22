@@ -48,7 +48,7 @@ def test_ni02_shared_UID_report_shape_freshness_and_bounded_IO(case,record_prope
     try:
         folder.chmod(0o755);child=folder/'ni02b';child.mkdir();os.chown(child,PORTAL,PRIVATE);child.chmod(0o700)
         code=folder/'code'
-        for name in ('app/network_metadata_projection/operations_health.py','app/device_fingerprint_sensor/operations_metadata.py','app/operations_health.py'):
+        for name in ('app/network_metadata_projection/operations_health.py','app/device_fingerprint_sensor/operations_metadata.py','app/operations_health.py','app/operations_verification.py'):
             target=code/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes((ROOT/name).read_bytes());target.chmod(0o644)
         for directory in [code,*[p for p in code.rglob('*') if p.is_dir()]]:directory.chmod(0o755)
         env=dict(os.environ,PYTHONPATH=str(code),PYTHONDONTWRITEBYTECODE='1')

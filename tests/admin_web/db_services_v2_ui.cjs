@@ -30,12 +30,15 @@ const context={document,window,Map,Set,Number,String,Array,Math,Promise,Date,
     if (scenario==="bad-reason") model.services[0].application_health_evidence.reason="/PRIVATE_XSS_CANARY";
     if (scenario==="false-green") {model.services[0].application_health=model.services[0].application_health_evidence.state="healthy";}
     if (scenario==="false-verified") model.databases[0].store_verification.status="verified";
+    if (scenario==="check-bad-scope") model.databases.find(r=>r.id==="visits").store_verification.scope=["integrity_check"];
+    if (scenario==="check-bad-owner") model.databases.find(r=>r.id==="visits").store_verification.source="fingerprint-sensor.service";
+    if (scenario==="check-raw-path") model.databases.find(r=>r.id==="visits").store_verification.path="/PRIVATE_XSS_CANARY";
     return {status:200,ok:true,json:async()=>model};
   }};
 const tick=async()=>{await new Promise(resolve=>setImmediate(resolve));};
 (async()=>{
   vm.runInNewContext(source,context,{timeout:1000});await tick();
-  const rejected=["401","403","503","bad-reason","false-green","false-verified"].includes(scenario);
+  const rejected=["401","403","503","bad-reason","false-green","false-verified","check-bad-scope","check-bad-owner","check-raw-path"].includes(scenario);
   assert.equal(calls.length,scenario==="fallback"?2:1);
   assert.equal(calls[0],"/admin/api/v2/operations/db-services");
   assert.equal(timers.size,1);assert.equal([...timers.values()][0].ms,15000);
@@ -46,8 +49,14 @@ const tick=async()=>{await new Promise(resolve=>setImmediate(resolve));};
     if(scenario!=="fallback"){
       assert(text(ids.get("ops-services")).includes("Health observed"));
       assert(text(ids.get("ops-services")).includes("Source-native ready; dependencies confirmed"));
-      assert(text(ids.get("ops-summary")).includes("No SQLite attestation collected"));
+      assert(text(ids.get("ops-summary")).includes(scenario.startsWith("check-") ? "Historical owner startup checks shown separately" : "No SQLite attestation collected"));
       assert(text(ids.get("ops-databases")).includes("DELETE journal (not included in main + WAL + SHM)"));
+      if(scenario.startsWith("check-")){
+        const expected={"check-passed":"Startup check passed","check-failed":"Startup check failed","check-stale":"Previously checked · stale evidence","check-settings":"Not applicable · Settings disabled"}[scenario];
+        assert(text(ids.get("ops-databases")).includes(expected));
+        assert(text(ids.get("ops-databases")).includes("SQLite quick_check"));
+        assert(!text(ids.get("ops-databases")).includes("full SQLite integrity_check"));
+      }
     }
   }
   assert(!text(ids.get("ops-services")).includes("PRIVATE_XSS_CANARY"));

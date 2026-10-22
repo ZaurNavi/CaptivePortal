@@ -20,6 +20,8 @@ from .operations_health import SensorHealthEvidence, project as project_health, 
 from app.operations_health import unknown_evidence
 from app.network_metadata_projection.operations_health import HealthReader, PROVENANCE
 from app.operations_health import NI02_UNIT
+from .operations_verification import OwnerChecks
+from app.operations_verification import opaque_identity,project as project_verification
 
 API_VERSION = "admin.operations.db-services.v1"
 API_VERSION_V2 = "admin.operations.db-services.v2"
@@ -269,13 +271,14 @@ def summarize(services, databases):
 
 class AdminOperationsReadService:
     def __init__(self, inventory, *, acquire=acquire_systemd, lstat=os.lstat, monotonic=time.monotonic, now=utc_now,
-                 sensor_metadata=None, ni02_health=None):
+                 sensor_metadata=None, ni02_health=None,owner_checks=None):
         self.inventory, self._acquire, self._lstat = inventory, acquire, lstat
         self._monotonic, self._now = monotonic, now
         self._sensor_metadata = sensor_metadata if sensor_metadata is not None else SensorMetadataReader()
         self._sensor_health = SensorHealthEvidence(self._sensor_metadata)
         self._ni02_report = ni02_health if ni02_health is not None else HealthReader()
         self._ni02_health = SensorHealthEvidence(self._ni02_report,unit=NI02_UNIT,source=PROVENANCE)
+        self._owner_checks=owner_checks if owner_checks is not None else OwnerChecks()
         self._condition = threading.Condition()
         self._cancel = threading.Event()
         self._busy = False
@@ -317,6 +320,7 @@ class AdminOperationsReadService:
         source_expiry = result.pop("_sensor_expires_boottime_ns", None)
         health_records = result.pop("_health_records", {})
         sensor_report = result.pop("_sensor_report", {})
+        check_records=result.pop('_verification_records',{})
         if source_expiry is not None and boot_ns() > source_expiry:
             for row in result["databases"]:
                 if row["id"] in SENSOR_STORES:
@@ -342,7 +346,12 @@ class AdminOperationsReadService:
                 evidence = project_health(record, stale=stale, boottime=boot_ns) if record else unknown_evidence()
                 row.update(application_health=evidence["state"], application_health_evidence=evidence)
             for row in result["databases"]:
-                row["store_verification"] = dict(status="not_attested", scope=None, as_of=None, source="none")
+                record=check_records.get(row['id'])
+                expires=None if record is None else record['expires']
+                row['store_verification']=project_verification(row['id'],record,
+                    None if record is None else record['current_id'],intent=row['expected_mode'],
+                    source_current=record is not None and record['source_current'],
+                    stale=stale or expires is not None and boot_ns()>expires)
                 row["metadata_evidence"], row["journal_bytes"] = (
                     sensor_store_metadata(sensor_report, row["id"], boottime=boot_ns) if row["id"] in SENSOR_STORES
                     else (dict(source="sampler_lstat", state="stale" if stale else "fresh",
@@ -413,6 +422,8 @@ class AdminOperationsReadService:
         except Exception:
             ni02_report = dict(status="unknown")
         health_records["network_metadata_projection"] = self._ni02_health.collect(ni02_report,ni02,self._now())
+        verification=self._owner_checks.collect(services,sensor_report,ni02_report,self._now(),
+            deadline=deadline,monotonic=self._monotonic,cancel=self._cancel)
         databases, storage_ids = [], {}
         sampled_files = {}
         def sample_file(path):
@@ -434,6 +445,11 @@ class AdminOperationsReadService:
                 row, identities, partial = store_row(item, self.inventory.store_intents[item.id], self.inventory.paths[item.id],
                     self._now(), sample_file, deadline=deadline, monotonic=self._monotonic, cancel=self._cancel)
             databases.append(row)
+            if item.id in verification:
+                current_id=(verification[item.id]['row']['observed_store_id'] if item.id in SENSOR_STORES
+                    else opaque_identity(sampled_files[self.inventory.paths[item.id]])
+                    if not isinstance(sampled_files.get(self.inventory.paths[item.id]),(OSError,type(None))) else None)
+                verification[item.id]['current_id']=current_id if row['file_presence']=='present' else None
             if partial:
                 failure("db_stat", row["id"], row["reason_code"] or "stat_unavailable")
             for identity in identities:
@@ -445,10 +461,11 @@ class AdminOperationsReadService:
                 row.update(operational_state="unknown", file_presence="unknown", main_file_bytes=None,
                            wal_bytes=None, shm_bytes=None, total_footprint_bytes=None, reason_code="storage_collision")
                 failure("inventory", row["id"], "storage_collision")
+                if row['id'] in verification:verification[row['id']]['current_id']=None
         # A successful absence is evidence too; all unknowns are not a snapshot.
         if not any(r["reason_code"] != "probe_unavailable" for r in services) and not any(r["file_presence"] != "unknown" for r in databases):
             raise OperationsError()
         return dict(snapshot_state="partial" if failures else "complete", sampling_started_at_utc=timestamp(began),
                     sampling_completed_at_utc=timestamp(self._now()), services=services, databases=databases,
                     partial_failures=failures, _sensor_expires_boottime_ns=expiry,
-                    _health_records=health_records, _sensor_report=sensor_report)
+                    _health_records=health_records, _sensor_report=sensor_report,_verification_records=verification)

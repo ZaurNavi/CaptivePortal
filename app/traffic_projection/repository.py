@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import os
+from app.operations_verification import startup_check
 import time
 from contextlib import closing, contextmanager
 from datetime import datetime
@@ -300,6 +301,8 @@ class TrafficProjectionRepository:
         self.projection_version = validate_projection_version(projection_version)
         self.busy_timeout_ms = int(busy_timeout_ms)
 
+    @startup_check('traffic_projection',lambda self:self.db_path,
+        ('schema_version','schema_signature','quick_check','foreign_key_check'),failures=(TrafficProjectionStorageCorrupt,))
     def initialize(self) -> bool:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         existed = self.db_path.exists()

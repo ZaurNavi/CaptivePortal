@@ -19,7 +19,7 @@
     symlink_file: "Symbolic link rejected", nonregular_file: "Nonregular file rejected",
     stat_unavailable: "File metadata unavailable", metadata_permission_boundary: "Metadata permission boundary; size unknown",
     orphan_sidecar_possible: "Main file absent; sidecar present", file_missing: "Expected file missing; owner bootstrap needs investigation",
-    not_attested: "File present; verification not collected by R1", storage_collision: "File identity collision; sizes excluded"
+    not_attested: "File presence only; see separate owner startup check", storage_collision: "File identity collision; sizes excluded"
   };
   const healthReasons = {source_ready:"Source-native ready; dependencies confirmed", source_degraded:"Source reports limited operation",
     source_unavailable:"Source reports unavailable", source_initializing:"Source initializing", source_stopping:"Source stopping",
@@ -252,7 +252,7 @@
       tile("Services", summary.services.expected_running ? `${summary.services.running} / ${summary.services.expected_running} processes running` : "0 processes expected to run",
         `${summary.services.registered} registered · App health: ${health.healthy} confirmed healthy · ${health.degraded} degraded · ${health.unavailable} unavailable · ${unknownHealth} unknown/stale`),
       tile("Databases", `${summary.databases.available} / ${summary.databases.registered} verified`,
-        `${v2 ? "No SQLite attestation collected" : "Verification not collected by R1"} · ${summary.databases.present_unverified} present · unverified; ${summary.databases.disabled} disabled; ${summary.databases.not_provisioned} not provisioned; ${summary.databases.unknown_or_stale} unknown/stale`),
+        `${v2 ? (model.databases.some(row => ["passed","failed","stale","unknown"].includes(row.store_verification.status)) ? "Historical owner startup checks shown separately" : "No SQLite attestation collected") : "Verification not collected by R1"} · ${summary.databases.present_unverified} present · unverified; ${summary.databases.disabled} disabled; ${summary.databases.not_provisioned} not provisioned; ${summary.databases.unknown_or_stale} unknown/stale`),
       tile(summary.storage.total_complete ? "Logical DB file lengths" : "Known subtotal", bytes(summary.storage.known_footprint_bytes),
         `Main + WAL + SHM · logical lengths, not allocated disk space · ${summary.storage.total_complete ? "Complete" : "Partial coverage; unknown sizes are not zero"}`),
       tile("Problems & coverage", `${summary.problems.established} confirmed · ${summary.problems.unknown_or_stale} unknown/stale`,
@@ -301,8 +301,8 @@
         ["Health evidence", row.health_evidence], ["Health checked", row.health_checked_at_utc],
         ["Sampled at", row.sampled_at_utc], ["Reason", reason(row.reason_code)]
       ]));
-      if (v2) article.append(details([["Verification", row.store_verification.status], ["Verification scope", row.store_verification.scope],
-        ["Verified as of", row.store_verification.as_of], ["Metadata source", row.metadata_evidence.source],
+      if (v2) article.append(verificationView(row), details([["Verification source", row.store_verification.source],
+        ["Check freshness", row.store_verification.freshness || "Unknown"], ["Metadata source", row.metadata_evidence.source],
         ["Metadata age / TTL", row.metadata_evidence.age == null ? "Unknown" : `${row.metadata_evidence.age}s / ${row.metadata_evidence.ttl}s`],
         ["DELETE journal (not included in main + WAL + SHM)", bytes(row.journal_bytes)]]));
       return article;
@@ -315,6 +315,52 @@
   }
   let timer = null, inFlight = false, controller = null, disposed = false, last = null;
   let useV2 = root.dataset.apiV2 === "/admin/api/v2/operations/db-services";
+  const checkScopes = {schema_version:"schema version",schema_signature:"schema structure",quick_check:"SQLite quick_check",
+    foreign_key_check:"foreign key check",integrity_check:"full SQLite integrity_check"};
+  const checkOwners = {portal_counter:"captive-portal.service",public_traffic:"captive-portal.service",visitor_registry:"captive-portal.service",
+    visits:"captive-portal.service",observations:"captive-portal.service",current_state:"captive-portal.service",settings:"captive-portal.service",
+    fingerprint_integration:"captive-portal.service",sensor_spool:"fingerprint-sensor.service",network_attribution:"fingerprint-sensor.service",
+    network_metadata_projection:"network-metadata-projection.service",network_metadata:"network-metadata.service",
+    network_service_intelligence:"network-service-recognition.service",traffic_projection:"traffic-projection.service",
+    fingerprint_evidence:"fingerprint-evidence.service",fingerprint_classification:"fingerprint-classification.service",fingerprint_control_plane:"fingerprint-classification.service"};
+  const permittedScopes = {visitor_registry:["schema_version","schema_signature","quick_check"],visits:["schema_version","schema_signature","quick_check","foreign_key_check"],
+    observations:["schema_version","schema_signature"],current_state:["schema_version","schema_signature","quick_check"],traffic_projection:["schema_version","schema_signature","quick_check","foreign_key_check"],
+    fingerprint_evidence:["schema_version","schema_signature"],fingerprint_integration:["schema_version","schema_signature"],network_metadata:["schema_version","schema_signature"],
+    network_attribution:["schema_version","schema_signature","quick_check","foreign_key_check"],network_metadata_projection:["schema_version","schema_signature","quick_check","foreign_key_check"],
+    network_service_intelligence:["schema_version","schema_signature","quick_check","foreign_key_check"],settings:["schema_version","schema_signature","quick_check","foreign_key_check"],sensor_spool:["schema_version","quick_check"]};
+  function validVerification(row) {
+    const v=row.store_verification;
+    if (!v || typeof v!=="object" || Array.isArray(v)) return false;
+    const fields=Object.keys(v).sort().join(",");
+    if (fields==="as_of,scope,source,status") return v.status==="not_attested" && v.scope===null && v.as_of===null && v.source==="none";
+    if (fields!=="as_of,freshness,reason,scope,source,status" || !["passed","failed","unknown","stale","not_attested","not_applicable"].includes(v.status) ||
+        !["none",checkOwners[row.id]].includes(v.source) || !["current_report","stale","unknown","not_applicable"].includes(v.freshness) ||
+        !["startup_check","startup_check_failed","startup_unavailable","check_not_run","store_changed","source_stale","configured_disabled"].includes(v.reason)) return false;
+    if (v.as_of!==null && (typeof v.as_of!=="string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v.as_of) ||
+        !Number.isFinite(Date.parse(v.as_of)) || new Date(v.as_of).toISOString()!==v.as_of)) return false;
+    if (v.scope!==null && (!Array.isArray(v.scope) || new Set(v.scope).size!==v.scope.length ||
+        v.scope.some(s=>typeof s!=="string" || !(permittedScopes[row.id] || []).includes(s)) ||
+        JSON.stringify(v.scope)!==JSON.stringify(Object.keys(checkScopes).filter(s=>v.scope.includes(s))))) return false;
+    if (["passed","failed","stale"].includes(v.status) && (v.source==="none" || v.as_of===null)) return false;
+    if (v.status==="passed") return !!v.scope?.length && v.freshness==="current_report" && v.reason==="startup_check";
+    if (v.status==="failed") return v.freshness==="current_report" && v.reason==="startup_check_failed";
+    if (v.status==="stale") return v.freshness==="stale" && ["source_stale","store_changed"].includes(v.reason);
+    if (v.status==="not_applicable") return row.id==="settings" && row.expected_mode==="optional_disabled" && v.source==="none" &&
+      v.scope===null && v.as_of===null && v.freshness==="not_applicable" && v.reason==="configured_disabled";
+    if (v.status==="not_attested") return v.source==="none" && v.scope===null && v.as_of===null && v.freshness==="unknown" && v.reason==="check_not_run";
+    return v.status==="unknown" && v.reason==="startup_unavailable";
+  }
+  function verificationView(row) {
+    const v=row.store_verification, block=element("section",null,"ops-verification");
+    const label={passed:"Startup check passed",failed:"Startup check failed",stale:"Previously checked · stale evidence",
+      unknown:"Owner check evidence unavailable",not_attested:"No verification evidence",not_applicable:"Not applicable · Settings disabled"};
+    block.append(element("strong",label[v.status]));
+    if (v.as_of) block.append(element("span",`Checked at ${v.as_of} · ${(v.scope || []).map(s=>checkScopes[s]).join(" + ") || "no completed successful scope reported"}`));
+    block.append(element("small",v.status==="passed" ? "Historical owner startup result, not continuous integrity monitoring." :
+      v.status==="stale" ? "Not a current verification: owner report expired or the store/process changed." : "File presence and application health are separate from this result."));
+    if (row.id==="network_metadata_projection" && v.source!=="none") block.append(element("small","Informational shared-admin self-report; not independently authenticated."));
+    return block;
+  }
   function validV2(model) {
     const states = new Set(["healthy","degraded","unavailable","unknown","stale"]);
     const keys = (value, expected) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === expected;
@@ -325,8 +371,7 @@
         Number.isInteger(e.ttl) && e.ttl > 0 && e.ttl <= 180 && (e.age === null || Number.isFinite(e.age) && e.age >= 0) &&
         (["fingerprint_sensor","network_metadata_projection"].includes(row.id) || e.state === "unknown" && e.source === "none") &&
         (!["healthy","degraded","unavailable"].includes(e.state) || e.source !== "none" && Number.isFinite(e.age) && e.age <= e.ttl && typeof e.observed_at === "string" && typeof e.received_at === "string");
-    }) && model.databases.every((row) => keys(row.store_verification, "as_of,scope,source,status") &&
-      row.store_verification.status === "not_attested" && row.store_verification.scope === null && row.store_verification.as_of === null && row.store_verification.source === "none" &&
+    }) && model.databases.every((row) => validVerification(row) &&
       keys(row.metadata_evidence,"age,source,state,ttl") && ["sensor_metadata","sampler_lstat","none"].includes(row.metadata_evidence.source) &&
       ["fresh","stale","unknown"].includes(row.metadata_evidence.state) &&
       (row.journal_bytes === null || row.id === "sensor_spool" && Number.isSafeInteger(row.journal_bytes) && row.journal_bytes >= 0));

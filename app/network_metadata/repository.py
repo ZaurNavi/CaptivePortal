@@ -1,5 +1,6 @@
 """Single-writer NI store. No source payload and no repair/migration path."""
 import os
+from app.operations_verification import startup_check, checked
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -49,6 +50,7 @@ class NetworkMetadataRepository:
         if self.telemetry is not None:
             self.telemetry.emit(event, **fields)
 
+    @startup_check('network_metadata',lambda self:self.config.db_path,('schema_version','schema_signature'))
     def initialize(self):
         if self.config.io_hotpath_v1_enabled:
             self.close()
@@ -65,7 +67,7 @@ class NetworkMetadataRepository:
                     raise NetworkMetadataStorageCorrupt()
                 with self.transaction():
                     create_schema(self.connection, ni_format_utc(self.clock()))
-            validate_schema(self.connection)
+            checked(validate_schema,self.connection)
             if self.config.io_hotpath_v1_enabled:
                 columns = {}
                 for table in TABLE_DDL:

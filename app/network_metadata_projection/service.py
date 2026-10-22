@@ -36,7 +36,7 @@ class NetworkMetadataProjectionService:
         self._operations_publisher = None
         try:
             from .operations_health import HealthPublisher
-            self._operations_publisher = HealthPublisher()
+            self._operations_publisher = HealthPublisher(db_path=config.db_path)
         except Exception:
             pass  # Optional informational output never changes projection.
         if config.telemetry_aggregation_enabled and telemetry is not None:
