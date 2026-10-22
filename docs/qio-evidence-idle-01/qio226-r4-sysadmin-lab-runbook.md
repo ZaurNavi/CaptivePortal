@@ -527,3 +527,72 @@ the next original LAB A/B/C proof. TechLead owns independent exact source review
 only then SysAdmin performs its separately authorized preserved-history run.
 
 COMMIT=HOLD; PUSH=NO; PR=NO; MERGE=NO; INSTALL=NO; PRODUCTION=NO.
+
+## 04I — one full SQLite audit, unchanged structural/domain T3
+
+Authority: [TASK-COORD-04I](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6346500575).
+Source parent: accepted04H `b394bac09060c21965a7b8a2d4b2acaba5af6ab3`.
+Only the TrafficProjection T3 adapter requests canonical `_validate(deep=False)`.
+Its caller still performs full `integrity_check`, then `foreign_key_check`, on
+the SAME immutable connection before adapter entry. The canonical repository's
+normal deep callers, schema/columns/index/expression checks, exact schema
+signature, row guards, lineage and watermark encoding are unchanged. The closed
+diagnostic name `tp_canonical_deep` is retained for compatibility; it now marks
+the structural canonical call, not a second physical scan. No public protocol,
+source read-view, deadline, release, queue or owner-helper change is made.
+
+[SQLite documents](https://www.sqlite.org/pragma.html#pragma_quick_check) that
+quick_check omits index/table consistency and UNIQUE checks present in full
+integrity_check; FK is a separate check. Disposable physical-index, UNIQUE and
+orphan-FK canaries verify earlier rejection. A native SQLite3.37.2 caveat is
+recorded honestly: after mode=ro reopening, the selected CHECK-negative fixture
+can return `ok` from BOTH integrity_check and quick_check; the unchanged adapter
+numeric check rejects it. Tests compare both native results on that exact RO
+connection, rather than falsely claiming earlier rejection. No new guarantee
+that every CHECK violation is diagnosed by native SQLite is asserted. The
+earlier-gate-only CHECK requirement needs TechLead disposition of this evidence.
+
+The allowed native test module provides a deterministic dense C workload:
+65,536 cycles, two APs per cycle, one site/version, 196,610 total canonical rows,
+no padding table or oversized error strings. Fixture size and physical hash are
+measured, not inferred from original LAB C. Compare exact clean04H app and the
+direct-parent LOCAL04I commit, with the SAME qualified interpreter, copied QA
+harness, private PIDNS/procfs, two descriptors, tmpfs, actual UID995/GID993/no
+supplementary groups, source UID1003/GID996/mode0600 and original1200s budget.
+The copied QA harness is NOT an installed-release/F2 qualification or a Git
+identity claim for the copy; record original commit/tree and source blob hashes.
+
+QA cost instrumentation wraps, never bypasses, the real guard on EVERY call.
+It retains the1000-opcode VM interval and three full image hashes. At most six
+aggregate checkpoints plus one final record per T3 go to a root-private0600
+child log; no row/SQL payload. Record actual wall/process/user/system CPU,
+per-stage guard CPU, encode CPU, canonical and SQLite execute timing, existing
+T3 phases/counts and image hashes. SQLite/canonical timings INCLUDE callbacks
+and therefore overlap guard timings; do not sum them as disjoint costs.
+`/proc/self/io` is recorded only when permitted after the real UID drop; an
+unavailable field remains unavailable, without changing process dumpability or
+permissions. Logical rchar is not guest block or physical host HDD I/O.
+Standalone raw quick/FK timing is a separate same-image control with no security
+guard, not the cost of guarded scans or a measurement of the original C.
+
+If the original1200s limit is reached, preserve the observed stage/aggregate
+CPU evidence and HOLD. Do not cache security checks, raise progress intervals,
+skip rows/hashes or extend deadlines to obtain PASS. Positive release requires
+actual reaps, cleanup, zero shmem/swap and two empty observations; test-finally
+disposal after a failed fixture is not a production positive-release receipt.
+
+A remains separate. Test-only lexical comparison proposes stripping ASCII
+whitespace BETWEEN tokens while preserving quoted literal/identifier bytes,
+comments, operators, numeric spelling and unknown-syntax rejection. It reports
+closed classes and hashes, not DDL payload. Real A's seven raw-signature
+differences plus simple whitespace-collapse equality do NOT prove lexical or
+semantic equivalence. `adapter_public_traffic` exact predicate remains unchanged
+and the disposable whitespace-only variant still fails current acceptance.
+No original A read, migration or invented PASS is authorized by this proposal.
+
+Native source/history and retained04F/04G/04H negative tests stay in scope.
+Coder runs only affected Linux root/nonroot and portable Windows tests; full
+independent acceptance belongs to TechLead. Existing OLD LAB results and scoped
+SysAdmin retirement are not rewritten by LOCAL fixture success or cleanup.
+
+LOCAL_COMMIT=REQUIRED_FOR_HANDOFF; PUSH=NO; PR=NO; INSTALL=NO; PRODUCTION=NO.

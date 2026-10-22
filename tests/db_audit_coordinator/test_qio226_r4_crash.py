@@ -878,3 +878,195 @@ def test_04H_broken_root_diagnostic_sink_cannot_promote_or_change_T3_result(monk
     subject=r4_release.Session.__new__(r4_release.Session);subject.decision=None
     subject.t3_outcome(dict(result='failed',reason_code='audit_failed',snapshot_metadata=None,t3_diagnostic=T3Trace().document()))
     assert subject.decision==dict(result='failed',reason_code='audit_failed',snapshot_metadata=None)
+
+
+def test_04I_same_connection_full_integrity_and_FK_once_before_structural_adapter(monkeypatch):
+    from app.db_audit_coordinator.live_sqlite import validate_snapshot,T3Trace
+    from app.traffic_projection.repository import TrafficProjectionRepository
+    from tests.db_audit_coordinator.test_b2_live_sqlite import initialize
+    db=sqlite3.connect(':memory:',isolation_level=None);db.row_factory=sqlite3.Row
+    initialize(db,'traffic_projection');statements=[];calls=[]
+    original=TrafficProjectionRepository._validate
+    def canonical(connection,*,deep):
+        assert connection is db
+        assert [s for s in statements if s in {'PRAGMA integrity_check','PRAGMA foreign_key_check'}]==[
+            'PRAGMA integrity_check','PRAGMA foreign_key_check']
+        calls.append(deep);return original(connection,deep=deep)
+    monkeypatch.setattr(TrafficProjectionRepository,'_validate',staticmethod(canonical))
+    db.set_trace_callback(statements.append)
+    try:
+        output=validate_snapshot(db,policy('traffic_projection'),lambda:None,trace=T3Trace())
+        assert output['schema_version']==1 and calls==[False]
+        assert statements.count('PRAGMA integrity_check')==statements.count('PRAGMA foreign_key_check')==1
+        assert 'PRAGMA quick_check' not in statements
+        assert any(s.startswith('PRAGMA table_info(') for s in statements)
+        assert any(s.startswith('PRAGMA index_info(') for s in statements)
+    finally:db.close()
+
+
+def test_04I_normal_repository_deep_validation_retains_its_original_scans():
+    from app.traffic_projection.repository import TrafficProjectionRepository
+    from tests.db_audit_coordinator.test_b2_live_sqlite import initialize
+    db=sqlite3.connect(':memory:',isolation_level=None);initialize(db,'traffic_projection')
+    statements=[];db.set_trace_callback(statements.append)
+    try:
+        TrafficProjectionRepository._validate(db,deep=True)
+        assert statements.count('PRAGMA foreign_key_check')==statements.count('PRAGMA quick_check')==1
+    finally:db.close()
+
+
+@pytest.mark.parametrize('fault',['CHECK','FK','index_content','UNIQUE','schema','domain'])
+def test_04I_original_full_gates_reject_corruption_before_any_domain_downgrade(tmp_path,fault,monkeypatch,record_property):
+    from app.db_audit_coordinator.live_sqlite import validate_snapshot,T3Trace
+    from app.traffic_projection.repository import schema_sql
+    from app.traffic_projection.models import PROJECTION_VERSION,SEMANTIC_CONTRACT_SHA256
+    from app.db_audit_coordinator import adapter_traffic_projection as adapter
+    path=tmp_path/'disposable-C.db';db=sqlite3.connect(path,isolation_level=None)
+    db.executescript(schema_sql());at='2026-10-19T00:00:00.000Z'
+    insert='INSERT INTO traffic_projection_versions(projection_version,projection_schema_version,source,source_schema_version,semantic_contract_sha256,status,created_at) VALUES(?,1,?,1,?,?,?)'
+    db.execute(insert,(PROJECTION_VERSION,'observations',SEMANTIC_CONTRACT_SHA256,'active',at))
+    if fault=='CHECK':
+        db.execute('PRAGMA ignore_check_constraints=ON')
+        db.execute("INSERT INTO traffic_projection_site_state(projection_version,site_id,projection_revision,status) VALUES(?,?,-1,'healthy')",(PROJECTION_VERSION,'fixture'))
+        db.execute('PRAGMA ignore_check_constraints=OFF')
+    elif fault=='FK':
+        db.execute("INSERT INTO traffic_projection_site_state(projection_version,site_id,projection_revision,status) VALUES('missing-parent','fixture',0,'healthy')")
+    elif fault=='index_content':
+        # Physical index/table inconsistency, not a relaxed schema predicate.
+        db.execute("INSERT INTO traffic_projection_site_state(projection_version,site_id,projection_revision,status) VALUES(?, 'fixture',0,'healthy')",(PROJECTION_VERSION,))
+        target=db.execute("SELECT rootpage FROM sqlite_schema WHERE name='idx_projection_ap_identity'").fetchone()[0]
+        db.execute('PRAGMA writable_schema=ON')
+        db.execute("UPDATE sqlite_schema SET rootpage=? WHERE name='sqlite_autoindex_traffic_projection_site_state_1'",(target,))
+        db.execute('PRAGMA writable_schema=OFF')
+    elif fault=='UNIQUE':
+        original=db.execute("SELECT sql FROM sqlite_schema WHERE name='idx_projection_one_active'").fetchone()[0]
+        db.execute('DROP INDEX idx_projection_one_active')
+        db.execute(original.replace('CREATE UNIQUE INDEX','CREATE INDEX'))
+        db.execute(insert,('fixture-second-version','observations',SEMANTIC_CONTRACT_SHA256,'active',at))
+        db.execute('PRAGMA writable_schema=ON')
+        db.execute("UPDATE sqlite_schema SET sql=? WHERE name='idx_projection_one_active'",(original,))
+        db.execute('PRAGMA writable_schema=OFF')
+    elif fault=='schema':db.execute('DROP INDEX idx_projection_cycles_started')
+    else:
+        db.execute(insert,('invalid version!','observations',SEMANTIC_CONTRACT_SHA256,'retired',at))
+    db.close()
+    # Read-only reopen forces SQLite to load the fixture's real on-disk index
+    # flags/schema. No source production DB or custom result stub is involved.
+    before=path.read_bytes();db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,isolation_level=None)
+    db.row_factory=sqlite3.Row;db.execute('PRAGMA query_only=ON');db.execute('PRAGMA foreign_keys=ON')
+    # Native SQLite 3.37.2 may not diagnose this CHECK after a mode=ro reopen.
+    # Establish that quick_check has NO extra coverage on that same connection;
+    # the unchanged adapter numeric guard must still reject it in that case.
+    native_check_detected=True
+    if fault=='CHECK':
+        full=tuple(tuple(row) for row in db.execute('PRAGMA integrity_check'))
+        quick=tuple(tuple(row) for row in db.execute('PRAGMA quick_check'))
+        assert full==quick
+        native_check_detected=full!=(('ok',),)
+    trace=T3Trace();entered=[];validate=adapter.validate
+    def observed(*args,**kwargs):entered.append(True);return validate(*args,**kwargs)
+    monkeypatch.setattr(adapter,'validate',observed)
+    try:
+        with pytest.raises(Exception):validate_snapshot(db,policy('traffic_projection'),lambda:None,trace=trace)
+        expected='sqlite_foreign_key' if fault=='FK' else 'tp_canonical_deep' if fault=='schema' else 'tp_versions' if fault=='domain' else 'tp_site_state' if fault=='CHECK' and not native_check_detected else 'sqlite_integrity'
+        assert trace.check==expected,(fault,trace.check)
+        assert bool(entered)==(fault in {'schema','domain'} or fault=='CHECK' and not native_check_detected)
+        record_property('04i_corruption_gate',json.dumps(dict(fault=fault,check=trace.check,adapter_entered=bool(entered),native_check_detected=native_check_detected)))
+    finally:db.close()
+    assert path.read_bytes()==before
+
+
+def proposed_04I_ddl_tokens(sql):
+    """TEST/PROPOSAL ONLY. No production adapter imports this comparator.
+
+    Drop only whitespace BETWEEN lexical tokens; retain case, token spelling,
+    quoted literal/identifier bytes, comments and operators. Uncertain syntax
+    is refused, never accepted through generic split()/regex normalization.
+    """
+    import re
+    if type(sql) is not str or not 0<len(sql)<=32768:raise ValueError('unsupported DDL')
+    tokens=[];position=0
+    while position<len(sql):
+        char=sql[position]
+        if char in ' \t\n\r\f':position+=1;continue
+        start=position
+        if char in "'\"`[":
+            end=']' if char=='[' else char;position+=1
+            while position<len(sql):
+                if sql[position]==end:
+                    if end!=']' and position+1<len(sql) and sql[position+1]==end:position+=2;continue
+                    position+=1;break
+                position+=1
+            else:raise ValueError('unsupported DDL')
+        elif sql.startswith('--',position):
+            end=sql.find('\n',position);position=len(sql) if end<0 else end
+        elif sql.startswith('/*',position):
+            end=sql.find('*/',position+2)
+            if end<0:raise ValueError('unsupported DDL')
+            position=end+2
+        else:
+            match=re.match(r'(?:[A-Za-z_][A-Za-z0-9_$]*|0[xX][0-9a-fA-F]+|(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?|->>|->|>=|<=|<>|!=|==|\|\||<<|>>|[(),;.+*/%<>=!~&|?:-])',sql[position:])
+            if match is None:raise ValueError('unsupported DDL')
+            position+=len(match.group())
+        tokens.append(sql[start:position])
+        if len(tokens)>4096:raise ValueError('unsupported DDL')
+    return tuple(tokens)
+
+
+def proposed_04I_schema_diff(expected,actual):
+    """Closed classifications/digests only, never return raw SQL or unknown names."""
+    expected_by={(row[0],row[1],row[2]):row for row in expected}
+    actual_by={(row[0],row[1],row[2]):row for row in actual}
+    assert len(expected_by)==len(expected) and len(actual_by)==len(actual)
+    differences=[]
+    for key in sorted(expected_by.keys() & actual_by.keys()):
+        left,right=expected_by[key],actual_by[key]
+        if left==right:continue
+        try:kind='whitespace_only_candidate' if proposed_04I_ddl_tokens(left[3])==proposed_04I_ddl_tokens(right[3]) else 'structural_or_literal_difference'
+        except ValueError:kind='unsupported_lexical_form'
+        differences.append(dict(type=key[0],name=key[1],classification=kind,
+            expected_sha256=hashlib.sha256(c.encode(left)).hexdigest(),actual_sha256=hashlib.sha256(c.encode(right)).hexdigest()))
+    return dict(missing=len(expected_by.keys()-actual_by.keys()),extra=len(actual_by.keys()-expected_by.keys()),
+        different=len(differences),objects=differences,expected_sha256=hashlib.sha256(c.encode(expected)).hexdigest(),
+        actual_sha256=hashlib.sha256(c.encode(actual)).hexdigest())
+
+
+def test_04I_A_seven_object_lexical_proposal_never_changes_current_exact_predicate(record_property):
+    from app.db_audit_coordinator.adapter_public_traffic import expected_signature,signature,validate
+    expected=expected_signature()
+    actual=tuple((*row[:3], ' \n '.join(proposed_04I_ddl_tokens(row[3]))) for row in expected)
+    report=proposed_04I_schema_diff(expected,actual)
+    assert report['missing']==report['extra']==0 and report['different']==7
+    assert all(row['classification']=='whitespace_only_candidate' for row in report['objects'])
+    # Generate real disposable tables/indexes from the variant DDL. Current
+    # canonical acceptance still rejects it, as required pending adjudication.
+    db=sqlite3.connect(':memory:',isolation_level=None);db.row_factory=sqlite3.Row
+    try:
+        for kind,name,table,sql in actual:
+            if kind=='table':db.execute(sql)
+        for kind,name,table,sql in actual:
+            if kind=='index':db.execute(sql)
+        db.execute('PRAGMA user_version=2')
+        assert signature(db)!=expected
+        with pytest.raises(c.CoordinatorError):validate(db,lambda:None)
+        record_property('04i_A_schema_proposal',json.dumps(report,sort_keys=True))
+    finally:db.close()
+
+
+@pytest.mark.parametrize('left,right',[
+    ("CHECK(x='a  b')","CHECK(x='a b')"),('CREATE TABLE "a  b"(x)','CREATE TABLE "a b"(x)'),
+    ('CHECK(x>=1)','CHECK(x> =1)'),('CHECK(x IS NOT NULL)','CHECK(x IS NOTNULL)'),
+    ('CHECK(x=1)','CHECK(x=1.0)'),('CHECK(x=1)','CHECK(x=2)'),
+    ("CHECK(x='it''s  x')","CHECK(x='it''s x')"),('CHECK(x COLLATE BINARY)','CHECK(x COLLATE NOCASE)'),
+    ('CHECK(x /* a  b */ =1)','CHECK(x /* a b */ =1)'),
+    ('CREATE TABLE t(x INTEGER)','CREATE TABLE t(x TEXT)'),
+])
+def test_04I_A_lexical_proposal_preserves_literals_identifiers_types_and_operators(left,right):
+    assert proposed_04I_ddl_tokens(left)!=proposed_04I_ddl_tokens(right)
+
+
+@pytest.mark.parametrize('sql',["CREATE TABLE t(x DEFAULT 'unterminated)",'CREATE TABLE [unclosed(x)',
+    'CREATE TABLE t(x /* never closed)','CREATE\u00a0TABLE t(x)',None,'','x'*32769],
+    ids=['unclosed_string','unclosed_identifier','unclosed_comment','non_SQL_whitespace','none','empty','oversize'])
+def test_04I_A_lexical_uncertainty_is_not_equivalence(sql):
+    with pytest.raises(ValueError):proposed_04I_ddl_tokens(sql)

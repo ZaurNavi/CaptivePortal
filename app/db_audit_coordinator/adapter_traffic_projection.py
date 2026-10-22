@@ -24,7 +24,10 @@ def validate(db, guard, *, check=lambda _:None):
     from app.traffic_projection.repository import TrafficProjectionRepository
     from app.traffic_projection.models import (PROJECTION_VERSION, SUPPORTED_SEMANTIC_CONTRACTS,
         VERSION_STATUSES, HEALTH_STATUSES, validate_projection_version)
-    check('tp_canonical_deep');TrafficProjectionRepository._validate(db,deep=True)
+    # validate_snapshot already completed FULL integrity_check and FK on this
+    # same pinned image/connection. Retain every canonical structural check,
+    # but do not repeat its weaker quick_check or the same FK scan here.
+    check('tp_canonical_deep');TrafficProjectionRepository._validate(db,deep=False)
     check('tp_schema_signature')
     require(signature(db)==expected_signature())
     lineage=hashlib.sha256(); watermark=hashlib.sha256(); active=0

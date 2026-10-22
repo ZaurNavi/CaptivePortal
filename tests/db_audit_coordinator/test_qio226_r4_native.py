@@ -25,6 +25,46 @@ def large_projection_fixture(db):
     assert db.execute('PRAGMA page_size').fetchone()[0]*db.execute('PRAGMA page_count').fetchone()[0]>=117*1024**2
 
 
+def dense_04I_projection_fixture(db,cycles=65536):
+    """Synthetic C: one site, real cycles/AP rows, no padding or large errors.
+
+    Row count is a declared synthetic workload, NOT inferred original C data.
+    All keys/times are deterministic so 04H/04I image hashes can be compared.
+    """
+    from datetime import datetime,timedelta,timezone
+    from app.traffic_projection.models import PROJECTION_VERSION,SEMANTIC_CONTRACT_SHA256
+    at='2026-10-19T00:00:00.000Z';version=PROJECTION_VERSION;site='synthetic-site-04i'
+    db.execute('INSERT INTO traffic_projection_versions(projection_version,projection_schema_version,source,source_schema_version,semantic_contract_sha256,status,created_at) VALUES(?,1,?,1,?,?,?)',
+        (version,'observations',SEMANTIC_CONTRACT_SHA256,'active',at))
+    db.execute("INSERT INTO traffic_projection_site_state(projection_version,site_id,projection_revision,status) VALUES(?,?,0,'healthy')",(version,site))
+    columns=[r[1] for r in db.execute('PRAGMA table_info(traffic_projection_cycles)')]
+    required={r[1]:r[2] for r in db.execute('PRAGMA table_info(traffic_projection_cycles)') if r[3]}
+    base={name:(0 if kind=='INTEGER' else at if name.endswith('_at') else 'synthetic') for name,kind in required.items()}
+    base.update(projection_version=version,site_id=site,source_kind='ap_traffic',source_state='completed',
+        source_revision_marker='a'*64,source_semantic_fingerprint='b'*64,integrity_ok=1,
+        stored_row_count=2,items_seen=2,items_stored=2,source_complete=1,source_result='success',
+        metric_facts_present=1,wired_complete=1,lan_complete=1,wired_pair_count=2,lan_pair_count=2,
+        wired_download_mbps=12.5,wired_upload_mbps=3.25,lan_download_mbps=7.5,lan_upload_mbps=1.25,
+        wired_ok_count=2,lan_ok_count=2)
+    start=datetime(2026,10,1,tzinfo=timezone.utc)
+    def cycle_rows():
+        for n in range(cycles):
+            stamp=(start+timedelta(seconds=15*n)).isoformat(timespec='milliseconds').replace('+00:00','Z')
+            row=dict(base,cycle_id=f'synthetic-cycle-{n:08d}',source_started_at=stamp,source_finished_at=stamp,
+                source_updated_at=stamp,projected_at=stamp,wired_oldest_at=stamp,wired_newest_at=stamp,
+                lan_oldest_at=stamp,lan_newest_at=stamp)
+            yield tuple(row.get(name) for name in columns)
+    db.execute('BEGIN')
+    db.executemany('INSERT INTO traffic_projection_cycles('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')',cycle_rows())
+    db.executemany('INSERT INTO traffic_projection_ap_cycles VALUES('+','.join('?' for _ in range(21))+')',
+        ((version,site,f'synthetic-cycle-{n:08d}',f'02:00:00:00:00:{ap:02x}',f'Synthetic AP {ap}',
+          0,1,1,1,1,at,at,6.25,1.625,'ok','ok',3.75,.625,'ok','ok',at)
+         for n in range(cycles) for ap in range(2)))
+    db.execute('COMMIT')
+    return dict(cycles=cycles,ap_rows=cycles*2,total_rows=cycles*3+2,
+        image_bytes=db.execute('PRAGMA page_size').fetchone()[0]*db.execute('PRAGMA page_count').fetchone()[0])
+
+
 DIRFD_DRIVER=r'''
 import array,errno,json,os,shutil,sqlite3,sys,tempfile,uuid,time,types,subprocess
 from dataclasses import replace
@@ -655,9 +695,103 @@ r4_sandbox.RAM_ROOT=sys.argv[2]
 # transport + canonical T3, NOT immutable installed release qualification F2.
 worker.verify_origin=lambda profile:None
 original=worker.r4_snapshot if hasattr(worker,'r4_snapshot') else None
+if len(sys.argv)>3 and sys.argv[3].startswith('04i_'):
+ from tests.db_audit_coordinator.test_qio226_r4_native import install_04I_cost_probe
+ install_04I_cost_probe()
 try:os._exit(worker.execute(int(sys.argv[1])))
 except BaseException:traceback.print_exc();os._exit(3)
 '''
+
+
+def install_04I_cost_probe():
+    """QA-only aggregate observer. NEVER installed or an authorization source.
+
+    Every original guard/VM callback and digest still executes. Timings overlap
+    (SQLite/canonical include guard CPU); they must not be summed as disjoint.
+    At most six checkpoints and one final record per T3, no row/SQL logging.
+    """
+    import resource
+    import sqlite3
+    import time
+    from app.db_audit_coordinator import contracts,r4_snapshot
+    from app.traffic_projection.repository import TrafficProjectionRepository
+    native_validate=r4_snapshot.validate
+    def measured(fd,parent,receipt,folder_receipt,policy,guard,**kwargs):
+        trace=kwargs['trace'];started=time.monotonic();cpu=time.process_time();usage=resource.getrusage(resource.RUSAGE_SELF)
+        def io():
+            try:
+                return {key:int(value) for key,value in (line.split(':') for line in Path('/proc/self/io').read_text().splitlines())
+                    if key in {'rchar','wchar','syscr','syscw','read_bytes','write_bytes','cancelled_write_bytes'}}
+            except PermissionError:return {}  # Some UID-drop procfs denies io; never change dumpability.
+        initial_io=io();counts=dict(guard=0,encode=0);cost=dict(guard_wall=0.,guard_cpu=0.,encode_cpu=0.,canonical_wall=0.,canonical_cpu=0.)
+        scans={name:dict(count=0,wall=0.,cpu=0.) for name in ('integrity_check','foreign_key_check','quick_check')}
+        canonical_deep=[];phase_cost={};checkpoints={1,10000,50000,100000,200000,400000}
+        def emit(kind):
+            now_usage=resource.getrusage(resource.RUSAGE_SELF);current=io()
+            print(json.dumps(dict(event='qio226_04i_private_cost',kind=kind,store=policy.store_id,
+                uid=os.geteuid(),gid=os.getegid(),groups=os.getgroups(),elapsed_s=time.monotonic()-started,
+                cpu_s=time.process_time()-cpu,user_s=now_usage.ru_utime-usage.ru_utime,system_s=now_usage.ru_stime-usage.ru_stime,
+                peak_rss_kib=now_usage.ru_maxrss,io={key:current[key]-initial_io[key] for key in initial_io},
+                counts=counts,cost=cost,phase_cost=phase_cost,scans=scans,canonical_deep=canonical_deep,
+                image_sha256=receipt['sha256'],image_bytes=receipt['size'],trace=trace.document()),sort_keys=True),file=sys.stderr,flush=True)
+        def observed_guard():
+            stage=trace.stage;wall=time.monotonic();tick=time.process_time()
+            try:return guard()
+            finally:
+                wall=time.monotonic()-wall;tick=time.process_time()-tick
+                counts['guard']+=1;cost['guard_wall']+=wall;cost['guard_cpu']+=tick
+                bucket=phase_cost.setdefault(stage,dict(guard_count=0,guard_wall=0.,guard_cpu=0.))
+                bucket['guard_count']+=1;bucket['guard_wall']+=wall;bucket['guard_cpu']+=tick
+                if counts['guard'] in checkpoints:emit('checkpoint')
+        encode=contracts.encode;canonical=TrafficProjectionRepository._validate;connect=sqlite3.connect
+        def observed_encode(*args,**options):
+            tick=time.process_time()
+            try:return encode(*args,**options)
+            finally:counts['encode']+=1;cost['encode_cpu']+=time.process_time()-tick
+        def observed_canonical(db,*,deep=True):
+            canonical_deep.append(deep);wall=time.monotonic();tick=time.process_time()
+            try:return canonical(db,deep=deep)
+            finally:cost['canonical_wall']+=time.monotonic()-wall;cost['canonical_cpu']+=time.process_time()-tick
+        class ObservedConnection(sqlite3.Connection):
+            def execute(self,sql,*args,**options):
+                name=sql.removeprefix('PRAGMA ')
+                if name not in scans:return super().execute(sql,*args,**options)
+                item=scans[name];item['count']+=1;wall=time.monotonic();tick=time.process_time()
+                try:return super().execute(sql,*args,**options)
+                finally:item['wall']+=time.monotonic()-wall;item['cpu']+=time.process_time()-tick
+        def observed_connect(*args,**options):
+            # T3 only. Canonical expected-signature :memory: connection unchanged.
+            if args and isinstance(args[0],str) and args[0].startswith('file:/proc/self/fd/'):
+                assert 'factory' not in options;options['factory']=ObservedConnection
+            return connect(*args,**options)
+        contracts.encode=observed_encode;TrafficProjectionRepository._validate=staticmethod(observed_canonical);sqlite3.connect=observed_connect
+        try:return native_validate(fd,parent,receipt,folder_receipt,policy,observed_guard,**kwargs)
+        finally:
+            contracts.encode=encode;TrafficProjectionRepository._validate=staticmethod(canonical);sqlite3.connect=connect
+            emit('final')
+    r4_snapshot.validate=measured
+
+
+def pipeline_04I_driver():
+    """Exact disposable 04H pipeline, dense fixture and bounded QA observations.
+
+    Literal substitutions are asserted unique; no production/profile/guard seam
+    is added beyond the explicitly existing uninstalled-provenance QA harness.
+    """
+    replacements=[
+        ("large=sys.argv[1]=='04h_large'", "large=sys.argv[1]=='04i_dense'"),
+        ("modern=sys.argv[1].startswith('04h_')", "modern=True"),
+        ("large_projection_fixture(writer)", "dense_04I_projection_fixture(writer)"),
+        ("import large_projection_fixture", "import dense_04I_projection_fixture"),
+        ("str(fd),str(ram)]", "str(fd),str(ram),sys.argv[1]]"),
+        ("log=open(root/'children.log','wb')", "log=open(root/'children.log','wb');os.fchmod(log.fileno(),0o600)"),
+        ("if log is not None:log.close()", "if log is not None:\n  log.flush();print((root/'children.log').read_text(),file=sys.stderr,flush=True);log.close()"),
+    ]
+    result=PIPELINE_DRIVER
+    for old,new in replacements:
+        assert result.count(old)==1,old
+        result=result.replace(old,new)
+    return result
 
 OWNER_DRIVER=r'''
 import os,sys,traceback
@@ -1249,3 +1383,73 @@ def test_04H_actual_UID995_authenticated_T3_private_summary_and_positive_release
         assert result['proofs'][0]['snapshot'] is not None  # Backup completed; NOT source-corruption proof.
     assert 'invalid-synthetic-date' not in json.dumps(diagnostics)
     record_property('04h_authenticated_pipeline',json.dumps(dict(result=result,diagnostics=diagnostics),sort_keys=True))
+
+
+def test_04I_dense_fixture_has_only_canonical_rows_and_deterministic_image(tmp_path):
+    from app.traffic_projection.repository import schema_sql
+    from app.db_audit_coordinator.live_sqlite import validate_snapshot
+    from tests.db_audit_coordinator.test_b2_live_policy import policy
+    import hashlib
+    digests=[]
+    for number in range(2):
+        target=tmp_path/f'synthetic-{number}.db'
+        import sqlite3
+        db=sqlite3.connect(target,isolation_level=None);db.row_factory=sqlite3.Row;db.executescript(schema_sql())
+        result=dense_04I_projection_fixture(db,cycles=3)
+        assert result['total_rows']==11
+        assert db.execute('SELECT count(*) FROM traffic_projection_cycles').fetchone()[0]==3
+        assert db.execute('SELECT count(*) FROM traffic_projection_ap_cycles').fetchone()[0]==6
+        assert db.execute('PRAGMA foreign_key_check').fetchone() is None
+        assert validate_snapshot(db,policy('traffic_projection'),lambda:None)['page_count']>0
+        db.close();digests.append(hashlib.sha256(target.read_bytes()).hexdigest())
+    assert digests[0]==digests[1]
+
+
+def run_04I_readable_pipeline(source_root,scenario):
+    """Existing qualified interpreter/dependencies, copied without installation.
+
+    Benchmark runner may supply exact clean 04H app plus this SAME QA harness.
+    Returns source blob inventory; does not pretend the QA copy is a Git tree.
+    """
+    import hashlib
+    import shutil
+    import sysconfig
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='qio226-04i-readable-fixture-') as temporary:
+        qualified=Path(temporary);qualified.chmod(0o755)
+        release=qualified/'release';release.mkdir()
+        shutil.copytree(source_root/'app',release/'app',ignore=shutil.ignore_patterns('__pycache__'))
+        (release/'tests').mkdir()
+        shutil.copytree(ROOT/'tests/db_audit_coordinator',release/'tests/db_audit_coordinator',ignore=shutil.ignore_patterns('__pycache__'))
+        interpreter=qualified/'bin/python';interpreter.parent.mkdir();shutil.copy2(Path(sys.executable).resolve(),interpreter)
+        (qualified/'pyvenv.cfg').write_text('home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.10\n')
+        packages=qualified/'lib/python3.10/site-packages';packages.parent.mkdir(parents=True)
+        shutil.copytree(sysconfig.get_path('purelib'),packages,ignore=shutil.ignore_patterns('__pycache__'))
+        blobs={str(path.relative_to(release)):hashlib.sha256(path.read_bytes()).hexdigest() for path in (release/'app').rglob('*.py')}
+        assert all(hashlib.sha256((source_root/name).read_bytes()).hexdigest()==digest for name,digest in blobs.items())
+        process=subprocess.run(['unshare','--mount','--pid','--fork','--propagation','private','--mount-proc',
+            str(interpreter),'-B','-E','-s','-c',pipeline_04I_driver(),scenario],cwd=release,
+            capture_output=True,text=True,timeout=1250)
+    return process,blobs
+
+
+@NATIVE
+def test_04I_private_cost_probe_preserves_UID995_guards_and_positive_release(record_property):
+    process,blobs=run_04I_readable_pipeline(ROOT,'04i_small')
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout)
+    observations=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{')
+        and json.loads(line).get('event')=='qio226_04i_private_cost']
+    finals=[row for row in observations if row['kind']=='final']
+    assert len(finals)==3 and result['states']==['completed']*3 and result['source_hashes_unchanged']
+    for record,proof in zip(finals,result['proofs']):
+        assert record['uid']==995 and record['gid']==993 and record['groups']==[]
+        assert record['counts']['guard']==record['trace']['guard_fast_count']>0
+        assert record['scans']['integrity_check']['count']==record['scans']['foreign_key_check']['count']==1
+        assert record['scans']['quick_check']['count']==0
+        assert record['trace']['digest_full_count']==3 and record['trace']['digest_bytes_verified']==3*record['image_bytes']
+        assert proof['helper_reaped'] and proof['gatekeeper_reaped'] and proof['cleanup_complete'] and proof['shmem_zero']
+        assert proof['empty_observations']==2 and proof['memory_observations']['swap_current']==0
+    assert finals[2]['canonical_deep']==[False]
+    assert len(observations)<=21 and len(blobs)>0
+    record_property('04i_private_cost_smoke',json.dumps(dict(result=result,observations=observations),sort_keys=True))
