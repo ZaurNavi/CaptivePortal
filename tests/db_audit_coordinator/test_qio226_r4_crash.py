@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import socket
 import sqlite3
+import json
 import sys
 import uuid
 
@@ -765,3 +766,115 @@ def test_K06_dependency_complete_clean_python_uses_exact_canonical_store_t3(stor
         else:
             with pytest.raises(Exception):validate_snapshot(db,policy(store),lambda:None)
     finally:db.close()
+
+
+@pytest.mark.parametrize('check',[
+    'sqlite_user_version','sqlite_integrity','sqlite_foreign_key','pt_schema_signature','pt_counter_singleton',
+    'pt_traffic_daily_date','pt_traffic_daily_numeric','pt_event_type','pt_event_offset_order',
+    'pt_event_counted_fields','pt_event_event_date','pt_reader_offset','pt_reader_flags',
+    'pt_reset_scope','pt_reset_numeric','pt_watermark_encode'])
+def test_04H_closed_A_predicates_keep_canonical_rejection_and_no_row_leak(check,record_property):
+    from app.db_audit_coordinator.live_sqlite import T3Trace,validate_snapshot
+    from app.db_audit_coordinator.adapter_public_traffic import validate
+    from tests.db_audit_coordinator.test_b2_live_sqlite import initialize,AT
+    db=sqlite3.connect(':memory:',isolation_level=None);db.row_factory=sqlite3.Row
+    initialize(db,'public_traffic');trace=T3Trace()
+    # Only disposable fixtures. Canonical full integrity stays enabled and can
+    # legitimately reject CHECK violations BEFORE a later adapter assertion.
+    db.execute('PRAGMA ignore_check_constraints=ON')
+    if check=='sqlite_user_version':db.execute('PRAGMA user_version=99')
+    elif check=='sqlite_integrity':db.execute('UPDATE traffic_daily SET traffic_bytes=-1')
+    elif check=='sqlite_foreign_key':
+        db.execute('CREATE TABLE fixture_parent(id PRIMARY KEY)')
+        db.execute('CREATE TABLE fixture_child(id REFERENCES fixture_parent(id))')
+        db.execute('INSERT INTO fixture_child VALUES(1)')
+    elif check=='pt_schema_signature':db.execute('CREATE TABLE forbidden_extra(x)')
+    elif check=='pt_counter_singleton':db.execute('DELETE FROM counter_state')
+    elif check=='pt_traffic_daily_date':db.execute("UPDATE traffic_daily SET local_date='bad-secret-date'")
+    elif check=='pt_traffic_daily_numeric':
+        db.execute('UPDATE traffic_daily SET traffic_bytes=?',(2**63-1,))
+        db.execute('INSERT INTO traffic_daily VALUES(?,?,?,?,?)',('2026-10-18','synthetic-ssid',1,1,AT))
+    elif check.startswith('pt_event_'):
+        event=dict(normalized_event_id='secret-id',ssid='secret-ssid',event_type='omada.client_offline',event_local_date='2026-10-19',
+            event_traffic_bytes=1,counted=1,skip_reason=None,source_identity='source-secret',source_path='/secret/source',
+            source_offset_start=0,source_offset_end=1,processed_at=AT)
+        if check=='pt_event_type':event['event_type']='secret-event'
+        elif check=='pt_event_offset_order':event['source_offset_start']=2
+        elif check=='pt_event_counted_fields':event['skip_reason']='secret-reason'
+        else:event['event_local_date']='invalid-secret-date'
+        db.execute('INSERT INTO processed_events('+','.join(event)+') VALUES('+','.join('?' for _ in event)+')',tuple(event.values()))
+    elif check in ('pt_reader_offset','pt_reader_flags'):
+        db.execute('INSERT INTO reader_state(source_identity,source_path,source_offset,retired_completed,updated_at) VALUES(?,?,?,?,?)',
+            ('secret-id','/secret/path',-1 if check=='pt_reader_offset' else 0,2 if check=='pt_reader_flags' else 0,AT))
+    elif check in ('pt_reset_scope','pt_reset_numeric'):
+        db.execute('INSERT INTO counter_resets(reset_id,reset_scope,reset_at,previous_today_bytes) VALUES(?,?,?,?)',
+            (str(uuid.uuid4()),'invalid-secret' if check=='pt_reset_scope' else 'all',AT,-1 if check=='pt_reset_numeric' else 0))
+    else:db.execute('UPDATE traffic_daily SET updated_at=?',(b'private-blob',))
+    db.execute('PRAGMA ignore_check_constraints=OFF')
+    try:
+        if check.startswith('pt_'):
+            with pytest.raises(Exception):validate(db,lambda:None,check=trace.mark)
+            assert trace.check==check
+        full=T3Trace()
+        with pytest.raises(Exception) as caught:validate_snapshot(db,policy('public_traffic'),lambda:None,trace=full)
+        full.fail(caught.value,'domain')
+        # CHECK-protected malformed reader/reset-scope rows are correctly
+        # caught by full SQLite integrity first. Do NOT bypass it to force a
+        # more convenient later diagnostic or claim that later check executed.
+        expected='sqlite_integrity' if check in {'pt_reader_offset','pt_reader_flags','pt_reset_scope'} else check
+        assert full.check==expected
+        output=full.document();assert output['category']=='domain'
+        assert not any(value in c.encode(output).decode() for value in ('secret','private-blob','/source','SELECT','UPDATE'))
+        record_property('04h_A_closed_predicate',json.dumps(dict(adapter_check=trace.check,actual_full_check=full.check,diagnostic=output)))
+    finally:db.close()
+
+
+@pytest.mark.parametrize('fault',[{'check':'SELECT private'},{'stage':'secret'},{'exception_class':'secret'},
+    {'guard_fast_count':True},{'guard_fast_count':100001},{'digest_full_count':4},{'elapsed_ms':-1},
+    {'adapter_validate_ms':1.2},{'extra':'private-row'},{'category':'audit_passed'}])
+def test_04H_root_private_T3_diagnostic_is_closed_non_authoritative_and_not_durable(fault,monkeypatch):
+    from app.db_audit_coordinator import r4_release
+    from app.db_audit_coordinator.live_sqlite import T3Trace
+    subject=r4_release.Session.__new__(r4_release.Session);subject.decision=None
+    logs=[];monkeypatch.setattr(r4_release,'emit_hold',logs.append)
+    payload=dict(result='failed',reason_code='audit_failed',snapshot_metadata=None,
+        t3_diagnostic=dict(T3Trace().document(),**fault))
+    with pytest.raises(Exception):subject.t3_outcome(payload)
+    assert subject.decision is None and logs==[]
+
+
+def test_04H_exact_one_optional_private_report_never_changes_legacy_result(monkeypatch):
+    from app.db_audit_coordinator import r4_release
+    from app.db_audit_coordinator.live_sqlite import T3Trace
+    logs=[];monkeypatch.setattr(r4_release,'emit_hold',logs.append)
+    for reported in (False,True):
+        subject=r4_release.Session.__new__(r4_release.Session);subject.decision=None
+        payload=dict(result='failed',reason_code='audit_failed',snapshot_metadata=None)
+        if reported:payload['t3_diagnostic']=T3Trace().document()
+        subject.t3_outcome(payload)
+        assert subject.decision==dict(result='failed',reason_code='audit_failed',snapshot_metadata=None)
+        with pytest.raises(c.CoordinatorError):subject.t3_outcome(payload)
+    assert len(logs)==2 and logs[0]['check']=='unreported'
+    assert not any(word in c.encode(logs).decode() for word in ('snapshot_metadata','job_id','source_path'))
+
+
+def test_04H_trace_clamps_counts_and_never_relabels_resource_interrupt_as_domain():
+    from app.db_audit_coordinator.live_sqlite import T3Trace
+    trace=T3Trace()
+    for key in ('guard_fast_count','progress_callbacks'):trace.count(key,200000)
+    trace.mark('resource_guard');trace.fail(c.CoordinatorError('canceled'),'resource_guard')
+    trace.fail(sqlite3.OperationalError('private SQL interrupted'),'domain')
+    document=trace.document()
+    assert document['guard_fast_count']==document['progress_callbacks']==100000
+    assert document['category']=='resource_guard' and document['check']=='resource_guard'
+    assert document['exception_class']=='CoordinatorError'
+
+
+def test_04H_broken_root_diagnostic_sink_cannot_promote_or_change_T3_result(monkeypatch):
+    from app.db_audit_coordinator import r4_release
+    from app.db_audit_coordinator.live_sqlite import T3Trace
+    def broken(_):raise OSError('private log unavailable')
+    monkeypatch.setattr(r4_release,'emit_hold',broken)
+    subject=r4_release.Session.__new__(r4_release.Session);subject.decision=None
+    subject.t3_outcome(dict(result='failed',reason_code='audit_failed',snapshot_metadata=None,t3_diagnostic=T3Trace().document()))
+    assert subject.decision==dict(result='failed',reason_code='audit_failed',snapshot_metadata=None)

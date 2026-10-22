@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+import time
+from contextlib import contextmanager
 
 from . import contracts as c
 from .live_policy import StorePolicy, integer, require
@@ -20,6 +22,70 @@ from .locks import protected_parent
 
 class AuditFailure(Exception):
     """Completed RAM image failed logical T3; contains no source payload."""
+
+
+T3_CHECKS=frozenset({'unreported','unexpected','resource_guard','snapshot_pinned','image_digest',
+    'sqlite_open','sqlite_user_version','sqlite_integrity','sqlite_foreign_key','snapshot_metadata','t3_complete',
+    'pt_schema_signature','pt_counter_singleton','pt_traffic_daily_date','pt_traffic_daily_numeric',
+    'pt_event_type','pt_event_offset_order','pt_event_counted_fields','pt_event_event_date',
+    'pt_reader_offset','pt_reader_flags','pt_reset_scope','pt_reset_numeric','pt_watermark_encode',
+    'tp_canonical_deep','tp_schema_signature','tp_versions','tp_site_state','tp_cycles','tp_ap_cycles',
+    'fingerprint_validate','service_intelligence_validate'})
+T3_STAGES=frozenset({'image_handoff','image_open','integrity_check','foreign_key_check',
+    'adapter_validate','image_digest_final','complete'})
+T3_TIMINGS=('integrity_check_ms','foreign_key_check_ms','adapter_validate_ms','image_digest_final_ms')
+T3_EXCEPTIONS=frozenset({'none','unknown','CoordinatorError','AuditFailure','OperationalError','DatabaseError',
+    'IntegrityError','ProgrammingError','ValueError','TypeError','OSError','PermissionError','FileNotFoundError',
+    'RuntimeError','MemoryError','TimeoutError','InterruptedError','OverflowError','ImportError','ModuleNotFoundError'})
+T3_CATEGORIES=frozenset({'none','domain','resource_guard','snapshot_tamper','unexpected'})
+
+
+def validate_t3_diagnostic(value):
+    c.closed(value,{'check','stage','category','exception_class','guard_fast_count','digest_full_count',
+        'digest_bytes_verified','progress_callbacks','elapsed_ms',*T3_TIMINGS})
+    require(value['check'] in T3_CHECKS and value['stage'] in T3_STAGES
+        and value['category'] in T3_CATEGORIES and value['exception_class'] in T3_EXCEPTIONS,'unauthorized')
+    for key in ('guard_fast_count','progress_callbacks'):integer(value[key],0,100000)
+    integer(value['digest_full_count'],0,3);integer(value['digest_bytes_verified'],0,3*2**31)
+    for key in ('elapsed_ms',*T3_TIMINGS):integer(value[key],0,5400000)
+    return value
+
+
+class T3Trace:
+    """One fixed-size private attempt summary; never an authority or row log."""
+    def __init__(self,clock=time.monotonic_ns):
+        self.clock=clock;self.started=clock();self.check='unreported';self.stage='image_handoff'
+        self.category='none';self.exception_class='none'
+        self.counts=dict(guard_fast_count=0,digest_full_count=0,digest_bytes_verified=0,progress_callbacks=0)
+        self.timings=dict.fromkeys(T3_TIMINGS,0)
+
+    def mark(self,check):
+        require(check in T3_CHECKS,'invalid_request');self.check=check
+
+    def count(self,key,amount=1):
+        bounds=dict(guard_fast_count=100000,digest_full_count=3,digest_bytes_verified=3*2**31,progress_callbacks=100000)
+        self.counts[key]=min(bounds[key],self.counts[key]+amount)
+
+    def fail(self,error,category):
+        # An SQLite progress callback wraps exceptions as 'interrupted'. Keep
+        # the actual guard classification, not an invented domain corruption.
+        if self.category!='none':return
+        self.category=category
+        name=type(error).__name__;self.exception_class=name if name in T3_EXCEPTIONS else 'unknown'
+
+    @contextmanager
+    def phase(self,stage,check):
+        require(stage in T3_STAGES,'invalid_request')
+        self.stage=stage;self.mark(check);started=self.clock()
+        try:yield
+        finally:
+            key=stage+'_ms'
+            if key in self.timings:self.timings[key]=min(5400000,(self.clock()-started)//1000000)
+
+    def document(self):
+        return validate_t3_diagnostic(dict(check=self.check,stage=self.stage,category=self.category,
+            exception_class=self.exception_class,elapsed_ms=min(5400000,max(0,(self.clock()-self.started)//1000000)),
+            **self.counts,**self.timings))
 
 
 def file_identity(path, policy, *, main=False):
@@ -60,27 +126,39 @@ def metadata(db):
     return page_size,page_count
 
 
-def validate_snapshot(db, policy, guard):
+def validate_snapshot(db, policy, guard, *, trace=None):
+    trace=trace or T3Trace()
+    check=trace.mark
+    check('sqlite_user_version')
     require(db.execute('PRAGMA user_version').fetchone()[0]==policy.schema_version)
     count=0
-    for row in db.execute('PRAGMA integrity_check'):
-        guard(); count+=1; require(tuple(row)==('ok',))
-    require(count==1)
-    require(db.execute('PRAGMA foreign_key_check').fetchone() is None)
-    if policy.store_id=='fingerprint_evidence':
-        from app.device_fingerprint.audit_runner import validate_snapshot as fingerprint_t3
-        from app.device_fingerprint.repository import DeviceFingerprintRepository
-        fingerprint_t3(db,guard)
-        mark=DeviceFingerprintRepository.read_ingest_watermark(db)
-        c.identifier(mark['database_generation_id'])
-        kind='native_lineage'; lineage=hashlib.sha256(mark['database_generation_id'].encode()).hexdigest()
-        watermark=hashlib.sha256(c.encode(mark)).hexdigest()
-    else:
-        if policy.store_id=='public_traffic': from .adapter_public_traffic import validate
-        elif policy.store_id=='traffic_projection': from .adapter_traffic_projection import validate
-        elif policy.store_id=='network_service_intelligence': from .adapter_service_intelligence import validate
-        else: raise c.CoordinatorError('not_admitted')
-        kind,lineage,watermark=validate(db,guard)
+    with trace.phase('integrity_check','sqlite_integrity'):
+        for row in db.execute('PRAGMA integrity_check'):
+            guard(); count+=1; require(tuple(row)==('ok',))
+        require(count==1)
+    with trace.phase('foreign_key_check','sqlite_foreign_key'):
+        require(db.execute('PRAGMA foreign_key_check').fetchone() is None)
+    with trace.phase('adapter_validate','unexpected'):
+        if policy.store_id=='fingerprint_evidence':
+            from app.device_fingerprint.audit_runner import validate_snapshot as fingerprint_t3
+            from app.device_fingerprint.repository import DeviceFingerprintRepository
+            check('fingerprint_validate');fingerprint_t3(db,guard)
+            mark=DeviceFingerprintRepository.read_ingest_watermark(db)
+            c.identifier(mark['database_generation_id'])
+            kind='native_lineage'; lineage=hashlib.sha256(mark['database_generation_id'].encode()).hexdigest()
+            watermark=hashlib.sha256(c.encode(mark)).hexdigest()
+        else:
+            if policy.store_id=='public_traffic':
+                from .adapter_public_traffic import validate
+                kind,lineage,watermark=validate(db,guard,check=check)
+            elif policy.store_id=='traffic_projection':
+                from .adapter_traffic_projection import validate
+                kind,lineage,watermark=validate(db,guard,check=check)
+            elif policy.store_id=='network_service_intelligence':
+                from .adapter_service_intelligence import validate
+                check('service_intelligence_validate');kind,lineage,watermark=validate(db,guard)
+            else: raise c.CoordinatorError('not_admitted')
+    check('snapshot_metadata')
     size,count=metadata(db)
     return dict(schema_version=policy.schema_version,generation_kind=kind,lineage_sha256=lineage,
         watermark_sha256=watermark,page_size=size,page_count=count)

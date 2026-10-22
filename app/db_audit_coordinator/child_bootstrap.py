@@ -225,19 +225,23 @@ def execute_r4(data,job,profile,policy):
         r4_ipc.send(channel,'gate_ready',binding,dict(lock_fd=gate.fd,namespace=namespace))
         kind,payload,received=receive(snapshot=True)
         outcome=dict(result='incomplete',reason_code='canceled',snapshot_metadata=None)
+        trace=live_sqlite.T3Trace()
         if kind=='snapshot':
             c.closed(payload,{'image','directory'})
             require(type(received) is tuple and len(received)==2,'unauthorized')
             image,final=received;received=None  # validate takes ownership of BOTH.
             try:
-                snapshot=r4_snapshot.validate(image,final,payload['image'],payload['directory'],policy,guard)
+                snapshot=r4_snapshot.validate(image,final,payload['image'],payload['directory'],policy,guard,trace=trace)
                 c.closed(snapshot,SNAPSHOT_KEYS)
                 outcome=dict(result='passed',reason_code='audit_passed',snapshot_metadata=snapshot)
             except Exception:
                 guard(cancel=False)  # Resource failure is NOT a corruption result.
                 if not select.select([data['cancel_fd']],[],[],0)[0]:
-                    outcome=dict(result='failed',reason_code='audit_failed',snapshot_metadata=None)
+                    outcome=(dict(result='failed',reason_code='audit_failed',snapshot_metadata=None)
+                        if trace.category=='domain' else
+                        dict(result='incomplete',reason_code='preflight_denied',snapshot_metadata=None))
         else:require(kind=='cancel' and payload=={} and received is None,'unauthorized')
+        outcome['t3_diagnostic']=trace.document()
         guard(cancel=False);r4_ipc.send(channel,'t3_done',binding,outcome)
         # No implicit gate close on a nominal result. Root must attest cleanup.
         kind,payload,fd=receive()

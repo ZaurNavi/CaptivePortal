@@ -78,14 +78,16 @@ def pin_final(job,image_fd,worker_gid):
     except Exception:os.close(fd);raise
 
 
-def validate(fd,parent,receipt,folder_receipt,policy,guard):
+def validate(fd,parent,receipt,folder_receipt,policy,guard,*,trace=None):
     """Owns/closes BOTH FDs. Private self-proc directory-FD bridge, no CWD change.
 
     Native SQLite expands an ordinary relative URI back to an inaccessible
     absolute path. Only the authenticated final DIRECTORY FD + fixed basename
     may bridge that traversal. No image-FD URI, source path or custom VFS.
     """
-    db=None
+    from .live_sqlite import T3Trace
+    trace=trace or T3Trace()
+    db=None;domain_active=False;guard_error=None
     try:
         from .live_sqlite import validate_snapshot
         from .r4_ipc import snapshot_pair
@@ -100,37 +102,73 @@ def validate(fd,parent,receipt,folder_receipt,policy,guard):
         # Decimal descriptor comes ONLY from validated SCM_RIGHTS, never input.
         alias='/proc/self/fd/'+str(parent)
         location=alias+'/snapshot.sqlite3'
-        def pinned():
-            guard()
-            own=os.getpid();lines=proc_text(own,'status').splitlines()
-            require(os.readlink('/proc/self')==str(own)
-                and [line.split()[1:] for line in lines if line.startswith('NSpid:')]==[[str(own)]]
-                and [line.split()[1:] for line in lines if line.startswith('PPid:')]==[[str(os.getppid())]]
-                and identity(os.stat(alias))==identity(os.fstat(parent))
-                and os.access(alias,os.X_OK,effective_ids=True)
-                and not os.access(alias,os.W_OK,effective_ids=True)
-                and identity(os.stat('.'))==cwd,'unauthorized')
-            metadata=os.stat('snapshot.sqlite3',dir_fd=parent,follow_symlinks=False)
-            image=os.fstat(fd)
-            require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid==0 and metadata.st_nlink==1
-                and metadata.st_gid==os.getegid() and stat.S_IMODE(metadata.st_mode)==0o440
-                and (identity(metadata),metadata.st_mode,metadata.st_uid,metadata.st_gid)==
-                    (identity(image),image.st_mode,image.st_uid,image.st_gid)
-                and identity(metadata)==(receipt['device'],receipt['inode'])
-                and final_receipt(parent,os.getegid())==folder_receipt
-                and identity(os.stat(location,follow_symlinks=False))==identity(metadata)
-                and set(os.listdir(parent))=={'snapshot.sqlite3'}
-                and not os.access('snapshot.sqlite3',os.W_OK,dir_fd=parent,effective_ids=True),'unsafe_path')
+        def stamp(info):
+            return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink,
+                info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+        image_stamp=stamp(os.fstat(fd));directory_stamp=stamp(os.fstat(parent))
+        def pinned_fast():
+            trace.count('guard_fast_count')
+            try:guard()  # Original deadline/cancel/flock/proc/cgroup resource gate, EVERY time.
+            except Exception as error:
+                trace.mark('resource_guard');trace.fail(error,'resource_guard');raise
+            try:
+                own=os.getpid();lines=proc_text(own,'status').splitlines()
+                require(os.readlink('/proc/self')==str(own)
+                    and [line.split()[1:] for line in lines if line.startswith('NSpid:')]==[[str(own)]]
+                    and [line.split()[1:] for line in lines if line.startswith('PPid:')]==[[str(os.getppid())]]
+                    and identity(os.stat(alias))==identity(os.fstat(parent))
+                    and os.access(alias,os.X_OK,effective_ids=True)
+                    and not os.access(alias,os.W_OK,effective_ids=True)
+                    and identity(os.stat('.'))==cwd,'unauthorized')
+                metadata=os.stat('snapshot.sqlite3',dir_fd=parent,follow_symlinks=False)
+                image=os.fstat(fd)
+                require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid==0 and metadata.st_nlink==1
+                    and metadata.st_gid==os.getegid() and stat.S_IMODE(metadata.st_mode)==0o440
+                    and stamp(metadata)==stamp(image)==image_stamp
+                    and image.st_size==receipt['size'] and 0<image.st_size<=policy.image_max_bytes
+                    and identity(metadata)==(receipt['device'],receipt['inode'])
+                    and stamp(os.fstat(parent))==directory_stamp
+                    and final_receipt(parent,os.getegid())==folder_receipt
+                    and identity(os.stat(location,follow_symlinks=False))==identity(metadata)
+                    and set(os.listdir(parent))=={'snapshot.sqlite3'}
+                    and not os.access('snapshot.sqlite3',os.W_OK,dir_fd=parent,effective_ids=True),'unsafe_path')
+            except Exception as error:
+                trace.mark('snapshot_pinned');trace.fail(error,'snapshot_tamper');raise
+        def pinned_strong():
+            pinned_fast();trace.mark('image_digest');trace.count('digest_full_count')
             require(digest_fd(fd,policy.image_max_bytes)==receipt,'unsafe_path')
-        pinned()
+            trace.count('digest_bytes_verified',receipt['size']);pinned_fast()
+        pinned_strong()  # Initial positive authenticated content handoff.
+        trace.stage='image_open';trace.mark('sqlite_open')
         db=sqlite3.connect('file:'+location+'?mode=ro&immutable=1',uri=True,isolation_level=None,timeout=0)
         db.row_factory=sqlite3.Row;db.execute('PRAGMA query_only=ON');db.execute('PRAGMA foreign_keys=ON')
         db.execute('PRAGMA temp_store=MEMORY')
-        db.set_progress_handler(lambda:(pinned(),0)[1],1000)
-        pinned()  # Correlate pathname before/after the native SQLite open.
-        result=validate_snapshot(db,policy,pinned)
-        db.close();db=None;pinned()
+        def interrupt():
+            nonlocal guard_error
+            trace.count('progress_callbacks')
+            try:pinned_fast();return 0
+            except Exception as error:
+                guard_error=error;return 1
+        db.set_progress_handler(interrupt,1000)
+        pinned_strong()  # Re-correlate topology/content after SQLite open.
+        domain_active=True
+        try:result=validate_snapshot(db,policy,pinned_fast,trace=trace)
+        except Exception:
+            if guard_error is not None:raise guard_error from None
+            raise
+        domain_active=False
+        db.close();db=None
+        with trace.phase('image_digest_final','image_digest'):
+            pinned_strong()  # AFTER SQLite closes, before ANY success receipt.
+        trace.stage='complete';trace.mark('t3_complete')
         return result
+    except Exception as error:
+        if isinstance(error,MemoryError):
+            trace.mark('resource_guard');trace.fail(error,'resource_guard')
+        elif isinstance(error,ImportError):
+            trace.mark('unexpected');trace.fail(error,'unexpected')
+        else:trace.fail(error,'domain' if domain_active else 'snapshot_tamper')
+        raise
     finally:
         try:
             if db is not None:db.close()

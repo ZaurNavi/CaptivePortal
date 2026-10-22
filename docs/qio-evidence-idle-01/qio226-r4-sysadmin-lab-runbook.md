@@ -1,5 +1,89 @@
 # QIO226 / 04D R4 — pinned T3 directory capability and first-HOLD attribution
 
+## 04H — fast pinned guards, strong boundary SHA and closed T3 attribution
+
+Authority: [TASK-COORD-04H](https://github.com/ZaurNavi/CaptivePortal/issues/226#issuecomment-6324005276).
+Exact source parent: `46e66c36bbb61b2bd80e0ca9025c21e554a55eaa`, tree
+`ea3bc9c7ce9ec7b1cb9f6d758239f3467fc37d60`. Coder may prepare one direct-parent
+LOCAL LAB-only commit after focused disposable tests. Push, PR, installation,
+real original A/B/C, queue operations, main and production remain forbidden.
+
+Real04G facts are preserved: owner backup DONE on all three; B real T3 PASS;
+A failed/audit_failed with unknown predicate; C hit the original1200s deadline
+and was held, then SysAdmin separately retired its exact kernel resources.
+That forced retirement is NOT positive R4 release and does not rewrite C.
+No original database is inspected here to guess or relax A's domain rule.
+
+Worker now uses two private guard strengths. Fast guard calls the original
+resource/deadline/cancel/flock guard EVERY time and rechecks fresh private
+proc/self/NSpid/PPid, unchanged CWD, final directory FD/alias, root0440/GID/
+regular-file/nlink1 image, inode/device/size, tmpfs receipt, child set and denied
+write access. Image and directory stat stamps include fixed nanosecond
+mtime/ctime captured at initial ownership handoff; same-size/same-inode
+rewrites and restored mtime still fail. No timed content-hash cache is trusted.
+
+Strong guard adds full authenticated image SHA with stable pre/post fast
+metadata checks: before SQLite opens, after it opens, and after SQLite CLOSES
+before success. Root's independent post-T3 full SHA before cleanup is unchanged.
+SQLite VM progress every1000 and canonical per-row callbacks use fast checks,
+not full-image reads. Full integrity_check, foreign_key_check, exact schema,
+canonical deep=True and all row/lineage/watermark assertions remain. No timeout,
+image allowance, owner read transaction, backup callback100000 cap, SQLite
+PRAGMA/durability, authorization, import provenance or release fence changed.
+
+The image is writable by no untrusted validator/source owner after helper reap
+and promotion. Root remains the trusted supervisor. The new stat pins plus
+strong boundary hashes do not claim protection against a malicious privileged
+root that can alter the code or falsify the kernel's metadata/clock. No such
+authority is granted to UID995 or the original source owner.
+
+One OPTIONAL `t3_diagnostic` object travels only inside authenticated private
+`t3_done`, with existing SO_PASSCRED/PID/claim-binding and no new FD/channel.
+Root validates exact field names, enums, integer types/ranges (bool rejected)
+and emits at most one protected `qio226_r4_t3_outcome` summary. It is stripped
+before adopting the original result/reason/snapshot fields: no public audit_result,
+queue or release-proof schema change. Missing/none is `unreported`; malformed
+private payload is rejected without echoing values. A broken logging sink
+cannot change the result. A valid diagnostic never authorizes PASS or release.
+
+Summary: last ACTUALLY entered check/stage, sanitized exception class, category
+(domain/resource_guard/snapshot_tamper/unexpected/none), fast-guard and VM counts
+(clamped100000), full-digest count (<=3), successfully verified digest bytes,
+elapsed_ms and fixed integrity/FK/adapter/final-digest timings. No per-row/tick
+logging, raw exception, SQL, source path, SSID, IP/MAC, row/job/event ID or payload.
+Milliseconds/counts are bounded diagnostics, not a wider resource allowance.
+The last check is set before its real query/assertion; it is not proof a later
+check ran. Native CHECK/FK failures can correctly stop at sqlite_integrity/FK
+before the more specific adapter stage. Do not relabel those as a later check.
+
+Python guard exceptions captured in SQLite progress are re-raised as the
+original private guard failure, not mislabeled as logical corruption merely
+because SQLite wraps them as interrupted. Semantic T3 failures preserve
+failed/audit_failed. Structural refusals use existing incomplete/preflight_denied;
+cancellation stays incomplete/canceled. An expired/resource-invalid guard may
+prevent any final packet/release, leaving the existing fail-closed orphan HOLD.
+Missing diagnostic then remains unreported, never a fabricated exact cause.
+
+Focused fixtures include a canonical117MiB+ C with16000 actual site-state rows,
+native SQLite VM progress, nonowner995/993 and real private PIDNS/proc/tmpfs
+two-FD transport. An exact04G bounded12-guard prefix is compared with the same
+candidate prefix; the full candidate separately must finish full T3 and final
+SHA. A canceled prefix is not a baseline PASS or a full-baseline runtime.
+Synthetic timings/bytes are RAM/Lab measurements, not original HDD/production
+savings or proof that full hashing was the ONLY real1200s C cause. Preserve
+the actual per-stage receipt for a next independently approved native run.
+
+UID995 cannot traverse the laptop owner's HOME: new native pipeline fixtures
+copy the existing test interpreter/dependencies and exact source bytes into a
+disposable traversable root; no package install, global chmod, user-site stub
+or installed F2 exception is introduced. These are QA-only provenance seams,
+not qualification of the immutable installed interpreter/release.
+
+NEXT=TECHLEAD_EXACT_SOURCE_REVIEW; then a separately approved SysAdmin original
+A/B/C only after old orphan kernel-clearance evidence and exact publication.
+Do not rerun old recovery, change an epoch/lock/history, restart services or
+grant source/helper access based on this source-only handoff.
+
 ## 04E owner-helper diagnostic amendment — source review, not a retry GO
 
 Authority: Issue226 SysAdmin handoff6305336464 plus Owner Coder directive.

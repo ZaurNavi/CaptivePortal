@@ -20,25 +20,28 @@ def expected_signature():
     finally:db.close()
 
 
-def validate(db, guard):
+def validate(db, guard, *, check=lambda _:None):
     from app.traffic_projection.repository import TrafficProjectionRepository
     from app.traffic_projection.models import (PROJECTION_VERSION, SUPPORTED_SEMANTIC_CONTRACTS,
         VERSION_STATUSES, HEALTH_STATUSES, validate_projection_version)
-    TrafficProjectionRepository._validate(db,deep=True)
+    check('tp_canonical_deep');TrafficProjectionRepository._validate(db,deep=True)
+    check('tp_schema_signature')
     require(signature(db)==expected_signature())
     lineage=hashlib.sha256(); watermark=hashlib.sha256(); active=0
     for row in db.execute('SELECT * FROM traffic_projection_versions ORDER BY projection_version'):
-        guard(); validate_projection_version(row['projection_version'])
+        guard();check('tp_versions');validate_projection_version(row['projection_version'])
         require(row['status'] in VERSION_STATUSES and row['projection_schema_version']==1
             and row['source']=='observations' and row['source_schema_version']==1
             and row['semantic_contract_sha256'] in SUPPORTED_SEMANTIC_CONTRACTS)
         active+=row['status']=='active'; lineage.update(c.encode(tuple(row)))
-    require(active<=1)
+    check('tp_versions');require(active<=1)
     for table, order in (('traffic_projection_site_state','projection_version,site_id'),
             ('traffic_projection_cycles','projection_version,site_id,cycle_id'),
             ('traffic_projection_ap_cycles','projection_version,site_id,cycle_id,ap_mac')):
         for row in db.execute(f'SELECT * FROM {table} ORDER BY {order}'):
             guard()
+            check({'traffic_projection_site_state':'tp_site_state','traffic_projection_cycles':'tp_cycles',
+                'traffic_projection_ap_cycles':'tp_ap_cycles'}[table])
             if table=='traffic_projection_site_state': require(row['status'] in HEALTH_STATUSES)
             for key in row.keys():
                 if row[key] is None:continue

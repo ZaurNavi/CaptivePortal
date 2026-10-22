@@ -12,14 +12,28 @@ NATIVE=pytest.mark.skipif(sys.platform!='linux' or getattr(os,'geteuid',lambda:-
     reason='R4 native disposable root mount/UID contract; not a Windows kernel PASS')
 
 
+def large_projection_fixture(db):
+    """Canonical 117MiB+ C with 16k REAL adapter rows, no surviving padding."""
+    from app.traffic_projection.models import PROJECTION_VERSION,SEMANTIC_CONTRACT_SHA256
+    at='2026-10-19T00:00:00.000Z'
+    db.execute('INSERT INTO traffic_projection_versions(projection_version,projection_schema_version,source,source_schema_version,semantic_contract_sha256,status,created_at) VALUES(?,1,?,1,?,?,?)',
+        (PROJECTION_VERSION,'observations',SEMANTIC_CONTRACT_SHA256,'active',at))
+    db.execute('BEGIN')
+    db.executemany('INSERT INTO traffic_projection_site_state(projection_version,site_id,projection_revision,status,last_error_category) VALUES(?,?,0,?,?)',
+        ((PROJECTION_VERSION,'synthetic-site-'+str(n),'healthy','x'*8192) for n in range(16000)))
+    db.execute('COMMIT')
+    assert db.execute('PRAGMA page_size').fetchone()[0]*db.execute('PRAGMA page_count').fetchone()[0]>=117*1024**2
+
+
 DIRFD_DRIVER=r'''
-import array,errno,json,os,shutil,sqlite3,sys,tempfile,uuid
+import array,errno,json,os,shutil,sqlite3,sys,tempfile,uuid,time,types,subprocess
 from dataclasses import replace
 from pathlib import Path
 from app.db_audit_coordinator import contracts as c,r4_ipc,r4_snapshot,r4_sandbox
 from app.db_audit_coordinator.live_receipts import identity
-from app.db_audit_coordinator.live_sqlite import validate_snapshot
+from app.db_audit_coordinator.live_sqlite import validate_snapshot,T3Trace
 from tests.db_audit_coordinator.test_b2_live_sqlite import disposable
+from tests.db_audit_coordinator.test_qio226_r4_native import large_projection_fixture
 assert os.geteuid()==0 and os.getpid()==1
 store,fault=sys.argv[1:];root=Path(tempfile.mkdtemp(prefix='qio226-04d-private-'));root.chmod(0o755)
 namespace=ram=writer=None;image_fd=final_fd=None
@@ -28,9 +42,20 @@ try:
  protected=root/'socket-parent';protected.mkdir(mode=0o750);os.chown(protected,0,992)
  base=protected/'ram-jobs';base.mkdir(mode=0o711)
  namespace=r4_sandbox.MountNamespace().enter()
- ram=r4_sandbox.PrivateTmpfs(namespace,str(uuid.uuid4()),str(uuid.uuid4()),16*1024**2,64,1003,1004,993,_base=str(base))
+ large=fault.startswith('04h_large')
+ ram=r4_sandbox.PrivateTmpfs(namespace,str(uuid.uuid4()),str(uuid.uuid4()),(192 if large else 16)*1024**2,64,1003,1004,993,_base=str(base))
  source=root/'source';source.mkdir(mode=0o700)
  writer,policy=disposable(source,store)
+ if fault=='vm_cancel':
+  writer.executemany('INSERT INTO traffic_daily VALUES(?,?,?,?,?)',(('2026-10-19','vm-fixture-'+str(n),1,1,'2026-10-19T00:00:00.000Z') for n in range(1500)))
+ if large:
+  large_projection_fixture(writer)
+  policy=replace(policy,image_max_bytes=192*1024**2,source_max_bytes=192*1024**2,memory_max_bytes=512*1024**2,attempt_seconds=1200)
+ old_module=None
+ if fault=='04h_large_baseline_prefix':
+  raw=subprocess.check_output(['git','-c','safe.directory='+os.getcwd(),'show','46e66c36bbb61b2bd80e0ca9025c21e554a55eaa:app/db_audit_coordinator/r4_snapshot.py'])
+  old_module=types.ModuleType('app.db_audit_coordinator._04g_snapshot');old_module.__package__='app.db_audit_coordinator'
+  exec(compile(raw,'04G-exact-r4_snapshot.py','exec'),old_module.__dict__)
  gid=996 if store=='traffic_projection' else 1004
  for file in source.iterdir():os.chown(file,1003,gid)
  os.chown(source,1003,gid);policy=replace(policy,uid=1003,gid=gid)
@@ -95,32 +120,59 @@ try:
       if isinstance(name,str) and name.startswith('/proc/self/fd/'):raise FileNotFoundError(errno.ENOENT,'synthetic')
       return original_stat(name,*args,**kwargs)
      os.stat=stat
-    ticks=[0];test_cwd=os.open('.',os.O_RDONLY|os.O_DIRECTORY) if fault=='cwd_change' else None
+    ticks=[0];trace=T3Trace();digest_calls=[]
+    actual_digest=r4_snapshot.digest_fd
+    def measured_digest(fd,maximum):
+     value=actual_digest(fd,maximum);digest_calls.append(value['size'])
+     if fault=='final_digest' and len(digest_calls)==3:return dict(value,sha256='0'*64)
+     return value
+    r4_snapshot.digest_fd=measured_digest
+    if old_module is not None:old_module.digest_fd=measured_digest
+    if fault=='unexpected_import':
+     from app.db_audit_coordinator import live_sqlite
+     def missing(*args,**kwargs):raise ModuleNotFoundError('SECRET synthetic missing dependency')
+     live_sqlite.validate_snapshot=missing
+    test_cwd=os.open('.',os.O_RDONLY|os.O_DIRECTORY) if fault=='cwd_change' else None
     opened_databases=[];native_connect=sqlite3.connect
     def connect(filename,**kwargs):
      assert filename=='file:/proc/self/fd/'+str(received[1])+'/snapshot.sqlite3?mode=ro&immutable=1'
      assert kwargs==dict(uri=True,isolation_level=None,timeout=0)
+     if fault=='tamper_after_close':
+      class FinalClose(sqlite3.Connection):
+       def close(self):
+        super().close();child_control.send(b'T');assert child_control.recv(1)==b'A'
+      kwargs['factory']=FinalClose
      db=native_connect(filename,**kwargs);opened_databases.append(db);return db
     sqlite3.connect=connect
     def guard():
      ticks[0]+=1
      assert identity(os.stat('.'))==cwd
+     if fault=='vm_cancel' and trace.counts['progress_callbacks']:raise c.CoordinatorError('canceled')
+     if fault=='row_cancel' and trace.stage=='adapter_validate':raise c.CoordinatorError('canceled')
+     if fault in {'04h_large_baseline_prefix','04h_large_candidate_prefix'} and ticks[0]>=12:
+      raise c.CoordinatorError('canceled')
      if ticks[0]==3:
       if fault=='cancel':raise c.CoordinatorError('canceled')
       if fault=='deadline':raise c.CoordinatorError('not_admitted')
       if fault=='cwd_change':os.chdir('/')  # Test-only violation: validator must reject it.
-      if fault=='tamper_during_t3':
+      if fault in {'tamper_during_t3','same_size_rewrite','restore_mtime'}:
        child_control.send(b'T');assert child_control.recv(1)==b'A'
     try:
-     answer=r4_snapshot.validate(received[0],received[1],payload['image'],payload['directory'],policy,guard)
-     assert fault=='positive',fault
+     wall=time.monotonic();cpu=time.process_time()
+     if old_module is not None:answer=old_module.validate(received[0],received[1],payload['image'],payload['directory'],policy,guard)
+     else:answer=r4_snapshot.validate(received[0],received[1],payload['image'],payload['directory'],policy,guard,trace=trace)
+     assert fault in {'positive','04h_large'},fault
      assert answer==expected;result['canonical_t3']='PASS';result['guard_calls']=ticks[0]
     except Exception as error:
-     assert fault!='positive',(type(error).__name__,str(error))
+     assert fault not in {'positive','04h_large'},(type(error).__name__,str(error))
      result['rejected']=type(error).__name__
      if fault=='cwd_change':
       assert identity(os.stat('.'))!=cwd;result['injected_cwd_change_rejected']=True
     finally:
+     result['t3_diagnostic']=trace.document();result['actual_digest_calls']=len(digest_calls)
+     result.update(guard_calls=ticks[0],full_bytes_hashed=sum(digest_calls),image_bytes=receipt['size'],
+      wall_seconds=time.monotonic()-wall,cpu_seconds=time.process_time()-cpu,
+      actual_adapter_rows=16000 if large else None)
      if test_cwd is not None:os.fchdir(test_cwd);os.close(test_cwd)  # Fixture restores its own fault.
      for db in opened_databases:
       try:db.execute('SELECT 1')
@@ -142,17 +194,23 @@ try:
  # Send raw rights only to allow receiver negative tests to prove closure.
  left.sendmsg([c.encode(dict(kind='snapshot',binding='1'*64,payload=dict(image=receipt,directory=folder)))],
   [( __import__('socket').SOL_SOCKET,__import__('socket').SCM_RIGHTS,array.array('i',[image_fd,final_fd]))])
- if fault=='tamper_during_t3':
+ if fault in {'tamper_during_t3','same_size_rewrite','restore_mtime','tamper_after_close'}:
   control.settimeout(5);assert control.recv(1)==b'T'
-  image.rename(ram.final/'old-image');image.write_bytes((ram.final/'old-image').read_bytes())
-  os.chown(image,0,993);image.chmod(0o440);control.send(b'A')
+  if fault=='tamper_during_t3':
+   image.rename(ram.final/'old-image');image.write_bytes((ram.final/'old-image').read_bytes())
+   os.chown(image,0,993);image.chmod(0o440)
+  else:
+   metadata=image.stat();write_fd=os.open(image,os.O_WRONLY)
+   os.pwrite(write_fd,b'changed!' if fault=='tamper_after_close' else os.pread(image_fd,8,100),100);os.close(write_fd)
+   if fault=='restore_mtime':os.utime(image,ns=(metadata.st_atime_ns,metadata.st_mtime_ns))
+  control.send(b'A')
  result=json.loads(os.read(read,8192));pid,status=os.waitpid(child,0)
  assert pid==child and os.waitstatus_to_exitcode(status)==0,result
  assert before=={p.name:sha(p) for p in source.iterdir()}
- if fault=='positive':
+ if fault in {'positive','04h_large'}:
   assert image_before==sha(image) and set(os.listdir(final_fd))=={'snapshot.sqlite3'}
  result.update(store=store,source_bytes_unchanged=True,private_pidns=True,
-  worker_t3='PASS' if fault=='positive' else 'REJECTED',fault=fault,kernel=os.uname().release)
+  worker_t3='PASS' if fault in {'positive','04h_large'} else 'REJECTED',fault=fault,kernel=os.uname().release)
  print(json.dumps(result))
  os.close(image_fd);image_fd=None;os.close(final_fd);final_fd=None;os.close(read)
  left.close();control.close()
@@ -202,6 +260,48 @@ def test_04D_private_pidns_invalid_fd_view_tamper_cancel_and_deadline_fail_close
     assert result['cwd_unchanged'] and result['received_fds_closed'] and result['source_bytes_unchanged']
     assert result['original_lab_db_pass'] is False
     record_property('04d_native_rejection',json.dumps(result,sort_keys=True))
+
+
+@NATIVE
+@pytest.mark.parametrize('fault',['same_size_rewrite','restore_mtime','tamper_after_close','final_digest','vm_cancel','row_cancel','unexpected_import'])
+def test_04H_native_fast_stat_strong_final_hash_and_wrapped_interrupt_fail_closed(fault,record_property):
+    process=subprocess.run(['unshare','--mount','--pid','--fork','--propagation','private','--mount-proc',
+        sys.executable,'-B','-E','-s','-c',DIRFD_DRIVER,'public_traffic',fault],cwd=ROOT,
+        capture_output=True,text=True,timeout=30)
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout);diagnostic=result['t3_diagnostic']
+    assert result['worker_t3']=='REJECTED' and result['received_fds_closed'] and result['source_bytes_unchanged']
+    if fault in {'vm_cancel','row_cancel'}:
+        assert diagnostic['category']=='resource_guard' and diagnostic['check']=='resource_guard'
+        assert diagnostic['exception_class']=='CoordinatorError'
+    elif fault=='unexpected_import':
+        assert diagnostic['category']=='unexpected' and diagnostic['check']=='unexpected'
+        assert diagnostic['exception_class']=='ModuleNotFoundError'
+    else:assert diagnostic['category']=='snapshot_tamper'
+    if fault=='final_digest':assert result['actual_digest_calls']==3 and diagnostic['check']=='image_digest'
+    record_property('04h_native_guard',json.dumps(result,sort_keys=True))
+
+
+@NATIVE
+def test_04H_117MiB_real_C_rows_full_T3_and_measured_hash_amplification(record_property):
+    results={}
+    for fault in ('04h_large_baseline_prefix','04h_large_candidate_prefix','04h_large'):
+        process=subprocess.run(['unshare','--mount','--pid','--fork','--propagation','private','--mount-proc',
+            sys.executable,'-B','-E','-s','-c',DIRFD_DRIVER,'traffic_projection',fault],cwd=ROOT,
+            capture_output=True,text=True,timeout=1200)
+        assert process.returncode==0,process.stdout+process.stderr
+        results[fault]=json.loads(process.stdout)
+    baseline=results['04h_large_baseline_prefix'];prefix=results['04h_large_candidate_prefix'];full=results['04h_large']
+    assert baseline['guard_calls']==prefix['guard_calls']==12
+    assert baseline['actual_digest_calls']==11 and prefix['actual_digest_calls']==2
+    assert baseline['full_bytes_hashed']>full['full_bytes_hashed']>prefix['full_bytes_hashed']
+    assert full['image_bytes']>=117*1024**2 and full['actual_adapter_rows']==16000
+    assert full['worker_t3']=='PASS' and full['guard_calls']>16000
+    assert full['actual_digest_calls']==full['t3_diagnostic']['digest_full_count']==3
+    assert full['t3_diagnostic']['progress_callbacks']>0 and full['t3_diagnostic']['check']=='t3_complete'
+    assert full['full_bytes_hashed']==3*full['image_bytes']
+    assert all(r['source_bytes_unchanged'] and r['received_fds_closed'] for r in results.values())
+    record_property('04h_large_C_hash_evidence',json.dumps(results,sort_keys=True))
 
 
 @NATIVE
@@ -675,6 +775,10 @@ try:
   (queue/'queue-state.v1.json').write_bytes(c.encode(empty_state()));(queue/'queue-state.v1.json').chmod(0o600)
   for filename,mode in (('coordinator.lock',0o600),('heavy.lock',0o640)):
    file=queue/filename;file.touch(mode=mode);os.chown(file,0,1000)
+  large=sys.argv[1]=='04h_large'
+  modern=sys.argv[1].startswith('04h_')
+  if modern:
+   os.chown(queue,0,993);os.chown(queue/'heavy.lock',0,993)
   policies=[]
   source_gids={'public_traffic':1004,'network_service_intelligence':1004,'traffic_projection':996}
   for store in STORES:
@@ -696,18 +800,25 @@ try:
     policy=fixture_policy(store,source=str(target),device=info.st_dev,inode=info.st_ino,uid=info.st_uid,gid=info.st_gid)
    else:
     writer,policy=disposable(source,store);writers.append(writer)
+    if large and store=='traffic_projection':
+     from tests.db_audit_coordinator.test_qio226_r4_native import large_projection_fixture
+     large_projection_fixture(writer)
+     policy=replace(policy,source_max_bytes=192*1024**2,wal_max_bytes=192*1024**2,image_max_bytes=192*1024**2,
+      backup_overhead_bytes=16*1024**2,validator_overhead_bytes=32*1024**2,margin_bytes=16*1024**2,memory_max_bytes=512*1024**2)
    # Controlled B failure: disposable original fixture is invalid from birth;
    # no runtime source writes, no production failure injection API.
    if store=='network_service_intelligence' and sys.argv[1]=='controlled_B':
     writer.execute("UPDATE service_materialization_generations SET ruleset_digest_sha256='bad'")
+   if store=='public_traffic' and sys.argv[1]=='04h_A_failure':
+    writer.execute("UPDATE traffic_daily SET local_date='invalid-synthetic-date'")
    for file in source.iterdir():os.chown(file,1003,source_gids[store]);file.chmod(0o600)
    os.chown(source,1003,source_gids[store])
-   policies.append(replace(policy,uid=1003,gid=source_gids[store],memory_max_bytes=256*1024**2,attempt_seconds=30))
+   policies.append(replace(policy,uid=1003,gid=source_gids[store],memory_max_bytes=(512 if large else 256)*1024**2,attempt_seconds=1200 if large else 30))
   ram=root/'ram';ram.mkdir(mode=0o711)
   cfg=R4Installation(R4_METHOD,True,1003,r4_sandbox.RAM_ROOT,ram.stat().st_dev,ram.stat().st_ino,16,64)
   value=profile(enabled=True,root=str(queue),release_root=os.getcwd(),python=sys.executable,
    delegated='/'+name+'/delegated',delegated_device=delegated.stat().st_dev,delegated_inode=delegated.stat().st_ino,
-   worker_uid=1000,worker_gid=1000,worker_groups=(),stores=tuple(policies),r4=cfg)
+   worker_uid=995 if modern else 1000,worker_gid=993 if modern else 1000,worker_groups=(),stores=tuple(policies),r4=cfg)
   runtime.LiveCoordinator.qualify=lambda self,profile:None
   PilotProfile.artifact=lambda self:None
   # Explicit path seam in this disposable native harness only.
@@ -786,7 +897,7 @@ try:
     print(json.dumps(dict(root=str(root),cgroup=str(top),queue=str(queue),
      sources=[dict(path=p.source,hashes=hashes(p.source)) for p in policies])),flush=True)
     os.kill(os.getpid(),9)
-   until=time.monotonic()+15
+   until=time.monotonic()+(1200 if large else 15)
    while subject.process is not None and time.monotonic()<until and not subject.orphan_hold:
     if select.select([subject._wake_read],[],[],.1)[0]:subject._wake_read.recv(1)
     subject.finish()
@@ -854,7 +965,7 @@ try:
   else:
    final=subject.store.read();states=[job['state'] for job in final['jobs']]
    failed_callbacks={'04f_bad_status','04f_page_budget','04f_busy_deadline'}
-   expected=['deferred']*3 if sys.argv[1] in failed_callbacks else ['completed','failed','completed'] if sys.argv[1]=='controlled_B' else ['completed','canceled','completed'] if sys.argv[1] in {'cancel_B','04f_busy_cancel'} else ['completed']*3
+   expected=['failed','completed','completed'] if sys.argv[1]=='04h_A_failure' else ['deferred']*3 if sys.argv[1] in failed_callbacks else ['completed','failed','completed'] if sys.argv[1]=='controlled_B' else ['completed','canceled','completed'] if sys.argv[1] in {'cancel_B','04f_busy_cancel'} else ['completed']*3
    assert states==expected,states
    if sys.argv[1] in {'cancel_B','04f_busy_cancel'}:assert fault_killed and final['jobs'][1]['audit_result']['result']=='incomplete'
    if sys.argv[1] in failed_callbacks:
@@ -864,7 +975,7 @@ try:
    assert not subject.dispatch_one() and not subject.orphan_hold
    assert len(gate_checks)==6
    print(json.dumps(dict(states=states,source_hashes_unchanged=True,proofs=subject.r4_proofs,
-    kernel=os.uname().release,installed_qualification='NOT_CLAIMED_QA_ONLY',uids=[0,1000,1003],
+    kernel=os.uname().release,installed_qualification='NOT_CLAIMED_QA_ONLY',uids=[0,value.worker_uid,1003],
     stages=directory_receipts,promoted_stages=stage_receipts)))
   if not subject.orphan_hold:subject.close();subject=None
   for writer in writers:writer.close()
@@ -1091,3 +1202,50 @@ def test_K07_native_supervisor_sigkill_keeps_durable_running_and_never_starts_B(
         for folder in sorted(group.rglob('*'),key=lambda p:len(p.parts),reverse=True):
             if folder.is_dir():folder.rmdir()
         group.rmdir();shutil.rmtree(root)
+
+
+@NATIVE
+@pytest.mark.parametrize('scenario',['04h_large','04h_A_failure'])
+def test_04H_actual_UID995_authenticated_T3_private_summary_and_positive_release(scenario,record_property):
+    import hashlib
+    import shutil
+    import sysconfig
+    import tempfile
+    # UID995 cannot traverse the owner's HOME. Copy existing qualified TEST
+    # dependencies and exact source into a disposable traversable root. No
+    # package install, global chmod, HOME change or import stub is allowed.
+    with tempfile.TemporaryDirectory(prefix='qio226-04h-readable-fixture-') as temporary:
+        qualified=Path(temporary);qualified.chmod(0o755)
+        release=qualified/'release';release.mkdir()
+        shutil.copytree(ROOT/'app',release/'app',ignore=shutil.ignore_patterns('__pycache__'))
+        (release/'tests').mkdir()
+        shutil.copytree(ROOT/'tests/db_audit_coordinator',release/'tests/db_audit_coordinator',ignore=shutil.ignore_patterns('__pycache__'))
+        interpreter=qualified/'bin/python';interpreter.parent.mkdir();shutil.copy2(Path(sys.executable).resolve(),interpreter)
+        (qualified/'pyvenv.cfg').write_text('home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.10\n')
+        packages=qualified/'lib/python3.10/site-packages';packages.parent.mkdir(parents=True)
+        shutil.copytree(sysconfig.get_path('purelib'),packages,ignore=shutil.ignore_patterns('__pycache__'))
+        hashes={str(path.relative_to(release)):hashlib.sha256(path.read_bytes()).hexdigest() for path in (release/'app').rglob('*.py')}
+        assert all(hashlib.sha256((ROOT/name).read_bytes()).hexdigest()==digest for name,digest in hashes.items())
+        process=subprocess.run(['unshare','--mount','--pid','--fork','--propagation','private','--mount-proc',
+            str(interpreter),'-B','-E','-s','-c',PIPELINE_DRIVER,scenario],cwd=release,
+            capture_output=True,text=True,timeout=1250)
+    assert process.returncode==0,process.stdout+process.stderr
+    result=json.loads(process.stdout)
+    diagnostics=[json.loads(line) for line in process.stderr.splitlines() if line.startswith('{')
+        and json.loads(line).get('event')=='qio226_r4_t3_outcome']
+    record_property('04h_authenticated_raw',json.dumps(dict(result=result,diagnostics=diagnostics),sort_keys=True))
+    assert len(diagnostics)==3 and result['uids']==[0,995,1003]
+    assert result['source_hashes_unchanged'] and len(result['proofs'])==3
+    assert all(p['helper_reaped'] and p['gatekeeper_reaped'] and p['cleanup_complete'] and p['shmem_zero']
+        and p['empty_observations']==2 for p in result['proofs'])
+    if scenario=='04h_large':
+        assert result['states']==['completed']*3
+        assert all(d['check']=='t3_complete' and d['digest_full_count']==3 for d in diagnostics)
+        assert result['proofs'][2]['snapshot']['size']>=117*1024**2
+        assert diagnostics[2]['guard_fast_count']>16000 and diagnostics[2]['progress_callbacks']>0
+    else:
+        assert result['states']==['failed','completed','completed']
+        assert diagnostics[0]['category']=='domain' and diagnostics[0]['check']=='pt_traffic_daily_date'
+        assert result['proofs'][0]['snapshot'] is not None  # Backup completed; NOT source-corruption proof.
+    assert 'invalid-synthetic-date' not in json.dumps(diagnostics)
+    record_property('04h_authenticated_pipeline',json.dumps(dict(result=result,diagnostics=diagnostics),sort_keys=True))
