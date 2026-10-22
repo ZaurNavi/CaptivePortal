@@ -1,0 +1,1765 @@
+diff --git a/app/admin_web/controller_settings.py b/app/admin_web/controller_settings.py
+index 2504a4870bbaa4c8f731bea230392123d2ac0b85..039f1385aa3cb02b4f8040afd4976919f1a60eeb 100644
+--- a/app/admin_web/controller_settings.py
++++ b/app/admin_web/controller_settings.py
+@@ -88,6 +88,12 @@ class ControllerConfigurationReadService:
+         fields["tls_certificate_verification"] = value("TLS certificate verification", "boolean",
+             snapshot.tls_certificate_verification, snapshot.tls_certificate_verification_source)
+         fields["tls_certificate_verification"].update(editable=False, read_only_reason="deployment_controlled")
++        fields["tls_certificate_verification"].update(
++            verification_mode=snapshot.tls_verification_mode,
++            trust_policy=snapshot.tls_trust_policy,
++            trust_anchor_source=snapshot.tls_trust_anchor_source,
++            certificate_status=snapshot.tls_certificate_status,
++        )
+         return {
+             "api_version": "admin.settings.controller.v3",
+             "request_id": request_id,
+diff --git a/app/config.py b/app/config.py
+index ba066ce624f64dd51edd4a841ef3691a6db4df7d..df107a228737563f2e214f5eb767d57603b0e3b0 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -136,7 +136,7 @@ if "PORT" in os.environ:
+ DEBUG = False
+ 
+ # SSL verification
+-VERIFY_SSL = False
++VERIFY_SSL = True
+ 
+ # Logging level
+ LOG_LEVEL = "INFO"
+@@ -899,6 +899,9 @@ OMADA_WEBHOOK_SITE_ID_MAP_JSON = os.getenv(
+ 
+ # Omada OpenAPI settings
+ OMADA_URL = os.getenv("OMADA_URL", "").strip()
++# QIO-01B Option B: deployment-approved public leaf; no network/TOFU admission.
++OMADA_TLS_TRUST_ANCHOR_PATH = os.getenv("OMADA_TLS_TRUST_ANCHOR_PATH", "").strip()
++OMADA_TLS_TRUST_ANCHOR_SHA256 = os.getenv("OMADA_TLS_TRUST_ANCHOR_SHA256", "").strip()
+ OMADA_ID = os.getenv("OMADA_ID", "").strip()
+ CLIENT_ID = os.getenv("OMADA_CLIENT_ID", "").strip()
+ CLIENT_SECRET = os.getenv("OMADA_CLIENT_SECRET", "").strip()
+diff --git a/app/controllers/omada.py b/app/controllers/omada.py
+index 023315b53b6a5c9a7183fd1b6404c8fdd1552e97..ca438f8cc51096da6449232a31bb69c453b7f5db 100644
+--- a/app/controllers/omada.py
++++ b/app/controllers/omada.py
+@@ -5,18 +5,232 @@ Omada Controller Provider.
+ import copy
+ import ipaddress
+ import math
++import os
++from pathlib import Path
++import re
++import ssl
++import stat
+ import threading
+ import time
++from datetime import datetime, timezone
++from urllib.parse import unquote, urlsplit
+ import requests
++from cryptography import x509
++from cryptography.hazmat.primitives import hashes
++from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
++from cryptography.x509.oid import ExtendedKeyUsageOID
+ from typing import Any, Optional
+ 
+ from app.common.mac import format_mac_colon, format_mac_hyphen
+ from app.controllers.base import ControllerInterface
+-from app.controllers.omada_config import OmadaControllerRuntimeConfig
++from app.controllers.omada_config import OmadaControllerRuntimeConfig, OmadaTlsPolicy
++from app.exceptions import ConfigurationError, ControllerError
+ from app.logger import logger
+ from app.models import Result
+ 
+ 
++class OmadaTransportError(requests.exceptions.SSLError):
++    """Sanitized non-authoritative failure; never includes a request or credentials."""
++
++    def __init__(self, reason):
++        self.reason = reason
++        super().__init__("Omada strict transport unavailable: " + reason)
++
++
++def _omada_ssl_context(policy):
++    """Admit one independently approved public leaf, not a network/TOFU certificate."""
++    path = Path(policy.trust_anchor_path)
++    repository = Path(__file__).resolve().parents[2]
++    try:
++        if path.resolve().is_relative_to(repository):
++            raise ConfigurationError("Omada TLS: trust_bundle_unapproved")
++        if os.name != "posix":
++            # A root-owned deployment file cannot be attested through POSIX mode
++            # bits on Windows. Nonproduction Windows fixtures may inject admission.
++            raise ConfigurationError("Omada TLS: trust_permissions_unattested")
++        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++        with os.fdopen(fd, "rb") as handle:
++            info = os.fstat(handle.fileno())
++            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
++                    or info.st_mode & 0o022 or not 0 < info.st_size <= 65536):
++                raise ConfigurationError("Omada TLS: trust_bundle_unapproved")
++            pem = handle.read(65537)
++    except (OSError, RuntimeError):
++        raise ConfigurationError("Omada TLS: trust_bundle_missing_or_unreadable") from None
++    try:
++        if (len(pem) > 65536 or pem.count(b"-----BEGIN CERTIFICATE-----") != 1
++                or not re.fullmatch(rb"\s*-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----\s*", pem)):
++            raise ValueError()
++        cert = x509.load_pem_x509_certificate(pem)
++        if cert.fingerprint(hashes.SHA256()).hex() != policy.trust_anchor_sha256:
++            raise ConfigurationError("Omada TLS: trust_bundle_unapproved")
++        now = datetime.now(timezone.utc)
++        before = (cert.not_valid_before_utc if hasattr(cert, "not_valid_before_utc")
++                  else cert.not_valid_before.replace(tzinfo=timezone.utc))
++        after = (cert.not_valid_after_utc if hasattr(cert, "not_valid_after_utc")
++                 else cert.not_valid_after.replace(tzinfo=timezone.utc))
++        if now < before:
++            raise ConfigurationError("Omada TLS: certificate_not_yet_valid")
++        if now >= after:
++            raise ConfigurationError("Omada TLS: certificate_expired")
++        names = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
++        if not any(name.lower() == "omada" for name in names.get_values_for_type(x509.DNSName)):
++            raise ConfigurationError("Omada TLS: name_mismatch")
++        if ExtendedKeyUsageOID.SERVER_AUTH not in cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value:
++            raise ConfigurationError("Omada TLS: certificate_purpose_invalid")
++        if cert.subject != cert.issuer:
++            raise ConfigurationError("Omada TLS: trust_bundle_unapproved")
++        try:
++            if cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
++                raise ConfigurationError("Omada TLS: trust_bundle_not_leaf")
++        except x509.ExtensionNotFound:
++            pass  # no CA capability is asserted; native TLS verification remains mandatory
++        key = cert.public_key()
++        if isinstance(key, rsa.RSAPublicKey):
++            key.verify(cert.signature, cert.tbs_certificate_bytes, padding.PKCS1v15(), cert.signature_hash_algorithm)
++        elif isinstance(key, ec.EllipticCurvePublicKey):
++            key.verify(cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(cert.signature_hash_algorithm))
++        else:
++            raise ValueError()
++        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
++        context.load_verify_locations(cadata=pem.decode("ascii"))
++        if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
++            raise ConfigurationError("Omada TLS: tls_policy_invalid")
++        return context
++    except ConfigurationError:
++        raise
++    except Exception:
++        raise ConfigurationError("Omada TLS: trust_bundle_invalid") from None
++
++
++class _OmadaTlsAdapter(requests.adapters.HTTPAdapter):
++    """Provider-local strict context, without Requests adding certifi/system roots."""
++
++    def __init__(self, context):
++        self._context = context
++        super().__init__(max_retries=0)
++
++    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
++        return super().init_poolmanager(connections, maxsize, block=block,
++                                        ssl_context=self._context, **kwargs)
++
++    def cert_verify(self, conn, url, verify, cert):
++        if verify is not True or cert is not None:
++            raise OmadaTransportError("tls_policy_invalid")
++        conn.cert_reqs = "CERT_REQUIRED"
++        conn.ca_certs = None
++        conn.ca_cert_dir = None
++        conn.ca_cert_data = None
++
++    def build_connection_pool_key_attributes(self, request, verify, cert=None):
++        # Requests >=2.32 otherwise substitutes its preloaded default CA context.
++        if verify is not True or cert is not None:
++            raise OmadaTransportError("tls_policy_invalid")
++        parsed = urlsplit(request.url)
++        return ({"scheme": parsed.scheme, "host": parsed.hostname, "port": parsed.port},
++                {"ssl_context": self._context, "cert_reqs": "CERT_REQUIRED"})
++
++    def proxy_manager_for(self, *args, **kwargs):
++        raise OmadaTransportError("proxy_not_admitted")
++
++
++class _OmadaVerifiedTransport:
++    """One TLS policy for every Omada call; no shared/global Requests mutations."""
++
++    def __init__(self, policy):
++        if not isinstance(policy, OmadaTlsPolicy):
++            raise ConfigurationError("Missing Omada strict TLS policy")
++        self._context = _omada_ssl_context(policy)
++        self._lock = threading.Lock()
++        self._reason = None
++        self._last_log = 0.0
++        self._repeated = 0
++        self._last_state = "unproven"
++
++    def _state(self, reason):
++        with self._lock:
++            now = time.monotonic()
++            if (self._last_state == "unproven" or reason != self._reason
++                    or (reason is not None and now - self._last_log >= 60)):
++                repeated = self._repeated
++                if reason is None:
++                    logger.info("omada.tls_state state=verified previous=%s repeated_failures=%d", self._reason, repeated)
++                else:
++                    logger.warning("omada.tls_state state=unavailable reason=%s previous=%s repeated_failures=%d", reason, self._reason, repeated)
++                self._reason, self._last_log, self._repeated = reason, now, 0
++            elif reason is not None:
++                self._repeated += 1
++            self._last_state = "unavailable" if reason else "verified_last_connection"
++
++    @property
++    def health(self):
++        with self._lock:
++            return {"verification_mode": "strict", "failure_reason": self._reason,
++                    "state": self._last_state,
++                    "repeated_failures": self._repeated}
++
++    @staticmethod
++    def _ssl_reason(error):
++        # Only classify locally. Never return/log the raw exception, URL or request.
++        text = str(error).lower()
++        for markers, reason in (
++            (("expired",), "certificate_expired"),
++            (("not yet valid",), "certificate_not_yet_valid"),
++            (("hostname", "doesn't match", "ip address mismatch"), "name_mismatch"),
++            (("unsuitable certificate purpose",), "certificate_purpose_invalid"),
++            (("self-signed", "unable to get local issuer", "unknown ca"), "certificate_unknown"),
++        ):
++            if any(marker in text for marker in markers):
++                return reason
++        return "tls_handshake"
++
++    def request(self, method, url, **kwargs):
++        try:
++            parsed = urlsplit(url)
++            decoded = unquote(parsed.path)
++            if (parsed.scheme != "https" or parsed.hostname is None or parsed.hostname.lower() != "omada"
++                    or parsed.port != 8043 or parsed.netloc.lower() != "omada:8043"
++                    or parsed.username is not None or parsed.password is not None or parsed.fragment
++                    or "\\" in url or any(ord(char) <= 32 for char in url)
++                    or decoded != parsed.path or any(part in {".", ".."} for part in decoded.split("/"))
++                    or not (parsed.path == "/openapi/authorize/token" or parsed.path.startswith("/openapi/v1/"))):
++                raise OmadaTransportError("origin_not_admitted")
++            if set(kwargs) - {"headers", "params", "json", "timeout"}:
++                raise OmadaTransportError("tls_policy_override_not_admitted")
++            if any(key.lower() in {"host", "proxy-authorization"} for key in kwargs.get("headers", {})):
++                raise OmadaTransportError("origin_not_admitted")
++            # Match existing top-level requests lifecycle: a fresh session/connection
++            # per operation. No indefinite pooled certificate/expiry attestation.
++            with requests.Session() as session:
++                session.trust_env = False  # excludes proxy, netrc and env CA overrides
++                session.mount("https://", _OmadaTlsAdapter(self._context))
++                response = session.request(method, url, verify=True, allow_redirects=False, **kwargs)
++                if 300 <= response.status_code < 400:
++                    response.close()
++                    raise OmadaTransportError("redirect_not_admitted")
++            self._state(None)
++            return response
++        except OmadaTransportError as error:
++            self._state(error.reason)
++            raise
++        except requests.exceptions.SSLError as error:
++            reason = self._ssl_reason(error)
++            self._state(reason)
++            raise OmadaTransportError(reason) from None
++        except requests.exceptions.ProxyError:
++            self._state("proxy_not_admitted")
++            raise OmadaTransportError("proxy_not_admitted") from None
++        except requests.exceptions.Timeout:
++            self._state("timeout")
++            raise
++        except requests.exceptions.ConnectionError:
++            self._state("network_error")
++            raise
++        except (ValueError, TypeError):
++            self._state("origin_not_admitted")
++            raise OmadaTransportError("origin_not_admitted") from None
++
++
+ class OmadaProvider(ControllerInterface):
+     """Omada SDN Controller Provider."""
+ 
+@@ -31,6 +245,11 @@ class OmadaProvider(ControllerInterface):
+         self._client_id = runtime_config.client_id
+         self._client_secret = runtime_config.client_secret
+         self._verify_ssl = runtime_config.verify_ssl
++        try:
++            self._transport = _OmadaVerifiedTransport(runtime_config.tls_policy)
++        except ConfigurationError:
++            logger.error("omada.tls_preflight state=unavailable")
++            raise
+         self._token_condition = threading.Condition(
+             threading.RLock()
+         )
+@@ -38,6 +257,16 @@ class OmadaProvider(ControllerInterface):
+         self._cached_token_expires_at = 0.0
+         self._token_refreshing = False
+ 
++    def _request(self, method, url, **kwargs):
++        transport = getattr(self, "_transport", None)
++        if not isinstance(transport, _OmadaVerifiedTransport):
++            raise OmadaTransportError("tls_policy_missing")
++        return transport.request(method, url, **kwargs)
++
++    @property
++    def tls_health(self):
++        return self._transport.health
++
+     def _request_token_uncached(self) -> Result:
+         url = f"{self._omada_url}/openapi/authorize/token?grant_type=client_credentials"
+         payload = {
+@@ -47,12 +276,14 @@ class OmadaProvider(ControllerInterface):
+         }
+ 
+         try:
+-            response = requests.post(
++            response = self._request("POST",
+                 url,
+                 json=payload,
+-                verify=self._verify_ssl,
+                 timeout=(5, 10),
+             )
++        except OmadaTransportError as exc:
++            return Result.fail(error="OMADA_TLS_UNAVAILABLE", message=str(exc), data={
++                "http_status": 0, "error_code": 0, "failure_category": exc.reason, "retryable": False})
+         except requests.exceptions.Timeout as exc:
+             return Result.fail(
+                 error="HTTP_ERROR",
+@@ -252,30 +483,33 @@ class OmadaProvider(ControllerInterface):
+             self._token_condition.notify_all()
+ 
+     def connect(self) -> None:
+-        logger.info("Omada provider ready (shared token cache)")
++        logger.info("Omada provider configured (strict TLS; shared token cache)")
+ 
+     def get_sites(self) -> list[dict[str, Any]]:
+         token_result = self._get_token()
+         if not token_result.success:
+-            return []
++            raise ControllerError("Omada authority unavailable")
+ 
+         token = token_result.data.get("token")
+         url = f"{self._omada_url}/openapi/v1/{self._omada_id}/sites?page=1&pageSize=100"
+         headers = {"Authorization": f"AccessToken={token}"}
+ 
+         try:
+-            response = requests.get(
++            response = self._request("GET",
+                 url,
+                 headers=headers,
+-                verify=self._verify_ssl,
+                 timeout=(5, 10),
+             )
+             data = response.json()
+-            if data.get("errorCode") == 0:
+-                return data.get("result", {}).get("data", [])
+-            return []
++            if (not 200 <= response.status_code < 300 or not isinstance(data, dict)
++                    or not self._is_success_error_code(data.get("errorCode")) or not isinstance(data.get("result"), dict)
++                    or not isinstance(data["result"].get("data"), list)
++                    or any(not isinstance(row, dict) for row in data["result"]["data"])):
++                raise ControllerError("Omada authority unavailable")
++            return data["result"]["data"]
+         except Exception:
+-            return []
++            # Public success remains a list; failed authority is never a zero-site fact.
++            raise ControllerError("Omada authority unavailable") from None
+ 
+     def get_clients(self, site_id: str) -> Result:
+         """
+@@ -307,14 +541,13 @@ class OmadaProvider(ControllerInterface):
+ 
+         for page in range(1, self.CLIENT_MAX_PAGES + 1):
+             try:
+-                response = requests.get(
++                response = self._request("GET",
+                     url,
+                     headers=headers,
+                     params={
+                         "page": page,
+                         "pageSize": self.CLIENT_PAGE_SIZE,
+                     },
+-                    verify=self._verify_ssl,
+                     timeout=(5, 10),
+                 )
+                 last_http_status = response.status_code
+@@ -636,10 +869,9 @@ class OmadaProvider(ControllerInterface):
+         headers = {"Authorization": f"AccessToken={token}"}
+ 
+         try:
+-            response = requests.post(
++            response = self._request("POST",
+                 url,
+                 headers=headers,
+-                verify=self._verify_ssl,
+                 timeout=(5, 10),
+             )
+             data = response.json()
+@@ -691,10 +923,9 @@ class OmadaProvider(ControllerInterface):
+         headers = {"Authorization": f"AccessToken={token}"}
+ 
+         try:
+-            response = requests.post(
++            response = self._request("POST",
+                 url,
+                 headers=headers,
+-                verify=self._verify_ssl,
+                 timeout=(5, 10),
+             )
+             data = response.json()
+@@ -752,10 +983,9 @@ class OmadaProvider(ControllerInterface):
+         headers = {"Authorization": f"AccessToken={token}"}
+ 
+         try:
+-            response = requests.get(
++            response = self._request("GET",
+                 url,
+                 headers=headers,
+-                verify=self._verify_ssl,
+                 timeout=(5, 10),
+             )
+             data = response.json()
+@@ -901,10 +1131,9 @@ class OmadaProvider(ControllerInterface):
+             "Accept": "application/json",
+         }
+         try:
+-            response = requests.get(
++            response = self._request("GET",
+                 url,
+                 headers=headers,
+-                verify=self._verify_ssl,
+                 timeout=(request_timeout, request_timeout),
+             )
+         except requests.exceptions.Timeout as exc:
+diff --git a/app/controllers/omada_config.py b/app/controllers/omada_config.py
+index 8230e82eecf85ac81c9fa1e219043cfbb0936ea8..3c6e85e58cd08a83d9e9ec3f8726ca342b0d9371 100644
+--- a/app/controllers/omada_config.py
++++ b/app/controllers/omada_config.py
+@@ -1,6 +1,8 @@
+ """Canonical startup Omada configuration and its separate public projection."""
+ 
+ from dataclasses import dataclass, field
++from pathlib import Path
++import re
+ from typing import Any, Mapping
+ from urllib.parse import urlsplit
+ 
+@@ -14,8 +16,32 @@ _REQUIRED = (
+     ("OMADA_CLIENT_SECRET", "client_secret", "client_secret"),
+ )
+ 
++CANONICAL_HTTPS_ORIGIN = "https://Omada:8043"
++
++
++@dataclass(frozen=True, slots=True)
++class OmadaTlsPolicy:
++    """Pure startup policy from adopted settings; certificate I/O belongs to transport."""
++    canonical_https_origin: str
++    trust_anchor_path: str = field(repr=False)
++    trust_anchor_sha256: str = field(repr=False)
++    verification_mode: str = "strict"
++
++    def __post_init__(self):
++        if not _valid_base_url(self.canonical_https_origin) or self.verification_mode != "strict":
++            raise ConfigurationError("Invalid Omada strict TLS origin/policy")
++        if not isinstance(self.trust_anchor_path, str) or not Path(self.trust_anchor_path).is_absolute():
++            raise ConfigurationError("Invalid configuration: OMADA_TLS_TRUST_ANCHOR_PATH")
++        if not isinstance(self.trust_anchor_sha256, str) or not re.fullmatch(
++                r"[0-9a-fA-F]{64}", self.trust_anchor_sha256):
++            raise ConfigurationError("Invalid configuration: OMADA_TLS_TRUST_ANCHOR_SHA256")
++        object.__setattr__(self, "canonical_https_origin", CANONICAL_HTTPS_ORIGIN)
++        object.__setattr__(self, "trust_anchor_sha256", self.trust_anchor_sha256.lower())
++
+ 
+ def _valid_base_url(value: str) -> bool:
++    if not isinstance(value, str):
++        return False
+     if any(character.isspace() for character in value) or "?" in value or "#" in value:
+         return False
+     try:
+@@ -24,14 +50,15 @@ def _valid_base_url(value: str) -> bool:
+     except ValueError:
+         return False
+     return (
+-        parsed.scheme in {"http", "https"}
++        parsed.scheme == "https"
+         and bool(parsed.netloc)
+-        and parsed.hostname is not None
++        and parsed.hostname is not None and parsed.hostname.lower() == "omada"
++        and parsed.netloc.lower() == "omada:8043"
+         and parsed.username is None
+         and parsed.password is None
+         and parsed.path in {"", "/"}
+         and not parsed.netloc.endswith(":")
+-        and port != 0
++        and port == 8043
+     )
+ 
+ 
+@@ -43,7 +70,7 @@ def normalize_controller_setting(key: str, value: Any) -> str:
+     if key == "OMADA_URL":
+         if not _valid_base_url(value):
+             raise ConfigurationError("Invalid configuration: OMADA_URL")
+-        return value[:-1] if value.endswith("/") else value
++        return CANONICAL_HTTPS_ORIGIN
+     return value
+ 
+ 
+@@ -54,6 +81,7 @@ class OmadaControllerRuntimeConfig:
+     client_id: str
+     client_secret: str = field(repr=False)
+     verify_ssl: bool
++    tls_policy: OmadaTlsPolicy | None = field(default=None, repr=False)
+ 
+     def __post_init__(self):
+         missing = [external for external, _, attribute in _REQUIRED
+@@ -64,14 +92,29 @@ class OmadaControllerRuntimeConfig:
+         for _, _, attribute in _REQUIRED:
+             key = next(key for key, _, name in _REQUIRED if name == attribute)
+             object.__setattr__(self, attribute, normalize_controller_setting(key, getattr(self, attribute)))
++        if self.verify_ssl is not True or not isinstance(self.tls_policy, OmadaTlsPolicy):
++            raise ConfigurationError("Missing or invalid Omada strict TLS policy")
++        if self.controller_url != self.tls_policy.canonical_https_origin:
++            raise ConfigurationError("Invalid Omada strict TLS origin/policy")
+ 
+ 
+ def build_omada_runtime_config(settings: Mapping[str, Any], secret_resolution=None) -> OmadaControllerRuntimeConfig:
+     """Resolve only from the caller's already-adopted mapping, with no I/O."""
++    required = {attribute: secret_resolution.value if attribute == "client_secret" and secret_resolution is not None
++                else settings.get(internal) for _, internal, attribute in _REQUIRED}
++    missing = [external for external, _, attribute in _REQUIRED
++               if not isinstance(required[attribute], str) or not required[attribute].strip()]
++    if missing:
++        raise ConfigurationError("Missing required configuration: " + ", ".join(missing))
++    origin = normalize_controller_setting("OMADA_URL", required["controller_url"])
+     return OmadaControllerRuntimeConfig(
+-        **{attribute: secret_resolution.value if attribute == "client_secret" and secret_resolution is not None
+-           else settings.get(internal) for _, internal, attribute in _REQUIRED},
++        **required,
+         verify_ssl=settings["verify_ssl"],
++        tls_policy=OmadaTlsPolicy(
++            canonical_https_origin=origin,
++            trust_anchor_path=settings.get("omada_tls_trust_anchor_path", ""),
++            trust_anchor_sha256=settings.get("omada_tls_trust_anchor_sha256", ""),
++        ),
+     )
+ 
+ 
+@@ -88,6 +131,10 @@ class OmadaControllerPublicConfigSnapshot:
+     tls_certificate_verification: bool
+     tls_certificate_verification_source: str
+     effective_generation: int | None = None
++    tls_verification_mode: str = "unavailable"
++    tls_trust_policy: str = "unavailable"
++    tls_trust_anchor_source: str = "repository_default"
++    tls_certificate_status: str = "unavailable"
+ 
+ 
+ def public_omada_snapshot(
+@@ -116,4 +163,11 @@ def public_omada_snapshot(
+         # VERIFY_SSL is a repository constant, not an environment binding.
+         tls_certificate_verification_source="repository_default",
+         effective_generation=settings_snapshot.generation_id if settings_snapshot is not None else None,
++        tls_verification_mode=runtime_config.tls_policy.verification_mode,
++        tls_trust_policy="independently_approved_self_signed_leaf",
++        tls_trust_anchor_source=("environment" if {
++            "OMADA_TLS_TRUST_ANCHOR_PATH", "OMADA_TLS_TRUST_ANCHOR_SHA256"
++        }.issubset(explicit_environment_names) else "repository_default"),
++        # A configuration projection is not a current peer/health attestation.
++        tls_certificate_status="verification_required_on_every_connection",
+     )
+diff --git a/app/controllers/omada_observations.py b/app/controllers/omada_observations.py
+index adbbb787a645992d5be72fe9ff49dc2fcbc1dcf4..174b1f1756d36a3a0fcc41f596edc5176175719a 100644
+--- a/app/controllers/omada_observations.py
++++ b/app/controllers/omada_observations.py
+@@ -128,14 +128,13 @@ def _request_page(
+         f"/sites/{site_id}/clients"
+     )
+     try:
+-        response = requests.get(
++        response = provider._request("GET",
+             url,
+             headers={
+                 "Authorization": f"AccessToken={token}",
+                 "Accept": "application/json",
+             },
+             params={"page": page, "pageSize": page_size},
+-            verify=provider._verify_ssl,
+             timeout=(timeout, timeout),
+         )
+     except requests.exceptions.Timeout:
+@@ -417,14 +416,13 @@ def _request_observation_result(
+     allow_missing_result: bool = False,
+ ) -> Result:
+     try:
+-        response = requests.get(
++        response = provider._request("GET",
+             url,
+             headers={
+                 "Authorization": f"AccessToken={token}",
+                 "Accept": "application/json",
+             },
+             params=params,
+-            verify=provider._verify_ssl,
+             timeout=(timeout, timeout),
+         )
+     except requests.exceptions.Timeout:
+diff --git a/app/controllers/omada_pending_sessions.py b/app/controllers/omada_pending_sessions.py
+index e795c3d26876916edf74dc6c6c0ce3a7c46de6fd..af9853bb3f0b0a417686a9bb1dc0b763ac85491f 100644
+--- a/app/controllers/omada_pending_sessions.py
++++ b/app/controllers/omada_pending_sessions.py
+@@ -175,11 +175,10 @@ def list_active_clients(
+         f"/sites/{site_id.strip()}/clients"
+     )
+     try:
+-        response = requests.get(
++        response = self._request("GET",
+             url,
+             headers={"Authorization": f"AccessToken={token}"},
+             params={"page": page, "pageSize": page_size},
+-            verify=self._verify_ssl,
+             timeout=(timeout, timeout),
+         )
+     except requests.exceptions.Timeout as exc:
+@@ -284,10 +283,9 @@ def get_pending_client_state(
+         f"/sites/{site_id.strip()}/clients/{endpoint_mac}"
+     )
+     try:
+-        response = requests.get(
++        response = self._request("GET",
+             url,
+             headers={"Authorization": f"AccessToken={token}"},
+-            verify=self._verify_ssl,
+             timeout=(timeout, timeout),
+         )
+     except requests.exceptions.Timeout as exc:
+@@ -369,10 +367,9 @@ def reconnect_client(
+         f"/sites/{site_id.strip()}/clients/{endpoint_mac}/reconnect"
+     )
+     try:
+-        response = requests.post(
++        response = self._request("POST",
+             url,
+             headers={"Authorization": f"AccessToken={token}"},
+-            verify=self._verify_ssl,
+             timeout=(timeout, timeout),
+         )
+     except requests.exceptions.Timeout as exc:
+diff --git a/app/settings.py b/app/settings.py
+index 4e9033ec868e943b08de9584dce0405cf5242fce..9a8f72699cbb358e33ed5fd1fad7dd40dc367566 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -215,6 +215,7 @@ from app.config import (
+     OMADA_WEBHOOK_LOG_FILE, OMADA_WEBHOOK_NORMALIZED_LOG_FILE,
+     OMADA_WEBHOOK_SITE_ID_MAP_JSON,
+     OMADA_URL, OMADA_ID, CLIENT_ID, CLIENT_SECRET,
++    OMADA_TLS_TRUST_ANCHOR_PATH, OMADA_TLS_TRUST_ANCHOR_SHA256,
+     # pending session cleaner constants
+     PENDING_SESSION_CLEANER_ENABLED,
+     PENDING_SESSION_CLEANER_SSIDS,
+@@ -730,6 +731,8 @@ def get_settings() -> dict:
+             OMADA_WEBHOOK_SITE_ID_MAP_JSON
+         ),
+         "omada_url": OMADA_URL,
++        "omada_tls_trust_anchor_path": OMADA_TLS_TRUST_ANCHOR_PATH,
++        "omada_tls_trust_anchor_sha256": OMADA_TLS_TRUST_ANCHOR_SHA256,
+         "omada_id": OMADA_ID,
+         "portal_ui_title_az": PORTAL_UI_TITLE_AZ,
+         "portal_ui_title_ru": PORTAL_UI_TITLE_RU,
+diff --git a/docs/configuration.md b/docs/configuration.md
+index fc97f2ac00c118825e1171828a184a19e258acf1..1800827dcb414df155222d4a502712ffcd6c06f9 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -187,8 +187,10 @@ is never stored there. See `docs/modules/device-fingerprint-portal.md`.
+ | `HOST` | `127.0.0.1` | application bind |
+ | `PORT` | `8088` | application port |
+ | `DEBUG` | `false` | no reloader in `run.py` |
+-| `VERIFY_SSL` | `false` | open security debt |
+-| `OMADA_URL` | required external | no secret literal |
++| `VERIFY_SSL` | `true` | mandatory Omada strict policy; no writable/unsafe toggle |
++| `OMADA_URL` | `https://Omada:8043` required externally | only the approved HTTPS origin; case-normalized |
++| `OMADA_TLS_TRUST_ANCHOR_PATH` | empty / required externally | absolute root-owned public PEM outside Git; no controller private key |
++| `OMADA_TLS_TRUST_ANCHOR_SHA256` | empty / required externally | approved DER SHA256 from independent Owner/SysAdmin export, not network TOFU |
+ | `OMADA_ID` | required external | controller id |
+ | `OMADA_CLIENT_ID` | required external | OpenAPI client |
+ | `OMADA_CLIENT_SECRET` | required secret | never commit/log |
+@@ -196,6 +198,56 @@ is never stored there. See `docs/modules/device-fingerprint-portal.md`.
+ 
+ Provider construction fails closed when required core Omada configuration is missing/invalid.
+ 
++### QIO-01B — Option B only (activation remains HOLD)
++
++The accepted startup settings mapping supplies one immutable strict Omada TLS
++policy. No request rereads the environment, accepts a certificate from a network
++handshake, changes DNS/SNI/Host, or falls back to HTTP/disabled verification.
++`OMADA_URL` must have scheme HTTPS, host `Omada`, explicit port 8043, no credentials,
++query, fragment or non-root path. A trailing root slash/case is normalized to
++`https://Omada:8043`. IP/localhost/other-controller aliases are rejected.
++
++At provider construction the public PEM must be one parseable, valid, self-signed
++certificate with DNS SAN Omada and server-auth EKU, with the independently approved
++DER fingerprint. It must be a regular single-link non-symlink file, owned by root,
++not group/other-writable, readable by the application, and outside the repository.
++Linux permission attestation is mandatory; an unsupported non-POSIX deployment
++fails closed rather than pretending POSIX mode bits attest a Windows ACL.
++Pure Settings semantic validation remains file/network-I/O-free; actual file
++admission is the provider's separate preflight before any Omada operation.
++
++The provider-local SSLContext contains only that admitted public leaf; it does
++not load certifi/system roots. Chain, reference hostname and validity are checked
++on each fresh connection. All twelve token/API request sites, including pending
++sessions and observations, use the same transport. Sessions are operation-local
++(as with the prior top-level Requests calls), without long-lived pooled trust.
++Environment proxies, netrc, REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE are not consulted
++for Omada; explicit proxy/verify/Host/redirect overrides are rejected. Other
++Requests clients are unchanged. No redirect (even same-origin) is followed.
++
++TLS/policy/redirect failures are sanitized, non-authoritative failures. In
++particular, get_sites raises ControllerError on failed authority (including token,
++TLS, DNS/timeout, HTTP/API failure or invalid site-list shape) instead of returning
++authoritative `[]`; a valid empty API result still returns `[]`. This assigned
++legacy boundary is the only success/error parsing change. Existing API paths,
++methods, payloads, timeouts, cache concurrency and other response parsing and
++non-TLS timeout/network classifications remain.
++Other Result-based methods return failure, never a successful empty snapshot.
++
++The first TLS failure and every reason transition/recovery is logged without
++URL, token, secret or PEM. Identical failures are aggregated for a monotonic
++60-second heartbeat with repeated counts and previous reason; individual failed
++operation results are never suppressed. Runtime tls_health describes only the
++last connection state, not authorization readiness or all-system health.
++Admin's existing read-only TLS field additionally exposes strict verification
++mode, approved-leaf policy/source and "verification required on every connection";
++it discloses neither PEM/path nor secrets, and adds no mutation control.
++
++Admission of the real leaf/name/IP, independent full/security/staging/performance
++acceptance, and production activation are Tech Lead/Owner gates, not implied by
++the lab code. Quiet logs are not proof of physical HDD savings. See the QIO-01B
++section in deployment.md for the single-path installation/rotation/rollback plan.
++
+ ## Feature groups
+ 
+ ### Public counters / telemetry
+@@ -713,13 +765,15 @@ by using the same canonical builder on its already-resolved local mapping;
+ an injected controller is never rebuilt.
+ 
+ `OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID` and `OMADA_CLIENT_SECRET` remain required.
+-Existing trim/base-URL normalization and OAuth/request semantics are unchanged.
++Trim and OAuth/request semantics are retained; QIO-01B now restricts the runtime
++origin to `https://Omada:8043` and requires an explicit admitted strict TLS policy.
+ The selected writable value is normalized by the same canonical Omada owner:
+ persisted override > explicit startup environment > repository default.
+ The immutable effective snapshot retains the adopted generation and each
+ writable value's `persisted_override`, `environment` or `repository_default`
+ provenance. No environment reread occurs in an Admin request.
+-`VERIFY_SSL=false` remains a repository constant.
++`VERIFY_SSL=true` is now a mandatory repository constant; QIO-01B permits no
++disabled-verification compatibility fallback.
+ Client Secret is represented only by presence/source, never its value or any
+ derived length/hash/mask. `OMADA_CLIENT_SECRET` and `VERIFY_SSL` have no ordinary
+ writable definition. Only the three non-secret Controller strings enter ordinary overrides/audit paths.
+diff --git a/docs/deployment.md b/docs/deployment.md
+index 37e4bc5e8b59ca5d990af755948be97f0dc7d2e1..262c0f8c769340052bc7f2d968ed4d98e41fb97c 100644
+--- a/docs/deployment.md
++++ b/docs/deployment.md
+@@ -1018,6 +1018,71 @@ Never delete audit/history to make rollback appear clean.
+ systemd, reverse proxy, Alloy, Loki and Grafana require their own
+ deploy/infrastructure authorization.
+ 
++### QIO-01B — approved existing Omada leaf, one path only (NOT deployment GO)
++
++QIO-01B is repository/Lab-only until independent acceptance and separate Owner GO.
++Do not change the controller certificate, restart Omada, modify EAP/Cisco/network
++DNS, install trust globally, or activate this candidate as part of coding.
++No other PKI option or disabled-verification fallback is supplied.
++
++For a later separately authorized installation, Owner/SysAdmin must first export
++the existing **public** certificate independently from Omada and confirm its
++DER SHA256, SAN Omada, server-auth EKU, self-signature, validity and name/IP
++ownership. The observed network fingerprint is only comparison evidence, not
++independent approval. No private key or live credential belongs in Git, logs,
++handoff or this runbook. Do not download-and-trust the network peer (TOFU).
++
++Under that separate GO, provision only the approved public PEM at a root-owned,
++application-readable, non-app-writable regular single-link file outside Git,
++for example `/etc/captiveportal/omada-controller-trust.pem` (`root:root 0644` in a
++protected directory). No symlink, extra bundle/chain or private key is accepted.
++Supply these **deployment** settings; they are not writable Admin settings:
++
++```text
++OMADA_URL=https://Omada:8043
++OMADA_TLS_TRUST_ANCHOR_PATH=/etc/captiveportal/omada-controller-trust.pem
++OMADA_TLS_TRUST_ANCHOR_SHA256=<independently-approved DER SHA256, 64 hex characters>
++```
++
++SysAdmin may separately manage local `/etc/hosts` mapping `192.168.0.222 Omada`
++on the CaptivPortal host only after Owner approval. Coder does not perform this.
++Read-only preflight then checks `getent ahostsv4 Omada`, IP ownership, file
++ownership/mode/readability, independent fingerprint, dates/SAN/EKU, exact HTTPS
++origin, and absence of any intended proxy route. Do not programmatically fake
++SNI/Host for an IP URL. Omada transport deliberately ignores environment proxy,
++netrc and global CA settings; other integrations retain their own policy.
++
++After RV-1/2/3 and independent Windows/Linux/TLS/lifecycle/security gates, use an
++explicitly authorized controlled **captive-portal.service** restart window:
++OmadaProvider belongs to the main process, not the QIO-01A auxiliary worker.
++The immutable adopted snapshot and approved leaf are loaded at startup; each
++operation creates a fresh verified TLS connection. Check real non-mutating
++Requests/OpenAPI, authentication/authorization health and failure audit under
++the separate staging/prod permissions, not a TLS-only socket or HTTP 400 proof.
++Observe warning/error rates, Auth latency, journald producer/cgroup I/O and
++physical-host IOPS/await before claiming performance benefit.
++
++Expiry/rotation monitoring is external operations responsibility. Inventory the
++independently confirmed expiry (current reported leaf expires 2028-10-27 UTC),
++approve alert lead times before rollout, and obtain/validate a replacement public
++leaf independently. This implementation admits one approved leaf per startup,
++not an unattended dual-trust window. Coordinate a separately approved maintenance
++window for controller rotation and application trust-policy adoption; operations
++may be unavailable during that window. A changed PEM is not hot-adopted by a
++running provider. A changed peer (even same name/key) is not implicitly approved.
++Unexpected certificate/expiry/handshake failure is unavailable + visible audit,
++never automatic trust refresh or fabricated empty clients. Already-authorized
++Omada sessions may persist; TLS failure cannot promise immediate remote revoke.
++
++Rollback retains the prior independently approved **strict** origin/anchor/digest
++and effective settings evidence. Restore it only if that previous certificate
++is still valid and matches the actual controller; otherwise hold Omada-dependent
++operations until a new strict policy is approved. Use the separate controlled
++app restart/adoption procedure; never fall back to VERIFY_SSL=false, HTTP,
++warning suppression, global CA/proxy changes, or weaken hostname verification.
++No deployment, certificate/name change, production request or service restart
++is performed by this implementation TASK.
++
+ ## Device Fingerprint Task-02 artifacts
+ 
+ Repository templates live under `deploy/device-fingerprint/`. Deployment keeps
+diff --git a/tests/omada_tls_support.py b/tests/omada_tls_support.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4911e2bdfb44cff52423bb928f808bb94291cbd
+--- /dev/null
++++ b/tests/omada_tls_support.py
+@@ -0,0 +1,114 @@
++"""Disposable, test-only certificates and loopback Omada-shaped HTTP fixtures.
++
++Never contains a production certificate/key/credential or changes /etc/hosts.
++The DNS mapping is pytest-only; runtime transport does not override DNS/SNI/Host.
++"""
++from contextlib import contextmanager
++from datetime import datetime, timedelta
++import hashlib
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++import json
++from pathlib import Path
++import ssl
++import threading
++from types import SimpleNamespace
++
++from cryptography import x509
++from cryptography.hazmat.primitives import hashes, serialization
++from cryptography.hazmat.primitives.asymmetric import rsa
++from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
++
++
++def make_anchor(directory, *, stem="anchor", name="Omada", state="valid", eku=True, key=None,
++                self_issued=True, signer=None, ca=False):
++    directory = Path(directory)
++    directory.mkdir(parents=True, exist_ok=True)
++    key = key or rsa.generate_private_key(public_exponent=65537, key_size=2048)
++    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "local TLS fixture")])
++    now = datetime.utcnow()
++    before = now + timedelta(days=1) if state == "future" else now - timedelta(days=2)
++    after = now - timedelta(days=1) if state == "expired" else now + timedelta(days=2)
++    issuer = subject if self_issued else x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "other issuer")])
++    builder = (x509.CertificateBuilder().subject_name(subject).issuer_name(issuer)
++               .public_key(key.public_key()).serial_number(x509.random_serial_number())
++               .not_valid_before(before).not_valid_after(after)
++               .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False)
++               .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
++               .add_extension(x509.ExtendedKeyUsage([
++                   ExtendedKeyUsageOID.SERVER_AUTH if eku else ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False))
++    certificate = builder.sign(signer or key, hashes.SHA256())
++    cert_path, key_path = directory / (stem + ".pem"), directory / (stem + ".key")
++    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
++    cert_path.chmod(0o444)
++    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
++                                         serialization.PrivateFormat.PKCS8,
++                                         serialization.NoEncryption()))
++    key_path.chmod(0o600)
++    return SimpleNamespace(path=cert_path, key=key_path,
++                           sha=hashlib.sha256(certificate.public_bytes(serialization.Encoding.DER)).hexdigest())
++
++
++def tls_settings(anchor, **overrides):
++    values = {"omada_url": "https://Omada:8043", "omada_id": "controller-id",
++              "client_id": "test-client", "client_secret": "DISPOSABLE_CLIENT_SECRET",
++              "verify_ssl": True, "omada_tls_trust_anchor_path": str(anchor.path),
++              "omada_tls_trust_anchor_sha256": anchor.sha}
++    values.update(overrides)
++    return values
++
++
++def api_payload(path):
++    if "/authorize/token" in path:
++        result = {"accessToken": "DISPOSABLE_ACCESS_TOKEN"}
++    elif path.endswith(("/auth", "/unauth", "/reconnect")):
++        result = {}
++    elif "/clients/" in path:
++        result = {"mac": "AA-BB-CC-DD-EE-FF", "active": True, "authStatus": 2}
++    else:
++        result = {"data": [], "totalRows": 0}
++    return {"errorCode": 0, "msg": "Success.", "result": result}
++
++
++@contextmanager
++def omada_server(anchor=None, responder=None):
++    records, sni = [], []
++
++    class Handler(BaseHTTPRequestHandler):
++        def handle_request(self):
++            length = int(self.headers.get("Content-Length", "0"))
++            body = self.rfile.read(length) if length else b""
++            records.append({"method": self.command, "path": self.path,
++                            "headers": dict(self.headers), "body": body})
++            status, headers, payload = (responder(self.path) if responder else
++                                         (200, {}, api_payload(self.path)))
++            raw = json.dumps(payload).encode()
++            self.send_response(status)
++            for name, value in headers.items():
++                self.send_header(name, value)
++            self.send_header("Content-Type", "application/json")
++            self.send_header("Content-Length", str(len(raw)))
++            self.end_headers()
++            self.wfile.write(raw)
++
++        do_GET = handle_request
++        do_POST = handle_request
++
++        def log_message(self, *args):
++            pass  # never print even synthetic authorization headers
++
++    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
++    server.daemon_threads = True
++    if anchor is not None:
++        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
++        context.load_cert_chain(str(anchor.path), str(anchor.key))
++        context.set_servername_callback(lambda connection, name, ctx: sni.append(name))
++        server.socket = context.wrap_socket(server.socket, server_side=True)
++    thread = threading.Thread(target=server.serve_forever, daemon=True)
++    thread.start()
++    try:
++        yield SimpleNamespace(port=server.server_address[1], records=records, sni=sni)
++    finally:
++        server.shutdown()
++        server.server_close()
++        thread.join(3)
++        assert not thread.is_alive()
+diff --git a/tests/pending_sessions/test_omada_pending_session_provider.py b/tests/pending_sessions/test_omada_pending_session_provider.py
+index 9e0681085e401c8ed1ba0759c086902be125dd83..c641a40be66a1713b822b9ccec7340fc82d7429e 100644
+--- a/tests/pending_sessions/test_omada_pending_session_provider.py
++++ b/tests/pending_sessions/test_omada_pending_session_provider.py
+@@ -18,6 +18,10 @@ class FakeProvider:
+     def _get_token(self):
+         return self.token_result
+ 
++    def _request(self, method, url, **kwargs):
++        # Parser-only fake; strict transport is independently exercised over TLS.
++        return getattr(subject.requests, method.lower())(url, verify=self._verify_ssl, **kwargs)
++
+ 
+ class FakeResponse:
+     def __init__(self, payload=None, *, status_code=200, json_error=None):
+diff --git a/tests/settings_control/__init__.py b/tests/settings_control/__init__.py
+index 72657014045af7fc3fb327d472c514e12539ffe1..cf0c6686116a8eb4ef7a60148bfdc90deb3e2255 100644
+--- a/tests/settings_control/__init__.py
++++ b/tests/settings_control/__init__.py
+@@ -1,12 +1,18 @@
+ """Synthetic disposable Settings V1 test helpers; no production access."""
+ import json
+ import logging
++from pathlib import Path
++import tempfile
+ import uuid
+ from app.admin_web.models import AdminPrincipal
+ from app.settings_control.bootstrap import bootstrap_settings_control
+ 
+-CONTROLLER_BASE = {"omada_url": "https://controller.invalid", "omada_id": "installation",
+-                   "client_id": "application", "client_secret": "synthetic-secret", "verify_ssl": False}
++# Pure Settings validation does not open the anchor. Actual certificate admission
++# and verified connections are covered by the isolated Omada TLS fixtures.
++CONTROLLER_BASE = {"omada_url": "https://Omada:8043", "omada_id": "installation",
++                   "client_id": "application", "client_secret": "synthetic-secret", "verify_ssl": True,
++                   "omada_tls_trust_anchor_path": str(Path(tempfile.gettempdir()) / "qio01b-synthetic-anchor.pem"),
++                   "omada_tls_trust_anchor_sha256": "a" * 64}
+ 
+ 
+ def stack(tmp_path, **values):
+diff --git a/tests/settings_control/test_controller_stage3.py b/tests/settings_control/test_controller_stage3.py
+index 41c04b5ecb7f0aac29ae77e078a6c5177ad068d9..112dc4bc7fb66497dc62c1fb5615a9a42aebda05 100644
+--- a/tests/settings_control/test_controller_stage3.py
++++ b/tests/settings_control/test_controller_stage3.py
+@@ -26,7 +26,7 @@ PRINCIPAL = AdminPrincipal("operator")
+ 
+ def write(boot, changes=None, *, generation=0, key=None, domain="controller"):
+     return boot.admin_context.mutation_service.mutate(json.dumps({"changes": changes or [
+-        {"key": "OMADA_URL", "operation": "set", "value": " https://new.invalid:8043/ "}]}),
++        {"key": "OMADA_URL", "operation": "set", "value": " https://Omada:8043/ "}]}),
+         principal=PRINCIPAL, source_ip="127.0.0.1", request_id=str(uuid.uuid4()),
+         idempotency_key=key or str(uuid.uuid4()), expected_generation=generation, domain=domain)
+ 
+@@ -147,7 +147,7 @@ def test_typed_coexistence_atomic_ownership_noop_clear_and_replay(tmp_path):
+     assert first.status == 201 and first.body["changed_keys"] == ["OMADA_URL"]
+     assert set(first.body) == {"api_version", "request_id", "scope", "resource", "changed", "changed_keys",
+         "configured_generation", "effective_generation", "activation_state", "restart_required"}
+-    assert "https://new.invalid" not in json.dumps(first.body)
++    assert "https://Omada:8043" not in json.dumps(first.body)
+     noop = write(boot, generation=1)
+     assert noop.status == 200 and noop.body["changed"] is False and noop.body["changed_keys"] == []
+     mutation(boot, generation=1, key=key)  # Same UUID, different domain is independent.
+@@ -155,7 +155,7 @@ def test_typed_coexistence_atomic_ownership_noop_clear_and_replay(tmp_path):
+     with pytest.raises(SettingsError, match="idempotency_conflict"):
+         write(boot, key=key, changes=[{"key": "OMADA_ID", "operation": "set", "value": "new"}])
+     repository = boot.admin_context.read_service.repository
+-    assert repository.configured() == (2, {"OMADA_URL": "https://new.invalid:8043", "WEB_ADMIN_DEVICE_PAGE_SIZE": 120})
++    assert repository.configured() == (2, {"OMADA_URL": "https://Omada:8043", "WEB_ADMIN_DEVICE_PAGE_SIZE": 120})
+     cleared = write(boot, generation=2, changes=[{"key": "OMADA_URL", "operation": "clear_override"}])
+     assert cleared.status == 201 and repository.configured() == (3, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 120})
+     with repository.transaction() as db:
+@@ -172,9 +172,9 @@ def test_explicit_same_environment_scalar_is_ownership_change(tmp_path):
+ 
+ def test_shadowed_invalid_lower_value_and_clear_are_fail_closed(tmp_path):
+     boot = stack(tmp_path)
+-    write(boot, changes=[{"key": "OMADA_URL", "operation": "set", "value": "https://new.invalid"}])
++    write(boot, changes=[{"key": "OMADA_URL", "operation": "set", "value": "https://Omada:8043"}])
+     masked = stack(tmp_path, omada_url="invalid-base")
+-    assert masked.runtime_settings["omada_url"] == "https://new.invalid"
++    assert masked.runtime_settings["omada_url"] == "https://Omada:8043"
+     before = masked.admin_context.read_service.repository.configured()
+     with pytest.raises(SettingsError, match="validation_failed"):
+         write(masked, generation=1, changes=[{"key": "OMADA_URL", "operation": "clear_override"}])
+@@ -235,19 +235,20 @@ def test_controller_set_requires_string(value):
+         parse_changes(json.dumps({"changes": [{"key": "OMADA_ID", "operation": "set", "value": value}]}), domain="controller")
+ 
+ 
+-@pytest.mark.parametrize("value", ["", " ", "https://a.invalid:0", "https://a.invalid/path", "https://user@a.invalid", "https://a.invalid?x", "https://a.invalid#x", "https://a.invalid:bad", "https://a .invalid"])
++@pytest.mark.parametrize("value", ["", " ", "https://a.invalid:0", "https://a.invalid/path", "https://user@a.invalid", "https://a.invalid?x", "https://a.invalid#x", "https://a.invalid:bad", "https://a .invalid",
++    "http://Omada:8043", "https://controller.invalid:8043", "https://192.168.0.222:8043",
++    "https://Omada", "https://Omada:443", "https://Omada:8043/path"])
+ def test_canonical_validation_rejects_invalid_urls_without_echo(value):
+     with pytest.raises(SettingsError, match="validation_failed") as error:
+         parse_changes(json.dumps({"changes": [{"key": "OMADA_URL", "operation": "set", "value": value}]}), domain="controller")
+     assert all(set(detail) == {"key", "reason"} for detail in error.value.details)
+ 
+ 
+-@pytest.mark.parametrize("scheme", ["http", "https"])
+-def test_one_validator_canonicalizes_runtime_and_settings(scheme):
+-    value = f" {scheme}://a.invalid:8043/ "
++@pytest.mark.parametrize("value", [" https://Omada:8043/ ", "https://omada:8043"])
++def test_one_validator_canonicalizes_runtime_and_settings(value):
+     change = parse_changes(json.dumps({"changes": [{"key": "OMADA_URL", "operation": "set", "value": value}]}), domain="controller")[0]
+     runtime = build_omada_runtime_config({**CONTROLLER_BASE, "omada_url": value})
+-    assert change.value == runtime.controller_url == value.strip()[:-1]
++    assert change.value == runtime.controller_url == "https://Omada:8043"
+ 
+ 
+ def test_secret_prerequisite_failure_is_safe_and_atomic(tmp_path):
+@@ -292,6 +293,25 @@ def test_replay_skips_candidate_validation(tmp_path, monkeypatch):
+     assert write(boot, key=key).body == original.body
+ 
+ 
++@pytest.mark.parametrize("url", ["https://controller.invalid:8043", "http://Omada:8043", "https://192.168.0.222:8043"])
++def test_invalid_persisted_controller_url_is_not_rewritten_or_adopted(tmp_path, url):
++    boot = stack(tmp_path)
++    adopt(boot)
++    repository = boot.admin_context.read_service.repository
++    # Model a pre-QIO store. Current writes must reject these values, while an
++    # existing untrusted override must fail startup rather than be canonicalized.
++    with sqlite3.connect(repository.db_path) as db:
++        db.execute("INSERT INTO settings_generations VALUES(1,0,'global','2026-10-07T00:00:00.000Z','platform_operator','operator','request')")
++        db.execute("INSERT INTO settings_overrides VALUES(1,'OMADA_URL','string',NULL,?)", (url,))
++    before = repository.configured()
++    with pytest.raises(SettingsError, match="settings_store_unavailable") as error:
++        stack(tmp_path)
++    assert (error.value.code, error.value.status) == ("settings_store_unavailable", 503)
++    assert repository.configured() == before == (1, {"OMADA_URL": url})
++    with repository.transaction() as db:
++        assert repository.effective(db) == 0
++
++
+ def test_corrupt_migration_shape_fails_without_recreation(tmp_path):
+     path = tmp_path / "v1.sqlite3"
+     v1_database(path)
+diff --git a/tests/settings_control/test_run_integration.py b/tests/settings_control/test_run_integration.py
+index a216159bfe86bbb863b258d3a91b9466def5666f..d1af314014dfadeb496cc063b18154be09160948 100644
+--- a/tests/settings_control/test_run_integration.py
++++ b/tests/settings_control/test_run_integration.py
+@@ -2,8 +2,27 @@ import pytest
+ from types import SimpleNamespace
+ import run as runtime
+ from app.settings_control.models import SettingsError
+-from tests.visitor_registry.test_snapshot_runtime import _prepare_main
+-from . import stack
++from tests.visitor_registry.test_snapshot_runtime import _prepare_main as _prepare_snapshot_main
++from . import CONTROLLER_BASE, stack
++
++
++def _prepare_main(monkeypatch):
++    prepared = _prepare_snapshot_main(monkeypatch)
++    events, controller, *_ = prepared
++
++    def create_controller(config):
++        # Keep this Settings composition stub local: the imported Snapshot
++        # helper still asserts its older, unrelated Controller fixture URL.
++        assert config.controller_url == "https://Omada:8043"
++        assert config.verify_ssl is True
++        assert config.tls_policy.verification_mode == "strict"
++        assert config.tls_policy.trust_anchor_path == CONTROLLER_BASE["omada_tls_trust_anchor_path"]
++        assert config.tls_policy.trust_anchor_sha256 == CONTROLLER_BASE["omada_tls_trust_anchor_sha256"]
++        events.append("create_controller")
++        return controller
++
++    monkeypatch.setattr(runtime, "create_controller", create_controller)
++    return prepared
+ 
+ 
+ def feature_composition(boot, monkeypatch):
+@@ -21,8 +40,8 @@ def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch,
+     from tests.admin_web.conftest import enabled_settings
+     admin_settings = enabled_settings() if failure == "configuration" else {}
+     boot = stack(tmp_path, **admin_settings, host="127.0.0.1", port=8088, debug=False,
+-                 omada_url="https://controller.invalid", omada_id="installation",
+-                 client_id="application", client_secret="fixture-secret", verify_ssl=False)
++                 omada_url="https://Omada:8043", omada_id="installation",
++                 client_id="application", client_secret="fixture-secret", verify_ssl=True)
+     # Use the real activation service and snapshot, with a disposable disabled Admin.
+     monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_kwargs: boot)
+     original = boot.activation_service.repository.activation
+diff --git a/tests/settings_control/test_validation.py b/tests/settings_control/test_validation.py
+index 8f330868098e0fc37633d403894d3974c1f25428..c00f4dc688e9958bb9d0363e4b4ac77ce6717c11 100644
+--- a/tests/settings_control/test_validation.py
++++ b/tests/settings_control/test_validation.py
+@@ -74,3 +74,26 @@ def test_invalid_resolved_secret_preserves_controller_prerequisite_validation():
+         SettingsValidationService().validate(snapshot,
+             secret_resolution=OmadaClientSecretResolution("", "environment", 0))
+     assert error.value.details == ({"key": None, "reason": "controller_prerequisite_invalid"},)
++
++
++@pytest.mark.parametrize("values", [
++    {"omada_url": "http://Omada:8043"},
++    {"omada_url": "https://controller.invalid:8043"},
++    {"omada_url": "https://192.168.0.222:8043"},
++    {"verify_ssl": False},
++    {"omada_tls_trust_anchor_path": ""},
++    {"omada_tls_trust_anchor_path": "relative.pem"},
++    {"omada_tls_trust_anchor_sha256": ""},
++    {"omada_tls_trust_anchor_sha256": "not-a-digest"},
++])
++def test_strict_tls_prerequisites_fail_closed_without_io(values, monkeypatch):
++    def forbidden(*_args, **_kwargs):
++        pytest.fail("Settings semantic validation must not admit a certificate or send requests")
++    monkeypatch.setattr("app.controllers.omada._omada_ssl_context", forbidden)
++    monkeypatch.setattr("requests.sessions.Session.request", forbidden)
++    with pytest.raises(SettingsError) as error:
++        snapshot, resolution = snapshot_with_secret_resolution(**values)
++        SettingsValidationService().validate(snapshot, secret_resolution=resolution)
++    assert (error.value.code, error.value.status) == ("validation_failed", 422)
++    assert all(set(detail) == {"key", "reason"} for detail in error.value.details)
++    assert "synthetic-secret" not in str(error.value) + repr(error.value.details)
+diff --git a/tests/test_capport_routes.py b/tests/test_capport_routes.py
+index 55857807dc0a6c8a6ecad2449994f6b90151f77c..aaf75050eff60b7b4506494614ace3ff02c06515 100644
+--- a/tests/test_capport_routes.py
++++ b/tests/test_capport_routes.py
+@@ -5,6 +5,7 @@ from urllib.parse import parse_qsl, urlsplit
+ from unittest.mock import Mock, patch
+ 
+ import pytest
++import requests
+ from flask import Flask
+ 
+ from app.capport.models import (
+@@ -328,6 +329,9 @@ def test_ip_mac_only_list_plus_get_client_returns_not_captive_api():
+     omada._omada_url = "https://controller.example"
+     omada._omada_id = "controller-id"
+     omada._verify_ssl = True
++    # Preserve this existing mock's purpose, not a runtime TLS-policy fallback.
++    omada._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
++        url, verify=omada._verify_ssl, **kwargs)
+     omada._get_token = Mock(
+         return_value=Result.ok(data={"token": "test-token"})
+     )
+diff --git a/tests/test_capport_service.py b/tests/test_capport_service.py
+index 5e60022f5fefd88a01e423bb75fbe766d8485a2a..44c7e4218c8e97ff28dbe6387c8989dc1ab7c882 100644
+--- a/tests/test_capport_service.py
++++ b/tests/test_capport_service.py
+@@ -4,6 +4,7 @@ from threading import Barrier, Event
+ from unittest.mock import Mock, call, patch
+ 
+ import pytest
++import requests
+ 
+ from app.auth_telemetry import events
+ from app.capport.models import CapportConfig
+@@ -191,6 +192,9 @@ def test_list_with_only_ip_mac_uses_authoritative_get_client_state():
+     omada._omada_url = "https://controller.example"
+     omada._omada_id = "controller-id"
+     omada._verify_ssl = True
++    # Preserve this parser/integration mock below the Omada transport boundary.
++    omada._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
++        url, verify=omada._verify_ssl, **kwargs)
+     omada._get_token = Mock(
+         return_value=Result.ok(data={"token": "test-token"})
+     )
+diff --git a/tests/test_omada_client_lookup.py b/tests/test_omada_client_lookup.py
+index 4dd87ba742f2e9fed4fc1cbd3e36f6667f80e4b5..7bb332f4e2344e03f1cc0fb5497375bd9b23d47a 100644
+--- a/tests/test_omada_client_lookup.py
++++ b/tests/test_omada_client_lookup.py
+@@ -2,6 +2,7 @@ from unittest.mock import Mock, patch
+ 
+ import pytest
+ import requests
++import requests
+ 
+ from app.controllers.omada import OmadaProvider
+ from app.models import Result
+@@ -24,6 +25,9 @@ def provider():
+     instance._omada_url = "https://controller.example"
+     instance._omada_id = "controller-id"
+     instance._verify_ssl = True
++    # Parser-only unit boundary. Real verified transport has isolated TLS coverage.
++    instance._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
++        url, verify=instance._verify_ssl, **kwargs)
+     instance._get_token = Mock(
+         return_value=Result.ok(data={"token": "test-token"})
+     )
+@@ -314,6 +318,8 @@ def test_token_login_converts_transport_failure():
+     omada._client_id = "client-id"
+     omada._client_secret = "client-secret"
+     omada._verify_ssl = True
++    omada._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
++        url, verify=omada._verify_ssl, **kwargs)
+ 
+     with patch(
+         "app.controllers.omada.requests.post",
+diff --git a/tests/test_omada_configuration.py b/tests/test_omada_configuration.py
+index debcd50a0271840dedbc54241eed7d85ce11a10e..2b0274aa361f70d698182443f7251e52af5af549 100644
+--- a/tests/test_omada_configuration.py
++++ b/tests/test_omada_configuration.py
+@@ -1,4 +1,5 @@
+ import importlib
++import ssl
+ from unittest.mock import patch
+ 
+ import pytest
+@@ -17,15 +18,27 @@ OMADA_ENVIRONMENT_NAMES = (
+     "OMADA_CLIENT_SECRET",
+ )
+ TEST_SECRET = "unit-test-client-secret"
++_POLICY_PATH = ""
++
++
++@pytest.fixture(autouse=True)
++def configuration_only_tls_boundary(tmp_path, monkeypatch):
++    # These tests validate pure startup mapping, not filesystem/certificate
++    # admission, which is exercised by test_omada_strict_tls with real fixtures.
++    monkeypatch.setitem(globals(), "_POLICY_PATH", str(tmp_path / "approved.pem"))
++    monkeypatch.setattr("app.controllers.omada._omada_ssl_context",
++                        lambda policy: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+ 
+ 
+ def valid_settings(**overrides):
+     settings = {
+-        "omada_url": "https://controller.invalid:8043",
++        "omada_url": "https://Omada:8043",
+         "omada_id": "unit-test-omada-id",
+         "client_id": "unit-test-client-id",
+         "client_secret": TEST_SECRET,
+-        "verify_ssl": False,
++        "verify_ssl": True,
++        "omada_tls_trust_anchor_path": _POLICY_PATH,
++        "omada_tls_trust_anchor_sha256": "0" * 64,
+     }
+     settings.update(overrides)
+     return settings
+@@ -159,6 +172,10 @@ def test_missing_values_are_reported_before_url_syntax_validation():
+         "https://controller.invalid:not-a-port",
+         "https://controller.invalid:65536",
+         "https://controller.invalid//",
++        "http://Omada:8043",
++        "https://192.168.0.222:8043",
++        "https://localhost:8043",
++        "https://controller.invalid:8043",
+     ],
+ )
+ def test_invalid_base_url_is_rejected_without_disclosure_or_network(
+@@ -174,14 +191,14 @@ def test_invalid_base_url_is_rejected_without_disclosure_or_network(
+ @pytest.mark.parametrize(
+     ("omada_url", "normalized_url"),
+     [
+-        ("http://controller.invalid", "http://controller.invalid"),
++        ("https://Omada:8043", "https://Omada:8043"),
+         (
+-            "https://controller.invalid:8043",
+-            "https://controller.invalid:8043",
++            "https://omada:8043",
++            "https://Omada:8043",
+         ),
+         (
+-            "https://controller.invalid:8043/",
+-            "https://controller.invalid:8043",
++            "https://OMADA:8043/",
++            "https://Omada:8043",
+         ),
+     ],
+ )
+diff --git a/tests/test_omada_observations.py b/tests/test_omada_observations.py
+index ff8b3439a920283ca158d33bf342a4d166a0da47..a76b1dda34ae5d06daa32ad41f747c6804948449 100644
+--- a/tests/test_omada_observations.py
++++ b/tests/test_omada_observations.py
+@@ -34,6 +34,10 @@ class FakeProvider:
+         token = self.tokens[min(len(self.token_calls) - 1, len(self.tokens) - 1)]
+         return Result.ok(data={"token": token})
+ 
++    def _request(self, method, url, **kwargs):
++        # Existing parser mocks remain below the now-shared transport boundary.
++        return getattr(subject.requests, method.lower())(url, verify=self._verify_ssl, **kwargs)
++
+     def _invalidate_cached_token(self, token):
+         self.invalidated.append(token)
+ 
+diff --git a/tests/test_omada_strict_tls.py b/tests/test_omada_strict_tls.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..38fa7f5d174eab7e23c01a3af389ace9a42a6094
+--- /dev/null
++++ b/tests/test_omada_strict_tls.py
+@@ -0,0 +1,420 @@
++"""QIO-01B Option B only; real isolated TLS, no Omada or guest mutations."""
++import ast
++import json
++import os
++from pathlib import Path
++import socket
++import ssl
++from unittest.mock import Mock
++
++import pytest
++import requests
++from cryptography.hazmat.primitives import serialization
++from cryptography.hazmat.primitives.asymmetric import rsa
++
++from app.controllers import OmadaProvider
++from app.controllers.omada import _OmadaVerifiedTransport, OmadaTransportError, _OmadaTlsAdapter
++from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
++from app.exceptions import ConfigurationError, ControllerError
++from app.models import Result
++from omada_tls_support import make_anchor, omada_server, tls_settings
++
++
++ROOT_FIXTURE = pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0,
++                                  reason="isolated root-owned Linux TLS-file fixture")
++MAC = "AA-BB-CC-DD-EE-FF"
++OPERATIONS = (
++    "token", "sites", "clients", "auth", "unauth", "client", "snapshot",
++    "pending-list", "pending-state", "pending-reconnect", "observation-clients", "observation-aps",
++)
++EXTENSION_OPERATIONS = OPERATIONS[7:]
++
++
++@pytest.fixture
++def anchor(tmp_path):
++    return make_anchor(tmp_path)
++
++
++@pytest.fixture
++def route_to(monkeypatch):
++    original = socket.getaddrinfo
++
++    def install(server):
++        def resolve(host, port, *args, **kwargs):
++            if str(host).lower() == "omada" and int(port) == 8043:
++                return original("127.0.0.1", server.port, *args, **kwargs)
++            if host not in ("127.0.0.1", "localhost", b"127.0.0.1"):
++                raise AssertionError("non-loopback network forbidden in TLS fixture")
++            return original(host, port, *args, **kwargs)
++        monkeypatch.setattr(socket, "getaddrinfo", resolve)
++    return install
++
++
++def provider(anchor, operation=None):
++    result = OmadaProvider(build_omada_runtime_config(tls_settings(anchor)))
++    if operation != "token":
++        result._get_token = Mock(return_value=Result.ok(data={"token": "DISPOSABLE_ACCESS_TOKEN"}))
++    return result
++
++
++def operation(subject, name):
++    calls = {
++        "token": lambda: subject._request_token_uncached(),
++        "sites": subject.get_sites,
++        "clients": lambda: subject.get_clients("site-1"),
++        "auth": lambda: subject.authorize("site-1", MAC),
++        "unauth": lambda: subject.unauthorize("site-1", MAC),
++        "client": lambda: subject.get_client("site-1", MAC),
++        "snapshot": lambda: subject.get_client_snapshot("site-1", MAC, 1),
++        "pending-list": lambda: subject.list_active_clients(site_id="site-1", page=1, page_size=100, timeout_seconds=1),
++        "pending-state": lambda: subject.get_pending_client_state(site_id="site-1", client_mac=MAC, timeout_seconds=1),
++        "pending-reconnect": lambda: subject.reconnect_client(site_id="site-1", client_mac=MAC, timeout_seconds=1),
++        "observation-clients": lambda: subject.list_observation_clients("site-1", 1, 100, 1),
++        "observation-aps": lambda: subject.list_observation_access_points("site-1", 1, 100, 1),
++    }
++    return calls[name]()
++
++
++def assert_unavailable(subject, name):
++    if name == "sites":
++        with pytest.raises(ControllerError, match="authority unavailable"):
++            operation(subject, name)
++    else:
++        result = operation(subject, name)
++        assert result.success is False
++        assert not isinstance(result.data, list)
++        assert "clients" not in (result.data or {})
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("name", OPERATIONS)
++def test_every_request_site_uses_real_verified_tls(anchor, route_to, name):
++    with omada_server(anchor) as server:
++        route_to(server)
++        subject = provider(anchor, name)
++        result = operation(subject, name)
++        assert result == [] if name == "sites" else result.success
++        assert len(server.records) == 1
++        assert server.records[0]["headers"]["Host"].lower() == "omada:8043"
++        assert server.sni and all(value.lower() == "omada" for value in server.sni)
++        assert subject._transport._context.verify_mode == ssl.CERT_REQUIRED
++        assert subject._transport._context.check_hostname is True
++        assert subject._transport._context.cert_store_stats()["x509"] == 1
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("name", OPERATIONS)
++def test_every_request_site_rejects_unknown_peer_before_credentials(anchor, tmp_path, route_to, name, caplog):
++    unknown = make_anchor(tmp_path, stem="unknown")
++    with omada_server(unknown) as server:
++        route_to(server)
++        subject = provider(anchor, name)
++        assert_unavailable(subject, name)
++        assert server.records == []
++        assert subject.tls_health["state"] == "unavailable"
++        assert "DISPOSABLE_CLIENT_SECRET" not in caplog.text
++        assert "DISPOSABLE_ACCESS_TOKEN" not in caplog.text
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("name", OPERATIONS)
++@pytest.mark.parametrize("location", ["https://foreign.invalid:8043/capture", "http://Omada:8043/capture", "/other"])
++def test_every_request_site_rejects_redirect_without_resending(anchor, route_to, name, location):
++    with omada_server(anchor, lambda path: (302, {"Location": location}, {})) as server:
++        route_to(server)
++        subject = provider(anchor, name)
++        assert_unavailable(subject, name)
++        assert len(server.records) == 1
++        assert subject.tls_health["failure_reason"] == "redirect_not_admitted"
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("name", EXTENSION_OPERATIONS)
++def test_extension_sites_ignore_environment_proxy_ca_and_netrc(anchor, tmp_path, route_to, monkeypatch, name):
++    with omada_server() as proxy, omada_server(anchor) as server:
++        route_to(server)
++        for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
++            monkeypatch.setenv(key, f"http://127.0.0.1:{proxy.port}")
++        monkeypatch.setenv("NO_PROXY", "")
++        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "unapproved.pem"))
++        netrc = tmp_path / "test-netrc"
++        netrc.write_text("machine omada login BAD_NETRC_LOGIN password BAD_NETRC_SECRET\n")
++        monkeypatch.setenv("NETRC", str(netrc))
++        result = operation(provider(anchor, name), name)
++        assert result.success
++        assert proxy.records == []
++        assert len(server.records) == 1
++        assert server.records[0]["headers"]["Authorization"] == "AccessToken=DISPOSABLE_ACCESS_TOKEN"
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("name", EXTENSION_OPERATIONS)
++def test_each_extension_site_rejects_proxy_failure_safely(anchor, monkeypatch, name, caplog):
++    subject = provider(anchor, name)
++    request = Mock(side_effect=requests.exceptions.ProxyError("PRIVATE_PROXY_TOKEN_CANARY"))
++    monkeypatch.setattr(requests.Session, "request", request)
++    assert_unavailable(subject, name)
++    assert subject.tls_health["failure_reason"] == "proxy_not_admitted"
++    assert "PRIVATE_PROXY_TOKEN_CANARY" not in caplog.text
++    assert request.call_args.args[1].startswith("https://Omada:8043/openapi/")
++    assert request.call_args.kwargs["allow_redirects"] is False
++    assert request.call_args.kwargs["verify"] is True
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("url", ["http://Omada:8043/openapi/v1/x", "https://192.168.0.222:8043/openapi/v1/x",
++                                 "https://localhost:8043/openapi/v1/x", "https://Omada:443/openapi/v1/x",
++                                 "https://user:private@Omada:8043/openapi/v1/x", "https://Omada:8043/other",
++                                 "https://Omada:8043/openapi/v1/../capture", "https://Omada:8043/openapi/v1/%2e%2e/capture"])
++def test_unadmitted_origin_or_path_never_sends(anchor, monkeypatch, url):
++    request = Mock(side_effect=AssertionError("network forbidden"))
++    monkeypatch.setattr(requests.Session, "request", request)
++    with pytest.raises(OmadaTransportError):
++        provider(anchor)._request("GET", url, headers={"Authorization": "DISPOSABLE_ACCESS_TOKEN"})
++    request.assert_not_called()
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("overrides", [{"verify": False}, {"proxies": {"https": "http://foreign.invalid"}},
++                                      {"allow_redirects": True}, {"cert": "private.key"},
++                                      {"headers": {"Host": "foreign.invalid"}}])
++def test_policy_and_proxy_overrides_rejected_before_send(anchor, monkeypatch, overrides):
++    request = Mock(side_effect=AssertionError("network forbidden"))
++    monkeypatch.setattr(requests.Session, "request", request)
++    with pytest.raises(OmadaTransportError):
++        provider(anchor)._request("GET", "https://Omada:8043/openapi/v1/x", **overrides)
++    request.assert_not_called()
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("state,expected", [("expired", "certificate_expired"), ("future", "certificate_not_yet_valid"),
++                                           ("wrong-name", "name_mismatch"), ("wrong-eku", "certificate_purpose_invalid")])
++def test_unusable_certificate_rejected_at_startup(tmp_path, state, expected):
++    anchor = make_anchor(tmp_path, name="localhost" if state == "wrong-name" else "Omada",
++                         state=state, eku=state != "wrong-eku")
++    with pytest.raises(ConfigurationError, match=expected):
++        provider(anchor)
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("kind", ["not-self-issued", "invalid-signature"])
++def test_chain_or_self_signature_cannot_substitute_for_approved_leaf(tmp_path, kind):
++    anchor = make_anchor(tmp_path, self_issued=kind != "not-self-issued",
++                         signer=rsa.generate_private_key(public_exponent=65537, key_size=2048)
++                         if kind == "invalid-signature" else None)
++    with pytest.raises(ConfigurationError):
++        provider(anchor)
++
++
++@ROOT_FIXTURE
++def test_general_ca_anchor_is_not_the_selected_leaf_policy(tmp_path):
++    anchor = make_anchor(tmp_path, ca=True)
++    with pytest.raises(ConfigurationError, match="trust_bundle_not_leaf"):
++        provider(anchor)
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("kind", ["missing", "directory", "garbage", "bundle", "digest", "symlink", "writable", "hardlink"])
++def test_invalid_or_unapproved_trust_file_fails_before_network(anchor, kind, tmp_path, monkeypatch):
++    anchor.path.chmod(0o644)
++    if kind == "missing":
++        anchor.path.unlink()
++    elif kind == "directory":
++        anchor.path = tmp_path
++    elif kind == "garbage":
++        anchor.path.write_bytes(b"invalid certificate; PRIVATE_CANARY")
++    elif kind == "bundle":
++        anchor.path.write_bytes(anchor.path.read_bytes() + anchor.path.read_bytes())
++    elif kind == "digest":
++        anchor.sha = "0" * 64
++    elif kind == "symlink":
++        link = tmp_path / "link.pem"
++        link.symlink_to(anchor.path)
++        anchor.path = link
++    elif kind == "writable":
++        anchor.path.chmod(0o666)
++    elif kind == "hardlink":
++        os.link(anchor.path, tmp_path / "other.pem")
++    request = Mock(side_effect=AssertionError("network forbidden"))
++    monkeypatch.setattr(requests.Session, "request", request)
++    with pytest.raises(ConfigurationError) as error:
++        provider(anchor)
++    assert "PRIVATE_CANARY" not in str(error.value)
++    request.assert_not_called()
++
++
++@ROOT_FIXTURE
++def test_file_rotation_is_not_implicitly_admitted(anchor, tmp_path, route_to):
++    subject = provider(anchor)
++    replacement = make_anchor(tmp_path, stem="replacement")
++    anchor.path.chmod(0o644)
++    anchor.path.write_bytes(replacement.path.read_bytes())
++    with omada_server(replacement) as server:
++        route_to(server)
++        with pytest.raises(ControllerError):
++            subject.get_sites()
++        assert server.records == []
++    # Explicit new independently approved policy + new provider can admit it.
++    with omada_server(replacement) as server:
++        route_to(server)
++        assert provider(replacement).get_sites() == []
++
++
++@ROOT_FIXTURE
++def test_new_self_signed_certificate_with_same_key_is_not_admitted(anchor, tmp_path, route_to):
++    key = serialization.load_pem_private_key(anchor.key.read_bytes(), password=None)
++    renewed = make_anchor(tmp_path, stem="renewed", key=key)
++    assert renewed.sha != anchor.sha
++    with omada_server(renewed) as server:
++        route_to(server)
++        subject = provider(anchor)
++        with pytest.raises(ControllerError):
++            subject.get_sites()
++        assert server.records == []
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("exception,category", [(requests.Timeout("synthetic timeout"), "timeout"),
++                                               (requests.ConnectionError("synthetic network"), "network_error")])
++def test_unchanged_token_transport_failure_classification(anchor, monkeypatch, exception, category):
++    subject = provider(anchor, "token")
++    monkeypatch.setattr(requests.Session, "request", Mock(side_effect=exception))
++    result = subject._get_token()
++    assert result.success is False
++    assert result.error == "HTTP_ERROR"
++    assert result.data["failure_category"] == category and result.data["retryable"] is True
++    assert subject._cached_token is None
++
++
++@ROOT_FIXTURE
++def test_first_failure_transitions_repeated_audit_and_recovery_are_visible(anchor, route_to, monkeypatch, caplog):
++    subject = provider(anchor)
++    with omada_server(anchor, lambda path: (302, {"Location": "https://private.invalid"}, {})) as server:
++        route_to(server)
++        for _ in range(3):
++            with pytest.raises(ControllerError):
++                subject.get_sites()
++        assert caplog.text.count("reason=redirect_not_admitted") == 1
++        assert subject.tls_health["repeated_failures"] == 2
++        subject._transport._last_log -= 61  # deterministic heartbeat, no sleep/retry-until-green
++        with pytest.raises(ControllerError):
++            subject.get_sites()
++        assert caplog.text.count("reason=redirect_not_admitted") == 2
++        assert "repeated_failures=2" in caplog.text
++    with omada_server(anchor) as server:
++        route_to(server)
++        assert subject.get_sites() == []
++        assert subject.tls_health["state"] == "verified_last_connection"
++        assert "state=verified" in caplog.text
++    assert "DISPOSABLE_ACCESS_TOKEN" not in caplog.text
++
++
++@ROOT_FIXTURE
++def test_sites_token_tls_failure_is_not_authoritative_empty(anchor):
++    subject = provider(anchor)
++    subject._get_token = Mock(return_value=Result.fail(error="OMADA_TLS_UNAVAILABLE"))
++    with pytest.raises(ControllerError):
++        subject.get_sites()
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("case", ["token-network", "timeout", "network", "http", "api", "shape"])
++def test_sites_failed_authority_is_never_a_zero_site_snapshot(anchor, monkeypatch, case):
++    subject = provider(anchor)
++    if case == "token-network":
++        subject._get_token = Mock(return_value=Result.fail(error="HTTP_ERROR"))
++    elif case in {"timeout", "network"}:
++        exception = requests.Timeout("disposable timeout") if case == "timeout" else requests.ConnectionError("disposable DNS error")
++        monkeypatch.setattr(requests.Session, "request", Mock(side_effect=exception))
++    else:
++        response = Mock(status_code=500 if case == "http" else 200)
++        response.json.return_value = {"errorCode": 5 if case == "api" else 0,
++                                      "result": {} if case == "shape" else {"data": []}}
++        subject._request = Mock(return_value=response)
++    with pytest.raises(ControllerError, match="authority unavailable"):
++        subject.get_sites()
++
++
++@ROOT_FIXTURE
++@pytest.mark.parametrize("code,success", [(False, False), ("0", True)])
++def test_sites_uses_canonical_typed_error_code_boundary(anchor, code, success):
++    subject = provider(anchor)
++    response = Mock(status_code=200)
++    response.json.return_value = {"errorCode": code, "result": {"data": []}}
++    subject._request = Mock(return_value=response)
++    if success:
++        assert subject.get_sites() == []
++    else:
++        with pytest.raises(ControllerError):
++            subject.get_sites()
++
++
++@ROOT_FIXTURE
++def test_adopted_policy_is_immutable_and_public_projection_is_secret_free(anchor, monkeypatch):
++    from app.admin_web.controller_settings import ControllerConfigurationReadService
++    from app.settings_control.models import SettingsError
++    config = build_omada_runtime_config(tls_settings(anchor))
++    OmadaProvider(config)  # local file admission only, no connection
++    monkeypatch.setenv("OMADA_TLS_TRUST_ANCHOR_PATH", "/unapproved/later.pem")
++    snapshot = public_omada_snapshot(config, frozenset({"OMADA_TLS_TRUST_ANCHOR_PATH", "OMADA_TLS_TRUST_ANCHOR_SHA256"}))
++    class Unavailable:
++        def read_controller(self):
++            raise SettingsError("settings_store_unavailable")
++    response = ControllerConfigurationReadService(snapshot, Unavailable()).read("request-1")
++    tls = response["fields"]["tls_certificate_verification"]
++    assert tls["effective_value"] is True and tls["editable"] is False
++    assert tls["verification_mode"] == "strict"
++    assert tls["trust_anchor_source"] == "environment"
++    assert tls["certificate_status"] == "verification_required_on_every_connection"
++    text = json.dumps(response)
++    assert str(anchor.path) not in text and "BEGIN CERTIFICATE" not in text
++    assert "DISPOSABLE_CLIENT_SECRET" not in text
++
++
++def test_pure_config_builder_requires_explicit_strict_policy_and_does_not_open_files(tmp_path, monkeypatch):
++    from types import SimpleNamespace
++    anchor = SimpleNamespace(path=tmp_path / "public.pem", sha="a" * 64)
++    monkeypatch.setattr(os, "open", Mock(side_effect=AssertionError("builder must remain pure")))
++    assert build_omada_runtime_config(tls_settings(anchor)).tls_policy.verification_mode == "strict"
++    for overrides in ({"verify_ssl": False}, {"omada_tls_trust_anchor_path": ""},
++                      {"omada_tls_trust_anchor_sha256": ""}, {"omada_url": "http://Omada:8043"}):
++        with pytest.raises(ConfigurationError):
++            build_omada_runtime_config(tls_settings(anchor, **overrides))
++
++
++@ROOT_FIXTURE
++def test_every_operation_establishes_fresh_verified_connection(anchor, route_to):
++    subject = provider(anchor)
++    with omada_server(anchor) as server:
++        route_to(server)
++        assert subject.get_sites() == []
++        assert subject.get_sites() == []
++        assert len(server.sni) == len(server.records) == 2
++
++
++def test_inventory_covers_all_twelve_sites_without_global_trust_changes():
++    root = Path(__file__).resolve().parents[1]
++    counts = {}
++    for name in ("omada", "omada_pending_sessions", "omada_observations"):
++        source = (root / "app/controllers" / (name + ".py")).read_text()
++        tree = ast.parse(source)
++        counts[name] = sum(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
++                           and node.func.attr == "_request" for node in ast.walk(tree))
++        assert "requests.get(" not in source and "requests.post(" not in source
++        assert "disable_warnings" not in source and "assert_hostname=False" not in source
++        assert "verify=False" not in source
++    assert counts == {"omada": 7, "omada_pending_sessions": 3, "omada_observations": 2}
++    with requests.Session() as independent:
++        assert independent.trust_env is True  # Omada policy has no process-global effect
++
++
++def test_requests_new_and_old_adapter_paths_use_only_owned_context():
++    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
++    adapter = _OmadaTlsAdapter(context)
++    request = requests.Request("GET", "https://Omada:8043/openapi/v1/x").prepare()
++    host, policy = adapter.build_connection_pool_key_attributes(request, True)
++    assert policy == {"ssl_context": context, "cert_reqs": "CERT_REQUIRED"}
++    assert host["host"] == "omada" and adapter.poolmanager.connection_pool_kw["ssl_context"] is context
++    with pytest.raises(OmadaTransportError):
++        adapter.proxy_manager_for("http://unapproved.invalid")
++    adapter.close()
+diff --git a/tests/visitor_registry/test_snapshot_provider.py b/tests/visitor_registry/test_snapshot_provider.py
+index 0590ed39dbe6ed4d4ee1d6db4625e7bb4510d14d..ba90894c07df2a963d288b745c75e0ec1061c3be 100644
+--- a/tests/visitor_registry/test_snapshot_provider.py
++++ b/tests/visitor_registry/test_snapshot_provider.py
+@@ -38,6 +38,9 @@ def provider():
+     instance._client_id = "client-id"
+     instance._client_secret = "client-secret"
+     instance._verify_ssl = False
++    # Snapshot/parser unit fake; strict transport has separate real TLS fixtures.
++    instance._request = lambda method, url, **kwargs: getattr(requests, method.lower())(
++        url, verify=instance._verify_ssl, **kwargs)
+     return instance
+ 
+ 

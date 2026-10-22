@@ -1,0 +1,1662 @@
+diff --git a/app/admin_web/historical_traffic_serialization.py b/app/admin_web/historical_traffic_serialization.py
+index cf1efcf9376678bef4f12592dc83c966689946fa..38ce07482aebb628dcad4ad996c63714e7f69883 100644
+--- a/app/admin_web/historical_traffic_serialization.py
++++ b/app/admin_web/historical_traffic_serialization.py
+@@ -328,6 +328,111 @@ def serialize_historical_traffic(
+     return result
+ 
+ 
++def serialize_partial_historical_traffic(value, site_id, **options):
++    """Validate strict contracts first; project the separate closed R3 overlay."""
++    from app.analytics.models import CoverageAwareHistoricalSiteTrafficV1
++    from app.analytics.historical_traffic import _PARTIAL_REASONS
++    if not isinstance(value, CoverageAwareHistoricalSiteTrafficV1):
++        raise HistoricalTrafficSerializationError("Partial History contract is invalid")
++    result = serialize_historical_traffic(value.strict, site_id, **options)
++    overlay = value.partial_coverage.evidence
++    counts = ("partial_cycle_count_examined", "partial_cycle_count_admitted",
++              "partial_cycle_count_integrity_rejected", "partial_ap_rows_examined")
++    keys = {"metric_version", "source_kind", "range_from_utc", "range_to_utc", "status", "reason",
++            "buckets", "bucket_count_returned", "has_partial_measurements", "source_coverage_insufficient",
++            "statistics_scope", "comparison_allowed", "ap_share_allowed", *counts}
++    reasons = {"partial_evidence": "partial_measurements_observed", "unavailable": "overlay_source_unavailable",
++               "capacity_limited": "overlay_capacity_limited", "source_coverage_insufficient":
++               "raw_observation_range_incomplete" if overlay.get("source_coverage_insufficient") is True
++               else "raw_observation_range_unproven"}
++    status = overlay.get("status")
++    if (set(overlay) != keys or status not in reasons or overlay["reason"] != reasons[status]
++        or overlay["metric_version"] != "network_traffic_partial_coverage_overlay.v1"
++        or overlay["source_kind"] != "observation_ap_dynamic"
++        or overlay["statistics_scope"] != "complete_coverage_intervals_only"
++        or overlay["range_from_utc"] != result["range"]["from_utc"]
++        or overlay["range_to_utc"] != result["range"]["to_utc"]
++        or overlay["comparison_allowed"] is not False or overlay["ap_share_allowed"] is not False
++        or overlay["has_partial_measurements"] is not (True if status == "partial_evidence" else None)
++        or (overlay["source_coverage_insufficient"] is not None and overlay["source_coverage_insufficient"] is not True)):
++        raise HistoricalTrafficSerializationError("Partial History envelope is invalid")
++    failed = status in {"unavailable", "capacity_limited"}
++    if failed:
++        if any(overlay[key] is not None for key in counts) or overlay["source_coverage_insufficient"] is not None:
++            raise HistoricalTrafficSerializationError("Partial failure counters are invalid")
++    else:
++        for key in counts:
++            _count(overlay[key])
++        if (overlay[counts[0]] != overlay[counts[1]] + overlay[counts[2]]
++            or overlay[counts[0]] > 10080 or overlay[counts[3]] > 150000
++            or (overlay[counts[1]] > 0) != (status == "partial_evidence")):
++            raise HistoricalTrafficSerializationError("Partial counter accounting is invalid")
++    projected = []
++    start, end = _utc(overlay["range_from_utc"]), _utc(overlay["range_to_utc"])
++    seconds = result["range"]["bucket_seconds"]
++    previous = None
++    selection_reasons = {
++        "wired": {"primary_full_partial_bucket_coverage", "primary_more_full_partial_cycles",
++                  "primary_higher_partial_pair_coverage", "primary_preferred_partial_tie_or_higher"},
++        "lan": {"fallback_full_partial_bucket_coverage", "fallback_more_full_partial_cycles",
++                "fallback_higher_partial_pair_coverage", "fallback_higher_partial_direction_coverage"},
++    }
++    bucket_counts = ("partial_cycle_count", "download_sample_count", "upload_sample_count", "measured_sample_count",
++                     "observed_ap_opportunities", "measured_download_ap_opportunities", "measured_upload_ap_opportunities",
++                     "measured_pair_ap_opportunities", "min_observed_ap_count", "max_observed_ap_count",
++                     "min_measured_ap_count", "max_measured_ap_count")
++    bucket_keys = {"bucket_start_utc", "bucket_end_utc", "status", "download_mbps", "upload_mbps", "total_mbps",
++                   "unit", "selected_source", "selection_reason", "coverage_ratio", "reasons", *bucket_counts}
++    for bucket in overlay["buckets"]:
++        if set(bucket) != bucket_keys:
++            raise HistoricalTrafficSerializationError("Partial bucket fields are invalid")
++        at, through = _utc(bucket["bucket_start_utc"]), _utc(bucket["bucket_end_utc"])
++        n = _count(bucket["partial_cycle_count"])
++        for key in bucket_counts:
++            _count(bucket[key])
++        d, u, t = (bucket[key] for key in ("download_sample_count", "upload_sample_count", "measured_sample_count"))
++        state = "partial_measured" if t else "partial_directional" if d or u else "partial_unmeasured"
++        observed, pairs = bucket["observed_ap_opportunities"], bucket["measured_pair_ap_opportunities"]
++        if (n == 0 or observed == 0 or bucket["status"] != state or bucket["unit"] != "Mbps"
++            or not start <= at < through <= end or (through - at).total_seconds() != seconds
++            or (at - start).total_seconds() % seconds != 0 or previous is not None and at < previous
++            or bucket["selected_source"] not in selection_reasons
++            or bucket["selection_reason"] not in selection_reasons[bucket["selected_source"]]
++            or not t <= min(d, u) <= max(d, u) <= n
++            or not pairs <= min(bucket["measured_download_ap_opportunities"], bucket["measured_upload_ap_opportunities"])
++            or max(bucket["measured_download_ap_opportunities"], bucket["measured_upload_ap_opportunities"]) > observed
++            or not 0 < bucket["min_observed_ap_count"] <= bucket["max_observed_ap_count"]
++            or not 0 <= bucket["min_measured_ap_count"] <= bucket["max_measured_ap_count"] <= bucket["max_observed_ap_count"]
++            or not math.isclose(_number(bucket["coverage_ratio"]), pairs / observed, rel_tol=1e-9, abs_tol=1e-9)
++            or tuple(bucket["reasons"]) != tuple(r for r in _PARTIAL_REASONS if r in bucket["reasons"])
++            or "source_cycle_partial" not in bucket["reasons"]):
++            raise HistoricalTrafficSerializationError("Partial bucket accounting is invalid")
++        for key, count in (("download_mbps", d), ("upload_mbps", u), ("total_mbps", t)):
++            if (_optional_number(bucket[key]) is not None) != (count > 0):
++                raise HistoricalTrafficSerializationError("Partial directional value is invalid")
++        # Independently denominated means deliberately have no D+U=T check.
++        projected.append({**dict(bucket), "reasons": list(bucket["reasons"])})
++        previous = through
++    if (_count(overlay["bucket_count_returned"]) != len(projected) or len(projected) > 720
++        or (bool(projected) != (status == "partial_evidence"))
++        or not failed and sum(b["partial_cycle_count"] for b in projected) != overlay[counts[1]]):
++        raise HistoricalTrafficSerializationError("Partial sparse bucket inventory is invalid")
++    result["partial_coverage"] = {**dict(overlay), "buckets": projected}
++    suffix = {"partial_evidence": "partial_coverage", "unavailable": "overlay_unavailable",
++              "capacity_limited": "overlay_capacity_limited", "source_coverage_insufficient": "source_coverage_insufficient"}[status]
++    result["comparison_state"] = "unavailable_" + suffix
++    if "ap_traffic_share" in result:
++        share = result["ap_traffic_share"]
++        share["status"] = "insufficient_data"
++        share["reason"] = {"partial_evidence": "partial_ap_coverage", "unavailable": "partial_coverage_unknown",
++                           "capacity_limited": "partial_coverage_capacity_limited", "source_coverage_insufficient": "source_coverage_insufficient"}[status]
++        for item in share["items"]:
++            for direction in ("download", "upload", "total"):
++                item[direction + "_share_fraction"] = None
++        share["items"].sort(key=lambda item: item["ap_mac"])
++    return result
++
++
+ def _ap_share(
+     value: Any, *, history_status: str, range_seconds: float,
+ ) -> dict[str, Any]:
+diff --git a/app/admin_web/query_service.py b/app/admin_web/query_service.py
+index 205c74a52d399874b34c02ad1c5ffb4ea3f189bc..60ed0503cfccc7f8bc62df2a2d84ab3dc5ab1624 100644
+--- a/app/admin_web/query_service.py
++++ b/app/admin_web/query_service.py
+@@ -111,6 +111,7 @@ from .home_health_serialization import (
+     serialize_home_health,
+ )
+ from .historical_traffic_serialization import (
++    serialize_partial_historical_traffic,
+     HistoricalTrafficSerializationError,
+     serialize_historical_traffic,
+ )
+@@ -713,8 +714,10 @@ class AdminQueryService:
+         include_peak=False, include_aps=False, include_ap_share=False,
+         include_history=True,
+         requested_products=None,
++        coverage_mode=None,
+     ):
+         self._authorize(principal, "admin.read.overview", site_id)
++        partial = self._partial_current_mode(coverage_mode)
+         try:
+             resolved_range = resolve_traffic_network_range(
+                 range_id, datetime.now(timezone.utc)
+@@ -736,6 +739,7 @@ class AdminQueryService:
+                 include_ap_share=include_ap_share,
+                 include_history=include_history,
+                 requested_products=requested_products,
++                coverage_mode="partial_v1" if partial else None,
+             )
+ 
+         return self._run(query)
+@@ -745,6 +749,7 @@ class AdminQueryService:
+         include_peak=False, include_aps=False, include_ap_share=False,
+         include_history=True, requested_products=None,
+         prefetched_current=_PREFETCH_NOT_PROVIDED,
++        coverage_mode=None,
+     ):
+         source = self._historical_traffic
+         if source is None:
+@@ -848,7 +853,8 @@ class AdminQueryService:
+                         current_population_status = (
+                             "unavailable" if include_ap_share else "available"
+                         )
+-            value = source.get_site_history(
++            read_history = source.get_site_history_partial_coverage if coverage_mode == "partial_v1" else source.get_site_history
++            value = read_history(
+                 site_id,
+                 from_utc=resolved_range.from_utc,
+                 to_utc=resolved_range.to_utc,
+@@ -862,13 +868,20 @@ class AdminQueryService:
+                 current_cycle_id=current_cycle_id,
+             )
+             if include_aps:
+-                value = source.compose_current_ap_traffic(
+-                    value,
++                strict_value = value.strict if coverage_mode == "partial_v1" else value
++                composed = source.compose_current_ap_traffic(
++                    strict_value,
+                     current_snapshot=current_snapshot,
+                     current_population_count=current_population_count,
+                     current_items=tuple(current_items),
+                 )
+-            result = serialize_historical_traffic(
++                if coverage_mode == "partial_v1":
++                    from dataclasses import replace
++                    value = replace(value, strict=composed)
++                else:
++                    value = composed
++            serialize = serialize_partial_historical_traffic if coverage_mode == "partial_v1" else serialize_historical_traffic
++            result = serialize(
+                 value,
+                 site_id,
+                 resolved_range=resolved_range,
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index 6aa552be6fda32687d22b633b90c4ef6cf2406da..3e57879c82e198972afcc13e56416fa34a35e54e 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -1872,7 +1872,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+                 reason = "feature_disabled"
+                 return response
+             if (
+-                not set(request.args).issubset({"range", "include", "products"})
++                not set(request.args).issubset({"range", "include", "products", "coverage_mode"})
++                or ("coverage_mode" in request.args and (
++                    len(request.args.getlist("coverage_mode")) != 1
++                    or request.args["coverage_mode"] != "partial_v1"))
+                 or "range" not in request.args
+                 or len(request.args.getlist("range")) != 1
+                 or (
+@@ -1889,6 +1892,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+                 reason = "invalid_request"
+                 return response
+             range_id = request.args.get("range")
++            if "coverage_mode" in request.args and not config.traffic_partial_coverage_enabled:
++                response = make_response(_error("not_found", 404))
++                reason = "feature_disabled"
++                return response
+             if "products" in request.args:
+                 if not config.traffic_independent_ranges_enabled:
+                     response = make_response(_error("not_found", 404))
+@@ -1963,6 +1970,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+                     include_aps=aps_requested,
+                     include_ap_share=ap_share_requested,
+                     requested_products=requested_products,
++                    **({"coverage_mode": "partial_v1"} if "coverage_mode" in request.args else {}),
+                 )
+                 result_status = result.result.get("status")
+                 coverage = result.result.get("coverage", {})
+diff --git a/app/admin_web/static/admin.js b/app/admin_web/static/admin.js
+index 334bceac980cb2a79a2b3a77c7127e3ad1f1c266..7396b3507917e069e62ba072560dbb92a8b1402b 100644
+--- a/app/admin_web/static/admin.js
++++ b/app/admin_web/static/admin.js
+@@ -1974,6 +1974,8 @@
+   const rangeContext = independentRanges
+     ? null : window.CaptivPortalTrafficNetworkRange;
+   const panel = document.getElementById("traffic-history-panel");
++  const partialCoverage = Boolean(panel && panel.dataset.partialCoverage === "true");
++  const coverageSuffix = partialCoverage ? "&coverage_mode=partial_v1" : "";
+   if (!root || root.dataset.page !== "traffic" || root.dataset.trafficEnabled !== "true"
+       || !panel || panel.dataset.historyEnabled !== "true" || !coordinator
+       || typeof coordinator.registerPanel !== "function"
+@@ -2211,6 +2213,7 @@
+         !== requestedProducts.includes("aps")) {
+       throw new Error("Invalid historical Traffic AP axis projection");
+     }
++    validatePartialOverlay(value);
+     return value;
+   }
+ 
+@@ -2486,6 +2489,7 @@
+   }
+ 
+   function validateApShare(value, history) {
++    const coverageAware = Boolean(history.partial_coverage);
+     const statuses = new Set(["ok", "partial", "insufficient_data", "unsupported_population"]);
+     const denominatorStatuses = new Set(["positive", "zero_traffic", "insufficient_data"]);
+     if (!object(value) || !statuses.has(value.status)
+@@ -2554,10 +2558,11 @@
+       }
+       return Object.freeze(value);
+     }
+-    if (population.population_count > 12
+-        || population.returned_ap_count !== population.population_count
+-        || value.items.length !== population.population_count
+-        || (currentAvailable && !population.population_complete)) {
++    if ((!coverageAware && population.population_count > 12)
++        || (coverageAware && population.population_count > 12 && value.items.length !== 0)
++        || population.returned_ap_count !== (population.population_count > 12 ? 0 : population.population_count)
++        || value.items.length !== population.returned_ap_count
++        || (currentAvailable && population.population_count <= 12 && !population.population_complete)) {
+       throw new Error("Invalid AP Traffic Share response");
+     }
+     let previous = null;
+@@ -2590,7 +2595,7 @@
+             || !Number.isFinite(fraction) || fraction < 0 || fraction > 1)) {
+           throw new Error("Invalid AP Traffic Share response");
+         }
+-        if (!item.range_presence_proven || status !== "positive") {
++        if (coverageAware || !item.range_presence_proven || status !== "positive") {
+           if (fraction !== null) throw new Error("Invalid AP Traffic Share response");
+         } else {
+           if (fraction === null) throw new Error("Invalid AP Traffic Share response");
+@@ -2616,7 +2621,7 @@
+       previous = order;
+     }
+     for (const direction of ["download", "upload", "total"]) {
+-      if (denominators[`${direction}_status`] === "positive"
++      if (!coverageAware && denominators[`${direction}_status`] === "positive"
+           && (fractionCounts[direction] === 0
+             || Math.abs(fractionSums[direction] - 1) > 1e-9)) {
+         throw new Error("Invalid AP Traffic Share response");
+@@ -2632,6 +2637,12 @@
+       && coverage.excluded_source_transition_interval_count === 0
+       && coverage.invalid_period_interval_count === 0;
+     const anyPresence = value.items.some((item) => item.range_presence_proven);
++    if (coverageAware) {
++      const reason = {partial_evidence: "partial_ap_coverage", unavailable: "partial_coverage_unknown",
++        capacity_limited: "partial_coverage_capacity_limited", source_coverage_insufficient: "source_coverage_insufficient"}[history.partial_coverage.status];
++      if (value.status !== "insufficient_data" || value.reason !== reason) throw new Error("Invalid partial AP share");
++      return Object.freeze(value);
++    }
+     if ((value.status === "ok" && !complete)
+         || (value.status === "partial" && (complete || !anyPresence))
+         || (value.status === "insufficient_data" && (
+@@ -2712,9 +2723,101 @@
+         || coverage.source_transition_count !== aggregate.transitions) {
+       throw new Error("Invalid historical Traffic response");
+     }
++    validatePartialOverlay(value);
+     return Object.freeze(value);
+   }
+ 
++  function validatePartialOverlay(history) {
++    const o = history.partial_coverage;
++    if (!partialCoverage) {
++      if (o !== undefined) throw new Error("Unexpected partial History contract");
++      return;
++    }
++    const reasons = {partial_evidence: "partial_measurements_observed", unavailable: "overlay_source_unavailable",
++      capacity_limited: "overlay_capacity_limited", source_coverage_insufficient:
++        o && o.source_coverage_insufficient === true ? "raw_observation_range_incomplete" : "raw_observation_range_unproven"};
++    const counters = ["partial_cycle_count_examined", "partial_cycle_count_admitted", "partial_cycle_count_integrity_rejected", "partial_ap_rows_examined"];
++    const keys = ["metric_version", "source_kind", "range_from_utc", "range_to_utc", "status", "reason", "buckets",
++      "bucket_count_returned", "has_partial_measurements", "source_coverage_insufficient", "statistics_scope",
++      "comparison_allowed", "ap_share_allowed", ...counters].sort().join(",");
++    if (!object(o) || Object.keys(o).sort().join(",") !== keys || !(o.status in reasons) || o.reason !== reasons[o.status]
++        || o.metric_version !== "network_traffic_partial_coverage_overlay.v1" || o.source_kind !== "observation_ap_dynamic"
++        || o.range_from_utc !== history.range.from_utc || o.range_to_utc !== history.range.to_utc
++        || o.statistics_scope !== "complete_coverage_intervals_only" || o.comparison_allowed !== false || o.ap_share_allowed !== false
++        || o.has_partial_measurements !== (o.status === "partial_evidence" ? true : null)
++        || ![true, null].includes(o.source_coverage_insufficient) || !Array.isArray(o.buckets)
++        || !count(o.bucket_count_returned) || o.bucket_count_returned !== o.buckets.length || o.buckets.length > 720) {
++      throw new Error("Invalid partial History envelope");
++    }
++    const failed = ["unavailable", "capacity_limited"].includes(o.status);
++    if ((failed && (counters.some((key) => o[key] !== null) || o.source_coverage_insufficient !== null))
++        || (!failed && (counters.some((key) => !count(o[key]))
++          || o.partial_cycle_count_examined !== o.partial_cycle_count_admitted + o.partial_cycle_count_integrity_rejected
++          || o.partial_cycle_count_examined > 10080 || o.partial_ap_rows_examined > 150000))) throw new Error("Invalid partial counters");
++    const orderedReasons = ["source_cycle_partial", "source_unavailable", "missing_direction", "no_valid_rate", "no_baseline", "counter_reset", "gap_too_large", "invalid_elapsed"];
++    const selection = {wired: ["primary_full_partial_bucket_coverage", "primary_more_full_partial_cycles", "primary_higher_partial_pair_coverage", "primary_preferred_partial_tie_or_higher"],
++      lan: ["fallback_full_partial_bucket_coverage", "fallback_more_full_partial_cycles", "fallback_higher_partial_pair_coverage", "fallback_higher_partial_direction_coverage"]};
++    let previous = Date.parse(history.range.from_utc), admitted = 0;
++    for (const b of o.buckets) {
++      const fields = ["partial_cycle_count", "download_sample_count", "upload_sample_count", "measured_sample_count", "observed_ap_opportunities",
++        "measured_download_ap_opportunities", "measured_upload_ap_opportunities", "measured_pair_ap_opportunities", "min_observed_ap_count", "max_observed_ap_count", "min_measured_ap_count", "max_measured_ap_count"];
++      const bucketKeys = [...fields, "bucket_start_utc", "bucket_end_utc", "status", "download_mbps", "upload_mbps", "total_mbps", "unit", "selected_source", "selection_reason", "coverage_ratio", "reasons"];
++      if (!object(b) || Object.keys(b).sort().join(",") !== bucketKeys.sort().join(",")
++          || !utc(b.bucket_start_utc) || !utc(b.bucket_end_utc)
++          || Date.parse(b.bucket_start_utc) < previous || Date.parse(b.bucket_end_utc) > Date.parse(history.range.to_utc)
++          || Date.parse(b.bucket_end_utc) - Date.parse(b.bucket_start_utc) !== history.range.bucket_seconds * 1000
++          || (Date.parse(b.bucket_start_utc) - Date.parse(history.range.from_utc)) % (history.range.bucket_seconds * 1000) !== 0
++          || fields.some((key) => !count(b[key])) || b.partial_cycle_count === 0 || b.observed_ap_opportunities === 0
++          || b.unit !== "Mbps" || !selection[b.selected_source]?.includes(b.selection_reason)
++          || !Array.isArray(b.reasons) || b.reasons.join(",") !== orderedReasons.filter((r) => b.reasons.includes(r)).join(",")
++          || !b.reasons.includes("source_cycle_partial") || !metric(b.coverage_ratio) || b.coverage_ratio === null
++          || Math.abs(b.coverage_ratio - b.measured_pair_ap_opportunities / b.observed_ap_opportunities) > 1e-9
++          || b.measured_sample_count > Math.min(b.download_sample_count, b.upload_sample_count)
++          || Math.max(b.download_sample_count, b.upload_sample_count) > b.partial_cycle_count
++          || b.measured_pair_ap_opportunities > Math.min(b.measured_download_ap_opportunities, b.measured_upload_ap_opportunities)
++          || Math.max(b.measured_download_ap_opportunities, b.measured_upload_ap_opportunities) > b.observed_ap_opportunities
++          || b.min_observed_ap_count === 0 || b.min_observed_ap_count > b.max_observed_ap_count
++          || b.min_measured_ap_count > b.max_measured_ap_count || b.max_measured_ap_count > b.max_observed_ap_count) {
++        throw new Error("Invalid partial bucket");
++      }
++      for (const [key, n] of [["download_mbps", b.download_sample_count], ["upload_mbps", b.upload_sample_count], ["total_mbps", b.measured_sample_count]]) {
++        if (!metric(b[key]) || (b[key] !== null) !== (n > 0)) throw new Error("Invalid partial direction");
++      }
++      const state = b.measured_sample_count > 0 ? "partial_measured" : b.download_sample_count || b.upload_sample_count ? "partial_directional" : "partial_unmeasured";
++      if (b.status !== state) throw new Error("Invalid partial bucket state");
++      previous = Date.parse(b.bucket_end_utc);
++      admitted += b.partial_cycle_count;
++    }
++    const comparison = {partial_evidence: "unavailable_partial_coverage", unavailable: "unavailable_overlay_unavailable",
++      capacity_limited: "unavailable_overlay_capacity_limited", source_coverage_insufficient: "unavailable_source_coverage_insufficient"}[o.status];
++    if (history.comparison_state !== comparison || (o.status === "partial_evidence") !== (o.buckets.length > 0)
++        || !failed && (admitted !== o.partial_cycle_count_admitted || (admitted > 0) !== (o.status === "partial_evidence"))) {
++      throw new Error("Invalid partial inventory");
++    }
++  }
++
++  function partialCopy(history) {
++    const o = history.partial_coverage;
++    if (!o) return null;
++    if (o.status === "partial_evidence") return {
++      message: "Observed partial AP measurements are shown separately; they are not included in the strict Average or Peak." + (o.source_coverage_insufficient === true ? " Partial-coverage evidence is incomplete for part of this period." : ""),
++      qualifier: "", comparison: "Comparison unavailable because AP coverage is partial.",
++      share: "AP share unavailable for the full period because AP coverage is partial."};
++    if (o.status === "capacity_limited") return {message: "Partial-coverage evidence exceeded the bounded query limit for this period.",
++      qualifier: " · partial coverage not fully evaluated", comparison: "Comparison unavailable because partial coverage could not be fully evaluated.",
++      share: "AP share unavailable because partial coverage could not be fully evaluated."};
++    if (o.status === "unavailable") return {message: "Partial-coverage evidence is unavailable for this period.",
++      qualifier: " · partial coverage not verified", comparison: "Comparison unavailable because partial-coverage status is unknown.",
++      share: "AP share unavailable because partial-coverage status is unknown."};
++    return {message: o.source_coverage_insufficient === true ? "Partial-coverage evidence is incomplete for part of this period."
++      : "No partial AP measurements were found in retained evidence; full-period partial coverage is not verified.",
++      qualifier: o.source_coverage_insufficient === true ? " · partial coverage not fully covered" : " · partial coverage not verified",
++      comparison: o.source_coverage_insufficient === true ? "Comparison unavailable because partial-coverage source coverage is incomplete."
++        : "Comparison unavailable because partial-coverage status is not verified.",
++      share: o.source_coverage_insufficient === true ? "AP share unavailable because partial-coverage source coverage is incomplete."
++        : "AP share unavailable because partial-coverage status is not verified."};
++  }
++
+   function displayRange(value) { return value === "24h" ? "Last 24 hours" : "Last 7 days"; }
+   function displayZone() {
+     const candidate = Intl.DateTimeFormat().resolvedOptions().timeZone;
+@@ -2765,8 +2868,38 @@
+     });
+     return output;
+   }
++  function overlayMarkers(history, maximum) {
++    const output = [];
++    for (const b of history.partial_coverage?.buckets || []) {
++      const index = (Date.parse(b.bucket_start_utc) - Date.parse(history.range.from_utc)) / (history.range.bucket_seconds * 1000);
++      const x = 48 + ((index + .5) / history.range.bucket_count) * 888;
++      const details = b.status === "partial_unmeasured" ? ["Partial coverage — no reliable traffic measurement"]
++        : b.status === "partial_measured" ? [`Measured traffic: ${b.total_mbps.toFixed(2)} Mbps`, `Partial data · pair coverage ${b.measured_pair_ap_opportunities}/${b.observed_ap_opportunities} AP opportunities`]
++          : [b.download_mbps === null ? "Download unavailable" : `Measured download: ${b.download_mbps.toFixed(2)} Mbps`,
++             b.upload_mbps === null ? "Upload unavailable" : `Measured upload: ${b.upload_mbps.toFixed(2)} Mbps`, "Combined total unavailable"];
++      if (b.min_measured_ap_count !== b.max_measured_ap_count) details.push(`Measured pair APs per sample: ${b.min_measured_ap_count}–${b.max_measured_ap_count}`);
++      if (b.min_observed_ap_count !== b.max_observed_ap_count) details.push(`Observed APs per sample: ${b.min_observed_ap_count}–${b.max_observed_ap_count}`);
++      if (history.buckets[index].complete_site_sample_count > 0) details.push("This interval contains both complete and partial AP measurements.");
++      const tooltip = details.join("\n");
++      for (const field of ["download_mbps", "upload_mbps"]) {
++        if (b[field] === null) continue;
++        const y = 284 - (b[field] / maximum) * 248;
++        const marker = svgElement("polygon", {points: `${x},${y - 5} ${x + 5},${y} ${x},${y + 5} ${x - 5},${y}`,
++          class: `traffic-history-partial-marker ${field === "download_mbps" ? "traffic-history-partial-marker-download" : "traffic-history-partial-marker-upload"}`,
++          tabindex: "0", role: "img", "aria-label": tooltip, "data-partial-state": b.status});
++        const title = svgElement("title", {}); title.textContent = tooltip; marker.appendChild(title); output.push(marker);
++      }
++      if (b.status === "partial_unmeasured") {
++        const marker = svgElement("text", {x, y: 24, class: "traffic-history-axis-label", tabindex: "0", role: "img",
++          "aria-label": tooltip, "data-partial-state": b.status});
++        marker.textContent = "◇";
++        const title = svgElement("title", {}); title.textContent = tooltip; marker.appendChild(title); output.push(marker);
++      }
++    }
++    return output;
++  }
+   function renderChart(value) {
+-    const numeric = value.buckets.flatMap((bucket) => [bucket.download_mbps, bucket.upload_mbps]).filter((item) => item !== null);
++    const numeric = [...value.buckets, ...(value.partial_coverage?.buckets || [])].flatMap((bucket) => [bucket.download_mbps, bucket.upload_mbps]).filter((item) => item !== null);
+     const maximum = Math.max(1, ...numeric);
+     const title = svgElement("title", {id: "traffic-history-chart-title"});
+     title.textContent = `Download and Upload network traffic history for ${displayRange(value.range.id)}`;
+@@ -2789,7 +2922,8 @@
+       ...paths(value.buckets, "download_mbps", maximum, "traffic-history-line-download"),
+       ...paths(value.buckets, "upload_mbps", maximum, "traffic-history-line-upload"),
+       ...partialMarkers(value.buckets, "download_mbps", maximum, "traffic-history-partial-marker-download"),
+-      ...partialMarkers(value.buckets, "upload_mbps", maximum, "traffic-history-partial-marker-upload"));
++      ...partialMarkers(value.buckets, "upload_mbps", maximum, "traffic-history-partial-marker-upload"),
++      ...overlayMarkers(value, maximum));
+   }
+   function renderLoading() {
+     elements.state.dataset.state = "warning";
+@@ -2847,6 +2981,16 @@
+     statisticsElements.intervals.textContent = `${(evidence.interval_coverage_ratio * 100).toFixed(1)}% · ${evidence.accepted_interval_count}/${evidence.candidate_interval_count} intervals`;
+     statisticsElements.watermark.textContent = history.coverage.source_watermark_utc === null
+       ? "—" : displayTime(history.coverage.source_watermark_utc);
++    const copy = partialCopy(history);
++    if (copy) {
++      for (const [id, label] of [["traffic-statistics-average-heading", "Average · complete-coverage intervals only"],
++        ["traffic-statistics-peak-heading", "Max observed with complete AP coverage"]]) {
++        const heading = document.getElementById(id);
++        if (heading) heading.textContent = label + copy.qualifier;
++      }
++      statisticsElements.state.dataset.state = "warning";
++      statisticsElements.message.textContent += ` ${copy.message} ${copy.comparison}`;
++    }
+   }
+   function renderPeak(value, history) {
+     if (value === null) {
+@@ -3007,6 +3151,8 @@
+         : (partial
+           ? "Shares cover accepted comparable historical evidence; current population or range evidence is incomplete."
+           : "Shares cover accepted Site Network Traffic evidence for the applied range."));
++    const copy = partialCopy(history);
++    if (copy) apShareElements.message.textContent = copy.share;
+     apShareElements.coverage.textContent = `${(value.coverage.interval_coverage_ratio * 100).toFixed(1)}% · ${value.coverage.accepted_interval_count}/${value.coverage.candidate_interval_count} intervals`;
+     for (const item of value.items) {
+       const card = document.createElement("article");
+@@ -3049,6 +3195,11 @@
+       ? "No canonical persisted traffic samples are available for the selected range."
+       : (partial ? "Accepted samples are shown; gaps and partial buckets remain visible."
+         : "Persisted traffic history has complete bucket coverage.");
++    const copy = partialCopy(value);
++    if (copy) {
++      elements.state.dataset.state = "warning";
++      elements.message.textContent += ` ${copy.message}`;
++    }
+     elements.applied.textContent = displayRange(appliedRange);
+     elements.coverage.textContent = value.coverage.status === "complete" ? "Complete"
+       : (value.coverage.status === "partial" ? "Partial" : "No data");
+@@ -3112,7 +3263,7 @@
+             : (apEnabled ? "aps" : null));
+         const suffix = include === null ? "" : `&include=${encodeURIComponent(include)}`;
+         const value = validate(
+-          await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}`),
++          await context.requestJson(`${context.apiBase}/traffic/history?range=${encodeURIComponent(requestRange)}${suffix}${coverageSuffix}`),
+           context.siteId,
+         );
+         let ap = null;
+@@ -3358,7 +3509,7 @@
+       const products = batch.products.join(",");
+       try {
+         const payload = await context.requestJson(
+-          `${context.apiBase}/traffic/history?range=${encodeURIComponent(batch.range)}&products=${encodeURIComponent(products)}`,
++          `${context.apiBase}/traffic/history?range=${encodeURIComponent(batch.range)}&products=${encodeURIComponent(products)}${coverageSuffix}`,
+         );
+         return Object.freeze({
+           batch,
+diff --git a/app/admin_web/templates/admin/traffic.html b/app/admin_web/templates/admin/traffic.html
+index c5aa8aa3ff224668e148b6b37f5f7929aa965fd7..0d313f9fdb95e353313d7d2667b4761c633cac3d 100644
+--- a/app/admin_web/templates/admin/traffic.html
++++ b/app/admin_web/templates/admin/traffic.html
+@@ -100,6 +100,7 @@
+     class="card card-wide traffic-history"
+     aria-labelledby="traffic-history-heading"
+     data-history-enabled="true"
++    data-partial-coverage="{{ 'true' if traffic_partial_coverage_enabled else 'false' }}"
+   >
+     <div class="card-heading traffic-history-heading-row">
+       <div>
+@@ -130,7 +131,8 @@
+     <div id="traffic-history-legend" class="traffic-history-legend" aria-label="Chart legend">
+       <span><i class="traffic-history-key traffic-history-key-download" aria-hidden="true"></i>Download</span>
+       <span><i class="traffic-history-key traffic-history-key-upload" aria-hidden="true"></i>Upload</span>
+-      <span><i class="traffic-history-key traffic-history-key-partial" aria-hidden="true"></i>Partial evidence</span>
++      <span><i class="traffic-history-key traffic-history-key-partial" aria-hidden="true"></i>{{ 'Measured partial coverage' if traffic_partial_coverage_enabled else 'Partial evidence' }}</span>
++      {% if traffic_partial_coverage_enabled %}<span>Complete AP coverage</span><span>No reliable data</span>{% endif %}
+     </div>
+     <div id="traffic-history-chart" class="traffic-history-chart" role="group" aria-label="Network traffic history chart">
+       <svg id="traffic-history-chart-svg" viewBox="0 0 960 320" role="img" aria-labelledby="traffic-history-chart-title traffic-history-chart-description">
+@@ -182,7 +184,7 @@
+     </div>
+     <div class="traffic-statistics-groups">
+       <section aria-labelledby="traffic-statistics-average-heading">
+-        <h3 id="traffic-statistics-average-heading">Average</h3>
++        <h3 id="traffic-statistics-average-heading">{{ 'Average · complete-coverage intervals only' if traffic_partial_coverage_enabled else 'Average' }}</h3>
+         <div class="traffic-statistics-metrics">
+           <article class="card live-metric"><p>Download</p><strong id="traffic-statistics-average-download">—</strong></article>
+           <article class="card live-metric"><p>Upload</p><strong id="traffic-statistics-average-upload">—</strong></article>
+@@ -190,7 +192,7 @@
+         </div>
+       </section>
+       <section aria-labelledby="traffic-statistics-peak-heading">
+-        <h3 id="traffic-statistics-peak-heading">Peak</h3>
++        <h3 id="traffic-statistics-peak-heading">{{ 'Max observed with complete AP coverage' if traffic_partial_coverage_enabled else 'Peak' }}</h3>
+         <div class="traffic-statistics-metrics">
+           <article class="card live-metric"><p>Download</p><strong id="traffic-statistics-peak-download">—</strong></article>
+           <article class="card live-metric"><p>Upload</p><strong id="traffic-statistics-peak-upload">—</strong></article>
+diff --git a/app/analytics/current_traffic.py b/app/analytics/current_traffic.py
+index 55a188725504cc04dd59e1cb68ab3350c3d15222..3f480f17f406a55e896dd06564395d63aad03b9e 100644
+--- a/app/analytics/current_traffic.py
++++ b/app/analytics/current_traffic.py
+@@ -305,42 +305,53 @@ def _partial_cursor(payload):
+ 
+ 
+ def _validate_partial_cycle(site, cycle, rows, actual_count):
++    _validate_partial_cycle_header(site, cycle, actual_count)
++    if len(rows) != actual_count:
++        raise ValueError("Invalid partial traffic cycle")
++    seen = set()
++    for row in rows:
++        _validate_partial_row(site, cycle, row, seen)
++
++
++def _validate_partial_cycle_header(site, cycle, actual_count):
+     started, finished = parse_utc(cycle["started_at"], "cycle started_at"), parse_utc(cycle["finished_at"], "cycle finished_at")
+     count = cycle["items_stored"]
+     if (
+         cycle["site_id"] != site or cycle["kind"] != "ap_dynamic"
+         or cycle["state"] != "completed" or cycle["result"] not in {"success", "partial"}
+-        or type(count) is not int or count <= 0 or actual_count != count or len(rows) != count
++        or type(count) is not int or count <= 0 or actual_count != count
+         or started > finished or cycle["items_seen"] != count or cycle["source_rows_reported"] != count
+         or cycle["items_skipped"] != 0 or cycle["data_quality_warning_count"] != 0
+         or type(cycle["error_count"]) is not int or cycle["error_count"] < 0
+         or cycle["complete"] not in (0, 1)
+     ):
+         raise ValueError("Invalid partial traffic cycle")
+-    seen = set()
+-    for row in rows:
+-        mac = row["ap_mac"]
+-        if (row["site_id"] != site or row["cycle_id"] != cycle["cycle_id"]
+-            or not isinstance(mac, str) or _MAC_PATTERN.fullmatch(mac) is None or mac in seen
+-            or row["name"] is not None and not isinstance(row["name"], str)
+-            or any(row[key] not in (0, 1) for key in (
+-                "partial", "overview_ok", "wired_uplink_ok", "lan_traffic_ok", "radios_ok"))):
+-            raise ValueError("Invalid AP identity")
+-        seen.add(mac)
+-        for source in ("wired", "lan"):
+-            down, up, dr, ur, at = _partial_values(row, source)
+-            for value, reason in ((down, dr), (up, ur)):
+-                if reason not in RATE_REASONS:
+-                    raise ValueError("Invalid rate reason")
+-                if reason == "ok":
+-                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+-                        raise ValueError("Invalid rate value")
+-                    if not started <= parse_utc(at, "source observed_at") <= finished:
+-                        raise ValueError("Invalid rate timestamp")
+-                elif value is not None:
+-                    raise ValueError("Non-ok numeric rate")
+-            if at is not None:
+-                parse_utc(at, "source observed_at")
++
++
++def _validate_partial_row(site, cycle, row, seen):
++    started, finished = parse_utc(cycle["started_at"], "cycle started_at"), parse_utc(cycle["finished_at"], "cycle finished_at")
++    mac = row["ap_mac"]
++    if (row["site_id"] != site or row["cycle_id"] != cycle["cycle_id"]
++        or not isinstance(mac, str) or _MAC_PATTERN.fullmatch(mac) is None or mac in seen
++        or row["name"] is not None and not isinstance(row["name"], str)
++        or any(row[key] not in (0, 1) for key in (
++            "partial", "overview_ok", "wired_uplink_ok", "lan_traffic_ok", "radios_ok"))):
++        raise ValueError("Invalid AP identity")
++    seen.add(mac)
++    for source in ("wired", "lan"):
++        down, up, dr, ur, at = _partial_values(row, source)
++        for value, reason in ((down, dr), (up, ur)):
++            if reason not in RATE_REASONS:
++                raise ValueError("Invalid rate reason")
++            if reason == "ok":
++                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
++                    raise ValueError("Invalid rate value")
++                if not started <= parse_utc(at, "source observed_at") <= finished:
++                    raise ValueError("Invalid rate timestamp")
++            elif value is not None:
++                raise ValueError("Non-ok numeric rate")
++        if at is not None:
++            parse_utc(at, "source observed_at")
+ 
+ 
+ def _partial_values(row, source):
+diff --git a/app/analytics/historical_traffic.py b/app/analytics/historical_traffic.py
+index 3527a129db75c2cb08dc3c1fe590cd8670894406..4dac0d09c00b8df00b8636158a179da91bacfef0 100644
+--- a/app/analytics/historical_traffic.py
++++ b/app/analytics/historical_traffic.py
+@@ -4,11 +4,14 @@ from __future__ import annotations
+ 
+ import math
+ import re
++import sqlite3
+ from dataclasses import dataclass, replace
+ from datetime import datetime, timedelta, timezone
+ from typing import Any, Mapping
+ 
+ from .models import (
++    CoverageAwareHistoricalSiteTrafficV1,
++    HistoricalTrafficPartialCoverageOverlayV1,
+     CurrentApTrafficItem,
+     CurrentTrafficSnapshot,
+     HistoricalSiteTraffic,
+@@ -40,7 +43,9 @@ from .source_gateway import (
+     AnalyticsSourceGateway,
+     AnalyticsSourceUnavailable,
+     QueryDeadline,
++    PartialTrafficCapacityLimited,
+ )
++from .current_traffic import _partial_values, _validate_partial_cycle_header, _validate_partial_row
+ from .validation import AnalyticsQueryValidationError, format_utc, parse_utc, require_site
+ 
+ 
+@@ -370,6 +375,104 @@ class HistoricalTrafficReadService:
+             ap_traffic_share=ap_traffic_share,
+         )
+ 
++    def get_site_history_partial_coverage(self, site_id, **options):
++        """Compose an unchanged strict History with positive retained evidence."""
++        deadline = options.get("deadline") or QueryDeadline.after(self._query_seconds)
++        options["deadline"] = deadline
++        strict = self.get_site_history(site_id, **options)
++        duration = (parse_utc(strict.range.to_utc, "to_utc") - parse_utc(strict.range.from_utc, "from_utc")).total_seconds()
++        if (duration, strict.range.bucket_seconds) not in ((86400, 300), (604800, 900)) or len(strict.buckets) > MAX_SITE_HISTORY_BUCKETS:
++            raise HistoricalTrafficValidationError("Partial History requires the bounded 24h/7d axis")
++        local = QueryDeadline(min(deadline.expires_at, deadline.monotonic() + 5.0), deadline.monotonic)
++        start = parse_utc(strict.range.from_utc, "from_utc")
++        end = parse_utc(strict.range.to_utc, "to_utc")
++        accumulators = {}
++
++        def consume(cycle, rows):
++            count, seen, valid = 0, set(), True
++            families = {source: _partial_family() for source in ("wired", "lan")}
++            for row in rows:
++                count += 1
++                try:
++                    _validate_partial_row(site_id, cycle, row, seen)
++                    for source, family in families.items():
++                        down, up, dr, ur, _at = _partial_values(row, source)
++                        d, u = dr == "ok", ur == "ok"
++                        family["d"] += d
++                        family["u"] += u
++                        family["p"] += d and u
++                        if d:
++                            family["download"] = math.fsum((family["download"], down))
++                        if u:
++                            family["upload"] = math.fsum((family["upload"], up))
++                        family["reasons"].update(reason for reason in (dr, ur) if reason != "ok")
++                except (ValueError, TypeError, KeyError, OverflowError):
++                    valid = False
++            try:
++                _validate_partial_cycle_header(site_id, cycle, count)
++                finished = parse_utc(cycle["finished_at"], "finished_at")
++                if cycle["result"] != "partial" or cycle["complete"] != 0 or not start <= finished < end:
++                    raise ValueError("Invalid partial lifecycle")
++                if not valid or any(not math.isfinite(f["download"] + f["upload"]) for f in families.values()):
++                    return False
++            except (ValueError, TypeError, KeyError):
++                return False
++            index = int((finished - start).total_seconds() // strict.range.bucket_seconds)
++            bucket = accumulators.setdefault(index, _partial_accumulator())
++            bucket["n"] += 1
++            bucket["observed"] += count
++            bucket["min_observed"] = min(bucket["min_observed"], count)
++            bucket["max_observed"] = max(bucket["max_observed"], count)
++            for source, f in families.items():
++                target = bucket[source]
++                coherent = f["d"] == f["u"] == f["p"] and f["p"] > 0
++                target["full"] += f["p"] == count
++                for key in ("d", "u", "p"):
++                    target[key] += f[key]
++                target["min_pair"] = min(target["min_pair"], f["p"])
++                target["max_pair"] = max(target["max_pair"], f["p"])
++                for key, has, subtotal in (("download", f["d"] > 0, f["download"]),
++                                           ("upload", f["u"] > 0, f["upload"]),
++                                           ("total", coherent, f["download"] + f["upload"])):
++                    if has:
++                        target[key] = math.fsum((target[key], subtotal))
++                        target[key + "_samples"] += 1
++                target["reasons"].update(f["reasons"])
++                if f["d"] != f["p"] or f["u"] != f["p"]:
++                    target["reasons"].add("missing_direction")
++                if f["d"] == f["u"] == 0:
++                    target["reasons"].add("no_valid_rate")
++            return True
++
++        evidence = {
++            "metric_version": "network_traffic_partial_coverage_overlay.v1",
++            "source_kind": "observation_ap_dynamic",
++            "range_from_utc": strict.range.from_utc, "range_to_utc": strict.range.to_utc,
++            "statistics_scope": "complete_coverage_intervals_only",
++            "comparison_allowed": False, "ap_share_allowed": False,
++        }
++        try:
++            counts = self._gateway.read_partial_ap_traffic_evidence(
++                site_id=site_id, from_utc=strict.range.from_utc, to_utc=strict.range.to_utc,
++                deadline=local, consume_cycle=consume)
++            local.require_remaining()
++            buckets = [_partial_bucket(index, bucket, start, strict.range.bucket_seconds)
++                       for index, bucket in sorted(accumulators.items())]
++            local.require_remaining()
++            positive = counts["partial_cycle_count_admitted"] > 0
++            evidence.update(counts, buckets=buckets, bucket_count_returned=len(buckets),
++                            has_partial_measurements=True if positive else None,
++                            status="partial_evidence" if positive else "source_coverage_insufficient",
++                            reason="partial_measurements_observed" if positive else (
++                                "raw_observation_range_incomplete" if counts["source_coverage_insufficient"]
++                                else "raw_observation_range_unproven"))
++        except (PartialTrafficCapacityLimited, AnalyticsQueryDeadlineExceeded, OverflowError):
++            evidence.update(_partial_failure("capacity_limited", "overlay_capacity_limited"))
++        except (AnalyticsSourceUnavailable, sqlite3.Error, OSError):
++            evidence.update(_partial_failure("unavailable", "overlay_source_unavailable"))
++        return CoverageAwareHistoricalSiteTrafficV1(
++            strict, HistoricalTrafficPartialCoverageOverlayV1(evidence))
++
+     def compose_current_ap_traffic(
+         self,
+         value: HistoricalSiteTraffic,
+@@ -1280,6 +1383,76 @@ class HistoricalTrafficReadService:
+         )
+ 
+ 
++_PARTIAL_REASONS = (
++    "source_cycle_partial", "source_unavailable", "missing_direction", "no_valid_rate",
++    "no_baseline", "counter_reset", "gap_too_large", "invalid_elapsed",
++)
++
++
++def _partial_family():
++    return dict(d=0, u=0, p=0, download=0.0, upload=0.0, reasons=set())
++
++
++def _partial_accumulator():
++    def family():
++        return {**_partial_family(), "full": 0, "total": 0.0,
++                "download_samples": 0, "upload_samples": 0, "total_samples": 0,
++                "min_pair": math.inf, "max_pair": 0}
++    return dict(n=0, observed=0, min_observed=math.inf, max_observed=0,
++                wired=family(), lan=family())
++
++
++def _partial_source(bucket):
++    w, l, n = bucket["wired"], bucket["lan"], bucket["n"]
++    if w["full"] == n:
++        return "wired", "primary_full_partial_bucket_coverage"
++    if l["full"] == n:
++        return "lan", "fallback_full_partial_bucket_coverage"
++    if l["full"] > w["full"]:
++        return "lan", "fallback_more_full_partial_cycles"
++    if w["full"] > l["full"]:
++        return "wired", "primary_more_full_partial_cycles"
++    if l["p"] > w["p"]:
++        return "lan", "fallback_higher_partial_pair_coverage"
++    if w["p"] > l["p"]:
++        return "wired", "primary_higher_partial_pair_coverage"
++    if l["d"] + l["u"] > w["d"] + w["u"]:
++        return "lan", "fallback_higher_partial_direction_coverage"
++    return "wired", "primary_preferred_partial_tie_or_higher"
++
++
++def _partial_bucket(index, bucket, start, seconds):
++    source, reason = _partial_source(bucket)
++    f = bucket[source]
++    at = start + timedelta(seconds=index * seconds)
++    total = f["total_samples"]
++    numeric = {key + "_mbps": f[key] / f[key + "_samples"] if f[key + "_samples"] else None
++               for key in ("download", "upload", "total")}
++    if any(value is not None and not math.isfinite(value) for value in numeric.values()):
++        raise OverflowError("Partial aggregate is not finite")
++    return {
++        "bucket_start_utc": format_utc(at), "bucket_end_utc": format_utc(at + timedelta(seconds=seconds)),
++        "status": "partial_measured" if total else (
++            "partial_directional" if f["download_samples"] or f["upload_samples"] else "partial_unmeasured"),
++        **numeric, "unit": "Mbps", "selected_source": source, "selection_reason": reason,
++        "partial_cycle_count": bucket["n"], "download_sample_count": f["download_samples"],
++        "upload_sample_count": f["upload_samples"], "measured_sample_count": total,
++        "observed_ap_opportunities": bucket["observed"],
++        "measured_download_ap_opportunities": f["d"], "measured_upload_ap_opportunities": f["u"],
++        "measured_pair_ap_opportunities": f["p"], "coverage_ratio": f["p"] / bucket["observed"],
++        "min_observed_ap_count": bucket["min_observed"], "max_observed_ap_count": bucket["max_observed"],
++        "min_measured_ap_count": f["min_pair"], "max_measured_ap_count": f["max_pair"],
++        "reasons": [r for r in _PARTIAL_REASONS if r == "source_cycle_partial" or r in f["reasons"]],
++    }
++
++
++def _partial_failure(status, reason):
++    return dict(status=status, reason=reason, buckets=[], bucket_count_returned=0,
++                has_partial_measurements=None, source_coverage_insufficient=None,
++                partial_cycle_count_examined=None, partial_cycle_count_admitted=None,
++                partial_cycle_count_integrity_rejected=None, partial_ap_rows_examined=None)
++
++
+ def _peak_samples(
+     raw_samples: tuple[Any, ...] | list[Any],
+     *,
+diff --git a/app/analytics/models.py b/app/analytics/models.py
+index ff93f2e11091d11f39b1a11c1363a8376d8f4f0f..79a407a3d8bd9f338415b8d5aa423bdc7d98f4ba 100644
+--- a/app/analytics/models.py
++++ b/app/analytics/models.py
+@@ -1236,6 +1236,22 @@ class HistoricalSiteTraffic:
+         object.__setattr__(self, "buckets", tuple(self.buckets))
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class HistoricalTrafficPartialCoverageOverlayV1:
++    """Positive retained evidence, never a whole-period absence proof."""
++
++    evidence: Mapping[str, Any]
++
++    def __post_init__(self) -> None:
++        object.__setattr__(self, "evidence", freeze(self.evidence))
++
++
++@dataclass(frozen=True, slots=True)
++class CoverageAwareHistoricalSiteTrafficV1:
++    strict: HistoricalSiteTraffic
++    partial_coverage: HistoricalTrafficPartialCoverageOverlayV1
++
++
+ @dataclass(frozen=True, slots=True)
+ class HomeActivityCoverage:
+     coverage_from_utc: str | None
+diff --git a/app/analytics/source_gateway.py b/app/analytics/source_gateway.py
+index 53c7e0fedd3d6c56ca49dd2e4c6a5ebd83a45a3f..8d6cd962e527cc8a65fb5741c52e59d037f6248f 100644
+--- a/app/analytics/source_gateway.py
++++ b/app/analytics/source_gateway.py
+@@ -7,10 +7,11 @@ import time
+ from datetime import datetime
+ from contextlib import contextmanager
+ from dataclasses import dataclass
+-from typing import Any, Iterable, Iterator, Mapping, Sequence
++from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol, Sequence
+ 
+ from app.observations.read_service import ObservationReadService
+ from app.observations.config import MAX_AP_ROWS
++from .validation import parse_utc
+ from app.visit_lifecycle.read_service import VisitLifecycleReadService
+ from app.visitor_registry.registry_read_service import (
+     VisitorRegistryReadService,
+@@ -23,6 +24,21 @@ SOURCE_SCHEMA_VERSIONS = {
+     "registry": 1,
+ }
+ MAX_CROSS_SOURCE_IDENTIFIERS = 250_000
++MAX_PARTIAL_CYCLES_PER_REQUEST = 10_080
++MAX_PARTIAL_AP_ROWS_PER_REQUEST = 150_000
++PARTIAL_AP_ROW_BATCH_SIZE = 2_000
++
++
++class PartialTrafficEvidenceReadBoundaryV1(Protocol):
++    def read_partial_ap_traffic_evidence(
++        self, *, site_id: str, from_utc: str, to_utc: str, deadline: "QueryDeadline",
++        consume_cycle: Callable[[Mapping[str, Any], Iterator[Mapping[str, Any]]], bool],
++    ) -> Mapping[str, Any]: ...
++
++
++class PartialTrafficCapacityLimited(RuntimeError):
++    """An incomplete bounded overlay must publish neither numbers nor counts."""
++
+ _SQLITE_PROGRESS_OPCODES = 100
+ _SNAPSHOT_BATCH_SIZE = 800
+ _VISIT_WINDOW_BATCH_SIZE = 100
+@@ -1951,6 +1967,80 @@ class AnalyticsSourceGateway:
+             finally:
+                 connection.rollback()
+ 
++    @contextmanager
++    def _partial_evidence_connection(self, deadline):
++        with self._connection("observations", deadline) as connection:
++            yield connection
++
++    def read_partial_ap_traffic_evidence(
++        self, *, site_id, from_utc, to_utc, deadline, consume_cycle,
++    ):
++        """Read raw evidence in one RO snapshot, streaming into the owner.
++
++        Projection-backed subclasses supply their existing raw Observation
++        boundary, not projection rows. No SQL rewriting is used here.
++        """
++        counts = dict(partial_cycle_count_examined=0, partial_cycle_count_admitted=0,
++                      partial_cycle_count_integrity_rejected=0, partial_ap_rows_examined=0)
++        with self._partial_evidence_connection(deadline) as connection:
++            connection.execute("BEGIN")
++            try:
++                with _statement_deadline(connection, deadline):
++                    first = connection.execute("""
++                        SELECT started_at FROM observation_cycles
++                        INDEXED BY idx_cycles_site_kind_started
++                        WHERE site_id=? AND kind='ap_dynamic'
++                        ORDER BY started_at,cycle_id LIMIT 1
++                    """, (site_id,)).fetchone()
++                    cycles = connection.execute("""
++                        SELECT * FROM observation_cycles
++                        INDEXED BY idx_cycles_site_kind_started
++                        WHERE site_id=? AND kind='ap_dynamic' AND state='completed'
++                          AND result='partial' AND complete=0 AND items_stored>0
++                          AND finished_at>=? AND finished_at<?
++                        ORDER BY started_at,cycle_id LIMIT ?
++                    """, (site_id, from_utc, to_utc, MAX_PARTIAL_CYCLES_PER_REQUEST + 1))
++                    for cycle in cycles:
++                        deadline.require_remaining()
++                        counts['partial_cycle_count_examined'] += 1
++                        if counts['partial_cycle_count_examined'] > MAX_PARTIAL_CYCLES_PER_REQUEST:
++                            raise PartialTrafficCapacityLimited()
++                        # The cycle index preserves all rows, including wrong-Site
++                        # corruption, for the shared structural validator.
++                        cursor = connection.execute("""
++                            SELECT * FROM ap_observations WHERE cycle_id=?
++                            ORDER BY ap_mac LIMIT ?
++                        """, (cycle['cycle_id'], MAX_PARTIAL_AP_ROWS_PER_REQUEST + 1))
++
++                        def rows():
++                            while True:
++                                deadline.require_remaining()
++                                batch = cursor.fetchmany(PARTIAL_AP_ROW_BATCH_SIZE)
++                                if not batch:
++                                    return
++                                for row in batch:
++                                    counts['partial_ap_rows_examined'] += 1
++                                    if counts['partial_ap_rows_examined'] > MAX_PARTIAL_AP_ROWS_PER_REQUEST:
++                                        raise PartialTrafficCapacityLimited()
++                                    yield row
++
++                        admitted = consume_cycle(cycle, rows())
++                        counts['partial_cycle_count_admitted' if admitted
++                               else 'partial_cycle_count_integrity_rejected'] += 1
++                deadline.require_remaining()
++                if first is not None:
++                    try:
++                        parse_utc(first['started_at'], "retained source boundary")
++                    except ValueError as exc:
++                        raise AnalyticsSourceUnavailable("Invalid retained source boundary") from exc
++                return {**counts, 'source_coverage_insufficient':
++                        True if first is not None and first['started_at'] > from_utc else None}
++            except sqlite3.OperationalError as exc:
++                _translate_sqlite_error(exc, deadline)
++                raise
++            finally:
++                connection.rollback()
++
+     def _historical_boundary_candidates(
+         self,
+         connection: sqlite3.Connection,
+diff --git a/app/traffic_projection/read_service.py b/app/traffic_projection/read_service.py
+index cff6c9be48297042544f2b8cccc8eebc682435e0..d6714442059f753813ca6c0224e2d98dc38c66e8 100644
+--- a/app/traffic_projection/read_service.py
++++ b/app/traffic_projection/read_service.py
+@@ -148,6 +148,25 @@ class _ReadSnapshot:
+ class TrafficProjectionReadService(AnalyticsSourceGateway):
+     """Expose one coherent projected range through the existing semantic owner."""
+ 
++    @contextmanager
++    def _partial_evidence_connection(self, deadline):
++        """Reuse the configured raw source; never infer partials from projection."""
++        if self._current_path is None:
++            raise AnalyticsSourceUnavailable("Raw Observation source is unavailable")
++        try:
++            with closing(sqlite3.connect(sqlite3_uri(self._current_path), uri=True,
++                                        timeout=0.5)) as connection:
++                connection.row_factory = sqlite3.Row
++                connection.execute("PRAGMA busy_timeout=500")
++                connection.execute("PRAGMA query_only=ON")
++                with _statement_deadline(connection, deadline):
++                    if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
++                        raise AnalyticsSourceUnavailable("Raw Observation schema is invalid")
++                    yield connection
++        except sqlite3.OperationalError as exc:
++            _translate_sqlite_error(exc, deadline)
++            raise
++
+     def __init__(
+         self,
+         repository: TrafficProjectionRepository,
+diff --git a/tests/admin_web/test_current_partial_coverage.py b/tests/admin_web/test_current_partial_coverage.py
+index a23fe510cad1cda7f96d744e6d4430a3ee1f60d6..7cc5f2f3d5f2a5d130e9bef30aa95701badf63d9 100644
+--- a/tests/admin_web/test_current_partial_coverage.py
++++ b/tests/admin_web/test_current_partial_coverage.py
+@@ -254,9 +254,9 @@ global.document={getElementById:id=>elements.get(id)||null};
+     assert completed.returncode == 0, completed.stdout + completed.stderr
+ 
+ 
+-def test_A_T15_history_js_block_is_byte_identical_to_baseline():
++def test_A_T15_protected_non_history_js_blocks_are_byte_identical_to_baseline():
+     candidate = Path("app/admin_web/static/admin.js").read_text(encoding="utf-8")
+     baseline = subprocess.run(["git", "show", "e8061de9fbd6da8be5cd269779070a4db4d59d64:app/admin_web/static/admin.js"], capture_output=True, text=True, encoding="utf-8", check=True).stdout
+-    for marker in ("TRAFFIC_HISTORY_PANEL", "TRAFFIC_NETWORK_RANGE_CONTEXT", "TRAFFIC_ONLINE_GUESTS_PANEL", "TRAFFIC_COMPLETED_SESSIONS_PANEL", "TRAFFIC_EVIDENCE_PANEL"):
++    for marker in ("TRAFFIC_NETWORK_RANGE_CONTEXT", "TRAFFIC_ONLINE_GUESTS_PANEL", "TRAFFIC_COMPLETED_SESSIONS_PANEL", "TRAFFIC_EVIDENCE_PANEL"):
+         segment = lambda text: text.split(f"/* {marker}_START */", 1)[1].split(f"/* {marker}_END */", 1)[0]
+         assert segment(candidate) == segment(baseline), marker
+diff --git a/tests/admin_web/test_historical_partial_coverage.py b/tests/admin_web/test_historical_partial_coverage.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..377213496b735aebd9d698a74b50f883f9da8f3c
+--- /dev/null
++++ b/tests/admin_web/test_historical_partial_coverage.py
+@@ -0,0 +1,259 @@
++"""Actual opt-in History composition, ACL, legacy and browser regression."""
++import copy
++import json
++import logging
++from datetime import datetime, timezone
++from types import SimpleNamespace
++
++import pytest
++from flask import Flask
++from werkzeug.middleware.proxy_fix import ProxyFix
++
++from app.admin_web import create_admin_web_runtime
++from app.analytics.historical_traffic import HistoricalTrafficReadService
++from app.settings_control.features import AdminFeaturePlanV1
++from app.settings_control.models import ResolvedSettingsSnapshot
++from tests.analytics.conftest import analytics_stack
++from tests.analytics.test_historical_partial_coverage import publish, read, wire, SITE, AT, START, EVALUATED
++from .conftest import enabled_settings, login
++from .test_traffic_history_frontend import _run_node, _panel_source, _range_context_source
++
++API_SITE = "0123456789abcdef01234567"
++
++
++def app_for(stack, monkeypatch, *, flag="true"):
++    import app.admin_web.query_service as queries
++    class Clock(datetime):
++        @classmethod
++        def now(cls, tz=None):
++            return cls(2026, 1, 1, 12, tzinfo=timezone.utc)
++    monkeypatch.setattr(queries, "datetime", Clock)
++    settings = enabled_settings(web_admin_traffic_enabled="true", web_admin_traffic_history_enabled="true",
++        web_admin_traffic_statistics_enabled="true", web_admin_traffic_peak_enabled="true",
++        web_admin_traffic_partial_coverage_enabled=flag, web_admin_traffic_independent_ranges_enabled="true")
++    plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
++    runtime = create_admin_web_runtime(settings,
++        SimpleNamespace(state="active", visit_service=object(), historical_traffic_service=HistoricalTrafficReadService(stack.gateway)),
++        stack.gateway._registry, stack.gateway._visits, stack.gateway._observations,
++        logging.getLogger("history-partial-test"), feature_plan=plan)
++    assert runtime.state == "active"
++    app = Flask(__name__)
++    app.config["TESTING"] = True
++    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
++    app.register_blueprint(runtime.blueprint)
++    app.extensions["admin_web_runtime"] = runtime
++    return app
++
++
++def url(query="range=24h", site=API_SITE):
++    return f"/admin/api/v1/sites/{site}/traffic/history?{query}"
++
++
++def test_opt_in_history_actual_read_and_legacy_identical(analytics_stack, monkeypatch):
++    publish(analytics_stack, site=API_SITE)
++    clients = []
++    for flag in ("false", "true"):
++        c = app_for(analytics_stack, monkeypatch, flag=flag).test_client()
++        login(c)
++        clients.append(c)
++    legacy = [c.get(url(), base_url="https://localhost") for c in clients]
++    assert all(r.status_code == 200 for r in legacy)
++    assert legacy[0].get_json()["result"] == legacy[1].get_json()["result"]
++    assert "partial_coverage" not in legacy[0].get_json()["result"]
++    assert clients[0].get(url("range=24h&coverage_mode=partial_v1"), base_url="https://localhost").status_code == 404
++    response = clients[1].get(url("range=24h&coverage_mode=partial_v1"), base_url="https://localhost")
++    assert response.status_code == 200
++    out = response.get_json()["result"]
++    assert out["partial_coverage"]["buckets"][0]["total_mbps"] == 21
++    assert out["buckets"] == legacy[1].get_json()["result"]["buckets"]
++    assert "no-store" in response.headers["Cache-Control"]
++
++
++def test_history_browser_flag_off_retains_strict_request_and_numbers(analytics_stack, tmp_path):
++    from app.admin_web.historical_traffic_serialization import serialize_historical_traffic
++    from app.admin_web.traffic_network_ranges import resolve_traffic_network_range
++    from app.analytics.validation import parse_utc
++    publish(analytics_stack)
++    publish(analytics_stack, "strict-a", at="2026-01-01T11:56:00.000Z", result="success", pairs=[(20, 4)])
++    publish(analytics_stack, "strict-b", at="2026-01-01T11:59:00.000Z", result="success", pairs=[(20, 4)])
++    strict = HistoricalTrafficReadService(analytics_stack.gateway).get_site_history(
++        SITE, from_utc=START, to_utc=EVALUATED, evaluated_at_utc=EVALUATED, include_period_statistics=True)
++    out = serialize_historical_traffic(strict, SITE,
++        resolved_range=resolve_traffic_network_range("24h", parse_utc(EVALUATED, "at")),
++        include_period_statistics=True)
++    payload = dict(api_version="admin.read.v1", site_id=SITE, result=out)
++    assertions = r'''
++(async()=>{
++ const spec=registrations[0];let requests=[];
++ const loaded=await spec.load({siteId:payload.site_id,apiBase:"/site",requestJson:async u=>{requests.push(u);return payload;}});
++ assert.equal(requests.length,1);assert(!requests[0].includes("coverage_mode"));
++ spec.render(loaded);
++ assert.equal(elements["traffic-statistics-average-total"].textContent,"24.00 Mbps");
++ assert.equal(elements["traffic-statistics-peak-total"].textContent,"24.00 Mbps");
++ assert(!elements["traffic-history-chart-svg"].children.some(x=>x.attributes["data-partial-state"]));
++ assert(!elements["traffic-history-state-message"].textContent.includes("partial AP measurements"));
++ console.log("LEGACY_HISTORY_FLAG_OFF_OK");
++})().catch(e=>{console.error(e);process.exitCode=1;});
++'''
++    script = NODE_DOM + '\nelements["traffic-history-panel"].dataset.partialCoverage="false";\n'
++    script += "const payload=" + json.dumps(payload) + ";\n"
++    assert "LEGACY_HISTORY_FLAG_OFF_OK" in _run_node(tmp_path, script + _range_context_source() + _panel_source() + assertions)
++
++
++@pytest.mark.parametrize("query,code", [("range=24h&coverage_mode=wrong", 400),
++    ("range=24h&coverage_mode=", 400), ("range=24h&coverage_mode=partial_v1&coverage_mode=partial_v1", 400),
++    ("range=48h&coverage_mode=partial_v1", 400), ("range=7d&coverage_mode=partial_v1", 200),
++    ("range=24h&include=statistics,peak&coverage_mode=partial_v1", 200),
++    ("range=24h&products=history,statistics,peak&coverage_mode=partial_v1", 200),
++    ("range=24h&products=statistics&coverage_mode=partial_v1", 200)])
++def test_history_query_gate_and_products(analytics_stack, monkeypatch, query, code):
++    publish(analytics_stack, site=API_SITE)
++    c = app_for(analytics_stack, monkeypatch).test_client()
++    assert c.get(url(query), base_url="https://localhost").status_code == 401
++    login(c)
++    response = c.get(url(query), base_url="https://localhost")
++    assert response.status_code == code
++    if code == 200:
++        value = response.get_json()["result"]
++        assert value["partial_coverage"]["comparison_allowed"] is False
++        assert value["comparison_state"] == "unavailable_partial_coverage"
++        if "products=statistics" in query:
++            assert "buckets" not in value and "period_statistics" in value
++    assert c.get(url(query, "b" * 24), base_url="https://localhost").status_code == 403
++
++
++NODE_DOM = r'''
++const assert=require("node:assert/strict");
++class Element {
++  constructor(id,ns=null){this.id=id;this.namespaceURI=ns;this.dataset={};this.textContent="";this.children=[];this.attributes={};this.listeners={};}
++  setAttribute(k,v){this.attributes[k]=String(v);}
++  addEventListener(k,f){(this.listeners[k]??=[]).push(f);}
++  replaceChildren(...children){this.children=children;}
++  appendChild(child){this.children.push(child);}
++}
++const ids=["admin-page","traffic-history-panel","traffic-history-state","traffic-history-state-title","traffic-history-state-message","traffic-history-applied-range","traffic-history-coverage","traffic-history-watermark","traffic-history-gaps","traffic-history-source-transitions","traffic-history-timezone","traffic-history-chart-svg","traffic-network-range-24h","traffic-network-range-7d",
++"traffic-statistics-panel","traffic-statistics-state","traffic-statistics-state-title","traffic-statistics-state-message","traffic-statistics-average-download","traffic-statistics-average-upload","traffic-statistics-average-total","traffic-statistics-peak-download","traffic-statistics-peak-upload","traffic-statistics-peak-total","traffic-statistics-applied-range","traffic-statistics-coverage","traffic-statistics-interval-coverage","traffic-statistics-watermark","traffic-statistics-average-heading","traffic-statistics-peak-heading"];
++const elements=Object.fromEntries(ids.map(id=>[id,new Element(id)]));
++elements["admin-page"].dataset={page:"traffic",trafficEnabled:"true"};
++elements["traffic-history-panel"].dataset={historyEnabled:"true",partialCoverage:"true"};
++elements["traffic-statistics-panel"].dataset={statisticsEnabled:"true"};
++elements["traffic-history-chart-svg"].namespaceURI="http://www.w3.org/2000/svg";
++let registrations=[];
++global.window={CaptivPortalTrafficCoordinator:{registerPanel:spec=>registrations.push(spec),refreshPanel:()=>false}};
++global.document={getElementById:id=>elements[id]||null,createElementNS:(ns,name)=>new Element(name,ns)};
++'''
++
++
++@pytest.mark.parametrize("case,pairs,message,markers", [
++    ("partial", [(10, 1), (5, 1), (3, 1), (None, None)], "Observed partial AP measurements", 2),
++    ("direction", [(4, None), (None, 2)], "Observed partial AP measurements", 2),
++    ("unmeasured", [(None, None)], "Observed partial AP measurements", 0),
++    ("empty", None, "No partial AP measurements were found", 0),
++])
++def test_real_browser_sparse_overlay_and_exact_statistics_copy(analytics_stack, tmp_path, case, pairs, message, markers):
++    if pairs is not None:
++        publish(analytics_stack, pairs=pairs)
++    publish(analytics_stack, "strict-a", at="2026-01-01T11:56:00.000Z", result="success", pairs=[(20, 4)])
++    publish(analytics_stack, "strict-b", at="2026-01-01T11:59:00.000Z", result="success", pairs=[(20, 4)])
++    # Presence before range start proves neither continuity nor absence.
++    publish(analytics_stack, "prefix", at=START, result="failed", pairs=[(None, None)])
++    out = wire(read(analytics_stack, include_period_statistics=True), include_period_statistics=True)
++    payload = dict(api_version="admin.read.v1", site_id=SITE, result=out)
++    assertions = r'''
++(async()=>{
++ const spec=registrations[0]; let requested;
++ const loaded=await spec.load({siteId:payload.site_id,apiBase:"/site",requestJson:async u=>{requested=u;return payload;}});
++ assert(requested.endsWith("&coverage_mode=partial_v1"));
++ spec.render(loaded);
++ assert(elements["traffic-history-state-message"].textContent.includes(expectedMessage));
++ assert(elements["traffic-statistics-average-total"].textContent==="24.00 Mbps");
++ assert(elements["traffic-statistics-peak-total"].textContent==="24.00 Mbps");
++ assert(elements["traffic-statistics-average-heading"].textContent.startsWith("Average · complete-coverage intervals only"));
++ assert(elements["traffic-statistics-peak-heading"].textContent.startsWith("Max observed with complete AP coverage"));
++ const chart=elements["traffic-history-chart-svg"];
++ const polygons=chart.children.filter(x=>x.id==="polygon");
++ assert.equal(polygons.length,expectedMarkers);
++ assert(chart.children.some(x=>x.id==="polyline"),"strict evidence remains distinct");
++ if(testCase==="partial"){
++   assert(polygons[0].attributes["aria-label"].includes("Measured traffic: 21.00 Mbps"));
++   assert(polygons[0].attributes["aria-label"].includes("pair coverage 3/4 AP opportunities"));
++   assert(polygons[0].attributes["aria-label"].includes("both complete and partial AP measurements"));
++ }
++ if(testCase==="direction") assert(polygons.every(x=>x.attributes["aria-label"].includes("Combined total unavailable")));
++ if(testCase==="unmeasured"){
++   const evidence=chart.children.filter(x=>x.attributes["data-partial-state"]==="partial_unmeasured");
++   assert.equal(evidence.length,1);assert(evidence[0].attributes["aria-label"].includes("no reliable traffic measurement"));
++   assert.equal(evidence[0].attributes.y,"24","no numeric zero point");
++ }
++ const malformed=structuredClone(payload);malformed.result.partial_coverage.has_partial_measurements=false;
++ await assert.rejects(()=>spec.load({siteId:payload.site_id,apiBase:"/site",requestJson:async()=>malformed}));
++ console.log("PARTIAL_HISTORY_BROWSER_OK");
++})().catch(e=>{console.error(e);process.exitCode=1;});
++'''
++    script = NODE_DOM + "\nconst payload=" + json.dumps(payload) + ";\n" + (
++        f"const expectedMessage={json.dumps(message)}, expectedMarkers={markers}, testCase={json.dumps(case)};\n")
++    result = _run_node(tmp_path, script + _range_context_source() + _panel_source() + assertions)
++    assert "PARTIAL_HISTORY_BROWSER_OK" in result
++
++
++@pytest.mark.parametrize("state,reason,qualifier,message", [
++    ("unavailable", "overlay_source_unavailable", "partial coverage not verified", "Partial-coverage evidence is unavailable for this period."),
++    ("capacity_limited", "overlay_capacity_limited", "partial coverage not fully evaluated", "Partial-coverage evidence exceeded the bounded query limit for this period."),
++])
++def test_browser_failure_envelope_preserves_strict_numbers(analytics_stack, tmp_path, monkeypatch, state, reason, qualifier, message):
++    import sqlite3
++    from app.analytics.source_gateway import PartialTrafficCapacityLimited
++    publish(analytics_stack, "strict-a", at="2026-01-01T11:56:00.000Z", result="success", pairs=[(20, 4)])
++    publish(analytics_stack, "strict-b", at="2026-01-01T11:59:00.000Z", result="success", pairs=[(20, 4)])
++    def broken(**kwargs):
++        raise (PartialTrafficCapacityLimited() if state == "capacity_limited" else sqlite3.OperationalError("source inaccessible"))
++    monkeypatch.setattr(analytics_stack.gateway, "read_partial_ap_traffic_evidence", broken)
++    payload = dict(api_version="admin.read.v1", site_id=SITE, result=wire(read(analytics_stack, include_period_statistics=True), include_period_statistics=True))
++    assertions = r'''
++(async()=>{
++ const spec=registrations[0];const loaded=await spec.load({siteId:payload.site_id,apiBase:"/site",requestJson:async()=>payload});spec.render(loaded);
++ assert(elements["traffic-history-state-message"].textContent.includes(message));
++ assert(elements["traffic-statistics-average-heading"].textContent.endsWith(qualifier));
++ assert.equal(elements["traffic-statistics-average-total"].textContent,"24.00 Mbps");
++ assert.equal(elements["traffic-statistics-peak-total"].textContent,"24.00 Mbps");
++ assert(!elements["traffic-history-chart-svg"].children.some(x=>x.attributes["data-partial-state"]));
++ console.log("FAILURE_QUALIFIED_STRICT_OK");
++})().catch(e=>{console.error(e);process.exitCode=1;});
++'''
++    script = NODE_DOM + f"\nconst payload={json.dumps(payload)}, message={json.dumps(message)}, qualifier={json.dumps(qualifier)};\n"
++    assert "FAILURE_QUALIFIED_STRICT_OK" in _run_node(tmp_path, script + _range_context_source() + _panel_source() + assertions)
++
++
++def test_independent_ranges_one_request_includes_null_shares_and_partial_contract(analytics_stack, tmp_path):
++    publish(analytics_stack)
++    publish(analytics_stack, "strict-a", at="2026-01-01T11:56:00.000Z", result="success", pairs=[(20, 4)])
++    publish(analytics_stack, "strict-b", at="2026-01-01T11:59:00.000Z", result="success", pairs=[(20, 4)])
++    out = wire(read(analytics_stack, include_period_statistics=True, include_ap_share=True),
++               include_period_statistics=True, include_ap_share=True, requested_products=("history", "statistics", "apshare"))
++    payload = dict(api_version="admin.read.v1", site_id=SITE, result=out)
++    additions = r'''
++elements["admin-page"].dataset.trafficIndependentRangesEnabled="true";
++window.CaptivPortalTrafficCoordinator.queuePanel=()=>{};
++document.createElement=name=>new Element(name);
++for(const id of ["traffic-apshare-panel","traffic-apshare-state","traffic-apshare-state-title","traffic-apshare-state-message","traffic-apshare-applied-range","traffic-apshare-population","traffic-apshare-coverage","traffic-apshare-current","traffic-apshare-items",
++"traffic-history-range-24h","traffic-history-range-7d","traffic-statistics-range-24h","traffic-statistics-range-7d","traffic-apshare-range-24h","traffic-apshare-range-7d"]){elements[id]=new Element(id);}
++elements["traffic-apshare-panel"].dataset.apshareEnabled="true";
++'''
++    assertions = r'''
++(async()=>{
++ const spec=registrations[0];let requests=[];
++ const loaded=await spec.load({siteId:payload.site_id,apiBase:"/site",requestJson:async u=>{requests.push(u);return payload;}});
++ assert.equal(requests.length,1);assert(requests[0].includes("products=history%2Cstatistics%2Capshare&coverage_mode=partial_v1"));
++ spec.render(loaded);
++ assert(elements["traffic-apshare-state-message"].textContent==="AP share unavailable for the full period because AP coverage is partial.");
++ assert(elements["traffic-apshare-items"].children.length>0);
++ assert(JSON.stringify(elements["traffic-apshare-items"]).includes("Total Share: —"));
++ assert.equal(elements["traffic-statistics-average-total"].textContent,"24.00 Mbps");
++ spec.prepareRefresh();
++ const malformed=structuredClone(payload);malformed.result.ap_traffic_share.items[0].total_share_fraction=.5;
++ await assert.rejects(()=>spec.load({siteId:payload.site_id,apiBase:"/site",requestJson:async()=>malformed}));
++ console.log("INDEPENDENT_PARTIAL_HISTORY_OK");
++})().catch(e=>{console.error(e);process.exitCode=1;});
++'''
++    script = NODE_DOM + additions + "\nconst payload=" + json.dumps(payload) + ";\n"
++    assert "INDEPENDENT_PARTIAL_HISTORY_OK" in _run_node(tmp_path, script + _panel_source() + assertions)
+diff --git a/tests/analytics/test_historical_partial_coverage.py b/tests/analytics/test_historical_partial_coverage.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d173b8514f9e86c135fdf879f23dd2afa1ca862
+--- /dev/null
++++ b/tests/analytics/test_historical_partial_coverage.py
+@@ -0,0 +1,356 @@
++"""Stage B R3 canaries use real retained Observation and strict History paths."""
++import sqlite3
++from dataclasses import replace
++
++import pytest
++
++from app.analytics.historical_traffic import HistoricalTrafficReadService
++from app.analytics.models import HistoricalTrafficPartialCoverageOverlayV1
++from app.analytics.source_gateway import QueryDeadline
++from app.admin_web.historical_traffic_serialization import (
++    serialize_historical_traffic, serialize_partial_historical_traffic, HistoricalTrafficSerializationError,
++)
++from app.admin_web.traffic_network_ranges import resolve_traffic_network_range
++from app.analytics.validation import parse_utc
++from tests.analytics.test_historical_traffic import _cycle, _row, EVALUATED
++
++SITE = "partial-history-site"
++START = "2025-12-31T12:00:00.000Z"
++AT = "2026-01-01T11:57:00.000Z"
++MACS = [f"02:AA:BB:CC:DD:{n:02X}" for n in range(1, 7)]
++
++
++def publish(stack, cycle="partial", *, at=AT, pairs=None, lan=None, site=SITE, result="partial"):
++    pairs = pairs if pairs is not None else [(10, 1), (5, 1), (3, 1), (None, None)]
++    rows = [_row(cycle, MACS[i], at, wired=pair, lan=(None, None) if lan is None else lan[i], site=site)
++            for i, pair in enumerate(pairs)]
++    for row in rows:
++        if result == "partial":
++            row.update(partial=True, radios_ok=False)
++        for key in ("wired_download_rate_reason", "wired_upload_rate_reason", "lan_rx_rate_reason", "lan_tx_rate_reason"):
++            if row[key] != "ok":
++                row[key] = "source_unavailable"
++    _cycle(stack, cycle, at, rows, site=site, result=result, complete=result == "success")
++
++
++def read(stack, *, gateway=None, **extra):
++    return HistoricalTrafficReadService(gateway or stack.gateway).get_site_history_partial_coverage(
++        SITE, from_utc=START, to_utc=EVALUATED, evaluated_at_utc=EVALUATED, **extra)
++
++
++def wire(value, **options):
++    return serialize_partial_historical_traffic(value, SITE,
++        resolved_range=resolve_traffic_network_range("24h", parse_utc(EVALUATED, "at")), **options)
++
++
++def test_R3_T19_empty_retained_query_is_not_absence(analytics_stack):
++    value = wire(read(analytics_stack))
++    o = value["partial_coverage"]
++    assert o["status"] == "source_coverage_insufficient" and o["reason"] == "raw_observation_range_unproven"
++    assert o["has_partial_measurements"] is o["source_coverage_insufficient"] is None
++    assert o["partial_cycle_count_examined"] == 0 and o["buckets"] == []
++    assert o["comparison_allowed"] is o["ap_share_allowed"] is False
++
++
++def test_R3_T20_T22_original_AP4_positive_even_when_prefix_short(analytics_stack):
++    publish(analytics_stack)
++    value = read(analytics_stack)
++    o = wire(value)["partial_coverage"]
++    assert o["status"] == "partial_evidence" and o["has_partial_measurements"] is True
++    assert o["source_coverage_insufficient"] is True
++    b = o["buckets"][0]
++    assert (b["download_mbps"], b["upload_mbps"], b["total_mbps"]) == (18, 3, 21)
++    assert b["observed_ap_opportunities"] == 4 and b["measured_pair_ap_opportunities"] == 3
++    assert b["coverage_ratio"] == .75 and b["status"] == "partial_measured"
++    assert b["reasons"] == ["source_cycle_partial", "source_unavailable"]
++    with pytest.raises(TypeError):
++        value.partial_coverage.evidence["buckets"][0]["total_mbps"] = 0
++
++
++def test_R3_T21_empty_partial_query_with_positive_prefix_shortage(analytics_stack):
++    publish(analytics_stack, result="success", pairs=[(1, 2)])
++    o = wire(read(analytics_stack))["partial_coverage"]
++    assert o["reason"] == "raw_observation_range_incomplete"
++    assert o["source_coverage_insufficient"] is True and o["has_partial_measurements"] is None
++    assert o["partial_cycle_count_admitted"] == 0
++
++
++def test_positive_with_unknown_continuity_and_site_isolation(analytics_stack):
++    _cycle(analytics_stack, "prefix", START, result="failed", complete=False, site=SITE)
++    publish(analytics_stack)
++    publish(analytics_stack, "other", site="site-b", pairs=[(999, 999)])
++    o = wire(read(analytics_stack))["partial_coverage"]
++    assert o["has_partial_measurements"] is True and o["source_coverage_insufficient"] is None
++    assert o["partial_cycle_count_examined"] == 1 and o["buckets"][0]["total_mbps"] == 21
++
++
++@pytest.mark.parametrize("pairs,state,values,counts", [
++    ([(None, None)], "partial_unmeasured", (None, None, None), (0, 0, 0)),
++    ([(4, None)], "partial_directional", (4, None, None), (1, 0, 0)),
++    ([(None, 2)], "partial_directional", (None, 2, None), (0, 1, 0)),
++    ([(4, None), (None, 2)], "partial_directional", (4, 2, None), (1, 1, 0)),
++    ([(0, 0)], "partial_measured", (0, 0, 0), (1, 1, 1)),
++])
++def test_R3_T23_T24_directional_populations_and_real_zero(analytics_stack, pairs, state, values, counts):
++    publish(analytics_stack, pairs=pairs)
++    b = wire(read(analytics_stack))["partial_coverage"]["buckets"][0]
++    assert b["status"] == state
++    assert tuple(b[k] for k in ("download_mbps", "upload_mbps", "total_mbps")) == values
++    assert tuple(b[k] for k in ("download_sample_count", "upload_sample_count", "measured_sample_count")) == counts
++
++
++def test_R1_independent_cycle_denominators_and_opportunity_ratio_7_over_9(analytics_stack):
++    publish(analytics_stack, "a", pairs=[(1, 1)] * 3 + [(None, None)])
++    publish(analytics_stack, "b", at="2026-01-01T11:58:00.000Z", pairs=[(2, 2)] * 4 + [(None, None)])
++    b = wire(read(analytics_stack))["partial_coverage"]["buckets"][0]
++    assert b["coverage_ratio"] == pytest.approx(7 / 9)
++    assert (b["min_observed_ap_count"], b["max_observed_ap_count"]) == (4, 5)
++    assert (b["min_measured_ap_count"], b["max_measured_ap_count"]) == (3, 4)
++    assert b["total_mbps"] == 11
++
++
++def test_Total_is_not_sum_of_independently_denominated_means(analytics_stack):
++    publish(analytics_stack, "a", pairs=[(4, 2)])
++    publish(analytics_stack, "b", at="2026-01-01T11:58:00.000Z", pairs=[(10, None)])
++    b = wire(read(analytics_stack))["partial_coverage"]["buckets"][0]
++    assert (b["download_mbps"], b["upload_mbps"], b["total_mbps"]) == (7, 2, 6)
++    assert (b["download_sample_count"], b["upload_sample_count"], b["measured_sample_count"]) == (2, 1, 1)
++
++
++@pytest.mark.parametrize("wired,lan,source,reason", [
++    ([(1, 2)], [(3, 4)], "wired", "primary_full_partial_bucket_coverage"),
++    ([(None, None)], [(3, 4)], "lan", "fallback_full_partial_bucket_coverage"),
++    ([(1, 2), (None, None)], [(3, None), (None, 4)], "wired", "primary_higher_partial_pair_coverage"),
++    ([(1, None), (None, 2)], [(3, 4), (None, None)], "lan", "fallback_higher_partial_pair_coverage"),
++    ([(1, None), (None, None)], [(3, None), (None, 4)], "lan", "fallback_higher_partial_direction_coverage"),
++    ([(1, None)], [(3, None)], "wired", "primary_preferred_partial_tie_or_higher"),
++])
++def test_R3_T27_one_bucket_family_never_mix(analytics_stack, wired, lan, source, reason):
++    publish(analytics_stack, pairs=wired, lan=lan)
++    b = wire(read(analytics_stack))["partial_coverage"]["buckets"][0]
++    assert (b["selected_source"], b["selection_reason"]) == (source, reason)
++
++
++@pytest.mark.parametrize("column,value", [("items_seen", 5), ("source_rows_reported", None),
++    ("items_skipped", 1), ("data_quality_warning_count", 1)])
++def test_corrupt_cycles_rejected_without_rejecting_positive_neighbors(analytics_stack, column, value):
++    publish(analytics_stack, "good")
++    publish(analytics_stack, "bad", at="2026-01-01T11:58:00.000Z")
++    with sqlite3.connect(analytics_stack.observations.db_path) as c:
++        c.execute(f"UPDATE observation_cycles SET {column}=? WHERE cycle_id='bad'", (value,))
++    o = wire(read(analytics_stack))["partial_coverage"]
++    assert (o["partial_cycle_count_examined"], o["partial_cycle_count_admitted"], o["partial_cycle_count_integrity_rejected"]) == (2, 1, 1)
++    assert o["buckets"][0]["total_mbps"] == 21
++
++
++@pytest.mark.parametrize("bound", ["MAX_PARTIAL_CYCLES_PER_REQUEST", "MAX_PARTIAL_AP_ROWS_PER_REQUEST"])
++def test_R3_T25_any_cap_discards_even_already_accumulated_positive(analytics_stack, monkeypatch, bound):
++    publish(analytics_stack, "a")
++    publish(analytics_stack, "b", at="2026-01-01T11:58:00.000Z")
++    monkeypatch.setattr("app.analytics.source_gateway." + bound, 1 if "CYCLES" in bound else 4)
++    o = wire(read(analytics_stack))["partial_coverage"]
++    assert o["status"] == "capacity_limited" and o["buckets"] == []
++    assert all(o[k] is None for k in ("partial_cycle_count_examined", "partial_cycle_count_admitted", "partial_cycle_count_integrity_rejected", "partial_ap_rows_examined", "has_partial_measurements"))
++
++
++def test_R3_T26_overlay_failure_preserves_strict_result(analytics_stack, monkeypatch):
++    publish(analytics_stack, result="success", pairs=[(1, 2)])
++    def broken(**kwargs):
++        raise sqlite3.OperationalError("private source unavailable")
++    monkeypatch.setattr(analytics_stack.gateway, "read_partial_ap_traffic_evidence", broken)
++    v = read(analytics_stack)
++    o = wire(v)["partial_coverage"]
++    assert o["status"] == "unavailable" and o["buckets"] == []
++    assert v.strict.buckets[-1].total_mbps == 3
++    assert "private" not in str(o)
++
++
++def test_R3_T28_strict_statistics_peak_and_overlap_unchanged(analytics_stack):
++    publish(analytics_stack, "strict-a", at="2026-01-01T11:56:00.000Z", result="success", pairs=[(20, 4)])
++    publish(analytics_stack, "strict-b", at="2026-01-01T11:59:00.000Z", result="success", pairs=[(20, 4)])
++    publish(analytics_stack)
++    v = read(analytics_stack, include_period_statistics=True, include_peak_load=True, include_ap_share=True)
++    out = wire(v, include_period_statistics=True, include_peak_load=True, include_ap_share=True)
++    old = serialize_historical_traffic(v.strict, SITE,
++        resolved_range=resolve_traffic_network_range("24h", parse_utc(EVALUATED, "at")),
++        include_period_statistics=True, include_peak_load=True, include_ap_share=True)
++    assert out["buckets"] == old["buckets"]
++    assert out["period_statistics"] == old["period_statistics"]
++    assert out["peak_load"] == old["peak_load"]
++    assert out["period_statistics"]["average"]["total_mbps"] == 24
++    assert out["partial_coverage"]["buckets"][0]["total_mbps"] == 21
++    assert out["comparison_state"] == "unavailable_partial_coverage"
++    assert out["ap_traffic_share"]["status"] == "insufficient_data"
++    assert all(item[k] is None for item in out["ap_traffic_share"]["items"]
++               for k in ("download_share_fraction", "upload_share_fraction", "total_share_fraction"))
++
++
++@pytest.mark.parametrize("key,value", [("has_partial_measurements", False), ("source_coverage_insufficient", False),
++                                       ("comparison_allowed", True), ("reason", "no_partial_measurements")])
++def test_serializer_rejects_forbidden_absence_and_permission(analytics_stack, key, value):
++    v = read(analytics_stack)
++    altered = replace(v, partial_coverage=HistoricalTrafficPartialCoverageOverlayV1({**v.partial_coverage.evidence, key: value}))
++    with pytest.raises(HistoricalTrafficSerializationError):
++        wire(altered)
++
++
++@pytest.mark.parametrize("winner", ["wired", "lan"])
++def test_bucket_priority_more_full_cycles_over_more_pairs(analytics_stack, winner):
++    primary = [(1, 1)] * 4
++    sparse = [(10, 10)] * 3 + [(None, None)]
++    absent = [(None, None)] * 4
++    for name, w, l in (("a", primary, sparse), ("b", absent, sparse)):
++        publish(analytics_stack, name, pairs=w if winner == "wired" else l,
++                lan=l if winner == "wired" else w)
++    b = wire(read(analytics_stack))["partial_coverage"]["buckets"][0]
++    assert b["selected_source"] == winner
++    assert b["selection_reason"] == ("primary_more_full_partial_cycles" if winner == "wired" else "fallback_more_full_partial_cycles")
++    assert b["total_mbps"] == 8 and b["measured_sample_count"] == 1
++
++
++def test_half_open_range_and_non_numeric_lifecycles(analytics_stack):
++    for name, at, result in (("at-start", START, "partial"), ("at-end", EVALUATED, "partial"),
++                             ("failed", AT, "failed"), ("shutdown", AT, "shutdown")):
++        publish(analytics_stack, name, at=at, result=result)
++    o = wire(read(analytics_stack))["partial_coverage"]
++    assert o["partial_cycle_count_examined"] == 1
++    assert o["buckets"][0]["bucket_start_utc"] == START
++
++
++@pytest.mark.parametrize("column,value", [("wired_download_rate_reason", "counter_reset"),
++                                         ("wired_observed_at", "2026-01-01T11:58:00.000Z")])
++def test_bad_rate_shape_or_timestamp_rejects_entire_partial_cycle(analytics_stack, column, value):
++    publish(analytics_stack)
++    with sqlite3.connect(analytics_stack.observations.db_path) as c:
++        c.execute(f"UPDATE ap_observations SET {column}=? WHERE cycle_id='partial' AND ap_mac=?", (value, MACS[0]))
++    o = wire(read(analytics_stack))["partial_coverage"]
++    assert o["partial_cycle_count_integrity_rejected"] == 1
++    assert o["has_partial_measurements"] is None and o["buckets"] == []
++
++
++def test_RO_snapshot_and_bounded_fetch_all_after_local_deadline(analytics_stack, monkeypatch):
++    from contextlib import contextmanager
++    publish(analytics_stack)
++    original = analytics_stack.gateway._partial_evidence_connection
++    clock = [0.0]
++    @contextmanager
++    def checked(deadline):
++        assert deadline.expires_at == 5.0
++        with original(deadline) as c:
++            assert c.execute("PRAGMA query_only").fetchone()[0] == 1
++            with pytest.raises(sqlite3.OperationalError):
++                c.execute("DELETE FROM observation_cycles")
++            c.rollback()
++            yield c
++        clock[0] = 6.0
++    monkeypatch.setattr(analytics_stack.gateway, "_partial_evidence_connection", checked)
++    # Crossing the deadline after return from the source must discard evidence too.
++    original_read = analytics_stack.gateway.read_partial_ap_traffic_evidence
++    def delayed(**kwargs):
++        result = original_read(**kwargs)
++        kwargs["deadline"].require_remaining()
++        return result
++    monkeypatch.setattr(analytics_stack.gateway, "read_partial_ap_traffic_evidence", delayed)
++    o = wire(read(analytics_stack, deadline=QueryDeadline(10.0, lambda: clock[0])))["partial_coverage"]
++    assert o["status"] == "capacity_limited" and o["buckets"] == []
++    assert o["partial_cycle_count_admitted"] is None
++
++
++def test_projection_gateway_reads_raw_partial_RO_without_projection_mutation(tmp_path):
++    import hashlib
++    from contextlib import contextmanager
++    from app.traffic_projection.read_service import TrafficProjectionReadService
++    from tests.traffic_projection.test_projected_read import _fixture
++    observation, repository = _fixture(tmp_path)
++    # Add raw partial evidence only; no projector/upsert is called for it.
++    with sqlite3.connect(observation) as c:
++        c.execute("INSERT INTO observation_cycles SELECT 'raw-partial',kind,site_id,state,started_at,finished_at,abandoned_at,0,'partial',source_rows_reported,items_seen,items_stored,items_skipped,2,data_quality_warning_count,created_at,updated_at FROM observation_cycles WHERE cycle_id='cycle-0'")
++        columns = [row[1] for row in c.execute("PRAGMA table_info(ap_observations)") if row[1] != "row_id"]
++        expressions = ["'raw-partial'" if col == "cycle_id" else col for col in columns]
++        c.execute(f"INSERT INTO ap_observations ({','.join(columns)}) SELECT {','.join(expressions)} FROM ap_observations WHERE cycle_id='cycle-0'")
++    before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in (observation, repository.db_path)}
++    gateway = TrafficProjectionReadService(repository, current_observation_db_path=str(observation))
++    original = gateway._partial_evidence_connection
++    @contextmanager
++    def verified(deadline):
++        with original(deadline) as c:
++            assert c.execute("PRAGMA query_only").fetchone()[0] == 1
++            assert c.execute("PRAGMA database_list").fetchall()[0][2] == str(observation)
++            with pytest.raises(sqlite3.OperationalError):
++                c.execute("DELETE FROM observation_cycles")
++            c.rollback()
++            yield c
++    gateway._partial_evidence_connection = verified
++    args = dict(from_utc="2026-09-02T10:00:00.000Z", to_utc="2026-09-03T10:00:00.000Z",
++                evaluated_at_utc="2026-09-03T10:00:00.000Z", current_cycle_id="cycle-1")
++    v = HistoricalTrafficReadService(gateway).get_site_history_partial_coverage("site-a", **args)
++    assert v.partial_coverage.evidence["status"] == "partial_evidence"
++    assert v.partial_coverage.evidence["buckets"][0]["total_mbps"] == 3
++    assert before == {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in (observation, repository.db_path)}
++    with sqlite3.connect(repository.db_path) as c:
++        assert c.execute("SELECT count(*) FROM traffic_projection_cycles WHERE cycle_id='raw-partial'").fetchone()[0] == 0
++
++
++def test_7d_axis_and_historical_four_three_four_recovery(analytics_stack):
++    for cycle, at, pairs in (("before", "2026-01-01T11:42:00.000Z", [(10, 1), (5, 1), (3, 1), (2, 1)]),
++                             ("incident", "2026-01-01T11:47:00.000Z", [(10, 1), (5, 1), (3, 1), (None, None)]),
++                             ("after", "2026-01-01T11:52:00.000Z", [(10, 1), (5, 1), (3, 1), (2, 1)])):
++        publish(analytics_stack, cycle, at=at, pairs=pairs)
++    v = read(analytics_stack)
++    assert [b["total_mbps"] for b in v.partial_coverage.evidence["buckets"]] == [24, 21, 24]
++    assert [b["coverage_ratio"] for b in v.partial_coverage.evidence["buckets"]] == [1, .75, 1]
++    v7 = HistoricalTrafficReadService(analytics_stack.gateway).get_site_history_partial_coverage(
++        SITE, from_utc="2025-12-25T12:00:00.000Z", to_utc=EVALUATED, evaluated_at_utc=EVALUATED)
++    assert len(v7.strict.buckets) == 672 and v7.strict.range.bucket_seconds == 900
++    assert v7.partial_coverage.evidence["partial_cycle_count_admitted"] == 3
++
++
++@pytest.mark.parametrize("bound", ["cycles", "rows"])
++def test_exact_physical_raw_read_caps_and_streaming_batches(analytics_stack, monkeypatch, bound):
++    from contextlib import contextmanager
++    from app.analytics.source_gateway import (
++        MAX_PARTIAL_CYCLES_PER_REQUEST, MAX_PARTIAL_AP_ROWS_PER_REQUEST,
++        PARTIAL_AP_ROW_BATCH_SIZE, PartialTrafficCapacityLimited,
++    )
++    assert (MAX_PARTIAL_CYCLES_PER_REQUEST, MAX_PARTIAL_AP_ROWS_PER_REQUEST, PARTIAL_AP_ROW_BATCH_SIZE) == (10080, 150000, 2000)
++    publish(analytics_stack, pairs=[(1, 1)])
++    with sqlite3.connect(analytics_stack.observations.db_path) as c:
++        if bound == "cycles":
++            columns = [r[1] for r in c.execute("PRAGMA table_info(observation_cycles)")]
++            expressions = ["?" if name == "cycle_id" else name for name in columns]
++            c.executemany(f"INSERT INTO observation_cycles ({','.join(columns)}) SELECT {','.join(expressions)} FROM observation_cycles WHERE cycle_id='partial'",
++                          [(f"extra-{n:05d}",) for n in range(10080)])
++        else:
++            columns = [r[1] for r in c.execute("PRAGMA table_info(ap_observations)") if r[1] != "row_id"]
++            expressions = ["?" if name == "ap_mac" else name for name in columns]
++            c.executemany(f"INSERT INTO ap_observations ({','.join(columns)}) SELECT {','.join(expressions)} FROM ap_observations WHERE cycle_id='partial' AND ap_mac=?",
++                          [(f"02:00:{n >> 24 & 255:02X}:{n >> 16 & 255:02X}:{n >> 8 & 255:02X}:{n & 255:02X}", MACS[0]) for n in range(150000)])
++    sizes, consumed = [], [0]
++    original = analytics_stack.gateway._partial_evidence_connection
++    class Cursor:
++        def __init__(self, cursor): self.cursor = cursor
++        def __getattr__(self, name): return getattr(self.cursor, name)
++        def __iter__(self): return iter(self.cursor)
++        def fetchmany(self, size):
++            batch = self.cursor.fetchmany(size)
++            sizes.append((size, len(batch)))
++            return batch
++    class Connection:
++        def __init__(self, connection): self.connection = connection
++        def __getattr__(self, name): return getattr(self.connection, name)
++        def execute(self, *args): return Cursor(self.connection.execute(*args))
++    @contextmanager
++    def measured(deadline):
++        with original(deadline) as c:
++            yield Connection(c)
++    monkeypatch.setattr(analytics_stack.gateway, "_partial_evidence_connection", measured)
++    def consume(cycle, rows):
++        consumed[0] += 1
++        for _ in rows: pass
++        return False
++    with pytest.raises(PartialTrafficCapacityLimited):
++        analytics_stack.gateway.read_partial_ap_traffic_evidence(
++            site_id=SITE, from_utc=START, to_utc=EVALUATED,
++            deadline=QueryDeadline.after(60), consume_cycle=consume)
++    assert consumed[0] == (10080 if bound == "cycles" else 1)
++    assert sizes and all(size == 2000 and length <= 2000 for size, length in sizes)

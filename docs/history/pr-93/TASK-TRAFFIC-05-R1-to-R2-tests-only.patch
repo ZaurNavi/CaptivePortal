@@ -1,0 +1,34 @@
+diff --git a/tests/analytics/test_historical_traffic_ap.py b/tests/analytics/test_historical_traffic_ap.py
+--- a/tests/analytics/test_historical_traffic_ap.py
++++ b/tests/analytics/test_historical_traffic_ap.py
+@@ -232,6 +232,8 @@ def test_ap_never_falls_back_inside_a_wired_site_bucket(analytics_stack):
+             wired_download_rate_reason="no_baseline",
+             wired_upload_rate_reason="no_baseline",
+             lan_rx_mbps=40, lan_tx_mbps=20,
++            lan_rx_rate_reason="ok",
++            lan_tx_rate_reason="ok",
+         ),
+     ])
+     # Keep the Current owner on a separate valid half-open boundary cycle.
+diff --git a/tests/admin_web/test_traffic_ap.py b/tests/admin_web/test_traffic_ap.py
+--- a/tests/admin_web/test_traffic_ap.py
++++ b/tests/admin_web/test_traffic_ap.py
+@@ -224,7 +224,8 @@ def test_ap_include_security_feature_gate_exact_grammar_and_no_pagination(tmp_path):
+     assert client.get(_url("range=24h&include=aps&ap_limit=4"), base_url="https://localhost").status_code == 400
+     response = client.get(_url("range=24h&include=aps"), base_url="https://localhost")
+     assert response.status_code == 200
+-    payload = response.get_json()["result"]["ap_traffic"]
++    result = response.get_json()["result"]
++    payload = result["ap_traffic"]
+     assert payload["population"]["population_count"] == 1
+     assert len(payload["items"]) == 1
+     assert source.calls[0][1]["include_ap_traffic"] is True
+@@ -237,7 +238,7 @@ def test_ap_include_security_feature_gate_exact_grammar_and_no_pagination(tmp_path):
+         "total_mbps": 23.0,
+         "download_reason": "ok",
+         "upload_reason": "ok",
+-        "observed_at": _result().range.to_utc,
++        "observed_at": result["range"]["to_utc"],
+         "age_seconds": 0.0,
+         "selected_source": "wired",
+     }
