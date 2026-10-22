@@ -490,6 +490,18 @@ input[type="radio"] { width: auto; min-height: 0; }
   #db-services-page .ops-flow-node small, #db-services-page .ops-flow-node .ops-badge { font-size: .68rem; }
 }
 
+/* #296: two independent materialized sections inside the actual Visit card. */
+.visit-network-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; width: 100%; margin-top: 1rem; }
+.visit-network-results .visit-network-section { grid-column: auto; min-width: 0; padding: 1rem; }
+.visit-network-results h3 { margin: 0 0 .75rem; font-size: 1rem; }
+.visit-network-results .state-panel { margin-bottom: .75rem; }
+.visit-network-results ul { list-style: none; margin: .75rem 0; padding: 0; }
+.visit-network-results li { padding: .6rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.visit-network-results li p { margin: .4rem 0; }
+.visit-network-results small { display: block; overflow-wrap: anywhere; color: var(--muted); }
+.visit-network-results > button { grid-column: 1 / -1; justify-self: start; }
+@media (max-width: 760px) { .visit-network-results { grid-template-columns: minmax(0, 1fr); } }
+
 #device-service-intelligence { min-width: 0; margin-top: 1.25rem; padding: 1.25rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow-wrap: anywhere; }
 #device-service-intelligence .section-heading > div { min-width: 0; }
 #device-service-intelligence .section-heading p { color: var(--muted); font-size: .85rem; }

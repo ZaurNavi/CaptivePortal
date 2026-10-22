@@ -67,6 +67,7 @@ CHECK((dst_snapshot_state='resolved' AND dst_snapshot_binding_id IS NOT NULL) OR
 INDEXES = {
 "idx_projection_site_event": "device_network_metadata_edges(site_id,event_at,edge_id)",
 "idx_projection_mac_event": "device_network_metadata_edges(site_id,client_mac,event_at,edge_id)",
+"idx_projection_mac_family_event_latest": "device_network_metadata_edges(site_id,client_mac,source_event_family,event_at DESC,edge_id)",
 "idx_projection_observation_role": "device_network_metadata_edges(source_observation_ref,device_endpoint_role)",
 "idx_projection_binding_evaluation": "projection_site_mac_bindings(binding_state,last_evaluated_at,site_id,client_mac)",
 "idx_projection_identity_mac": "projection_registry_identities(client_mac)",
@@ -113,6 +114,9 @@ def _expected_signatures():
 
 def validate_core_schema_v2(connection):
     expected, _ = _expected_signatures()
+    # A strict old Core V2 remains readable during the additive index rollout.
+    # Presence is not sufficient: a present index must match its exact SQL.
+    expected = _with_installed_visit_index(connection, expected)
     names = {row[1] for row in expected}
     actual = tuple(row for row in signature(connection) if row[1] in names)
     rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
@@ -160,6 +164,7 @@ def validate_schema(connection, *, integrity=False):
         validate_core_schema_v2(connection)
         present = validate_service_recognition_extension_v1(connection)
         core, extension = _expected_signatures()
+        core = _with_installed_visit_index(connection, core)
         if signature(connection) != tuple(sorted(core + (extension if present else ()))):
             raise ValueError
         if integrity and (connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
@@ -168,3 +173,10 @@ def validate_schema(connection, *, integrity=False):
         return "CORE_PLUS_EXTENSION_V1" if present else "CORE_ONLY"
     except Exception:
         raise ProjectionUnavailable() from None
+
+
+def _with_installed_visit_index(connection, core):
+    name = "idx_projection_mac_family_event_latest"
+    if connection.execute("SELECT 1 FROM sqlite_schema WHERE name=?", (name,)).fetchone() is None:
+        return tuple(row for row in core if row[1] != name)
+    return core

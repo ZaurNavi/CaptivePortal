@@ -45,7 +45,7 @@ def test_closed_store_and_pragmas(materialized):
     for pragma,value in [('synchronous',2),('foreign_keys',1),('busy_timeout',500),('wal_autocheckpoint',1000)]:
         assert repo.connection.execute('PRAGMA '+pragma).fetchone()[0]==value
     tables=[r[0] for r in repo.connection.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
-    assert len(tables)==8 and 'device_category_rollups' not in tables
+    assert len(tables)==9 and 'ni04_visit_delivery_outbox' in tables and 'device_category_rollups' not in tables
     schema=' '.join(r[0] for r in repo.connection.execute("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL")).lower()
     for forbidden in ('sni','dns_name','src_ip','dst_ip','device_ip','peer_ip','packet_payload'):
         assert forbidden not in schema

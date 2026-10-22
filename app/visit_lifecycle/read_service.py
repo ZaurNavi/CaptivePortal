@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 import uuid
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import Any
+from app.network_metadata.models import NetworkMetadataValidationError
 
 from .models import (
     VisitPage,
@@ -17,6 +20,7 @@ from .models import (
     optional_mac,
     require_mac,
     require_text,
+    protocol_visit_guard,
 )
 from .repository import VisitRepository
 
@@ -46,6 +50,14 @@ class VisitLifecycleReadService:
             _site(site_id),
             _mac(client_mac, "client_mac"),
         )
+
+    def visit_protocol_summary(self, site_id, device_id, visit_id):
+        """Stored Visit knowledge only; never an NI02 query from HTTP."""
+        site, device, visit_id = _site(site_id), _uuid(device_id, 'device_id'), _uuid(visit_id, 'visit_id')
+        visit = self.repository.get_visit(site, visit_id)
+        if visit is None or visit.device_id != device:
+            return None
+        return project_visit_protocol_summary(visit, self.repository.saved_protocol_summary(visit))
 
     def list_visits(
         self,
@@ -194,6 +206,100 @@ class VisitLifecycleReadService:
                 last.visit_id,
             )
         return VisitPage(items=tuple(visible), next_cursor=next_cursor)
+
+
+def project_visit_protocol_summary(visit, row):
+    """Pure closed public projection, shared by lifecycle and Admin readers."""
+    from app.network_metadata.validation import ni_timestamp, digest
+    value = dict(type='VisitProtocolSummaryV1', schema_version=1, site_id=visit.site_id,
+        device_id=visit.device_id, visit_id=visit.visit_id, visit_status=visit.status,
+        started_at=visit.started_at, closed_at=visit.closed_at, summary_state='not_materialized',
+        protocols=[], last_protocol_observation=None, evaluated_at=None, source_coverage='unknown',
+        attribution_coverage='unknown', finalized_at=None, partial_reason='not_materialized',
+        historical_completeness_claimed=False)
+    try:
+        if row is None:
+            return value
+        if row['summary_version'] != 1 or row['site_id'] != visit.site_id or row['device_id'] != visit.device_id or row['visit_guard'] != protocol_visit_guard(visit):
+            value.update(summary_state='partial', partial_reason='visit_revision_changed')
+            return value
+        evaluated = _time(row['evaluated_at'], 'evaluated_at')
+        lower = datetime.fromisoformat(visit.started_at.replace('Z', '+00:00'))
+        upper = datetime.fromisoformat((visit.closed_at or evaluated).replace('Z', '+00:00'))
+        if (row['summary_state'] not in {'pending','partial','active','unavailable','finalized'}
+                or row['source_coverage'] not in {'unknown','bounded_partial','unavailable'}
+                or row['attribution_coverage'] not in {'unknown','current_available','limited'}
+                or row['partial_reason'] not in {'identity_unconfirmed','source_unavailable','no_confirmed_observation','late_unresolved','bounded_source','grace_elapsed_partial'}
+                or (row['summary_state']=='finalized') != (row['finalized_at'] is not None)):
+            raise ValueError()
+        protocols = []
+        for family in ('dns','tls','quic'):
+            stamp, edge = row[family+'_at'], row[family+'_edge']
+            if (stamp is None) != (edge is None):raise ValueError()
+            if stamp is not None:
+                digest(edge)
+                if not lower <= ni_timestamp(stamp, canonical=True) < upper:raise ValueError()
+                protocols.append(dict(protocol_id=family, last_observed_at=stamp))
+        value.update(summary_state=row['summary_state'], protocols=protocols, evaluated_at=evaluated,
+            source_coverage=row['source_coverage'], attribution_coverage=row['attribution_coverage'],
+            finalized_at=None if row['finalized_at'] is None else _time(row['finalized_at'],'finalized_at'),
+            partial_reason=row['partial_reason'])
+        if protocols:
+            value['last_protocol_observation'] = sorted(protocols, key=lambda r:(-ni_timestamp(r['last_observed_at'],canonical=True).timestamp(),r['protocol_id']))[0]
+        return value
+    except (KeyError, ValueError, TypeError, NetworkMetadataValidationError):
+        value.update(summary_state='unavailable', protocols=[], last_protocol_observation=None, partial_reason='source_unavailable')
+        return value
+
+
+def project_visit_service_history(visit, rows, consumer, *, evaluated_now):
+    """Only saved Visit data. Strict, privacy-safe labels and no completeness claim."""
+    from datetime import timedelta
+    from app.network_metadata.validation import ni_timestamp,digest,integer,canonical_uuid
+    result=dict(type='VisitServiceHistoryV1',schema_version=1,site_id=visit.site_id,device_id=visit.device_id,
+        visit_id=visit.visit_id,visit_status=visit.status,started_at=visit.started_at,closed_at=visit.closed_at,
+        history_state='incomplete',partial_reason='not_materialized',evaluated_at=None,
+        services=[],truncated=False,historical_completeness_claimed=False)
+    try:
+        if consumer is None:return result
+        canonical_uuid(consumer['consumer_id']);canonical_uuid(consumer['source_stream_id'])
+        digest(consumer['last_outbox_hash']);integer(consumer['last_outbox_seq'])
+        ttl=consumer['history_ttl_days'];integer(ttl,1,365)
+        result['evaluated_at']=_time(max((r['updated_at'] for r in rows),default=consumer['updated_at']),'updated_at')
+        if visit.closed_at is not None and datetime.fromisoformat(visit.closed_at.replace('Z','+00:00'))+timedelta(days=ttl)<=datetime.fromisoformat(evaluated_now.replace('Z','+00:00')):
+            result['partial_reason']='history_expired';return result
+        if consumer['status'] not in {'processing','incomplete','unavailable'}:raise ValueError()
+        result['partial_reason']='backfill_limited';result['truncated']=len(rows)>50
+        lower=datetime.fromisoformat(visit.started_at.replace('Z','+00:00'))
+        upper=datetime.fromisoformat((visit.closed_at or evaluated_now).replace('Z','+00:00'))
+        for row in rows[:50]:
+            if row['site_id']!=visit.site_id or row['device_id']!=visit.device_id or row['visit_id']!=visit.visit_id:raise ValueError()
+            if row['visit_guard']!=protocol_visit_guard(visit):
+                result['partial_reason']='visit_revision_changed';continue
+            first=ni_timestamp(row['first_observed_at'],canonical=True);last=ni_timestamp(row['last_observed_at'],canonical=True)
+            if not lower<=first<=last<upper:raise ValueError()
+            integer(row['distinct_observation_count'],1)
+            integer(row['taxonomy_version'],1);integer(row['ruleset_version'],1)
+            digest(row['taxonomy_digest']);digest(row['ruleset_digest'])
+            if row['status'] not in {'processing','confirmed','incomplete'}:raise ValueError()
+            for key in ('service_id','service_label','organization_id','organization_label','taxonomy_id','ruleset_id'):
+                if type(row[key]) is not str or not 1<=len(row[key])<=128 or any(ord(char)<32 for char in row[key]):raise ValueError()
+            if row['finalized_at'] is None and row['generation_id']!=consumer['active_generation_id']:
+                result['partial_reason']='lineage_pending';continue
+            result['services'].append(dict(service_id=row['service_id'],display_name=row['service_label'],
+                organization_id=row['organization_id'],organization_display_name=row['organization_label'],
+                first_observed_at=row['first_observed_at'],last_observed_at=row['last_observed_at'],
+                distinct_observation_count=row['distinct_observation_count'],status=row['status'],finalized_at=row['finalized_at'],
+                taxonomy=dict(id=row['taxonomy_id'],version=row['taxonomy_version'],digest_sha256=row['taxonomy_digest']),
+                ruleset=dict(id=row['ruleset_id'],version=row['ruleset_version'],digest_sha256=row['ruleset_digest']),
+                provenance='materialized_ni04_strong_observation'))
+        result['history_state']='processing' if visit.status=='open' or consumer['status']=='processing' else 'incomplete' if result['services'] else 'no_confirmed_observation'
+        if result['partial_reason'] in {'visit_revision_changed','lineage_pending'}:result['history_state']='incomplete'
+        if consumer['status']=='unavailable':result.update(history_state='unavailable',partial_reason='source_unavailable')
+        return result
+    except (KeyError,ValueError,TypeError,NetworkMetadataValidationError):
+        result.update(history_state='unavailable',partial_reason='source_unavailable',services=[])
+        return result
 
 
 def _source_event(row: Any) -> VisitSourceEventRecord:

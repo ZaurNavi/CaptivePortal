@@ -11,7 +11,7 @@ from app.visit_lifecycle.repository import (
     WRITE_OPERATION_READER,
     WRITE_OPERATION_START,
     VisitRepository,
-    _expected_v2_signature,
+    expected_visit_signature,
     _schema_signature,
 )
 from app.visit_lifecycle.reconciliation import VisitLinkReconciler
@@ -322,4 +322,5 @@ def test_concurrent_start_reader_reconciliation_series_preserves_invariants(
     with repository._connect(readonly=True) as connection:  # noqa: SLF001
         assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert _schema_signature(connection) == _expected_v2_signature()
+        from app.visit_lifecycle.models import SCHEMA_VERSION
+        assert _schema_signature(connection) == expected_visit_signature(SCHEMA_VERSION)
