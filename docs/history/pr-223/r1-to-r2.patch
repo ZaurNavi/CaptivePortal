@@ -1,0 +1,287 @@
+diff --git a/app/admin_web/device_gateway.py b/app/admin_web/device_gateway.py
+index 5aec505a817f7ede7771a73b7fe18a0ae3e74b86..8359ca0033232dab5643bb7631674eea60e4bb27 100644
+--- a/app/admin_web/device_gateway.py
++++ b/app/admin_web/device_gateway.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+ 
+ import re
+ import sqlite3
++import time
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Any
+@@ -20,6 +21,8 @@ _VISIT_ALIAS = "visit_db"
+ _CURRENT_ALIAS = "current_state_db"
+ _PROGRESS_OPCODE_INTERVAL = 10_000
+ _SQLITE_BUSY_WAIT_SECONDS = 0.1
++_SQLITE_BUSY_RETRY_INTERVAL_SECONDS = 0.005
++_SQLITE_BUSY_MAX_RETRIES = 20
+ _MAC_PATTERN = re.compile(r"[0-9A-F]{2}(?::[0-9A-F]{2}){5}")
+ _SCOPE_HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
+ 
+@@ -42,14 +45,21 @@ class AdminDeviceIntegrityError(AdminDeviceSourceError):
+     diagnostic_reason = "integrity_failure"
+ 
+ 
++def _sqlite_is_busy(error: BaseException) -> bool:
++    code = getattr(error, "sqlite_errorcode", None)
++    if type(code) is int:
++        return code & 255 in (5, 6)
++    # Python 3.10 has no result codes. Do not retry arbitrary text containing "locked".
++    message = str(error).lower()
++    return isinstance(error, sqlite3.OperationalError) and (
++        message in {"database is locked", "database table is locked"}
++        or message.startswith("database table is locked: "))
++
++
+ def _device_source_error(error: BaseException) -> AdminDeviceSourceError:
+     code = getattr(error, "sqlite_errorcode", None)
+-    primary = code & 255 if isinstance(code, int) else None
+-    # Python 3.10 does not expose result codes; only classify its known lock text.
+-    busy = primary in (5, 6) or (primary is None and isinstance(error, sqlite3.Error)
+-                               and ("database is locked" in str(error).lower()
+-                                    or "database table is locked" in str(error).lower()))
+-    if busy:
++    primary = code & 255 if type(code) is int else None
++    if _sqlite_is_busy(error):
+         return AdminDeviceSQLiteBusy("device source unavailable")
+     if primary in (11, 26):
+         return AdminDeviceIntegrityError("device source unavailable")
+@@ -57,28 +67,40 @@ def _device_source_error(error: BaseException) -> AdminDeviceSourceError:
+ 
+ 
+ class _DeviceQueryConnection(sqlite3.Connection):
+-    """Bound each statement's busy wait by the remaining shared request budget."""
++    """Immediate native failure, with finite retries shared by all statements."""
+ 
+     def __init__(self, *args, deadline: QueryDeadline, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._deadline = deadline
+-        self._busy_timeout_ms = None
++        self._busy_expires_at = min(deadline.expires_at, deadline.monotonic() + _SQLITE_BUSY_WAIT_SECONDS)
++        self._busy_retries_remaining = _SQLITE_BUSY_MAX_RETRIES
++        super().execute("PRAGMA busy_timeout=0").close()
++
++    def _execute_once(self, sql, parameters):
++        return super().execute(sql, parameters)
+ 
+     def execute(self, sql, parameters=()):
+-        self._deadline.require_remaining()
+-        remaining = max(0.0, self._deadline.expires_at - self._deadline.monotonic())
+-        milliseconds = int(min(_SQLITE_BUSY_WAIT_SECONDS, remaining) * 1000)
+-        if milliseconds != self._busy_timeout_ms:
+-            cursor = super().execute(f"PRAGMA busy_timeout={milliseconds}")
+-            cursor.close()
+-            self._busy_timeout_ms = milliseconds
+-        result = super().execute(sql, parameters)
+-        try:
++        while True:
+             self._deadline.require_remaining()
+-        except AnalyticsQueryDeadlineExceeded:
+-            result.close()
+-            raise
+-        return result
++            try:
++                result = self._execute_once(sql, parameters)
++            except sqlite3.Error as exc:
++                self._deadline.require_remaining()
++                remaining = min(self._busy_expires_at, self._deadline.expires_at) - self._deadline.monotonic()
++                if not _sqlite_is_busy(exc) or remaining <= 0 or self._busy_retries_remaining == 0:
++                    raise
++                time.sleep(min(_SQLITE_BUSY_RETRY_INTERVAL_SECONDS, remaining))
++                self._deadline.require_remaining()
++                if self._deadline.monotonic() >= self._busy_expires_at:
++                    raise
++                self._busy_retries_remaining -= 1
++                continue
++            try:
++                self._deadline.require_remaining()
++            except AnalyticsQueryDeadlineExceeded:
++                result.close()
++                raise
++            return result
+ 
+ 
+ class AdminDeviceContextExpired(AdminDeviceSourceError):
+diff --git a/tests/admin_web/test_device_sqlite_contention.py b/tests/admin_web/test_device_sqlite_contention.py
+index 4762c30ad7f5ce5c7cf99a12dbf037ba4822eff4..6ba63fe3a4ad3fa5dfa3b53aa788e1612462cf25 100644
+--- a/tests/admin_web/test_device_sqlite_contention.py
++++ b/tests/admin_web/test_device_sqlite_contention.py
+@@ -114,10 +114,12 @@ def request_in_window(case, monkeypatch, *, delay, suffix="/current", budget=1):
+             original_execute = gateway_module._DeviceQueryConnection.execute
+             def timed_execute(connection, sql, parameters=()):
+                 started = time.monotonic()
++                retries_before = connection._busy_retries_remaining
+                 try:
+                     return original_execute(connection, sql, parameters)
+                 finally:
+                     statements.append({"phase": "attach" if sql.startswith("ATTACH") else "query_or_metadata",
++                                       "retries": retries_before - connection._busy_retries_remaining,
+                                        "elapsed_ms": (time.monotonic() - started) * 1000})
+             scoped.setattr(gateway_module._DeviceQueryConnection, "execute", timed_execute)
+             start = time.monotonic()
+@@ -194,7 +196,7 @@ def test_normal_wal_writer_does_not_cause_503(device_http, monkeypatch):
+         conn.close()
+ 
+ 
+-def test_busy_wait_recomputed_for_each_statement_and_expiry_is_closed(device_http):
++def test_busy_wait_recomputed_for_each_statement_and_expiry_is_closed(device_http, monkeypatch):
+     clock = [0.0]
+     deadline = QueryDeadline(0.08, lambda: clock[0])
+     conn = device_http.runtime.query_service._devices._open(deadline)
+@@ -204,10 +206,29 @@ def test_busy_wait_recomputed_for_each_statement_and_expiry_is_closed(device_htt
+         clock[0] = 0.07
+         conn.execute("SELECT 1")
+         second = sqlite3.Connection.execute(conn, "PRAGMA busy_timeout").fetchone()[0]
+-        assert first == 80 and 0 <= second <= 10
++        assert first == second == 0  # Native waiting stays disabled, including on Windows.
++        assert conn._busy_expires_at == 0.08
++        sleeps, attempts = [], []
++        original_execute = conn._execute_once
++        def busy(sql, parameters):
++            if sql == "SELECT 2":
++                attempts.append(clock[0])
++                raise sqlite3.OperationalError("database is locked")
++            return original_execute(sql, parameters)
++        def sleep(seconds):
++            sleeps.append(seconds)
++            clock[0] += seconds
++        monkeypatch.setattr(conn, "_execute_once", busy)
++        monkeypatch.setattr(gateway_module.time, "sleep", sleep)
++        with pytest.raises(AnalyticsQueryDeadlineExceeded):
++            conn.execute("SELECT 2")
++        assert 0 < sum(sleeps) <= 0.010001  # No fresh 100 ms allowance for later statements.
++        assert len(attempts) <= 3
++        before = len(attempts)
+         clock[0] = 0.081
+         with pytest.raises(AnalyticsQueryDeadlineExceeded):
+-            conn.execute("SELECT 1")
++            conn.execute("SELECT 2")
++        assert len(attempts) == before
+     finally:
+         conn.close()
+ 
+@@ -315,7 +336,11 @@ def test_context_third_attachment_uses_same_remaining_deadline(device_http, rele
+         else:
+             with pytest.raises((AdminDeviceSourceError, AnalyticsQueryDeadlineExceeded)):
+                 gateway._open_context(deadline)
+-        assert time.monotonic() - start < min(0.4, budget + 0.08)
++        elapsed = time.monotonic() - start
++        (device_http.tmp_path / "third-attachment.json").write_text(json.dumps({
++            "release_after_seconds": release_after, "query_budget_seconds": budget,
++            "outcome": "opened" if success else "refused", "elapsed_seconds": elapsed}), encoding="utf-8")
++        assert elapsed < min(0.4, budget + 0.08)
+ 
+ 
+ def test_deadline_during_attachment_closes_connection(device_http, monkeypatch):
+@@ -339,3 +364,110 @@ def test_deadline_during_attachment_closes_connection(device_http, monkeypatch):
+     assert len(connections) == 1
+     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+         sqlite3.Connection.execute(connections[0], "SELECT 1")
++
++
++@pytest.mark.parametrize("code,message,retry", [
++    (5, "synthetic busy", True), (6, "synthetic locked", True),
++    (261, "extended busy", True), (11, "database is locked", False),
++    (None, "database is locked", True), (None, "database table is locked", True),
++    (None, "database table is locked: fixture", True),
++    (None, "syntax error near database is locked", False),
++])
++def test_retry_unit_only_confirmed_busy_and_finite_even_with_static_clock(monkeypatch, code, message, retry):
++    deadline = QueryDeadline(1.0, lambda: 0.0)
++    conn = gateway_module._DeviceQueryConnection(":memory:", deadline=deadline)
++    attempts, sleeps = [], []
++    error = sqlite3.OperationalError(message)
++    if code is not None:
++        error.sqlite_errorcode = code
++    def fail(sql, parameters):
++        attempts.append(sql)
++        raise error
++    monkeypatch.setattr(conn, "_execute_once", fail)
++    monkeypatch.setattr(gateway_module.time, "sleep", sleeps.append)
++    try:
++        assert sqlite3.Connection.execute(conn, "PRAGMA busy_timeout").fetchone()[0] == 0
++        with pytest.raises(sqlite3.OperationalError) as caught:
++            conn.execute("SELECT 1")
++        assert caught.value is error
++        assert len(attempts) == (21 if retry else 1)
++        assert len(sleeps) == (20 if retry else 0)
++        assert all(0 < seconds <= 0.005 for seconds in sleeps)
++        assert conn.total_changes == 0
++    finally:
++        conn.close()
++
++
++def test_retry_unit_count_is_shared_across_statements(monkeypatch):
++    conn = gateway_module._DeviceQueryConnection(":memory:", deadline=QueryDeadline(1.0, lambda: 0.0))
++    attempts, sleeps = {"SELECT 1": 0, "SELECT 2": 0}, []
++    once = conn._execute_once
++    def execute(sql, parameters):
++        attempts[sql] += 1
++        if sql == "SELECT 1" and attempts[sql] == 3:
++            return once(sql, parameters)
++        raise sqlite3.OperationalError("database is locked")
++    monkeypatch.setattr(conn, "_execute_once", execute)
++    monkeypatch.setattr(gateway_module.time, "sleep", sleeps.append)
++    try:
++        assert conn.execute("SELECT 1").fetchone() == (1,)
++        with pytest.raises(sqlite3.OperationalError):
++            conn.execute("SELECT 2")
++        assert attempts == {"SELECT 1": 3, "SELECT 2": 19}
++        assert len(sleeps) == 20
++    finally:
++        conn.close()
++
++
++def test_retry_unit_late_success_closes_cursor_instead_of_returning_it(monkeypatch):
++    clock, cursors = [0.0], []
++    conn = gateway_module._DeviceQueryConnection(":memory:", deadline=QueryDeadline(0.02, lambda: clock[0]))
++    once = conn._execute_once
++    def late(sql, parameters):
++        cursor = once(sql, parameters)
++        cursors.append(cursor)
++        clock[0] = 0.03
++        return cursor
++    monkeypatch.setattr(conn, "_execute_once", late)
++    try:
++        with pytest.raises(AnalyticsQueryDeadlineExceeded):
++            conn.execute("SELECT 1")
++        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
++            cursors[0].fetchone()
++    finally:
++        conn.close()
++
++
++@pytest.mark.parametrize("release_after,success", [(0.025, True), (None, False)])
++def test_retry_unit_attachment_aliases_and_failure_connection_cleanup(device_http, monkeypatch, release_after, success):
++    gateway = device_http.runtime.query_service._devices
++    connections, attempts = [], []
++    connect, execute_once = sqlite3.connect, gateway_module._DeviceQueryConnection._execute_once
++    def tracked_connect(*args, **kwargs):
++        conn = connect(*args, **kwargs)
++        connections.append(conn)
++        return conn
++    def tracked_execute(conn, sql, parameters):
++        if sql.startswith("ATTACH"):
++            attempts.append(sql)
++        return execute_once(conn, sql, parameters)
++    monkeypatch.setattr(gateway_module.sqlite3, "connect", tracked_connect)
++    monkeypatch.setattr(gateway_module._DeviceQueryConnection, "_execute_once", tracked_execute)
++    with ExclusiveWALWindow(device_http.registry, release_after=release_after) as window:
++        window.attempt.set()
++        if success:
++            conn = gateway._open(QueryDeadline.after(1.0))
++            try:
++                aliases = [row[1] for row in conn.execute("PRAGMA database_list")]
++                assert aliases.count("registry_db") == aliases.count("visit_db") == 1
++                assert conn.total_changes == 0
++            finally:
++                conn.close()
++        else:
++            with pytest.raises(AdminDeviceSourceError):
++                gateway._open(QueryDeadline.after(1.0))
++        # The writer is connections[0]; the only gateway connection must be closed.
++        assert len(connections) == 2
++        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
++            sqlite3.Connection.execute(connections[1], "SELECT 1")
++        assert 2 <= len(attempts) <= (22 if success else 21)
