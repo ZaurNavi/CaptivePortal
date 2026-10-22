@@ -1,0 +1,262 @@
+TASK-TRAFFIC-02 — TECH LEAD REVIEW
+
+VERDICT:
+
+R1 RETURNED FOR TARGETED CORRECTIONS
+
+CENTRAL LAB:
+NOT AUTHORIZED YET
+
+Do not rewrite the implementation.
+Do not change app/analytics/**.
+Do not change the accepted HistoricalTrafficReadService.
+
+Exact R1 identity:
+
+Baseline:
+6b4adf770ab1afa289dac14680ba876711088d94
+
+Baseline tree:
+04f5e2d23da8b2d44390c285fc14dbb62fa06221
+
+R1 candidate tree:
+cbd738a6c21519d8346e73749867e36f62fb3491
+
+R1 patch SHA256:
+7f6ec381b3502fde9c0a044f20d47b220618b660f84fc7e05466ecaf1a2daf39
+
+Apply only the following targeted corrections.
+
+A. RESTORE BUCKET OWNERSHIP TO HistoricalTrafficReadService
+
+traffic_network_ranges.py must own only:
+
+range id
+from_utc
+to_utc
+evaluated_at_utc
+
+Remove bucket_seconds and bucket_count from TrafficNetworkRange.
+
+AdminQueryService.historical_traffic_history() MUST NOT pass bucket_seconds.
+
+Call:
+
+HistoricalTrafficReadService.get_site_history(
+site_id,
+from_utc=...,
+to_utc=...,
+evaluated_at_utc=...,
+deadline=deadline,
+)
+
+and let the accepted service choose automatic resolution.
+
+Serializer still MUST validate returned canonical product resolutions:
+
+24h:
+300 seconds
+288 buckets
+
+7d:
+900 seconds
+672 buckets
+
+but validation != ownership.
+
+Update focused tests so they prove bucket_seconds is NOT supplied by Admin.
+
+B. TECH LEAD CONTROLLED CONTRACT CORRECTION — NONE BUCKET PROVENANCE
+
+Do NOT change Analytics.
+
+Merged HistoricalTrafficReadService legitimately supports:
+
+status=none
+complete_site_sample_count=0
+numeric values=null
+
+with either:
+
+1.
+
+selected_source=null
+selection_reason=no_canonical_samples
+
+when there are no canonical samples;
+
+OR:
+
+2.
+
+selected_source=wired|lan
+
+when canonical cycles exist and the READ source-selection algorithm selected a family, but no complete Site numeric sample was available.
+
+Therefore remove the unconditional Admin/browser rule:
+
+status=none → selected_source must always be null.
+
+Backend serializer must validate the real merged READ contract and preserve provenance.
+
+Frontend validator must accept the safe serialized form.
+
+Add a focused regression representing canonical cycles with no complete Site sample.
+
+Do not use invented fixture reason "no_complete_site_sample" where the merged READ contract uses canonical source-selection reasons.
+
+C. MOVE selected Network range OUT OF History-private state
+
+Current:
+
+let selectedRange = "24h"
+
+inside TRAFFIC_HISTORY_PANEL
+
+is not acceptable as permanent ownership.
+
+Create one page-level/shared Network Traffic range context in admin.js.
+
+It owns:
+
+selected Network range
+default 24h
+allowed 24h|7d
+range-control state
+
+History reads/subscribes to that shared state as the first consumer.
+
+Future TRAFFIC-03/04/05/06 must be able to reuse the same context without creating another selected range.
+
+Do NOT modify CaptivPortalTrafficCoordinator public API.
+
+Do NOT add scheduler/timer/fetch/AbortController.
+
+D. FIX PARTIAL SVG REPRESENTATION
+
+One partial bucket MUST NOT turn an entire continuous series into partial styling.
+
+Either:
+
+split presentation segments when complete/partial status changes
+
+OR
+
+retain canonical Download/Upload lines and overlay explicit partial markers/segments.
+
+Required focused test:
+
+complete
+complete
+partial
+complete
+complete
+
+with no missing bucket
+
+→ partial evidence visibly distinguishable
+→ complete evidence remains normal
+→ Download/Upload series identity remains distinguishable.
+
+Null still breaks line.
+Real 0.0 still plots zero.
+
+E. COMPLETE REQUIRED HISTORY SEMANTICS / AXES
+
+History panel must visibly communicate the approved meaning:
+
+Historical Site AP/network throughput derived from persisted evidence.
+May include local/service traffic and is not Internet/WAN-only traffic.
+
+Preserve the existing per-bucket source helper.
+
+Chart must have actual presentation semantics:
+
+X axis = time from returned timestamps
+Y axis = Mbps
+Y axis starts at zero
+
+At minimum render readable start/end or equivalent bounded time labels from returned bucket timestamps and a visible Mbps axis/unit indication.
+
+Browser acceptance must be able to prove:
+
+unit Mbps visible
+time axis uses returned evidence
+timezone visible
+zero baseline
+
+If browser timezone name is unavailable, formatting must actually use UTC, not merely label an unspecified local formatter as UTC.
+
+F. COMPLETE SERIALIZER AGGREGATE VALIDATION
+
+Where derivable from bucket collection, validate at least:
+
+coverage.complete_site_sample_count
+== sum(bucket.complete_site_sample_count)
+
+coverage.excluded_site_sample_count
+== sum(bucket.excluded_site_sample_count)
+
+coverage.gap_bucket_count
+== count(bucket.gap_count_over_threshold > 0)
+
+coverage.source_transition_count
+== sum(bucket.source_changed_from_previous)
+
+Also retain existing:
+
+complete + partial + missing == bucket_count
+
+and bucket-status count equality.
+
+Do not invent new Traffic metrics.
+
+G. ADD REAL FRONTEND RACE TEST
+
+Using the real extracted Traffic Foundation coordinator, prove:
+
+initial 24h succeeds
+→ 7d request starts and remains in flight
+→ user selects 24h before 7d completes
+→ coordinator supersedes/aborts old generation
+→ stale 7d completion cannot render
+→ final applied range belongs only to latest successful 24h execution.
+
+Also keep explicit no-admission/backoff proof:
+
+refreshPanel returns false
+→ no fake Loading
+→ no applied-range mutation.
+
+After corrections rerun ONLY TASK-focused tests:
+
+python -m pytest -q 
+tests/admin_web/test_traffic_history.py 
+tests/admin_web/test_traffic_history_frontend.py
+
+Static:
+
+PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc 
+python -m compileall -q app/admin_web
+
+git diff --check
+
+Do NOT run broader/full/Central Lab tests.
+
+Return R2 handoff with:
+
+* exact baseline SHA/tree;
+* new candidate tree;
+* exact changed files;
+* focused passed/skipped/failed;
+* compileall;
+* diff-check;
+* complete R2 unified patch;
+* patch size + SHA256;
+* confirmation app/analytics/** unchanged;
+* confirmation no commit/push/PR/merge/deploy.
+
+No commit.
+No push.
+No PR.
+No production action.
