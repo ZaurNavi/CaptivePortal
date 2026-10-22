@@ -1,0 +1,120 @@
+CaptivPortal — доступ к production через Remote Desktop Commander
+
+У нас есть штатный путь для AI-агентов к production-консоли:
+
+ChatGPT / Agent
+→ Remote Desktop Commander
+→ авторизованный Windows workstation DESKTOP-7C8M3BS
+→ PuTTY / plink saved session "Ubunt"
+→ SSH user admin
+→ CaptivPortal production 192.168.0.202
+
+ВАЖНО:
+production = 192.168.0.202
+192.168.0.99 НЕ использовать.
+
+Сначала через Remote Desktop Commander нужно убедиться, что DESKTOP-7C8M3BS online.
+
+Базовый read-only вызов с Windows:
+
+& 'C:\Program Files\PuTTY\plink.exe' -batch -load Ubunt 'hostname; id -un; uptime'
+
+Проверка CaptivPortal:
+
+& 'C:\Program Files\PuTTY\plink.exe' -batch -load Ubunt 'cd /opt/CaptivePortal; git rev-parse HEAD; git rev-parse HEAD^{tree}; git status --porcelain; systemctl is-active captive-portal.service; systemctl show captive-portal.service -p MainPID -p NRestarts --no-pager'
+
+Для сложных команд лучше не строить гигантскую строку с кавычками.
+
+Через Remote Desktop Commander создаётся временный PowerShell-файл, например:
+
+C:\CaptivPortal-Lab\tmp\server-check.ps1
+
+Содержимое:
+
+$remote = @'
+cd /opt/CaptivePortal
+git rev-parse HEAD
+git rev-parse HEAD^{tree}
+git status --porcelain
+systemctl is-active captive-portal.service
+'@
+
+& 'C:\Program Files\PuTTY\plink.exe' -batch -load Ubunt $remote
+
+После этого файл запускается через Remote Desktop Commander, а output читается через process-output polling до фактического завершения команды.
+
+Передача файлов на сервер:
+
+& 'C:\Program Files\PuTTY\pscp.exe' -batch -load Ubunt `
+  'C:\CaptivPortal-Lab\tmp\reviewed-script.sh' `
+  'admin@192.168.0.202:/home/admin/reviewed-script.sh'
+
+Перед выполнением shell-скрипта:
+
+& 'C:\Program Files\PuTTY\plink.exe' -batch -load Ubunt `
+  'chmod 700 /home/admin/reviewed-script.sh; bash -n /home/admin/reviewed-script.sh; sha256sum /home/admin/reviewed-script.sh'
+
+Правила безопасности:
+
+Не выводить и не читать:
+- private SSH key;
+- пароли;
+- OMADA_CLIENT_SECRET;
+- access tokens;
+- Authorization headers;
+- полный process environment.
+
+Не делать общий env dump.
+Проверять только конкретные не-secret keys.
+
+sudo -n сейчас не доступен.
+Нельзя просить пользователя прислать sudo password в чат и нельзя вытаскивать credentials с рабочей станции.
+
+Если операция требует sudo — либо используется заранее согласованный локальный operator action, либо задача возвращается Tech Lead для отдельного плана.
+
+Перед любой production mutation обязательны:
+
+exact HEAD / TREE;
+clean worktree;
+service state;
+MainPID / NRestarts;
+точный target commit/tree;
+backup изменяемых persistent данных;
+rollback plan.
+
+Правильный Admin HTTPS vhost:
+
+captivportal-navi.duckdns.org
+
+Проверка с Windows:
+
+curl.exe -k --resolve captivportal-navi.duckdns.org:443:192.168.0.202 `
+  -D - -o NUL `
+  https://captivportal-navi.duckdns.org/admin/login
+
+Нормальная unauthenticated граница:
+
+/admin/login
+→ 200
+
+/admin/settings/controller
+→ 302 → login
+
+/admin/api/v1/settings/controller
+→ 401 JSON
+
+КРИТИЧЕСКОЕ ПРАВИЛО:
+systemctl active + стабильный MainPID НЕ означают, что CaptivPortal уже готов.
+
+После каждого deploy обязательно проверять:
+
+127.0.0.1:8088 LISTEN
++
+local HTTP readiness
++
+external HTTPS smoke
+
+И только после этого объявлять production PASS.
+
+Никогда не предполагать, что GitHub main == production.
+HEAD/TREE GitHub и production всегда проверяются независимо.
