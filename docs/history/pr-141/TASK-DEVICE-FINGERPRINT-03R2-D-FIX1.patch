@@ -1,0 +1,688 @@
+diff --git a/app/device_fingerprint/artifact_content.py b/app/device_fingerprint/artifact_content.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c15198e0a4768b71c9fc79fe3d4057795fa943c
+--- /dev/null
++++ b/app/device_fingerprint/artifact_content.py
+@@ -0,0 +1,185 @@
++"""Immutable R14 ArtifactContent identity and canonical byte rules."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import re
++import unicodedata
++from dataclasses import dataclass
++from decimal import Decimal
++from typing import Any, Callable
++
++from .models import DeviceFingerprintValidationError
++
++_DIGEST = re.compile(r"[0-9a-f]{64}")
++_ARTIFACT_ID = re.compile(r"([A-Za-z][A-Za-z0-9]*):v1:sha256:([0-9a-f]{64})")
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _normalized(value: Any) -> Any:
++    if isinstance(value, dict):
++        result = {}
++        for key, child in value.items():
++            if not isinstance(key, str):
++                _fail("Artifact object keys must be strings")
++            normalized_key = unicodedata.normalize("NFC", key)
++            if normalized_key in result:
++                _fail("Artifact NFC key collision")
++            result[normalized_key] = _normalized(child)
++        return result
++    if isinstance(value, (list, tuple)):
++        return [_normalized(child) for child in value]
++    if isinstance(value, str):
++        return unicodedata.normalize("NFC", value)
++    if value is None or type(value) in (bool, int):
++        return value
++    if isinstance(value, (float, Decimal)):
++        _fail("Artifact floating-point values are forbidden")
++    _fail("Unsupported artifact value")
++
++
++def canonical_artifact_json(value: Any) -> bytes:
++    """Return ArtifactCanonicalJsonV1 UTF-8 bytes (not evidence JSON)."""
++    try:
++        normalized = _normalized(value)
++        return json.dumps(
++            normalized, ensure_ascii=True, allow_nan=False, sort_keys=True,
++            separators=(",", ":"),
++        ).encode("utf-8")
++    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
++        raise DeviceFingerprintValidationError("Invalid artifact JSON") from exc
++
++
++def decode_artifact_json(value: str) -> Any:
++    """Decode imported JSON without losing duplicate-key evidence."""
++    if not isinstance(value, str):
++        _fail("Artifact JSON must be text")
++    try:
++        return json.loads(
++            value, object_pairs_hook=_unique_pairs,
++            parse_constant=lambda _constant: _fail("Non-standard artifact constant"),
++        )
++    except (ValueError, TypeError, RecursionError) as exc:
++        raise DeviceFingerprintValidationError("Invalid artifact JSON") from exc
++
++
++def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
++    result = {}
++    for key, value in pairs:
++        if key in result:
++            _fail("Duplicate artifact JSON key")
++        result[key] = value
++    return result
++
++
++def canonical_set(values: list[Any], primary_key: Callable[[Any], Any]) -> list[Any]:
++    """Order a declared SET and reject duplicate semantic primary keys."""
++    if not isinstance(values, list):
++        _fail("Artifact SET must be a list")
++    ordered = []
++    for value in values:
++        normalized = _normalized(value)
++        key = _normalized(primary_key(normalized))
++        ordered.append((key, canonical_artifact_json(normalized), normalized))
++    try:
++        ordered.sort(key=lambda row: (row[0], row[1]))
++    except TypeError as exc:
++        raise DeviceFingerprintValidationError("Invalid artifact SET key") from exc
++    for previous, current in zip(ordered, ordered[1:]):
++        if previous[0] == current[0] and previous[1] == current[1]:
++            _fail("Duplicate artifact SET element")
++    return [row[2] for row in ordered]
++
++
++@dataclass(frozen=True, slots=True)
++class ArtifactContent:
++    artifact_type: str
++    artifact_schema_version: int
++    _semantic_payload_json: bytes
++    content_sha256: str
++    artifact_id: str
++
++    def __post_init__(self) -> None:
++        if (self.artifact_schema_version != 1
++                or not isinstance(self._semantic_payload_json, bytes)):
++            _fail("Invalid artifact content")
++        try:
++            parsed = decode_artifact_json(self._semantic_payload_json.decode("utf-8"))
++        except UnicodeError as exc:
++            raise DeviceFingerprintValidationError("Invalid artifact content") from exc
++        if not isinstance(parsed, dict) or canonical_artifact_json(parsed) != self._semantic_payload_json:
++            _fail("Noncanonical artifact content")
++        digest = hashlib.sha256(self.digest_input_json).hexdigest()
++        if (self.content_sha256 != digest
++                or self.artifact_id != f"{self.artifact_type}:v1:sha256:{digest}"):
++            _fail("Artifact content identity mismatch")
++
++    @property
++    def semantic_payload(self) -> dict[str, Any]:
++        return json.loads(self._semantic_payload_json)
++
++    @property
++    def semantic_payload_json(self) -> bytes:
++        return self._semantic_payload_json
++
++    @property
++    def digest_input_json(self) -> bytes:
++        return canonical_artifact_json({
++            "artifact_type": self.artifact_type,
++            "artifact_schema_version": self.artifact_schema_version,
++            "semantic_payload": self.semantic_payload,
++        })
++
++
++def make_artifact_content(artifact_type: str, semantic_payload: dict[str, Any]) -> ArtifactContent:
++    if not isinstance(artifact_type, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", artifact_type):
++        _fail("Invalid artifact type")
++    if not isinstance(semantic_payload, dict):
++        _fail("Artifact semantic payload must be an object")
++    payload_json = canonical_artifact_json(semantic_payload)
++    digest_input = canonical_artifact_json({
++        "artifact_type": artifact_type,
++        "artifact_schema_version": 1,
++        "semantic_payload": json.loads(payload_json),
++    })
++    digest = hashlib.sha256(digest_input).hexdigest()
++    return ArtifactContent(
++        artifact_type=artifact_type,
++        artifact_schema_version=1,
++        _semantic_payload_json=payload_json,
++        content_sha256=digest,
++        artifact_id=f"{artifact_type}:v1:sha256:{digest}",
++    )
++
++
++@dataclass(frozen=True, slots=True)
++class ArtifactRef:
++    artifact_id: str
++    content_sha256: str
++
++    def __post_init__(self) -> None:
++        match = _ARTIFACT_ID.fullmatch(self.artifact_id) if isinstance(self.artifact_id, str) else None
++        if (match is None or not isinstance(self.content_sha256, str)
++                or _DIGEST.fullmatch(self.content_sha256) is None
++                or match.group(2) != self.content_sha256):
++            _fail("Invalid artifact reference")
++
++    @classmethod
++    def from_dict(cls, value: dict[str, Any]) -> "ArtifactRef":
++        if not isinstance(value, dict) or set(value) != {"artifact_id", "content_sha256"}:
++            _fail("Invalid artifact reference shape")
++        return cls(value["artifact_id"], value["content_sha256"])
++
++    def as_dict(self) -> dict[str, str]:
++        return {"artifact_id": self.artifact_id, "content_sha256": self.content_sha256}
++
++    def resolve(self, content: ArtifactContent, expected_type: str) -> None:
++        if (not isinstance(content, ArtifactContent)
++                or content.artifact_type != expected_type
++                or self.artifact_id != content.artifact_id
++                or self.content_sha256 != content.content_sha256):
++            _fail("Artifact reference does not match content")
+diff --git a/app/device_fingerprint/foundation_schema_artifacts.py b/app/device_fingerprint/foundation_schema_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a632ff4da6711db6e9fe47f6f51a0822e8ccd3b8
+--- /dev/null
++++ b/app/device_fingerprint/foundation_schema_artifacts.py
+@@ -0,0 +1,242 @@
++"""Closed-world immutable F-A5 schema artifacts (no runtime activation)."""
++
++from __future__ import annotations
++
++from typing import Any
++
++from .artifact_content import (
++    ArtifactContent, ArtifactRef, canonical_set, make_artifact_content,
++)
++from .models import DeviceFingerprintValidationError
++from .network_schemas import (
++    _TCP_V2_BOOLEAN_KEYS, _TCP_V2_KEYS, _TCP_V2_OPTION_COMMON,
++    _TCP_V2_OPTION_FIELDS, validate_dhcp_v1, validate_quic_v1,
++    validate_tcp_syn_v1, validate_tcp_syn_v2, validate_tls_v1,
++)
++from .portal_schemas import validate_portal_headers_v1, validate_portal_headers_v2
++from .schema_registry import build_production_schema_registry
++
++_TCP_INT_BOUNDS = {
++    "ip_version": (4, 4), "observed_ttl": (0, 255),
++    "ip_option_length_bytes": (0, 40), "ip_ecn_bits": (0, 3),
++    "tcp_header_length_bytes": (20, 60), "tcp_window": (0, 65535),
++}
++_TCP_BOOLEAN_FIELDS = frozenset({
++    "ip_id_zero", "ip_df", "ip_reserved_flag", "tcp_sequence_zero",
++    "tcp_ack_number_nonzero", "tcp_ack_first_octet_lsb_set",
++    "tcp_urg_pointer_nonzero", "tcp_fin", "tcp_rst", "tcp_push",
++    "tcp_urg", "tcp_ns", "tcp_ece", "tcp_cwr", "tcp_payload_present",
++})
++_TCP_TYPES = {**{name: "INT" for name in _TCP_INT_BOUNDS},
++              **{name: "BOOL" for name in _TCP_BOOLEAN_FIELDS},
++              "tcp_option_records": "ARRAY"}
++_VARIANTS = (
++    ("EOL", 0, "eol", False), ("NOP", 1, "nop", False),
++    ("MSS", 2, "mss", True), ("WINDOW_SCALE", 3, "window_scale", True),
++    ("SACK_PERMITTED", 4, "sack_permitted", True),
++    ("TIMESTAMP", 8, "timestamp", True),
++    ("UNKNOWN", None, "unknown", True),
++)
++_OPTION_COMMON = frozenset({
++    "record_type", "kind", "declared_length", "available_value_length",
++    "structure_state",
++})
++_OPTION_ADDITIONAL = {
++    "eol": frozenset({"eol_padding_length", "eol_padding_nonzero",
++                      "eol_padding_nonzero_before_final_byte"}),
++    "nop": frozenset(), "mss": frozenset({"mss"}),
++    "window_scale": frozenset({"window_scale_raw"}),
++    "sack_permitted": frozenset(),
++    "timestamp": frozenset({"timestamp_value_zero", "timestamp_echo_nonzero"}),
++    "unknown": frozenset(),
++}
++_PORTAL_FIELDS = (
++    ("model_family", "STRING", "portal_ch_model_v1", "Sec-CH-UA-Model"),
++    ("os_major", "INTEGER", "portal_ch_platform_version_major_v1", "Sec-CH-UA-Platform-Version"),
++    ("form_factor_mobile", "BOOLEAN", "portal_ch_form_factor_membership_v1", "Sec-CH-UA-Form-Factors"),
++    ("form_factor_tablet", "BOOLEAN", "portal_ch_form_factor_membership_v1", "Sec-CH-UA-Form-Factors"),
++    ("form_factor_desktop", "BOOLEAN", "portal_ch_form_factor_membership_v1", "Sec-CH-UA-Form-Factors"),
++)
++_PROVENANCE = {
++    "model_family": ("model_source", "sec_ch_ua_model"),
++    "os_major": ("os_major_source", "sec_ch_ua_platform_version"),
++    "form_factor_mobile": ("form_factors_source", "sec_ch_ua_form_factors"),
++    "form_factor_tablet": ("form_factors_source", "sec_ch_ua_form_factors"),
++    "form_factor_desktop": ("form_factors_source", "sec_ch_ua_form_factors"),
++}
++_RUNTIME_VALIDATORS = {
++    ("dhcp", 1): validate_dhcp_v1,
++    ("tcp_syn", 1): validate_tcp_syn_v1,
++    ("tcp_syn", 2): validate_tcp_syn_v2,
++    ("tls_client", 1): validate_tls_v1,
++    ("quic_client", 1): validate_quic_v1,
++    ("portal_headers", 1): validate_portal_headers_v1,
++    ("portal_headers", 2): validate_portal_headers_v2,
++}
++
++
++def _fail() -> None:
++    raise DeviceFingerprintValidationError("Invalid foundation schema artifact")
++
++
++def assert_runtime_registry_coherence() -> None:
++    """Pin both exact keys and executable validator identity."""
++    registry = build_production_schema_registry()
++    if not registry.frozen or registry._validators != _RUNTIME_VALIDATORS:
++        _fail()
++    if (set(_TCP_TYPES) != _TCP_V2_KEYS
++            or _TCP_BOOLEAN_FIELDS != _TCP_V2_BOOLEAN_KEYS
++            or _OPTION_COMMON != _TCP_V2_OPTION_COMMON
++            or _OPTION_ADDITIONAL != _TCP_V2_OPTION_FIELDS):
++        _fail()
++
++
++def _tcp_payload() -> dict[str, Any]:
++    assert_runtime_registry_coherence()
++    fields = []
++    for name, field_type in _TCP_TYPES.items():
++        bounds = _TCP_INT_BOUNDS.get(name, (None, None))
++        fields.append({
++            "field_name": name, "field_type": field_type, "nullable": False,
++            "minimum_int": bounds[0], "maximum_int": bounds[1],
++            "enum_values": [], "privacy_role": "required_minimized_protocol_semantic",
++        })
++    variants = []
++    for variant_id, kind, record_type, malformed in _VARIANTS:
++        variants.append({
++            "variant_id": variant_id,
++            "kind_match_mode": "OTHER" if kind is None else "EXACT",
++            "kind_value": kind,
++            "excluded_kind_values": [0, 1, 2, 3, 4, 8] if kind is None else [],
++            "exact_fields": canonical_set(
++                list(_OPTION_COMMON | _OPTION_ADDITIONAL[record_type]),
++                lambda value: value,
++            ),
++            "malformed_observable_supported": malformed,
++        })
++    return {
++        "schema_family": "tcp_syn", "feature_schema_version": 2,
++        "source_kind": "tcp_syn",
++        "supported_scope_identity": "tcp_syn_v2_ipv4_outbound_guest_request_syn_pre_router_rspan_v1",
++        "top_level_field_contracts": canonical_set(fields, lambda value: value["field_name"]),
++        "tcp_option_record_variant_contracts": canonical_set(variants, lambda value: value["variant_id"]),
++        "privacy_minimization_contract_version": "tcp_syn_v2_privacy_minimization_v1",
++        "malformed_observable_contract_version": "tcp_syn_v2_malformed_observable_v1",
++        "evidence_canonical_json_identity": "EvidenceCanonicalJsonV1",
++    }
++
++
++def _portal_payload() -> dict[str, Any]:
++    fields = [{
++        "field_id": name, "value_type": value_type, "nullable": True,
++        "enum_values": [], "normalization_rule_id": rule,
++        "source_header_id": header,
++    } for name, value_type, rule, header in _PORTAL_FIELDS]
++    provenance = [{
++        "normalized_field_id": name, "provenance_field_id": source[0],
++        "allowed_source_values": [source[1]],
++    } for name, source in _PROVENANCE.items()]
++    return {
++        "schema_family": "portal_headers", "feature_schema_version": 2,
++        "source_kind": "portal_headers",
++        "normalized_field_contracts": canonical_set(fields, lambda value: value["field_id"]),
++        "normalized_provenance_contracts": canonical_set(provenance, lambda value: value["normalized_field_id"]),
++        "privacy_non_durability_contract_version": "portal_headers_v2_privacy_non_durability_v1",
++        "accept_ch_bounded_lifecycle_contract_version": "portal_headers_v2_accept_ch_bounded_lifecycle_v1",
++        "evidence_canonical_json_identity": "EvidenceCanonicalJsonV1",
++    }
++
++
++def _disposition_payload() -> dict[str, Any]:
++    return {
++        "capability_id": "portal_headers/2", "status": "ADMITTED",
++        "reason_codes": [], "fallback_source_kind": None,
++        "fallback_feature_schema_version": None,
++    }
++
++
++def _ref(content: ArtifactContent) -> dict[str, str]:
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++def _registry_payload(tcp: ArtifactContent, portal: ArtifactContent,
++                      disposition: ArtifactContent) -> dict[str, Any]:
++    ArtifactRef.from_dict(_ref(tcp)).resolve(tcp, "TcpSynV2SchemaContract")
++    ArtifactRef.from_dict(_ref(portal)).resolve(portal, "PortalHeadersV2SchemaContract")
++    ArtifactRef.from_dict(_ref(disposition)).resolve(disposition, "CapabilityDisposition")
++    assert_runtime_registry_coherence()
++    entries = []
++    for (source_kind, version) in _RUNTIME_VALIDATORS:
++        status = "KNOWN_NON_FUSION" if (source_kind, version) == ("tcp_syn", 1) else "SUPPORTED"
++        contract_ref = None
++        if (source_kind, version) == ("tcp_syn", 2):
++            contract_ref = {"contract_kind": "TCP_SYN_V2", "ref": _ref(tcp)}
++        if (source_kind, version) == ("portal_headers", 2):
++            contract_ref = {"contract_kind": "PORTAL_HEADERS_V2", "ref": _ref(portal)}
++        entries.append({
++            "source_kind": source_kind, "feature_schema_version": version,
++            "schema_status": status,
++            "validator_contract_id": f"device_fingerprint.validator.{source_kind}.v{version}",
++            "schema_contract_ref": contract_ref,
++        })
++    return {
++        "registry_contract_version": 1,
++        "evidence_canonical_json_version": "EvidenceCanonicalJsonV1",
++        "schema_entries": canonical_set(entries, lambda value: (
++            value["source_kind"], value["feature_schema_version"])),
++        "portal_headers_v2_disposition": _ref(disposition),
++    }
++
++
++def _ordered_payload(artifact_type: str, payload: dict[str, Any]) -> dict[str, Any]:
++    """Canonicalize only the SET fields declared by these four contracts."""
++    value = dict(payload)
++    if artifact_type == "TcpSynV2SchemaContract":
++        for field, key in (("top_level_field_contracts", "field_name"),
++                           ("tcp_option_record_variant_contracts", "variant_id")):
++            value[field] = canonical_set(value[field], lambda row: row[key])
++        for row in value["tcp_option_record_variant_contracts"]:
++            row["excluded_kind_values"] = canonical_set(row["excluded_kind_values"], lambda item: item)
++            row["exact_fields"] = canonical_set(row["exact_fields"], lambda item: item)
++    elif artifact_type == "PortalHeadersV2SchemaContract":
++        for field, key in (("normalized_field_contracts", "field_id"),
++                           ("normalized_provenance_contracts", "normalized_field_id")):
++            value[field] = canonical_set(value[field], lambda row: row[key])
++        for row in value["normalized_field_contracts"]:
++            row["enum_values"] = canonical_set(row["enum_values"], lambda item: item)
++        for row in value["normalized_provenance_contracts"]:
++            row["allowed_source_values"] = canonical_set(row["allowed_source_values"], lambda item: item)
++    elif artifact_type == "CapabilityDisposition":
++        value["reason_codes"] = canonical_set(value["reason_codes"], lambda item: item)
++    elif artifact_type == "EvidenceSchemaRegistryContract":
++        value["schema_entries"] = canonical_set(value["schema_entries"], lambda row: (
++            row["source_kind"], row["feature_schema_version"]))
++    else:
++        _fail()
++    return value
++
++
++def build_foundation_schema_artifacts() -> dict[str, ArtifactContent]:
++    tcp = make_artifact_content("TcpSynV2SchemaContract", _tcp_payload())
++    portal = make_artifact_content("PortalHeadersV2SchemaContract", _portal_payload())
++    disposition = make_artifact_content("CapabilityDisposition", _disposition_payload())
++    registry = make_artifact_content(
++        "EvidenceSchemaRegistryContract", _registry_payload(tcp, portal, disposition))
++    return {item.artifact_type: item for item in (tcp, portal, disposition, registry)}
++
++
++def validate_foundation_payload(artifact_type: str, payload: dict[str, Any]) -> ArtifactContent:
++    """Reject all fields and semantics outside the four frozen F-A5 payloads."""
++    if not isinstance(payload, dict):
++        _fail()
++    expected = build_foundation_schema_artifacts().get(artifact_type)
++    if expected is None:
++        _fail()
++    try:
++        ordered = _ordered_payload(artifact_type, payload)
++        actual = make_artifact_content(artifact_type, ordered)
++    except (KeyError, TypeError, AttributeError) as exc:
++        raise DeviceFingerprintValidationError("Invalid foundation schema artifact") from exc
++    if actual.semantic_payload_json != expected.semantic_payload_json:
++        _fail()
++    return actual
+diff --git a/tests/device_fingerprint/test_artifact_content.py b/tests/device_fingerprint/test_artifact_content.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe1bc0ee091cfec08e8bdb6060b8dd6e5a28a61b
+--- /dev/null
++++ b/tests/device_fingerprint/test_artifact_content.py
+@@ -0,0 +1,95 @@
++import json
++from decimal import Decimal
++
++import pytest
++
++from app.device_fingerprint.artifact_content import (
++    ArtifactContent, ArtifactRef, canonical_artifact_json, canonical_set,
++    decode_artifact_json, make_artifact_content,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++
++
++def test_canonical_json_v1_pinned_fixture_and_nfc_equivalence():
++    value = {"nested": {"sequence": [True, False, None, 7, 0, -3]},
++             "ascii": "plain", "bmp": "caf\u00e9", "astral": "\U0001f600",
++             "escapes": '"\\\n\t\x01'}
++    encoded = canonical_artifact_json(value)
++    assert encoded == (
++        b'{"ascii":"plain","astral":"\\ud83d\\ude00","bmp":"caf\\u00e9",'
++        b'"escapes":"\\\"\\\\\\n\\t\\u0001","nested":{"sequence":[true,false,null,7,0,-3]}}'
++    )
++    assert not encoded.endswith(b"\n")
++    assert canonical_artifact_json({"\u00e9": "cafe\u0301"}) == canonical_artifact_json({"e\u0301": "caf\u00e9"})
++
++
++@pytest.mark.parametrize("value", [
++    {"e\u0301": 1, "\u00e9": 2}, {1: "bad"}, {"x": 1.0},
++    {"x": Decimal("1")}, {"x": float("nan")}, {"x": float("inf")},
++    {"nested": [float("-inf")]},
++])
++def test_canonical_rejects_noncanonical_or_noninteger_values(value):
++    with pytest.raises(DeviceFingerprintValidationError):
++        canonical_artifact_json(value)
++
++
++@pytest.mark.parametrize("raw", [
++    '{"a":1,"a":2}', '{"a":{"b":1,"b":2}}',
++    '{"a":NaN}', '{"a":Infinity}', '{"a":-Infinity}',
++])
++def test_import_decode_rejects_duplicates_and_nonstandard_constants(raw):
++    with pytest.raises(DeviceFingerprintValidationError):
++        decode_artifact_json(raw)
++
++
++def test_sequence_order_is_preserved_and_declared_set_is_permutation_invariant():
++    assert canonical_artifact_json({"sequence": [2, 1]}) != canonical_artifact_json({"sequence": [1, 2]})
++    assert canonical_set([{"id": "b"}, {"id": "a"}], lambda row: row["id"]) == [
++        {"id": "a"}, {"id": "b"},
++    ]
++    assert canonical_set([3, 1, 2], lambda item: item) == [1, 2, 3]
++    same_primary = [{"id": "a", "value": 2}, {"id": "a", "value": 1}]
++    expected = [{"id": "a", "value": 1}, {"id": "a", "value": 2}]
++    assert canonical_set(same_primary, lambda row: row["id"]) == expected
++    assert canonical_set(list(reversed(same_primary)), lambda row: row["id"]) == expected
++    with pytest.raises(DeviceFingerprintValidationError):
++        canonical_set([{"id": "a", "value": 1}, {"id": "a", "value": 1}], lambda row: row["id"])
++    with pytest.raises(DeviceFingerprintValidationError):
++        canonical_set(["a", "a"], lambda item: item)
++
++
++def test_artifact_content_identity_is_stable_and_mutation_changes_identity():
++    first = make_artifact_content("Fixture", {"items": ["a"], "flag": True})
++    same = make_artifact_content("Fixture", {"flag": True, "items": ["a"]})
++    changed = make_artifact_content("Fixture", {"items": ["b"], "flag": True})
++    assert first.semantic_payload_json == same.semantic_payload_json
++    assert first.digest_input_json == same.digest_input_json
++    assert first.content_sha256 == same.content_sha256
++    assert first.artifact_id == same.artifact_id
++    assert first.content_sha256 != changed.content_sha256
++    assert first.artifact_id != changed.artifact_id
++    assert json.loads(first.digest_input_json) == {
++        "artifact_type": "Fixture", "artifact_schema_version": 1,
++        "semantic_payload": {"items": ["a"], "flag": True},
++    }
++    returned = first.semantic_payload
++    returned["items"].append("mutated")
++    assert first.semantic_payload == {"items": ["a"], "flag": True}
++    with pytest.raises(DeviceFingerprintValidationError):
++        ArtifactContent("Fixture", 1, first.semantic_payload_json, "0" * 64, first.artifact_id)
++
++
++def test_artifact_ref_exact_digest_type_and_resolution():
++    content = make_artifact_content("Fixture", {"x": 1})
++    ref = ArtifactRef(content.artifact_id, content.content_sha256)
++    assert ArtifactRef.from_dict(ref.as_dict()) == ref
++    ref.resolve(content, "Fixture")
++    with pytest.raises(DeviceFingerprintValidationError):
++        ArtifactRef(content.artifact_id, "0" * 64)
++    with pytest.raises(DeviceFingerprintValidationError):
++        ref.resolve(content, "Other")
++    other = make_artifact_content("Fixture", {"x": 2})
++    with pytest.raises(DeviceFingerprintValidationError):
++        ref.resolve(other, "Fixture")
++    with pytest.raises(DeviceFingerprintValidationError):
++        ArtifactRef.from_dict({**ref.as_dict(), "extra": 1})
+diff --git a/tests/device_fingerprint/test_foundation_schema_artifacts.py b/tests/device_fingerprint/test_foundation_schema_artifacts.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..541d6dce50a61c71f6e2d6997d7a0f956ccc65a5
+--- /dev/null
++++ b/tests/device_fingerprint/test_foundation_schema_artifacts.py
+@@ -0,0 +1,142 @@
++from copy import deepcopy
++
++import pytest
++
++from app.device_fingerprint.foundation_schema_artifacts import (
++    assert_runtime_registry_coherence, build_foundation_schema_artifacts,
++    validate_foundation_payload,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.network_schemas import _TCP_V2_KEYS
++from app.device_fingerprint.portal_schemas import PORTAL_HEADER_V2_KEYS
++
++
++def test_four_frozen_artifacts_have_stable_identity_and_exact_dependency_refs():
++    first = build_foundation_schema_artifacts()
++    again = build_foundation_schema_artifacts()
++    assert set(first) == {
++        "TcpSynV2SchemaContract", "PortalHeadersV2SchemaContract",
++        "CapabilityDisposition", "EvidenceSchemaRegistryContract",
++    }
++    assert {key: value.content_sha256 for key, value in first.items()} == {
++        "TcpSynV2SchemaContract": "7d15812e100f7b7c2e3f3549a685db2a241042a61ae25bdece122916a4026e98",
++        "PortalHeadersV2SchemaContract": "4fb5782b1c042e470dafb52c9db456b0639495be44f0c18dee7a20d2db7bd89d",
++        "CapabilityDisposition": "53ae5181e5a1fc8aa371214ded51c2ca719aafc21ba27c745b3cfafe5a77ae50",
++        "EvidenceSchemaRegistryContract": "090d763e99247ca3b10be34976069e4e7e708be0899e21a15c6e103a015f7814",
++    }
++    assert [(key, value.artifact_id) for key, value in first.items()] == [
++        (key, value.artifact_id) for key, value in again.items()
++    ]
++    for key, value in first.items():
++        assert value.semantic_payload_json == again[key].semantic_payload_json
++        assert value.digest_input_json == again[key].digest_input_json
++        assert validate_foundation_payload(key, value.semantic_payload).artifact_id == value.artifact_id
++    registry = first["EvidenceSchemaRegistryContract"].semantic_payload
++    for source, version, contract_kind, target in (
++        ("tcp_syn", 2, "TCP_SYN_V2", first["TcpSynV2SchemaContract"]),
++        ("portal_headers", 2, "PORTAL_HEADERS_V2", first["PortalHeadersV2SchemaContract"]),
++    ):
++        row = next(row for row in registry["schema_entries"]
++                   if (row["source_kind"], row["feature_schema_version"]) == (source, version))
++        assert row["schema_contract_ref"] == {
++            "contract_kind": contract_kind,
++            "ref": {"artifact_id": target.artifact_id, "content_sha256": target.content_sha256},
++        }
++    disposition = first["CapabilityDisposition"]
++    assert registry["portal_headers_v2_disposition"] == {
++        "artifact_id": disposition.artifact_id,
++        "content_sha256": disposition.content_sha256,
++    }
++
++
++def test_tcp_syn_v2_contract_matches_frozen_schema_and_repaired_unknown():
++    payload = build_foundation_schema_artifacts()["TcpSynV2SchemaContract"].semantic_payload
++    assert set(payload) == {
++        "schema_family", "feature_schema_version", "source_kind", "supported_scope_identity",
++        "top_level_field_contracts", "tcp_option_record_variant_contracts",
++        "privacy_minimization_contract_version", "malformed_observable_contract_version",
++        "evidence_canonical_json_identity",
++    }
++    fields = {row["field_name"]: row for row in payload["top_level_field_contracts"]}
++    assert set(fields) == _TCP_V2_KEYS
++    assert fields["tcp_ack_first_octet_lsb_set"]["field_type"] == "BOOL"
++    assert fields["tcp_ns"]["field_type"] == "BOOL"
++    assert all(row["nullable"] is False for row in fields.values())
++    variants = {row["variant_id"]: row for row in payload["tcp_option_record_variant_contracts"]}
++    assert set(variants) == {"EOL", "NOP", "MSS", "WINDOW_SCALE", "SACK_PERMITTED", "TIMESTAMP", "UNKNOWN"}
++    assert "eol_padding_nonzero_before_final_byte" in variants["EOL"]["exact_fields"]
++    assert variants["UNKNOWN"]["kind_match_mode"] == "OTHER"
++    assert variants["UNKNOWN"]["kind_value"] is None
++    assert variants["UNKNOWN"]["excluded_kind_values"] == [0, 1, 2, 3, 4, 8]
++
++
++def test_portal_contract_and_admitted_disposition_are_exact():
++    artifacts = build_foundation_schema_artifacts()
++    portal = artifacts["PortalHeadersV2SchemaContract"].semantic_payload
++    fields = {row["field_id"]: row for row in portal["normalized_field_contracts"]}
++    provenance = {row["normalized_field_id"]: row for row in portal["normalized_provenance_contracts"]}
++    assert set(fields) | {"model_source", "os_major_source", "form_factors_source"} == PORTAL_HEADER_V2_KEYS
++    assert set(provenance) == set(fields)
++    assert fields["model_family"]["source_header_id"] == "Sec-CH-UA-Model"
++    assert fields["os_major"]["source_header_id"] == "Sec-CH-UA-Platform-Version"
++    assert all(fields[name]["source_header_id"] == "Sec-CH-UA-Form-Factors"
++               for name in ("form_factor_mobile", "form_factor_tablet", "form_factor_desktop"))
++    assert provenance["model_family"] == {
++        "normalized_field_id": "model_family", "provenance_field_id": "model_source",
++        "allowed_source_values": ["sec_ch_ua_model"],
++    }
++    assert artifacts["CapabilityDisposition"].semantic_payload == {
++        "capability_id": "portal_headers/2", "status": "ADMITTED", "reason_codes": [],
++        "fallback_source_kind": None, "fallback_feature_schema_version": None,
++    }
++
++
++def test_final_registry_exact_entries_and_runtime_binding():
++    assert_runtime_registry_coherence()
++    payload = build_foundation_schema_artifacts()["EvidenceSchemaRegistryContract"].semantic_payload
++    entries = {(row["source_kind"], row["feature_schema_version"]): row
++               for row in payload["schema_entries"]}
++    assert set(entries) == {
++        ("dhcp", 1), ("tcp_syn", 1), ("tcp_syn", 2),
++        ("tls_client", 1), ("quic_client", 1),
++        ("portal_headers", 1), ("portal_headers", 2),
++    }
++    assert entries[("tcp_syn", 1)]["schema_status"] == "KNOWN_NON_FUSION"
++    assert entries[("tcp_syn", 2)]["schema_status"] == "SUPPORTED"
++    assert entries[("portal_headers", 2)]["schema_status"] == "SUPPORTED"
++    assert all(row["schema_contract_ref"] is None for key, row in entries.items()
++               if key not in {("tcp_syn", 2), ("portal_headers", 2)})
++    assert "GateResultManifest" not in str(payload)
++
++
++@pytest.mark.parametrize("artifact_type,field", [
++    ("TcpSynV2SchemaContract", "top_level_field_contracts"),
++    ("PortalHeadersV2SchemaContract", "normalized_field_contracts"),
++    ("CapabilityDisposition", "reason_codes"),
++    ("EvidenceSchemaRegistryContract", "schema_entries"),
++])
++def test_extra_semantic_fields_are_closed_world(artifact_type, field):
++    payload = build_foundation_schema_artifacts()[artifact_type].semantic_payload
++    payload["extra"] = True
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_foundation_payload(artifact_type, payload)
++    payload.pop("extra")
++    if payload[field]:
++        payload[field][0]["extra"] = True
++        with pytest.raises(DeviceFingerprintValidationError):
++            validate_foundation_payload(artifact_type, payload)
++
++
++@pytest.mark.parametrize("artifact_type,field", [
++    ("TcpSynV2SchemaContract", "top_level_field_contracts"),
++    ("PortalHeadersV2SchemaContract", "normalized_field_contracts"),
++    ("EvidenceSchemaRegistryContract", "schema_entries"),
++])
++def test_set_permutation_identity_and_duplicate_primary_rejection(artifact_type, field):
++    content = build_foundation_schema_artifacts()[artifact_type]
++    payload = content.semantic_payload
++    payload[field] = list(reversed(payload[field]))
++    assert validate_foundation_payload(artifact_type, payload).artifact_id == content.artifact_id
++    payload[field].append(deepcopy(payload[field][0]))
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_foundation_payload(artifact_type, payload)

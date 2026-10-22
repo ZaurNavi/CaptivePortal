@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from app.operations_verification import startup_check
 import sqlite3
 import stat
 import threading
@@ -514,6 +515,8 @@ class ObservationRepository:
         self.busy_timeout_ms = max(1, min(int(busy_timeout_ms), 60_000))
         self._write_lock = threading.RLock()
 
+    @startup_check('observations',lambda self:self.db_path,
+        ('schema_version','schema_signature'),failures=(ObservationSchemaError,))
     def initialize(self, now_utc: str | None = None) -> InitializationResult:
         """Create/validate schema and abandon stale running cycles."""
         now = require_utc(now_utc or utc_now(), "now_utc")

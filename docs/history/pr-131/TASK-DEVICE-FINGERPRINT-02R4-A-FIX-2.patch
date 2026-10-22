@@ -1,0 +1,186 @@
+diff --git a/app/device_fingerprint/network_schemas.py b/app/device_fingerprint/network_schemas.py
+index a8286fe..9a9cf45 100644
+--- a/app/device_fingerprint/network_schemas.py
++++ b/app/device_fingerprint/network_schemas.py
+@@ -39,7 +39,10 @@ _TCP_V2_OPTION_COMMON = frozenset({
+     "structure_state",
+ })
+ _TCP_V2_OPTION_FIELDS = {
+-    "eol": frozenset({"eol_padding_length", "eol_padding_nonzero"}),
++    "eol": frozenset({
++        "eol_padding_length", "eol_padding_nonzero",
++        "eol_padding_nonzero_before_final_byte",
++    }),
+     "nop": frozenset(),
+     "mss": frozenset({"mss"}),
+     "window_scale": frozenset({"window_scale_raw"}),
+@@ -157,9 +160,14 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
+                     or record["structure_state"] != "well_formed"
+                     or not last
+                     or type(record["eol_padding_nonzero"]) is not bool
+-                    or type(record["eol_padding_length"]) is not int
++                    or type(record["eol_padding_nonzero_before_final_byte"]) is not bool
++                    or not _integer(record["eol_padding_length"], 0, 40)
+                     or record["eol_padding_length"] != option_length - offset
+-                    or (record["eol_padding_length"] == 0 and record["eol_padding_nonzero"])):
++                    or (record["eol_padding_length"] == 0 and record["eol_padding_nonzero"])
++                    or (record["eol_padding_length"] <= 1
++                        and record["eol_padding_nonzero_before_final_byte"])
++                    or (record["eol_padding_nonzero_before_final_byte"]
++                        and not record["eol_padding_nonzero"])):
+                 _fail()
+             offset = option_length
+             stopped = True
+diff --git a/app/device_fingerprint_sensor/tcp_syn.py b/app/device_fingerprint_sensor/tcp_syn.py
+index af4da00..d680fd6 100644
+--- a/app/device_fingerprint_sensor/tcp_syn.py
++++ b/app/device_fingerprint_sensor/tcp_syn.py
+@@ -65,11 +65,13 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
+         kind = raw[offset]
+         offset += 1
+         if kind == 0:
++            padding = raw[offset:]
+             records.append({
+                 "record_type": "eol", "kind": 0, "declared_length": None,
+                 "available_value_length": 0, "structure_state": "well_formed",
+-                "eol_padding_length": len(raw) - offset,
+-                "eol_padding_nonzero": any(raw[offset:]),
++                "eol_padding_length": len(padding),
++                "eol_padding_nonzero": any(padding),
++                "eol_padding_nonzero_before_final_byte": any(padding[:-1]),
+             })
+             break
+         if kind == 1:
+diff --git a/tests/device_fingerprint/test_network_schemas.py b/tests/device_fingerprint/test_network_schemas.py
+index 9f55351..76c6dda 100644
+--- a/tests/device_fingerprint/test_network_schemas.py
++++ b/tests/device_fingerprint/test_network_schemas.py
+@@ -44,6 +44,7 @@ def tcp_v2(**changes):
+             "record_type": "eol", "kind": 0, "declared_length": None,
+             "available_value_length": 0, "structure_state": "well_formed",
+             "eol_padding_length": 3, "eol_padding_nonzero": False,
++            "eol_padding_nonzero_before_final_byte": False,
+         }],
+     }
+     value.update(changes)
+@@ -155,6 +156,7 @@ def test_tcp_v2_top_level_contract_is_closed_and_bounded(change):
+     {"structure_state": "malformed_but_observable"},
+     {"eol_padding_length": 2}, {"eol_padding_nonzero": 1},
+     {"raw_options": "secret"}, {"timestamp_value": 1},
++    {"eol_padding_bitmap": "010"}, {"p0f_opt_plus": True},
+ ])
+ def test_tcp_v2_record_contract_rejects_impossible_or_private_fields(change):
+     record = {**tcp_v2()["tcp_option_records"][0], **change}
+@@ -162,23 +164,30 @@ def test_tcp_v2_record_contract_rejects_impossible_or_private_fields(change):
+         validate_tcp_syn_v2(tcp_v2(tcp_option_records=[record]))
+ 
+ 
+-@pytest.mark.parametrize("padding_length, padding_nonzero, accepted", [
+-    (0, False, True),
+-    (0, True, False),
+-    (3, False, True),
+-    (3, True, True),
++@pytest.mark.parametrize("padding_length, padding_nonzero, before_final, accepted", [
++    (0, False, False, True),
++    (0, True, False, False),
++    (0, False, True, False),
++    (1, False, False, True),
++    (1, True, False, True),
++    (1, True, True, False),
++    (3, False, False, True),
++    (3, False, True, False),
++    (3, True, False, True),
++    (3, True, True, True),
+ ])
+-def test_tcp_v2_eol_padding_nonzero_requires_remaining_bytes(padding_length, padding_nonzero, accepted):
++def test_tcp_v2_eol_padding_consistency(padding_length, padding_nonzero, before_final, accepted):
+     eol = {
+         **tcp_v2()["tcp_option_records"][0],
+         "eol_padding_length": padding_length,
+         "eol_padding_nonzero": padding_nonzero,
++        "eol_padding_nonzero_before_final_byte": before_final,
+     }
+     nop = {
+         "record_type": "nop", "kind": 1, "declared_length": None,
+         "available_value_length": 0, "structure_state": "well_formed",
+     }
+-    records = [dict(nop) for _ in range(3)] + [eol] if padding_length == 0 else [eol]
++    records = [dict(nop) for _ in range(3 - padding_length)] + [eol]
+     payload = tcp_v2(tcp_option_records=records)
+     if accepted:
+         assert validate_tcp_syn_v2(payload) == payload
+@@ -187,6 +196,13 @@ def test_tcp_v2_eol_padding_nonzero_requires_remaining_bytes(padding_length, pad
+             validate_tcp_syn_v2(payload)
+ 
+ 
++def test_tcp_v2_eol_requires_new_structural_field():
++    eol = dict(tcp_v2()["tcp_option_records"][0])
++    del eol["eol_padding_nonzero_before_final_byte"]
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[eol]))
++
++
+ def test_tcp_v2_missing_keys_and_impossible_option_sequence_fail():
+     missing = tcp_v2()
+     del missing["tcp_option_records"]
+diff --git a/tests/device_fingerprint_sensor/test_tcp_syn.py b/tests/device_fingerprint_sensor/test_tcp_syn.py
+index 095f28e..b04a0a7 100644
+--- a/tests/device_fingerprint_sensor/test_tcp_syn.py
++++ b/tests/device_fingerprint_sensor/test_tcp_syn.py
+@@ -126,8 +126,14 @@ def test_ip_tcp_boolean_derivatives_and_ipv4_options(
+ 
+ 
+ @pytest.mark.parametrize("options,expected_type,extra", [
+-    (b"\x00\0\0\0", "eol", {"eol_padding_length": 3, "eol_padding_nonzero": False}),
+-    (b"\x00\0\x01\0", "eol", {"eol_padding_length": 3, "eol_padding_nonzero": True}),
++    (b"\x00\0\0\0", "eol", {
++        "eol_padding_length": 3, "eol_padding_nonzero": False,
++        "eol_padding_nonzero_before_final_byte": False,
++    }),
++    (b"\x00\0\x01\0", "eol", {
++        "eol_padding_length": 3, "eol_padding_nonzero": True,
++        "eol_padding_nonzero_before_final_byte": True,
++    }),
+     (b"\x01\x01\x01\x01", "nop", {}),
+     (b"\x02\x04\x05\xb4", "mss", {"mss": 1460}),
+     (b"\x03\x03\xff\x01", "window_scale", {"window_scale_raw": 255}),
+@@ -151,6 +157,39 @@ def test_well_formed_option_variants(options, expected_type, extra):
+         assert records[0]["window_scale_raw"] > 14
+ 
+ 
++@pytest.mark.parametrize("eol_layout,length,nonzero,before_final", [
++    (b"\x00", 0, False, False),
++    (b"\x00\x00", 1, False, False),
++    (b"\x00\x01", 1, True, False),
++    (b"\x00\x01\x00\x00", 3, True, True),
++    (b"\x00\x00\x00\x01", 3, True, False),
++    (b"\x00\x00\x01\x00", 3, True, True),
++    (b"\x00\x00\x00\x00", 3, False, False),
++])
++def test_eol_padding_structural_fact(eol_layout, length, nonzero, before_final):
++    options = b"\x01" * (4 - len(eol_layout)) + eol_layout
++    records = parsed(options)["tcp_option_records"]
++    eol = records[-1]
++    assert eol == {
++        "record_type": "eol", "kind": 0, "declared_length": None,
++        "available_value_length": 0, "structure_state": "well_formed",
++        "eol_padding_length": length,
++        "eol_padding_nonzero": nonzero,
++        "eol_padding_nonzero_before_final_byte": before_final,
++    }
++
++
++def test_oracle_eol_layouts_have_distinct_canonical_tcp_v2_payloads():
++    early_nonzero = parsed(b"\x00\x01\x00\x00")
++    final_nonzero = parsed(b"\x00\x00\x00\x01")
++    assert early_nonzero["tcp_option_records"][0]["eol_padding_nonzero"] is True
++    assert final_nonzero["tcp_option_records"][0]["eol_padding_nonzero"] is True
++    assert early_nonzero["tcp_option_records"][0]["eol_padding_nonzero_before_final_byte"] is True
++    assert final_nonzero["tcp_option_records"][0]["eol_padding_nonzero_before_final_byte"] is False
++    assert canonical_json(early_nonzero) != canonical_json(final_nonzero)
++    assert canonical_sha256(canonical_json(early_nonzero)) != canonical_sha256(canonical_json(final_nonzero))
++
++
+ @pytest.mark.parametrize("options,expected_type,available,extra", [
+     (b"\x02\x03\x01\x01", "mss", 1, {"mss": None}),
+     (b"\x01\x01\x02\x04", "mss", 0, {"mss": None}),

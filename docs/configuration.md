@@ -71,6 +71,58 @@ See [CAPPORT](modules/capport.md) and [deployment](deployment.md).
 
 ## Device Fingerprint Evidence (default disabled)
 
+### Explicit empty-v2 first installation (Issue #245 Part A)
+
+`python3 -m app.device_fingerprint.cli provision-empty-v2` is a separate offline
+operator command for an independently authorized stopped-writer installation.
+It is not called by `run`, migration, recovery, Sensor or Admin. Ordinary startup
+still refuses a missing database. No path/force/schema/SQL/UUID command-line
+options exist; effective `get_settings()` supplies the sole DB path, writer lock
+path and configured max DB bytes. These three inputs are independently strictly
+validated even when Evidence is disabled; TLS and producer credentials are not
+needed and are not synthesized. A clean Git artifact identity is required before
+CLI side effects; success reports the source SHA/tree and new generation.
+
+Legacy defaults remain the flat Evidence DB and its writer lock. The explicitly
+architect-approved **conditional .99 layout** is configured, not a symlink or fork:
+
+```ini
+DEVICE_FINGERPRINT_DB_PATH=/opt/CaptivePortal/data/evidence/evidence.sqlite3
+DEVICE_FINGERPRINT_WRITER_LOCK_PATH=/opt/CaptivePortal/data/evidence/evidence.writer.lock
+DEVICE_FINGERPRINT_EVIDENCE_DB_PATH=/opt/CaptivePortal/data/evidence/evidence.sqlite3
+```
+
+Run under the intended writer identity, with existing writer-owned protected
+parent directories (no automatic mkdir, path normalization or symlink traversal).
+Other principals must not have directory write. Runtime writer lock semantics are
+unchanged: an existing lock must already be trusted, mode 0640, one NUL byte and
+single-link; a missing lock is securely established once, never reset or removed.
+The command holds that same writer lock, builds exact schema v2 and empty state
+in a private 0600 stage, validates/fsyncs it, publishes with no-clobber link and
+directory fsync, removes only its own staging link, and verifies the final file.
+No original DB or existing sidecar is opened for mutation. Published DB remains
+0600; normal writer startup's existing 0640 enforcement and WAL/NORMAL remain
+unchanged. Provisioning never grants reader ACLs or alters service configuration.
+
+`PROVISIONED` is the only success (exit 0). `ALREADY_EXISTS_NO_CHANGE` and all
+`HOLD_*` outcomes exit nonzero: reconcile explicitly, never use force/reset.
+Private stages left by failure/crash are quarantined, not automatically promoted
+or removed. `HOLD_PUBLISHED_RECONCILE` may mean a complete target exists but final
+durability/validation was not confirmed; never delete it or retry destructively.
+This Linux-local-filesystem procedure is fail-closed on native Windows; Windows
+tests do not represent Unix permissions/directory-fsync acceptance.
+The current filesystem admission is bounded to Linux ext, XFS, Btrfs and overlay;
+tmpfs, remote/FUSE/9p and unrecognized filesystems are refused, not silently copied
+elsewhere. A successful fsync is not a new hardware power-loss certification.
+
+**This source change does not authorize .99 provisioning or startup.** Issue #243
+still requires effective writer/reader identity and path parity, approved Admin
+Inventory admission/manifest, safe ACL/WAL sidecar lifecycle, and Owner first-start
+GO. All readers need the same real DB inode; receiver-only environment settings
+are insufficient. Read-only WAL access can depend on writer-created readable
+sidecars; never grant reader directory write, use live `immutable=1`, or hand-create
+WAL/SHM as a workaround. See [SQLite WAL read-only rules](https://www.sqlite.org/wal.html#read_only_databases).
+
 ## Sensor/Portal producer deployment configuration
 
 DEPLOY-CONFIG-02 affects only startup parsers and the Sensor's fixed-name
@@ -95,11 +147,49 @@ Sensor interface must be a 1..15-byte ASCII Linux name with alphanumeric first
 character and only letters/digits/underscore/dot/hyphen, not `lo`/`any`/wildcard/path.
 Preflight remains interface-relative: UP, no master/L3/default routes/forwarding,
 DHCP disabled and no active DHCP client/NetworkManager profile. All runtime checks
-and frozen BPF/selected-interface AF_PACKET binding remain; parser checks no NIC.
+and fixed-grammar BPF/selected-interface AF_PACKET binding remain; parser checks no NIC.
 Readiness host is canonical private IPv4 or exact `127.0.0.1`, port canonical
 ASCII decimal `1024..65535`. DHCP authorities are independently configured
 canonical IPv4 unicast, not implicitly forced equal or RFC1918-only; actual DHCP
 evidence and directed-broadcast/topology facts require separate operational proof.
+
+### Sensor raw-capture BPF scope (Issue #244)
+
+`DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS` is the sole raw-capture guest-scope
+setting; there is no BPF override or second CIDR setting. The enabled startup
+parser freezes 1..16 canonical, disjoint IPv4 networks (no `/0`, aliases, host
+bits, duplicates, overlaps or whitespace). Explicit public IPv4 networks remain
+valid. Disabled Sensor startup does not parse deployment overrides. Scope order
+is preserved in the configuration; only rendering sorts by address/prefix.
+
+Offline commands accept explicit scope, without enabling Sensor or reading its
+environment. `render` emits ASCII and exactly one LF, including on Windows:
+
+```sh
+python -m app.device_fingerprint_sensor.bpf_cli render --guest-cidrs 10.50.0.0/19
+python -m app.device_fingerprint_sensor.bpf_cli verify --guest-cidrs 10.50.0.0/19 --artifact /absolute/disposable/raw-capture.bpf
+```
+
+Verification is read-only; it does not install or authorize an artifact. Runtime
+only accepts `/etc/captive-portal/device-fingerprint/raw-capture.bpf`, owned by
+root under trusted root-owned, non-group/world-writable, nonsymlink ancestors.
+The regular single-link artifact must contain exactly the renderer's ASCII
+expression, optionally followed by one LF; CRLF/BOM/extra whitespace is rejected.
+Missing, stale or untrusted bytes prevent capture. Runtime never rewrites it.
+
+The checked-in `deploy/device-fingerprint/raw-capture.bpf` remains the unchanged
+legacy `192.168.8.0/22` example. It is not universal site configuration. A separately
+authorized operator must install the rendered artifact matching the startup tuple.
+DHCP UDP ports 67/68 remain globally eligible; only TCP SYN-without-ACK is limited
+to configured source networks. This does not change downstream evidence validation.
+RawCapture starts with protocol zero, attaches the verified filter, then binds the
+selected interface with Python AF_PACKET tuple protocol `3` (ETH_P_ALL).
+No receive-capable socket is published before both operations succeed.
+
+Suricata HOME_NET/BPF/interface alignment is a separate Issue #243 deployment
+gate; this raw-capture change does not configure or admit Suricata on another site.
+Existing nonempty-spool identity/scope restrictions still apply: never relabel or
+clear a spool to adopt a new scope without its independently approved procedure.
 
 | Portal suffix (`DEVICE_FINGERPRINT_PORTAL_`) | Exact legacy default |
 | --- | --- |
@@ -357,23 +447,13 @@ operator must explicitly grant `admin.read.operations` in
 `WEB_ADMIN_GLOBAL_CAPABILITIES`; default grants are unchanged. The GLOBAL page is
 `/admin/db-services`, with one read endpoint `/admin/api/v1/operations/db-services`.
 Activation additionally requires the root-owned, non-group/world-writable file
-`/etc/captive-portal/admin-db-services-v1.json` and protected ancestors. Its closed
+`/etc/captiveportal/admin-db-services-v1.json` and protected ancestors. Its closed
 schema is `admin.db-services.bindings.v1` with exactly nine `services` entries
 (`id,intent`) and seventeen `databases` entries (`id,path,intent`). Service intents
 are `run|disabled|maintenance|unknown`; database intents are
 `expected|optional_disabled|unknown`. No extra keys, duplicates, selectors, secrets
 or implicit path defaults are accepted. Database paths have a direct parent in
-`/opt/CaptivePortal/data`, `/var/lib/captivprod-sensor` or
-`/var/lib/captivprod-evidence`, using the exact catalog filename. The attested
-special bindings are `fingerprint_evidence` →
-`/var/lib/captivprod-evidence/evidence.sqlite3`, `network_attribution` →
-`/var/lib/captivprod-sensor/network_attribution.sqlite3`, and `sensor_spool` →
-`/var/lib/captivprod-sensor/spool.sqlite3`; legacy or cross-root aliases for
-these stores are rejected. The other fourteen deployment bindings and all intents
-must be independently verified by the operator; catalog/default paths are not
-evidence that a file exists or is active. Unverified intent stays `unknown`.
-Denied sensor-directory metadata remains unknown/unavailable, not healthy;
-no ACL or service-user privilege change is implied by source integration.
+`/opt/CaptivePortal/data` or `/var/lib/captive-portal/fingerprint-sensor`.
 The manifest is read once at composition. Missing/invalid bindings disable only
 Operations, not Auth or other Admin pages. This repository change does not create
 the operator file, grant the permission, or activate the flag.

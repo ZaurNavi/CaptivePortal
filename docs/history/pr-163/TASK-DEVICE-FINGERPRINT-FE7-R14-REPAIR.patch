@@ -1,0 +1,164 @@
+diff --git a/app/device_fingerprint/fe7_knowledge_bundle.py b/app/device_fingerprint/fe7_knowledge_bundle.py
+index 43da7ea53cd20bfb686cea542beed5ee1627b848..ab6a35f024c959ddd57eb95ac0d8ae2f6e122707 100644
+--- a/app/device_fingerprint/fe7_knowledge_bundle.py
++++ b/app/device_fingerprint/fe7_knowledge_bundle.py
+@@ -16,23 +16,6 @@ from .knowledge_bundle import (
+ from .models import DeviceFingerprintValidationError
+ from .validation import parse_utc
+ 
+-_INITIAL_TIME = "2026-09-22T22:30:34.464Z"
+-_INITIAL_IDS = {
+-    "classification_taxonomy": "ClassificationTaxonomy:v1:sha256:399e2a337e7ebecb1bd7a9b21dff5e744c13be36313bc39f16832bc7a57a4d10",
+-    "alias_mapping": "AliasMapping:v1:sha256:f1cdd7c9510c2a33bad99bd1ae15eaccd20fcb828a52e02533b9917fdfc2e228",
+-    "k3_portal_rule_set": "K3PortalRuleSet:v1:sha256:5e47945da04c60baf8dc1d1a7777a4e2efa2dfa0e80bf7639a97ba51d6fdb28f",
+-    "k3_provenance": "KnowledgeProvenanceManifest:v1:sha256:99029f81d6ca8c2afc6d48640ac4c1f47f01c78baa2836d68dcec5d0adc28b92",
+-}
+-_INITIAL_EXTERNAL = {
+-    "k1": ("4f64a405fb1debbd2e066478a7190b821424e0691399068421fdaf168da09b14",
+-           "2026-09-19T21:00:50.036Z", 903, "fresh"),
+-    "k2b": ("791444ebf9a97a492b7a94020f721d016584918c437a450ccaa5525a55c95ad0",
+-            "2026-09-22T22:16:00.456Z", 43, "stale"),
+-    "k4": ("eb81bb97240fb7754659c33c13a9139583f7f505e38bc6618f9eef51b3878ae5",
+-           "2026-09-22T20:43:37.766Z", 54012, "fresh"),
+-}
+-
+-
+ @dataclass(frozen=True, slots=True)
+ class FE7GateExecution:
+     knowledge_bundle_artifact_id: str | None
+@@ -62,43 +45,6 @@ def _candidate_refs(candidate: KnowledgeBundleCandidate) -> list[dict[str, str]]
+     )
+ 
+ 
+-def _initial_anchor_reasons(
+-    candidate: KnowledgeBundleCandidate, evaluation_time: str,
+-    per_source: tuple[dict[str, Any], ...],
+-) -> list[str]:
+-    reasons = []
+-    if evaluation_time != _INITIAL_TIME:
+-        reasons.append("initial_f_e5_trusted_time_mismatch")
+-    for name, expected_id in _INITIAL_IDS.items():
+-        content = getattr(candidate, name)
+-        if content is None or content.artifact_id != expected_id:
+-            reasons.append(f"initial_{name}_identity_mismatch")
+-    for slot, (digest, retrieved, count, state) in _INITIAL_EXTERNAL.items():
+-        provenance = getattr(candidate, f"{slot}_provenance")
+-        record_set = getattr(candidate, f"{slot}_record_set")
+-        if provenance is None or record_set is None:
+-            reasons.append(f"initial_{slot}_dependency_missing")
+-            continue
+-        source = provenance.semantic_payload
+-        records = record_set.semantic_payload.get("records")
+-        if (source.get("source_artifact_sha256") != digest
+-                or source.get("retrieved_at_utc") != retrieved
+-                or not isinstance(records, list) or len(records) != count):
+-            reasons.append(f"initial_{slot}_source_or_count_mismatch")
+-        report = next((row for row in per_source if row["slot"] == slot), None)
+-        if (report is None or report["freshness_state"] != state
+-                or not report["claim_eligible"]
+-                or (slot == "k2b" and report["claim_strength_cap"] != "supporting")):
+-            reasons.append(f"initial_{slot}_freshness_mismatch")
+-    rule_set = candidate.k3_portal_rule_set
+-    k3 = rule_set.semantic_payload if rule_set is not None else {}
+-    rules, vectors = k3.get("rules"), k3.get("test_vectors")
+-    if (not isinstance(rules, list) or not isinstance(vectors, list)
+-            or (len(rules), len(vectors)) != (13, 21)):
+-        reasons.append("initial_k3_concrete_count_mismatch")
+-    return reasons
+-
+-
+ def run_fe7_knowledge_bundle_gate(
+     candidate: KnowledgeBundleCandidate,
+     *,
+@@ -161,8 +107,6 @@ def run_fe7_knowledge_bundle_gate(
+                 or not result["claim_eligible"] or result["freshness_state"] == "expired"):
+             reasons.append(f"{slot}_knowledge_not_usable")
+     per_source = tuple(reports)
+-    reasons.extend(_initial_anchor_reasons(candidate, foundation_knowledge_evaluation_at_utc,
+-                                           per_source))
+     if not retained_evidence_refs:
+         reasons.append("retained_evidence_required")
+     if not decision_record_refs:
+diff --git a/tests/device_fingerprint_fe7/test_knowledge_bundle.py b/tests/device_fingerprint_fe7/test_knowledge_bundle.py
+index 516f9929e5aca60195e2e55979dd4bdc2206c48c..edd6724db73076be9a21f128682cc02868260174 100644
+--- a/tests/device_fingerprint_fe7/test_knowledge_bundle.py
++++ b/tests/device_fingerprint_fe7/test_knowledge_bundle.py
+@@ -5,7 +5,6 @@ from __future__ import annotations
+ from copy import deepcopy
+ from dataclasses import replace
+ from inspect import signature
+-from unittest.mock import patch
+ 
+ import pytest
+ 
+@@ -139,12 +138,6 @@ def _gate_kwargs(**changes):
+ 
+ 
+ def _gate(value: KnowledgeBundleCandidate, **changes):
+-    # Synthetic-only proof of generic gate mechanics; the public gate has no bypass.
+-    with patch.object(fe7, "_initial_anchor_reasons", return_value=[]):
+-        return run_fe7_knowledge_bundle_gate(value, **_gate_kwargs(**changes))
+-
+-
+-def _real_gate(value: KnowledgeBundleCandidate, **changes):
+     return run_fe7_knowledge_bundle_gate(value, **_gate_kwargs(**changes))
+ 
+ 
+@@ -286,12 +279,8 @@ def test_k3_internal_provenance_rule_and_taxonomy_links_are_exact():
+         validate_knowledge_bundle_dependencies(build_initial_knowledge_bundle_v1(bad), bad)
+ 
+ 
+-def test_generic_k3_provenance_allows_other_repository_identity_but_initial_gate_does_not():
++def test_k3_provenance_allows_other_repository_identity_when_links_resolve():
+     value = candidate()
+-    assert value.k3_provenance.artifact_id == (
+-        "KnowledgeProvenanceManifest:v1:sha256:"
+-        "99029f81d6ca8c2afc6d48640ac4c1f47f01c78baa2836d68dcec5d0adc28b92"
+-    )
+     alternate = build_k3_internal_provenance(
+         value.k3_portal_rule_set,
+         repository_commit_sha="a" * 40,
+@@ -301,10 +290,9 @@ def test_generic_k3_provenance_allows_other_repository_identity_but_initial_gate
+     changed = replace(value, k3_provenance=alternate)
+     bundle = build_initial_knowledge_bundle_v1(changed)
+     assert validate_knowledge_bundle_dependencies(bundle, changed)
+-    result = _real_gate(changed)
+-    assert "initial_k3_provenance_identity_mismatch" in result.failure_reasons
+-    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
+-    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++    result = _gate(changed)
++    assert result.gate_result_manifest.semantic_payload["status"] == "PASS"
++    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == [_ref(bundle)]
+ 
+ 
+ @pytest.mark.parametrize("slot", ["k1", "k2b", "k4"])
+@@ -427,22 +415,16 @@ def test_gate_requires_retained_evidence_and_owner_decision(evidence, decisions)
+     assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
+ 
+ 
+-def test_initial_admission_checks_exact_accepted_anchors_without_synthetic_fabrication():
+-    result = _real_gate(candidate())
+-    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
+-    assert any(reason.startswith("initial_k1_source_or_count") for reason in result.failure_reasons)
+-    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
+-
+-
+ def test_public_gate_has_no_initial_admission_bypass():
+     assert "initial_admission" not in signature(run_fe7_knowledge_bundle_gate).parameters
+     with pytest.raises(TypeError):
+         run_fe7_knowledge_bundle_gate(candidate(), **_gate_kwargs(initial_admission=False))
+ 
+ 
+-def test_wrong_f_e5_trusted_time_fails_real_initial_gate():
+-    result = _real_gate(candidate(),
+-                        foundation_knowledge_evaluation_at_utc="2026-09-22T22:30:34.465Z")
+-    assert "initial_f_e5_trusted_time_mismatch" in result.failure_reasons
+-    assert result.gate_result_manifest.semantic_payload["status"] == "FAIL"
+-    assert result.gate_result_manifest.semantic_payload["output_artifact_refs"] == []
++def test_supplied_prerequisite_time_is_used_without_historical_pin():
++    supplied_time = "2026-09-23T00:00:00.000Z"
++    result = _gate(candidate(), foundation_knowledge_evaluation_at_utc=supplied_time)
++    manifest = result.gate_result_manifest.semantic_payload
++    assert manifest["status"] == "PASS", result.failure_reasons
++    assert manifest["trusted_time_inputs"]["foundation_knowledge_evaluation_at_utc"] == supplied_time
++    assert len(manifest["input_artifact_refs"]) == 16

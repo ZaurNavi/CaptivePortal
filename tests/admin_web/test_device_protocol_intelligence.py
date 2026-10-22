@@ -1,4 +1,3 @@
-"""#296 replaces the removed Device rolling window with stored Visit results."""
 import logging
 from dataclasses import replace
 from pathlib import Path
@@ -10,219 +9,319 @@ from flask import Flask
 from app.admin_web.config import admin_web_config_from_settings, AdminWebConfigError
 from app.admin_web.models import AdminPrincipal
 from app.admin_web.query_service import (
-    AdminQueryResponse, AdminQueryValidationError, AdminQueryForbidden, AdminQueryNotFound,
-    AdminQueryUnavailable, AdminQueryDeadline, AdminQueryBusy,
+    AdminQueryService, AdminQueryResponse, AdminQueryValidationError, AdminQueryForbidden,
+    AdminQueryNotFound, AdminQueryUnavailable, AdminQueryDeadline, AdminQueryBusy,
 )
 from app.admin_web.routes import create_admin_web_blueprint
 from app.admin_web.runtime import create_admin_web_runtime
+from app.network_metadata_projection.models import ProjectionConfig
+from app.network_protocol_intelligence.read_service import DeviceProtocolIntelligenceReadService
+from app.network_protocol_intelligence.models import ProtocolUnavailable, ProtocolDeadline, ProtocolBusy, public_summary
 from app.settings_control.features import AdminFeaturePlanV1
 from app.settings_control.models import ResolvedSettingsSnapshot
+from tests.network_protocol_intelligence.test_read_service import Reader, fact, summary, DEVICE, MAC
 from .conftest import SITE_ID, enabled_settings, login
-from tests.visit_lifecycle.conftest import visit_config, visit_repository, visit_service, make_request
-from tests.visit_lifecycle.test_visit_service_delivery import delivery
 
-DEVICE = "10000000-0000-4000-8000-000000000001"
-VISIT = "20000000-0000-4000-8000-000000000001"
-PATH = f"/admin/api/v2/sites/{SITE_ID}/devices/{DEVICE}/visits/{VISIT}/protocol-intelligence"
-OLD_PATH = f"/admin/api/v1/sites/{SITE_ID}/devices/{DEVICE}/protocol-intelligence"
-
-
-def summary():
-    return dict(type="VisitProtocolSummaryV1", schema_version=1, site_id=SITE_ID, device_id=DEVICE,
-        visit_id=VISIT, visit_status="open", started_at="2026-10-21T10:00:00.000Z", closed_at=None,
-        summary_state="active", protocols=[dict(protocol_id="tls",last_observed_at="2026-10-21T10:01:00.000000Z")],
-        last_protocol_observation=dict(protocol_id="tls",last_observed_at="2026-10-21T10:01:00.000000Z"),
-        evaluated_at="2026-10-21T10:02:00.000Z",source_coverage="bounded_partial",
-        attribution_coverage="current_available",finalized_at=None,partial_reason="bounded_source",
-        historical_completeness_claimed=False)
+PATH = f"/admin/api/v1/sites/{SITE_ID}/devices/{DEVICE}/protocol-intelligence"
 
 
 @pytest.fixture
 def product_app(admin_app):
     runtime = admin_app.extensions["admin_web_runtime"]
     runtime.config = replace(runtime.config, device_protocol_intelligence_enabled=True)
-    runtime.query_service._config = runtime.config
-    def forbidden(*a, **k):
-        pytest.fail("Visit API must never use Device MAC, Registry, NI02 or live NI03")
-    runtime.query_service._devices = SimpleNamespace(get_device=forbidden)
-    runtime.query_service._reads = SimpleNamespace(visit_protocol_summary=lambda **kwargs: summary())
-    app = Flask(__name__); app.config["TESTING"] = True
-    app.register_blueprint(create_admin_web_blueprint(runtime,logger=logging.getLogger("visit-protocol-test")))
+    query = runtime.query_service
+    query._config = runtime.config
+    query._devices = SimpleNamespace(get_device=lambda **kwargs: SimpleNamespace(canonical_mac=MAC))
+    query._protocol_intelligence = DeviceProtocolIntelligenceReadService(Reader())
+    # Fixed narrow snapshot carries no time-dependent facts for API routing tests.
+    app = Flask(__name__)
+    app.config["TESTING"] = True
+    app.register_blueprint(create_admin_web_blueprint(runtime, logger=logging.getLogger("ni03-test")))
     app.extensions["admin_web_runtime"] = runtime
     return app
 
 
 def test_exact_api_success_headers_and_privacy(product_app):
-    client=product_app.test_client();login(client)
-    response=client.get(PATH,base_url="https://localhost")
-    assert response.status_code==200
-    assert set(response.json)=={"api_version","request_id","site_id","result","page"}
-    assert response.json["api_version"]=="admin.visit.protocol-intelligence.v1"
-    assert response.json["result"]==summary() and response.json["page"] is None
-    assert response.headers["Cache-Control"]=="no-store" and response.headers["Pragma"]=="no-cache"
-    for private in ("client_mac","peer_ip","edge_id","snapshot_id","attribution_binding_id","sni"):
+    client = product_app.test_client(); login(client)
+    response = client.get(PATH, base_url="https://localhost")
+    assert response.status_code == 200
+    value = response.json
+    assert set(value) == {"api_version", "request_id", "site_id", "result", "page"}
+    assert value["api_version"] == "admin.device.protocol-intelligence.v1"
+    assert value["result"]["evidence_state"] == "empty"
+    assert value["result"]["availability_state"] == "usable"
+    assert value["page"] is None
+    assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
+    for private in ("client_mac", "peer_ip", "edge_id", "safe_reason", "attribution_binding_id", "sni"):
         assert private not in response.get_data(as_text=True)
-    assert client.get(OLD_PATH,base_url="https://localhost").status_code==404
 
 
-@pytest.mark.parametrize("authenticated,site,device,visit,suffix,body,status,code",[
-    (False,SITE_ID,DEVICE,VISIT,"",None,401,"authentication_required"),
-    (True,"invalid",DEVICE,VISIT,"",None,400,"invalid_request"),
-    (True,"f"*24,DEVICE,VISIT,"",None,403,"site_forbidden"),
-    (True,SITE_ID,"invalid",VISIT,"",None,400,"invalid_request"),
-    (True,SITE_ID,DEVICE,"invalid","",None,400,"invalid_request"),
-    (True,SITE_ID,"ABCD0000-0000-4000-8000-000000000001",VISIT,"",None,400,"invalid_request"),
-    (True,SITE_ID,DEVICE,VISIT,"?extra=1",None,400,"invalid_request"),
-    (True,SITE_ID,DEVICE,VISIT,"?a=1&a=2",None,400,"invalid_request"),
-    (True,SITE_ID,DEVICE,VISIT,"",b"{}",400,"invalid_request"),
-    (True,SITE_ID,DEVICE,VISIT,"",None,404,"not_found"),
+@pytest.mark.parametrize("binding,identity", [("not_yet_registry_resolved", "pending"),
+    ("registry_unavailable", "unavailable"), (None, "absent")])
+def test_api_usable_projection_without_authoritative_identity_is_degraded(product_app, binding, identity):
+    query = product_app.extensions["admin_web_runtime"].query_service
+    query._protocol_intelligence = DeviceProtocolIntelligenceReadService(Reader(binding=binding, bound=None))
+    client = product_app.test_client(); login(client)
+    response = client.get(PATH, base_url="https://localhost")
+    assert response.status_code == 200
+    value = response.json["result"]
+    assert value["availability_state"] == "degraded"
+    assert value["coverage"]["projection_state"] == "usable"
+    assert value["identity_binding_state"] == identity
+    assert value["evidence_state"] == "identity_pending"
+    assert value["freshness_state"] == "unavailable"
+
+
+@pytest.mark.parametrize("authenticated,site,device,suffix,body,status,code", [
+    (False, SITE_ID, DEVICE, "", None, 401, "authentication_required"),
+    (True, "invalid", DEVICE, "", None, 400, "invalid_request"),
+    (True, "f" * 24, DEVICE, "", None, 403, "site_forbidden"),
+    (True, SITE_ID, "invalid", "", None, 400, "invalid_request"),
+    (True, SITE_ID, "ABCD0000-0000-4000-8000-000000000001", "", None, 400, "invalid_request"),
+    (True, SITE_ID, DEVICE, "?extra=1", None, 400, "invalid_request"),
+    (True, SITE_ID, DEVICE, "", b"{}", 400, "invalid_request"),
+    (True, SITE_ID, DEVICE, "", None, 404, "not_found"),
 ])
-def test_feature_off_preserves_route_gate_precedence_no_read(admin_app,monkeypatch,authenticated,site,device,visit,suffix,body,status,code):
-    query=admin_app.extensions["admin_web_runtime"].query_service
-    monkeypatch.setattr(query,"visit_protocol_intelligence",lambda *a,**k:pytest.fail("OFF read"))
-    client=admin_app.test_client()
-    if authenticated:login(client)
-    path=f"/admin/api/v2/sites/{site}/devices/{device}/visits/{visit}/protocol-intelligence"
-    response=client.get(path+suffix,data=body,base_url="https://localhost")
-    assert response.status_code==status and response.json["error"]["code"]==code
-    assert response.json["api_version"]=="admin.visit.protocol-intelligence.v1"
+def test_feature_off_preserves_route_gate_precedence_no_read(admin_app, monkeypatch, authenticated, site, device, suffix, body, status, code):
+    query = admin_app.extensions["admin_web_runtime"].query_service
+    def forbidden(*args, **kwargs):
+        pytest.fail("feature OFF must not call query, Device lookup or semantic/projection read")
+    monkeypatch.setattr(query, "device_protocol_intelligence", forbidden)
+    query._devices = SimpleNamespace(get_device=forbidden)
+    query._protocol_intelligence = DeviceProtocolIntelligenceReadService(SimpleNamespace(read_protocol_latest_snapshot=forbidden))
+    client = admin_app.test_client()
+    if authenticated: login(client)
+    response = client.get(f"/admin/api/v1/sites/{site}/devices/{device}/protocol-intelligence" + suffix,
+                          data=body, base_url="https://localhost")
+    assert response.status_code == status
+    assert response.json["error"]["code"] == code
+    assert response.json["api_version"] == "admin.device.protocol-intelligence.v1"
 
 
-def test_capability_denial_precedes_input_and_feature_gate(admin_app,monkeypatch):
-    runtime=admin_app.extensions["admin_web_runtime"];original=type(runtime.access_policy).authorize
-    monkeypatch.setattr(type(runtime.access_policy),"authorize",lambda self,p,c,s:False if c=="admin.read.visits" else original(self,p,c,s))
-    client=admin_app.test_client();login(client)
-    response=client.get(PATH.replace(VISIT,"invalid")+"?extra=1",base_url="https://localhost")
-    assert response.status_code==403 and response.json["error"]["code"]=="site_forbidden"
+def test_feature_off_capability_denial_precedes_input_and_feature_gate(admin_app, monkeypatch):
+    runtime = admin_app.extensions["admin_web_runtime"]
+    original = type(runtime.access_policy).authorize
+    monkeypatch.setattr(type(runtime.access_policy), "authorize",
+        lambda self, principal, capability, site: False if capability == "admin.read.device" else original(self, principal, capability, site))
+    monkeypatch.setattr(runtime.query_service, "device_protocol_intelligence", lambda *a, **k: pytest.fail("feature OFF read"))
+    client = admin_app.test_client(); login(client)
+    response = client.get(PATH.replace(DEVICE, "invalid") + "?extra=1", base_url="https://localhost")
+    assert response.status_code == 403 and response.json["error"]["code"] == "site_forbidden"
+    assert response.json["api_version"] == "admin.device.protocol-intelligence.v1"
 
 
-@pytest.mark.parametrize("exc,status,code",[(AdminQueryBusy,429,"concurrency_limit"),
-    (AdminQueryDeadline,503,"query_deadline"),(AdminQueryUnavailable,503,"source_unavailable"),
-    (AdminQueryNotFound,404,"not_found"),(AdminQueryForbidden,403,"site_forbidden"),(RuntimeError,500,"internal_error")])
-def test_api_safe_failure_mapping(product_app,monkeypatch,caplog,exc,status,code):
-    def fail(*a,**k):raise exc("private-device-sentinel")
-    monkeypatch.setattr(product_app.extensions["admin_web_runtime"].query_service,"visit_protocol_intelligence",fail)
-    client=product_app.test_client();login(client);response=client.get(PATH,base_url="https://localhost")
-    assert response.status_code==status and response.json["error"]["code"]==code
-    if status==429:assert response.headers["Retry-After"]=="1"
-    assert "private-device-sentinel" not in response.get_data(as_text=True)+caplog.text
+@pytest.mark.parametrize("suffix,body,status", [("?extra=1", None, 400), ("?a=1&a=2", None, 400), ("", b"{}", 400)])
+def test_forbidden_request_inputs(product_app, suffix, body, status):
+    client = product_app.test_client(); login(client)
+    response = client.get(PATH + suffix, data=body, base_url="https://localhost")
+    assert response.status_code == status and response.json["error"]["code"] == "invalid_request"
+    assert response.json["api_version"] == "admin.device.protocol-intelligence.v1"
+
+
+def test_authentication_and_site_boundary(product_app):
+    client = product_app.test_client()
+    assert client.get(PATH, base_url="https://localhost").status_code == 401
+    login(client)
+    query = product_app.extensions["admin_web_runtime"].query_service
+    query._devices = SimpleNamespace(get_device=lambda **kwargs: (_ for _ in ()).throw(AssertionError("no cross-Site lookup")))
+    assert client.get(PATH.replace(SITE_ID, "f" * 24), base_url="https://localhost").status_code == 403
+    assert client.get(PATH.replace(SITE_ID, "invalid"), base_url="https://localhost").status_code == 400
+
+
+@pytest.mark.parametrize("exc,status,code", [(AdminQueryBusy, 429, "concurrency_limit"),
+    (AdminQueryDeadline, 503, "query_deadline"), (AdminQueryUnavailable, 503, "source_unavailable"),
+    (AdminQueryNotFound, 404, "not_found"), (AdminQueryForbidden, 403, "site_forbidden"),
+    (RuntimeError, 500, "internal_error")])
+def test_api_safe_failure_mapping(product_app, monkeypatch, caplog, exc, status, code):
+    query = product_app.extensions["admin_web_runtime"].query_service
+    def fail(*args, **kwargs): raise exc("private-device-sentinel")
+    monkeypatch.setattr(query, "device_protocol_intelligence", fail)
+    client = product_app.test_client(); login(client)
+    response = client.get(PATH, base_url="https://localhost")
+    assert response.status_code == status and response.json["error"]["code"] == code
+    assert response.json["api_version"] == "admin.device.protocol-intelligence.v1"
+    if status == 429: assert response.headers["Retry-After"] == "1"
+    assert "private-device-sentinel" not in response.get_data(as_text=True) + caplog.text
     assert DEVICE not in caplog.text
 
 
-def test_response_cap(product_app,monkeypatch):
-    query=product_app.extensions["admin_web_runtime"].query_service
-    monkeypatch.setattr(query,"visit_protocol_intelligence",lambda *a,**k:AdminQueryResponse("a"*16385))
-    client=product_app.test_client();login(client)
-    response=client.get(PATH,base_url="https://localhost")
-    assert response.status_code==503 and response.json["error"]["code"]=="response_too_large"
+def test_response_cap(product_app, monkeypatch):
+    query = product_app.extensions["admin_web_runtime"].query_service
+    monkeypatch.setattr(query, "device_protocol_intelligence", lambda *a, **k: AdminQueryResponse("a" * 16385))
+    client = product_app.test_client(); login(client)
+    response = client.get(PATH, base_url="https://localhost")
+    assert response.status_code == 503 and response.json["error"]["code"] == "response_too_large"
 
 
-def test_shared_slot_and_exact_visit_ownership_not_device_mac(product_app):
-    query=product_app.extensions["admin_web_runtime"].query_service;requested=[]
-    query._reads=SimpleNamespace(visit_protocol_summary=lambda **kw:requested.append(kw))
-    client=product_app.test_client();login(client)
-    for _ in range(query._config.max_concurrent_queries):assert query._slots.acquire(False)
-    try:
-        response=client.get(PATH,base_url="https://localhost")
-        assert response.status_code==429 and requested==[]
-    finally:
-        for _ in range(query._config.max_concurrent_queries):query._slots.release()
-    assert client.get(PATH,base_url="https://localhost").status_code==404
-    assert requested[0]["site_id"]==SITE_ID and requested[0]["device_id"]==DEVICE and requested[0]["visit_id"]==VISIT
-    with pytest.raises(AdminQueryValidationError):
-        query.visit_protocol_intelligence(AdminPrincipal("operator"),SITE_ID,DEVICE,"invalid")
+def test_device_lookup_precedes_optional_dependency_and_no_fallback(product_app):
+    query = product_app.extensions["admin_web_runtime"].query_service
+    principal = AdminPrincipal("operator")
+    query._protocol_intelligence = None
+    query._devices = SimpleNamespace(get_device=lambda **kwargs: None)
+    with pytest.raises(AdminQueryNotFound): query.device_protocol_intelligence(principal, SITE_ID, DEVICE)
+    query._devices = SimpleNamespace(get_device=lambda **kwargs: SimpleNamespace(canonical_mac=MAC))
+    with pytest.raises(AdminQueryUnavailable): query.device_protocol_intelligence(principal, SITE_ID, DEVICE)
+    with pytest.raises(AdminQueryValidationError): query.device_protocol_intelligence(principal, SITE_ID, DEVICE.upper().replace("1000", "ABCD", 1))
 
 
-def test_page_composition_visit_cards_only(product_app,admin_app):
-    for app,enabled in [(product_app,True),(admin_app,False)]:
-        client=app.test_client();login(client)
-        for suffix in (f"devices/{DEVICE}","visits"):
-            response=client.get(f"/admin/sites/{SITE_ID}/{suffix}",base_url="https://localhost")
-            assert response.status_code==200
-            assert (b"device_protocol_intelligence.js" in response.data) is enabled
-            assert b'id="device-protocol-intelligence"' not in response.data
+@pytest.mark.parametrize("error,mapped", [(ProtocolBusy, AdminQueryBusy), (ProtocolDeadline, AdminQueryDeadline),
+    (ProtocolUnavailable, AdminQueryUnavailable)])
+def test_real_query_translates_semantic_failures(product_app, error, mapped):
+    query = product_app.extensions["admin_web_runtime"].query_service
+    def fail(*a, **k): raise error()
+    query._protocol_intelligence = SimpleNamespace(get_device_protocol_summary=fail)
+    with pytest.raises(mapped): query.device_protocol_intelligence(AdminPrincipal("operator"), SITE_ID, DEVICE)
+
+
+def test_page_section_and_script_only_enabled(product_app, admin_app):
+    for app, enabled in [(product_app, True), (admin_app, False)]:
+        client = app.test_client(); login(client)
+        response = client.get(f"/admin/sites/{SITE_ID}/devices/{DEVICE}", base_url="https://localhost")
+        assert response.status_code == 200
+        html = response.get_data(as_text=True)
+        assert ('id="device-protocol-intelligence"' in html) is enabled
+        assert ('filename=\"device_protocol_intelligence.js\"' in html or 'device_protocol_intelligence.js' in html) is enabled
+        if enabled:
+            for label in ("Network / Protocol Intelligence", "Recent protocol evidence derived from device-relative network metadata.", "device-protocol-refresh"):
+                assert label in html
+        else:
+            response = client.get(PATH, base_url="https://localhost")
+            assert response.status_code == 404
 
 
 def test_flag_default_outer_gate_and_registry_independence():
     assert not admin_web_config_from_settings({}).device_protocol_intelligence_enabled
-    settings={"web_admin_enabled":"false","web_admin_device_protocol_intelligence_enabled":"true"}
-    config=admin_web_config_from_settings(settings)
+    settings = {"web_admin_enabled": "false", "web_admin_device_protocol_intelligence_enabled": "true"}
+    config = admin_web_config_from_settings(settings)
     assert not config.enabled and config.device_protocol_intelligence_enabled
-    plan=AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None,settings,{},{},{}))
-    assert plan.composition_settings(settings)["web_admin_device_protocol_intelligence_enabled"]=="true"
+    plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
+    assert plan.composition_settings(settings)["web_admin_device_protocol_intelligence_enabled"] == "true"
     from app.settings_control.definitions import SettingsDefinitionRegistry
-    assert len(SettingsDefinitionRegistry().for_domain("features"))==17
-    with pytest.raises(AdminWebConfigError):admin_web_config_from_settings({"web_admin_device_protocol_intelligence_enabled":"TRUE"})
+    registry = SettingsDefinitionRegistry()
+    assert all(item.settings_dict_key != "web_admin_device_protocol_intelligence_enabled" for item in registry)
+    assert len(registry.for_domain("features")) == 17
+    assert all(item.settings_dict_key != "web_admin_device_protocol_intelligence_enabled" for item in plan.registry)
+    with pytest.raises(AdminWebConfigError):
+        admin_web_config_from_settings({"web_admin_device_protocol_intelligence_enabled": "TRUE"})
 
 
-@pytest.mark.parametrize("enabled",[False,True])
-def test_admin_never_composes_raw_projection_even_when_enabled(monkeypatch,tmp_path,enabled):
+@pytest.mark.parametrize("enabled,projection", [(False, "unused"), (True, "disabled"), (True, "invalid"), (True, "valid")])
+def test_composition_uses_only_canonical_projection_config(admin_app, monkeypatch, tmp_path, enabled, projection):
     import app.network_metadata_projection.config as configuration
-    monkeypatch.setattr(configuration,"projection_config_from_env",lambda:pytest.fail("Admin may only open Visits DB"))
-    values=enabled_settings(web_admin_device_protocol_intelligence_enabled="true" if enabled else "false")
-    plan=AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None,values,{},{},{}))
-    runtime=create_admin_web_runtime(values,SimpleNamespace(state="active",visit_service=object()),
-        SimpleNamespace(repository=SimpleNamespace(config=SimpleNamespace(db_path=tmp_path/"r"))),
-        SimpleNamespace(repository=SimpleNamespace(db_path=tmp_path/"v")),
-        SimpleNamespace(_repository=SimpleNamespace(db_path=tmp_path/"o")),logging.getLogger("ni03"),feature_plan=plan)
-    assert runtime.state=="active" and runtime.feature_plan is plan
-    assert not hasattr(runtime.query_service,"_protocol_intelligence")
-    assert not any(tmp_path.iterdir())
+    import app.network_metadata_projection.read_service as reads
+    values = enabled_settings(web_admin_device_protocol_intelligence_enabled="true" if enabled else "false")
+    plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, values, {}, {}, {}))
+    calls = []
+    path = str(tmp_path / "canonical.sqlite3")
+    def get_config():
+        calls.append("config")
+        if projection == "invalid": raise ValueError("safe config failure")
+        return ProjectionConfig(enabled=projection == "valid", db_path=path)
+    original = reads.DeviceNetworkMetadataReadService
+    def reader(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+    monkeypatch.setattr(configuration, "projection_config_from_env", get_config)
+    monkeypatch.setattr(reads, "DeviceNetworkMetadataReadService", reader)
+    runtime = create_admin_web_runtime(values, SimpleNamespace(state="active", visit_service=object()),
+        SimpleNamespace(repository=SimpleNamespace(config=SimpleNamespace(db_path=tmp_path / "r"))),
+        SimpleNamespace(repository=SimpleNamespace(db_path=tmp_path / "v")),
+        SimpleNamespace(_repository=SimpleNamespace(db_path=tmp_path / "o")), logging.getLogger("ni03"), feature_plan=plan)
+    assert runtime.state == "active" and runtime.feature_plan is plan and not Path(path).exists()
+    if not enabled: assert calls == []
+    elif projection == "invalid": assert calls == ["config"] and runtime.query_service._protocol_intelligence is None
+    else:
+        assert calls[1]["db_path"] == path and calls[1]["enabled"] is (projection == "valid")
 
 
-def test_open_visit_background_to_real_readonly_api_no_source_query(product_app,visit_config,visit_repository,visit_service,monkeypatch):
-    import hashlib
-    import sqlite3
-    from app.admin_web.read_gateway import AdminSqlReadGateway
-    from tests.visit_lifecycle.test_visit_protocol_materialization import Source, fact, worker, SNAPSHOT
+def test_disabled_admin_never_composes_projection(monkeypatch):
+    import app.network_metadata_projection.config as configuration
+    monkeypatch.setattr(configuration, "projection_config_from_env", lambda: pytest.fail("outer gate"))
+    values = {"web_admin_enabled": "false", "web_admin_device_protocol_intelligence_enabled": "true"}
+    plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, values, {}, {}, {}))
+    runtime = create_admin_web_runtime(values, None, None, None, None, logging.getLogger("ni03"), feature_plan=plan)
+    assert runtime.state == "disabled" and runtime.feature_plan is plan
+
+
+def test_deployment_artifact_exact_and_no_settings_write_scope():
+    root = Path(__file__).parents[2]
+    assert (root / "deploy/network-metadata-projection/captive-portal-network-metadata-projection-read.conf").read_text() == "[Service]\nEnvironmentFile=-/etc/captive-portal/network-metadata-projection.env\n"
+    document = (root / "deploy/network-metadata-projection/README.md").read_text()
+    for token in ("20-network-metadata-projection-read.conf", "ACTIVATION=HOLD", "semantically", "/etc/default/captive-portal"):
+        assert token in document
+
+
+def test_denied_device_capability_hides_panel_and_forbids_api(product_app, monkeypatch):
+    policy = product_app.extensions["admin_web_runtime"].access_policy
+    original = type(policy).authorize
+    monkeypatch.setattr(type(policy), "authorize", lambda self, principal, capability, site: False if capability == "admin.read.device" else original(self, principal, capability, site))
+    client = product_app.test_client(); login(client)
+    page = client.get(f"/admin/sites/{SITE_ID}/devices/{DEVICE}", base_url="https://localhost")
+    assert page.status_code == 200 and b'device-protocol-intelligence' not in page.data
+    assert client.get(PATH, base_url="https://localhost").status_code == 403
+
+
+def test_shared_admin_slot_and_exact_device_not_found(product_app):
+    query = product_app.extensions["admin_web_runtime"].query_service
+    semaphore = query._slots
+    for _ in range(query._config.max_concurrent_queries): assert semaphore.acquire(False)
+    try:
+        client = product_app.test_client(); login(client)
+        response = client.get(PATH, base_url="https://localhost")
+        assert response.status_code == 429 and response.headers["Retry-After"] == "1"
+    finally:
+        for _ in range(query._config.max_concurrent_queries): semaphore.release()
+    requested = []
+    def missing(**kwargs):
+        requested.append(kwargs)
+        return None
+    query._devices = SimpleNamespace(get_device=missing)
+    assert client.get(PATH, base_url="https://localhost").status_code == 404
+    assert requested[0]["site_id"] == SITE_ID and requested[0]["device_id"] == DEVICE
+
+
+@pytest.mark.parametrize("state,source,attribution,expected", [("attribution_unavailable", "usable", "degraded", "recent"),
+    ("source_unavailable", "unavailable", "unknown", "stale"), ("capacity_halted", "degraded", "degraded", "recent")])
+def test_committed_evidence_degraded_returns_200(product_app, state, source, attribution, expected):
+    from datetime import datetime, timezone, timedelta
+    from app.network_metadata.validation import ni_format_utc
+    class CurrentReader:
+        def read_protocol_latest_snapshot(self, *args, **kwargs):
+            return dict(runtime_state=state, binding_state="authoritative", bound_device_id=DEVICE,
+                facts=({"edge_id": "a" * 64, "source_event_family": "dns", "event_at": ni_format_utc(datetime.now(timezone.utc) - timedelta(seconds=1))},))
+    product_app.extensions["admin_web_runtime"].query_service._protocol_intelligence = DeviceProtocolIntelligenceReadService(CurrentReader())
+    client = product_app.test_client(); login(client)
+    response = client.get(PATH, base_url="https://localhost")
+    assert response.status_code == 200
+    value = response.json["result"]
+    assert value["availability_state"] == "degraded" and value["freshness_state"] == expected
+    assert value["coverage"]["source_state"] == source and value["coverage"]["attribution_state"] == attribution
+
+
+@pytest.mark.parametrize("count", [0, 1, 20000, 20001, 28976, 30000, 100001])
+def test_issue293_real_projection_high_volume_http200(product_app, tmp_path, monkeypatch, count):
+    from datetime import datetime
+    from tests.network_metadata_projection.test_protocol_latest_snapshot import seed, AT, DEVICE as bound_device
     from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
-    outcome=visit_service.submit_authorized(make_request(site_id=SITE_ID))
-    visit_repository.record_reconciliation_attempt(outcome.visit_id,device_id=DEVICE,initial_snapshot_id=SNAPSHOT,
-        attempted_at="2026-08-13T10:00:00.000Z",retry_at="2026-08-13T10:01:00.000Z")
-    source=Source();source.facts=[fact("10:00:01"),fact("10:00:02","tls","b"),fact("10:00:03","quic","c")]
-    assert worker(visit_config,visit_repository,source).run_protocol_once(now="2026-08-13T10:01:00.000Z")==1
-    query=product_app.extensions["admin_web_runtime"].query_service
-    query._reads=AdminSqlReadGateway(visit_config.db_path,"absent-observation.sqlite3")
-    monkeypatch.setattr(DeviceNetworkMetadataReadService,"read_visit_protocol_snapshot",lambda *a,**k:pytest.fail("HTTP must not query NI02"))
-    path=PATH.replace(VISIT,outcome.visit_id);client=product_app.test_client();login(client)
-    with sqlite3.connect(visit_config.db_path) as c:c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    before=hashlib.sha256(Path(visit_config.db_path).read_bytes()).hexdigest()
-    response=client.get(path,base_url="https://localhost")
-    assert response.status_code==200
-    value=response.json["result"]
-    assert value["visit_status"]=="open" and len(value["protocols"])==3
-    assert value["visit_id"]==outcome.visit_id and value["historical_completeness_claimed"] is False
-    assert client.get(path.replace(DEVICE,"90000000-0000-4000-8000-000000000001"),base_url="https://localhost").status_code==404
-    assert client.get(path.replace(outcome.visit_id,VISIT),base_url="https://localhost").status_code==404
-    assert hashlib.sha256(Path(visit_config.db_path).read_bytes()).hexdigest()==before
-
-
-def test_same_open_visit_shows_both_materialized_sections_no_http_source_reads(product_app,delivery,visit_repository,visit_service,monkeypatch):
-    from app.admin_web.read_gateway import AdminSqlReadGateway
-    from tests.visit_lifecycle.test_visit_service_delivery import open_visit,put,evaluated,NOW,DEVICE as SOURCE_DEVICE
-    from tests.visit_lifecycle.test_visit_protocol_materialization import Source
-    import app.network_service_recognition.materialization_repository as source_module
-    source,gen,w=delivery;visit=open_visit(visit_service,visit_repository)
-    assert SOURCE_DEVICE==DEVICE
-    protocol=Source();protocol.facts=[dict(source_event_family=f,event_at='2026-10-12T14:10:00.000001Z',edge_id=e*64) for f,e in [('dns','a'),('tls','b'),('quic','c')]]
-    w.protocol_reader=protocol
-    assert w.run_protocol_once(now=NOW)==1
-    put(source,gen,evaluated());assert w.run_services_once(now=NOW)==1
-    query=product_app.extensions['admin_web_runtime'].query_service
-    query._reads=AdminSqlReadGateway(visit_repository.db_path,'absent.sqlite3')
-    monkeypatch.setattr(source_module,'read_visit_delivery_page',lambda *a,**k:pytest.fail('Admin GET must not open NI04'))
-    client=product_app.test_client();login(client)
-    path=PATH.replace(VISIT,visit.visit_id)
-    protocols=client.get(path,base_url='https://localhost')
-    services=client.get(path.replace('/protocol-intelligence','/recognized-services'),base_url='https://localhost')
-    assert protocols.status_code==services.status_code==200
-    assert protocols.json['result']['visit_status']==services.json['result']['visit_status']=='open'
-    assert len(protocols.json['result']['protocols'])==3
-    history=services.json['result'];assert history['type']=='VisitServiceHistoryV1' and history['services'][0]['display_name']=='YouTube'
-    assert history['services'][0]['distinct_observation_count']==1 and history['historical_completeness_claimed'] is False
-    for secret in ('client_mac','edge_id','source_ref','source_observation_id','binding_seq','sni','www.youtube.com'):
-        assert secret not in services.get_data(as_text=True)
-    assert client.get(path.replace(DEVICE,'90000000-0000-4000-8000-000000000001').replace('/protocol-intelligence','/recognized-services'),base_url='https://localhost').status_code==404
-    assert client.get(path.replace('/protocol-intelligence','/recognized-services')+'?extra=1',base_url='https://localhost').status_code==400
-    unauthenticated=product_app.test_client().get(path.replace('/protocol-intelligence','/recognized-services'),base_url='https://localhost')
-    assert unauthenticated.status_code==401 and unauthenticated.json['api_version']=='admin.visit.recognized-services.v1'
+    import app.admin_web.query_service as queries
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return AT
+    state = seed(tmp_path, count, site=SITE_ID, mac=MAC)
+    try:
+        assert bound_device == DEVICE
+        monkeypatch.setattr(queries, "datetime", FixedDateTime)
+        query = product_app.extensions["admin_web_runtime"].query_service
+        query._protocol_intelligence = DeviceProtocolIntelligenceReadService(DeviceNetworkMetadataReadService(state.config.db_path))
+        client = product_app.test_client(); login(client)
+        response = client.get(PATH, base_url="https://localhost")
+        assert response.status_code == 200
+        result = response.json["result"]
+        assert result["evidence_state"] == ("present" if count else "empty")
+        assert result["identity_binding_state"] == "authoritative"
+        assert result["coverage"]["historical_window_completeness_claimed"] is False
+        assert len(result["recent_protocols"]) == min(count, 3)
+        assert all(key not in response.get_data(as_text=True) for key in ("client_mac", "edge_id", "peer_ip"))
+    finally:
+        state.repo.close()

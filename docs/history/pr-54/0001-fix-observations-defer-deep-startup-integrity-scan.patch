@@ -1,0 +1,577 @@
+From 7e203644d6e94c4386de908f8b038b32131a1062 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Thu, 20 Aug 2026 22:33:07 +0000
+Subject: [PATCH] fix(observations): defer deep startup integrity scan
+
+---
+ app/observations/integrity.py         | 121 ++++++++++++++++++++++++++
+ app/observations/repository.py        |  45 ++++++++--
+ app/observations/runtime.py           |  23 ++++-
+ tests/observations/test_integrity.py  |  99 +++++++++++++++++++++
+ tests/observations/test_repository.py |  40 +++++++++
+ tests/observations/test_runtime.py    |  95 ++++++++++++++++++++
+ 6 files changed, 412 insertions(+), 11 deletions(-)
+ create mode 100644 app/observations/integrity.py
+ create mode 100644 tests/observations/test_integrity.py
+
+diff --git a/app/observations/integrity.py b/app/observations/integrity.py
+new file mode 100644
+index 0000000..7e069a6
+--- /dev/null
++++ b/app/observations/integrity.py
+@@ -0,0 +1,121 @@
++"""Bounded background integrity validation for Observation storage."""
++
++from __future__ import annotations
++
++import threading
++import time
++from typing import Callable
++
++from .repository import ObservationRepository
++from .telemetry import ObservationTelemetry
++
++
++INTEGRITY_CHECK_MAX_DURATION_SECONDS = 900.0
++
++
++class ObservationIntegrityWorker:
++    """Run the expensive SQLite integrity scan outside portal readiness."""
++
++    def __init__(
++        self,
++        repository: ObservationRepository,
++        telemetry: ObservationTelemetry,
++        *,
++        max_duration_seconds: float = INTEGRITY_CHECK_MAX_DURATION_SECONDS,
++        monotonic: Callable[[], float] = time.monotonic,
++    ):
++        self._repository = repository
++        self._telemetry = telemetry
++        self._max_duration_seconds = max(0.001, float(max_duration_seconds))
++        self._monotonic = monotonic
++        self._stop_event = threading.Event()
++        self._lock = threading.Lock()
++        self._thread: threading.Thread | None = None
++        self.last_error: Exception | None = None
++        self.completed = False
++        self.timed_out = False
++
++    @property
++    def running(self) -> bool:
++        with self._lock:
++            return self._thread is not None and self._thread.is_alive()
++
++    def start(self) -> bool:
++        with self._lock:
++            if self._thread is not None and self._thread.is_alive():
++                return False
++            self._stop_event.clear()
++            self.last_error = None
++            self.completed = False
++            self.timed_out = False
++            self._thread = threading.Thread(
++                target=self._run,
++                name="observation-integrity",
++                daemon=True,
++            )
++            self._thread.start()
++            return True
++
++    def stop(self, timeout: float | None = None) -> bool:
++        with self._lock:
++            thread = self._thread
++        if thread is None:
++            return True
++        self._stop_event.set()
++        thread.join(None if timeout is None else max(0.0, float(timeout)))
++        stopped = not thread.is_alive()
++        if stopped:
++            with self._lock:
++                if self._thread is thread:
++                    self._thread = None
++        return stopped
++
++    def _run(self) -> None:
++        started = self._monotonic()
++        deadline = started + self._max_duration_seconds
++        self._telemetry.emit(
++            "observation.integrity_check_started",
++            max_duration_seconds=self._max_duration_seconds,
++        )
++        try:
++            completed = self._repository.validate_runtime_health(
++                should_interrupt=lambda: (
++                    self._stop_event.is_set()
++                    or self._monotonic() >= deadline
++                )
++            )
++        except Exception as exc:
++            self.last_error = exc
++            self._telemetry.emit(
++                "observation.integrity_check_failed",
++                "error",
++                failure_category="storage_error",
++                duration_ms=round(
++                    (self._monotonic() - started) * 1000,
++                    3,
++                ),
++            )
++            return
++
++        duration_ms = round((self._monotonic() - started) * 1000, 3)
++        if completed:
++            self.completed = True
++            self.last_error = None
++            self._telemetry.emit(
++                "observation.integrity_check_completed",
++                duration_ms=duration_ms,
++            )
++            return
++        if self._stop_event.is_set():
++            self._telemetry.emit(
++                "observation.integrity_check_interrupted",
++                duration_ms=duration_ms,
++            )
++            return
++        self.timed_out = True
++        self._telemetry.emit(
++            "observation.integrity_check_timed_out",
++            "warning",
++            duration_ms=duration_ms,
++            max_duration_seconds=self._max_duration_seconds,
++        )
+diff --git a/app/observations/repository.py b/app/observations/repository.py
+index 33667d5..0d45078 100644
+--- a/app/observations/repository.py
++++ b/app/observations/repository.py
+@@ -575,14 +575,39 @@ class ObservationRepository:
+             abandoned_cycles=max(0, int(updated)),
+         )
+ 
+-    def validate_runtime_health(self) -> None:
++    def validate_runtime_health(
++        self,
++        *,
++        should_interrupt: Callable[[], bool] | None = None,
++    ) -> bool:
++        interrupted = False
++
++        def progress_handler() -> int:
++            nonlocal interrupted
++            interrupted = bool(
++                should_interrupt is not None and should_interrupt()
++            )
++            return int(interrupted)
++
+         try:
+             with closing(self._connect(readonly=True)) as connection:
+                 self._startup_check(connection)
++                if should_interrupt is not None:
++                    connection.set_progress_handler(progress_handler, 10_000)
++                try:
++                    self._integrity_check(connection)
++                finally:
++                    if should_interrupt is not None:
++                        connection.set_progress_handler(None, 0)
+         except ObservationSchemaError:
+             raise
++        except sqlite3.OperationalError as exc:
++            if interrupted and "interrupted" in str(exc).lower():
++                return False
++            raise _storage_error(exc) from exc
+         except sqlite3.Error as exc:
+             raise _storage_error(exc) from exc
++        return True
+ 
+     def create_cycle(
+         self,
+@@ -995,12 +1020,21 @@ class ObservationRepository:
+             )
+         if version != SCHEMA_VERSION:
+             raise ObservationSchemaError("Observation schema version mismatch")
++        self._validate_schema(connection)
++
++    def _integrity_check(self, connection: sqlite3.Connection) -> None:
+         quick = connection.execute("PRAGMA quick_check").fetchone()
+         if not quick or str(quick[0]) != "ok":
+             raise ObservationSchemaError(
+-                "Observation startup health check failed"
++                "Observation storage integrity check failed"
++            )
++        violations = connection.execute(
++            "PRAGMA foreign_key_check"
++        ).fetchone()
++        if violations is not None:
++            raise ObservationSchemaError(
++                "Observation foreign key validation failed"
+             )
+-        self._validate_schema(connection)
+ 
+     def _validate_schema(self, connection: sqlite3.Connection) -> None:
+         tables = self._table_names(connection)
+@@ -1084,11 +1118,6 @@ class ObservationRepository:
+                 raise ObservationSchemaError(
+                     f"Observation foreign key is invalid: {table}"
+                 )
+-        violations = connection.execute("PRAGMA foreign_key_check").fetchone()
+-        if violations is not None:
+-            raise ObservationSchemaError(
+-                "Observation foreign key validation failed"
+-            )
+ 
+     @staticmethod
+     def _table_names(connection: sqlite3.Connection) -> set[str]:
+diff --git a/app/observations/runtime.py b/app/observations/runtime.py
+index 0d677e9..a8462ab 100644
+--- a/app/observations/runtime.py
++++ b/app/observations/runtime.py
+@@ -11,6 +11,7 @@ from .ap_worker import APObservationWorker
+ from .cleanup import ObservationCleanup, ObservationCleanupWorker
+ from .client_worker import ClientObservationWorker
+ from .config import observation_config_from_settings
++from .integrity import ObservationIntegrityWorker
+ from .models import ObservationConfig, ObservationConfigError
+ from .repository import ObservationRepository
+ from .telemetry import ObservationTelemetry
+@@ -70,6 +71,10 @@ class ObservationFoundationRuntime:
+             config,
+             telemetry=telemetry,
+         )
++        self.integrity_worker = ObservationIntegrityWorker(
++            self.repository,
++            telemetry,
++        )
+         self._state = "disabled"
+         self._lock = threading.RLock()
+ 
+@@ -81,6 +86,8 @@ class ObservationFoundationRuntime:
+             self.client_worker.degraded
+             or self.ap_worker.degraded
+             or self.cleanup_worker.last_error is not None
++            or self.integrity_worker.last_error is not None
++            or self.integrity_worker.timed_out
+         ):
+             return "degraded"
+         return current
+@@ -92,13 +99,13 @@ class ObservationFoundationRuntime:
+             self._state = "starting"
+         try:
+             initialized = self.repository.initialize()
+-            self.repository.validate_runtime_health()
+             started = []
+             if self.config.client_enabled:
+                 started.append(self.client_worker.start())
+             if self.config.ap_enabled:
+                 started.append(self.ap_worker.start())
+             started.append(self.cleanup_worker.start())
++            started.append(self.integrity_worker.start())
+             if not all(started):
+                 raise RuntimeError("Observation worker did not start")
+         except Exception:
+@@ -130,7 +137,12 @@ class ObservationFoundationRuntime:
+         timeout = self.config.shutdown_timeout_seconds if timeout_seconds is None else max(0.0, float(timeout_seconds))
+         deadline = time.monotonic() + timeout
+         success = True
+-        for worker in (self.ap_worker, self.client_worker, self.cleanup_worker):
++        for worker in (
++            self.integrity_worker,
++            self.ap_worker,
++            self.client_worker,
++            self.cleanup_worker,
++        ):
+             remaining = max(0.0, deadline - time.monotonic())
+             try:
+                 success = bool(worker.stop(remaining)) and success
+@@ -144,7 +156,12 @@ class ObservationFoundationRuntime:
+         return False
+ 
+     def _stop_started_workers(self) -> None:
+-        for worker in (self.ap_worker, self.client_worker, self.cleanup_worker):
++        for worker in (
++            self.integrity_worker,
++            self.ap_worker,
++            self.client_worker,
++            self.cleanup_worker,
++        ):
+             try:
+                 worker.stop(0.0)
+             except Exception:
+diff --git a/tests/observations/test_integrity.py b/tests/observations/test_integrity.py
+new file mode 100644
+index 0000000..7a8d827
+--- /dev/null
++++ b/tests/observations/test_integrity.py
+@@ -0,0 +1,99 @@
++from __future__ import annotations
++
++import time
++
++from app.observations.integrity import ObservationIntegrityWorker
++from app.observations.telemetry import ObservationTelemetry
++
++
++class Events:
++    def __init__(self):
++        self.items = []
++
++    def safe_emit_system(self, event, level="info", **fields):
++        self.items.append((event, level, fields))
++        return True
++
++
++class Logger:
++    def log(self, *args, **kwargs):
++        raise AssertionError("telemetry fallback should not be used")
++
++
++def wait_until_stopped(worker, timeout=1.0):
++    deadline = time.monotonic() + timeout
++    while worker.running and time.monotonic() < deadline:
++        time.sleep(0.01)
++    assert worker.running is False
++
++
++def test_integrity_worker_reports_success_without_blocking_start():
++    class Repository:
++        def validate_runtime_health(self, *, should_interrupt):
++            assert should_interrupt() is False
++            return True
++
++    events = Events()
++    worker = ObservationIntegrityWorker(
++        Repository(),
++        ObservationTelemetry(events, Logger()),
++    )
++
++    assert worker.start() is True
++    wait_until_stopped(worker)
++
++    assert worker.completed is True
++    assert worker.timed_out is False
++    assert worker.last_error is None
++    assert [item[0] for item in events.items] == [
++        "observation.integrity_check_started",
++        "observation.integrity_check_completed",
++    ]
++
++
++def test_integrity_worker_reports_hard_deadline():
++    class Repository:
++        def validate_runtime_health(self, *, should_interrupt):
++            return not should_interrupt()
++
++    values = iter((0.0, 2.0, 2.0))
++    events = Events()
++    worker = ObservationIntegrityWorker(
++        Repository(),
++        ObservationTelemetry(events, Logger()),
++        max_duration_seconds=1.0,
++        monotonic=lambda: next(values, 2.0),
++    )
++
++    assert worker.start() is True
++    wait_until_stopped(worker)
++
++    assert worker.completed is False
++    assert worker.timed_out is True
++    assert worker.last_error is None
++    assert [item[0] for item in events.items] == [
++        "observation.integrity_check_started",
++        "observation.integrity_check_timed_out",
++    ]
++
++
++def test_integrity_worker_failure_is_sanitized_and_degraded():
++    class Repository:
++        def validate_runtime_health(self, *, should_interrupt):
++            raise RuntimeError("sensitive database detail")
++
++    events = Events()
++    worker = ObservationIntegrityWorker(
++        Repository(),
++        ObservationTelemetry(events, Logger()),
++    )
++
++    assert worker.start() is True
++    wait_until_stopped(worker)
++
++    assert isinstance(worker.last_error, RuntimeError)
++    event, level, fields = events.items[-1]
++    assert event == "observation.integrity_check_failed"
++    assert level == "error"
++    assert fields["failure_category"] == "storage_error"
++    assert "sensitive" not in repr(fields)
+diff --git a/tests/observations/test_repository.py b/tests/observations/test_repository.py
+index 2e4eff8..2f367a8 100644
+--- a/tests/observations/test_repository.py
++++ b/tests/observations/test_repository.py
+@@ -337,6 +337,46 @@ def test_startup_detects_missing_required_index(observation_config):
+         repository.initialize("2026-01-02T00:00:00.000Z")
+ 
+ 
++def test_initialize_does_not_run_full_integrity_scan(
++    observation_config,
++    monkeypatch,
++):
++    repository = ObservationRepository(observation_config)
++
++    def fail_if_called(connection):
++        raise AssertionError("full integrity scan entered startup path")
++
++    monkeypatch.setattr(repository, "_integrity_check", fail_if_called)
++    initialized = repository.initialize("2026-01-01T00:00:00.000Z")
++
++    assert initialized.created is True
++    with pytest.raises(AssertionError, match="full integrity scan"):
++        repository.validate_runtime_health()
++
++
++def test_runtime_health_scan_honors_interrupt_callback(
++    repository,
++    monkeypatch,
++):
++    def expensive_scan(connection):
++        connection.execute(
++            """
++            WITH RECURSIVE sequence(value) AS (
++                SELECT 1
++                UNION ALL
++                SELECT value + 1 FROM sequence WHERE value < 1000000
++            )
++            SELECT sum(value) FROM sequence
++            """
++        ).fetchone()
++
++    monkeypatch.setattr(repository, "_integrity_check", expensive_scan)
++
++    assert repository.validate_runtime_health(
++        should_interrupt=lambda: True
++    ) is False
++
++
+ def test_strict_fixed_width_utc_and_nonfinite_values_are_rejected(repository):
+     with pytest.raises(ObservationValidationError):
+         repository.create_cycle(
+diff --git a/tests/observations/test_runtime.py b/tests/observations/test_runtime.py
+index bb68b0f..1bea395 100644
+--- a/tests/observations/test_runtime.py
++++ b/tests/observations/test_runtime.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import threading
++import time
+ from pathlib import Path
+ from types import SimpleNamespace
+ 
+@@ -89,6 +91,85 @@ def test_runtime_preserves_provider_identity_recovers_starts_and_stops(tmp_path)
+     assert "observation.runtime_stopped" in names
+ 
+ 
++def test_runtime_start_does_not_wait_for_full_integrity_scan(
++    tmp_path,
++    monkeypatch,
++):
++    data = tmp_path / "data"
++    data.mkdir(mode=0o750)
++    runtime = create_observation_foundation(
++        enabled(tmp_path),
++        object(),
++        Telemetry(),
++    )
++    entered = threading.Event()
++    release = threading.Event()
++
++    def delayed_health_check(*, should_interrupt):
++        entered.set()
++        while not release.wait(0.01):
++            if should_interrupt():
++                return False
++        return True
++
++    monkeypatch.setattr(
++        runtime.repository,
++        "validate_runtime_health",
++        delayed_health_check,
++    )
++
++    started_at = time.monotonic()
++    assert runtime.start() is True
++    elapsed = time.monotonic() - started_at
++    try:
++        assert elapsed < 0.5
++        assert entered.wait(1)
++        assert runtime.state == "active"
++        assert runtime.integrity_worker.running is True
++    finally:
++        release.set()
++        runtime.stop(2)
++
++
++def test_background_integrity_failure_degrades_without_stopping_runtime(
++    tmp_path,
++    monkeypatch,
++):
++    data = tmp_path / "data"
++    data.mkdir(mode=0o750)
++    telemetry = Telemetry()
++    runtime = create_observation_foundation(
++        enabled(tmp_path),
++        object(),
++        telemetry,
++    )
++
++    def failed_health_check(*, should_interrupt):
++        raise RuntimeError("integrity failure")
++
++    monkeypatch.setattr(
++        runtime.repository,
++        "validate_runtime_health",
++        failed_health_check,
++    )
++
++    assert runtime.start() is True
++    try:
++        deadline = time.monotonic() + 1
++        while (
++            runtime.integrity_worker.last_error is None
++            and time.monotonic() < deadline
++        ):
++            time.sleep(0.01)
++        assert runtime.state == "degraded"
++        assert runtime.client_worker.running is True
++        assert runtime.ap_worker.running is True
++        names = [event[0] for event in telemetry.events]
++        assert "observation.integrity_check_failed" in names
++    finally:
++        runtime.stop(2)
++
++
+ def test_stop_timeout_leaves_runtime_stopping(tmp_path, monkeypatch):
+     data = tmp_path / "data"
+     data.mkdir(mode=0o750)
+@@ -141,6 +222,20 @@ def test_cleanup_success_clears_runtime_degraded_state(tmp_path, monkeypatch):
+     assert runtime.state == "active"
+ 
+ 
++def test_integrity_timeout_marks_runtime_degraded(tmp_path):
++    data = tmp_path / "data"
++    data.mkdir(mode=0o750)
++    runtime = create_observation_foundation(
++        enabled(tmp_path),
++        object(),
++        Telemetry(),
++    )
++    runtime._state = "active"
++    runtime.integrity_worker.timed_out = True
++
++    assert runtime.state == "degraded"
++
++
+ def test_process_wiring_passes_same_provider_and_app_telemetry(monkeypatch):
+     events = []
+     provider = object()
+-- 
+2.51.1
+

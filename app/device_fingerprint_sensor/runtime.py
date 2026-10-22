@@ -33,7 +33,7 @@ class SensorRuntime:
         self.state = "initializing"
         self.reason: str | None = None
         self.preflight = preflight or InterfacePreflight(config.interface)
-        self.capture = capture or RawCapture(config.interface)
+        self.capture = capture if capture is not None else RawCapture(config.interface, config.guest_cidrs)
         self.eve = eve or EveReceiver(config.eve_socket_path, max_datagram_bytes=config.eve_max_datagram_bytes)
         self.spool = spool or SensorSpool(
             config.spool_path, total_budget_bytes=config.spool_total_budget_bytes,
@@ -63,6 +63,16 @@ class SensorRuntime:
         self._delivery_available = True
         self._delivery_permanent_fault = False
         self._attribution = None
+        # No I/O at composition; absent/unprovisioned channel stays fail-closed.
+        self._operations_metadata = None
+        try:
+            from .operations_metadata import SensorMetadataPublisher
+            self._operations_metadata = SensorMetadataPublisher({
+                "sensor_spool": config.spool_path,
+                "network_attribution": attribution_config.db_path if attribution_config is not None and attribution_config.enabled else None,
+            }, health_provider=self._operations_health)
+        except Exception:
+            pass  # Optional metadata composition cannot prevent Sensor startup.
         self._capture_preflight_passed = False
         self._routine_aggregate = None
         if config.io_telemetry_aggregation_enabled:
@@ -281,6 +291,25 @@ class SensorRuntime:
                 self._publish_local_health()
             self._refresh_state()
             self._emit_metrics()
+            if not self.stop_event.is_set():
+                try:
+                    self._operations_metadata.publish(self.stop_event)
+                except Exception:
+                    pass  # Optional metadata never changes capture/spool health.
+
+    def _operations_health(self):
+        """Already-refreshed lifecycle only; never a health-triggered DB read."""
+        from app.operations_health import sensor_health
+        heartbeat = self._suricata_last_heartbeat
+        return sensor_health(self.state, dict(
+            preflight=self._capture_preflight_passed is True,
+            raw_capture=all(self._local_health.get(kind, (None,))[0] == "available" for kind in ("dhcp", "tcp_syn")),
+            suricata=(self._suricata_ready is True and heartbeat is not None
+                      and 0 <= self.monotonic() - heartbeat <= SURICATA_HEARTBEAT_TIMEOUT_SECONDS
+                      and all(self._local_health.get(kind, (None,))[0] == "available" for kind in ("tls_client", "quic_client"))),
+            delivery=self._delivery_available is True and not self._delivery_permanent_fault
+                     and not getattr(self.producer, "permanent_fault", False),
+            spool=not self.spool.capacity_blocked and not self.stop_event.is_set()))
 
     def _set_local(self, kinds: tuple[str, ...], status: str, reason: str | None) -> None:
         events = []

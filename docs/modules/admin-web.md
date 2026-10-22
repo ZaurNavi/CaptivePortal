@@ -339,22 +339,35 @@ unsafe components produce unknown totals; inode collisions are not double-counte
 Partial trustworthy siblings survive individual failures. The response limit is
 48,000 UTF-8 bytes with at most 32 safe partial-failure entries. No absolute paths,
 raw systemd output, file exceptions, environment or credentials reach the browser.
-
-Captiv-Prod integration reads only the fixed privileged manifest
-`/etc/captive-portal/admin-db-services-v1.json`. Its direct-parent roots are
-`/opt/CaptivePortal/data`, `/var/lib/captivprod-sensor` and
-`/var/lib/captivprod-evidence`; filenames are catalog-bound, and the three
-attested Evidence/Sensor bindings cannot fall back to legacy locations.
-Fingerprint Evidence's deployment filename is `evidence.sqlite3`, not the old
-application default `device_fingerprint_evidence.sqlite3`. This Operations
-catalog correction does not change the Device Card reader configuration.
-Other bindings require operator verification, not filesystem discovery.
-Code-only delivery keeps `WEB_ADMIN_DB_SERVICES_ENABLED=false`; it neither grants
-`admin.read.operations` nor creates a manifest, adjusts ACLs, or activates sampling.
-Missing/denied metadata is unknown/unavailable; file presence is never DB health.
 There is no maintenance-attestation ingestion, control operation, scheduler,
 daemon, new persistent store or writable Settings integration. Activation and
 rollback (flag OFF + controlled restart) remain separate Owner decisions.
+
+### Historical owner startup checks (Issue #298)
+
+Operations v2 now displays existing owner initialization results separately from
+file metadata and application health. It does not run a check. Each visible
+result names the actual completed scope and original UTC check time; a refreshed
+report is not a newly executed check. `quick_check` is not `integrity_check`.
+The exact17-store owner/check mapping and deployment boundary are documented in
+[`operations-owner-checks-298.md`](../deployment/operations-owner-checks-298.md).
+
+The v1 DTO remains unchanged. V2 preserves `store_verification.status`, `scope`,
+`as_of`, `source`, adding `freshness`/safe `reason` for evidence-bearing results.
+Legacy four-field `not_attested` remains valid. Explicit states include passed,
+failed, unknown, stale and disabled-Settings not_applicable. PASS means a
+historical startup check of that scope, never continuous database health.
+Restart/boot/epoch mismatch, file identity change or expired source report
+revokes current evidence. One-shot owner reports naturally become historical/
+stale; no heartbeat/check is invented to keep the panel green.
+
+Portal-owned results are process-local; Sensor v3 and NI02B v2 extend their
+existing exact-versioned4096-byte reports/cadence. Other admitted owners may emit
+one startup-only tmpfs report per process. All are consumed by the same30-second
+sampler/cache; no additional browser poll, SQLite open/PRAGMA or source RPC is
+introduced. Report readers never fall back to raw Sensor storage. Missing future
+provisioning means no evidence, not permission to create directories or relax
+access controls. Independent acceptance and Owner deployment remain separate.
 
 ### Operational Data Flow (R1)
 

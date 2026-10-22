@@ -1,0 +1,2278 @@
+diff --git a/app/network_metadata/projection_source.py b/app/network_metadata/projection_source.py
+index 95265db..61af0a0 100644
+--- a/app/network_metadata/projection_source.py
++++ b/app/network_metadata/projection_source.py
+@@ -16,6 +16,10 @@ from .schema import validate_schema
+ from .validation import canonical_uuid, digest, integer, ip, ni_timestamp
+ 
+ 
++class NetworkMetadataProjectionScopeUntrusted(NetworkMetadataStorageUnavailable):
++    """Closed source-scope proof failure, distinct from a storage outage."""
++
++
+ @dataclass(frozen=True, slots=True, repr=False)
+ class NetworkMetadataProjectionSourceRecordV1:
+     observation_id: str
+@@ -37,6 +41,7 @@ class NetworkMetadataProjectionSourceRecordV1:
+     src_port: int | None
+     dst_port: int | None
+     transport_protocol: str | None
++    binding_valid_from_utc: str | None = None
+ 
+ 
+ class NetworkMetadataProjectionSourceReadService:
+@@ -55,6 +60,8 @@ class NetworkMetadataProjectionSourceReadService:
+             connection.execute("BEGIN")
+             validate_schema(connection, writer=False)
+             yield connection
++        except NetworkMetadataProjectionScopeUntrusted:
++            raise
+         except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, NetworkMetadataError):
+             raise NetworkMetadataStorageUnavailable() from None
+         finally:
+@@ -63,6 +70,13 @@ class NetworkMetadataProjectionSourceReadService:
+ 
+     @staticmethod
+     def _binding(connection, generation):
++        try:
++            return NetworkMetadataProjectionSourceReadService._checked_binding(connection, generation)
++        except Exception:
++            raise NetworkMetadataProjectionScopeUntrusted() from None
++
++    @staticmethod
++    def _checked_binding(connection, generation):
+         if generation.logical_source_id != LOGICAL_SOURCE_ID:
+             raise ValueError
+         row = connection.execute("SELECT * FROM network_metadata_capture_scope_bindings WHERE binding_digest=?",
+@@ -88,6 +102,8 @@ class NetworkMetadataProjectionSourceReadService:
+             raise ValueError
+         generation = SourceGenerationV1(**dict(row))
+         self._binding(connection, generation)
++        integer(generation.generation_start_offset)
++        integer(generation.committed_byte_offset, generation.generation_start_offset)
+         return generation
+ 
+     def list_source_generations(self):
+@@ -104,11 +120,25 @@ class NetworkMetadataProjectionSourceReadService:
+         with self._snapshot() as connection:
+             return self._generation(connection, source_generation_id)
+ 
++    def validate_generation_admission(self, source_generation_id, *, admission):
++        from types import SimpleNamespace
++        with self._snapshot() as connection:
++            generation = self._generation(connection, source_generation_id)
++            binding = self._binding(connection, generation)
++            admission.binding_for(SimpleNamespace(site_id=binding.site_id, capture_source_id=binding.capture_source_id,
++                network_scope_id=binding.network_scope_id, capture_scope_binding_digest=binding.binding_digest,
++                capture_scope_ipv4_cidrs=binding.ipv4_cidrs, binding_valid_from_utc=binding.valid_from_utc,
++                network_scope_state="within_intended_scope", event_at=binding.valid_from_utc))
++
+     def _record(self, connection, row, generation):
+         values = dict(row)
+         binding = self._binding(connection, generation)
+         offset = integer(values["record_start_byte_offset"])
+         identity = source_event_identity(generation.source_generation_id, offset)
++        if (values["network_scope_state"] != "within_intended_scope"
++                or any(values[name] != getattr(binding, name) for name in ("site_id", "capture_source_id", "network_scope_id"))
++                or values["capture_scope_binding_digest"] != binding.binding_digest):
++            raise NetworkMetadataProjectionScopeUntrusted()
+         if (values["source_generation_id"] != generation.source_generation_id
+                 or values["source_event_identity"] != identity
+                 or values["observation_id"] != observation_uuid(values["source_event_family"], identity)
+@@ -119,7 +149,8 @@ class NetworkMetadataProjectionSourceReadService:
+                 or values["capture_scope_binding_digest"] != binding.binding_digest
+                 or not generation.generation_start_offset <= offset < generation.committed_byte_offset):
+             raise ValueError
+-        ni_timestamp(values["event_at"], canonical=True)
++        if ni_timestamp(values["event_at"], canonical=True) < ni_timestamp(binding.valid_from_utc, canonical=True):
++            raise NetworkMetadataProjectionScopeUntrusted()
+         ni_timestamp(values["ingested_at"], canonical=True)
+         # Only dependencies of this selected observation: never audit the store.
+         health = connection.execute("SELECT * FROM network_metadata_source_health WHERE health_id=?",
+@@ -164,7 +195,36 @@ class NetworkMetadataProjectionSourceReadService:
+         # Never expose stale endpoints even if a damaged source leaves old rows.
+         names = NetworkMetadataProjectionSourceRecordV1.__dataclass_fields__
+         selected = {name: values[name] for name in names if name in values}
+-        return NetworkMetadataProjectionSourceRecordV1(**selected, capture_scope_ipv4_cidrs=binding.ipv4_cidrs, **endpoints)
++        return NetworkMetadataProjectionSourceRecordV1(**selected, capture_scope_ipv4_cidrs=binding.ipv4_cidrs,
++                                                       binding_valid_from_utc=binding.valid_from_utc, **endpoints)
++
++    def read_reset_snapshot(self, *, admission):
++        """One consistent, query-only generation/tail snapshot; no raw-file floors."""
++        from types import SimpleNamespace
++        floors = []
++        with self._snapshot() as connection:
++            rows = connection.execute("SELECT * FROM network_metadata_source_generations ORDER BY source_generation_id")
++            for row in rows:
++                generation = self._generation(connection, row["source_generation_id"])
++                binding = self._binding(connection, generation)
++                proof = SimpleNamespace(site_id=binding.site_id, capture_source_id=binding.capture_source_id,
++                    network_scope_id=binding.network_scope_id, capture_scope_binding_digest=binding.binding_digest,
++                    capture_scope_ipv4_cidrs=binding.ipv4_cidrs, binding_valid_from_utc=binding.valid_from_utc,
++                    network_scope_state="within_intended_scope", event_at=binding.valid_from_utc)
++                admission.binding_for(proof)
++                tail = connection.execute("SELECT * FROM network_metadata_observations WHERE source_generation_id=? "
++                    "ORDER BY record_start_byte_offset DESC LIMIT 1", (generation.source_generation_id,)).fetchone()
++                record = None if tail is None else self._record(connection, tail, generation)
++                if record is not None:
++                    admission.binding_for(record)
++                floors.append(dict(source_generation_id=generation.source_generation_id, site_id=binding.site_id,
++                    capture_source_id=binding.capture_source_id, network_scope_id=binding.network_scope_id,
++                    capture_scope_binding_digest=binding.binding_digest, binding_valid_from_utc=binding.valid_from_utc,
++                    generation_start_offset=generation.generation_start_offset,
++                    committed_byte_offset=generation.committed_byte_offset,
++                    last_retained_record_start_byte_offset=None if record is None else record.record_start_byte_offset,
++                    last_retained_observation_id=None if record is None else record.observation_id))
++        return tuple(floors)
+ 
+     def read_projection_batch(self, source_generation_id, after_record_start_byte_offset, limit):
+         integer(limit, 1, 256)
+diff --git a/app/network_metadata_projection/config.py b/app/network_metadata_projection/config.py
+index d372b88..ec986be 100644
+--- a/app/network_metadata_projection/config.py
++++ b/app/network_metadata_projection/config.py
+@@ -1,15 +1,81 @@
+ """Default-OFF independent configuration; upstream paths are read-only."""
+ import hashlib
++import ipaddress
+ import os
+ import re
+ from dataclasses import asdict, fields
+ from pathlib import Path
+ from app.network_metadata.canonical import ni01_canonical_json
++from app.network_metadata.config import make_capture_scope_binding
++from app.network_metadata.validation import strict_json, ni_timestamp
++from .models import ProjectionConflict
+ from .models import ProjectionConfig, ProjectionValidationError
+ 
+ PREFIX = "NETWORK_METADATA_PROJECTION_"
+ 
+ 
++class ScopeAdmission:
++    """Closed operator admission. Physical placement is attested, not discovered."""
++    def __init__(self, encoded):
++        try:
++            if type(encoded) is not str or len(encoded.encode("utf-8")) > 65536:
++                raise ValueError
++            value = strict_json(encoded)
++            if (type(value) is not dict or set(value) != {"schema_version", "placement_kind", "scopes"}
++                    or type(value["schema_version"]) is not int or value["schema_version"] != 1
++                    or value["placement_kind"] != "verified_pre_nat_guest_ipv4"
++                    or type(value["scopes"]) is not list or not 1 <= len(value["scopes"]) <= 64):
++                raise ValueError
++            bindings = []
++            for entry in value["scopes"]:
++                if type(entry) is not dict or set(entry) != {"site_id", "capture_source_id", "network_scope_id",
++                        "capture_scope_binding_digest", "ipv4_cidrs", "binding_valid_from_utc"}:
++                    raise ValueError
++                ni_timestamp(entry["binding_valid_from_utc"], canonical=True)
++                binding = make_capture_scope_binding(dict(schema_version=1, site_id=entry["site_id"],
++                    capture_source_id=entry["capture_source_id"], network_scope_id=entry["network_scope_id"],
++                    ipv4_cidrs=entry["ipv4_cidrs"], valid_from_utc=entry["binding_valid_from_utc"]))
++                if (binding.binding_digest != entry["capture_scope_binding_digest"]
++                        or list(binding.ipv4_cidrs) != entry["ipv4_cidrs"]
++                        or any(ipaddress.IPv4Network(cidr).prefixlen == 0 for cidr in binding.ipv4_cidrs)
++                        or any(old.binding_digest == binding.binding_digest
++                            or (old.site_id == binding.site_id and old.capture_source_id == binding.capture_source_id
++                                and old.network_scope_id == binding.network_scope_id) for old in bindings)):
++                    raise ValueError
++                bindings.append(binding)
++            # One event binding per Site/source/scope, no contradictory overlapping
++            # attribution domains in one Site. Different Sites may reuse RFC1918.
++            for index, binding in enumerate(bindings):
++                for other in bindings[:index]:
++                    if binding.site_id == other.site_id and any(ipaddress.IPv4Network(a).overlaps(ipaddress.IPv4Network(b))
++                            for a in binding.ipv4_cidrs for b in other.ipv4_cidrs):
++                        raise ValueError
++            value["scopes"] = sorted(value["scopes"], key=lambda entry: (
++                entry["site_id"], entry["capture_source_id"], entry["network_scope_id"]))
++            self.canonical = ni01_canonical_json(value).decode("utf-8")
++            self.digest = hashlib.sha256(self.canonical.encode("utf-8")).hexdigest()
++            self.bindings = tuple(bindings)
++        except Exception:
++            raise ProjectionConflict("scope_admission_untrusted") from None
++
++    def binding_for(self, source):
++        try:
++            return self._binding_for(source)
++        except Exception:
++            raise ProjectionConflict("scope_admission_untrusted") from None
++
++    def _binding_for(self, source):
++        matches = [binding for binding in self.bindings if all(getattr(source, name) == getattr(binding, name)
++            for name in ("site_id", "capture_source_id", "network_scope_id"))]
++        if (len(matches) != 1 or source.network_scope_state != "within_intended_scope"
++                or matches[0].binding_digest != source.capture_scope_binding_digest
++                or matches[0].ipv4_cidrs != tuple(source.capture_scope_ipv4_cidrs)
++                or getattr(source, "binding_valid_from_utc", None) != matches[0].valid_from_utc
++                or ni_timestamp(source.event_at, canonical=True) < ni_timestamp(matches[0].valid_from_utc, canonical=True)):
++            raise ProjectionConflict("scope_admission_untrusted")
++        return matches[0]
++
++
+ def configuration_digest(config):
+     values = asdict(config)
+     # New OFF fields are absent from the original canonical configuration.
+@@ -43,7 +109,9 @@ def projection_config_from_env(environ=None):
+         key = {"source_db_path": "NETWORK_METADATA_DB_PATH", "registry_db_path": "VISITOR_REGISTRY_DB_PATH"}.get(name, PREFIX + name.upper())
+         default = getattr(defaults, name)
+         value = env.get(key, str(default))
+-        if type(default) is bool:
++        if name == "scope_admission_json":
++            value = ScopeAdmission(env.get(key)).canonical
++        elif type(default) is bool:
+             value = env.get(key, "true" if default else "false")
+             if type(value) is not str or value not in {"true", "false"}:
+                 raise ProjectionValidationError()
+diff --git a/app/network_metadata_projection/models.py b/app/network_metadata_projection/models.py
+index b9ec332..cee3cce 100644
+--- a/app/network_metadata_projection/models.py
++++ b/app/network_metadata_projection/models.py
+@@ -1,15 +1,18 @@
+ """Closed NI-02B constants and safe errors; no import-time composition."""
+ from dataclasses import dataclass
+ 
+-ALGORITHM = "dti-ni-02b-projection-v1"
++ALGORITHM = "dti-ni-02b-projection-v2"
++PROJECTION_CONTRACT_VERSION = 2
+ PROJECTION_TRANSACTION_HEADROOM_BYTES = 16777216
+ ATTRIBUTION_STATES = frozenset({"resolved", "ambiguous", "unattributed", "unavailable",
+-    "outside_historical_horizon", "invalid", "unsupported_address_family", "endpoint_absent"})
++    "outside_historical_horizon", "invalid", "unsupported_address_family", "endpoint_absent",
++    "not_applicable_outside_guest_scope"})
+ BINDING_STATES = frozenset({"authoritative", "not_yet_registry_resolved", "registry_unavailable"})
+ RUNTIME_STATES = frozenset({"initializing", "usable", "degraded", "source_unavailable", "attribution_unavailable",
+     "registry_degraded", "capacity_waiting_reader", "capacity_halted", "blocked_conflict", "stopping"})
+ CONFLICTS = frozenset({"source_observation_identity_conflict", "resolved_endpoint_outside_capture_scope",
+-    "attribution_query_contract_invalid", "edge_semantic_conflict", "registry_identity_conflict", "checkpoint_source_conflict"})
++    "attribution_query_contract_invalid", "edge_semantic_conflict", "registry_identity_conflict", "checkpoint_source_conflict",
++    "scope_admission_untrusted"})
+ 
+ 
+ class ProjectionError(RuntimeError):
+@@ -58,6 +61,19 @@ class ProjectionConfig:
+     idle_write_reduction_enabled: bool = False
+     checkpoint_opt_enabled: bool = False
+     telemetry_aggregation_enabled: bool = False
++    scope_admission_json: str | None = None
++
++
++@dataclass(frozen=True, slots=True, repr=False)
++class EndpointDisposition:
++    """NI-02B-owned non-identity terminal; never an invented NI-02A result."""
++    state: str
++    binding_id: None = None
++
++    def __post_init__(self):
++        if self.state not in {"not_applicable_outside_guest_scope", "endpoint_absent",
++                              "unsupported_address_family"} or self.binding_id is not None:
++            raise ProjectionValidationError()
+ 
+ 
+ @dataclass(frozen=True, slots=True, repr=False)
+@@ -69,7 +85,7 @@ class RegistryEvaluation:
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+-class NetworkMetadataProjectionResultV1:
++class NetworkMetadataProjectionResultV2:
+     observation_id: str
+     src_attribution_state: str
+     dst_attribution_state: str
+@@ -120,7 +136,7 @@ class PreparedDisposition:
+     source: object
+     edges: list
+     pending: dict | None
+-    result: NetworkMetadataProjectionResultV1
++    result: NetworkMetadataProjectionResultV2
+ 
+     def __iter__(self):
+         yield self.source
+diff --git a/app/network_metadata_projection/read_service.py b/app/network_metadata_projection/read_service.py
+index b18a0b4..144165b 100644
+--- a/app/network_metadata_projection/read_service.py
++++ b/app/network_metadata_projection/read_service.py
+@@ -167,7 +167,7 @@ class DeviceNetworkMetadataReadService:
+ 
+     def get_status(self):
+         defaults = dict(enabled=self.enabled, store_state="unavailable" if self.enabled else "disabled",
+-            runtime_state=None, safe_reason=None, schema_version=None, projection_contract_version=1,
++            runtime_state=None, safe_reason=None, schema_version=None, projection_contract_version=2,
+             projection_algorithm_version=ALGORITHM, last_projection_commit_at=None, last_registry_reconcile_at=None,
+             pending_attribution_count=0, checkpoint_count=0, db_bytes=0, capacity_limit_bytes=self.max_db_bytes)
+         if not self.enabled:
+@@ -187,7 +187,7 @@ class DeviceNetworkMetadataReadService:
+                         total += Path(self.db_path + suffix).stat().st_size
+                     except FileNotFoundError:
+                         pass
+-                defaults.update(store_state="available", schema_version=1, db_bytes=total)
++                defaults.update(store_state="available", schema_version=2, db_bytes=total)
+         except (ProjectionUnavailable, OSError):
+             defaults["safe_reason"] = "projection_store_unavailable"
+         return defaults
+diff --git a/app/network_metadata_projection/repository.py b/app/network_metadata_projection/repository.py
+index a97d96f..e735aa1 100644
+--- a/app/network_metadata_projection/repository.py
++++ b/app/network_metadata_projection/repository.py
+@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ 
+ from app.network_metadata.validation import digest, ni_timestamp
+-from .config import configuration_digest
++from .config import configuration_digest, ScopeAdmission
+ from .models import (ALGORITHM, PROJECTION_TRANSACTION_HEADROOM_BYTES, ProjectionUnavailable,
+                      ProjectionCapacity, ProjectionConflict, RUNTIME_STATES)
+ from .schema import TABLES, create_schema, validate_schema
+@@ -18,10 +18,14 @@ from .service_extension import append_candidate, maintain_authoritative_change
+ 
+ class ProjectionRepository:
+     def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None,
+-                 monotonic=time.monotonic, install_service_recognition_extension=False):
++                 monotonic=time.monotonic, install_service_recognition_extension=False, reset_bootstrap=None):
+         if type(install_service_recognition_extension) is not bool:
+             raise ProjectionUnavailable()
+         self._install_service_recognition_extension = install_service_recognition_extension
++        if reset_bootstrap is not None and (type(reset_bootstrap) is not dict or set(reset_bootstrap) != {
++                "floors", "reset_epoch_id", "reset_at_utc"}):
++            raise ProjectionUnavailable("invalid_reset_bootstrap")
++        self._reset_bootstrap = reset_bootstrap
+         self.config, self.clock, self.crash_point = config, clock, crash_point
+         self.connection = self._writer_fd = None
+         self._retention_authorized = False
+@@ -85,6 +89,17 @@ class ProjectionRepository:
+             if objects == 0 and self.connection.execute("PRAGMA user_version").fetchone()[0] == 0:
+                 with self.transaction():
+                     create_schema(self.connection, timestamp(self.clock()))
++                    if self.config.scope_admission_json is not None:
++                        self._pin_scope_admission()
++                    if self._reset_bootstrap is not None:
++                        self.crash_point("reset_core_created")
++                        self._insert_reset_floors(**self._reset_bootstrap)
++                        self.crash_point("reset_floors_installed")
++            elif self._reset_bootstrap is not None:
++                raise ProjectionUnavailable("reset_requires_fresh_store")
++            if self.config.scope_admission_json is not None:
++                with self.transaction():
++                    self._pin_scope_admission()
+             self.service_recognition_extension_present = (
+                 validate_schema(self.connection, integrity=True) == "CORE_PLUS_EXTENSION_V1")
+             row = self.connection.execute("SELECT runtime_state,safe_reason FROM projection_runtime_state").fetchone()
+@@ -93,9 +108,21 @@ class ProjectionRepository:
+                 from .service_extension import install_service_recognition_extension
+                 install_service_recognition_extension(self)
+             return self
+-        except (sqlite3.Error, OSError, ProjectionUnavailable):
++        except (sqlite3.Error, OSError, ProjectionUnavailable, ProjectionConflict):
+             self.close()
+             raise ProjectionUnavailable() from None
++        except BaseException:
++            self.close()
++            raise
++
++    def _pin_scope_admission(self):
++        admission = ScopeAdmission(self.config.scope_admission_json)
++        old = self.connection.execute("SELECT admission_digest,admission_json FROM projection_scope_admission").fetchone()
++        if old is None:
++            self.insert("projection_scope_admission", dict(singleton_id=1,
++                admission_digest=admission.digest, admission_json=admission.canonical))
++        elif tuple(old) != (admission.digest, admission.canonical):
++            raise ProjectionConflict("scope_admission_untrusted")
+ 
+     def maintain_capacity(self, *, post_commit=False, retention_ran=False):
+         """Legacy PASSIVE cadence or opt-in conditional soft maintenance.
+@@ -189,19 +216,50 @@ class ProjectionRepository:
+         digest(identity.artifact_sha, 40)
+         digest(identity.artifact_tree, 40)
+         run_id = str(uuid.uuid4())
++        admission = ScopeAdmission(self.config.scope_admission_json)
++        stored = self.connection.execute("SELECT admission_digest FROM projection_scope_admission").fetchone()
++        if stored is None or stored[0] != admission.digest:
++            raise ProjectionConflict("scope_admission_untrusted")
+         with self.transaction():
+             if self.config.idle_write_reduction_enabled and self.live_state != "blocked_conflict":
+                 self.runtime("initializing")
+             self.insert("projection_runs", dict(projection_run_id=run_id, started_at_utc=timestamp(self.clock()),
+                 repository_head=identity.artifact_sha, repository_tree=identity.artifact_tree,
+-                projection_contract_version=1, projection_algorithm_version=ALGORITHM,
+-                configuration_digest=configuration_digest(self.config)))
++                projection_contract_version=2, projection_algorithm_version=ALGORITHM,
++                configuration_digest=configuration_digest(self.config), scope_admission_digest=admission.digest))
+         self.active_run_id = run_id
+         return run_id
+ 
+     def checkpoint(self, generation):
+         return self.connection.execute("SELECT * FROM projection_source_checkpoints WHERE source_generation_id=?", (generation,)).fetchone()
+ 
++    def reset_floor(self, generation):
++        return self.connection.execute("SELECT * FROM projection_source_reset_floors WHERE source_generation_id=?", (generation,)).fetchone()
++
++    def install_reset_floors(self, floors, *, reset_epoch_id, reset_at_utc):
++        with self.transaction():
++            self._insert_reset_floors(floors, reset_epoch_id=reset_epoch_id, reset_at_utc=reset_at_utc)
++
++    def _insert_reset_floors(self, floors, *, reset_epoch_id, reset_at_utc):
++        import hashlib
++        from app.network_metadata.canonical import ni01_canonical_json
++        from app.network_metadata.validation import canonical_uuid
++        from .validation import validate_reset_floors
++        canonical_uuid(reset_epoch_id, 4)
++        ni_timestamp(reset_at_utc, canonical=True)
++        admission = ScopeAdmission(self.config.scope_admission_json)
++        ordered = sorted(floors, key=lambda item: item["source_generation_id"])
++        if not self.connection.in_transaction or any(self.connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() for table in (
++                "projection_runs", "device_network_metadata_edges", "projection_source_checkpoints",
++                "projection_pending_attribution", "projection_source_reset_epoch")):
++            raise ProjectionUnavailable("reset_requires_fresh_store")
++        self.insert("projection_source_reset_epoch", dict(singleton_id=1, reset_epoch_id=reset_epoch_id,
++            reset_at_utc=reset_at_utc, admission_digest=admission.digest,
++            source_snapshot_digest=hashlib.sha256(ni01_canonical_json(ordered)).hexdigest(), floor_count=len(ordered)))
++        for floor in ordered:
++            self.insert("projection_source_reset_floors", dict(floor, reset_epoch_id=reset_epoch_id, reset_at_utc=reset_at_utc))
++        validate_reset_floors(self.connection, admission)
++
+     def existing_edges(self, observation):
+         return {row["device_endpoint_role"]: dict(row) for row in self.connection.execute(
+             "SELECT * FROM device_network_metadata_edges WHERE source_observation_ref=?", (observation,))}
+@@ -332,7 +390,15 @@ class ProjectionRepository:
+             if checkpoint is not None:
+                 last = next(iter(dispositions[-1]))
+                 old = self.checkpoint(last.source_generation_id)
+-                if (old is not None and (checkpoint is None or old["last_record_start_byte_offset"] != checkpoint["after"])) or (old is None and checkpoint["after"] is not None):
++                floor = self.reset_floor(last.source_generation_id)
++                boundaries = [value for value in (
++                    None if old is None else old["last_record_start_byte_offset"],
++                    None if floor is None else floor["last_retained_record_start_byte_offset"]) if value is not None]
++                expected_after = max(boundaries) if boundaries else None
++                if (checkpoint["after"] != expected_after or any(
++                        source.source_generation_id != last.source_generation_id
++                        or (expected_after is not None and source.record_start_byte_offset <= expected_after)
++                        for source, _, _ in dispositions)):
+                     raise ProjectionConflict("checkpoint_source_conflict")
+                 self.connection.execute("INSERT INTO projection_source_checkpoints VALUES(?,?,?,?,?) ON CONFLICT(source_generation_id) DO UPDATE SET "
+                     "last_record_start_byte_offset=excluded.last_record_start_byte_offset,last_observation_id=excluded.last_observation_id,"
+diff --git a/app/network_metadata_projection/schema.py b/app/network_metadata_projection/schema.py
+index 05e5cf8..37d2b1b 100644
+--- a/app/network_metadata_projection/schema.py
++++ b/app/network_metadata_projection/schema.py
+@@ -1,4 +1,4 @@
+-"""Exact Core V1 with an optional, separately versioned Service extension."""
++"""Exact fresh Core V2 with an optional, separately versioned Service extension."""
+ import sqlite3
+ from functools import lru_cache
+ from .models import ALGORITHM, ATTRIBUTION_STATES, RUNTIME_STATES, ProjectionUnavailable
+@@ -7,10 +7,22 @@ from app.network_metadata.validation import ni_timestamp
+ 
+ STATES = ",".join("'" + item + "'" for item in sorted(ATTRIBUTION_STATES))
+ SNAPSHOT_STATES = ",".join("'" + item + "'" for item in sorted(ATTRIBUTION_STATES - {"invalid"}))
+-VERSION = "projection_contract_version INTEGER NOT NULL CHECK(projection_contract_version=1), projection_algorithm_version TEXT NOT NULL CHECK(projection_algorithm_version='" + ALGORITHM + "')"
++VERSION = "projection_contract_version INTEGER NOT NULL CHECK(projection_contract_version=2), projection_algorithm_version TEXT NOT NULL CHECK(projection_algorithm_version='" + ALGORITHM + "')"
+ TABLES = {
+-"network_metadata_projection_schema": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), schema_version INTEGER NOT NULL CHECK(schema_version=1), " + VERSION + ", created_at_utc TEXT NOT NULL",
+-"projection_runs": "projection_run_id TEXT PRIMARY KEY, started_at_utc TEXT NOT NULL, repository_head TEXT NOT NULL, repository_tree TEXT NOT NULL, " + VERSION + ", configuration_digest TEXT NOT NULL",
++"network_metadata_projection_schema": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), schema_version INTEGER NOT NULL CHECK(schema_version=2), " + VERSION + ", created_at_utc TEXT NOT NULL",
++"projection_scope_admission": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), admission_digest TEXT NOT NULL UNIQUE, admission_json TEXT NOT NULL",
++"projection_runs": "projection_run_id TEXT PRIMARY KEY, started_at_utc TEXT NOT NULL, repository_head TEXT NOT NULL, repository_tree TEXT NOT NULL, " + VERSION + ", configuration_digest TEXT NOT NULL, scope_admission_digest TEXT NOT NULL REFERENCES projection_scope_admission(admission_digest)",
++"projection_source_reset_epoch": "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), reset_epoch_id TEXT NOT NULL UNIQUE, reset_at_utc TEXT NOT NULL, admission_digest TEXT NOT NULL REFERENCES projection_scope_admission(admission_digest), source_snapshot_digest TEXT NOT NULL, floor_count INTEGER NOT NULL CHECK(floor_count>=0)",
++"projection_source_reset_floors": """source_generation_id TEXT PRIMARY KEY,
++reset_epoch_id TEXT NOT NULL REFERENCES projection_source_reset_epoch(reset_epoch_id), reset_at_utc TEXT NOT NULL,
++site_id TEXT NOT NULL, capture_source_id TEXT NOT NULL, network_scope_id TEXT NOT NULL,
++capture_scope_binding_digest TEXT NOT NULL, binding_valid_from_utc TEXT NOT NULL,
++generation_start_offset INTEGER NOT NULL CHECK(generation_start_offset>=0),
++committed_byte_offset INTEGER NOT NULL CHECK(committed_byte_offset>=generation_start_offset),
++last_retained_record_start_byte_offset INTEGER, last_retained_observation_id TEXT,
++CHECK((last_retained_record_start_byte_offset IS NULL AND last_retained_observation_id IS NULL) OR
++(last_retained_record_start_byte_offset IS NOT NULL AND last_retained_observation_id IS NOT NULL AND
++last_retained_record_start_byte_offset>=generation_start_offset AND last_retained_record_start_byte_offset<committed_byte_offset))""",
+ "device_network_metadata_edges": """edge_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL CHECK(schema_version=1),
+ site_id TEXT NOT NULL, client_mac TEXT NOT NULL, event_at TEXT NOT NULL, source_ingested_at TEXT NOT NULL, projected_at TEXT NOT NULL,
+ device_endpoint_role TEXT NOT NULL CHECK(device_endpoint_role IN ('src','dst')), device_ip TEXT NOT NULL,
+@@ -75,9 +87,12 @@ def create_schema(connection, now):
+     for table in ("device_network_metadata_edges", "projection_registry_binding_events"):
+         connection.execute(f"CREATE TRIGGER immutable_{table} BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT,'immutable_projection_fact'); END")
+         connection.execute(f"CREATE TRIGGER retained_{table} BEFORE DELETE ON {table} WHEN projection_retention_delete_authorized()!=1 BEGIN SELECT RAISE(ABORT,'projection_retention_required'); END")
+-    connection.execute("INSERT INTO network_metadata_projection_schema VALUES(1,1,1,?,?)", (ALGORITHM, now))
++    for table in ("projection_scope_admission", "projection_source_reset_epoch", "projection_source_reset_floors"):
++        for operation in ("UPDATE", "DELETE"):
++            connection.execute(f"CREATE TRIGGER immutable_{table}_{operation.lower()} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'immutable_reset_boundary'); END")
++    connection.execute("INSERT INTO network_metadata_projection_schema VALUES(1,2,2,?,?)", (ALGORITHM, now))
+     connection.execute("INSERT INTO projection_runtime_state(singleton_id,runtime_state,pending_attribution_count,updated_at_utc) VALUES(1,'initializing',0,?)", (now,))
+-    connection.execute("PRAGMA user_version=1")
++    connection.execute("PRAGMA user_version=2")
+ 
+ 
+ def signature(connection):
+@@ -96,19 +111,35 @@ def _expected_signatures():
+     return core, extension
+ 
+ 
+-def validate_core_schema_v1(connection):
++def validate_core_schema_v2(connection):
+     expected, _ = _expected_signatures()
+     names = {row[1] for row in expected}
+     actual = tuple(row for row in signature(connection) if row[1] in names)
+     rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
+     runtime = connection.execute("SELECT * FROM projection_runtime_state").fetchall()
+-    if (actual != expected or connection.execute("PRAGMA user_version").fetchone()[0] != 1
+-            or len(rows) != 1 or tuple(rows[0])[:4] != (1, 1, 1, ALGORITHM)
++    if (actual != expected or connection.execute("PRAGMA user_version").fetchone()[0] != 2
++            or len(rows) != 1 or tuple(rows[0])[:4] != (1, 2, 2, ALGORITHM)
+             or len(runtime) != 1 or runtime[0][0] != 1
+             or connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1
+             or connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal"):
+         raise ValueError
+     ni_timestamp(rows[0][4], canonical=True)
++    from .config import ScopeAdmission
++    admission_rows = connection.execute("SELECT admission_digest,admission_json FROM projection_scope_admission").fetchall()
++    if len(admission_rows) > 1:
++        raise ValueError
++    if admission_rows:
++        admitted = ScopeAdmission(admission_rows[0][1])
++        if admitted.digest != admission_rows[0][0] or admitted.canonical != admission_rows[0][1]:
++            raise ValueError
++    epoch = connection.execute("SELECT * FROM projection_source_reset_epoch").fetchall()
++    if len(epoch) > 1 or (epoch and not admission_rows):
++        raise ValueError
++    if epoch:
++        from .validation import validate_reset_floors
++        validate_reset_floors(connection, admitted)
++    elif connection.execute("SELECT 1 FROM projection_source_reset_floors LIMIT 1").fetchone():
++        raise ValueError
+ 
+ 
+ def validate_service_recognition_extension_v1(connection):
+@@ -126,7 +157,7 @@ def validate_service_recognition_extension_v1(connection):
+ 
+ def validate_schema(connection, *, integrity=False):
+     try:
+-        validate_core_schema_v1(connection)
++        validate_core_schema_v2(connection)
+         present = validate_service_recognition_extension_v1(connection)
+         core, extension = _expected_signatures()
+         if signature(connection) != tuple(sorted(core + (extension if present else ()))):
+diff --git a/app/network_metadata_projection/service.py b/app/network_metadata_projection/service.py
+index 2979fa9..e2bdb9e 100644
+--- a/app/network_metadata_projection/service.py
++++ b/app/network_metadata_projection/service.py
+@@ -11,7 +11,10 @@ from app.network_attribution.models import NetworkMetadataAttributionResultV1
+ from app.network_attribution.validation import canonical_mac
+ from .models import (ALGORITHM, ATTRIBUTION_STATES, ProjectionConflict, ProjectionError,
+                      ProjectionUnavailable, RegistryEvaluation)
+-from .models import NetworkMetadataProjectionResultV1, PreparedDisposition
++from .models import NetworkMetadataProjectionResultV2, PreparedDisposition
++from .models import EndpointDisposition
++from .config import ScopeAdmission
++from app.network_metadata.projection_source import NetworkMetadataProjectionScopeUntrusted
+ from .validation import edge_id, semantic_digest, timestamp
+ from .effective_runtime_state import effective_runtime_state
+ from .telemetry import RETRY_COUNTER_FIELDS, MAX_COUNTER
+@@ -27,6 +30,7 @@ class NetworkMetadataProjectionService:
+         self.last_retry = self.last_reconcile = self.last_retention = None
+         self._retry_counts = dict.fromkeys(RETRY_COUNTER_FIELDS, 0)
+         self._authority_failed_in_batch = False
++        self._scope_admission = None if not config.enabled else ScopeAdmission(config.scope_admission_json)
+         if config.telemetry_aggregation_enabled and telemetry is not None:
+             telemetry.enable_aggregation(monotonic=monotonic)
+             repository.telemetry = telemetry
+@@ -42,6 +46,11 @@ class NetworkMetadataProjectionService:
+         if not self.config.enabled:
+             return False
+         self.repository.initialize()
++        # Deleting a derived DB and launching the ordinary writer must never
++        # silently replay retained NI-01 history. V2 startup requires the explicit
++        # offline bootstrap epoch (even for a source snapshot with zero floors).
++        if self.repository.connection.execute("SELECT 1 FROM projection_source_reset_epoch WHERE singleton_id=1").fetchone() is None:
++            raise ProjectionUnavailable("reset_bootstrap_required")
+         self.repository.attribution_read_state = None
+         if self.config.idle_write_reduction_enabled:
+             self.repository.source_verified_in_run = False
+@@ -87,9 +96,12 @@ class NetworkMetadataProjectionService:
+         result = NetworkMetadataAttributionResultV1
+         address = getattr(source, role + "_ip")
+         if address is None:
+-            return result("endpoint_absent")
++            return EndpointDisposition("endpoint_absent")
+         if ipaddress.ip_address(address).version != 4:
+-            return result("unsupported_address_family")
++            return EndpointDisposition("unsupported_address_family")
++        if not any(ipaddress.IPv4Address(address) in ipaddress.IPv4Network(cidr)
++                   for cidr in source.capture_scope_ipv4_cidrs):
++            return EndpointDisposition("not_applicable_outside_guest_scope")
+         if horizon.state != "available":
+             return result("unavailable", "authority_horizon_unavailable")
+         instant = ni_timestamp(source.event_at, canonical=True)
+@@ -100,7 +112,7 @@ class NetworkMetadataProjectionService:
+         except Exception:
+             self._authority_read(False)
+             return result("unavailable", "attribution_store_unavailable")
+-        if value.state not in ATTRIBUTION_STATES or value.state == "invalid":
++        if value.state not in ATTRIBUTION_STATES - {"invalid", "not_applicable_outside_guest_scope"}:
+             raise ProjectionConflict("attribution_query_contract_invalid")
+         if value.state == "unavailable" and value.reason in {
+                 "attribution_disabled", "authority_horizon_unavailable", "attribution_store_unavailable"}:
+@@ -140,14 +152,15 @@ class NetworkMetadataProjectionService:
+             attribution_source="trusted_dhcp_v4", attribution_binding_id=own.binding_id,
+             attribution_valid_from=own.valid_from, attribution_valid_until=own.valid_until,
+             peer_attribution_state=peer.state, peer_attribution_binding_id=peer.binding_id if peer.state == "resolved" else None,
+-            projection_contract_version=1, projection_algorithm_version=ALGORITHM, projection_run_id=self.run_id)
++            projection_contract_version=2, projection_algorithm_version=ALGORITHM, projection_run_id=self.run_id)
+         edge["edge_semantic_digest"] = semantic_digest(edge)
+         return edge
+ 
+     def prepare(self, source, *, prior_pending=None):
+         self._source_identity(source)
++        self._scope_admission.binding_for(source)
+         if not self._eligible(source):
+-            result = NetworkMetadataProjectionResultV1(source.observation_id,
++            result = NetworkMetadataProjectionResultV2(source.observation_id,
+                 prior_pending["src_snapshot_state"] if prior_pending is not None else "endpoint_absent",
+                 prior_pending["dst_snapshot_state"] if prior_pending is not None else "endpoint_absent",
+                 len(self.repository.existing_edges(source.observation_id)),
+@@ -157,16 +170,24 @@ class NetworkMetadataProjectionService:
+                 ("site_id", "site_id"), ("source_generation_id", "source_generation_id"),
+                 ("record_start_byte_offset", "record_start_byte_offset"), ("event_at", "event_at"), ("source_ingested_at", "ingested_at"))):
+             raise ProjectionConflict("source_observation_identity_conflict")
+-        try:
+-            horizon = self.attribution.get_authority_horizon(source.site_id)
+-        except Exception:
+-            horizon = SimpleNamespace(state="unavailable")
+-        self._authority_read(horizon.state == "available")
++        horizon = SimpleNamespace(state="unavailable")
++        guest = any(address is not None and ipaddress.ip_address(address).version == 4
++                    and any(ipaddress.IPv4Address(address) in ipaddress.IPv4Network(cidr)
++                            for cidr in source.capture_scope_ipv4_cidrs)
++                    for address in (source.src_ip, source.dst_ip))
++        if guest:
++            try:
++                horizon = self.attribution.get_authority_horizon(source.site_id)
++            except Exception:
++                pass
++            self._authority_read(horizon.state == "available")
+         states = {}
+         for role in ("src", "dst"):
+             if prior_pending is not None and not prior_pending["pending_" + role]:
+-                states[role] = NetworkMetadataAttributionResultV1(prior_pending[role + "_snapshot_state"],
+-                    binding_id=prior_pending[role + "_snapshot_binding_id"])
++                state = prior_pending[role + "_snapshot_state"]
++                states[role] = (EndpointDisposition(state) if state in {"not_applicable_outside_guest_scope",
++                    "endpoint_absent", "unsupported_address_family"} else NetworkMetadataAttributionResultV1(state,
++                    binding_id=prior_pending[role + "_snapshot_binding_id"]))
+             else:
+                 if prior_pending is not None:
+                     self._count_retry("attribution_retry_attempted_roles")
+@@ -192,7 +213,7 @@ class NetworkMetadataProjectionService:
+                 pending[role + "_snapshot_binding_id"] = value.binding_id if value.state == "resolved" else None
+         count = len(existing) + len(edges)
+         status = ("partial_pending" if count else "pending") if pending is not None else ("complete" if count else "terminal_no_edge")
+-        result = NetworkMetadataProjectionResultV1(source.observation_id, states["src"].state, states["dst"].state, count, status)
++        result = NetworkMetadataProjectionResultV2(source.observation_id, states["src"].state, states["dst"].state, count, status)
+         return PreparedDisposition(source, edges, pending, result)
+ 
+     def _evaluations(self, dispositions):
+@@ -230,6 +251,20 @@ class NetworkMetadataProjectionService:
+             raise ProjectionConflict("checkpoint_source_conflict")
+         return offset
+ 
++    def _read_after(self, generation):
++        processed = self._checkpoint_verified(generation)
++        floor = self.repository.reset_floor(generation.source_generation_id)
++        discarded = None
++        if floor is not None:
++            if (floor["generation_start_offset"] != generation.generation_start_offset
++                    or floor["committed_byte_offset"] > generation.committed_byte_offset
++                    or floor["capture_scope_binding_digest"] != generation.capture_scope_binding_digest
++                    or floor["binding_valid_from_utc"] != generation.binding_valid_from_utc):
++                raise ProjectionConflict("checkpoint_source_conflict")
++            discarded = floor["last_retained_record_start_byte_offset"]
++        values = [value for value in (processed, discarded) if value is not None]
++        return max(values) if values else None
++
+     def poll(self):
+         if self.stop_event.is_set() or self.repository.live_state == "blocked_conflict":
+             return
+@@ -237,7 +272,8 @@ class NetworkMetadataProjectionService:
+         try:
+             generations = self.source.list_source_generations()
+             for generation in generations:
+-                after = self._checkpoint_verified(generation)
++                self.source.validate_generation_admission(generation.source_generation_id, admission=self._scope_admission)
++                after = self._read_after(generation)
+                 batch = self.source.read_projection_batch(generation.source_generation_id, after, self.config.batch_max_observations)
+                 if batch:
+                     self._authority_failed_in_batch = False
+@@ -265,10 +301,14 @@ class NetworkMetadataProjectionService:
+                     self.repository.success_state(source_verified=True, last_source_poll_at=timestamp(self.repository.clock()))
+             if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
+                 self.telemetry.observe_success(idle_poll_count=1)
++        except NetworkMetadataProjectionScopeUntrusted:
++            self.repository.set_failure("blocked_conflict", "scope_admission_untrusted", observation=observation)
++            self.emit("projection_conflict", reason_code="scope_admission_untrusted")
++            return ()
+         except ProjectionConflict as error:
+             self.repository.set_failure("blocked_conflict", error.reason, observation=observation)
+             self.emit("projection_conflict", reason_code=error.reason)
+-            return (NetworkMetadataProjectionResultV1(observation, "invalid", "invalid", 0, "conflict", error.reason),) if observation else ()
++            return (NetworkMetadataProjectionResultV2(observation, "invalid", "invalid", 0, "conflict", error.reason),) if observation else ()
+         except ProjectionError:
+             raise
+         except Exception:
+@@ -305,7 +345,7 @@ class NetworkMetadataProjectionService:
+                     return tuple(results)
+                 source = self.source.get_projection_source_record(row["observation_id"])
+                 if source is None:
+-                    result = NetworkMetadataProjectionResultV1(row["observation_id"], row["src_snapshot_state"], row["dst_snapshot_state"],
++                    result = NetworkMetadataProjectionResultV2(row["observation_id"], row["src_snapshot_state"], row["dst_snapshot_state"],
+                         len(self.repository.existing_edges(row["observation_id"])), "expired_unresolved")
+                     prepared.append(PreparedDisposition(SimpleNamespace(observation_id=row["observation_id"]), [], None, result))
+                     self.emit("expired_unresolved", observation_id=row["observation_id"])
+diff --git a/app/network_metadata_projection/service_delivery_read_service.py b/app/network_metadata_projection/service_delivery_read_service.py
+index 9f3bf61..ff95a38 100644
+--- a/app/network_metadata_projection/service_delivery_read_service.py
++++ b/app/network_metadata_projection/service_delivery_read_service.py
+@@ -4,7 +4,7 @@ from app.device_fingerprint.validation import validate_site_id
+ from app.network_attribution.validation import canonical_mac
+ from app.network_metadata.validation import canonical_uuid, digest, integer, ip, ni_timestamp, text
+ from app.network_metadata.canonical import observation_uuid, source_event_identity
+-from .models import ProjectionUnavailable, ProjectionValidationError
++from .models import ProjectionUnavailable, ProjectionValidationError, ALGORITHM
+ from .read_service import DeviceNetworkMetadataReadService
+ from .recognition_read_service import RecognitionProjectionEdgeFactV1
+ from .validation import edge_id, semantic_digest, read_window
+@@ -107,7 +107,10 @@ class ServiceRecognitionDeliveryReadService(DeviceNetworkMetadataReadService):
+                 or edge["peer_scope"] != "external" or edge["source_event_family"] not in {"dns", "tls", "quic"}
+                 or edge["attribution_state"] != "resolved" or edge["attribution_source"] != "trusted_dhcp_v4"
+                 or edge["network_scope_state"] != "within_intended_scope"
+-                or edge["projection_contract_version"] != 1):
++                or edge["projection_contract_version"] != 2
++                or edge["projection_algorithm_version"] != ALGORITHM
++                or edge["peer_attribution_state"] != "not_applicable_outside_guest_scope"
++                or edge["peer_attribution_binding_id"] is not None):
+             raise ValueError
+         canonical_uuid(edge["source_generation_id"], 4)
+         canonical_uuid(edge["source_observation_ref"], 5)
+diff --git a/app/network_metadata_projection/service_extension.py b/app/network_metadata_projection/service_extension.py
+index b245186..dee7a5d 100644
+--- a/app/network_metadata_projection/service_extension.py
++++ b/app/network_metadata_projection/service_extension.py
+@@ -1,4 +1,4 @@
+-"""Closed optional Service Recognition Extension V1; Core V1 stays unchanged."""
++"""Closed optional Service Recognition Extension V1 over exact fresh Core V2."""
+ from app.network_metadata.validation import ni_timestamp
+ from .models import ProjectionUnavailable
+ 
+@@ -34,7 +34,10 @@ def validate_extension_metadata(connection):
+ 
+ def append_candidate(connection, edge, committed_at):
+     if (edge["device_endpoint_role"] == "src" and edge["direction"] == "outbound"
+-            and edge["peer_scope"] == "external" and edge["source_event_family"] in {"dns", "tls", "quic"}):
++            and edge["peer_scope"] == "external" and edge["source_event_family"] in {"dns", "tls", "quic"}
++            and edge["projection_contract_version"] == 2
++            and edge["attribution_state"] == "resolved"
++            and edge["peer_attribution_state"] == "not_applicable_outside_guest_scope"):
+         connection.execute(
+             "INSERT INTO projection_service_recognition_feed(edge_id,committed_at_utc) VALUES(?,?)",
+             (edge["edge_id"], committed_at))
+diff --git a/app/network_metadata_projection/validation.py b/app/network_metadata_projection/validation.py
+index a390282..80376fb 100644
+--- a/app/network_metadata_projection/validation.py
++++ b/app/network_metadata_projection/validation.py
+@@ -39,3 +39,48 @@ def read_window(site_id, from_utc, to_utc, limit, cursor):
+ 
+ def timestamp(value):
+     return ni_format_utc(value)
++
++
++def validate_reset_floors(connection, admission):
++    """Closed durable discard proof. No assertions of historical processing."""
++    from types import SimpleNamespace
++    from app.network_metadata.canonical import observation_uuid, source_event_identity
++    epoch_row = connection.execute("SELECT * FROM projection_source_reset_epoch").fetchone()
++    names = [column[0] for column in connection.execute("SELECT * FROM projection_source_reset_epoch LIMIT 0").description]
++    epoch = dict(zip(names, epoch_row))
++    canonical_uuid(epoch["reset_epoch_id"], 4)
++    ni_timestamp(epoch["reset_at_utc"], canonical=True)
++    digest(epoch["source_snapshot_digest"])
++    if type(epoch["floor_count"]) is not int or epoch["floor_count"] < 0:
++        raise ValueError
++    if epoch["admission_digest"] != admission.digest:
++        raise ValueError
++    columns = [column[0] for column in connection.execute("SELECT * FROM projection_source_reset_floors LIMIT 0").description]
++    floors = []
++    for row in connection.execute("SELECT * FROM projection_source_reset_floors ORDER BY source_generation_id"):
++        floor = dict(zip(columns, row))
++        if floor.pop("reset_epoch_id") != epoch["reset_epoch_id"] or floor.pop("reset_at_utc") != epoch["reset_at_utc"]:
++            raise ValueError
++        canonical_uuid(floor["source_generation_id"], 4)
++        matches = [b for b in admission.bindings if b.binding_digest == floor["capture_scope_binding_digest"]]
++        if len(matches) != 1:
++            raise ValueError
++        admission.binding_for(SimpleNamespace(**floor, capture_scope_ipv4_cidrs=matches[0].ipv4_cidrs,
++            network_scope_state="within_intended_scope", event_at=floor["binding_valid_from_utc"]))
++        low, high = floor["generation_start_offset"], floor["committed_byte_offset"]
++        if type(low) is not int or type(high) is not int or not 0 <= low <= high:
++            raise ValueError
++        offset, observation = floor["last_retained_record_start_byte_offset"], floor["last_retained_observation_id"]
++        if offset is None:
++            if observation is not None:
++                raise ValueError
++        else:
++            if type(offset) is not int or not low <= offset < high:
++                raise ValueError
++            identity = source_event_identity(floor["source_generation_id"], offset)
++            if observation not in {observation_uuid(family, identity) for family in ("dns", "tls", "quic")}:
++                raise ValueError
++        floors.append(floor)
++    if len(floors) != epoch["floor_count"] or hashlib.sha256(ni01_canonical_json(floors)).hexdigest() != epoch["source_snapshot_digest"]:
++        raise ValueError
++    return tuple(floors)
+diff --git a/docs/ni02b-v2-devreset.md b/docs/ni02b-v2-devreset.md
+new file mode 100644
+index 0000000..f949840
+--- /dev/null
++++ b/docs/ni02b-v2-devreset.md
+@@ -0,0 +1,194 @@
++# NI-02B External Peer V2 — implementation boundary
++
++Baseline: `f324c1e157b71802acda14a797c0e0f6747b6276` / tree
++`cbe9ac1d3efed53a3d66b60915b9f1c21e7caa5c`.
++
++Normative priority: Architecture Exception v1 (SHA256
++`565a2dc6cfab8021b79967bb4d40290449b57ad659e322d6ce7951723e863ee8`),
++Implementation Contract v1, TechLead23 review. This is development tooling,
++not authorization to reset, deploy, restart or activate production.
++
++## WP0 authorized production-source inventory (before implementation)
++
++- `app/network_metadata/projection_source.py`: event-time trust and one read-only reset snapshot.
++- `app/network_metadata_projection/models.py`: V2 identity and NI-02B-local terminal.
++- `app/network_metadata_projection/config.py`: closed explicit scope admission.
++- `app/network_metadata_projection/schema.py`: exact fresh Core V2 and immutable reset floors.
++- `app/network_metadata_projection/repository.py`: pin admission, floors distinct from processed checkpoints.
++- `app/network_metadata_projection/service.py`: independent endpoint classification and floor consumption.
++- `app/network_metadata_projection/cli.py`: composition only if required.
++- `app/network_metadata_projection/read_service.py`: strict V2 status/read admission.
++- `app/network_metadata_projection/recognition_read_service.py`: only required V2 interoperability.
++- `app/network_metadata_projection/service_delivery_read_service.py`: strict V2 candidate admission.
++- `app/network_metadata_projection/service_extension.py`: preserve Extension V1 over Core V2.
++- `app/network_metadata_projection/validation.py`: only required closed validation.
++- `app/network_metadata_projection/telemetry.py`: only required bounded safe reasons/counters.
++- `app/network_protocol_intelligence/read_service.py`: only required V2 source admission, public V1 unchanged.
++- `app/network_service_recognition/*`: only strictly necessary V2 interoperability, public V3 unchanged.
++- `scripts/ni02b_v2_offline_bootstrap.py`: inert inspect/prepare/verify, no production switch.
++
++Tests remain in existing focused test layouts. No Admin source, deployment files,
++NI-01 writer, NI-02A, Fingerprint, Auth/CAPPORT, Registry or knowledge changes.
++Any newly required production path outside this list requires TechLead approval.
++
++## V1 → V2 reference matrix
++
++| Boundary | Baseline assumption | V2 requirement |
++| --- | --- | --- |
++| models / service / repository | algorithm V1, emitted/run contract 1 | algorithm V2, contract 2 |
++| schema / all inherited readers | Core signature and user_version 1 | exact Core V2, no migration/fallback |
++| edge DTO | schema 1, same logical fields | schema 1 preserved; explicit projection contract 2 and closed terminal |
++| pending | unavailable iff pending, closed snapshots | same invariants plus outside-guest terminal |
++| feed candidate validator | projection contract 1 | projection contract 2; proven outbound guest source only |
++| Extension V1 | separate 3-table signature | same extension version/signature, validated against exact Core V2 |
++| NI-03 | inherits projection reader, public V1 | strict source V2, public V1 unchanged |
++| NI-04 legacy / worker | inherits projection/recognition/delivery readers | strict source V2, unchanged matcher/coverage/public V3 |
++| NI-04 serve | query-only materialization V1 | same V1 store/public V3; never source fallback |
++| Admin | composed typed readers, no direct Core constant found | no source changes anticipated |
++
++## Frozen operational boundaries
++
++Scope admission is operator-provided pre-NAT guest-DHCP proof, not topology
++discovery or public-Internet inference. Unknown scope blocks the entire affected
++batch. Genuine guest DHCP gaps remain pending. Reset floors discard retained
++normalized history; they are never evidence of processing.
++
++Exactly NI-02B and NI-04 derived database groups may be selected by a separately
++authorized operator. NI-01, NI-02A, Registry and all other stores are KEEP.
++No executable destructive switch or service control is part of Coder tooling.
++The two-store replacement is not atomic: interruption requires an offline hold
++until both stores independently validate. Pre-V2 code is not a rollback target.
++
++## Composition and scope proof
++
++The independent NI-02B composition reads the explicit
++`NETWORK_METADATA_PROJECTION_SCOPE_ADMISSION_JSON` operator statement only when
++enabled. Disabled composition performs no admission/dependency I/O. There is no
++fallback to current capture environment CIDRs, no public-IP shortcut and no
++wildcard guest domain. Reordered object keys canonicalize deterministically;
++duplicate members, NaN/Infinity, unrecognized keys, noncanonical CIDRs/UTC,
++overlaps and unknown placement are rejected. The canonical statement and its
++SHA256 are durably pinned; runs reference that admission through a foreign key.
++Restart with changed proof rejects the store; topology requires re-admission.
++The NI-02B-local projection result is explicitly `NetworkMetadataProjectionResultV2`;
++the NI-01 source record remains V1 and the unchanged logical edge field shape
++remains `DeviceNetworkMetadataEdgeV1` with `projection_contract_version=2`.
++
++`tests/network_metadata_projection/support.py::scope_admission` and
++`test_external_peer_v2.py::admitted_source` construct fully valid **synthetic**
++examples from the exact disposable CaptureScopeBinding. No sample represents
++current production topology. The operator must replace it with reviewed proof.
++The complete canonical sample is
++`tests/network_metadata_projection/fixtures/external_peer_scope_synthetic.json`.
++
++Each generation is admitted, even when it has no rows. Each observation must
++carry the exact binding's valid-from value and event time >= valid-from. Source
++scope errors become `scope_admission_untrusted`; storage outages remain distinct.
++The NI-02B-owned `EndpointDisposition` is not an NI-02A result and carries no
++MAC/Device/binding for the outside terminal. In-guest authority rules are unchanged.
++
++## Reset proof and transactions
++
++`projection_scope_admission` pins the statement. `projection_source_reset_epoch`
++pins epoch/time/admission/snapshot digest/count. `projection_source_reset_floors`
++pins each generation, Site/source/scope/binding/valid-from, committed bounds and
++the nullable exact retained normalized tail. These rows are immutable; exact
++signature and closed-data validation are enforced by every projection reader.
++
++Core schema, admission, epoch and all floors are committed in **one initial
++transaction** by the offline bootstrap. Extension V1 is installed separately
++under the same acquired writer lock; no PREPARED manifest is issued until both
++stores validate. A crash at any stage leaves staging incomplete/offline, not a
++permission to start it. No in-place V1 migration exists.
++
++The source floor is never advanced. Source selection is strictly after
++`max(floor, processed_checkpoint)`; the latter changes only with committed new
++dispositions. The first floor-based commit verifies that boundary inside the
++write transaction. Existing generation appends remain eligible, an empty tail
++has no invented offset, and new generations start naturally. Canonical lineage
++continues to validate when legitimate source retention removes old normalized
++rows. No raw file size, source wall-clock cutoff or fabricated checkpoint is used.
++Ordinary V2 writer startup refuses a store without an explicit bootstrap reset
++epoch. Simply deleting the old derived DB and starting the service cannot
++silently replay retained NI-01 history. A legitimately empty source snapshot
++still has an explicit epoch with zero floors, not fabricated processing.
++
++## Offline helper API (no execution authority)
++
++Use the exact admitted interpreter from the repository root:
++
++```text
++python -m scripts.ni02b_v2_offline_bootstrap inspect|dry-run|prepare|verify
++  --projection-target <absolute effective NI02B DB path>
++  --materialization-target <absolute effective NI04 DB path>
++  --keep-path <absolute effective protected DB path> [repeat for ALL protected stores]
++```
++
++- `inspect` (default) / `dry-run`: no writes, no SQLite connections or sidecar
++  creation. Reports exact selected DB/sidecar groups, KEEP paths, quiescence
++  prerequisite, and **unqualified on-disk header** versions. A WAL may contain
++  newer state; this is not signature acceptance. Optional `--admission-file`
++  validates the typed statement, not the physical topology.
++- `prepare`: additionally requires `--source-path`, `--admission-file`, a new
++  `--staging-dir`, `--writers-stopped` and `--readers-drained`. These flags are
++  explicit operator assertions, **not** automatic proof that processes stopped.
++  Only new staging files are written. Source must be in KEEP. Takes one query-only
++  NI-01 transaction, creates fresh stores and immutable `prepared-pair.json`.
++- `verify`: additionally requires `--manifest`, `--manifest-sha256` (reviewed and
++  externally retained), and `--admission-file`. Re-reads both stores query-only,
++  validates exact signatures/quick-check/FK/floors/emptiness and hashes/sizes.
++  Symlinks, hardlinks, selected/protected aliases, nonempty WAL or journals,
++  scope changes, malformed state or mismatched pair fail closed.
++
++Verification never stops a process, switches/replaces a file or changes mode.
++Query-only WAL validation can create SQLite's empty WAL/shared-index sidecars;
++it never changes logical records. Outstanding WAL content is rejected, not
++checkpointed. The externally retained manifest freezes database contents and
++reset proof. Repeat prepare must use a **new** staging directory and epoch.
++
++The source/target/KEEP inventory must originate from current effective config,
++including NI-01, NI-02A, Registry, Auth/session/CAPPORT, Omada, Admin Settings and
++all other stores. The helper cannot discover omitted consumers or prove physical
++quiescence, mount topology or pre-NAT placement. Operator independent preflight
++is mandatory; do not interpret a typed statement as auto-detected topology.
++
++## Operator-only pair switch and rollback
++
++No activate/delete/switch command is implemented. The separately approved
++runbook owns these state transitions:
++
++1. `PREPARED`: reviewed staging and externally retained manifest hash. Old stores
++   remain untouched. NI-04 writer stopped first, NI-02B second; all NI readers
++   drained, including transient Admin readers.
++2. `REPLACED_NOT_STARTED`: operator replaces exactly the selected two DB groups,
++   updates reviewed pair paths, independently records the new manifest hash.
++   **Both readers and writers stay offline**, including after a one-file crash.
++3. `VERIFIED`: qualified verification of both selected files as the same prepared
++   pair; independent quiescence/KEEP checks and explicit Owner authority still
++   required. No tool automatically starts services or interprets this as GO_SERVE.
++
++Interruption: hold offline and reprepare/verify both stores with a newly approved
++reset snapshot as necessary; never mix one old and one new DB. Preserve NI-01,
++NI-02A, Registry and guest operations. No backup of discarded NI history is a
++mandatory gate; exact paths and technical integrity are mandatory.
++
++Start NI-02B V2 first, then NI-04 shadow against the fresh pair; confirm new-only
++facts, genuine guest gaps and freshness. Owner-controlled 15-minute natural-load
++acceptance and a separate GO_SERVE are mandatory. No pre-V2 rollback against V2
++files. Disable NI readers/workers or forward-repair/reset under separate authority.
++
++## Test ownership / honest limits
++
++Local Coder targeted tests cover T01–T09/T11 deterministic portions, V2-01–V2-14,
++closed versions, source concurrency, crashes, protected files and public API
++compatibility. Existing guest-gap, temporal, capacity and immutable-edge checks
++remain. The old frontend byte-identity test permits exactly the two authorized
++projection status version-field changes; other NI-03/UI bytes remain frozen.
++
++T10 / V2-15: the bounded disposable local load test reports timings/footprint
++without claiming HDD or production acceptance. Physical HDD I/O, p95/p99 live
++poll, 15-minute natural load, topology, deploy/reset/read-drain and activation
++are pending Owner/TechLead operational gates. No Full Gate PASS, no universal
++`usable`, no claimed disk recovery. DNS/SNI limits, real DHCP gaps and source
++freshness remain independently visible. Full Project/Central gates belong to
++TechLead, not Coder.
+diff --git a/scripts/ni02b_v2_offline_bootstrap.py b/scripts/ni02b_v2_offline_bootstrap.py
+new file mode 100644
+index 0000000..a1845c2
+--- /dev/null
++++ b/scripts/ni02b_v2_offline_bootstrap.py
+@@ -0,0 +1,294 @@
++"""Inert NI-02B V2 / NI-04 offline staging; never switches or deletes live DBs.
++
++Only inspect, prepare and verify are implemented. The separately authorized
++operator owns quiescence, the non-atomic pair replacement and service controls.
++"""
++import argparse
++import hashlib
++import json
++import os
++import sqlite3
++import uuid
++from contextlib import contextmanager
++from datetime import datetime, timezone
++from pathlib import Path
++
++from app.network_metadata.canonical import ni01_canonical_json
++from app.network_metadata.validation import strict_json, canonical_uuid, ni_format_utc, digest, integer
++from app.network_metadata.projection_source import NetworkMetadataProjectionSourceReadService
++from app.network_metadata_projection.config import ScopeAdmission
++from app.network_metadata_projection.models import ProjectionConfig
++from app.network_metadata_projection.repository import ProjectionRepository
++from app.network_metadata_projection.schema import validate_schema as validate_projection
++from app.network_metadata_projection.validation import validate_reset_floors
++from app.network_service_recognition.materialization_repository import ServiceMaterializationRepository
++from app.network_service_recognition.materialization_schema import validate_schema as validate_materialization
++
++SUFFIXES = ("", "-wal", "-shm", "-journal")
++STATES = frozenset({"PREPARED", "REPLACED_NOT_STARTED", "VERIFIED"})
++
++
++class BootstrapHold(RuntimeError):
++    def __init__(self, code="hold_staging"):
++        super().__init__(code)
++
++
++def exact_path(value):
++    path = Path(value)
++    if type(value) is not str or not path.is_absolute() or "\0" in value:
++        raise BootstrapHold("hold_path_alias")
++    # Reject symlinks at any ancestor, not just the database leaf.
++    if any(parent.is_symlink() for parent in (path, *path.parents)) or path.resolve() != path:
++        raise BootstrapHold("hold_path_alias")
++    if path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
++        raise BootstrapHold("hold_path_alias")
++    return path
++
++
++def inspect_paths(*, projection_target, materialization_target, keep_paths):
++    if type(keep_paths) not in {tuple, list} or not keep_paths:
++        raise BootstrapHold("hold_keep_inventory")
++    targets = [exact_path(value) for value in (projection_target, materialization_target)]
++    keep = [exact_path(value) for value in keep_paths]
++    groups = [[exact_path(str(target) + suffix) for suffix in SUFFIXES] for target in targets]
++    protected = [exact_path(str(path) + suffix) for path in keep for suffix in SUFFIXES]
++    selected = [path for group in groups for path in group]
++    if len(set(selected + protected)) != len(selected + protected):
++        raise BootstrapHold("hold_protected_path")
++    existing = [path for path in selected + protected if path.exists()]
++    inodes = [(path.stat().st_dev, path.stat().st_ino) for path in existing]
++    if len(set(inodes)) != len(inodes):
++        raise BootstrapHold("hold_protected_path")
++    return {"selected_groups": [[str(path) for path in group] for group in groups],
++            "keep_paths": [str(path) for path in keep], "destructive_action": False,
++            "required_barrier": "stop_NI04_then_NI02B_and_drain_ALL_SQLite_readers"}
++
++
++def file_identity(path):
++    path = exact_path(str(path))
++    with path.open("rb") as stream:
++        hashed = hashlib.file_digest(stream, "sha256") if hasattr(hashlib, "file_digest") else None
++        if hashed is None:
++            hashed = hashlib.sha256()
++            for chunk in iter(lambda: stream.read(65536), b""):
++                hashed.update(chunk)
++    return {"path": str(path), "bytes": path.stat().st_size, "sha256": hashed.hexdigest()}
++
++
++def inspect_versions(inventory):
++    """No SQLite connection/sidecar creation: unqualified on-disk header only.
++
++    A live WAL may contain a newer version. This is never schema admission;
++    qualified signature/integrity checks occur only in offline verify.
++    """
++    versions = []
++    for group in inventory["selected_groups"]:
++        path = Path(group[0])
++        header = b""
++        if path.exists():
++            with path.open("rb") as stream:
++                header = stream.read(100)
++        version = int.from_bytes(header[60:64], "big") if len(header) == 100 and header[:16] == b"SQLite format 3\0" else None
++        versions.append({"path": str(path), "header_user_version": version, "schema_admitted": False,
++                         "wal_may_contain_newer_state": Path(str(path)+"-wal").exists()})
++    return versions
++
++
++@contextmanager
++def read_only(path):
++    connection = sqlite3.connect(exact_path(str(path)).as_uri() + "?mode=ro", uri=True, timeout=.5, isolation_level=None)
++    connection.row_factory = sqlite3.Row
++    try:
++        for pragma in ("query_only=ON", "foreign_keys=ON", "busy_timeout=500"):
++            connection.execute("PRAGMA " + pragma)
++        connection.execute("BEGIN")
++        yield connection
++    finally:
++        connection.close()
++
++
++def prepare(*, staging_dir, source_path, projection_target, materialization_target,
++            keep_paths, admission_json, writers_stopped, readers_drained):
++    if writers_stopped is not True or readers_drained is not True:
++        raise BootstrapHold("hold_reader_drain")
++    admission = ScopeAdmission(admission_json)
++    source = exact_path(source_path)
++    if str(source) not in keep_paths:
++        raise BootstrapHold("hold_keep_inventory")
++    inventory = inspect_paths(projection_target=projection_target,
++        materialization_target=materialization_target, keep_paths=keep_paths)
++    stage = Path(staging_dir)
++    if not stage.is_absolute() or stage.exists() or stage.resolve() != stage or any(p.is_symlink() for p in stage.parents):
++        raise BootstrapHold("hold_staging_path")
++    if any(stage == Path(path).parent or stage in Path(path).parents for group in inventory["selected_groups"] for path in group):
++        raise BootstrapHold("hold_staging_path")
++    floors = NetworkMetadataProjectionSourceReadService(str(source)).read_reset_snapshot(admission=admission)
++    epoch, at = str(uuid.uuid4()), ni_format_utc(datetime.now(timezone.utc))
++    # Only new staging paths are writable. No existing target is ever opened RW.
++    stage.mkdir(mode=0o700)
++    projection = stage / "network_metadata_projection.sqlite3"
++    materialization = stage / "network_service_intelligence.sqlite3"
++    repo = ProjectionRepository(ProjectionConfig(enabled=True, db_path=str(projection),
++        source_db_path=str(source), scope_admission_json=admission.canonical),
++        install_service_recognition_extension=True,
++        reset_bootstrap=dict(floors=floors, reset_epoch_id=epoch, reset_at_utc=at))
++    store = ServiceMaterializationRepository(str(materialization))
++    try:
++        repo.initialize()
++        if validate_projection(repo.connection, integrity=True) != "CORE_PLUS_EXTENSION_V1":
++            raise BootstrapHold()
++        store.initialize()
++        validate_materialization(store.connection, integrity=True)
++    finally:
++        repo.close()
++        store.close()
++    manifest = {"schema_version": 1, "state": "PREPARED", "reset_epoch_id": epoch,
++        "reset_at_utc": at, "admission_digest": admission.digest,
++        "source_path": str(source), "source_snapshot_digest": hashlib.sha256(ni01_canonical_json(sorted(floors,
++            key=lambda item: item["source_generation_id"]))).hexdigest(),
++        "projection_target": projection_target, "materialization_target": materialization_target,
++        "keep_paths": list(keep_paths), "projection": file_identity(projection),
++        "materialization": file_identity(materialization)}
++    manifest_path = stage / "prepared-pair.json"
++    encoded = ni01_canonical_json(manifest)
++    with manifest_path.open("xb") as stream:
++        stream.write(encoded)
++        stream.flush()
++        os.fsync(stream.fileno())
++    # A successful prepare is not an execution/activation token.
++    verify(manifest_path=str(manifest_path), admission_json=admission.canonical)
++    return manifest
++
++
++def verify(*, manifest_path, admission_json, expected_manifest_sha256=None, expected_inventory=None):
++    admission = ScopeAdmission(admission_json)
++    path = exact_path(manifest_path)
++    if path.stat().st_size > 65536:
++        raise BootstrapHold("hold_pair_manifest")
++    if expected_manifest_sha256 is not None:
++        digest(expected_manifest_sha256)
++        if file_identity(path)["sha256"] != expected_manifest_sha256:
++            raise BootstrapHold("hold_pair_manifest")
++    manifest = strict_json(path.read_text(encoding="utf-8"))
++    required = {"schema_version", "state", "reset_epoch_id", "reset_at_utc", "admission_digest", "source_path",
++        "source_snapshot_digest", "projection_target", "materialization_target", "keep_paths", "projection", "materialization"}
++    if (type(manifest) is not dict or set(manifest) != required or type(manifest["schema_version"]) is not int
++            or manifest["schema_version"] != 1 or manifest["state"] not in STATES
++            or manifest["admission_digest"] != admission.digest):
++        raise BootstrapHold("hold_pair_manifest")
++    canonical_uuid(manifest["reset_epoch_id"], 4)
++    digest(manifest["source_snapshot_digest"])
++    if expected_inventory is not None and (expected_inventory["selected_groups"] != [
++            [manifest[name] + suffix for suffix in SUFFIXES] for name in ("projection_target", "materialization_target")]
++            or expected_inventory["keep_paths"] != manifest["keep_paths"]):
++        raise BootstrapHold("hold_pair_manifest")
++    inspect_paths(projection_target=manifest["projection_target"], materialization_target=manifest["materialization_target"],
++                  keep_paths=manifest["keep_paths"])
++    if manifest["source_path"] not in manifest["keep_paths"]:
++        raise BootstrapHold("hold_keep_inventory")
++    staged = []
++    for name in ("projection", "materialization"):
++        entry = manifest[name]
++        if type(entry) is not dict or set(entry) != {"path", "bytes", "sha256"}:
++            raise BootstrapHold("hold_pair_manifest")
++        integer(entry["bytes"], 1)
++        digest(entry["sha256"])
++        wal = Path(entry["path"] + "-wal")
++        journal = Path(entry["path"] + "-journal")
++        # A query-only WAL connection may create an empty WAL/shared-index. They
++        # are not database contents; any actual outstanding journal is a HOLD.
++        if (file_identity(entry["path"]) != entry or (wal.exists() and wal.stat().st_size != 0)
++                or journal.exists()):
++            raise BootstrapHold("hold_pair_identity")
++        staged.append(entry["path"])
++    inspect_paths(projection_target=staged[0], materialization_target=staged[1], keep_paths=manifest["keep_paths"])
++    if len(set(staged + manifest["keep_paths"])) != len(staged + manifest["keep_paths"]):
++        raise BootstrapHold("hold_protected_path")
++    if manifest["state"] != "PREPARED" and staged != [manifest["projection_target"], manifest["materialization_target"]]:
++        raise BootstrapHold("hold_pair_identity")
++    with read_only(staged[0]) as connection:
++        if validate_projection(connection, integrity=True) != "CORE_PLUS_EXTENSION_V1":
++            raise BootstrapHold()
++        floors = validate_reset_floors(connection, admission)
++        epoch = connection.execute("SELECT * FROM projection_source_reset_epoch").fetchone()
++        if (epoch["reset_epoch_id"] != manifest["reset_epoch_id"] or epoch["reset_at_utc"] != manifest["reset_at_utc"]
++                or epoch["source_snapshot_digest"] != manifest["source_snapshot_digest"]):
++            raise BootstrapHold("hold_pair_identity")
++        for table in ("projection_runs", "device_network_metadata_edges", "projection_source_checkpoints",
++                      "projection_pending_attribution", "projection_registry_identities", "projection_site_mac_bindings",
++                      "projection_registry_binding_events", "projection_service_recognition_feed", "projection_registry_binding_change_index"):
++            if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
++                raise BootstrapHold("hold_nonempty_store")
++    with read_only(staged[1]) as connection:
++        validate_materialization(connection, integrity=True)
++        for table in ("service_materialization_generations", "service_recognition_observations", "device_service_rollups",
++                      "device_materialization_state", "service_materialization_checkpoints", "service_binding_replay_jobs"):
++            if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
++                raise BootstrapHold("hold_nonempty_store")
++    reader = NetworkMetadataProjectionSourceReadService(manifest["source_path"])
++    # Retention may have removed the old tail. Monotonic progress and immutable
++    # canonical lineage, not a nearest row or raw file length, prove the floor.
++    for floor in floors:
++        generation = reader.get_source_progress(floor["source_generation_id"])
++        if (generation.generation_start_offset != floor["generation_start_offset"]
++                or generation.committed_byte_offset < floor["committed_byte_offset"]
++                or generation.capture_scope_binding_digest != floor["capture_scope_binding_digest"]
++                or generation.binding_valid_from_utc != floor["binding_valid_from_utc"]):
++            raise BootstrapHold("hold_source_floor")
++    return {"schema_version": 1, "state": "VERIFIED" if manifest["state"] != "PREPARED" else "PREPARED",
++            "reset_epoch_id": manifest["reset_epoch_id"], "floor_count": len(floors),
++            "destructive_action": False, "activation_authorized": False}
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("command", choices=("inspect", "dry-run", "prepare", "verify"), nargs="?", default="inspect")
++    parser.add_argument("--projection-target", required=True)
++    parser.add_argument("--materialization-target", required=True)
++    parser.add_argument("--keep-path", action="append", required=True)
++    parser.add_argument("--source-path")
++    parser.add_argument("--admission-file")
++    parser.add_argument("--staging-dir")
++    parser.add_argument("--manifest")
++    parser.add_argument("--manifest-sha256", help="externally retained SHA256 of the reviewed immutable pair manifest")
++    parser.add_argument("--writers-stopped", action="store_true")
++    parser.add_argument("--readers-drained", action="store_true")
++    args = parser.parse_args(argv)
++    try:
++        inventory = inspect_paths(projection_target=args.projection_target,
++            materialization_target=args.materialization_target, keep_paths=args.keep_path)
++        if args.command in {"inspect", "dry-run"}:
++            result = dict(inventory, current_header_versions=inspect_versions(inventory),
++                reset_boundary="single_NI01_normalized_tail_snapshot_not_yet_taken",
++                scope_admission="not_supplied", schema_admitted=False)
++            if args.admission_file is not None:
++                admission_path = exact_path(args.admission_file)
++                if admission_path.stat().st_size > 65536:
++                    raise BootstrapHold("hold_scope_admission")
++                admitted = ScopeAdmission(admission_path.read_text(encoding="utf-8"))
++                result.update(scope_admission="typed_operator_statement_only", admission_digest=admitted.digest,
++                              scope_count=len(admitted.bindings))
++        else:
++            admission_path = exact_path(args.admission_file)
++            if admission_path.stat().st_size > 65536:
++                raise BootstrapHold("hold_scope_admission")
++            admission_json = admission_path.read_text(encoding="utf-8")
++            if args.command == "prepare":
++                result = prepare(staging_dir=args.staging_dir, source_path=args.source_path,
++                    projection_target=args.projection_target, materialization_target=args.materialization_target,
++                    keep_paths=args.keep_path, admission_json=admission_json,
++                    writers_stopped=args.writers_stopped, readers_drained=args.readers_drained)
++            else:
++                if args.manifest_sha256 is None:
++                    raise BootstrapHold("hold_pair_manifest")
++                result = verify(manifest_path=args.manifest, admission_json=admission_json,
++                                expected_manifest_sha256=args.manifest_sha256, expected_inventory=inventory)
++        print(json.dumps(result, sort_keys=True))
++        return 0
++    except Exception:
++        print("ni02b_v2_bootstrap_hold")
++        return 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/admin_web/test_device_service_intelligence_frontend.py b/tests/admin_web/test_device_service_intelligence_frontend.py
+index e563f0c..156b925 100644
+--- a/tests/admin_web/test_device_service_intelligence_frontend.py
++++ b/tests/admin_web/test_device_service_intelligence_frontend.py
+@@ -27,6 +27,18 @@ def test_existing_admin_js_prefix_and_ni03_assets_unchanged():
+         # Wave-1 idle-source guard in the shared projection reader.
+         accepted = subprocess.check_output(["git", "show", "5c7b4c46afa5a57d55fe044c4326da3a10b9e145:" + name], cwd=ROOT)
+         current = ROOT.joinpath(name).read_bytes().replace(b"\r\n", b"\n")
++        accepted = accepted.replace(b"\r\n", b"\n")
++        if name == "app/network_metadata_projection/read_service.py":
++            # Architecture Exception V1 explicitly authorizes only internal
++            # Core/projection V2 admission. All other shared-reader bytes and
++            # every NI-03/UI source above remain frozen.
++            for before, after in (
++                (b"schema_version=None, projection_contract_version=1,", b"schema_version=None, projection_contract_version=2,"),
++                (b"defaults.update(store_state=\"available\", schema_version=1, db_bytes=total)",
++                 b"defaults.update(store_state=\"available\", schema_version=2, db_bytes=total)"),
++            ):
++                assert accepted.count(before) == current.count(after) == 1
++                accepted = accepted.replace(before, after, 1)
+         assert current == accepted.replace(b"\r\n", b"\n")
+ 
+ 
+diff --git a/tests/network_metadata_projection/fixtures/external_peer_scope_synthetic.json b/tests/network_metadata_projection/fixtures/external_peer_scope_synthetic.json
+new file mode 100644
+index 0000000..0e6a225
+--- /dev/null
++++ b/tests/network_metadata_projection/fixtures/external_peer_scope_synthetic.json
+@@ -0,0 +1 @@
++{"placement_kind":"verified_pre_nat_guest_ipv4","schema_version":1,"scopes":[{"binding_valid_from_utc":"2026-01-01T00:00:00.000000Z","capture_scope_binding_digest":"5d2ce1358f69c2f53d6ba702be72f88883a31230c367007d2c29865896d7da00","capture_source_id":"synthetic-sensor","ipv4_cidrs":["10.73.0.0/16"],"network_scope_id":"synthetic-scope","site_id":"6a64f17630da7c70d232187a"}]}
+diff --git a/tests/network_metadata_projection/service_delivery_load.py b/tests/network_metadata_projection/service_delivery_load.py
+index a1fc3ba..9cafea7 100644
+--- a/tests/network_metadata_projection/service_delivery_load.py
++++ b/tests/network_metadata_projection/service_delivery_load.py
+@@ -29,7 +29,7 @@ def main(argv=None):
+         raise ValueError("invalid_lab_configuration")
+     sys.path.insert(0, str(root))
+     from tests.network_metadata_projection.support import (
+-        source_record, Clock, Source, Attribution, Registry, IDENTITY, MAC, OTHER_MAC, GENERATION)
++        source_record, Clock, Source, Attribution, Registry, IDENTITY, MAC, OTHER_MAC, GENERATION, scope_admission)
+     from app.network_metadata_projection.repository import ProjectionRepository
+     from app.network_metadata_projection.models import ProjectionConfig, RegistryEvaluation
+     from app.network_metadata_projection.service import NetworkMetadataProjectionService
+@@ -40,7 +40,8 @@ def main(argv=None):
+     tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
+     commits, elapsed, projected = [], 0.0, 0
+     with tempfile.TemporaryDirectory(prefix="ni04mat-g2-load-", dir=args.lab_temp) as disposable:
+-        config = ProjectionConfig(True, str(Path(disposable) / "projection.sqlite3"), max_db_bytes=536870912)
++        config = ProjectionConfig(True, str(Path(disposable) / "projection.sqlite3"), max_db_bytes=536870912,
++                                  scope_admission_json=scope_admission())
+         clock = Clock()
+         repo = ProjectionRepository(config, clock=clock).initialize()
+         try:
+diff --git a/tests/network_metadata_projection/support.py b/tests/network_metadata_projection/support.py
+index f7f17bb..2adf5bf 100644
+--- a/tests/network_metadata_projection/support.py
++++ b/tests/network_metadata_projection/support.py
+@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
+ from types import SimpleNamespace
+ from dataclasses import replace
+ import uuid
++import json
+ 
+ from app.network_metadata.config import make_capture_scope_binding
+ from app.network_metadata.canonical import source_event_identity, observation_uuid
+@@ -32,17 +33,29 @@ class Clock:
+ 
+ 
+ def source_record(offset=0, **changes):
+-    binding = make_capture_scope_binding(dict(schema_version=1, capture_source_id="synthetic-sensor",
+-        site_id=SITE, network_scope_id="synthetic-scope", ipv4_cidrs=["10.73.0.0/16"],
+-        valid_from_utc="2026-01-01T00:00:00.000000Z"))
++    binding = make_capture_scope_binding(dict(schema_version=1,
++        capture_source_id=changes.get("capture_source_id", "synthetic-sensor"),
++        site_id=changes.get("site_id", SITE), network_scope_id=changes.get("network_scope_id", "synthetic-scope"),
++        ipv4_cidrs=list(changes.get("capture_scope_ipv4_cidrs", ("10.73.0.0/16",))),
++        valid_from_utc=changes.get("binding_valid_from_utc", "2026-01-01T00:00:00.000000Z")))
+     identity = source_event_identity(GENERATION, offset)
+     value = NetworkMetadataProjectionSourceRecordV1(observation_uuid("dns", identity), identity, "dns", GENERATION,
+-        offset, SITE, binding.capture_source_id, binding.network_scope_id, "within_intended_scope", binding.binding_digest,
++        offset, binding.site_id, binding.capture_source_id, binding.network_scope_id, "within_intended_scope", binding.binding_digest,
+         binding.ipv4_cidrs, "2026-10-09T12:00:00.123456Z", ni_format_utc(T0), "observed_retained",
+-        "10.73.0.7", "10.73.0.8", 65535, 65535, "UDP")
++        "10.73.0.7", "10.73.0.8", 65535, 65535, "UDP", binding.valid_from_utc)
+     return replace(value, **changes)
+ 
+ 
++def scope_admission(records=None):
++    scopes = {}
++    for record in records or [source_record()]:
++        scopes[record.capture_scope_binding_digest] = dict(site_id=record.site_id,
++            capture_source_id=record.capture_source_id, network_scope_id=record.network_scope_id,
++            capture_scope_binding_digest=record.capture_scope_binding_digest,
++            ipv4_cidrs=list(record.capture_scope_ipv4_cidrs), binding_valid_from_utc=record.binding_valid_from_utc)
++    return json.dumps(dict(schema_version=1, placement_kind="verified_pre_nat_guest_ipv4", scopes=list(scopes.values())))
++
++
+ class Source:
+     def __init__(self, records=()):
+         self.records = list(records)
+@@ -56,6 +69,10 @@ class Source:
+         records = [value for value in self.records if value.source_generation_id == generation]
+         return SimpleNamespace(source_generation_id=generation, generation_start_offset=0,
+             committed_byte_offset=max((value.record_start_byte_offset for value in records), default=0) + 1)
++    def validate_generation_admission(self, generation, *, admission):
++        for record in self.records:
++            if record.source_generation_id == generation:
++                admission.binding_for(record)
+     def read_projection_batch(self, generation, after, limit):
+         return tuple(sorted((record for record in self.records if record.source_generation_id == generation
+             and (after is None or record.record_start_byte_offset > after)), key=lambda value: value.record_start_byte_offset)[:limit])
+@@ -101,7 +118,8 @@ class Registry:
+ 
+ def stack(tmp_path, records=None):
+     clock = Clock()
+-    config = ProjectionConfig(True, str(tmp_path / "projection.sqlite3"), max_db_bytes=67108864)
++    config = ProjectionConfig(True, str(tmp_path / "projection.sqlite3"), max_db_bytes=67108864,
++                              scope_admission_json=scope_admission(records))
+     repository = ProjectionRepository(config, clock=clock).initialize()
+     source, attribution, registry = Source(records or [source_record()]), Attribution(), Registry()
+     service = NetworkMetadataProjectionService(config, repository, source, attribution, registry, IDENTITY)
+diff --git a/tests/network_metadata_projection/test_capacity_config.py b/tests/network_metadata_projection/test_capacity_config.py
+index de916b8..4e6f61f 100644
+--- a/tests/network_metadata_projection/test_capacity_config.py
++++ b/tests/network_metadata_projection/test_capacity_config.py
+@@ -11,7 +11,7 @@ from app.network_metadata_projection.models import (PROJECTION_TRANSACTION_HEADR
+ from app.network_metadata_projection.config import projection_config_from_env
+ from app.network_metadata_projection.repository import ProjectionRepository
+ from app.network_metadata_projection.cli import main
+-from .support import stack, source_record, SITE, MAC, IDENTITY
++from .support import stack, source_record, SITE, MAC, IDENTITY, scope_admission
+ 
+ 
+ def test_default_off_no_db_lock_upstream_or_identity(tmp_path, monkeypatch):
+@@ -41,6 +41,7 @@ def test_closed_capacity_config(value):
+ def test_processing_config_accepts_only_frozen_value(tmp_path, name):
+     default = getattr(ProjectionConfig(), name)
+     env = {"NETWORK_METADATA_PROJECTION_ENABLED": "true",
++        "NETWORK_METADATA_PROJECTION_SCOPE_ADMISSION_JSON": scope_admission(),
+         "NETWORK_METADATA_PROJECTION_DB_PATH": str(tmp_path / "projection.sqlite3"),
+         "NETWORK_METADATA_DB_PATH": str(tmp_path / "source.sqlite3"),
+         "VISITOR_REGISTRY_DB_PATH": str(tmp_path / "registry.sqlite3"),
+@@ -58,6 +59,7 @@ def test_processing_config_accepts_only_frozen_value(tmp_path, name):
+ @pytest.mark.parametrize("capacity", [67108864, 17179869184, 68719476736])
+ def test_admitted_capacity_range_preserved(tmp_path, capacity):
+     env = {"NETWORK_METADATA_PROJECTION_ENABLED": "true",
++        "NETWORK_METADATA_PROJECTION_SCOPE_ADMISSION_JSON": scope_admission(),
+         "NETWORK_METADATA_PROJECTION_DB_PATH": str(tmp_path / "projection.sqlite3"),
+         "NETWORK_METADATA_DB_PATH": str(tmp_path / "source.sqlite3"),
+         "VISITOR_REGISTRY_DB_PATH": str(tmp_path / "registry.sqlite3"),
+@@ -65,7 +67,7 @@ def test_admitted_capacity_range_preserved(tmp_path, capacity):
+     assert projection_config_from_env(env).max_db_bytes == capacity
+ 
+ 
+-@pytest.mark.parametrize("damage", ["CREATE TABLE foreign_table(value)", "PRAGMA user_version=2", "DROP TABLE projection_pending_attribution"])
++@pytest.mark.parametrize("damage", ["CREATE TABLE foreign_table(value)", "PRAGMA user_version=1", "DROP TABLE projection_pending_attribution"])
+ def test_foreign_schema_preserved_and_writer_lock(tmp_path, damage):
+     value = stack(tmp_path)
+     try:
+@@ -157,7 +159,7 @@ def test_maximum_256_observation_transaction_growth_under_fixed_headroom(tmp_pat
+         dst = f"254.254.{100 + index // 78}.{101 + index % 78 * 2}"
+         records.append(source_record(9223372036854775550 + index, src_ip=src, dst_ip=dst,
+                                     capture_source_id="x" * 64, network_scope_id="y" * 64,
+-                                    capture_scope_ipv4_cidrs=("0.0.0.0/0",)))
++                                    capture_scope_ipv4_cidrs=("254.254.0.0/16",)))
+     value = stack(tmp_path, records)
+     try:
+         for index, record in enumerate(records):
+diff --git a/tests/network_metadata_projection/test_external_peer_v2.py b/tests/network_metadata_projection/test_external_peer_v2.py
+new file mode 100644
+index 0000000..a88576d
+--- /dev/null
++++ b/tests/network_metadata_projection/test_external_peer_v2.py
+@@ -0,0 +1,662 @@
++"""Owner T01–T11 / V2 regression fixtures: entirely disposable, no live reset."""
++import hashlib
++import json
++import shutil
++import sqlite3
++import subprocess
++import time
++import uuid
++from dataclasses import asdict, replace
++from datetime import timedelta
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++from app.analytics.source_gateway import QueryDeadline
++from app.network_metadata.config import make_capture_scope_binding
++from app.network_metadata.projection_source import NetworkMetadataProjectionSourceReadService
++from app.network_metadata.models import NetworkMetadataStorageUnavailable
++from app.network_metadata_projection.config import ScopeAdmission, projection_config_from_env
++from app.network_metadata_projection.models import ProjectionConfig, ProjectionConflict, ProjectionUnavailable, ALGORITHM, EndpointDisposition, RegistryEvaluation
++from app.network_metadata_projection.repository import ProjectionRepository
++from app.network_metadata_projection.schema import validate_schema, signature
++from app.network_metadata_projection.service import NetworkMetadataProjectionService
++from app.network_metadata_projection.service_extension import install_service_recognition_extension
++from app.network_metadata_projection.service_delivery_read_service import ServiceRecognitionDeliveryReadService
++from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
++from app.network_metadata_projection.validation import timestamp
++from app.network_metadata_projection.telemetry import ProjectionTelemetry
++from scripts.ni02b_v2_offline_bootstrap import prepare, verify, inspect_paths, BootstrapHold
++from tests.network_metadata import store, record, source_event, outcome, BOOT
++from .support import stack, source_record, scope_admission, SITE, MAC, IDENTITY, GENERATION, Clock, Attribution, Registry
++
++BASE = "f324c1e157b71802acda14a797c0e0f6747b6276"
++
++
++@pytest.mark.parametrize("role,address", [(role, address) for role in ("src", "dst")
++    for address in ("203.0.113.93", "192.168.50.2", "172.16.1.1")])
++def test_T01_T02_V2_01_02_external_terminal_no_dhcp_or_phantom_edge(tmp_path, role, address):
++    other = "dst" if role == "src" else "src"
++    value = stack(tmp_path, [source_record(**{other + "_ip": address})])
++    try:
++        install_service_recognition_extension(value.repo)
++        result, = value.service.poll()
++        edge, = value.repo.existing_edges(result.observation_id).values()
++        assert result.emitted_edge_count == 1 and result.projection_state == "complete"
++        assert getattr(result, other + "_attribution_state") == "not_applicable_outside_guest_scope"
++        assert [call[1] for call in value.attribution.calls] == [getattr(value.source.records[0], role + "_ip")]
++        assert edge["device_endpoint_role"] == role and edge["site_id"] == SITE
++        assert edge["event_at"] == value.source.records[0].event_at
++        assert edge["peer_scope"] == "external" and edge["direction"] == ("outbound" if role == "src" else "inbound")
++        assert edge["peer_attribution_binding_id"] is None
++        assert edge["projection_contract_version"] == 2 and edge["schema_version"] == 1
++        assert edge["projection_algorithm_version"] == ALGORITHM
++        assert not value.repo.connection.execute("SELECT 1 FROM projection_pending_attribution").fetchone()
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0] == (role == "src")
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("states,count,pending", [(("resolved", "resolved"), 2, 0),
++    (("resolved", "unattributed"), 1, 0), (("ambiguous", "unattributed"), 0, 0),
++    (("resolved", "unavailable"), 1, 1), (("unavailable", "unavailable"), 0, 1)])
++def test_T03_V2_03_guest_both_exact_temporal_calls(tmp_path, states, count, pending):
++    value = stack(tmp_path)
++    try:
++        value.attribution.states = dict(zip(("10.73.0.7", "10.73.0.8"), states))
++        result, = value.service.poll()
++        assert result.emitted_edge_count == count
++        assert [call[1] for call in value.attribution.calls] == ["10.73.0.7", "10.73.0.8"]
++        assert all(call[0] == SITE and call[2] == value.source.records[0].event_at for call in value.attribution.calls)
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_pending_attribution").fetchone()[0] == pending
++    finally:
++        value.repo.close()
++
++
++def test_T05_T08_V2_04_guest_gap_only_guest_retry_and_honest_unavailable(tmp_path):
++    value = stack(tmp_path, [source_record(dst_ip="203.0.113.93")])
++    try:
++        value.attribution.states["10.73.0.7"] = "unavailable"
++        result, = value.service.poll()
++        pending, = value.repo.connection.execute("SELECT * FROM projection_pending_attribution")
++        assert pending["pending_src"] == 1 and pending["pending_dst"] == 0
++        assert pending["dst_snapshot_state"] == "not_applicable_outside_guest_scope"
++        assert result.emitted_edge_count == 0 and value.repo.live_state == "attribution_unavailable"
++        assert DeviceNetworkMetadataReadService(value.config.db_path).get_status()["runtime_state"] == "attribution_unavailable"
++        for _ in range(3):
++            value.clock.advance(seconds=30)
++            value.service.retry()
++        assert all(call[1] == "10.73.0.7" for call in value.attribution.calls)
++        value.attribution.states.clear()
++        value.clock.advance(seconds=30)
++        value.service.retry()
++        edge = value.repo.existing_edges(result.observation_id)["src"]
++        value.clock.advance(seconds=30)
++        value.service.retry()
++        assert value.repo.existing_edges(result.observation_id)["src"] == edge
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_pending_attribution").fetchone()[0] == 0
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("changes", [dict(site_id="f" * 24), dict(capture_source_id="wrong"),
++    dict(network_scope_id="wrong"), dict(capture_scope_binding_digest="f" * 64),
++    dict(binding_valid_from_utc="2026-10-09T13:00:00.000000Z"),
++    dict(capture_scope_ipv4_cidrs=("10.74.0.0/16",)), dict(network_scope_state="unknown"),
++    dict(event_at="2025-12-31T23:59:59.999999Z")])
++def test_T04_V2_05_scope_conflict_blocks_entire_batch(tmp_path, changes):
++    value = stack(tmp_path)
++    try:
++        value.source.records.append(replace(source_record(1), **changes))
++        value.service.poll()
++        assert value.repo.live_reason == "scope_admission_untrusted"
++        assert value.repo.checkpoint(GENERATION) is None
++        for table in ("device_network_metadata_edges", "projection_pending_attribution"):
++            assert not value.repo.connection.execute(f"SELECT 1 FROM {table}").fetchone()
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("mutation", ["missing", "post_nat", "duplicate", "overlap", "wrong_digest", "bool", "extra", "wildcard"])
++def test_V2_05_06_closed_manifest_not_guessed(mutation):
++    value = json.loads(scope_admission())
++    if mutation == "missing":
++        value["scopes"] = []
++    elif mutation == "post_nat":
++        value["placement_kind"] = "post_nat"
++    elif mutation == "duplicate":
++        value["scopes"] *= 2
++    elif mutation in {"overlap", "wildcard"}:
++        value["scopes"][0]["ipv4_cidrs"] = ["10.73.0.0/16", "10.73.0.0/24"] if mutation == "overlap" else ["0.0.0.0/0"]
++    elif mutation == "wrong_digest":
++        value["scopes"][0]["capture_scope_binding_digest"] = "f" * 64
++    elif mutation == "bool":
++        value["schema_version"] = True
++    else:
++        value["allow_any"] = True
++    with pytest.raises(ProjectionConflict, match="scope_admission_untrusted"):
++        ScopeAdmission(json.dumps(value))
++
++
++def test_V2_admission_deterministic_strict_json_and_restart_pin(tmp_path):
++    value = stack(tmp_path)
++    try:
++        canonical = ScopeAdmission(scope_admission())
++        assert ScopeAdmission(canonical.canonical).digest == canonical.digest
++        for encoded in ('{"schema_version":1,"schema_version":1}', '{"schema_version":NaN}'):
++            with pytest.raises(ProjectionConflict):
++                ScopeAdmission(encoded)
++        value.repo.close()
++        changed = scope_admission([source_record(site_id="f" * 24)])
++        with pytest.raises(ProjectionUnavailable):
++            ProjectionRepository(replace(value.config, scope_admission_json=changed)).initialize()
++        value.repo = ProjectionRepository(value.config, clock=value.clock).initialize()
++        assert value.repo.connection.execute("SELECT admission_digest FROM projection_scope_admission").fetchone()[0] == canonical.digest
++        with pytest.raises(sqlite3.Error):
++            value.repo.connection.execute("UPDATE projection_scope_admission SET admission_digest=?", ("f" * 64,))
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("peer,state", [(None, "endpoint_absent"), ("2001:db8::1", "unsupported_address_family")])
++def test_T04_V2_06_ipv6_absence_distinct_no_lookup(tmp_path, peer, state):
++    value = stack(tmp_path, [source_record(dst_ip=peer, dst_port=None)])
++    try:
++        result, = value.service.poll()
++        assert result.dst_attribution_state == state and len(value.attribution.calls) == 1
++        assert value.repo.existing_edges(result.observation_id)["src"]["peer_scope"] == "unknown"
++        assert not isinstance(EndpointDisposition(state), type(value.attribution.resolve_ipv4(SITE, "10.73.0.7", source_record().event_at)))
++    finally:
++        value.repo.close()
++
++
++def admitted_source(source):
++    binding = source.config.capture_scope_binding
++    return json.dumps(dict(schema_version=1, placement_kind="verified_pre_nat_guest_ipv4", scopes=[dict(
++        site_id=binding.site_id, capture_source_id=binding.capture_source_id, network_scope_id=binding.network_scope_id,
++        capture_scope_binding_digest=binding.binding_digest, ipv4_cidrs=list(binding.ipv4_cidrs),
++        binding_valid_from_utc=binding.valid_from_utc)]))
++
++
++def seed_source(source, *, data=None, start=0, generation=None):
++    item = outcome(source.config.capture_scope_binding, data=data, start=start,
++                   generation=generation or source.generation.source_generation_id)
++    source.repo.ingest_batch([item], source.run, source.health, source.anchor)
++    return item
++
++
++def test_V2_08_consistent_read_only_tail_not_raw_length_and_empty_generation(tmp_path):
++    with store(tmp_path) as source:
++        reader = NetworkMetadataProjectionSourceReadService(source.config.db_path)
++        admission = ScopeAdmission(admitted_source(source))
++        empty, = reader.read_reset_snapshot(admission=admission)
++        assert empty["last_retained_record_start_byte_offset"] is empty["last_retained_observation_id"] is None
++        seed_source(source)
++        before = source.repo.connection.total_changes
++        floor, = reader.read_reset_snapshot(admission=admission)
++        assert floor["last_retained_record_start_byte_offset"] == 0
++        assert floor["last_retained_observation_id"] == reader.read_projection_batch(source.generation.source_generation_id, None, 1)[0].observation_id
++        assert source.repo.connection.total_changes == before
++        assert floor["last_retained_record_start_byte_offset"] != Path(source.config.source_path).stat().st_size
++
++
++def staged(source, tmp_path, suffix="stage"):
++    keep = [source.config.db_path, str(tmp_path / "protected-attribution.sqlite3"), str(tmp_path / "protected-registry.sqlite3")]
++    for path in keep[1:]:
++        Path(path).write_bytes(b"synthetic protected sentinel")
++    manifest = prepare(staging_dir=str(tmp_path / suffix), source_path=source.config.db_path,
++        projection_target=str(tmp_path / "target-projection.sqlite3"),
++        materialization_target=str(tmp_path / "target-ni04.sqlite3"), keep_paths=keep,
++        admission_json=admitted_source(source), writers_stopped=True, readers_drained=True)
++    return manifest, keep
++
++
++def test_T06_T07_V2_08_09_reset_append_restart_no_pre_reset_replay(tmp_path):
++    data = record(source_event(dest_ip="203.0.113.93"))
++    with store(tmp_path, source=(data+b"\n")*3) as source:
++        seed_source(source, data=data)
++        manifest, keep = staged(source, tmp_path)
++        floor = json.loads(Path(tmp_path / "stage" / "prepared-pair.json").read_text())
++        assert floor == manifest
++        seed_source(source, data=data, start=len(data)+1)
++        clock = Clock()
++        config = ProjectionConfig(enabled=True, db_path=manifest["projection"]["path"],
++            source_db_path=source.config.db_path, scope_admission_json=admitted_source(source))
++        repo = ProjectionRepository(config, clock=clock).initialize()
++        try:
++            assert not repo.connection.execute("SELECT 1 FROM projection_source_checkpoints").fetchone()
++            authority = Attribution()
++            authority.get_authority_horizon = lambda site: SimpleNamespace(state="available",
++                first_usable_at="2026-01-01T00:00:00.000Z", retained_from="2026-01-01T00:00:00.000Z")
++            original = authority.resolve_ipv4
++            authority.resolve_ipv4 = lambda *args: replace(original(*args), valid_from="2026-01-01T00:00:00.000Z")
++            service = NetworkMetadataProjectionService(config, repo,
++                NetworkMetadataProjectionSourceReadService(source.config.db_path), authority, Registry(), IDENTITY)
++            service.run_id = repo.create_run(IDENTITY)
++            result, = service.poll()
++            assert result.emitted_edge_count == 1
++            assert repo.checkpoint(source.generation.source_generation_id)["last_record_start_byte_offset"] == len(data)+1
++            assert repo.reset_floor(source.generation.source_generation_id)["last_retained_record_start_byte_offset"] == 0
++            before = tuple(repo.connection.iterdump())
++            service.poll()
++            assert repo.connection.execute("SELECT count(*) FROM device_network_metadata_edges").fetchone()[0] == 1
++            assert repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0] == 1
++            assert before != ()
++        finally:
++            repo.close()
++        with pytest.raises(BootstrapHold):
++            verify(manifest_path=str(tmp_path / "stage" / "prepared-pair.json"), admission_json=admitted_source(source))
++        assert all(Path(path).read_bytes() == b"synthetic protected sentinel" for path in keep[1:])
++
++
++def test_V2_10_reset_install_crash_whole_boundary_rollback(tmp_path):
++    value = stack(tmp_path)
++    try:
++        # Fresh-store requirement is real: a run is already present.
++        with pytest.raises(ProjectionUnavailable):
++            value.repo.install_reset_floors((), reset_epoch_id=str(uuid.uuid4()), reset_at_utc=timestamp(value.clock()))
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_source_reset_epoch").fetchone()[0] == 0
++    finally:
++        value.repo.close()
++    config = replace(value.config, db_path=str(tmp_path / "fresh.sqlite3"))
++    repo = ProjectionRepository(config).initialize()
++    class Crash(BaseException):
++        pass
++    try:
++        repo.crash_point = lambda point: (_ for _ in ()).throw(Crash()) if point == "before_commit" else None
++        with pytest.raises(Crash):
++            repo.install_reset_floors((), reset_epoch_id=str(uuid.uuid4()), reset_at_utc=timestamp(value.clock()))
++        assert repo.connection.execute("SELECT count(*) FROM projection_source_reset_epoch").fetchone()[0] == 0
++        assert not repo.connection.execute("SELECT 1 FROM projection_source_checkpoints").fetchone()
++    finally:
++        repo.close()
++
++
++def test_V2_07_11_frozen_old_schema_rejects_terminal_and_new_core(tmp_path):
++    root = Path(__file__).resolve().parents[2]
++    models = subprocess.check_output(["git", "show", BASE+":app/network_metadata_projection/models.py"], cwd=root).decode()
++    schema = subprocess.check_output(["git", "show", BASE+":app/network_metadata_projection/schema.py"], cwd=root).decode()
++    namespace = {"__name__": "frozen_v1", "__package__": "app.network_metadata_projection"}
++    exec(compile(models, "frozen_v1_models.py", "exec"), namespace)
++    schema = schema.replace("from .models import ALGORITHM, ATTRIBUTION_STATES, RUNTIME_STATES, ProjectionUnavailable", "")
++    exec(compile(schema, "frozen_v1_schema.py", "exec"), namespace)
++    old = sqlite3.connect(tmp_path / "v1.sqlite3")
++    old.execute("PRAGMA journal_mode=WAL")
++    old.execute("PRAGMA foreign_keys=ON")
++    namespace["create_schema"](old, "2026-10-09T12:00:00.000000Z")
++    old.commit()
++    before = tuple(old.iterdump())
++    with pytest.raises(ProjectionUnavailable):
++        validate_schema(old)
++    assert tuple(old.iterdump()) == before
++    assert "not_applicable_outside_guest_scope" not in namespace["STATES"]
++    old.close()
++    value = stack(tmp_path)
++    try:
++        with pytest.raises(namespace["ProjectionUnavailable"]):
++            namespace["validate_schema"](value.repo.connection)
++        item = value.service.prepare(source_record(dst_ip="203.0.113.93"))
++        invalid = dict(item.edges[0], peer_attribution_state="invented")
++        with pytest.raises(ProjectionUnavailable):
++            value.repo.commit_dispositions([(item.source, [invalid], None)], value.service._evaluations([item]), value.service.run_id)
++        assert not value.repo.existing_edges(item.source.observation_id)
++    finally:
++        value.repo.close()
++
++
++def test_T06_T07_V2_12_inert_pair_verify_rejects_partial_or_changed_db(tmp_path):
++    with store(tmp_path) as source:
++        manifest, keep = staged(source, tmp_path)
++        report = verify(manifest_path=str(tmp_path / "stage" / "prepared-pair.json"), admission_json=admitted_source(source))
++        assert report["state"] == "PREPARED" and not report["activation_authorized"]
++        with pytest.raises(BootstrapHold):
++            prepare(staging_dir=str(tmp_path / "other"), source_path=source.config.db_path,
++                projection_target=manifest["projection_target"], materialization_target=manifest["materialization_target"],
++                keep_paths=keep, admission_json=admitted_source(source), writers_stopped=True, readers_drained=False)
++        assert not (tmp_path / "other").exists()
++        # Disposable simulation only: one switched DB never constitutes a pair.
++        shutil.copyfile(manifest["projection"]["path"], manifest["projection_target"])
++        interrupted = dict(manifest, state="REPLACED_NOT_STARTED",
++            projection=dict(manifest["projection"], path=manifest["projection_target"]))
++        path = tmp_path / "interrupted.json"
++        path.write_text(json.dumps(interrupted))
++        with pytest.raises(BootstrapHold):
++            verify(manifest_path=str(path), admission_json=admitted_source(source))
++        assert all(Path(p).read_bytes() == b"synthetic protected sentinel" for p in keep[1:])
++
++
++def test_V2_12_path_alias_symlink_hardlink_protected_hold(tmp_path):
++    keep = tmp_path / "keep.sqlite3"
++    keep.write_bytes(b"protected")
++    for target in (keep, tmp_path / "link.sqlite3", tmp_path / "hard.sqlite3"):
++        if target.name == "link.sqlite3":
++            target.symlink_to(keep)
++        elif target.name == "hard.sqlite3":
++            target.hardlink_to(keep)
++        with pytest.raises(BootstrapHold):
++            inspect_paths(projection_target=str(target), materialization_target=str(tmp_path / "ni04.sqlite3"), keep_paths=[str(keep)])
++    assert keep.read_bytes() == b"protected"
++
++
++def test_T11_V2_14_closed_counter_and_no_raw_endpoint_logs(tmp_path, caplog):
++    value = stack(tmp_path, [source_record(dst_ip="203.0.113.93")])
++    try:
++        value.service.telemetry = ProjectionTelemetry()
++        with caplog.at_level("INFO"):
++            value.service.poll()
++        assert all(token not in caplog.text for token in ("10.73.0.7", "203.0.113.93", MAC))
++        with pytest.raises(ValueError):
++            value.service.telemetry.emit("attribution_retry_counters", peer_ip="203.0.113.93")
++    finally:
++        value.repo.close()
++
++
++def test_V2_08_single_snapshot_concurrent_append_preserves_new_tail(tmp_path, monkeypatch):
++    data = record()
++    with store(tmp_path, source=(data+b"\n")*2) as source:
++        seed_source(source, data=data)
++        reader = NetworkMetadataProjectionSourceReadService(source.config.db_path)
++        original = reader._binding
++        appended = []
++        def binding(connection, generation):
++            value = original(connection, generation)
++            if not appended:
++                appended.append(True)
++                seed_source(source, data=data, start=len(data)+1)
++            return value
++        monkeypatch.setattr(reader, "_binding", binding)
++        floor, = reader.read_reset_snapshot(admission=ScopeAdmission(admitted_source(source)))
++        assert appended == [True] and floor["last_retained_record_start_byte_offset"] == 0
++        fresh, = reader.read_projection_batch(source.generation.source_generation_id, 0, 256)
++        assert fresh.record_start_byte_offset == len(data)+1
++
++
++@pytest.mark.parametrize("point,committed", [("before_commit", False), ("after_commit", True)])
++def test_V2_09_10_post_floor_crash_and_real_restart(tmp_path, point, committed):
++    data = record(source_event(dest_ip="203.0.113.93"))
++    with store(tmp_path, source=(data+b"\n")*2) as source:
++        seed_source(source, data=data)
++        manifest, _ = staged(source, tmp_path)
++        seed_source(source, data=data, start=len(data)+1)
++        config = ProjectionConfig(enabled=True, db_path=manifest["projection"]["path"], scope_admission_json=admitted_source(source))
++        clock, authority = Clock(), Attribution()
++        authority.get_authority_horizon = lambda site: SimpleNamespace(state="available",
++            first_usable_at="2026-01-01T00:00:00.000Z", retained_from="2026-01-01T00:00:00.000Z")
++        resolve = authority.resolve_ipv4
++        authority.resolve_ipv4 = lambda *args: replace(resolve(*args), valid_from="2026-01-01T00:00:00.000Z")
++        repo = ProjectionRepository(config, clock=clock).initialize()
++        service = NetworkMetadataProjectionService(config, repo,
++            NetworkMetadataProjectionSourceReadService(source.config.db_path), authority, Registry(), IDENTITY)
++        service.run_id = repo.create_run(IDENTITY)
++        floor = dict(repo.reset_floor(source.generation.source_generation_id))
++        class Crash(BaseException):
++            pass
++        repo.crash_point = lambda stage: (_ for _ in ()).throw(Crash()) if stage == point else None
++        try:
++            with pytest.raises(Crash):
++                service.poll()
++            assert (repo.checkpoint(source.generation.source_generation_id) is not None) == committed
++            assert dict(repo.reset_floor(source.generation.source_generation_id)) == floor
++        finally:
++            repo.close()
++        repo = ProjectionRepository(config, clock=clock).initialize()
++        try:
++            service.repository = repo
++            service.run_id = repo.create_run(IDENTITY)
++            service.poll()
++            assert repo.connection.execute("SELECT count(*) FROM device_network_metadata_edges").fetchone()[0] == 1
++            assert repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0] == 1
++            assert dict(repo.reset_floor(source.generation.source_generation_id)) == floor
++            assert repo.checkpoint(source.generation.source_generation_id)["last_record_start_byte_offset"] == len(data)+1
++        finally:
++            repo.close()
++
++
++def test_V2_09_empty_and_new_generation_natural_beginning_retention(tmp_path):
++    from app.network_metadata.retention import RetentionPolicy
++    data = record()
++    with store(tmp_path, source=data+b"\n") as source:
++        manifest, _ = staged(source, tmp_path)  # Existing generation with no rows.
++        config = ProjectionConfig(enabled=True, db_path=manifest["projection"]["path"], scope_admission_json=admitted_source(source))
++        repo = ProjectionRepository(config).initialize()
++        try:
++            service = NetworkMetadataProjectionService(config, repo,
++                NetworkMetadataProjectionSourceReadService(source.config.db_path), Attribution(), Registry(), IDENTITY)
++            generation = service.source.get_source_progress(source.generation.source_generation_id)
++            assert service._read_after(generation) is None
++            seed_source(source, data=data)
++            assert service.source.read_projection_batch(generation.source_generation_id, service._read_after(generation), 256)[0].record_start_byte_offset == 0
++            source.clock.advance(days=31)
++            RetentionPolicy(source.repo).run()
++            assert not service.source.read_projection_batch(generation.source_generation_id, None, 256)
++            assert service._read_after(service.source.get_source_progress(generation.source_generation_id)) is None
++            new, _ = source.repo.transition_generation(binding=source.config.capture_scope_binding,
++                boot_id=BOOT, physical=(1, 2), close_reason="rotation")
++            assert repo.reset_floor(new.source_generation_id) is None
++            assert service._read_after(service.source.get_source_progress(new.source_generation_id)) is None
++            with pytest.raises(sqlite3.Error):
++                repo.connection.execute("DELETE FROM projection_source_reset_floors")
++        finally:
++            repo.close()
++
++
++def test_V2_unadmitted_empty_generation_is_blocked_not_false_complete(tmp_path):
++    with store(tmp_path) as source:
++        config = ProjectionConfig(enabled=True, db_path=str(tmp_path / "projection.sqlite3"), scope_admission_json=scope_admission())
++        repo = ProjectionRepository(config).initialize()
++        try:
++            service = NetworkMetadataProjectionService(config, repo,
++                NetworkMetadataProjectionSourceReadService(source.config.db_path), Attribution(), Registry(), IDENTITY)
++            service.run_id = repo.create_run(IDENTITY)
++            assert service.poll() == ()
++            assert repo.live_state == "blocked_conflict" and repo.live_reason == "scope_admission_untrusted"
++            assert not repo.connection.execute("SELECT 1 FROM projection_source_checkpoints").fetchone()
++            assert repo.connection.execute("SELECT last_source_poll_at FROM projection_runtime_state").fetchone()[0] is None
++        finally:
++            repo.close()
++
++
++def test_T08_T10_V2_15_bounded_local_load_reports_not_hdd_acceptance(tmp_path, record_property, monkeypatch):
++    import socket
++    attempts = []
++    def no_network(*args, **kwargs):
++        attempts.append(True)
++        raise AssertionError("online lookup forbidden")
++    monkeypatch.setattr(socket, "socket", no_network)
++    records = [source_record(index, dst_ip="203.0.113.93") for index in range(1024)]
++    value = stack(tmp_path, records)
++    samples = []
++    try:
++        install_service_recognition_extension(value.repo)
++        for _ in range(4):
++            started = time.perf_counter()
++            results = value.service.poll()
++            samples.append((time.perf_counter()-started)*1000)
++            assert len(results) == 256
++        assert not attempts and len(value.attribution.calls) == 1024
++        assert all(call[1] == "10.73.0.7" for call in value.attribution.calls)
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_pending_attribution").fetchone()[0] == 0
++        assert value.repo.connection.execute("SELECT count(*) FROM projection_service_recognition_feed").fetchone()[0] == 1024
++        ordered = sorted(samples)
++        record_property("local_load", json.dumps(dict(samples_ms=samples, p95_ms=ordered[-1], p99_ms=ordered[-1],
++            footprint_bytes=value.repo.footprint(), scope="disposable laptop WSL; not physical HDD or production acceptance",
++            performance_pass_claimed=False)))
++    finally:
++        value.repo.close()
++
++
++@pytest.mark.parametrize("point,committed", [("reset_core_created", False), ("reset_floors_installed", False),
++                                            ("before_commit", False), ("after_commit", True)])
++def test_V2_08_core_and_floors_one_atomic_initialization(tmp_path, point, committed):
++    class Crash(BaseException):
++        pass
++    config = ProjectionConfig(enabled=True, db_path=str(tmp_path / "new.sqlite3"), scope_admission_json=scope_admission())
++    repo = ProjectionRepository(config, reset_bootstrap=dict(floors=(), reset_epoch_id=str(uuid.uuid4()),
++        reset_at_utc="2026-10-14T00:00:00.000000Z"),
++        crash_point=lambda stage: (_ for _ in ()).throw(Crash()) if stage == point else None)
++    with pytest.raises(Crash):
++        repo.initialize()
++    assert repo.connection is repo._writer_fd is None
++    with sqlite3.connect(config.db_path) as connection:
++        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
++        assert bool(tables) == committed
++        if committed:
++            assert connection.execute("SELECT floor_count FROM projection_source_reset_epoch").fetchone()[0] == 0
++            assert not connection.execute("SELECT 1 FROM projection_source_checkpoints").fetchone()
++
++
++def test_V2_manifest_external_hash_and_corruption_fail_closed(tmp_path):
++    with store(tmp_path) as source:
++        manifest, keep = staged(source, tmp_path)
++        path = tmp_path / "stage" / "prepared-pair.json"
++        frozen = hashlib.sha256(path.read_bytes()).hexdigest()
++        assert verify(manifest_path=str(path), admission_json=admitted_source(source), expected_manifest_sha256=frozen)["state"] == "PREPARED"
++        path.write_text(json.dumps(dict(manifest, state="VERIFIED")))
++        with pytest.raises(BootstrapHold):
++            verify(manifest_path=str(path), admission_json=admitted_source(source), expected_manifest_sha256=frozen)
++
++
++def test_T09_V2_13_fresh_pair_publishes_only_post_floor_ni03_ni04(tmp_path):
++    from tests.network_service_recognition.support import AT, bundle
++    from tests.network_service_recognition.test_summary import EVENT
++    from tests.network_service_recognition.test_protected_readers import DEVICE
++    from app.network_metadata.validation import ni_timestamp
++    from app.network_service_recognition.materialization_repository import ServiceMaterializationRepository
++    from app.network_service_recognition.worker import ServiceMaterializationWorker
++    from app.network_service_recognition.source_adapter import WorkerSourceReadService
++    from app.network_service_recognition.materialized_read_service import MaterializedDeviceServiceReadService
++    from app.network_service_recognition.serialization import serialize_device_service_intelligence
++    from app.network_protocol_intelligence.read_service import DeviceProtocolIntelligenceReadService
++    event = source_event("tls", timestamp=EVENT, dest_ip="203.0.113.93", proto="TCP")
++    event["tls"]["sni"] = "www.youtube.com"
++    data = record(event)
++    with store(tmp_path, source=(data+b"\n")*2) as source:
++        source.clock.value = ni_timestamp(AT, canonical=True)
++        seed_source(source, data=data)
++        old_ref = source.repo.connection.execute("SELECT observation_id FROM network_metadata_observations").fetchone()[0]
++        manifest, _ = staged(source, tmp_path)
++        clock = lambda: ni_timestamp(AT, canonical=True)
++        config = ProjectionConfig(enabled=True, db_path=manifest["projection"]["path"], scope_admission_json=admitted_source(source))
++        repo = ProjectionRepository(config, clock=clock).initialize()
++        target = ServiceMaterializationRepository(manifest["materialization"]["path"], clock=clock).initialize()
++        authority, registry = Attribution(), Registry()
++        registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
++        resolve = authority.resolve_ipv4
++        authority.resolve_ipv4 = lambda *args: replace(resolve(*args), valid_from="2026-10-11T00:00:00.000Z", valid_until="2026-10-13T00:00:00.000Z")
++        source_reader = NetworkMetadataProjectionSourceReadService(source.config.db_path)
++        service = NetworkMetadataProjectionService(config, repo, source_reader, authority, registry, IDENTITY)
++        service.run_id = repo.create_run(IDENTITY)
++        b = bundle()
++        worker = ServiceMaterializationWorker(target, ServiceRecognitionDeliveryReadService(repo.config.db_path),
++            WorkerSourceReadService(source.config.db_path), b, clock=clock)
++        try:
++            service.poll()
++            worker.cycle()
++            assert not repo.existing_edges(old_ref)
++            assert not target.connection.execute("SELECT 1 FROM service_recognition_observations").fetchone()
++            seed_source(source, data=data, start=len(data)+1)
++            service.poll()
++            worker.cycle()
++            assert not repo.existing_edges(old_ref)
++            assert repo.connection.execute("SELECT count(*) FROM device_network_metadata_edges").fetchone()[0] == 1
++            assert target.connection.execute("SELECT count(*) FROM service_recognition_observations").fetchone()[0] == 1
++            site = source.config.capture_scope_binding.site_id
++            protocol = DeviceProtocolIntelligenceReadService(DeviceNetworkMetadataReadService(repo.config.db_path)).get_device_protocol_summary(
++                site, DEVICE, MAC, evaluated_at_utc=AT, deadline=QueryDeadline.after(5))
++            assert protocol.schema_version == 1 and protocol.last_protocol_observation.protocol_id == "tls"
++            ni04 = MaterializedDeviceServiceReadService(target.db_path, b)
++            value = ni04.get_device_service_summary(site, DEVICE, MAC, evaluated_at_utc=AT, deadline=QueryDeadline.after(5))
++            assert value.schema_version == 3 and value.recent_services[0].service_id == "service.youtube"
++            public = json.dumps(serialize_device_service_intelligence(value, b))
++            assert all(token not in public for token in (MAC, "203.0.113.93", "10.73.0.7", "www.youtube.com", old_ref))
++        finally:
++            target.close()
++            repo.close()
++
++
++def test_bootstrap_default_inspect_no_sqlite_or_writes(tmp_path, monkeypatch, capsys):
++    from scripts.ni02b_v2_offline_bootstrap import main
++    keep = tmp_path / "keep.sqlite3"
++    keep.write_bytes(b"protected")
++    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
++    def forbidden(*args, **kwargs):
++        pytest.fail("inspect must not open SQLite or create sidecars")
++    monkeypatch.setattr(sqlite3, "connect", forbidden)
++    assert main(["--projection-target", str(tmp_path / "projection.sqlite3"),
++        "--materialization-target", str(tmp_path / "ni04.sqlite3"), "--keep-path", str(keep)]) == 0
++    output = json.loads(capsys.readouterr().out)
++    assert output["destructive_action"] is output["schema_admitted"] is False
++    assert output["scope_admission"] == "not_supplied"
++    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
++
++
++def test_bootstrap_verify_exact_operator_inventory(tmp_path):
++    with store(tmp_path) as source:
++        manifest, keep = staged(source, tmp_path)
++        path = tmp_path / "stage" / "prepared-pair.json"
++        other = inspect_paths(projection_target=str(tmp_path / "different.sqlite3"),
++            materialization_target=manifest["materialization_target"], keep_paths=keep)
++        with pytest.raises(BootstrapHold):
++            verify(manifest_path=str(path), admission_json=admitted_source(source), expected_inventory=other)
++
++
++def test_synthetic_scope_fixture_canonical_identity_and_disabled_boundary():
++    path = Path(__file__).parent / "fixtures" / "external_peer_scope_synthetic.json"
++    fixture = ScopeAdmission(path.read_text())
++    assert fixture.canonical == ScopeAdmission(scope_admission()).canonical
++    assert projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "false",
++        "NETWORK_METADATA_PROJECTION_SCOPE_ADMISSION_JSON": "not-json"}) == ProjectionConfig()
++    with pytest.raises(ProjectionConflict, match="scope_admission_untrusted"):
++        projection_config_from_env({"NETWORK_METADATA_PROJECTION_ENABLED": "true"})
++
++
++def test_runtime_start_requires_discard_epoch_no_implicit_replay(tmp_path):
++    config = ProjectionConfig(enabled=True, db_path=str(tmp_path / "unprepared.sqlite3"), scope_admission_json=scope_admission())
++    repo = ProjectionRepository(config)
++    dependency = SimpleNamespace()  # Must not read any source/authority.
++    service = NetworkMetadataProjectionService(config, repo, dependency, dependency, dependency, IDENTITY)
++    try:
++        with pytest.raises(ProjectionUnavailable, match="reset_bootstrap_required"):
++            service.startup()
++        for table in ("projection_runs", "projection_source_checkpoints", "projection_pending_attribution", "device_network_metadata_edges"):
++            assert not repo.connection.execute(f"SELECT 1 FROM {table}").fetchone()
++    finally:
++        repo.close()
++    ready = replace(config, db_path=str(tmp_path / "prepared.sqlite3"))
++    repo = ProjectionRepository(ready, reset_bootstrap=dict(floors=(), reset_epoch_id=str(uuid.uuid4()),
++        reset_at_utc="2026-10-14T00:00:00.000000Z"))
++    service = NetworkMetadataProjectionService(ready, repo, dependency, dependency, dependency, IDENTITY)
++    try:
++        assert service.startup() is True
++        assert repo.connection.execute("SELECT count(*) FROM projection_runs").fetchone()[0] == 1
++        assert not repo.connection.execute("SELECT 1 FROM projection_source_checkpoints").fetchone()
++    finally:
++        repo.close()
++
++
++def test_T06_V2_12_complete_disposable_pair_discards_derived_only(tmp_path):
++    with store(tmp_path) as source:
++        manifest, keep = staged(source, tmp_path)
++        protected = {p: Path(p).read_bytes() for p in keep}
++        targets = [manifest["projection_target"], manifest["materialization_target"]]
++        for target in targets:
++            with sqlite3.connect(target) as connection:
++                connection.execute("CREATE TABLE old_derived_history(value TEXT)")
++                connection.execute("INSERT INTO old_derived_history VALUES('disposable derived history')")
++        paired = dict(manifest, state="REPLACED_NOT_STARTED")
++        for member, target in zip(("projection", "materialization"), targets):
++            # Simulation under tmp_path only; no executable reset capability in
++            # the shipped helper and no production paths or services are used.
++            shutil.copyfile(manifest[member]["path"], target)
++            paired[member] = dict(manifest[member], path=target)
++        path = tmp_path / "replaced-pair.json"
++        path.write_text(json.dumps(paired))
++        frozen = hashlib.sha256(path.read_bytes()).hexdigest()
++        report = verify(manifest_path=str(path), admission_json=admitted_source(source),
++                        expected_manifest_sha256=frozen)
++        assert report["state"] == "VERIFIED" and report["activation_authorized"] is False
++        for target in targets:
++            with sqlite3.connect(Path(target).as_uri()+"?mode=ro", uri=True) as connection:
++                assert not connection.execute("SELECT 1 FROM sqlite_master WHERE name='old_derived_history'").fetchone()
++        assert {p: Path(p).read_bytes() for p in keep} == protected
+diff --git a/tests/network_metadata_projection/test_projection.py b/tests/network_metadata_projection/test_projection.py
+index 75bab4d..c0112cf 100644
+--- a/tests/network_metadata_projection/test_projection.py
++++ b/tests/network_metadata_projection/test_projection.py
+@@ -165,12 +165,12 @@ def test_crash_checkpoint_atomicity(state, point, committed):
+     assert len(edges(state)) == 2
+ 
+ 
+-@pytest.mark.parametrize("kind", ["invalid", "outside_scope", "source_identity"])
++@pytest.mark.parametrize("kind", ["invalid", "unadmitted_scope", "source_identity"])
+ def test_conflict_no_checkpoint_and_upstream_unmodified(state, kind):
+     if kind == "invalid":
+         state.attribution.states["10.73.0.7"] = "invalid"
+-    elif kind == "outside_scope":
+-        state.source.records = [replace(state.source.records[0], src_ip="10.74.0.7")]
++    elif kind == "unadmitted_scope":
++        state.source.records = [replace(state.source.records[0], capture_scope_binding_digest="f" * 64)]
+     else:
+         state.source.records = [replace(state.source.records[0], source_event_identity="bad")]
+     state.service.poll()
+diff --git a/tests/network_metadata_projection/test_service_delivery.py b/tests/network_metadata_projection/test_service_delivery.py
+index afbfe66..c4dff44 100644
+--- a/tests/network_metadata_projection/test_service_delivery.py
++++ b/tests/network_metadata_projection/test_service_delivery.py
+@@ -107,7 +107,7 @@ def test_G2_default_off_and_explicit_startup_install(state):
+     state.repo = ProjectionRepository(state.config, clock=state.clock,
+                                      install_service_recognition_extension=True).initialize()
+     assert state.repo.service_recognition_extension_present is True
+-    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 1
++    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+ 
+ 
+ def test_G2_feed_exact_provenance_readonly_and_monotonic(state):
+@@ -275,8 +275,9 @@ def test_G2_coverage_only_and_bounded_replay_share_exact_identity(state):
+     before = tuple(state.repo.connection.iterdump())
+     coverage = api.read_recognition_device_coverage(SITE, DEVICE, MAC, first, last, deadline=QueryDeadline.after(5))
+     assert coverage.identity_binding_state == "authoritative"
+-    assert coverage.projection_safe_reason == "pending_attribution"
+-    assert coverage.device_linked_pending_count == 1
++    assert coverage.projection_safe_reason is None
++    assert coverage.device_linked_pending_count == 0
++    assert [call[1] for call in state.attribution.calls] == ["10.73.0.7"]
+     assert not hasattr(coverage, "facts")
+     page = api.read_candidate_page(SITE, first, last, client_mac=MAC, limit=1, deadline=QueryDeadline.after(5))
+     assert len(page) == 1 and page[0].identity.device_id == DEVICE
+diff --git a/tests/network_metadata_projection/test_service_extension_bridge.py b/tests/network_metadata_projection/test_service_extension_bridge.py
+index 7f02970..f21113e 100644
+--- a/tests/network_metadata_projection/test_service_extension_bridge.py
++++ b/tests/network_metadata_projection/test_service_extension_bridge.py
+@@ -55,7 +55,7 @@ def test_G1_R2_QA01_core_only_default_no_installer(state):
+     state.service.poll()
+     assert len(edges(state)) == 1
+     assert not any(name in TABLES for _, name, _ in signature(state.repo.connection))
+-    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 1
++    assert state.repo.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+ 
+ 
+ def test_G1_R2_QA02_R2_QA09_core_plus_extension_off_upkeep(state):
+@@ -86,7 +86,7 @@ def test_G1_R2_QA03_old_baseline_is_not_rollback_floor(state):
+     "DROP INDEX idx_projection_mac_event",
+     "DROP TRIGGER immutable_device_network_metadata_edges",
+     "DELETE FROM projection_service_recognition_extension_meta",
+-    "PRAGMA user_version=2",
++    "PRAGMA user_version=1",
+ ])
+ def test_G1_R2_QA06_QA07_QA08_closed_object_and_metadata_validation(state, damage):
+     install_fixture(state)
+diff --git a/tests/network_service_recognition/test_attribution_recovery_v2.py b/tests/network_service_recognition/test_attribution_recovery_v2.py
+index e689fb8..9a9312d 100644
+--- a/tests/network_service_recognition/test_attribution_recovery_v2.py
++++ b/tests/network_service_recognition/test_attribution_recovery_v2.py
+@@ -125,11 +125,15 @@ def test_T02_T03_T04_T10_T29_T30_pending_requires_exact_materialized_device_link
+     # First edge is confirmed. The independent second observation may be pending.
+     first = source_record(dst_ip="203.0.113.93")
+     second = source_record(100, src_ip="10.73.0.9", dst_ip="203.0.113.94")
++    # In Core V2 only a genuine guest role may remain pending. A separate local
++    # observation links that guest gap to the same Device; outbound facts remain.
++    third = source_record(101, src_ip="10.73.0.9", dst_ip="10.73.0.8")
+     if kind == "other_site":
+-        second = replace(second, site_id="f" * 24)
+-    state = stack(tmp_path, [first, second])
++        second = source_record(100, src_ip="10.73.0.9", dst_ip="203.0.113.94", site_id="f" * 24)
++        third = source_record(101, src_ip="10.73.0.9", dst_ip="10.73.0.8", site_id="f" * 24)
++    state = stack(tmp_path, [first, second, third])
+     try:
+-        state.attribution.states.update({"203.0.113.93": "endpoint_absent", "203.0.113.94": "unavailable"})
++        state.attribution.states["10.73.0.8"] = "unavailable"
+         state.attribution.macs["10.73.0.9"] = OTHER_MAC if kind == "other_device" else MAC
+         if kind == "both_pending":
+             state.attribution.states["10.73.0.9"] = "unavailable"
+@@ -170,9 +174,9 @@ def test_v2_serialization_golden_field_order_and_coverage():
+ 
+ 
+ def test_runtime_binding_facts_and_pending_share_one_read_snapshot(tmp_path):
+-    state = stack(tmp_path, [source_record(dst_ip="203.0.113.93")])
++    state = stack(tmp_path, [source_record(dst_ip="203.0.113.93"), source_record(100)])
+     try:
+-        state.attribution.states["203.0.113.93"] = "unavailable"
++        state.attribution.states["10.73.0.8"] = "unavailable"
+         state.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
+         state.service.poll()
+         reader = DeviceNetworkMetadataRecognitionReadService(state.config.db_path)
+@@ -215,10 +219,10 @@ def test_runtime_binding_facts_and_pending_share_one_read_snapshot(tmp_path):
+         state.repo.close()
+ 
+ 
+-def test_pending_window_half_open_and_inbound_edge_can_link_without_service_fact(tmp_path):
+-    state = stack(tmp_path, [source_record(src_ip="203.0.113.93", dst_ip="10.73.0.7")])
++def test_pending_window_half_open_and_local_edge_can_link_without_service_fact(tmp_path):
++    state = stack(tmp_path, [source_record(src_ip="10.73.0.8", dst_ip="10.73.0.7")])
+     try:
+-        state.attribution.states["203.0.113.93"] = "unavailable"
++        state.attribution.states["10.73.0.8"] = "unavailable"
+         state.registry.values[MAC] = RegistryEvaluation("authoritative", DEVICE)
+         state.service.poll()
+         snapshot = snapshot_for(state)

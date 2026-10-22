@@ -1,0 +1,2189 @@
+diff --git a/.env.example b/.env.example
+index 473f496357e2c3bbdd61f760fc8091bedbe87a75..ff520fe569543865bb2ef107f1baf296cbee7fd2 100644
+--- a/.env.example
++++ b/.env.example
+@@ -251,6 +251,27 @@ DEVICE_FINGERPRINT_MAX_EVENTS_PER_BATCH=100
+ DEVICE_FINGERPRINT_MAX_PAYLOAD_BYTES=8192
+ DEVICE_FINGERPRINT_MAX_CONCURRENT_INGEST_REQUESTS=2
+ 
++# Portal UA / low-entropy Client-Hints evidence producer (default off).
++# The Bearer secret is provisioned only in the external credential file.
++DEVICE_FINGERPRINT_PORTAL_ENABLED=false
++DEVICE_FINGERPRINT_PORTAL_PRODUCER_ID=portal-zefer-01
++DEVICE_FINGERPRINT_PORTAL_CAPTURE_SOURCE_ID=zefer-portal-http-01
++DEVICE_FINGERPRINT_PORTAL_SITE_ID=6a64f17630da7c70d232187a
++DEVICE_FINGERPRINT_PORTAL_GUEST_CIDRS=192.168.8.0/22
++DEVICE_FINGERPRINT_PORTAL_ALLOWED_SSIDS=Zefer_Parki
++DEVICE_FINGERPRINT_PORTAL_EVIDENCE_BASE_URL=https://192.168.0.202:9443/api/internal/device-fingerprint/v1
++DEVICE_FINGERPRINT_PORTAL_CA_CERT_PATH=/etc/captive-portal/device-fingerprint/portal-ca.crt
++DEVICE_FINGERPRINT_PORTAL_CREDENTIAL_PATH=/etc/captive-portal/device-fingerprint/portal.bearer
++DEVICE_FINGERPRINT_PORTAL_QUEUE_MAX_EVENTS=256
++DEVICE_FINGERPRINT_PORTAL_BATCH_SIZE=50
++DEVICE_FINGERPRINT_PORTAL_QUEUE_MAX_AGE_SECONDS=300
++DEVICE_FINGERPRINT_PORTAL_COALESCE_SECONDS=21600
++DEVICE_FINGERPRINT_PORTAL_COALESCE_MAX_ENTRIES=8192
++DEVICE_FINGERPRINT_PORTAL_CONNECT_TIMEOUT_SECONDS=0.5
++DEVICE_FINGERPRINT_PORTAL_READ_TIMEOUT_SECONDS=2.0
++DEVICE_FINGERPRINT_PORTAL_TRANSIENT_COOLDOWN_SECONDS=30
++DEVICE_FINGERPRINT_PORTAL_REJECT_COOLDOWN_SECONDS=300
++
+ # Pending Session Cleaner
+ PENDING_SESSION_CLEANER_ENABLED=false
+ PENDING_SESSION_CLEANER_SSIDS=Zefer_Parki
+diff --git a/app/capport/routes.py b/app/capport/routes.py
+index 4063dbc5846164b392d2aec96a81902f22531543..f9aa2e8166abafcb70152f0c0054be18c540065d 100644
+--- a/app/capport/routes.py
++++ b/app/capport/routes.py
+@@ -3,6 +3,7 @@
+ import json
+ import math
+ import time
++from datetime import datetime, timezone
+ from urllib.parse import urlencode
+ 
+ from flask import (
+@@ -32,6 +33,8 @@ def create_capport_blueprint(
+     portal_entry_handler,
+     config: CapportConfig,
+     telemetry,
++    portal_evidence_extractor=None,
++    portal_evidence_telemetry=None,
+ ) -> Blueprint:
+     blueprint = Blueprint("capport", __name__)
+ 
+@@ -120,6 +123,26 @@ def create_capport_blueprint(
+                 mimetype="text/html",
+             ))
+ 
++        portal_evidence_candidate = None
++        if portal_evidence_extractor is not None:
++            observed_at = datetime.now(timezone.utc)
++            try:
++                portal_evidence_candidate = portal_evidence_extractor(
++                    request.headers,
++                    source_subtype="capport_login",
++                    observed_at=observed_at,
++                )
++            except Exception:
++                try:
++                    if portal_evidence_telemetry is not None:
++                        portal_evidence_telemetry.emit(
++                            "portal_evidence_extractor_failed",
++                            source_subtype="capport_login",
++                            error_category="extractor_exception",
++                        )
++                except Exception:
++                    pass
++
+         telemetry.safe_emit_system(
+             events.CAPPORT_PORTAL_OPENED,
+             site_id=state.client.site_id,
+@@ -136,12 +159,26 @@ def create_capport_blueprint(
+             ssid=state.client.ssid,
+         )
+         if wants_json:
+-            result = portal_entry_handler.prepare_portal(context)
++            result = (
++                portal_entry_handler.prepare_portal(
++                    context,
++                    portal_evidence_candidate=portal_evidence_candidate,
++                )
++                if portal_evidence_candidate is not None
++                else portal_entry_handler.prepare_portal(context)
++            )
+             return _no_store(
+                 jsonify(_entry_json(result)),
+                 result.status_code,
+             )
+-        return _no_store(portal_entry_handler.open_portal(context))
++        return _no_store(
++            portal_entry_handler.open_portal(
++                context,
++                portal_evidence_candidate=portal_evidence_candidate,
++            )
++            if portal_evidence_candidate is not None
++            else portal_entry_handler.open_portal(context)
++        )
+ 
+     blueprint.add_url_rule(
+         config.api_path,
+diff --git a/app/device_fingerprint/portal_schemas.py b/app/device_fingerprint/portal_schemas.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7cbf3b1ee4f48960edda47ab6e20f4a24738c2b
+--- /dev/null
++++ b/app/device_fingerprint/portal_schemas.py
+@@ -0,0 +1,103 @@
++"""Strict normalized portal-header evidence schema for Task-03."""
++
++from __future__ import annotations
++
++import re
++from collections.abc import Mapping
++from typing import Any
++
++from .models import DeviceFingerprintValidationError
++
++PORTAL_HEADER_KEYS = frozenset({
++    "platform_family", "mobile_boolean", "browser_runtime_family",
++    "webview_or_captive_context", "model_family", "os_major",
++    "platform_source", "mobile_source", "runtime_source", "context_source",
++    "model_source", "os_major_source", "ua_present", "sec_ch_ua_present",
++    "sec_ch_ua_platform_present", "sec_ch_ua_mobile_present",
++})
++
++_PLATFORMS = frozenset({"android", "ios", "windows", "macos", "chromeos", "linux"})
++_RUNTIMES = frozenset({"android_webview", "chromium", "firefox", "safari_webkit"})
++_CONTEXTS = frozenset({"android_webview", "captive_helper"})
++_PLATFORM_SOURCES = frozenset({"sec_ch_ua_platform", "user_agent"})
++_MOBILE_SOURCES = frozenset({"sec_ch_ua_mobile", "user_agent"})
++_RUNTIME_SOURCES = frozenset({"sec_ch_ua", "user_agent", "combined"})
++_MODEL = re.compile(r"[0-9A-Za-z][0-9A-Za-z ._()+-]{0,63}")
++_MAC_LIKE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
++_UUID_LIKE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
++
++
++def validate_portal_headers_v1(value: Mapping[str, Any]) -> Mapping[str, Any]:
++    """Validate the exact P1-only ``portal_headers/1`` payload."""
++    if set(value) != PORTAL_HEADER_KEYS:
++        _fail()
++    _nullable_enum(value["platform_family"], _PLATFORMS)
++    _nullable_boolean(value["mobile_boolean"])
++    _nullable_enum(value["browser_runtime_family"], _RUNTIMES)
++    _nullable_enum(value["webview_or_captive_context"], _CONTEXTS)
++    model = value["model_family"]
++    if model is not None and (
++        not isinstance(model, str)
++        or _MODEL.fullmatch(model) is None
++        or _MAC_LIKE.fullmatch(model) is not None
++        or _UUID_LIKE.fullmatch(model) is not None
++        or any(ord(character) < 0x20 or ord(character) > 0x7E for character in model)
++    ):
++        _fail()
++    major = value["os_major"]
++    if major is not None and (type(major) is not int or not 1 <= major <= 99):
++        _fail()
++    _nullable_enum(value["platform_source"], _PLATFORM_SOURCES)
++    _nullable_enum(value["mobile_source"], _MOBILE_SOURCES)
++    _nullable_enum(value["runtime_source"], _RUNTIME_SOURCES)
++    for key in ("context_source", "model_source", "os_major_source"):
++        _nullable_enum(value[key], frozenset({"user_agent"}))
++    for key in (
++        "ua_present", "sec_ch_ua_present", "sec_ch_ua_platform_present",
++        "sec_ch_ua_mobile_present",
++    ):
++        if type(value[key]) is not bool:
++            _fail()
++    for field, source in (
++        ("platform_family", "platform_source"),
++        ("mobile_boolean", "mobile_source"),
++        ("browser_runtime_family", "runtime_source"),
++        ("webview_or_captive_context", "context_source"),
++        ("model_family", "model_source"),
++        ("os_major", "os_major_source"),
++    ):
++        if (value[field] is None) != (value[source] is None):
++            _fail()
++    if all(value[key] is None for key in (
++        "platform_family", "mobile_boolean", "browser_runtime_family",
++        "webview_or_captive_context", "model_family", "os_major",
++    )):
++        _fail()
++    if value["platform_source"] == "sec_ch_ua_platform" and not value["sec_ch_ua_platform_present"]:
++        _fail()
++    if value["mobile_source"] == "sec_ch_ua_mobile" and not value["sec_ch_ua_mobile_present"]:
++        _fail()
++    if value["runtime_source"] in {"sec_ch_ua", "combined"} and not value["sec_ch_ua_present"]:
++        _fail()
++    if value["runtime_source"] == "combined" and not value["ua_present"]:
++        _fail()
++    if any(value[key] == "user_agent" for key in (
++        "platform_source", "mobile_source", "runtime_source", "context_source",
++        "model_source", "os_major_source",
++    )) and not value["ua_present"]:
++        _fail()
++    return dict(value)
++
++
++def _nullable_enum(value: Any, allowed: frozenset[str]) -> None:
++    if value is not None and (not isinstance(value, str) or value not in allowed):
++        _fail()
++
++
++def _nullable_boolean(value: Any) -> None:
++    if value is not None and type(value) is not bool:
++        _fail()
++
++
++def _fail() -> None:
++    raise DeviceFingerprintValidationError("Invalid portal header evidence")
+diff --git a/app/device_fingerprint/schema_registry.py b/app/device_fingerprint/schema_registry.py
+index 435984b594e3d006321330667a6a0a190930ce50..17d6707cd35ca701d982e9d5d8d2a25d5cb8ca28 100644
+--- a/app/device_fingerprint/schema_registry.py
++++ b/app/device_fingerprint/schema_registry.py
+@@ -13,6 +13,7 @@ from .network_schemas import (
+     validate_tcp_syn_v1,
+     validate_tls_v1,
+ )
++from .portal_schemas import validate_portal_headers_v1
+ 
+ Validator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+ 
+@@ -58,4 +59,5 @@ def build_production_schema_registry() -> EvidenceSchemaRegistry:
+     registry.register("tcp_syn", 1, validate_tcp_syn_v1)
+     registry.register("tls_client", 1, validate_tls_v1)
+     registry.register("quic_client", 1, validate_quic_v1)
++    registry.register("portal_headers", 1, validate_portal_headers_v1)
+     return registry.freeze()
+diff --git a/app/device_fingerprint_portal/__init__.py b/app/device_fingerprint_portal/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..47d298ff7c1af22b9ebda783f37f88f6e38652ad
+--- /dev/null
++++ b/app/device_fingerprint_portal/__init__.py
+@@ -0,0 +1,15 @@
++"""Bounded portal-header evidence acquisition for Device Fingerprint Task-03."""
++
++from .config import PortalEvidenceConfig, PortalEvidenceConfigError, portal_config_from_env
++from .extractor import extract_portal_evidence_candidate
++from .models import PortalEvidenceCandidate
++from .runtime import PortalEvidenceRuntime
++
++__all__ = [
++    "PortalEvidenceCandidate",
++    "PortalEvidenceConfig",
++    "PortalEvidenceConfigError",
++    "PortalEvidenceRuntime",
++    "extract_portal_evidence_candidate",
++    "portal_config_from_env",
++]
+diff --git a/app/device_fingerprint_portal/coalescer.py b/app/device_fingerprint_portal/coalescer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c177fd5caea257f0d1efaf7b459845aef2a8480d
+--- /dev/null
++++ b/app/device_fingerprint_portal/coalescer.py
+@@ -0,0 +1,83 @@
++"""Bounded atomic non-blocking admission coalescer."""
++
++from __future__ import annotations
++
++import queue
++import threading
++import time
++from collections import OrderedDict
++from collections.abc import Callable, Iterable
++from dataclasses import dataclass
++from itertools import islice
++from typing import Any
++
++from .models import CoalescerKey, QueuedPortalEvidence
++
++
++@dataclass(frozen=True, slots=True)
++class AdmissionResult:
++    status: str
++    item: QueuedPortalEvidence | None = None
++
++
++class PortalEvidenceCoalescer:
++    def __init__(self, *, expiry_seconds: int = 21600, max_entries: int = 8192,
++                 monotonic=time.monotonic, lock: Any = None) -> None:
++        self.expiry_seconds = expiry_seconds
++        self.max_entries = max_entries
++        self.monotonic = monotonic
++        self._lock = lock or threading.Lock()
++        self._entries: OrderedDict[CoalescerKey, float] = OrderedDict()
++
++    def try_admit(
++        self,
++        key: CoalescerKey,
++        destination: queue.Queue[QueuedPortalEvidence],
++        item_factory: Callable[[float], QueuedPortalEvidence],
++    ) -> AdmissionResult:
++        if not self._lock.acquire(blocking=False):
++            return AdmissionResult("busy")
++        try:
++            now = self.monotonic()
++            self._cleanup_expired(now)
++            expiry = self._entries.get(key)
++            if expiry is not None and expiry > now:
++                return AdmissionResult("coalesced")
++            if expiry is not None:
++                self._entries.pop(key, None)
++            item = item_factory(now)
++            try:
++                destination.put_nowait(item)
++            except queue.Full:
++                return AdmissionResult("full")
++            if key not in self._entries and len(self._entries) >= self.max_entries:
++                self._entries.popitem(last=False)
++            self._entries[key] = now + self.expiry_seconds
++            self._entries.move_to_end(key)
++            return AdmissionResult("admitted", item)
++        finally:
++            self._lock.release()
++
++    def shorten(self, keys: Iterable[CoalescerKey], deadline: float) -> None:
++        with self._lock:
++            for key in keys:
++                if key in self._entries:
++                    self._entries[key] = min(self._entries[key], deadline)
++
++    def remove(self, keys: Iterable[CoalescerKey]) -> None:
++        with self._lock:
++            for key in keys:
++                self._entries.pop(key, None)
++
++    def expiry(self, key: CoalescerKey) -> float | None:
++        with self._lock:
++            return self._entries.get(key)
++
++    def __len__(self) -> int:
++        with self._lock:
++            return len(self._entries)
++
++    def _cleanup_expired(self, now: float) -> None:
++        for key in list(islice(self._entries, 32)):
++            if self._entries[key] <= now:
++                self._entries.pop(key, None)
+diff --git a/app/device_fingerprint_portal/config.py b/app/device_fingerprint_portal/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..90518f9292b1beb8d8243bd070305239044e83f2
+--- /dev/null
++++ b/app/device_fingerprint_portal/config.py
+@@ -0,0 +1,95 @@
++"""Strict isolated environment configuration for the Task-03 portal producer."""
++
++from __future__ import annotations
++
++import ipaddress
++import os
++from collections.abc import Mapping
++from pathlib import Path
++from urllib.parse import urlsplit
++
++from .models import PortalEvidenceConfig, PortalEvidenceConfigError
++
++PRODUCER_ID = "portal-zefer-01"
++CAPTURE_SOURCE_ID = "zefer-portal-http-01"
++SITE_ID = "6a64f17630da7c70d232187a"
++GUEST_CIDRS = "192.168.8.0/22"
++ALLOWED_SSIDS = "Zefer_Parki"
++EVIDENCE_BASE_URL = "https://192.168.0.202:9443/api/internal/device-fingerprint/v1"
++CA_CERT_PATH = "/etc/captive-portal/device-fingerprint/portal-ca.crt"
++CREDENTIAL_PATH = "/etc/captive-portal/device-fingerprint/portal.bearer"
++
++
++def portal_config_from_env(env: Mapping[str, str] | None = None) -> PortalEvidenceConfig:
++    values = os.environ if env is None else env
++    enabled = _boolean(values.get("DEVICE_FINGERPRINT_PORTAL_ENABLED", "false"))
++    defaults = {
++        "PRODUCER_ID": PRODUCER_ID,
++        "CAPTURE_SOURCE_ID": CAPTURE_SOURCE_ID,
++        "SITE_ID": SITE_ID,
++        "GUEST_CIDRS": GUEST_CIDRS,
++        "ALLOWED_SSIDS": ALLOWED_SSIDS,
++        "EVIDENCE_BASE_URL": EVIDENCE_BASE_URL,
++        "CA_CERT_PATH": CA_CERT_PATH,
++        "CREDENTIAL_PATH": CREDENTIAL_PATH,
++        "QUEUE_MAX_EVENTS": "256",
++        "BATCH_SIZE": "50",
++        "QUEUE_MAX_AGE_SECONDS": "300",
++        "COALESCE_SECONDS": "21600",
++        "COALESCE_MAX_ENTRIES": "8192",
++        "CONNECT_TIMEOUT_SECONDS": "0.5",
++        "READ_TIMEOUT_SECONDS": "2.0",
++        "TRANSIENT_COOLDOWN_SECONDS": "30",
++        "REJECT_COOLDOWN_SECONDS": "300",
++    }
++    source = values if enabled else {}
++
++    def exact(name: str) -> str:
++        raw = source.get("DEVICE_FINGERPRINT_PORTAL_" + name, defaults[name])
++        if not isinstance(raw, str) or raw != defaults[name] or "\x00" in raw:
++            raise PortalEvidenceConfigError(f"DEVICE_FINGERPRINT_PORTAL_{name} is invalid")
++        return raw
++
++    producer_id = exact("PRODUCER_ID")
++    capture_source_id = exact("CAPTURE_SOURCE_ID")
++    site_id = exact("SITE_ID")
++    guest_cidrs = tuple(ipaddress.ip_network(item, strict=True) for item in exact("GUEST_CIDRS").split(","))
++    allowed_ssids = tuple(exact("ALLOWED_SSIDS").split(","))
++    base_url = exact("EVIDENCE_BASE_URL")
++    parsed = urlsplit(base_url)
++    if parsed.scheme != "https" or parsed.query or parsed.fragment:
++        raise PortalEvidenceConfigError("Portal evidence URL is invalid")
++    ca_cert_path = _absolute(exact("CA_CERT_PATH"), "CA_CERT_PATH")
++    credential_path = _absolute(exact("CREDENTIAL_PATH"), "CREDENTIAL_PATH")
++    return PortalEvidenceConfig(
++        enabled=enabled,
++        producer_id=producer_id,
++        capture_source_id=capture_source_id,
++        site_id=site_id,
++        guest_cidrs=guest_cidrs,
++        allowed_ssids=allowed_ssids,
++        evidence_base_url=base_url,
++        ca_cert_path=ca_cert_path,
++        credential_path=credential_path,
++        queue_max_events=int(exact("QUEUE_MAX_EVENTS")),
++        batch_size=int(exact("BATCH_SIZE")),
++        queue_max_age_seconds=int(exact("QUEUE_MAX_AGE_SECONDS")),
++        coalesce_seconds=int(exact("COALESCE_SECONDS")),
++        coalesce_max_entries=int(exact("COALESCE_MAX_ENTRIES")),
++        connect_timeout_seconds=float(exact("CONNECT_TIMEOUT_SECONDS")),
++        read_timeout_seconds=float(exact("READ_TIMEOUT_SECONDS")),
++        transient_cooldown_seconds=int(exact("TRANSIENT_COOLDOWN_SECONDS")),
++        reject_cooldown_seconds=int(exact("REJECT_COOLDOWN_SECONDS")),
++    )
++
++
++def _boolean(value: object) -> bool:
++    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
++        return value.strip().lower() == "true"
++    raise PortalEvidenceConfigError("DEVICE_FINGERPRINT_PORTAL_ENABLED must be true or false")
++
++
++def _absolute(value: str, name: str) -> str:
++    if not (value.startswith("/") or Path(value).is_absolute()):
++        raise PortalEvidenceConfigError(f"DEVICE_FINGERPRINT_PORTAL_{name} must be absolute")
++    return value
+diff --git a/app/device_fingerprint_portal/extractor.py b/app/device_fingerprint_portal/extractor.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c1c5e0ca98cf23148a9fdf3cf7dc11381ab6b79
+--- /dev/null
++++ b/app/device_fingerprint_portal/extractor.py
+@@ -0,0 +1,279 @@
++"""Pure bounded User-Agent and low-entropy Client-Hints normalization."""
++
++from __future__ import annotations
++
++import re
++from collections.abc import Mapping
++from datetime import datetime
++from typing import Any
++
++from app.device_fingerprint.validation import format_utc
++
++from .models import PortalEvidenceCandidate
++
++_SUBTYPES = frozenset({"omada_external_portal", "capport_login"})
++_LIMITS = {
++    "User-Agent": 1024,
++    "sec-ch-ua": 1024,
++    "sec-ch-ua-platform": 128,
++    "sec-ch-ua-mobile": 16,
++}
++_PLATFORM_CH = re.compile(r'[ \t]*"([0-9A-Za-z ._-]{1,64})"[ \t]*')
++_PLATFORM_MAP = {
++    "android": "android", "ios": "ios", "windows": "windows",
++    "macos": "macos", "chrome os": "chromeos", "linux": "linux",
++}
++_BRAND_ITEM = re.compile(
++    r'[ \t]*"([^"\\,;\r\n]{1,64})"[ \t]*;[ \t]*v[ \t]*=[ \t]*"([0-9A-Za-z._-]{1,32})"[ \t]*'
++)
++_BRAND_MAP = {
++    "android webview": "android_webview",
++    "chromium": "chromium", "google chrome": "chromium",
++    "microsoft edge": "chromium", "opera": "chromium", "firefox": "firefox",
++}
++_ANDROID_VERSION = re.compile(r"Android ([1-9][0-9]?)(?:\.[0-9]{1,3}){0,3}", re.IGNORECASE)
++_IOS_VERSION = re.compile(
++    r"(?<![0-9A-Za-z])(?:CPU iPhone OS|CPU OS) ([1-9][0-9]?)(?:_[0-9]{1,3}){0,3}(?![0-9A-Za-z_.])",
++    re.IGNORECASE,
++)
++_LOCALE = re.compile(r"[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8}){1,2}")
++_MODEL_BUILD = re.compile(
++    r"(?P<model>[0-9A-Za-z][0-9A-Za-z ._()+\-\t]{0,63})[ \t]+Build/[A-Za-z0-9._-]{1,64}",
++    re.IGNORECASE,
++)
++_MAC_LIKE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
++_UUID_LIKE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
++
++
++def extract_portal_evidence_candidate(
++    headers: Mapping[str, Any], *, source_subtype: str, observed_at: datetime | str
++) -> PortalEvidenceCandidate | None:
++    if source_subtype not in _SUBTYPES:
++        raise ValueError("Unsupported portal evidence subtype")
++    raw = {name: _bounded_header(headers, name, limit) for name, limit in _LIMITS.items()}
++    ua = raw["User-Agent"]
++    ch_ua = raw["sec-ch-ua"]
++    ch_platform = raw["sec-ch-ua-platform"]
++    ch_mobile = raw["sec-ch-ua-mobile"]
++
++    ua_platform = _ua_platform(ua)
++    parsed_platform = _ch_platform(ch_platform)
++    platform = parsed_platform or ua_platform
++    platform_source = "sec_ch_ua_platform" if parsed_platform else ("user_agent" if ua_platform else None)
++
++    parsed_mobile = _ch_mobile(ch_mobile)
++    ua_mobile = _ua_mobile(ua)
++    mobile = parsed_mobile if parsed_mobile is not None else ua_mobile
++    mobile_source = "sec_ch_ua_mobile" if parsed_mobile is not None else ("user_agent" if ua_mobile is not None else None)
++
++    ch_runtime = _ch_runtime(ch_ua)
++    ua_runtime = _ua_runtime(ua)
++    runtime, runtime_source = _reconcile_runtime(ch_runtime, ua_runtime)
++    context = _ua_context(ua)
++    model, android_majors = _android_details(ua) if platform == "android" else (None, set())
++    if platform == "android":
++        os_major = next(iter(android_majors)) if len(android_majors) == 1 else None
++    elif platform == "ios":
++        majors = {int(match.group(1)) for match in _IOS_VERSION.finditer(ua or "")}
++        os_major = next(iter(majors)) if len(majors) == 1 else None
++    else:
++        os_major = None
++
++    payload = {
++        "platform_family": platform,
++        "mobile_boolean": mobile,
++        "browser_runtime_family": runtime,
++        "webview_or_captive_context": context,
++        "model_family": model,
++        "os_major": os_major,
++        "platform_source": platform_source,
++        "mobile_source": mobile_source,
++        "runtime_source": runtime_source,
++        "context_source": "user_agent" if context else None,
++        "model_source": "user_agent" if model else None,
++        "os_major_source": "user_agent" if os_major is not None else None,
++        "ua_present": ua is not None,
++        "sec_ch_ua_present": ch_ua is not None,
++        "sec_ch_ua_platform_present": ch_platform is not None,
++        "sec_ch_ua_mobile_present": ch_mobile is not None,
++    }
++    values = (platform, mobile, runtime, context, model, os_major)
++    if all(value is None for value in values):
++        return None
++    quality = "valid" if platform is not None and runtime is not None and (mobile is not None or context is not None) else "partial"
++    timestamp = format_utc(observed_at) if isinstance(observed_at, datetime) else observed_at
++    return PortalEvidenceCandidate(source_subtype, timestamp, payload, quality)
++
++
++def _bounded_header(headers: Mapping[str, Any], name: str, limit: int) -> str | None:
++    value = headers.get(name)
++    if not isinstance(value, str) or not value or len(value) > limit:
++        return None
++    if name == "User-Agent" and any(character in value for character in ("\r", "\n", "\x00")):
++        return None
++    return value
++
++
++def _ch_platform(value: str | None) -> str | None:
++    if value is None:
++        return None
++    match = _PLATFORM_CH.fullmatch(value)
++    return _PLATFORM_MAP.get(match.group(1).lower()) if match else None
++
++
++def _ch_mobile(value: str | None) -> bool | None:
++    if value is None or re.fullmatch(r"[ \t]*\?[01][ \t]*", value) is None:
++        return None
++    return "?1" in value
++
++
++def _ch_runtime(value: str | None) -> str | None:
++    if value is None:
++        return None
++    position = 0
++    families: set[str] = set()
++    count = 0
++    while position < len(value):
++        match = _BRAND_ITEM.match(value, position)
++        if match is None:
++            return None
++        count += 1
++        if count > 16:
++            return None
++        brand = match.group(1)
++        if any(ord(character) < 0x20 or ord(character) > 0x7E for character in brand):
++            return None
++        family = _BRAND_MAP.get(brand.lower())
++        if family:
++            families.add(family)
++        position = match.end()
++        if position == len(value):
++            break
++        comma = re.match(r'[ \t]*,[ \t]*', value[position:])
++        if comma is None:
++            return None
++        position += comma.end()
++        if position == len(value):
++            return None
++    if "android_webview" in families:
++        return "android_webview"
++    return next(iter(families)) if len(families) == 1 else None
++
++
++def _token(value: str | None, literal: str) -> bool:
++    if value is None:
++        return False
++    return re.search(rf"(?<![0-9A-Za-z]){re.escape(literal)}(?![0-9A-Za-z])", value, re.IGNORECASE) is not None
++
++
++def _ua_platform(ua: str | None) -> str | None:
++    for family, literals in (
++        ("android", ("Android",)), ("ios", ("iPhone", "iPad", "iPod")),
++        ("chromeos", ("CrOS",)), ("windows", ("Windows NT",)),
++        ("macos", ("Macintosh", "Mac OS X")), ("linux", ("X11", "Linux")),
++    ):
++        if any(_token(ua, item) for item in literals):
++            return family
++    return None
++
++
++def _ua_mobile(ua: str | None) -> bool | None:
++    if _token(ua, "iPhone") or _token(ua, "iPod"):
++        return True
++    if _token(ua, "Android") and _token(ua, "Mobile"):
++        return True
++    return None
++
++
++def _ua_runtime(ua: str | None) -> str | None:
++    if ua is None:
++        return None
++    if _ua_context(ua) == "android_webview":
++        return "android_webview"
++    if re.search(r"(?<![0-9A-Za-z])Firefox/", ua, re.IGNORECASE):
++        return "firefox"
++    chromium = re.search(r"(?<![0-9A-Za-z])(?:CriOS|Chrome|Chromium|Edg|OPR)/", ua, re.IGNORECASE)
++    if chromium:
++        return "chromium"
++    if re.search(r"(?<![0-9A-Za-z])Version/", ua, re.IGNORECASE) and re.search(r"(?<![0-9A-Za-z])Safari/", ua, re.IGNORECASE):
++        return "safari_webkit"
++    return None
++
++
++def _reconcile_runtime(ch: str | None, ua: str | None) -> tuple[str | None, str | None]:
++    if ch == "android_webview" or ua == "android_webview":
++        source = "combined" if ch == ua else ("sec_ch_ua" if ch == "android_webview" else "user_agent")
++        return "android_webview", source
++    if ch is not None and ua is not None:
++        return (ch, "combined") if ch == ua else (None, None)
++    return (ch, "sec_ch_ua") if ch is not None else ((ua, "user_agent") if ua is not None else (None, None))
++
++
++def _ua_context(ua: str | None) -> str | None:
++    if ua is None:
++        return None
++    if re.search(r";[ \t]*wv[ \t]*\)", ua, re.IGNORECASE):
++        return "android_webview"
++    android = re.search(r"(?<![0-9A-Za-z])Android(?![0-9A-Za-z])", ua, re.IGNORECASE)
++    if android:
++        remainder = ua[android.end():]
++        first = re.search(r"Version/4\.0", remainder, re.IGNORECASE)
++        second = re.search(r"(?:Chrome|Chromium)/", remainder[first.end():], re.IGNORECASE) if first else None
++        third = re.search(r"Mobile Safari/", remainder[first.end() + second.end():], re.IGNORECASE) if first and second else None
++        if first and second and third:
++            return "android_webview"
++    if any(_token(ua, item) for item in ("CaptiveNetworkSupport", "CaptivePortalLogin", "CaptivePortal")):
++        return "captive_helper"
++    return None
++
++
++def _android_details(ua: str | None) -> tuple[str | None, set[int]]:
++    if ua is None:
++        return None, set()
++    models: set[str] = set()
++    majors: set[int] = set()
++    for comment in _non_nested_comments(ua):
++        if len(comment) > 256:
++            continue
++        fields = comment.split(";", 7)
++        fields = [field.strip(" \t") for field in fields]
++        for index, field in enumerate(fields):
++            version = _ANDROID_VERSION.fullmatch(field)
++            if version is None:
++                continue
++            majors.add(int(version.group(1)))
++            target = index + 1
++            if target < len(fields) and _LOCALE.fullmatch(fields[target]):
++                target += 1
++            if target >= len(fields):
++                continue
++            model_match = _MODEL_BUILD.fullmatch(fields[target])
++            if model_match is None:
++                continue
++            model = re.sub(r"[ \t]+", " ", model_match.group("model").strip(" \t"))
++            if not model or len(model) > 64 or _MAC_LIKE.fullmatch(model) or _UUID_LIKE.fullmatch(model):
++                continue
++            models.add(model)
++    return (next(iter(models)) if len(models) == 1 else None), majors
++
++
++def _non_nested_comments(ua: str) -> list[str]:
++    comments: list[str] = []
++    depth = 0
++    start = 0
++    nested = False
++    for index, character in enumerate(ua):
++        if character == "(":
++            if depth == 0:
++                start = index + 1
++                nested = False
++            else:
++                nested = True
++            depth += 1
++        elif character == ")" and depth:
++            depth -= 1
++            if depth == 0 and not nested:
++                comments.append(ua[start:index])
++                if len(comments) == 4:
++                    break
++    return comments
+diff --git a/app/device_fingerprint_portal/models.py b/app/device_fingerprint_portal/models.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a413b9a55288e2ff8c2dd59ac63722513d06cf85
+--- /dev/null
++++ b/app/device_fingerprint_portal/models.py
+@@ -0,0 +1,61 @@
++"""Immutable Task-03 portal producer models."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any
++
++
++class PortalEvidenceError(RuntimeError):
++    pass
++
++
++class PortalEvidenceConfigError(PortalEvidenceError):
++    pass
++
++
++@dataclass(frozen=True, slots=True)
++class PortalEvidenceConfig:
++    enabled: bool
++    producer_id: str
++    capture_source_id: str
++    site_id: str
++    guest_cidrs: tuple[Any, ...]
++    allowed_ssids: tuple[str, ...]
++    evidence_base_url: str
++    ca_cert_path: str
++    credential_path: str
++    queue_max_events: int
++    batch_size: int
++    queue_max_age_seconds: int
++    coalesce_seconds: int
++    coalesce_max_entries: int
++    connect_timeout_seconds: float
++    read_timeout_seconds: float
++    transient_cooldown_seconds: int
++    reject_cooldown_seconds: int
++
++
++@dataclass(frozen=True, slots=True)
++class PortalEvidenceCandidate:
++    source_subtype: str
++    observed_at: str
++    payload: dict[str, Any]
++    quality_state: str
++
++
++CoalescerKey = tuple[str, str, str, str]
++
++
++@dataclass(frozen=True, slots=True)
++class QueuedPortalEvidence:
++    event: dict[str, Any]
++    coalescer_key: CoalescerKey
++    enqueued_monotonic: float
++
++
++@dataclass(frozen=True, slots=True)
++class DeliveryResult:
++    status: str
++    cooldown_seconds: int
++    http_status: int | None = None
+diff --git a/app/device_fingerprint_portal/producer.py b/app/device_fingerprint_portal/producer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbcf17b75e2eb18ced1891c71f7d18baf3f74422
+--- /dev/null
++++ b/app/device_fingerprint_portal/producer.py
+@@ -0,0 +1,78 @@
++"""Background-only HTTPS/Bearer producer for normalized portal evidence."""
++
++from __future__ import annotations
++
++import re
++import ssl
++from pathlib import Path
++from typing import Any, Iterable
++
++import requests
++
++from .models import DeliveryResult, PortalEvidenceConfig, PortalEvidenceError
++
++_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,256}")
++_TRANSIENT = frozenset({500, 503})
++_PERMANENT = frozenset({400, 401, 403, 404, 405, 409, 413})
++
++
++class PortalEvidenceProducer:
++    def __init__(self, config: PortalEvidenceConfig, *, session: Any = requests) -> None:
++        self.config = config
++        self.session = session
++
++    def deliver_evidence(self, events: Iterable[dict[str, Any]]) -> DeliveryResult:
++        return self._post("evidence/batch", list(events))
++
++    def deliver_source_health(self, events: Iterable[dict[str, Any]]) -> DeliveryResult:
++        return self._post("source-health/batch", list(events))
++
++    def _post(self, endpoint: str, events: list[dict[str, Any]]) -> DeliveryResult:
++        try:
++            token = self._credential()
++            self._validate_ca()
++        except PortalEvidenceError:
++            return DeliveryResult("config_unavailable", self.config.reject_cooldown_seconds)
++        try:
++            response = self.session.post(
++                f"{self.config.evidence_base_url}/{endpoint}",
++                json={"producer_id": self.config.producer_id, "events": events},
++                headers={"Authorization": f"Bearer {token}"},
++                timeout=(self.config.connect_timeout_seconds, self.config.read_timeout_seconds),
++                verify=self.config.ca_cert_path,
++            )
++        except requests.RequestException:
++            return DeliveryResult("transient", self.config.transient_cooldown_seconds)
++        status = int(response.status_code)
++        if status == 200:
++            return DeliveryResult("success", 0, status)
++        if status == 429:
++            return DeliveryResult("transient", _retry_after(response), status)
++        if status in _TRANSIENT:
++            return DeliveryResult("transient", self.config.transient_cooldown_seconds, status)
++        if status in _PERMANENT:
++            return DeliveryResult("permanent", self.config.reject_cooldown_seconds, status)
++        return DeliveryResult("permanent", self.config.reject_cooldown_seconds, status)
++
++    def _credential(self) -> str:
++        try:
++            token = Path(self.config.credential_path).read_text(encoding="ascii").strip()
++        except (OSError, UnicodeError) as exc:
++            raise PortalEvidenceError("producer credential is unavailable") from exc
++        if _TOKEN.fullmatch(token) is None:
++            raise PortalEvidenceError("producer credential is invalid")
++        return token
++
++    def _validate_ca(self) -> None:
++        try:
++            ssl.create_default_context(cafile=self.config.ca_cert_path)
++        except (OSError, ssl.SSLError) as exc:
++            raise PortalEvidenceError("producer CA is unavailable") from exc
++
++
++def _retry_after(response: Any) -> int:
++    try:
++        value = int(response.headers.get("Retry-After", ""))
++    except (TypeError, ValueError):
++        value = 0
++    return value if 1 <= value <= 60 else 30
+diff --git a/app/device_fingerprint_portal/runtime.py b/app/device_fingerprint_portal/runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c4ea675aa18335e7eb6932327b29333da97df07
+--- /dev/null
++++ b/app/device_fingerprint_portal/runtime.py
+@@ -0,0 +1,217 @@
++"""Non-blocking portal sink and isolated background delivery runtime."""
++
++from __future__ import annotations
++
++import ipaddress
++import queue
++import threading
++import time
++import uuid
++from datetime import datetime, timezone
++from typing import Any
++
++from app.common.mac import format_mac_colon, parse_mac
++from app.device_fingerprint.validation import canonical_json, canonical_sha256, format_utc, parse_utc
++from app.device_fingerprint.portal_schemas import validate_portal_headers_v1
++
++from .coalescer import PortalEvidenceCoalescer
++from .models import DeliveryResult, PortalEvidenceCandidate, PortalEvidenceConfig, QueuedPortalEvidence
++from .producer import PortalEvidenceProducer
++from .telemetry import PortalEvidenceTelemetry, safe_emit
++
++UTC = timezone.utc
++
++
++class PortalEvidenceRuntime:
++    def __init__(self, config: PortalEvidenceConfig, *, producer: Any = None,
++                 telemetry: Any = None, monotonic=time.monotonic, now=None,
++                 output_queue: queue.Queue[QueuedPortalEvidence] | None = None,
++                 coalescer: PortalEvidenceCoalescer | None = None) -> None:
++        self.config = config
++        self.telemetry = telemetry or PortalEvidenceTelemetry()
++        self.monotonic = monotonic
++        self.now = now or (lambda: datetime.now(UTC))
++        self.queue = output_queue or queue.Queue(maxsize=config.queue_max_events)
++        self.coalescer = coalescer or PortalEvidenceCoalescer(
++            expiry_seconds=config.coalesce_seconds,
++            max_entries=config.coalesce_max_entries,
++            monotonic=monotonic,
++        )
++        self.producer = producer or PortalEvidenceProducer(config)
++        self.stop_event = threading.Event()
++        self.thread: threading.Thread | None = None
++        self.cooldown_until = 0.0
++        self.health_state = "unknown"
++        self.unavailable_started_at: datetime | None = None
++
++    def start(self) -> None:
++        if self.thread is not None:
++            raise RuntimeError("Portal evidence runtime already started")
++        self.thread = threading.Thread(
++            target=self._worker_loop,
++            name="device-fingerprint-portal",
++            daemon=True,
++        )
++        self.thread.start()
++
++    def stop(self) -> None:
++        self.stop_event.set()
++
++    def try_submit(self, session: Any, candidate: PortalEvidenceCandidate) -> bool:
++        try:
++            if (
++                candidate.source_subtype not in {"omada_external_portal", "capport_login"}
++                or candidate.quality_state not in {"valid", "partial"}
++            ):
++                raise ValueError("invalid portal evidence candidate")
++            parse_utc(candidate.observed_at)
++            normalized_payload = dict(validate_portal_headers_v1(candidate.payload))
++            if session.site_id != self.config.site_id:
++                safe_emit(self.telemetry, "portal_evidence_dropped", drop_site_scope=1)
++                return False
++            if not session.client_mac:
++                safe_emit(self.telemetry, "portal_evidence_dropped", drop_missing_mac=1)
++                return False
++            canonical_mac = format_mac_colon(parse_mac(session.client_mac))
++            observed_ip = session.client_ip
++            if observed_ip is not None:
++                parsed_ip = ipaddress.ip_address(observed_ip)
++                if not any(parsed_ip in network for network in self.config.guest_cidrs):
++                    safe_emit(self.telemetry, "portal_evidence_dropped", drop_ip_scope=1)
++                    return False
++                observed_ip = str(parsed_ip)
++            if session.ssid is not None and session.ssid not in self.config.allowed_ssids:
++                safe_emit(self.telemetry, "portal_evidence_dropped", drop_ssid_scope=1)
++                return False
++            payload_json = canonical_json(normalized_payload)
++            key = (
++                session.site_id,
++                canonical_mac,
++                candidate.source_subtype,
++                canonical_sha256(payload_json),
++            )
++
++            def item_factory(admitted_at: float) -> QueuedPortalEvidence:
++                event = {
++                    "source_event_id": str(uuid.uuid4()),
++                    "source_kind": "portal_headers",
++                    "source_subtype": candidate.source_subtype,
++                    "extractor_name": "portal-http-parser",
++                    "extractor_version": "1.0.0",
++                    "feature_schema_version": 1,
++                    "rule_version": None,
++                    "site_id": session.site_id,
++                    "capture_source_id": self.config.capture_source_id,
++                    "observed_at": candidate.observed_at,
++                    "observed_mac": canonical_mac,
++                    "observed_ip": observed_ip,
++                    "quality_state": candidate.quality_state,
++                    "payload": normalized_payload,
++                }
++                return QueuedPortalEvidence(event, key, admitted_at)
++
++            result = self.coalescer.try_admit(key, self.queue, item_factory)
++            field = {
++                "admitted": "events_queued", "coalesced": "events_coalesced",
++                "busy": "drop_coalescer_busy", "full": "drop_queue_full",
++            }[result.status]
++            safe_emit(self.telemetry, "portal_evidence_admission", **{field: 1})
++            return result.status == "admitted"
++        except Exception:
++            safe_emit(self.telemetry, "portal_evidence_dropped", drop_malformed=1)
++            return False
++
++    def process_once(self, *, block: bool = False) -> int:
++        try:
++            first = self.queue.get(timeout=0.1) if block else self.queue.get_nowait()
++        except queue.Empty:
++            return 0
++        items = [first]
++        while len(items) < self.config.batch_size:
++            try:
++                items.append(self.queue.get_nowait())
++            except queue.Empty:
++                break
++        now = self.now()
++        active: list[QueuedPortalEvidence] = []
++        for item in items:
++            try:
++                age = (now - parse_utc(item.event["observed_at"])).total_seconds()
++            except Exception:
++                age = self.config.queue_max_age_seconds + 1
++            if age > self.config.queue_max_age_seconds:
++                self.coalescer.remove((item.coalescer_key,))
++                safe_emit(self.telemetry, "portal_evidence_dropped", drop_queue_stale=1)
++            else:
++                active.append(item)
++        if not active:
++            return len(items)
++        current = self.monotonic()
++        if current < self.cooldown_until:
++            self.coalescer.shorten((item.coalescer_key for item in active), self.cooldown_until)
++            return len(items)
++        try:
++            result = self.producer.deliver_evidence(item.event for item in active)
++        except Exception:
++            result = DeliveryResult("transient", self.config.transient_cooldown_seconds)
++        if result.status == "success":
++            safe_emit(self.telemetry, "portal_evidence_delivery", delivery_success=len(active), batch_size=len(active))
++            self._evidence_success(now)
++        else:
++            self.cooldown_until = current + result.cooldown_seconds
++            self.coalescer.shorten((item.coalescer_key for item in active), self.cooldown_until)
++            if result.status in {"transient", "config_unavailable"}:
++                if self.health_state != "unavailable":
++                    self.unavailable_started_at = now
++                self.health_state = "unavailable"
++            event = "portal_evidence_producer_config_unavailable" if result.status == "config_unavailable" else "portal_evidence_delivery_failed"
++            safe_emit(
++                self.telemetry, event,
++                error_category=result.status, http_status=result.http_status,
++                cooldown_seconds=result.cooldown_seconds,
++                delivery_transient=1 if result.status == "transient" else 0,
++                delivery_permanent=1 if result.status in {"permanent", "config_unavailable"} else 0,
++            )
++        return len(items)
++
++    def _worker_loop(self) -> None:
++        while not self.stop_event.is_set():
++            try:
++                self.process_once(block=True)
++            except Exception:
++                safe_emit(
++                    self.telemetry,
++                    "portal_evidence_worker_failure",
++                    error_category="contained_worker_exception",
++                    runtime_state="degraded",
++                )
++
++    def _evidence_success(self, recovered_at: datetime) -> None:
++        events: list[dict[str, Any]] = []
++        if self.health_state == "unknown":
++            events.append(self._health_event("available", None, recovered_at))
++        elif self.health_state == "unavailable":
++            unavailable = self.unavailable_started_at
++            if unavailable is not None and (recovered_at - unavailable).total_seconds() <= 86400:
++                events.append(self._health_event("unavailable", "ingest_delivery_unavailable", unavailable))
++            events.append(self._health_event("available", None, recovered_at))
++        else:
++            return
++        self.health_state = "available"
++        self.unavailable_started_at = None
++        try:
++            self.producer.deliver_source_health(events)
++        except Exception:
++            pass
++        safe_emit(self.telemetry, "portal_evidence_source_health", source_health_transition="available")
++
++    def _health_event(self, status: str, reason: str | None, observed_at: datetime) -> dict[str, Any]:
++        return {
++            "source_health_event_id": str(uuid.uuid4()),
++            "site_id": self.config.site_id,
++            "capture_source_id": self.config.capture_source_id,
++            "source_kind": "portal_headers",
++            "status": status,
++            "reason_code": reason,
++            "observed_at": format_utc(observed_at),
++        }
+diff --git a/app/device_fingerprint_portal/telemetry.py b/app/device_fingerprint_portal/telemetry.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b47c385bcd893739ec0521e43c5f20c59c87e8f9
+--- /dev/null
++++ b/app/device_fingerprint_portal/telemetry.py
+@@ -0,0 +1,53 @@
++"""Sanitized counter/state-only Task-03 operational telemetry."""
++
++from __future__ import annotations
++
++import json
++import logging
++import math
++from typing import Any
++
++SAFE_FIELDS = frozenset({
++    "runtime_state", "reason", "source_kind", "source_subtype", "status",
++    "error_category", "http_status", "cooldown_seconds", "batch_size",
++    "events_extracted", "events_partial", "events_queued", "events_coalesced",
++    "drop_missing_mac", "drop_site_scope", "drop_ip_scope", "drop_ssid_scope",
++    "drop_malformed", "drop_coalescer_busy", "drop_queue_full", "drop_queue_stale",
++    "delivery_success", "delivery_transient", "delivery_permanent",
++    "source_health_transition",
++})
++
++
++class PortalEvidenceTelemetry:
++    def __init__(self, logger: logging.Logger | None = None) -> None:
++        self.logger = logger or logging.getLogger("captivportal.device_fingerprint_portal")
++
++    def emit(self, event: str, **fields: Any) -> None:
++        try:
++            payload: dict[str, Any] = {"event": str(event)[:128]}
++            for key, value in fields.items():
++                if key in SAFE_FIELDS and _safe(value):
++                    payload[key] = value
++            self.logger.info(
++                "%s",
++                json.dumps(payload, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")),
++            )
++        except Exception:
++            return
++
++
++def safe_emit(telemetry: Any, event: str, **fields: Any) -> None:
++    try:
++        if telemetry is not None:
++            telemetry.emit(event, **fields)
++    except Exception:
++        return
++
++
++def _safe(value: Any) -> bool:
++    return (
++        value is None
++        or type(value) in {bool, int}
++        or (isinstance(value, float) and math.isfinite(value))
++        or (isinstance(value, str) and len(value) <= 128)
++    )
+diff --git a/app/web/portal_entry.py b/app/web/portal_entry.py
+index 72027550f92b6aef7ec202fe0a005920ce75ce0e..e82b31208f02addf05afd2052288b4d0aeb2b6f6 100644
+--- a/app/web/portal_entry.py
++++ b/app/web/portal_entry.py
+@@ -10,6 +10,7 @@ from flask import render_template
+ from app.auth.worker import log_auth_event
+ from app.auth_telemetry import events as telemetry_events
+ from app.logger import logger
++from app.device_fingerprint_portal.telemetry import safe_emit as safe_portal_evidence_emit
+ from app.web.localization import PORTAL_TRANSLATIONS
+ 
+ 
+@@ -46,6 +47,8 @@ class PortalEntryHandler:
+         auth_telemetry: Any,
+         portal_counter_service: Any = None,
+         counter_recording_enabled: bool = False,
++        portal_evidence_sink: Any = None,
++        portal_evidence_telemetry: Any = None,
+     ):
+         self._session_manager = session_manager
+         self._auth_worker = auth_worker
+@@ -53,9 +56,11 @@ class PortalEntryHandler:
+         self._auth_telemetry = auth_telemetry
+         self._portal_counter_service = portal_counter_service
+         self._counter_recording_enabled = counter_recording_enabled
++        self._portal_evidence_sink = portal_evidence_sink
++        self._portal_evidence_telemetry = portal_evidence_telemetry
+ 
+-    def open_portal(self, context: PortalClientContext):
+-        result = self.prepare_portal(context)
++    def open_portal(self, context: PortalClientContext, portal_evidence_candidate=None):
++        result = self.prepare_portal(context, portal_evidence_candidate)
+         rendered = render_template(
+             "portal.html",
+             session_id=result.session_id,
+@@ -77,6 +82,7 @@ class PortalEntryHandler:
+     def prepare_portal(
+         self,
+         context: PortalClientContext,
++        portal_evidence_candidate=None,
+     ) -> PortalEntryResult:
+         """Create/reuse one session and return its authoritative state."""
+         try:
+@@ -149,6 +155,16 @@ class PortalEntryHandler:
+                         ),
+                     )
+ 
++            if self._portal_evidence_sink is not None and portal_evidence_candidate is not None:
++                try:
++                    self._portal_evidence_sink.try_submit(session, portal_evidence_candidate)
++                except Exception:
++                    safe_portal_evidence_emit(
++                        self._portal_evidence_telemetry,
++                        "portal_evidence_submit_failed",
++                        error_category="sink_exception",
++                    )
++
+             snapshot = self._session_manager.snapshot(session)
+             if snapshot is None:
+                 return self._failure_result(
+diff --git a/app/web/web.py b/app/web/web.py
+index 815b01f62d0303bd15206aab082bcec93786b702..bd3dfa0808cda95db6fad67158c042cf323394e2 100644
+--- a/app/web/web.py
++++ b/app/web/web.py
+@@ -8,6 +8,7 @@ server-side AuthSession/AuthWorker flow.
+ import os
+ import uuid
+ from concurrent.futures import ThreadPoolExecutor
++from datetime import datetime, timezone
+ 
+ from flask import Flask, jsonify, render_template, request
+ from werkzeug.middleware.proxy_fix import ProxyFix
+@@ -60,11 +61,18 @@ from app.web.portal_entry import (
+     PortalEntryHandler,
+ )
+ from app.web.localization import PORTAL_TRANSLATIONS
++from app.device_fingerprint_portal import (
++    PortalEvidenceRuntime,
++    extract_portal_evidence_candidate,
++    portal_config_from_env,
++)
++from app.device_fingerprint_portal.telemetry import PortalEvidenceTelemetry, safe_emit
+ 
+ 
+ MAX_WORKERS = 4
+ _AUTO_COUNTER = object()
+ _AUTO_TRAFFIC = object()
++_AUTO_PORTAL_EVIDENCE = object()
+ 
+ 
+ def _normalize_external_portal_ssid(value):
+@@ -110,6 +118,7 @@ def create_app(
+     visitor_snapshot_collector=None,
+     visit_start_submitter=None,
+     authorization_health_tracker=None,
++    portal_evidence_sink=_AUTO_PORTAL_EVIDENCE,
+ ) -> Flask:
+     """Create and configure the Flask application."""
+     template_dir = os.path.abspath(
+@@ -128,6 +137,30 @@ def create_app(
+ 
+     settings = get_settings()
+     auth_telemetry = configure_auth_telemetry(settings)
++    portal_evidence_telemetry = PortalEvidenceTelemetry()
++    portal_evidence_runtime = None
++    if portal_evidence_sink is _AUTO_PORTAL_EVIDENCE:
++        portal_evidence_sink = None
++        try:
++            portal_evidence_config = portal_config_from_env()
++            if portal_evidence_config.enabled:
++                candidate_runtime = PortalEvidenceRuntime(
++                    portal_evidence_config,
++                    telemetry=portal_evidence_telemetry,
++                )
++                candidate_runtime.start()
++                portal_evidence_runtime = candidate_runtime
++                portal_evidence_sink = candidate_runtime
++        except Exception:
++            safe_emit(
++                portal_evidence_telemetry,
++                "portal_evidence_startup_failed",
++                error_category="configuration_or_worker_start",
++                runtime_state="disabled",
++            )
++            portal_evidence_sink = None
++    app.extensions["portal_evidence_sink"] = portal_evidence_sink
++    app.extensions["portal_evidence_runtime"] = portal_evidence_runtime
+     app.extensions["auth_telemetry"] = auth_telemetry
+ 
+     webhook_config = OmadaWebhookConfig.from_settings(settings)
+@@ -322,6 +355,8 @@ def create_app(
+         auth_telemetry=auth_telemetry,
+         portal_counter_service=portal_counter_service,
+         counter_recording_enabled=counter_recording_enabled,
++        portal_evidence_sink=portal_evidence_sink,
++        portal_evidence_telemetry=portal_evidence_telemetry,
+     )
+     app.extensions["portal_entry_handler"] = portal_entry_handler
+ 
+@@ -339,6 +374,12 @@ def create_app(
+                 portal_entry_handler=portal_entry_handler,
+                 config=capport_config,
+                 telemetry=auth_telemetry,
++                portal_evidence_extractor=(
++                    extract_portal_evidence_candidate
++                    if portal_evidence_sink is not None
++                    else None
++                ),
++                portal_evidence_telemetry=portal_evidence_telemetry,
+             )
+         )
+ 
+@@ -386,6 +427,23 @@ def create_app(
+                 ),
+             ), 400
+ 
++        portal_evidence_candidate = None
++        if portal_evidence_sink is not None:
++            observed_at = datetime.now(timezone.utc)
++            try:
++                portal_evidence_candidate = extract_portal_evidence_candidate(
++                    request.headers,
++                    source_subtype="omada_external_portal",
++                    observed_at=observed_at,
++                )
++            except Exception:
++                safe_emit(
++                    portal_evidence_telemetry,
++                    "portal_evidence_extractor_failed",
++                    source_subtype="omada_external_portal",
++                    error_category="extractor_exception",
++                )
++
+         context = PortalClientContext(
+             site_id=site_id,
+             client_mac=client_mac,
+@@ -395,6 +453,11 @@ def create_app(
+             redirect_url=redirect_url,
+             radio_id=radio_id,
+         )
++        if portal_evidence_candidate is not None:
++            return portal_entry_handler.open_portal(
++                context,
++                portal_evidence_candidate=portal_evidence_candidate,
++            )
+         return portal_entry_handler.open_portal(context)
+ 
+     @app.route(
+diff --git a/docs/configuration.md b/docs/configuration.md
+index e498e27d1c97428679f639b0d0e29eb1b700fe04..45f6ddfafcbabb9d51f35e90c24e20f22f00e54a 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -40,6 +40,16 @@ private keys are provisioned outside Git. Source-health retention is fixed at
+ | `DEVICE_FINGERPRINT_MAX_PAYLOAD_BYTES` | `8192` (range `256..65536`) |
+ | `DEVICE_FINGERPRINT_MAX_CONCURRENT_INGEST_REQUESTS` | `2` (range `1..8`) |
+ 
++### Portal fingerprint producer (default disabled)
++
++`DEVICE_FINGERPRINT_PORTAL_ENABLED=false` leaves the main portal without a
++Task-03 worker or I/O. When enabled, the isolated configuration is frozen to
++producer `portal-zefer-01`, capture source `zefer-portal-http-01`, the production
++Site/guest CIDR/SSID scope, a 256-event queue, 50-event batches, 300-second
++queue age, six-hour coalescing, `(0.5s, 2.0s)` HTTPS timeouts, and 30/300-second
++cooldowns. The full exact variable list is in `.env.example`; the Bearer value
++is never stored there. See `docs/modules/device-fingerprint-portal.md`.
++
+ ## Core / Omada
+ 
+ | Setting | Repository default / requirement | Notes |
+diff --git a/docs/module-index.md b/docs/module-index.md
+index 7e3acf56043ec043e503b96b65be66e4a735d25a..e8caa8c14a91191b0eb6d97d1f1fc88a0faa20c3 100644
+--- a/docs/module-index.md
++++ b/docs/module-index.md
+@@ -14,6 +14,7 @@ Runtime tree: `8312658be3ba272998f46212d9bad76950e3867e`
+ | CAPPORT | current | `app/capport/` | `modules/capport.md` | bounded caches | yes |
+ | Auth telemetry | current | `app/auth_telemetry/` | `modules/auth-telemetry.md` | JSONL | no |
+ | Device Fingerprint Evidence | current; default disabled | `app/device_fingerprint/` | `modules/device-fingerprint.md` | isolated SQLite v1 | no |
++| Device Fingerprint Portal Evidence | current; default disabled | `app/device_fingerprint_portal/` | `modules/device-fingerprint-portal.md` | bounded memory; writes through Task-01 API | no |
+ | Public authorization counter | current | `app/portal_counter/` | `modules/public-authorization-counter.md` | SQLite | no |
+ | Public traffic counter | current | `app/public_traffic/` | `modules/public-traffic-counter.md` | SQLite | no |
+ | Authorized snapshot | current; default disabled | `app/visitor_registry/snapshot_*` | `modules/authorized-client-snapshot.md` | JSONL | yes |
+diff --git a/docs/modules/device-fingerprint-portal.md b/docs/modules/device-fingerprint-portal.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4ee4db512a320bb9d7a323fb6ea5671ab3725dd
+--- /dev/null
++++ b/docs/modules/device-fingerprint-portal.md
+@@ -0,0 +1,27 @@
++# Device Fingerprint Portal Evidence
++
++Status: **implemented; repository default disabled**.
++
++TASK-DEVICE-FINGERPRINT-03 adds passive normalized evidence from the existing
++Omada External Portal and resolved CAPPORT login requests. It reads only the
++bounded `User-Agent`, `sec-ch-ua`, `sec-ch-ua-platform`, and
++`sec-ch-ua-mobile` values. Raw headers, their hashes, cookies, authorization,
++URLs, high-entropy Client Hints, and JavaScript fingerprint signals are never
++queued, logged, or persisted.
++
++Eligible requests are normalized in the request thread and handed off with
++`put_nowait()` through a bounded 256-item FIFO. A non-blocking, 8192-entry,
++six-hour coalescer prevents portal refresh floods. The daemon worker named
++`device-fingerprint-portal` sends batches of at most 50 normalized P1 events to
++the existing direct-TLS Task-01 API. Delivery, credential, CA, queue, parser,
++and telemetry failures are contained and never change authorization results.
++
++The producer identity is fixed to `portal-zefer-01`, capture source
++`zefer-portal-http-01`, Site `6a64f17630da7c70d232187a`, guest CIDR
++`192.168.8.0/22`, and optional corroborating SSID `Zefer_Parki`. The production
++schema registry adds only `portal_headers/1`; no classifier, DB, API, collector,
++or identity-linking model is introduced.
++
++Configuration is isolated under `DEVICE_FINGERPRINT_PORTAL_*`; the default is
++`DEVICE_FINGERPRINT_PORTAL_ENABLED=false`. The Bearer credential and CA trust
++file remain external to Git. Production activation is a separate Owner action.
+diff --git a/docs/modules/device-fingerprint.md b/docs/modules/device-fingerprint.md
+index 1da4e3895f40176b25a9de4a52c6d0f1ff52e8c8..1882da6035077ac77bb963e80e1a7daf161859d7 100644
+--- a/docs/modules/device-fingerprint.md
++++ b/docs/modules/device-fingerprint.md
+@@ -26,7 +26,8 @@ creation.
+ 
+ The database contains only normalized P1 device-evidence rows and immutable
+ point-in-time source-health rows. Evidence schemas are registered locally before
+-the registry is frozen; Task-02 registers four bounded network schemas. Unknown
++the registry is frozen; Task-02 registers four bounded network schemas and
++Task-03 adds normalized `portal_headers/1`. Unknown
+ schemas fail closed. Retention is based on `observed_at` (configured
+ 1–90 days for evidence and fixed 30 days for source health).
+ 
+@@ -49,3 +50,6 @@ The authoritative accepted design and verification contract is
+ `TASK-DEVICE-FINGERPRINT-01-FINAL.md`.
+ Task-02 extends only the reserved schema-registry boundary and is governed by
+ `TASK-DEVICE-FINGERPRINT-02-FINAL.md` plus FINAL ADDENDUM-1.
++Task-03 reuses the same API/DB boundary through the isolated asynchronous portal
++producer described in `docs/modules/device-fingerprint-portal.md`; it adds no
++second database or classifier.
+diff --git a/docs/modules/portal-entry.md b/docs/modules/portal-entry.md
+index 0a5df85fa0a16e6d6796db4547e8116fda7e6398..02c25d7deb1ee91a970b71f7179ab21d2f7ef310 100644
+--- a/docs/modules/portal-entry.md
++++ b/docs/modules/portal-entry.md
+@@ -36,7 +36,8 @@ PortalClientContext, PortalEntryResult, PortalEntryHandler, AuthSession.
+ 
+ ## 7. Зависимости
+ 
+-Flask, AuthSessionManager, AuthWorker, telemetry, optional counter.
++Flask, AuthSessionManager, AuthWorker, telemetry, optional counter, and the
++default-disabled non-blocking normalized Task-03 portal-evidence sink.
+ 
+ ## 8. Fail-open
+ 
+@@ -48,7 +49,9 @@ Host/port/debug и module settings через get_settings().
+ 
+ ## 10. Data events
+ 
+-Нет собственного persistent journal.
++Нет собственного persistent journal. When Task-03 is enabled, eligible entry
++requests may submit only an already-normalized candidate to a bounded in-memory
++queue after successful AuthWorker scheduling; raw headers never enter it.
+ 
+ ## 11. Operational telemetry
+ 
+diff --git a/tests/device_fingerprint/test_portal_schema.py b/tests/device_fingerprint/test_portal_schema.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..399b315321ad37e38a4cd89239981a861d389518
+--- /dev/null
++++ b/tests/device_fingerprint/test_portal_schema.py
+@@ -0,0 +1,48 @@
++from copy import deepcopy
++
++import pytest
++
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.portal_schemas import PORTAL_HEADER_KEYS, validate_portal_headers_v1
++from app.device_fingerprint.schema_registry import build_production_schema_registry
++
++
++def payload():
++    return {
++        "platform_family": "android", "mobile_boolean": True,
++        "browser_runtime_family": "chromium", "webview_or_captive_context": None,
++        "model_family": "Pixel 8", "os_major": 14,
++        "platform_source": "sec_ch_ua_platform", "mobile_source": "sec_ch_ua_mobile",
++        "runtime_source": "combined", "context_source": None,
++        "model_source": "user_agent", "os_major_source": "user_agent",
++        "ua_present": True, "sec_ch_ua_present": True,
++        "sec_ch_ua_platform_present": True, "sec_ch_ua_mobile_present": True,
++    }
++
++
++def test_exact_portal_schema_is_registered_as_fifth_production_schema():
++    value = payload()
++    assert set(value) == PORTAL_HEADER_KEYS
++    assert build_production_schema_registry().validate("portal_headers", 1, value) == value
++
++
++@pytest.mark.parametrize("mutation", [
++    lambda value: value.update(raw_user_agent="secret"),
++    lambda value: value.pop("platform_family"),
++    lambda value: value.update(os_major=100),
++    lambda value: value.update(mobile_boolean=1),
++    lambda value: value.update(model_family="AA:BB:CC:DD:EE:FF"),
++    lambda value: value.update(platform_family=None),
++    lambda value: value.update(runtime_source="user_agent", ua_present=False),
++    lambda value: value.update(
++        platform_family=None, mobile_boolean=None, browser_runtime_family=None,
++        webview_or_captive_context=None, model_family=None, os_major=None,
++        platform_source=None, mobile_source=None, runtime_source=None,
++        context_source=None, model_source=None, os_major_source=None,
++    ),
++])
++def test_invalid_or_cross_field_portal_schema_is_rejected(mutation):
++    value = deepcopy(payload())
++    mutation(value)
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_portal_headers_v1(value)
+diff --git a/tests/device_fingerprint_portal/__init__.py b/tests/device_fingerprint_portal/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..18a90e6c0afc83ece6e1e6b89185339f0e6bc696
+--- /dev/null
++++ b/tests/device_fingerprint_portal/__init__.py
+@@ -0,0 +1 @@
++"""Task-03 focused tests."""
+diff --git a/tests/device_fingerprint_portal/test_coalescer.py b/tests/device_fingerprint_portal/test_coalescer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f7ec0849064478e3349742ca1595da1ddfa82aa
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_coalescer.py
+@@ -0,0 +1,45 @@
++import queue
++import threading
++
++from app.device_fingerprint_portal.coalescer import PortalEvidenceCoalescer
++from app.device_fingerprint_portal.models import QueuedPortalEvidence
++
++
++class Clock:
++    value = 0.0
++    def __call__(self): return self.value
++
++
++def item(key):
++    return lambda admitted: QueuedPortalEvidence({"observed_at": "2026-09-15T00:00:00.000Z"}, key, admitted)
++
++
++def test_atomic_admission_coalescing_expiry_and_queue_full_no_poison():
++    clock = Clock(); coalescer = PortalEvidenceCoalescer(expiry_seconds=21600, max_entries=2, monotonic=clock)
++    output = queue.Queue(maxsize=1); key = ("s", "m", "capport_login", "h")
++    assert coalescer.try_admit(key, output, item(key)).status == "admitted"
++    assert coalescer.try_admit(key, output, item(key)).status == "coalesced"
++    other = ("s", "m2", "capport_login", "h")
++    assert coalescer.try_admit(other, output, item(other)).status == "full"
++    assert coalescer.expiry(other) is None
++    output.get_nowait(); assert coalescer.try_admit(other, output, item(other)).status == "admitted"
++    clock.value = 21601; output.get_nowait()
++    assert coalescer.try_admit(key, output, item(key)).status == "admitted"
++
++
++def test_capacity_evicts_only_after_successful_queue_admission_and_shorten_remove_work():
++    clock = Clock(); coalescer = PortalEvidenceCoalescer(expiry_seconds=100, max_entries=1, monotonic=clock)
++    output = queue.Queue(maxsize=1); one=("s","1","x","h"); two=("s","2","x","h")
++    coalescer.try_admit(one, output, item(one)); assert coalescer.try_admit(two, output, item(two)).status == "full"
++    assert coalescer.expiry(one) == 100
++    output.get(); coalescer.try_admit(two, output, item(two)); assert coalescer.expiry(one) is None
++    coalescer.shorten((two,), 10); assert coalescer.expiry(two) == 10
++    coalescer.remove((two,)); assert len(coalescer) == 0
++
++
++def test_request_path_never_waits_for_contended_lock():
++    lock = threading.Lock(); lock.acquire()
++    coalescer = PortalEvidenceCoalescer(lock=lock)
++    key=("s","m","x","h")
++    assert coalescer.try_admit(key, queue.Queue(), item(key)).status == "busy"
++    lock.release()
+diff --git a/tests/device_fingerprint_portal/test_config.py b/tests/device_fingerprint_portal/test_config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c3568d6c9354945132b734ff3d851f6e9f84600
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_config.py
+@@ -0,0 +1,18 @@
++import pytest
++
++from app.device_fingerprint_portal.config import (
++    CAPTURE_SOURCE_ID, PRODUCER_ID, SITE_ID, portal_config_from_env,
++)
++from app.device_fingerprint_portal.models import PortalEvidenceConfigError
++
++
++def test_disabled_is_fail_open_and_uses_frozen_defaults():
++    config = portal_config_from_env({"DEVICE_FINGERPRINT_PORTAL_ENABLED": "false", "DEVICE_FINGERPRINT_PORTAL_SITE_ID": "bad"})
++    assert not config.enabled
++    assert (config.producer_id, config.capture_source_id, config.site_id) == (PRODUCER_ID, CAPTURE_SOURCE_ID, SITE_ID)
++
++
++def test_enabled_exact_config_and_fixed_override_rejection():
++    assert portal_config_from_env({"DEVICE_FINGERPRINT_PORTAL_ENABLED": "true"}).enabled
++    with pytest.raises(PortalEvidenceConfigError):
++        portal_config_from_env({"DEVICE_FINGERPRINT_PORTAL_ENABLED": "true", "DEVICE_FINGERPRINT_PORTAL_BATCH_SIZE": "51"})
+diff --git a/tests/device_fingerprint_portal/test_extractor.py b/tests/device_fingerprint_portal/test_extractor.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b84983f2015bdd60175a06e70f2f6203f3abc7e
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_extractor.py
+@@ -0,0 +1,68 @@
++from datetime import datetime, timezone
++
++import pytest
++
++from app.device_fingerprint_portal.extractor import extract_portal_evidence_candidate
++
++NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
++
++
++def extract(headers):
++    return extract_portal_evidence_candidate(headers, source_subtype="capport_login", observed_at=NOW)
++
++
++def test_android_ch_and_ua_are_normalized_without_build_id():
++    result = extract({
++        "User-Agent": "Mozilla/5.0 (Linux; Android 14; en-US; Pixel 8 Pro Build/UQ1A.240205.002; wv) Version/4.0 Chrome/120.0 Mobile Safari/537.36",
++        "sec-ch-ua": '"Not A Brand";v="99", "Chromium";v="120"',
++        "sec-ch-ua-platform": ' "Android" ',
++        "sec-ch-ua-mobile": "\t?1 ",
++    })
++    assert result.quality_state == "valid"
++    assert result.payload["platform_family"] == "android"
++    assert result.payload["mobile_boolean"] is True
++    assert result.payload["browser_runtime_family"] == "android_webview"
++    assert result.payload["webview_or_captive_context"] == "android_webview"
++    assert result.payload["model_family"] == "Pixel 8 Pro"
++    assert result.payload["os_major"] == 14
++    assert "UQ1A" not in repr(result.payload)
++
++
++@pytest.mark.parametrize("value", ["Android", '"Android";x=1', '"Android","Linux"', '"And\\roid"', '\n"Android"'])
++def test_malformed_platform_ch_falls_back_only_to_available_ua(value):
++    result = extract({"sec-ch-ua-platform": value, "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Firefox/120"})
++    assert result.payload["platform_family"] == "linux"
++    assert result.payload["platform_source"] == "user_agent"
++
++
++@pytest.mark.parametrize("value, expected", [(" ?1\t", True), ("\t?0 ", False), ("? 1", None), ('"?1"', None), ("?1,x", None)])
++def test_mobile_ch_exact_grammar(value, expected):
++    result = extract({"sec-ch-ua-mobile": value, "User-Agent": "Firefox/120"})
++    assert result.payload["mobile_boolean"] is expected
++
++
++def test_brand_list_malformed_item_poisons_ch_and_conflict_is_null():
++    malformed = extract({"sec-ch-ua": '"Chromium";v="120", broken', "User-Agent": "Firefox/120"})
++    assert malformed.payload["browser_runtime_family"] == "firefox"
++    conflict = extract({
++        "sec-ch-ua": '"Chromium";v="120"',
++        "sec-ch-ua-platform": '"Linux"',
++        "User-Agent": "Firefox/120",
++    })
++    assert conflict.payload["browser_runtime_family"] is None
++    assert conflict.payload["runtime_source"] is None
++
++
++def test_ios_major_captive_helper_and_missing_or_oversized_headers():
++    ios = extract({"User-Agent": "CaptiveNetworkSupport Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) Version/17.0 Safari/605.1"})
++    assert ios.payload["platform_family"] == "ios"
++    assert ios.payload["os_major"] == 17
++    assert ios.payload["webview_or_captive_context"] == "captive_helper"
++    assert extract({}) is None
++    assert extract({"User-Agent": "Android Mobile Chrome/1 " + "x" * 1025}) is None
++
++
++def test_multiple_android_models_are_ambiguous():
++    result = extract({"User-Agent": "Mozilla/5.0 (Android 13; Pixel 7 Build/A) (Android 13; Pixel 8 Build/B) Chrome/120 Mobile"})
++    assert result.payload["model_family"] is None
++    assert result.payload["os_major"] == 13
+diff --git a/tests/device_fingerprint_portal/test_privacy.py b/tests/device_fingerprint_portal/test_privacy.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f45c737122f223f1748125ec581b1469018e75f5
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_privacy.py
+@@ -0,0 +1,60 @@
++import ipaddress
++from datetime import datetime, timezone
++from types import SimpleNamespace
++
++from app.device_fingerprint.models import DeviceFingerprintProducer
++from app.device_fingerprint.repository import DeviceFingerprintRepository
++from app.device_fingerprint.schema_registry import build_production_schema_registry
++from app.device_fingerprint.service import DeviceFingerprintService
++from app.device_fingerprint_portal.extractor import extract_portal_evidence_candidate
++from app.device_fingerprint_portal.config import SITE_ID, portal_config_from_env
++from app.device_fingerprint_portal.runtime import PortalEvidenceRuntime
++from tests.device_fingerprint import config as core_config
++
++
++def test_raw_headers_accept_language_and_build_canaries_are_not_normalized():
++    canary="RAW-PRIVATE-CANARY"
++    value=extract_portal_evidence_candidate({
++        "User-Agent": f"Mozilla/5.0 (Android 14; Pixel 8 Build/{canary}) Chrome/120 Mobile",
++        "sec-ch-ua": '"Chromium";v="120"',
++        "Accept-Language": canary,
++    }, source_subtype="omada_external_portal", observed_at=datetime.now(timezone.utc))
++    assert canary not in repr(value.payload)
++    assert "Accept-Language" not in repr(value.payload)
++
++
++def test_only_normalized_p1_payload_reaches_task01_storage(tmp_path):
++    observed = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
++    canary = "PRIVATE-RAW-HEADER-CANARY"
++    candidate = extract_portal_evidence_candidate({
++        "User-Agent": f"Mozilla/5.0 (Android 14; Pixel 8 Build/{canary}) Chrome/120 Mobile",
++        "sec-ch-ua": '"Chromium";v="120"',
++    }, source_subtype="capport_login", observed_at=observed)
++    portal_runtime = PortalEvidenceRuntime(
++        portal_config_from_env({}),
++        now=lambda: observed,
++        monotonic=lambda: 1.0,
++    )
++    session = SimpleNamespace(
++        site_id=SITE_ID, client_mac="AA:BB:CC:DD:EE:FF",
++        client_ip="192.168.8.10", ssid="Zefer_Parki", ap_mac="NEVER-DURABLE",
++    )
++    assert portal_runtime.try_submit(session, candidate)
++    event = portal_runtime.queue.get_nowait().event
++
++    cfg = core_config(tmp_path)
++    repository = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
++    repository.initialize()
++    producer = DeviceFingerprintProducer(
++        "portal-zefer-01", "A" * 32, "zefer-portal-http-01", SITE_ID,
++        (ipaddress.ip_network("192.168.8.0/22"),), ("portal_headers",),
++    )
++    service = DeviceFingerprintService(
++        cfg, repository, build_production_schema_registry(), now=lambda: observed,
++    )
++    service.evidence_batch(producer, {"producer_id": producer.producer_id, "events": [event]})
++    row = repository.connection.execute(
++        "SELECT privacy_class,payload_json FROM device_fingerprint_evidence"
++    ).fetchone()
++    assert row[0] == "P1"
++    assert canary not in row[1] and "NEVER-DURABLE" not in row[1]
+diff --git a/tests/device_fingerprint_portal/test_producer.py b/tests/device_fingerprint_portal/test_producer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3143410cc52c46866f3367cf3843c9e6c64404c
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_producer.py
+@@ -0,0 +1,57 @@
++from dataclasses import replace
++
++import pytest
++import requests
++
++from app.device_fingerprint_portal.config import portal_config_from_env
++from app.device_fingerprint_portal.producer import PortalEvidenceProducer
++
++
++class Response:
++    def __init__(self, status, retry_after=None):
++        self.status_code = status
++        self.headers = {} if retry_after is None else {"Retry-After": retry_after}
++
++
++class Session:
++    def __init__(self, result): self.result=result; self.calls=[]
++    def post(self, *args, **kwargs):
++        self.calls.append((args, kwargs))
++        if isinstance(self.result, Exception): raise self.result
++        return self.result
++
++
++def producer(tmp_path, result, monkeypatch):
++    credential = tmp_path / "portal.bearer"; credential.write_text("a" * 32, encoding="ascii")
++    ca = tmp_path / "portal-ca.crt"; ca.write_text("certificate", encoding="ascii")
++    config = replace(portal_config_from_env({}), credential_path=str(credential), ca_cert_path=str(ca))
++    session = Session(result); value = PortalEvidenceProducer(config, session=session)
++    monkeypatch.setattr(value, "_validate_ca", lambda: None)
++    return value, session
++
++
++@pytest.mark.parametrize("response,status,cooldown", [
++    (Response(200), "success", 0), (Response(500), "transient", 30),
++    (Response(503), "transient", 30), (Response(429, "7"), "transient", 7),
++    (Response(429, "bad"), "transient", 30), (Response(400), "permanent", 300),
++    (Response(401), "permanent", 300), (Response(403), "permanent", 300),
++    (Response(409), "permanent", 300), (Response(413), "permanent", 300),
++    (requests.Timeout(), "transient", 30),
++])
++def test_delivery_classification_and_exact_https_contract(tmp_path, monkeypatch, response, status, cooldown):
++    value, session = producer(tmp_path, response, monkeypatch)
++    result = value.deliver_evidence([{"safe": True}])
++    assert (result.status, result.cooldown_seconds) == (status, cooldown)
++    if session.calls:
++        _args, kwargs = session.calls[0]
++        assert kwargs["timeout"] == (0.5, 2.0)
++        assert kwargs["verify"] == value.config.ca_cert_path
++        assert kwargs["headers"]["Authorization"] == "Bearer " + "a" * 32
++
++
++def test_local_credential_failure_is_config_unavailable_without_http(tmp_path):
++    config = replace(portal_config_from_env({}), credential_path=str(tmp_path / "missing"))
++    session = Session(Response(200)); result = PortalEvidenceProducer(config, session=session).deliver_evidence([{}])
++    assert result.status == "config_unavailable"
++    assert result.cooldown_seconds == 300
++    assert session.calls == []
+diff --git a/tests/device_fingerprint_portal/test_runtime.py b/tests/device_fingerprint_portal/test_runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bfb1c23d4440e782f515512fc81eb5efad26db54
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_runtime.py
+@@ -0,0 +1,92 @@
++from dataclasses import replace
++from datetime import datetime, timedelta, timezone
++from types import SimpleNamespace
++
++from app.device_fingerprint_portal.config import SITE_ID, portal_config_from_env
++from app.device_fingerprint_portal.models import DeliveryResult, PortalEvidenceCandidate
++from app.device_fingerprint_portal.runtime import PortalEvidenceRuntime
++
++UTC = timezone.utc
++
++
++class Clock:
++    monotonic_value = 0.0
++    now_value = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
++    def monotonic(self): return self.monotonic_value
++    def now(self): return self.now_value
++    def advance(self, seconds):
++        self.monotonic_value += seconds; self.now_value += timedelta(seconds=seconds)
++
++
++class Producer:
++    def __init__(self, outcomes=None): self.outcomes=list(outcomes or [DeliveryResult("success",0)]); self.evidence=[]; self.health=[]
++    def deliver_evidence(self, events):
++        self.evidence.append(list(events)); return self.outcomes.pop(0)
++    def deliver_source_health(self, events):
++        self.health.append(list(events)); return DeliveryResult("success",0)
++
++
++def candidate(clock, payload=None):
++    return PortalEvidenceCandidate("capport_login", clock.now().isoformat(timespec="milliseconds").replace("+00:00","Z"), payload or {
++        "platform_family":"android", "mobile_boolean":True, "browser_runtime_family":"chromium",
++        "webview_or_captive_context":None, "model_family":None, "os_major":14,
++        "platform_source":"user_agent", "mobile_source":"user_agent", "runtime_source":"user_agent",
++        "context_source":None, "model_source":None, "os_major_source":"user_agent",
++        "ua_present":True, "sec_ch_ua_present":False, "sec_ch_ua_platform_present":False,
++        "sec_ch_ua_mobile_present":False,
++    }, "valid")
++
++
++def session(**changes):
++    values = dict(site_id=SITE_ID, client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.8.10", ssid="Zefer_Parki", ap_mac="SECRET")
++    values.update(changes); return SimpleNamespace(**values)
++
++
++def runtime(outcomes=None):
++    clock=Clock(); producer=Producer(outcomes); config=portal_config_from_env({})
++    value=PortalEvidenceRuntime(config, producer=producer, monotonic=clock.monotonic, now=clock.now)
++    return value, producer, clock
++
++
++def test_scope_envelope_coalescing_and_no_ap_identity():
++    value, _producer, clock = runtime()
++    assert value.try_submit(session(), candidate(clock))
++    assert not value.try_submit(session(), candidate(clock))
++    item=value.queue.get_nowait(); assert item.event["observed_mac"] == "AA:BB:CC:DD:EE:FF"
++    assert item.event["observed_ip"] == "192.168.8.10"
++    assert "ap_mac" not in repr(item.event).lower()
++    assert not value.try_submit(session(client_mac=None), candidate(clock))
++    assert not value.try_submit(session(site_id="other"), candidate(clock))
++    assert not value.try_submit(session(client_ip="10.0.0.1"), candidate(clock))
++    assert not value.try_submit(session(ssid="Other"), candidate(clock))
++    assert value.try_submit(session(client_ip=None, client_mac="AA:BB:CC:DD:EE:01", ssid=None), candidate(clock))
++
++
++def test_transient_cooldown_shortens_key_and_blocks_http_until_expiry():
++    value, producer, clock = runtime([DeliveryResult("transient",30,503), DeliveryResult("success",0,200)])
++    assert value.try_submit(session(), candidate(clock)); item=list(value.queue.queue)[0]; original=value.coalescer.expiry(item.coalescer_key)
++    value.process_once(); assert value.cooldown_until == 30; assert value.coalescer.expiry(item.coalescer_key) == 30 < original
++    different=candidate(clock, {**candidate(clock).payload, "os_major":13})
++    assert value.try_submit(session(), different); value.process_once(); assert len(producer.evidence) == 1
++    clock.advance(30); assert value.try_submit(session(), candidate(clock)); value.process_once(); assert len(producer.evidence) == 2
++    assert [event["status"] for event in producer.health[-1]] == ["unavailable", "available"]
++
++
++def test_stale_queue_item_is_removed_and_can_be_readmitted_immediately():
++    value, producer, clock = runtime(); assert value.try_submit(session(), candidate(clock)); first=list(value.queue.queue)[0]
++    clock.advance(301); value.process_once(); assert producer.evidence == []; assert value.coalescer.expiry(first.coalescer_key) is None
++    assert value.try_submit(session(), candidate(clock))
++
++
++def test_initial_health_once_and_stale_recovery_omits_unavailable():
++    value, producer, clock = runtime([DeliveryResult("success",0), DeliveryResult("transient",30), DeliveryResult("success",0)])
++    value.try_submit(session(), candidate(clock)); value.process_once(); assert [[e["status"] for e in batch] for batch in producer.health] == [["available"]]
++    clock.advance(21601); value.try_submit(session(), candidate(clock)); value.process_once()
++    clock.advance(86401); value.try_submit(session(), candidate(clock)); value.process_once()
++    assert [event["status"] for event in producer.health[-1]] == ["available"]
++
++
++def test_worker_thread_contract_is_one_named_daemon():
++    value, _producer, _clock = runtime(); value.start()
++    assert value.thread.name == "device-fingerprint-portal" and value.thread.daemon
++    value.stop(); value.thread.join(timeout=1)
+diff --git a/tests/device_fingerprint_portal/test_telemetry.py b/tests/device_fingerprint_portal/test_telemetry.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..43b35491d85d2ca52dbfe5b1405a17522d78cc1c
+--- /dev/null
++++ b/tests/device_fingerprint_portal/test_telemetry.py
+@@ -0,0 +1,12 @@
++import logging
++
++from app.device_fingerprint_portal.telemetry import PortalEvidenceTelemetry
++
++
++def test_telemetry_is_safe_field_only(caplog):
++    telemetry=PortalEvidenceTelemetry(logging.getLogger("portal-test"))
++    with caplog.at_level(logging.INFO, logger="portal-test"):
++        telemetry.emit("event", events_queued=1, observed_mac="AA:BB", raw_user_agent="SECRET", model_family="SECRET-MODEL", authorization="Bearer SECRET")
++    text=caplog.text
++    assert "events_queued" in text
++    assert "AA:BB" not in text and "SECRET" not in text
+diff --git a/tests/test_capport_routes.py b/tests/test_capport_routes.py
+index f5dc4e136db2495eee6d6fa76c7017dc5fa06f68..57cff1a389c737e510270b485d1e6fbcf969bcf1 100644
+--- a/tests/test_capport_routes.py
++++ b/tests/test_capport_routes.py
+@@ -88,7 +88,7 @@ def state(
+     )
+ 
+ 
+-def app_for(service, handler=None):
++def app_for(service, handler=None, *, extractor=None, portal_telemetry=None):
+     template_dir = (
+         Path(__file__).parents[1] / "app" / "web" / "templates"
+     )
+@@ -100,12 +100,47 @@ def app_for(service, handler=None):
+             portal_entry_handler=handler,
+             config=config(),
+             telemetry=NoopTelemetry(),
++            portal_evidence_extractor=extractor,
++            portal_evidence_telemetry=portal_telemetry,
+         )
+     )
+     app.config["TESTING"] = True
+     return app, handler
+ 
+ 
++def test_capport_fingerprint_extraction_requires_resolved_client_and_is_contained():
++    candidate = object()
++    extractor = Mock(return_value=candidate)
++    service = Mock()
++    service.resolve_for_login.side_effect = [
++        state(found=False, allowed=False), state(found=False), state(found=True),
++    ]
++    handler = Mock()
++    handler.open_portal.return_value = ("opened", 200)
++    app, _ = app_for(service, handler, extractor=extractor, portal_telemetry=Mock())
++    client = app.test_client()
++
++    assert client.get("/capport/login", environ_base={"REMOTE_ADDR": "192.168.1.10"}).status_code == 403
++    assert extractor.call_count == 0
++    assert client.get("/capport/login", environ_base={"REMOTE_ADDR": "192.168.1.10"}).status_code == 200
++    assert extractor.call_count == 0
++    assert client.get("/capport/login", headers={"User-Agent": "Firefox/120"}, environ_base={"REMOTE_ADDR": "192.168.1.10"}).status_code == 200
++    extractor.assert_called_once()
++    handler.open_portal.assert_called_once_with(
++        PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"),
++        portal_evidence_candidate=candidate,
++    )
++
++
++def test_capport_extractor_exception_preserves_existing_login():
++    service = Mock(); service.resolve_for_login.return_value = state(found=True)
++    handler = Mock(); handler.open_portal.return_value = ("opened", 200)
++    app, _ = app_for(service, handler, extractor=Mock(side_effect=RuntimeError("secret")), portal_telemetry=Mock())
++    response = app.test_client().get("/capport/login", environ_base={"REMOTE_ADDR": "192.168.1.10"})
++    assert response.status_code == 200
++    handler.open_portal.assert_called_once_with(PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:FF", client_ip="192.168.1.10"))
++
++
+ def javascript_constant(page, name):
+     match = re.search(
+         rf"const {re.escape(name)}\s*=\s*(.*?);",
+diff --git a/tests/test_portal_entry.py b/tests/test_portal_entry.py
+index 581151bcfe438f7422deb6ad26af3cc0344b1766..ddb4e841b1603cc4a87f002c30e630f8c2c80c89 100644
+--- a/tests/test_portal_entry.py
++++ b/tests/test_portal_entry.py
+@@ -147,6 +147,57 @@ def test_repeated_prepare_reuses_session_and_starts_one_worker():
+     ]
+ 
+ 
++def test_evidence_submission_follows_worker_and_reuse_and_is_contained():
++    manager = AuthSessionManager()
++    executor = CapturingExecutor()
++    candidate = object()
++
++    class Sink:
++        def __init__(self):
++            self.calls = []
++
++        def try_submit(self, session, submitted):
++            assert executor.submissions
++            self.calls.append((session, submitted))
++            if len(self.calls) == 2:
++                raise RuntimeError("isolated sink failure")
++
++    sink = Sink()
++    handler = PortalEntryHandler(
++        session_manager=manager,
++        auth_worker=Mock(),
++        executor=executor,
++        auth_telemetry=Mock(),
++        portal_evidence_sink=sink,
++        portal_evidence_telemetry=Mock(),
++    )
++    context = PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:44")
++
++    first = handler.prepare_portal(context, candidate)
++    reused = handler.prepare_portal(context, candidate)
++
++    assert first.status_code == reused.status_code == 200
++    assert first.session_id == reused.session_id
++    assert len(sink.calls) == 2
++
++
++def test_worker_start_failure_never_submits_evidence():
++    sink = Mock()
++    handler = PortalEntryHandler(
++        session_manager=AuthSessionManager(),
++        auth_worker=Mock(),
++        executor=FailingExecutor(),
++        auth_telemetry=Mock(),
++        portal_evidence_sink=sink,
++    )
++    result = handler.prepare_portal(
++        PortalClientContext(site_id="site-1", client_mac="AA:BB:CC:DD:EE:45"),
++        object(),
++    )
++    assert result.status_code == 500
++    sink.try_submit.assert_not_called()
++
++
+ def test_portal_context_ssid_is_preserved_in_new_auth_session():
+     manager = AuthSessionManager()
+     handler = PortalEntryHandler(
+diff --git a/tests/test_proxy_headers.py b/tests/test_proxy_headers.py
+index 17e9c5eac1cdcce7174ccdf3407cc24e42e16e72..f3b930c582a5adb10799699042befd8dbd409a0e 100644
+--- a/tests/test_proxy_headers.py
++++ b/tests/test_proxy_headers.py
+@@ -1,8 +1,12 @@
+-from unittest.mock import patch
++import threading
++from unittest.mock import Mock, patch
+ 
+ from flask import jsonify, request
+ 
+ import app.web.web as web_module
++from app.device_fingerprint_portal.config import portal_config_from_env
++from app.device_fingerprint_portal.models import DeliveryResult
++from app.device_fingerprint_portal.runtime import PortalEvidenceRuntime
+ 
+ 
+ class NoopExecutor:
+@@ -10,7 +14,7 @@ class NoopExecutor:
+         return None
+ 
+ 
+-def create_test_app():
++def create_test_app(portal_evidence_sink=None, *, automatic=False):
+     settings = {
+         "portal_counter_enabled": False,
+         "portal_counter_db_path": "unused.db",
+@@ -36,9 +40,10 @@ def create_test_app():
+             NoopExecutor(),
+         ),
+     ):
+-        app = web_module.create_app(
+-            portal_counter_service=None
+-        )
++        arguments = {"portal_counter_service": None}
++        if not automatic:
++            arguments["portal_evidence_sink"] = portal_evidence_sink
++        app = web_module.create_app(**arguments)
+ 
+     @app.get("/_proxy_state")
+     def proxy_state():
+@@ -54,6 +59,104 @@ def create_test_app():
+     return app
+ 
+ 
++def test_external_portal_guard_precedes_extractor_and_valid_request_plumbs_candidate():
++    sink = object()
++    app = create_test_app(sink)
++    handler = app.extensions["portal_entry_handler"]
++    candidate = object()
++    handler.open_portal = Mock(return_value="opened")
++    extractor = Mock(return_value=candidate)
++    with patch.object(web_module, "extract_portal_evidence_candidate", extractor):
++        rejected = app.test_client().get("/?clientMac=AA:BB:CC:DD:EE:01")
++        accepted = app.test_client().get("/?site=site-1&clientMac=AA:BB:CC:DD:EE:01", headers={"User-Agent": "Firefox/120"})
++    assert rejected.status_code == 400
++    assert accepted.status_code == 200
++    extractor.assert_called_once()
++    handler.open_portal.assert_called_once()
++    assert handler.open_portal.call_args.kwargs["portal_evidence_candidate"] is candidate
++
++
++def test_external_portal_extractor_failure_is_contained():
++    app = create_test_app(object())
++    handler = app.extensions["portal_entry_handler"]
++    handler.open_portal = Mock(return_value="opened")
++    with patch.object(web_module, "extract_portal_evidence_candidate", side_effect=RuntimeError("secret")):
++        response = app.test_client().get("/?site=site-1&clientMac=AA:BB:CC:DD:EE:02")
++    assert response.status_code == 200
++    handler.open_portal.assert_called_once()
++
++
++def test_injected_sink_bypasses_auto_composition():
++    sink = object()
++    with patch.object(web_module, "portal_config_from_env", side_effect=AssertionError("must not read auto config")):
++        app = create_test_app(sink)
++    assert app.extensions["portal_evidence_sink"] is sink
++    assert app.extensions["portal_evidence_runtime"] is None
++
++
++def test_auto_disabled_and_invalid_config_are_fail_open():
++    disabled = web_module.portal_config_from_env({})
++    with patch.object(web_module, "portal_config_from_env", return_value=disabled):
++        app = create_test_app(automatic=True)
++    assert app.extensions["portal_evidence_sink"] is None
++    with patch.object(web_module, "portal_config_from_env", side_effect=ValueError("invalid secret-free config")):
++        invalid = create_test_app(automatic=True)
++    assert invalid.extensions["portal_evidence_sink"] is None
++
++
++def test_auto_worker_start_failure_is_fail_open():
++    enabled = web_module.portal_config_from_env({"DEVICE_FINGERPRINT_PORTAL_ENABLED": "true"})
++    runtime = Mock()
++    runtime.start.side_effect = RuntimeError("thread unavailable")
++    with (
++        patch.object(web_module, "portal_config_from_env", return_value=enabled),
++        patch.object(web_module, "PortalEvidenceRuntime", return_value=runtime),
++    ):
++        app = create_test_app(automatic=True)
++    assert app.extensions["portal_evidence_sink"] is None
++    runtime.start.assert_called_once_with()
++
++
++def test_auto_enabled_composes_and_starts_exact_runtime():
++    enabled = web_module.portal_config_from_env({"DEVICE_FINGERPRINT_PORTAL_ENABLED": "true"})
++    runtime = Mock()
++    with (
++        patch.object(web_module, "portal_config_from_env", return_value=enabled),
++        patch.object(web_module, "PortalEvidenceRuntime", return_value=runtime) as constructor,
++    ):
++        app = create_test_app(automatic=True)
++    constructor.assert_called_once()
++    runtime.start.assert_called_once_with()
++    assert app.extensions["portal_evidence_sink"] is runtime
++    assert app.extensions["portal_evidence_runtime"] is runtime
++
++
++def test_blocked_background_delivery_does_not_block_portal_response():
++    entered = threading.Event(); release = threading.Event()
++
++    class BlockingProducer:
++        def deliver_evidence(self, events):
++            list(events); entered.set(); release.wait(timeout=2)
++            return DeliveryResult("success", 0, 200)
++
++        def deliver_source_health(self, events):
++            list(events); return DeliveryResult("success", 0, 200)
++
++    runtime = PortalEvidenceRuntime(portal_config_from_env({}), producer=BlockingProducer())
++    runtime.start()
++    try:
++        app = create_test_app(runtime)
++        response = app.test_client().get(
++            "/?site=6a64f17630da7c70d232187a&clientMac=AA:BB:CC:DD:EE:90&clientIp=192.168.8.10",
++            headers={"User-Agent": "Mozilla/5.0 (Android 14) Chrome/120 Mobile"},
++        )
++        assert response.status_code == 200
++        assert entered.wait(timeout=1)
++    finally:
++        release.set(); runtime.stop()
++        runtime.thread.join(timeout=2)
++
++
+ def test_one_forwarded_hop_sets_real_client_ip():
+     app = create_test_app()
+ 

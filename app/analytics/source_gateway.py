@@ -13,7 +13,6 @@ from app.observations.read_service import ObservationReadService
 from app.observations.config import MAX_AP_ROWS
 from .validation import parse_utc
 from app.visit_lifecycle.read_service import VisitLifecycleReadService
-from app.visit_lifecycle.models import SCHEMA_VERSION as VISIT_SCHEMA_VERSION, compatible_visit_schema_version
 from app.visitor_registry.registry_read_service import (
     VisitorRegistryReadService,
 )
@@ -21,16 +20,10 @@ from app.visitor_registry.registry_read_service import (
 
 SOURCE_SCHEMA_VERSIONS = {
     "observations": 1,
-    "visits": VISIT_SCHEMA_VERSION,
+    "visits": 2,
     "registry": 1,
 }
 MAX_CROSS_SOURCE_IDENTIFIERS = 250_000
-
-
-def compatible_source_schema_version(source, version):
-    if source == 'visits':
-        return compatible_visit_schema_version(version)
-    return type(version) is int and version == SOURCE_SCHEMA_VERSIONS[source]
 MAX_PARTIAL_CYCLES_PER_REQUEST = 10_080
 MAX_PARTIAL_AP_ROWS_PER_REQUEST = 150_000
 PARTIAL_AP_ROW_BATCH_SIZE = 2_000
@@ -4668,7 +4661,7 @@ class AnalyticsSourceGateway:
                 version = self._one(
                     connection, "PRAGMA user_version", (), deadline
                 )
-                if version is None or not compatible_source_schema_version(source, int(version[0])):
+                if version is None or int(version[0]) != SOURCE_SCHEMA_VERSIONS[source]:
                     raise AnalyticsSourceUnavailable(
                         f"{source} schema version is unavailable"
                     )

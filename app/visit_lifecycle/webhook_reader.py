@@ -19,10 +19,6 @@ from app.common.mac import format_mac_colon
 from app.integrations.omada.webhook_journal import (
     DEFAULT_ROTATION_BACKUP_COUNT,
 )
-from app.integrations.omada.webhook_normalizer import (
-    offline_event_proof,
-    offline_record_matches_proof,
-)
 
 from .models import (
     MAX_SQLITE_INTEGER,
@@ -624,9 +620,6 @@ def _contention_fields(error: VisitStorageError) -> dict[str, Any]:
 def _offline_evidence(record: dict[str, Any]) -> OfflineEvidence | None:
     if record.get("event") != "omada.client_offline":
         return None
-    proof = offline_event_proof(record.get("raw_text"))
-    if proof is None:
-        return None
     event_id = _optional_text(record.get("normalized_event_id"))
     invalid_reason = None if event_id is not None else "invalid_event_id"
 
@@ -645,8 +638,6 @@ def _offline_evidence(record: dict[str, Any]) -> OfflineEvidence | None:
     received_at = _optional_utc(record.get("received_at"))
     if controller_at is None and received_at is None:
         invalid_reason = invalid_reason or "invalid_time"
-    if not offline_record_matches_proof(record, proof):
-        invalid_reason = invalid_reason or "invalid_offline_provenance"
 
     return OfflineEvidence(
         event_id=event_id,

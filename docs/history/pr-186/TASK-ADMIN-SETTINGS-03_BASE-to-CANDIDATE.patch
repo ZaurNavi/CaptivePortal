@@ -1,0 +1,2219 @@
+diff --git a/app/admin_web/controller_settings.py b/app/admin_web/controller_settings.py
+index 98a510a174754f529de56a287e22285a4699d544..9d1b3c30202d49fe4afbc627534798f1a3200602 100644
+--- a/app/admin_web/controller_settings.py
++++ b/app/admin_web/controller_settings.py
+@@ -1,4 +1,4 @@
+-"""Read-only, secret-free Controller projection. No provider/store/network access."""
++"""Secret-free Controller V2 composition through the common Settings boundary."""
+ 
+ from dataclasses import dataclass
+ 
+@@ -8,6 +8,7 @@ from app.controllers.omada_config import OmadaControllerPublicConfigSnapshot
+ @dataclass(frozen=True, slots=True)
+ class ControllerConfigurationReadService:
+     snapshot: OmadaControllerPublicConfigSnapshot
++    configured_read_service: object = None
+ 
+     def __post_init__(self):
+         if type(self.snapshot) is not OmadaControllerPublicConfigSnapshot:
+@@ -18,7 +19,8 @@ class ControllerConfigurationReadService:
+                 raise ValueError("public Controller snapshot unavailable")
+         for name in ("controller_url_source", "controller_id_source", "client_id_source",
+                      "client_secret_source", "tls_certificate_verification_source"):
+-            if getattr(snapshot, name) not in ("environment", "repository_default"):
++            allowed = ("environment", "repository_default", "persisted_override") if name in ("controller_url_source", "controller_id_source", "client_id_source") else ("environment", "repository_default")
++            if getattr(snapshot, name) not in allowed:
+                 raise ValueError("public Controller snapshot unavailable")
+         if snapshot.client_secret_presence not in ("configured", "not_configured"):
+             raise ValueError("public Controller snapshot unavailable")
+@@ -27,29 +29,56 @@ class ControllerConfigurationReadService:
+ 
+     def read(self, request_id: str) -> dict:
+         snapshot = self.snapshot
++        configured = None
++        if self.configured_read_service is not None:
++            try:
++                configured = self.configured_read_service.read_controller()
++            except Exception:
++                # An adopted immutable effective snapshot survives request-time Store loss.
++                configured = None
++        generation = configured["configured_generation"] if configured else None
+ 
+         def value(label, kind, effective_value, source):
+             return {"display_label": label, "value_type": kind,
+                     "effective_value": effective_value, "effective_source": source}
+ 
++        fields = {}
++        for name, key, label, kind in (
++            ("controller_url", "OMADA_URL", "Controller URL", "url"),
++            ("controller_id", "OMADA_ID", "Controller ID", "string"),
++            ("client_id", "OMADA_CLIENT_ID", "Client / Application ID", "string"),
++        ):
++            item = value(label, kind, getattr(snapshot, name), getattr(snapshot, name + "_source"))
++            current = configured["fields"][key] if configured else {}
++            pending = (configured is not None and generation != snapshot.effective_generation
++                       and (current["configured_value"], current["configured_source"]) != (item["effective_value"], item["effective_source"]))
++            item.update(setting_key=key, editable=True, read_only_reason=None,
++                persisted_override_value=current.get("persisted_override_value"),
++                configured_value=current.get("configured_value"), configured_source=current.get("configured_source"),
++                pending_value=current.get("configured_value") if pending else None,
++                pending_source=current.get("configured_source") if pending else None,
++                apply_requirement="main_service_restart", activation_target="captive-portal.service",
++                consumer_state="active", validation={"type": "string", "required": True},
++                last_changed_at=current.get("last_changed_at"), last_changed_by=current.get("last_changed_by"))
++            fields[name] = item
++        fields["client_secret"] = {"display_label": "Client Secret", "value_type": "secret_presence",
++            "effective_presence": snapshot.client_secret_presence, "effective_source": snapshot.client_secret_source,
++            "editable": False, "read_only_reason": "deployment_controlled"}
++        fields["tls_certificate_verification"] = value("TLS certificate verification", "boolean",
++            snapshot.tls_certificate_verification, snapshot.tls_certificate_verification_source)
++        fields["tls_certificate_verification"].update(editable=False, read_only_reason="deployment_controlled")
+         return {
+-            "api_version": "admin.settings.controller.v1",
++            "api_version": "admin.settings.controller.v2",
+             "request_id": request_id,
+             "scope": {"type": "global"},
+             "resource": {"type": "omada_controller", "scope": "installation"},
+-            "management_mode": "deployment_controlled",
++            "management_mode": "hybrid",
+             "configuration_state": "configured",
+-            "fields": {
+-                "controller_url": value("Controller URL", "url", snapshot.controller_url,
+-                                        snapshot.controller_url_source),
+-                "controller_id": value("Controller ID", "string", snapshot.controller_id,
+-                                       snapshot.controller_id_source),
+-                "client_id": value("Client / Application ID", "string", snapshot.client_id,
+-                                   snapshot.client_id_source),
+-                "client_secret": {"display_label": "Client Secret", "value_type": "secret_presence",
+-                                  "effective_presence": snapshot.client_secret_presence,
+-                                  "effective_source": snapshot.client_secret_source},
+-                "tls_certificate_verification": value("TLS certificate verification", "boolean",
+-                    snapshot.tls_certificate_verification, snapshot.tls_certificate_verification_source),
+-            },
++            "store_state": "available" if configured else "unavailable",
++            "configured_generation": generation,
++            "effective_generation": snapshot.effective_generation,
++            "activation_state": configured["activation_state"] if configured else None,
++            "restart_required": configured["restart_required"] if configured else None,
++            "pending_controller_setting_count": sum(item.get("pending_value") is not None for item in fields.values()) if configured else None,
++            "fields": fields,
+         }
+diff --git a/app/admin_web/policy.py b/app/admin_web/policy.py
+index 15c5e32f82a540fbcfd29d5bfca4118784ab9ab9..6986eb52d8e08abe37d8bd6921dcb743d52fdd5e 100644
+--- a/app/admin_web/policy.py
++++ b/app/admin_web/policy.py
+@@ -20,7 +20,7 @@ READ_CAPABILITIES = frozenset(
+ )
+ 
+ GLOBAL_SETTINGS_CAPABILITIES = frozenset({
+-    "admin.read.settings.global", "admin.write.settings.global", "admin.read.settings.controller",
++    "admin.read.settings.global", "admin.write.settings.global", "admin.read.settings.controller", "admin.write.settings.controller",
+ })
+ 
+ 
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index ba38b472705f46e11e7584e0462ca6827a00ce7b..a3b6346fa10befdb1109ec00538ea8d2d941ffa4 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -107,7 +107,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             and any(len(request.args.getlist(key)) != 1 for key in request.args)
+         ):
+             return _error("invalid_request", 400)
+-        if request.method == "POST" and request.path != "/admin/api/v1/settings/generations":
++        if request.method == "POST" and request.path not in ("/admin/api/v1/settings/generations", "/admin/api/v1/settings/controller/generations"):
+             if request.content_length is None:
+                 return _error("length_required", 411)
+             if request.content_length > config.max_post_bytes:
+@@ -172,7 +172,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+         if not getattr(runtime, "settings_feature_enabled", False):
+             return _error("feature_disabled" if _is_api_path(request.path) else "not_found", 404)
+         if not policy.authorize_global(g.admin_principal, capability):
+-            return _error("controller_settings_forbidden" if capability == "admin.read.settings.controller"
++            return _error("controller_settings_forbidden" if capability.endswith(".controller")
+                           else "settings_forbidden", 403)
+         return None
+ 
+@@ -201,7 +201,8 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+         return render_template("admin/settings_controller.html",
+             page={"key": "settings_controller", "title": "Controller"},
+             username=g.admin_principal.username, csrf_token=g.admin_session.csrf_token,
+-            controller_settings_state=runtime.controller_settings_state)
++            controller_settings_state=runtime.controller_settings_state,
++            controller_settings_write_allowed=policy.authorize_global(g.admin_principal, "admin.write.settings.controller"))
+ 
+     @blueprint.get("/admin/api/v1/settings/controller")
+     @authenticated
+@@ -222,7 +223,10 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             # Never render or log projection exceptions / raw config.
+             return _error("controller_settings_read_unavailable", 503)
+         try:
+-            return jsonify(model)
++            response = jsonify(model)
++            if model["configured_generation"] is not None:
++                response.headers["ETag"] = f'"settings-g{model["configured_generation"]}"'
++            return response
+         except Exception:
+             return _error("internal_error", 500)
+ 
+@@ -246,9 +250,17 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+     @blueprint.post("/admin/api/v1/settings/generations")
+     @authenticated
+     def settings_mutation():
++        return mutate_settings("general")
++
++    @blueprint.post("/admin/api/v1/settings/controller/generations")
++    @authenticated
++    def controller_settings_mutation():
++        return mutate_settings("controller")
++
++    def mutate_settings(domain):
+         import re
+         from app.settings_control.models import SettingsError
+-        rejected = settings_gate("admin.write.settings.global")
++        rejected = settings_gate("admin.write.settings.controller" if domain == "controller" else "admin.write.settings.global")
+         if rejected is not None:
+             return rejected
+         try:
+@@ -270,7 +282,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             if request.mimetype != "application/json":
+                 raise SettingsError("unsupported_media_type", 415)
+             if request.content_length is None:
+-                raise SettingsError("length_required", 411)
++                raise SettingsError("invalid_request", 400) if domain == "controller" else SettingsError("length_required", 411)
+             if request.content_length > 32768:
+                 raise SettingsError("request_too_large", 413)
+             raw = request.get_data(cache=False)
+@@ -280,13 +292,19 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+                 raise SettingsError("settings_store_unavailable")
+             result = runtime.settings_mutation_service.mutate(raw, principal=g.admin_principal,
+                 source_ip=g.admin_source_ip, request_id=g.admin_request_id,
+-                idempotency_key=key, expected_generation=int(parsed[1]))
++                idempotency_key=key, expected_generation=int(parsed[1]), domain=domain)
+             response = jsonify(result.body)
+             response.status_code = result.status
+             response.headers["ETag"] = f'"settings-g{result.body["configured_generation"]}"'
+             return response
+         except SettingsError as error:
++            if domain == "controller":
++                return jsonify({"api_version": "admin.settings.controller.mutation.v1", "request_id": g.admin_request_id,
++                    "error": {"code": error.code, "details": list(error.details)}}), error.status
+             return settings_failure(error)
++        except Exception:
++            # No raw exception text or caller configuration in public errors/logs.
++            return _error("internal_error", 500)
+ 
+     @blueprint.get("/admin/login")
+     def login_form() -> Response:
+@@ -2184,7 +2202,9 @@ def _error(code: str, status_code: int) -> Response:
+     if _is_api_path(request.path):
+         return jsonify(
+             {
+-                "api_version": ("admin.settings.controller.v1"
++                "api_version": ("admin.settings.controller.mutation.v1"
++                    if request.path == "/admin/api/v1/settings/controller/generations"
++                    else "admin.settings.controller.v2"
+                     if request.path == "/admin/api/v1/settings/controller"
+                     else "admin.settings.v1" if request.path.startswith("/admin/api/v1/settings") else API_VERSION),
+                 "request_id": getattr(g, "admin_request_id", str(uuid.uuid4())),
+diff --git a/app/admin_web/runtime.py b/app/admin_web/runtime.py
+index 0a97c37c94ffbd4d4322cbe44c1e5d7f448585fc..0b228f2c722346e10f6d52b5117f81f8cce6b366 100644
+--- a/app/admin_web/runtime.py
++++ b/app/admin_web/runtime.py
+@@ -419,7 +419,8 @@ def create_admin_web_runtime(
+         try:
+             from .controller_settings import ControllerConfigurationReadService
+ 
+-            controller_settings_read_service = ControllerConfigurationReadService(controller_public_snapshot)
++            controller_settings_read_service = ControllerConfigurationReadService(controller_public_snapshot,
++                settings_control.read_service if settings_control else None)
+             controller_settings_state = "active"
+         except Exception:
+             logger.error("admin.controller_settings_projection_unavailable")
+diff --git a/app/admin_web/static/controller_settings.js b/app/admin_web/static/controller_settings.js
+index 624500adde5be6eb933ac57f37a3dd78ce14c675..150c1f53d90820d3543ae531b0d68af9d06217c3 100644
+--- a/app/admin_web/static/controller_settings.js
++++ b/app/admin_web/static/controller_settings.js
+@@ -5,45 +5,121 @@
+   if (!page || page.dataset.controllerState !== "active") return;
+   const state = document.getElementById("controller-settings-state");
+   const fields = document.getElementById("controller-settings-fields");
+-  const keys = ["controller_url", "controller_id", "client_id", "client_secret", "tls_certificate_verification"];
++  const save = document.getElementById("controller-settings-save");
++  const writable = ["controller_url", "controller_id", "client_id"];
++  const keys = [...writable, "client_secret", "tls_certificate_verification"];
++  const sources = {environment: "Environment", repository_default: "Repository default", persisted_override: "Persisted override"};
++  const edits = new Map();
++  let model = null;
++  let etag = null;
+ 
+-  async function load() {
++  function note(parent, label, value) {
++    const line = document.createElement("small");
++    line.className = "controller-settings-source";
++    line.textContent = `${label}: ${value === null || value === undefined ? "Unavailable" : value}`;
++    parent.append(line);
++  }
++
++  async function load(message = null) {
++    model = null;
++    etag = null;
++    edits.clear();
++    if (save) save.disabled = true;
++    fields.replaceChildren();
+     try {
+       const response = await fetch("/admin/api/v1/settings/controller", {
+-        method: "GET", credentials: "same-origin", cache: "no-store",
+-        headers: {Accept: "application/json"}
++        method: "GET", credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}
+       });
+       if (!response.ok) throw new Error("unavailable");
+-      const model = await response.json();
+-      if (model.api_version !== "admin.settings.controller.v1") throw new Error("unavailable");
++      const current = await response.json();
++      if (current.api_version !== "admin.settings.controller.v2") throw new Error("unavailable");
++      model = current;
++      etag = response.headers.get("ETag");
++      const canEdit = page.dataset.writeAllowed === "true" && current.store_state === "available" && etag !== null;
+       const rows = [];
+       for (const key of keys) {
+-        const item = model.fields[key];
++        const item = current.fields[key];
+         const label = document.createElement("dt");
+         label.textContent = item.display_label;
+         const value = document.createElement("dd");
+-        const text = document.createElement("span");
+-        if (key === "client_secret") {
+-          text.textContent = item.effective_presence === "configured" ? "Configured" : "Not configured";
+-        } else if (key === "tls_certificate_verification") {
+-          text.textContent = item.effective_value ? "Enabled" : "Disabled";
++        if (writable.includes(key)) {
++          note(value, "Configured value", item.configured_value);
++          note(value, "Configured source", sources[item.configured_source]);
++          note(value, "Effective value", item.effective_value);
++          note(value, "Effective source", sources[item.effective_source]);
++          note(value, "Persisted override", item.persisted_override_value);
++          if (item.pending_value !== null) {
++            note(value, "Pending value", item.pending_value);
++            note(value, "Pending source", sources[item.pending_source]);
++          }
++          if (canEdit) {
++            const input = document.createElement("input");
++            input.type = "text";
++            input.value = item.configured_value;
++            input.setAttribute("aria-label", item.display_label);
++            const clearLabel = document.createElement("label");
++            const clear = document.createElement("input");
++            clear.type = "checkbox";
++            clear.disabled = item.persisted_override_value === null;
++            clear.addEventListener("change", () => { input.disabled = clear.checked; });
++            clearLabel.append(clear, document.createTextNode(" Clear override / use deployment value"));
++            value.append(input, clearLabel);
++            edits.set(key, {input, clear, original: item.configured_value});
++          }
+         } else {
+-          text.textContent = item.effective_value;
++          note(value, "Effective", key === "client_secret" ? (item.effective_presence === "configured" ? "Configured" : "Not configured") : (item.effective_value ? "Enabled" : "Disabled"));
++          note(value, "Source", sources[item.effective_source]);
++          note(value, "Management", "Read-only / deployment-controlled");
+         }
+-        const source = document.createElement("small");
+-        source.className = "controller-settings-source";
+-        source.textContent = item.effective_source === "environment" ? "Environment" : "Repository default";
+-        value.append(text, source);
+         rows.push(label, value);
+       }
+       fields.replaceChildren(...rows);
+       fields.hidden = false;
+-      state.textContent = "Read-only effective startup configuration.";
++      if (save) save.disabled = !canEdit;
++      state.textContent = message || (current.store_state !== "available" ? "SettingsStore unavailable. Effective configuration only; mutation is disabled." :
++        current.restart_required ? `Global Settings restart pending; ${current.pending_controller_setting_count} Controller fields pending.` : "Current configured and effective Controller configuration.");
++      return true;
+     } catch (_) {
++      model = null;
++      etag = null;
+       fields.replaceChildren();
+       fields.hidden = true;
+       state.textContent = "Controller configuration is unavailable.";
++      return false;
++    }
++  }
++
++  async function submit() {
++    if (!model || !etag || !save || save.disabled) return;
++    const changes = [];
++    for (const [key, edit] of edits) {
++      const setting = model.fields[key].setting_key;
++      if (edit.clear.checked) changes.push({key: setting, operation: "clear_override"});
++      else if (edit.input.value !== edit.original) changes.push({key: setting, operation: "set", value: edit.input.value});
++    }
++    if (!changes.length) { state.textContent = "No changes selected."; return; }
++    if (!window.confirm(`Persist ${changes.map(item => item.key).join(", ")}? No connection test will be performed. Current runtime configuration remains unchanged until external captive-portal.service restart/adoption.`)) return;
++    save.disabled = true;
++    try {
++      const response = await fetch("/admin/api/v1/settings/controller/generations", {
++        method: "POST", credentials: "same-origin", cache: "no-store",
++        headers: {"Content-Type": "application/json", "X-CSRF-Token": page.dataset.csrfToken, "If-Match": etag, "Idempotency-Key": crypto.randomUUID()},
++        body: JSON.stringify({changes})
++      });
++      if (response.status === 412) {
++        await load("Configuration changed elsewhere. Review the reloaded values before saving again.");
++        return;
++      }
++      if (response.status === 200 || response.status === 201) {
++        // The receipt acknowledges the original durable operation, never field truth.
++        await load("Configuration persisted. If restart is pending, current runtime still uses the effective configuration shown.");
++        return;
++      }
++      await load("Save was not accepted. Review current configuration before retrying.");
++    } catch (_) {
++      await load("Save outcome unavailable. Review current configuration before retrying.");
+     }
+   }
++  if (save) save.addEventListener("click", submit);
+   load();
+ })();
+diff --git a/app/admin_web/templates/admin/base.html b/app/admin_web/templates/admin/base.html
+index aba9af20bf43c34a05ae0f1f8713e20949e924c5..4a1fec7666f10b23f3235f26eb6f606a08e1bb6b 100644
+--- a/app/admin_web/templates/admin/base.html
++++ b/app/admin_web/templates/admin/base.html
+@@ -75,6 +75,7 @@
+         data-store-state="{{ settings_store_state }}" data-csrf-token="{{ csrf_token }}"
+         {% elif page.key == 'settings_controller' %}
+         id="controller-settings-page" data-controller-state="{{ controller_settings_state }}"
++        data-write-allowed="{{ 'true' if controller_settings_write_allowed else 'false' }}" data-csrf-token="{{ csrf_token }}"
+         {% else %}
+         id="admin-page"
+         data-page="{{ page.key }}"
+diff --git a/app/admin_web/templates/admin/settings_controller.html b/app/admin_web/templates/admin/settings_controller.html
+index c420b601b66a6f5b0e58a5a20fb795b698722bdb..866ff3434e909c3bbe50a490d48772df43ce1a6e 100644
+--- a/app/admin_web/templates/admin/settings_controller.html
++++ b/app/admin_web/templates/admin/settings_controller.html
+@@ -1,8 +1,11 @@
+ {% extends "admin/base.html" %}
+-{% block subtitle %}<p>Omada Controller</p><p>Deployment-controlled. No connection test performed.</p>{% endblock %}
++{% block subtitle %}<p>Omada Controller</p><p>Save persists configuration only. No connection test is performed. Activation requires an externally performed captive-portal.service restart.</p>{% endblock %}
+ {% block page_body %}
+ <div id="controller-settings-state" class="state-panel" role="status" aria-live="polite">
+   {% if controller_settings_state == 'active' %}Loading Controller configuration…{% else %}Controller configuration is unavailable.{% endif %}
+ </div>
+ <dl id="controller-settings-fields" class="detail-list" hidden></dl>
++{% if controller_settings_write_allowed %}
++<button type="button" id="controller-settings-save" class="button" disabled>Save Controller configuration</button>
++{% endif %}
+ {% endblock %}
+diff --git a/app/controllers/omada_config.py b/app/controllers/omada_config.py
+index 722602e6806ed1dc73e64d79c0fa22874214a564..35b939aa0ead5383b1663a7eaa401a306f19eecb 100644
+--- a/app/controllers/omada_config.py
++++ b/app/controllers/omada_config.py
+@@ -35,6 +35,18 @@ def _valid_base_url(value: str) -> bool:
+     )
+ 
+ 
++def normalize_controller_setting(key: str, value: Any) -> str:
++    """The same local semantic boundary for Settings and runtime composition."""
++    if not isinstance(value, str) or not value.strip():
++        raise ConfigurationError("Missing required configuration: " + key)
++    value = value.strip()
++    if key == "OMADA_URL":
++        if not _valid_base_url(value):
++            raise ConfigurationError("Invalid configuration: OMADA_URL")
++        return value[:-1] if value.endswith("/") else value
++    return value
++
++
+ @dataclass(frozen=True, slots=True)
+ class OmadaControllerRuntimeConfig:
+     controller_url: str
+@@ -50,11 +62,8 @@ class OmadaControllerRuntimeConfig:
+         if missing:
+             raise ConfigurationError("Missing required configuration: " + ", ".join(missing))
+         for _, _, attribute in _REQUIRED:
+-            object.__setattr__(self, attribute, getattr(self, attribute).strip())
+-        if not _valid_base_url(self.controller_url):
+-            raise ConfigurationError("Invalid configuration: OMADA_URL")
+-        if self.controller_url.endswith("/"):
+-            object.__setattr__(self, "controller_url", self.controller_url[:-1])
++            key = next(key for key, _, name in _REQUIRED if name == attribute)
++            object.__setattr__(self, attribute, normalize_controller_setting(key, getattr(self, attribute)))
+ 
+ 
+ def build_omada_runtime_config(settings: Mapping[str, Any]) -> OmadaControllerRuntimeConfig:
+@@ -77,14 +86,19 @@ class OmadaControllerPublicConfigSnapshot:
+     client_secret_source: str
+     tls_certificate_verification: bool
+     tls_certificate_verification_source: str
++    effective_generation: int | None = None
+ 
+ 
+ def public_omada_snapshot(
+     runtime_config: OmadaControllerRuntimeConfig,
+     explicit_environment_names: frozenset[str],
++    settings_snapshot=None,
+ ) -> OmadaControllerPublicConfigSnapshot:
+     """Project the same config used by the provider; never expose secret material."""
+     def source(name):
++        if settings_snapshot is not None and settings_snapshot.generation_id is not None and name in settings_snapshot.base_source_by_key:
++            return ("persisted_override" if settings_snapshot.persisted_override_by_key[name] is not None
++                    else settings_snapshot.base_source_by_key[name])
+         return "environment" if name in explicit_environment_names else "repository_default"
+ 
+     return OmadaControllerPublicConfigSnapshot(
+@@ -99,4 +113,5 @@ def public_omada_snapshot(
+         tls_certificate_verification=runtime_config.verify_ssl,
+         # VERIFY_SSL is a repository constant, not an environment binding.
+         tls_certificate_verification_source="repository_default",
++        effective_generation=settings_snapshot.generation_id if settings_snapshot is not None else None,
+     )
+diff --git a/app/settings_control/activation.py b/app/settings_control/activation.py
+index 484c48ead28bf2209c1703a7584d43f1a3e6ac94..458a68acfbcd3d78954d3a1ead2269a1f55a5820 100644
+--- a/app/settings_control/activation.py
++++ b/app/settings_control/activation.py
+@@ -34,6 +34,6 @@ class SettingsActivationService:
+         self.read_service._adopted = True
+ 
+     def fail(self, safe_error_code):
+-        if safe_error_code not in {"snapshot_mismatch", "admin_configuration_adoption_failed", "settings_validation_failed"}:
++        if safe_error_code not in {"snapshot_mismatch", "admin_configuration_adoption_failed", "settings_validation_failed", "controller_configuration_adoption_failed"}:
+             raise ValueError("invalid activation failure category")
+         self.repository.activation(self.snapshot.generation_id, False, safe_error_code)
+diff --git a/app/settings_control/bootstrap.py b/app/settings_control/bootstrap.py
+index 5ebc142cd3376457cb5194557bbd33cba4b44790..7be002980ff0fa40c192a9fbc33d7383ae05f483 100644
+--- a/app/settings_control/bootstrap.py
++++ b/app/settings_control/bootstrap.py
+@@ -1,4 +1,4 @@
+-"""One-shot startup resolution, disabled/store-unavailable fail-open boundary."""
++"""One-shot startup resolution; enabled Store failures are fail-closed."""
+ from .activation import SettingsActivationService
+ from .models import SettingsAdminContext, SettingsBootstrapResult, ResolvedSettingsSnapshot, SettingsError
+ from .repository import SettingsRepository
+@@ -18,7 +18,7 @@ def bootstrap_settings_control(*, base_settings, explicit_environment_names, log
+         generation, overrides = repository.configured()
+     except (SettingsError, TypeError, ValueError, OSError):
+         logger.error("settings.store_unavailable")
+-        return SettingsBootstrapResult(True, "unavailable", base_settings, fallback, SettingsAdminContext(True, "unavailable"))
++        raise SettingsError("settings_store_unavailable") from None
+     try:
+         snapshot = resolve_settings(base_settings, explicit_environment_names, overrides, generation)
+         SettingsValidationService().validate(snapshot)
+diff --git a/app/settings_control/definitions.py b/app/settings_control/definitions.py
+index c54dd319fd8c704c69257e38283f710442b71a08..84f526fea3326444d254764f76945f5c54c964ab 100644
+--- a/app/settings_control/definitions.py
++++ b/app/settings_control/definitions.py
+@@ -1,4 +1,4 @@
+-"""The ordered, closed twelve-key writable Settings definition registry."""
++"""One ordered domain-aware registry: twelve General and three Controller keys."""
+ from dataclasses import dataclass
+ from app import config
+ 
+@@ -6,9 +6,9 @@ from app import config
+ @dataclass(frozen=True, slots=True)
+ class SettingsDefinition:
+     key: str
+-    repository_default_value: int
+-    min_value: int
+-    max_value: int
++    repository_default_value: int | str
++    min_value: int | None
++    max_value: int | None
+     display_label: str
+     description: str
+     semantic_validator: str
+@@ -20,14 +20,11 @@ class SettingsDefinition:
+     editable: bool = True
+     apply_requirement: str = "main_service_restart"
+     activation_target: str = "captive-portal.service"
+-
+-    @property
+-    def settings_dict_key(self):
+-        return self.key.lower()
+-
+-    @property
+-    def environment_variable_name(self):
+-        return self.key
++    domain: str = "general"
++    settings_dict_key: str = ""
++    environment_variable_name: str = ""
++    presentation_type: str = "integer"
++    required: bool = True
+ 
+ 
+ _ROWS = (
+@@ -55,13 +52,26 @@ class SettingsDefinitionRegistry:
+                 label, description, validator + "_config_from_settings",
+                 "web_admin_" + consumer,
+                 "pagination" if index < 6 else "refresh",
++                settings_dict_key=("WEB_ADMIN_" + suffix).lower(),
++                environment_variable_name="WEB_ADMIN_" + suffix,
+             )
+             for index, (suffix, minimum, maximum, label, description, validator, consumer)
+             in enumerate(_ROWS)
+-        )
++        ) + tuple(SettingsDefinition(
++            key, "", None, None, label, "Required shared Omada Controller configuration.",
++            "omada_runtime_config", "", "controller", value_type="string", domain="controller",
++            settings_dict_key=internal, environment_variable_name=key, presentation_type=presentation,
++        ) for key, internal, label, presentation in (
++            ("OMADA_URL", "omada_url", "Controller URL", "url"),
++            ("OMADA_ID", "omada_id", "Controller ID", "string"),
++            ("OMADA_CLIENT_ID", "client_id", "Client / Application ID", "string"),
++        ))
+ 
+     def __iter__(self):
+         return iter(self.definitions)
+ 
+     def get(self, key):
+         return next((item for item in self if item.key == key), None)
++
++    def for_domain(self, domain):
++        return tuple(item for item in self if item.domain == domain)
+diff --git a/app/settings_control/models.py b/app/settings_control/models.py
+index 83ea3f74086ca2c14e50b2f781f99d2fd6ba2b11..d06b1435d9545fbc90d95c4ae06add7a6ec34278 100644
+--- a/app/settings_control/models.py
++++ b/app/settings_control/models.py
+@@ -41,8 +41,8 @@ class ResolvedSettingsSnapshot:
+     generation_id: int | None
+     values: Mapping[str, Any]
+     base_source_by_key: Mapping[str, str]
+-    base_value_by_key: Mapping[str, int]
+-    persisted_override_by_key: Mapping[str, int | None]
++    base_value_by_key: Mapping[str, int | str | None]
++    persisted_override_by_key: Mapping[str, int | str | None]
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -84,7 +84,7 @@ class SettingsReadModelV1:
+ class SettingsMutationChange:
+     key: str
+     operation: str
+-    value: int | None = None
++    value: int | str | None = None
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+diff --git a/app/settings_control/repository.py b/app/settings_control/repository.py
+index 949d4c18b60f1f150975416b9befac6adb363047..601c1f57154f0cf3db8ffb8f039ce5ac9816c23c 100644
+--- a/app/settings_control/repository.py
++++ b/app/settings_control/repository.py
+@@ -5,9 +5,9 @@ from contextlib import contextmanager
+ from .definitions import SettingsDefinitionRegistry
+ from .models import SettingsError, TARGET, utc_now
+ 
+-SETTINGS_SCHEMA_VERSION = 1
++SETTINGS_SCHEMA_VERSION = 2
+ SETTINGS_SQLITE_BUSY_TIMEOUT_MS = 1000
+-_DDL = (
++_V1_DDL = (
+     """CREATE TABLE settings_generations (
+         generation_id INTEGER PRIMARY KEY,
+         parent_generation_id INTEGER REFERENCES settings_generations(generation_id),
+@@ -47,6 +47,27 @@ _DDL = (
+         result_changed INTEGER NOT NULL CHECK(result_changed IN (0,1)), created_at_utc TEXT NOT NULL,
+         UNIQUE(principal_type,principal_name,scope_type,idempotency_key))""",
+ )
++_AUDIT_TYPE_CHECK = """CHECK(
++    (setting_domain='general' AND value_type='integer'
++     AND typeof(previous_configured_value)='integer' AND typeof(new_configured_value)='integer'
++     AND (previous_persisted_override IS NULL OR typeof(previous_persisted_override)='integer')
++     AND (new_persisted_override IS NULL OR typeof(new_persisted_override)='integer'))
++    OR (setting_domain='controller' AND value_type='string'
++     AND typeof(previous_configured_value)='text' AND typeof(new_configured_value)='text'
++     AND (previous_persisted_override IS NULL OR typeof(previous_persisted_override)='text')
++     AND (new_persisted_override IS NULL OR typeof(new_persisted_override)='text')))"""
++_DDL = tuple(
++    sql.replace("value_type TEXT NOT NULL CHECK(value_type='integer'),\n        integer_value INTEGER NOT NULL",
++                "value_type TEXT NOT NULL CHECK(value_type IN ('integer','string')),\n        integer_value INTEGER, string_value TEXT,\n        CHECK((value_type='integer' AND typeof(integer_value)='integer' AND string_value IS NULL)\n        OR (value_type='string' AND integer_value IS NULL AND typeof(string_value)='text'))")
++    .replace("previous_persisted_override INTEGER, new_persisted_override INTEGER,\n        previous_configured_value INTEGER NOT NULL, new_configured_value INTEGER NOT NULL,",
++             "setting_domain TEXT NOT NULL CHECK(setting_domain IN ('general','controller')),\n        value_type TEXT NOT NULL CHECK(value_type IN ('integer','string')),\n        previous_persisted_override, new_persisted_override,\n        previous_configured_value NOT NULL, new_configured_value NOT NULL,")
++    .replace("UNIQUE(generation_id,setting_key))", _AUDIT_TYPE_CHECK + ", UNIQUE(generation_id,setting_key))")
++    .replace("scope_type TEXT NOT NULL CHECK(scope_type='global'), idempotency_key TEXT NOT NULL,",
++             "scope_type TEXT NOT NULL CHECK(scope_type='global'),\n        mutation_domain TEXT NOT NULL CHECK(mutation_domain IN ('general','controller')), idempotency_key TEXT NOT NULL,")
++    .replace("UNIQUE(principal_type,principal_name,scope_type,idempotency_key)",
++             "UNIQUE(principal_type,principal_name,scope_type,mutation_domain,idempotency_key)")
++    for sql in _V1_DDL
++)
+ _IMMUTABLE = (
+     "settings_generations", "settings_overrides", "settings_activation_events",
+     "settings_mutation_audit", "settings_idempotency",
+@@ -98,29 +119,71 @@ class SettingsRepository:
+             if version == 0 and not tables:
+                 for statement in (*_DDL, *_TRIGGERS):
+                     db.execute(statement)
+-                db.execute("PRAGMA user_version=1")
++                db.execute("PRAGMA user_version=2")
+                 db.execute("INSERT INTO settings_generations VALUES(0,NULL,'global',?,'system','settings_bootstrap',NULL)", (utc_now(),))
+                 db.execute("INSERT INTO settings_target_state VALUES(?,NULL,NULL)", (TARGET,))
++            elif version == 1:
++                self._validate_schema(db, _V1_DDL)
++                self._validate_history(db, legacy=True)
++                self._migrate_v1(db)
+             elif version != SETTINGS_SCHEMA_VERSION:
+                 raise SettingsError("settings_store_unavailable")
+-            expected = {statement.split()[2]: statement for statement in (*_DDL, *_TRIGGERS)}
+-            actual = {row[0]: row[1] for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type IN ('table','trigger') AND name NOT LIKE 'sqlite_%'")}
+-            normalize = lambda value: " ".join(value.split())
+-            if actual.keys() != expected.keys() or any(normalize(actual[key]) != normalize(sql) for key, sql in expected.items()):
+-                raise SettingsError("settings_store_unavailable")
+-            if db.execute("PRAGMA quick_check").fetchall()[0][0] != "ok" or db.execute("PRAGMA foreign_key_check").fetchall():
+-                raise SettingsError("settings_store_unavailable")
+-            root = db.execute("SELECT * FROM settings_generations WHERE generation_id=0").fetchone()
+-            if root is None or root[1] is not None or root[2] != "global" or tuple(root)[4:] != ("system", "settings_bootstrap", None):
+-                raise SettingsError("settings_store_unavailable")
+-            if db.execute("SELECT 1 FROM settings_overrides WHERE generation_id=0").fetchone():
+-                raise SettingsError("settings_store_unavailable")
+-            if db.execute("SELECT COUNT(*) FROM settings_target_state WHERE target=?", (TARGET,)).fetchone()[0] != 1:
++            self._validate_schema(db, _DDL)
++            self._validate_history(db)
++
++    @staticmethod
++    def _validate_schema(db, ddl):
++        expected = {statement.split()[2]: statement for statement in (*ddl, *_TRIGGERS)}
++        actual = {row[0]: row[1] for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type IN ('table','trigger') AND name NOT LIKE 'sqlite_%'")}
++        normalize = lambda value: " ".join(value.split())
++        if actual.keys() != expected.keys() or any(normalize(actual[key]) != normalize(sql) for key, sql in expected.items()):
++            raise SettingsError("settings_store_unavailable")
++
++    @staticmethod
++    def _migrate_v1(db):
++        # Only leaf tables are replaced. Parent history/targets/events are untouched.
++        for table in ("settings_overrides", "settings_mutation_audit", "settings_idempotency"):
++            for action in ("update", "delete"):
++                db.execute(f"DROP TRIGGER {table}_immutable_{action}")
++            db.execute(f"ALTER TABLE {table} RENAME TO {table}_v1")
++            db.execute(next(sql for sql in _DDL if sql.startswith("CREATE TABLE " + table + " ")))
++            columns = [row[1] for row in db.execute(f"PRAGMA table_info({table}_v1)")]
++            additions = {"settings_overrides": {"string_value": "NULL"},
++                         "settings_mutation_audit": {"setting_domain": "'general'", "value_type": "'integer'"},
++                         "settings_idempotency": {"mutation_domain": "'general'"}}[table]
++            target = columns + list(additions)
++            db.execute(f"INSERT INTO {table} ({','.join(target)}) SELECT {','.join(columns + list(additions.values()))} FROM {table}_v1")
++            db.execute(f"DROP TABLE {table}_v1")
++            for statement in _TRIGGERS:
++                if statement.startswith("CREATE TRIGGER " + table + "_"):
++                    db.execute(statement)
++        db.execute("PRAGMA user_version=2")
++
++    def _validate_history(self, db, legacy=False):
++        if db.execute("PRAGMA quick_check").fetchall()[0][0] != "ok" or db.execute("PRAGMA foreign_key_check").fetchall():
++            raise SettingsError("settings_store_unavailable")
++        root = db.execute("SELECT * FROM settings_generations WHERE generation_id=0").fetchone()
++        if root is None or root[1] is not None or root[2] != "global" or tuple(root)[4:] != ("system", "settings_bootstrap", None):
++            raise SettingsError("settings_store_unavailable")
++        if db.execute("SELECT 1 FROM settings_overrides WHERE generation_id=0").fetchone():
++            raise SettingsError("settings_store_unavailable")
++        if db.execute("SELECT COUNT(*) FROM settings_target_state WHERE target=?", (TARGET,)).fetchone()[0] != 1:
++            raise SettingsError("settings_store_unavailable")
++        for row in db.execute("SELECT setting_key,value_type,integer_value" + ("" if legacy else ",string_value") + " FROM settings_overrides"):
++            definition = self.registry.get(row[0])
++            if definition is None or row[1] != definition.value_type:
+                 raise SettingsError("settings_store_unavailable")
+-            for row in db.execute("SELECT setting_key,value_type,integer_value FROM settings_overrides"):
+-                definition = self.registry.get(row[0])
+-                if definition is None or row[1] != "integer" or type(row[2]) is not int or not definition.min_value <= row[2] <= definition.max_value:
++            if row[1] == "integer":
++                if type(row[2]) is not int or not definition.min_value <= row[2] <= definition.max_value:
+                     raise SettingsError("settings_store_unavailable")
++            else:
++                from app.controllers.omada_config import normalize_controller_setting
++                from app.exceptions import ConfigurationError
++                try:
++                    if legacy or normalize_controller_setting(row[0], row[3]) != row[3]:
++                        raise SettingsError("settings_store_unavailable")
++                except ConfigurationError as exc:
++                    raise SettingsError("settings_store_unavailable") from exc
+ 
+     @staticmethod
+     def head(db):
+@@ -129,7 +192,7 @@ class SettingsRepository:
+ 
+     @staticmethod
+     def overrides(db, generation):
+-        return {row[0]: row[1] for row in db.execute("SELECT setting_key,integer_value FROM settings_overrides WHERE generation_id=?", (generation,))}
++        return {row[0]: row[2] if row[1] == "integer" else row[3] for row in db.execute("SELECT setting_key,value_type,integer_value,string_value FROM settings_overrides WHERE generation_id=?", (generation,))}
+ 
+     def configured(self):
+         with self.transaction() as db:
+@@ -150,49 +213,67 @@ class SettingsRepository:
+         row = db.execute("SELECT timestamp_utc,principal_type,principal_name FROM settings_mutation_audit WHERE setting_key=? AND generation_id<=? ORDER BY audit_id DESC LIMIT 1", (key, generation)).fetchone()
+         return dict(row) if row else None
+ 
+-    @staticmethod
+-    def create_generation(db, *, parent, principal, request_id, created_at, overrides):
++    def create_generation(self, db, *, parent, principal, request_id, created_at, overrides):
++        from app.controllers.omada_config import normalize_controller_setting
++        from app.exceptions import ConfigurationError
++        for key, value in overrides.items():
++            definition = self.registry.get(key)
++            if definition is None:
++                raise SettingsError("settings_store_unavailable")
++            if definition.value_type == "integer":
++                if type(value) is not int or not definition.min_value <= value <= definition.max_value:
++                    raise SettingsError("settings_store_unavailable")
++            else:
++                try:
++                    if normalize_controller_setting(key, value) != value:
++                        raise SettingsError("settings_store_unavailable")
++                except ConfigurationError as exc:
++                    raise SettingsError("settings_store_unavailable") from exc
+         generation = db.execute("""INSERT INTO settings_generations
+             (parent_generation_id,scope_type,created_at_utc,created_by_principal_type,created_by_principal_name,request_id)
+             VALUES(?,'global',?,?,?,?)""", (parent, created_at, principal.principal_type, principal.username, request_id)).lastrowid
+-        db.executemany("INSERT INTO settings_overrides VALUES(?,?,'integer',?)", [(generation, key, value) for key, value in sorted(overrides.items())])
++        db.executemany("INSERT INTO settings_overrides VALUES(?,?,?,?,?)", [
++            (generation, key, "integer" if type(value) is int else "string",
++             value if type(value) is int else None, value if type(value) is str else None)
++            for key, value in sorted(overrides.items())])
+         return generation
+ 
+     @staticmethod
+     def append_mutation_audit(db, *, generation, parent, principal, source_ip, request_id,
+                               idempotency_key, timestamp, key, operation, previous_override,
+-                              new_override, previous_value, new_value, apply_requirement, activation_target):
++                              new_override, previous_value, new_value, apply_requirement, activation_target,
++                              domain="general", value_type="integer"):
+         db.execute("""INSERT INTO settings_mutation_audit (
+             generation_id,parent_generation_id,principal_type,principal_name,source_ip,request_id,
+             idempotency_key,timestamp_utc,scope_type,scope_id,setting_key,operation,
+             previous_persisted_override,new_persisted_override,previous_configured_value,new_configured_value,
+-            apply_requirement,activation_target) VALUES(?,?,?,?,?,?,?,?,'global',NULL,?,?,?,?,?,?,?,?)""", (
++            apply_requirement,activation_target,setting_domain,value_type) VALUES(?,?,?,?,?,?,?,?,'global',NULL,?,?,?,?,?,?,?,?,?,?)""", (
+                 generation, parent, principal.principal_type, principal.username, source_ip, request_id,
+                 idempotency_key, timestamp, key, operation, previous_override, new_override,
+-                previous_value, new_value, apply_requirement, activation_target,
++                previous_value, new_value, apply_requirement, activation_target, domain, value_type,
+             ))
+ 
+     @staticmethod
+-    def idempotency(db, principal, key):
+-        return db.execute("SELECT * FROM settings_idempotency WHERE principal_type=? AND principal_name=? AND scope_type='global' AND idempotency_key=?", (principal.principal_type, principal.username, key)).fetchone()
++    def idempotency(db, principal, key, domain="general"):
++        return db.execute("SELECT * FROM settings_idempotency WHERE principal_type=? AND principal_name=? AND scope_type='global' AND mutation_domain=? AND idempotency_key=?", (principal.principal_type, principal.username, domain, key)).fetchone()
+ 
+-    def lookup_idempotency(self, principal, key):
++    def lookup_idempotency(self, principal, key, domain="general"):
+         # Ordinary read transaction: successful replay never needs writer ownership.
+         with self.transaction() as db:
+-            row = self.idempotency(db, principal, key)
++            row = self.idempotency(db, principal, key, domain)
+             return dict(row) if row else None
+ 
+     @staticmethod
+-    def save_idempotency(db, principal, key, payload_hash, status, body):
++    def save_idempotency(db, principal, key, payload_hash, status, body, domain="general"):
+         serialized = canonical_json(body)
+         if len(serialized.encode("utf-8")) > 65536:
+-            raise SettingsError("settings_store_unavailable")
++            raise SettingsError("internal_error", 500)
+         db.execute("""INSERT INTO settings_idempotency (
+             principal_type,principal_name,scope_type,idempotency_key,request_payload_hash,
+-            result_http_status,result_response_json,result_generation,result_changed,created_at_utc)
+-            VALUES(?,?,'global',?,?,?,?,?,?,?)""", (
++            result_http_status,result_response_json,result_generation,result_changed,created_at_utc,mutation_domain)
++            VALUES(?,?,'global',?,?,?,?,?,?,?,?)""", (
+                 principal.principal_type, principal.username, key, payload_hash, status,
+-                serialized, body["configured_generation"], int(body["changed"]), utc_now(),
++                serialized, body["configured_generation"], int(body["changed"]), utc_now(), domain,
+             ))
+ 
+     def activation(self, generation, adopted, safe_error_code=None):
+diff --git a/app/settings_control/resolver.py b/app/settings_control/resolver.py
+index c8248debc237f0160d6358852ecce22d94870905..ee25fb187c0fc4bde974baa2522c3a15ae9fedc0 100644
+--- a/app/settings_control/resolver.py
++++ b/app/settings_control/resolver.py
+@@ -2,6 +2,8 @@
+ from types import MappingProxyType
+ from .definitions import SettingsDefinitionRegistry
+ from .models import ResolvedSettingsSnapshot, SettingsError
++from app.controllers.omada_config import normalize_controller_setting
++from app.exceptions import ConfigurationError
+ 
+ 
+ def freeze(value):
+@@ -20,6 +22,20 @@ def resolve_settings(base_settings, explicit_environment_names, overrides, gener
+     sources, base_values, persisted = {}, {}, {}
+     for definition in registry:
+         raw = base_settings.get(definition.settings_dict_key, definition.repository_default_value)
++        if definition.value_type == "string":
++            # A shadowed invalid deployment value is not the selected candidate.
++            base = raw
++            selected = overrides.get(definition.key, base)
++            try:
++                selected = normalize_controller_setting(definition.key, selected)
++            except ConfigurationError as exc:
++                raise SettingsError("validation_failed", 422, ({"key": definition.key,
++                    "reason": "required" if not isinstance(selected, str) or not selected.strip() else "invalid_url"},)) from exc
++            sources[definition.key] = "environment" if definition.environment_variable_name in explicit_environment_names else "repository_default"
++            base_values[definition.key] = base
++            persisted[definition.key] = overrides.get(definition.key)
++            values[definition.settings_dict_key] = selected
++            continue
+         if type(raw) is int:
+             base = raw
+         elif isinstance(raw, str) and raw.isascii() and raw.isdigit():
+diff --git a/app/settings_control/services.py b/app/settings_control/services.py
+index 0393bff38a90d5b82b4ebd61b8847c7d0c21c933..05edcf23cdcc9807769324471276b5bd93be917b 100644
+--- a/app/settings_control/services.py
++++ b/app/settings_control/services.py
+@@ -7,9 +7,11 @@ from .models import API_VERSION, SettingsError, SettingReadModelV1, SettingsMuta
+ from .repository import canonical_json
+ from .resolver import resolve_settings
+ from .validation import SettingsValidationService
++from app.controllers.omada_config import normalize_controller_setting
++from app.exceptions import ConfigurationError
+ 
+ 
+-def parse_changes(raw, registry=None):
++def parse_changes(raw, registry=None, domain="general"):
+     registry = registry or SettingsDefinitionRegistry()
+ 
+     def pairs(values):
+@@ -28,18 +30,25 @@ def parse_changes(raw, registry=None):
+         if type(document) is not dict or set(document) != {"changes"}:
+             raise ValueError()
+         changes = document["changes"]
+-        if type(changes) is not list or not 1 <= len(changes) <= 64:
++        if domain not in ("general", "controller") or type(changes) is not list or not 1 <= len(changes) <= (3 if domain == "controller" else 64):
+             raise ValueError()
+         seen, result = set(), []
+         for change in changes:
+             if type(change) is not dict:
+                 raise ValueError()
+             key, operation = change.get("key"), change.get("operation")
+-            if type(key) is not str or registry.get(key) is None or key in seen:
++            definition = registry.get(key) if type(key) is str else None
++            if definition is None or definition.domain != domain or key in seen:
+                 raise ValueError()
+             seen.add(key)
+-            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is int:
+-                result.append(SettingsMutationChange(key, operation, change["value"]))
++            if operation == "set" and set(change) == {"key", "operation", "value"} and type(change["value"]) is (str if domain == "controller" else int):
++                value = change["value"]
++                if domain == "controller":
++                    try:
++                        value = normalize_controller_setting(key, value)
++                    except ConfigurationError as exc:
++                        raise SettingsError("validation_failed", 422, ({"key": key, "reason": "required" if not value.strip() else "invalid_url"},)) from exc
++                result.append(SettingsMutationChange(key, operation, value))
+             elif operation == "clear_override" and set(change) == {"key", "operation"}:
+                 result.append(SettingsMutationChange(key, operation))
+             else:
+@@ -68,7 +77,7 @@ class SettingsReadService:
+             "active" if generation == effective else "activation_failed" if latest_result == "failed" else "pending_main_restart"
+         )
+         settings = []
+-        for item in self.registry:
++        for item in self.registry.for_domain("general"):
+             enabled = self.startup_snapshot.values.get(item.consumer_enable_settings_dict_key, "false") in (True, "true")
+             consumer = ("active" if enabled else "consumer_disabled") if trustworthy else None
+             audit = self.repository.latest_setting_audit(db, item.key, generation)
+@@ -97,6 +106,30 @@ class SettingsReadService:
+         with self.repository.transaction() as db:
+             return self.project(db)
+ 
++    def read_controller(self):
++        """Safe configured-domain boundary; excludes the secret-bearing mapping."""
++        with self.repository.transaction() as db:
++            generation = self.repository.head(db)
++            overrides = self.repository.overrides(db, generation)
++            snapshot = resolve_settings(self.base_settings, self.environment_names, overrides, generation, self.registry)
++            effective = self.repository.effective(db)
++            trustworthy = self._adopted and effective == self.startup_snapshot.generation_id
++            latest = self.repository.latest_activation_result(db, generation)
++            activation = "runtime_unavailable" if not trustworthy else (
++                "active" if generation == effective else "activation_failed" if latest == "failed" else "pending_main_restart")
++            fields = {}
++            for item in self.registry.for_domain("controller"):
++                audit = self.repository.latest_setting_audit(db, item.key, generation)
++                fields[item.key] = {
++                    "persisted_override_value": overrides.get(item.key),
++                    "configured_value": snapshot.values[item.settings_dict_key],
++                    "configured_source": "persisted_override" if item.key in overrides else snapshot.base_source_by_key[item.key],
++                    "last_changed_at": audit["timestamp_utc"] if audit else None,
++                    "last_changed_by": {"principal_type": audit["principal_type"], "principal_name": audit["principal_name"]} if audit else None,
++                }
++            return {"configured_generation": generation, "activation_state": activation,
++                    "restart_required": generation != effective, "fields": fields}
++
+ 
+ class SettingsMutationService:
+     def __init__(self, repository, read_service, validation=None):
+@@ -109,19 +142,20 @@ class SettingsMutationService:
+             raise SettingsError("idempotency_conflict", 409)
+         return SettingsMutationResult(existing["result_http_status"], json.loads(existing["result_response_json"]))
+ 
+-    def mutate(self, raw_body, *, principal, source_ip, request_id, idempotency_key, expected_generation):
+-        changes = parse_changes(raw_body, self.read_service.registry)
++    def mutate(self, raw_body, *, principal, source_ip, request_id, idempotency_key, expected_generation, domain="general"):
++        changes = parse_changes(raw_body, self.read_service.registry, domain)
+         canonical = {"changes": [
+             {"key": change.key, "operation": change.operation, **({"value": change.value} if change.operation == "set" else {})}
+             for change in changes
+         ]}
+         payload_hash = hashlib.sha256(canonical_json(canonical).encode("utf-8")).hexdigest()
+-        existing = self.repository.lookup_idempotency(principal, idempotency_key)
++        domain_args = (domain,) if domain != "general" else ()
++        existing = self.repository.lookup_idempotency(principal, idempotency_key, *domain_args)
+         if existing:
+             return self._replay(existing, payload_hash)
+         with self.repository.transaction(write=True) as db:
+             # Mandatory re-check: another writer may have accepted this identity.
+-            existing = self.repository.idempotency(db, principal, idempotency_key)
++            existing = self.repository.idempotency(db, principal, idempotency_key, *domain_args)
+             if existing:
+                 return self._replay(existing, payload_hash)
+             parent = self.repository.head(db)
+@@ -153,11 +187,24 @@ class SettingsMutationService:
+                         previous_override=previous.get(change.key), new_override=overrides.get(change.key),
+                         previous_value=current.values[definition.settings_dict_key],
+                         new_value=candidate.values[definition.settings_dict_key],
+-                        apply_requirement=definition.apply_requirement, activation_target=definition.activation_target)
+-            projection = self.read_service.project(db, generation)
+-            body = {key: projection[key] for key in ("api_version", "scope", "configured_generation", "effective_generation", "restart_required", "settings")}
+-            body.update(request_id=request_id, changed=changed,
+-                        activation_state="pending_main_restart" if changed else projection["settings"][0]["activation_state"])
++                        apply_requirement=definition.apply_requirement, activation_target=definition.activation_target,
++                        domain=domain, value_type=definition.value_type)
++            if domain == "controller":
++                effective = self.repository.effective(db)
++                latest = self.repository.latest_activation_result(db, generation)
++                activation = "pending_main_restart" if changed else (
++                    "runtime_unavailable" if not self.read_service._adopted else "active" if generation == effective
++                    else "activation_failed" if latest == "failed" else "pending_main_restart")
++                body = {"api_version": "admin.settings.controller.mutation.v1", "request_id": request_id,
++                        "scope": {"type": "global"}, "resource": {"type": "omada_controller", "scope": "installation"},
++                        "changed": changed, "changed_keys": [item.key for item in changes if previous.get(item.key) != overrides.get(item.key)],
++                        "configured_generation": generation, "effective_generation": effective,
++                        "activation_state": activation, "restart_required": generation != effective}
++            else:
++                projection = self.read_service.project(db, generation)
++                body = {key: projection[key] for key in ("api_version", "scope", "configured_generation", "effective_generation", "restart_required", "settings")}
++                body.update(request_id=request_id, changed=changed,
++                            activation_state="pending_main_restart" if changed else projection["settings"][0]["activation_state"])
+             status = 201 if changed else 200
+-            self.repository.save_idempotency(db, principal, idempotency_key, payload_hash, status, body)
++            self.repository.save_idempotency(db, principal, idempotency_key, payload_hash, status, body, *domain_args)
+             return SettingsMutationResult(status, body)
+diff --git a/app/settings_control/validation.py b/app/settings_control/validation.py
+index fe94a49f632e9404f0b8426e4c9c668bb0cf2ba5..b52255b2cbe217e48157ade7bc0658835c7a6f2c 100644
+--- a/app/settings_control/validation.py
++++ b/app/settings_control/validation.py
+@@ -6,6 +6,8 @@ from app.admin_web.home_ap_24h_config import home_ap_24h_config_from_settings
+ from app.current_state.config import current_state_config_from_settings
+ from .definitions import SettingsDefinitionRegistry
+ from .models import SettingsError
++from app.controllers.omada_config import build_omada_runtime_config
++from app.exceptions import ConfigurationError
+ 
+ 
+ class SettingsValidationService:
+@@ -15,6 +17,8 @@ class SettingsValidationService:
+     def validate(self, snapshot):
+         details = []
+         for item in self.registry:
++            if item.domain != "general":
++                continue
+             value = snapshot.values[item.settings_dict_key]
+             if type(value) is not int:
+                 details.append({"key": item.key, "reason": "integer_required"})
+@@ -35,3 +39,7 @@ class SettingsValidationService:
+             home_ap_24h_config_from_settings(snapshot.values, admin_config=admin)
+         except (ValueError, TypeError) as exc:
+             raise SettingsError("validation_failed", 422, ({"key": None, "reason": "semantic_validation_failed"},)) from exc
++        try:
++            build_omada_runtime_config(snapshot.values)
++        except (ConfigurationError, KeyError, TypeError) as exc:
++            raise SettingsError("validation_failed", 422, ({"key": None, "reason": "controller_prerequisite_invalid"},)) from exc
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 81730f8d03158a22e3f9e86001d724d53bf6858c..d06e157bcefed3353f14ccc12ff7cb86956e54d4 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -522,14 +522,17 @@ variable and not a 1-GiB reservation.
+ SettingsStore I/O and keeps base settings authoritative. `SETTINGS_DB_PATH`
+ defaults to `/opt/CaptivePortal/data/settings.sqlite3`; these two bootstrap
+ controls are not editable Settings. Provision the parent directory externally;
+-the application does not create it or migrate an incompatible database.
++the application does not create it. Only the exact accepted schema-v1 database
++is migrated automatically to v2 during Settings-enabled startup; incompatible
++or corrupt stores are rejected.
+ 
+ When enabled and available, GLOBAL persisted overrides precede explicit
+ environment values, which precede the shared typed repository defaults. An
+-available but semantically invalid startup configuration aborts; only an
+-unavailable SettingsStore permits automatic base-settings fallback.
++invalid configuration or unavailable SettingsStore aborts enabled startup
++before the shared Omada provider or any Controller-dependent worker starts.
++There is no automatic base-settings fallback when Settings is enabled.
+ 
+-The ordered writable allowlist is exactly:
++The unchanged ordered General integer allowlist is exactly:
+ 
+ | Key | Default | Bounds |
+ | --- | ---: | --- |
+@@ -546,23 +549,32 @@ The ordered writable allowlist is exactly:
+ | WEB_ADMIN_HOME_HEALTH_REFRESH_SECONDS | 60 | 60–300 |
+ | WEB_ADMIN_HOME_AP_24H_REFRESH_SECONDS | 120 | 60–600 |
+ 
+-SQLite schema v1 retains immutable generations, complete per-generation
++SQLite schema v2 retains immutable generations, complete typed per-generation
+ override sets, mutation audit, successful idempotency responses and activation
+ events, plus the mutable `captive-portal.service` effective-generation target.
+ Generation 0 is created with `system / settings_bootstrap`, no overrides, no
+ mutation audit and no idempotency record. Foreign keys are enabled and the
+ SQLite busy timeout is 1000 ms.
+ 
++The common definition registry has 15 entries: the twelve General integers
++above and exactly three Controller strings (`OMADA_URL`, `OMADA_ID`,
++`OMADA_CLIENT_ID`). The same Store, generation head and CAS authority serve
++both domains. Idempotency keys are scoped by domain. The transactional v1→v2
++migration preserves generation IDs, original audit/activation history and exact
++successful General response bytes; migration itself creates no generation,
++audit or activation event.
++
+ A successful Save persists configuration only. All keys require a main-service
+ restart; the Settings API cannot restart services or hot-reload configuration.
+ The main runtime composes one immutable startup snapshot and durably adopts
+-that exact generation before serving. Operational source degradation is not
++that exact generation before starting Controller-dependent workers or serving
++HTTP. Operational source degradation is not
+ Settings activation failure. No service or production activation is performed
+ by this implementation.
+ 
+-## Read-only Omada Controller Settings
++## Omada Controller Settings — writable non-secret Stage 3
+ 
+-`WEB_ADMIN_SETTINGS_ENABLED` also gates the GLOBAL Controller read page/API.
++`WEB_ADMIN_SETTINGS_ENABLED` also gates the GLOBAL Controller page/read/write API.
+ The main process builds one immutable `OmadaControllerRuntimeConfig` from the
+ Stage-1 resolved settings, injects it into the shared provider and derives a
+ separate secret-free public snapshot for Admin. The provider no longer reads
+@@ -572,9 +584,25 @@ an injected controller is never rebuilt.
+ 
+ `OMADA_URL`, `OMADA_ID`, `OMADA_CLIENT_ID` and `OMADA_CLIENT_SECRET` remain required.
+ Existing trim/base-URL normalization and OAuth/request semantics are unchanged.
+-Startup environment-name membership determines public `environment` versus
+-`repository_default` provenance; `VERIFY_SSL=false` is a repository constant.
++The selected writable value is normalized by the same canonical Omada owner:
++persisted override > explicit startup environment > repository default.
++The immutable effective snapshot retains the adopted generation and each
++writable value's `persisted_override`, `environment` or `repository_default`
++provenance. No environment reread occurs in an Admin request.
++`VERIFY_SSL=false` remains a repository constant.
+ Client Secret is represented only by presence/source, never its value or any
+-derived length/hash/mask. No Controller values are stored in SettingsStore and
+-the twelve writable integer settings are unchanged. No live probe, reload,
+-restart, deployment or production activation is performed.
++derived length/hash/mask. `OMADA_CLIENT_SECRET` and `VERIFY_SSL` have no writable
++definition and cannot enter the new Controller override/audit/idempotency paths.
++Only the three non-secret Controller strings may be persisted. General reads
++and successful General receipts still contain exactly the twelve integers.
++
++Controller Save persists configuration, not running provider state. The GLOBAL
++`admin.write.settings.controller` capability is independent of General write
++authorization. A successful Save requires an externally authorized/performed
++`captive-portal.service` restart to activate; no Admin restart control, Test
++Connection, hot reconnect, live-health claim, deployment or production
++activation is supplied here.
++
++After trustworthy startup adoption, Store loss does not invent configured
++truth: the Controller V2 read can return effective-only state with configured
++fields/pending state null, while writes return `503 settings_store_unavailable`.
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index d278a7fa9165a57bd8815c1c71fd2fe96e891d78..ddf5ac9833f44c7306e2036bcff63a6167fd4b0c 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -874,23 +874,40 @@ full 12-item response even after configured/effective generations advance.
+ Settings UI offers Set/Clear Override and Save, never restart/reload controls.
+ No activation capability is exposed to Admin handlers.
+ 
+-## GLOBAL Controller Settings — read-only Stage 2
++## GLOBAL Controller Settings — writable non-secret Stage 3
+ 
+ `GET /admin/settings/controller` and `GET /admin/api/v1/settings/controller`
+ require `WEB_ADMIN_SETTINGS_ENABLED` and the GLOBAL capability
+-`admin.read.settings.controller`. There is no write capability, Site variant,
+-generation or mutation route. Unexpected API query parameters return
+-`400 invalid_request`. JSON uses `admin.settings.controller.v1`, a request UUID,
++`admin.read.settings.controller`. Writes additionally require the independent
++GLOBAL capability `admin.write.settings.controller`; there is no Site variant.
++Unexpected API query parameters return
++`400 invalid_request`. Read JSON uses `admin.settings.controller.v2`, a request UUID,
+ GLOBAL scope, installation-level `omada_controller` resource and
+-`management_mode=deployment_controlled`. Responses are `no-store` / `no-cache`.
++`management_mode=hybrid`. Responses are `no-store` / `no-cache`.
+ 
+ `ControllerConfigurationReadService` receives only the immutable public
+ projection of the exact config adopted by the shared Omada provider at startup.
+-It cannot read environment/settings/store/provider state and performs zero
+-Omada/OAuth I/O. The five fields show Controller URL, Controller ID,
+-Client / Application ID, Client Secret presence and TLS verification, with
+-`environment` / `repository_default` sources. No connection/token health is
+-claimed and no secret value, substring, length or digest is retained/disclosed.
++Its configured boundary is the common Settings read service's secret-free,
++three-key projection, not environment/systemd/provider rereads. It performs
++zero Omada/OAuth I/O. Controller URL, Controller ID and Client / Application ID
++show configured/effective values, override/source, safe audit metadata and
++pending restart state. Client Secret presence and TLS verification remain
++read-only; no connection/token health, secret value, substring, length, digest
++or mask is retained/disclosed.
++
++`POST /admin/api/v1/settings/controller/generations` accepts at most three
++unique string Set or Clear Override operations under the common 32768-byte
++strict JSON boundary. It requires session CSRF, a quoted global Settings ETag
++and canonical UUID idempotency key. Duplicate members and non-finite numbers
++are rejected. General and Controller share generation/CAS authority, while
++idempotency replay is domain-scoped and returns original success bytes before
++current CAS/full-candidate validation. Changed/no-op status is 201/200.
++
++The bounded `admin.settings.controller.mutation.v1` receipt carries generation
++and changed-key state, never Controller scalar values. The UI confirms selected
++keys, explains external main-service restart, and always reloads the V2 GET
++after success/replay. On 412 it reloads, reports conflict and does not auto-retry.
++Secret/TLS editing, Test Connection, restart and service controls are absent.
+ 
+ General and Controller authorization/navigation are independent. The Settings
+ top-level link chooses General when allowed, otherwise Controller; secondary
+@@ -902,6 +919,10 @@ Disabled HTML is 404, disabled API is `404 feature_disabled`; unavailable
+ projection/read is `503 controller_settings_read_unavailable`. Authentication,
+ capability and malformed-query failures are respectively 401, 403 and 400;
+ unexpected response serialization errors are sanitized `500 internal_error`.
+-SettingsStore failure alone does not disable a trustworthy Controller snapshot.
++After adoption, SettingsStore failure alone does not disable a trustworthy
++Controller snapshot: reads are effective-only 200 with configured/pending fields
++null; writes are 503. Enabled startup Store failure instead aborts before provider
++use. Controller consumers (pending cleaner, Observation, Current State, visitor
++snapshot collector) start only after durable Settings adoption.
+ Projection failure remains fail-open for the shared provider and Portal/Auth.
+-Stage 2 grants no network probe, systemd or production authority.
++Stage 3 grants no network probe, systemd or production authority.
+diff --git a/run.py b/run.py
+index 36482db50db64d77fbdaf414800fa0c350101c94..cf519e68ececb46dc64baaa0ef606858322bab32 100644
+--- a/run.py
++++ b/run.py
+@@ -393,10 +393,16 @@ def main() -> None:
+     settings = settings_bootstrap.runtime_settings
+     logger.info("Configuration loaded")
+ 
+-    controller_config = build_omada_runtime_config(settings)
+-    controller = create_controller(controller_config)
+     try:
+-        controller_public_snapshot = public_omada_snapshot(controller_config, explicit_environment_names)
++        controller_config = build_omada_runtime_config(settings)
++        controller = create_controller(controller_config)
++    except Exception:
++        if settings_bootstrap.activation_service is not None:
++            settings_bootstrap.activation_service.fail("controller_configuration_adoption_failed")
++        raise
++    try:
++        controller_public_snapshot = public_omada_snapshot(controller_config, explicit_environment_names,
++            settings_bootstrap.resolved_snapshot)
+     except Exception:
+         controller_public_snapshot = None
+         logger.error("admin.controller_settings_projection_unavailable")
+@@ -442,23 +448,6 @@ def main() -> None:
+         auth_manager=auth_manager,
+         telemetry=app.extensions.get("auth_telemetry"),
+     )
+-    try:
+-        _pending_session_cleaner.start()
+-    except Exception:
+-        logger.exception("pending_session_cleaner_start_failed")
+-    try:
+-        _observation_foundation.start()
+-    except Exception:
+-        logger.exception("observation_foundation_start_failed")
+-    if _current_state_runtime is not None:
+-        try:
+-            _current_state_runtime.start()
+-        except Exception:
+-            logger.exception("current_state_runtime_start_failed")
+-    try:
+-        _visitor_snapshot_collector.start()
+-    except Exception:
+-        logger.exception("visitor_snapshot_start_failed")
+     try:
+         _visitor_registry = create_visitor_registry(settings)
+     except Exception:
+@@ -490,6 +479,24 @@ def main() -> None:
+                          controller_public_snapshot)
+     if settings_bootstrap.activation_service is not None:
+         settings_bootstrap.activation_service.adopt(settings, _admin_web_runtime)
++    # Shared-provider consumers may use candidate G only after durable adoption.
++    try:
++        _pending_session_cleaner.start()
++    except Exception:
++        logger.exception("pending_session_cleaner_start_failed")
++    try:
++        _observation_foundation.start()
++    except Exception:
++        logger.exception("observation_foundation_start_failed")
++    if _current_state_runtime is not None:
++        try:
++            _current_state_runtime.start()
++        except Exception:
++            logger.exception("current_state_runtime_start_failed")
++    try:
++        _visitor_snapshot_collector.start()
++    except Exception:
++        logger.exception("visitor_snapshot_start_failed")
+     _start_public_traffic_worker(app)
+ 
+     host = settings["host"]
+diff --git a/tests/admin_web/controller_settings_stage3_ui.cjs b/tests/admin_web/controller_settings_stage3_ui.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b50537a14600461d393ba512ff167e44e4bf2cb9
+--- /dev/null
++++ b/tests/admin_web/controller_settings_stage3_ui.cjs
+@@ -0,0 +1,79 @@
++// Disposable DOM/fetch boundary: execute the real dedicated script, no network.
++const fs = require("fs");
++const vm = require("vm");
++const assert = require("assert");
++const [script, scenario] = process.argv.slice(2);
++class Element {
++  constructor(tag = "div") { this.tag = tag; this.children = []; this.listeners = {}; this.disabled = false; this.checked = false; this.dataset = {}; }
++  append(...items) { this.children.push(...items); }
++  replaceChildren(...items) { this.children = items; }
++  setAttribute(key, value) { this[key] = value; }
++  addEventListener(name, callback) { this.listeners[name] = callback; }
++}
++const page = new Element();
++page.dataset = {controllerState: "active", writeAllowed: scenario === "readonly" ? "false" : "true", csrfToken: "csrf"};
++const state = new Element();
++const fields = new Element();
++const save = scenario === "readonly" ? null : new Element("button");
++const nodes = {"controller-settings-page": page, "controller-settings-state": state, "controller-settings-fields": fields, "controller-settings-save": save};
++const current = {api_version: "admin.settings.controller.v2", store_state: scenario === "outage" ? "unavailable" : "available", restart_required: false, pending_controller_setting_count: 0, fields: {}};
++for (const [name, key] of [["controller_url", "OMADA_URL"], ["controller_id", "OMADA_ID"], ["client_id", "OMADA_CLIENT_ID"]]) {
++  current.fields[name] = {setting_key: key, display_label: name, configured_value: "old", configured_source: "environment", effective_value: "effective", effective_source: "environment", persisted_override_value: "old", pending_value: null};
++}
++current.fields.client_secret = {display_label: "Client Secret", effective_presence: "configured", effective_source: "environment"};
++current.fields.tls_certificate_verification = {display_label: "TLS", effective_value: false, effective_source: "repository_default"};
++const calls = [];
++let uuid = 0;
++const confirmations = [];
++const context = {
++  document: {getElementById: id => nodes[id], createElement: tag => new Element(tag), createTextNode: text => ({textContent: text})},
++  window: {confirm: text => { confirmations.push(text); return scenario !== "cancel"; }},
++  crypto: {randomUUID: () => `unique-${++uuid}`},
++  fetch: async (url, options) => {
++    calls.push({url, options});
++    if (options.method === "GET") return {ok: true, headers: {get: () => scenario === "outage" ? null : '"settings-g0"'}, json: async () => current};
++    return {status: scenario === "conflict" ? 412 : scenario === "noop" ? 200 : 201};
++  }
++};
++function descend(node) { return [node, ...(node.children || []).flatMap(descend)]; }
++const settle = () => new Promise(resolve => setImmediate(resolve));
++(async () => {
++  vm.runInNewContext(fs.readFileSync(script, "utf8"), context);
++  await settle();
++  const inputs = descend(fields).filter(item => item.tag === "input" && item.type === "text");
++  if (["outage", "readonly"].includes(scenario)) {
++    assert.equal(inputs.length, 0);
++    if (save) assert.equal(save.disabled, true);
++    assert.equal(calls.length, 1);
++    return;
++  }
++  assert.equal(inputs.length, 3); // Never a secret/TLS input.
++  if (scenario === "clear") {
++    const clears = descend(fields).filter(item => item.tag === "input" && item.type === "checkbox");
++    clears[0].checked = true;
++    clears[0].listeners.change();
++    assert.equal(inputs[0].disabled, true);
++  } else inputs[0].value = "new";
++  await save.listeners.click();
++  await settle();
++  assert(confirmations[0].includes("OMADA_URL"));
++  assert(confirmations[0].includes("No connection test"));
++  assert(confirmations[0].includes("restart/adoption"));
++  assert(!confirmations[0].includes("new"));
++  if (scenario === "cancel") { assert.equal(calls.length, 1); return; }
++  assert.deepEqual(calls.map(item => item.options.method), ["GET", "POST", "GET"]);
++  const changes = JSON.parse(calls[1].options.body).changes;
++  assert.equal(changes.length, 1);
++  assert.equal(changes[0].key, "OMADA_URL");
++  assert.equal(changes[0].operation, scenario === "clear" ? "clear_override" : "set");
++  assert.equal(calls[1].options.headers["X-CSRF-Token"], "csrf");
++  assert.equal(calls[1].options.headers["If-Match"], '"settings-g0"');
++  if (scenario === "conflict") {
++    assert(state.textContent.includes("Review"));
++    const next = descend(fields).find(item => item.tag === "input" && item.type === "text");
++    next.value = "retry";
++    await save.listeners.click();
++    await settle();
++    assert.notEqual(calls[1].options.headers["Idempotency-Key"], calls[3].options.headers["Idempotency-Key"]);
++  }
++})().catch(error => { process.stderr.write(error.stack); process.exitCode = 1; });
+diff --git a/tests/admin_web/test_controller_settings_stage3.py b/tests/admin_web/test_controller_settings_stage3.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..98668015db1a2dd652d412643ba51f96f9532f91
+--- /dev/null
++++ b/tests/admin_web/test_controller_settings_stage3.py
+@@ -0,0 +1,148 @@
++"""Controller V2 + bounded mutation route integration, all inputs disposable."""
++import json
++import logging
++import uuid
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++from flask import Flask
++
++from app.admin_web import create_admin_web_runtime
++from app.admin_web.models import AdminPrincipal
++from app.admin_web.routes import create_admin_web_blueprint
++from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
++from app.settings_control.bootstrap import bootstrap_settings_control
++from tests.settings_control import CONTROLLER_BASE
++from .conftest import enabled_settings, login
++
++API = "/admin/api/v1/settings/controller"
++POST = API + "/generations"
++SECRET = "AS03_HTTP_SENTINEL_secret_NOT_DISCLOSED_123"
++
++
++def setup(tmp_path, monkeypatch, *, authenticated=True):
++    monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **k: pytest.fail("Controller/OAuth I/O"))
++    base = {**enabled_settings(web_admin_settings_enabled=True), **CONTROLLER_BASE,
++            "client_secret": SECRET, "settings_db_path": str(tmp_path / "settings.sqlite3")}
++    boot = bootstrap_settings_control(base_settings=base, explicit_environment_names={"OMADA_URL"}, logger=logging.getLogger("as03"))
++    safe = public_omada_snapshot(build_omada_runtime_config(boot.runtime_settings), frozenset({"OMADA_URL"}), boot.resolved_snapshot)
++    runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None, logging.getLogger("as03"),
++        settings_control=boot.admin_context, controller_public_snapshot=safe)
++    app = Flask(__name__)
++    app.config["TESTING"] = True
++    app.register_blueprint(runtime.blueprint)
++    boot.activation_service.adopt(boot.runtime_settings, runtime)
++    client = app.test_client()
++    csrf = ""
++    if authenticated:
++        assert login(client).status_code == 302
++        csrf = client.get("/admin/api/v1/session", base_url="https://localhost").json["result"]["csrf_token"]
++    return client, boot, runtime, csrf
++
++
++def post(client, csrf, changes=None, *, body=None, key=None, etag='"settings-g0"', **kwargs):
++    data = body if body is not None else json.dumps({"changes": changes or [{"key": "OMADA_ID", "operation": "set", "value": "new-installation"}]})
++    return client.post(POST, data=data, content_type="application/json", base_url="https://localhost",
++        headers={"X-CSRF-Token": csrf, "If-Match": etag, "Idempotency-Key": key or str(uuid.uuid4())}, **kwargs)
++
++
++def test_route_changed_noop_replay_global_etag_and_secret_isolation(tmp_path, monkeypatch, caplog):
++    client, boot, runtime, csrf = setup(tmp_path, monkeypatch)
++    key = str(uuid.uuid4())
++    initial = client.get(API, base_url="https://localhost")
++    assert initial.status_code == 200 and initial.headers["ETag"] == '"settings-g0"'
++    assert initial.json["effective_generation"] == 0
++    first = post(client, csrf, key=key)
++    assert first.status_code == 201 and first.json["api_version"] == "admin.settings.controller.mutation.v1"
++    assert first.json["changed_keys"] == ["OMADA_ID"] and first.headers["ETag"] == '"settings-g1"'
++    assert "new-installation" not in first.text
++    assert post(client, csrf, key=key).json == first.json
++    assert post(client, csrf).status_code == 412
++    noop = post(client, csrf, etag='"settings-g1"')
++    assert noop.status_code == 200 and not noop.json["changed"]
++    current = client.get(API, base_url="https://localhost")
++    assert current.json["fields"]["controller_id"]["configured_value"] == "new-installation"
++    assert current.json["fields"]["controller_id"]["effective_value"] == "installation"
++    assert current.json["pending_controller_setting_count"] == 1
++    page = client.get("/admin/settings/controller", base_url="https://localhost")
++    assert b'id="controller-settings-save"' in page.data
++    assert b'data-write-allowed="true"' in page.data
++    assert "new-installation" not in page.text
++    assert SECRET not in initial.text + first.text + current.text + page.text + caplog.text
++    runtime.site_resolver = SimpleNamespace(default=lambda: pytest.fail("Site"), resolve=lambda _: pytest.fail("Site"))
++    assert client.get(API, base_url="https://localhost").status_code == 200
++
++
++@pytest.mark.parametrize("body", [
++    '{"changes":[],"changes":[]}', '{"changes":[]}', '[]', '{',
++    '{"changes":[{"key":"OMADA_ID","key":"OMADA_URL","operation":"set","value":"x"}]}',
++    '{"changes":[{"key":"OMADA_ID","operation":"set","value":"x","extra":1}]}',
++    '{"changes":[{"key":"OMADA_ID","operation":"clear_override","value":"x"}]}',
++    '{"changes":[{"key":"OMADA_ID","operation":"set","value":NaN}]}',
++    '{"changes":[{"key":"OMADA_ID","operation":"set","value":Infinity}]}',
++    '{"changes":[{"key":"OMADA_ID","operation":"set","value":-Infinity}]}',
++    '{"changes":[{"key":"OMADA_ID","operation":"set","value":false}]}',
++    '{"changes":[{"key":"OMADA_ID","operation":"set","value":"x"}],"site_id":"fake"}',
++    *[json.dumps({"changes": [{"key": key, "operation": "set", "value": SECRET}]}) for key in
++      ("OMADA_CLIENT_SECRET", "VERIFY_SSL", "WEB_ADMIN_DEVICE_PAGE_SIZE")],
++    json.dumps({"changes": [{"key": "OMADA_ID", "operation": "set", "value": "x"}] * 2}),
++    json.dumps({"changes": [{"key": "OMADA_ID", "operation": "set", "value": "x"}] * 4}),
++])
++def test_strict_controller_json_and_domain_rejected_atomically(tmp_path, monkeypatch, body):
++    client, boot, runtime, csrf = setup(tmp_path, monkeypatch)
++    response = post(client, csrf, body=body)
++    assert response.status_code == 400 and response.json["error"]["code"] == "invalid_request"
++    assert SECRET not in response.text
++    assert boot.admin_context.read_service.repository.configured() == (0, {})
++
++
++def test_csrf_headers_auth_permission_and_request_limits(tmp_path, monkeypatch):
++    client, boot, runtime, csrf = setup(tmp_path, monkeypatch)
++    assert post(client, "wrong").status_code == 400
++    assert post(client, csrf, etag="*").status_code == 400
++    assert post(client, csrf, key="wrong").status_code == 400
++    assert post(client, csrf, query_string={"unexpected": "x"}).status_code == 400
++    assert post(client, csrf, body=" " * 32769).status_code == 413
++    assert client.post(POST, json={"changes": []}, base_url="https://localhost",
++        headers={"X-CSRF-Token": csrf}).status_code == 428
++    assert client.post("/admin/logout", json={}, base_url="https://localhost").status_code == 415
++    # Deliberately independent read/write permissions; General write does not grant Controller write.
++    policy = runtime.access_policy
++    runtime.access_policy = SimpleNamespace(authorize_global=lambda principal, cap:
++        cap != "admin.write.settings.controller" and policy.authorize_global(principal, cap))
++    # Blueprint captured policy, so construct it on a fresh app before any request.
++    app = Flask("controller-no-write")
++    app.register_blueprint(create_admin_web_blueprint(runtime, logger=logging.getLogger("as03")))
++    other = app.test_client()
++    login(other)
++    assert other.get(API, base_url="https://localhost").status_code == 200
++    page = other.get("/admin/settings/controller", base_url="https://localhost")
++    assert b'id="controller-settings-save"' not in page.data
++    assert post(other, csrf).json["error"]["code"] == "controller_settings_forbidden"
++    unauthenticated, _, _, _ = setup(tmp_path, monkeypatch, authenticated=False)
++    assert post(unauthenticated, csrf).status_code == 401
++
++
++def test_later_store_outage_retains_effective_but_cannot_mutate(tmp_path, monkeypatch):
++    client, boot, runtime, csrf = setup(tmp_path, monkeypatch)
++    assert post(client, csrf).status_code == 201
++    boot.admin_context.read_service.repository.db_path = str(tmp_path / "missing" / "bad.sqlite3")
++    response = client.get(API, base_url="https://localhost")
++    assert response.status_code == 200 and "ETag" not in response.headers
++    assert response.json["store_state"] == "unavailable"
++    assert response.json["fields"]["controller_id"]["configured_value"] is None
++    assert response.json["fields"]["controller_id"]["effective_value"] == "installation"
++    assert post(client, csrf).json["error"]["code"] == "settings_store_unavailable"
++
++
++def test_controller_validation_and_internal_errors_never_echo_secret(tmp_path, monkeypatch, caplog):
++    client, boot, runtime, csrf = setup(tmp_path, monkeypatch)
++    invalid = post(client, csrf, changes=[{"key": "OMADA_URL", "operation": "set", "value": "https://user:" + SECRET + "@bad.invalid"}])
++    assert invalid.status_code == 422 and SECRET not in invalid.text
++    def fail(*args, **kwargs):
++        raise RuntimeError(SECRET)
++    monkeypatch.setattr(runtime.settings_mutation_service, "mutate", fail)
++    response = post(client, csrf)
++    assert response.status_code == 500 and response.json["error"]["code"] == "internal_error"
++    assert SECRET not in response.text + caplog.text
+diff --git a/tests/admin_web/test_controller_settings_stage3_frontend.py b/tests/admin_web/test_controller_settings_stage3_frontend.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..dff4e9500f30f80f668d15cba1feff43f1304b66
+--- /dev/null
++++ b/tests/admin_web/test_controller_settings_stage3_frontend.py
+@@ -0,0 +1,12 @@
++"""Exercise the actual browser script in a disposable DOM and fetch stub."""
++from pathlib import Path
++import subprocess
++import pytest
++
++
++@pytest.mark.parametrize("scenario", ["success", "noop", "conflict", "cancel", "clear", "outage", "readonly"])
++def test_controller_browser_save_reload_behavior(scenario):
++    root = Path(__file__).resolve().parents[2]
++    result = subprocess.run(["node", str(Path(__file__).with_name("controller_settings_stage3_ui.cjs")),
++        str(root / "app/admin_web/static/controller_settings.js"), scenario], capture_output=True, text=True, timeout=15)
++    assert result.returncode == 0, result.stdout + result.stderr
+diff --git a/tests/admin_web/test_settings_routes.py b/tests/admin_web/test_settings_routes.py
+index 3d891f14d6182c821c41c613fcff8cf3874aea8c..7fbe88fb6b3f08d6c6c3de254b8f86d74fa35d21 100644
+--- a/tests/admin_web/test_settings_routes.py
++++ b/tests/admin_web/test_settings_routes.py
+@@ -8,18 +8,22 @@ from app.admin_web.models import AdminPrincipal
+ from app.admin_web.policy import AdminAccessPolicy
+ from app.settings_control.bootstrap import bootstrap_settings_control
+ from .conftest import enabled_settings, login
++from tests.settings_control import CONTROLLER_BASE
+ 
+ 
+ def settings_app(tmp_path, *, enabled=True, unavailable=False):
+-    base = enabled_settings(web_admin_settings_enabled="true" if enabled else "false",
+-                            settings_db_path=str(tmp_path / ("missing/settings.sqlite3" if unavailable else "settings.sqlite3")))
++    base = {**CONTROLLER_BASE, **enabled_settings(web_admin_settings_enabled="true" if enabled else "false",
++                            settings_db_path=str(tmp_path / "settings.sqlite3"))}
+     boot = bootstrap_settings_control(base_settings=base, explicit_environment_names=set(), logger=logging.getLogger("settings-ui"))
++    if unavailable and boot.admin_context.read_service is not None:
++        # Outage of an existing running process, not an enabled new startup fallback.
++        boot.admin_context.read_service.repository.db_path = str(tmp_path / "missing" / "settings.sqlite3")
+     runtime = create_admin_web_runtime(boot.runtime_settings, None, None, None, None,
+                                       logging.getLogger("settings-ui"), settings_control=boot.admin_context)
+     app = Flask(__name__)
+     app.config["TESTING"] = True
+     app.register_blueprint(runtime.blueprint)
+-    if boot.activation_service:
++    if boot.activation_service and not unavailable:
+         boot.activation_service.adopt(boot.runtime_settings, runtime)
+     client = app.test_client()
+     assert login(client).status_code == 302
+diff --git a/tests/settings_control/__init__.py b/tests/settings_control/__init__.py
+index fed4087785e4ebbac7c07be0ff8fde144e1e7100..c58f4aeef3ec4724abb8ea3c704f241716a63469 100644
+--- a/tests/settings_control/__init__.py
++++ b/tests/settings_control/__init__.py
+@@ -5,9 +5,12 @@ import uuid
+ from app.admin_web.models import AdminPrincipal
+ from app.settings_control.bootstrap import bootstrap_settings_control
+ 
++CONTROLLER_BASE = {"omada_url": "https://controller.invalid", "omada_id": "installation",
++                   "client_id": "application", "client_secret": "synthetic-secret", "verify_ssl": False}
++
+ 
+ def stack(tmp_path, **values):
+-    base = {"web_admin_settings_enabled": "true", "settings_db_path": str(tmp_path / "settings.sqlite3")}
++    base = {**CONTROLLER_BASE, "web_admin_settings_enabled": "true", "settings_db_path": str(tmp_path / "settings.sqlite3")}
+     base.update(values)
+     return bootstrap_settings_control(base_settings=base, explicit_environment_names=frozenset(), logger=logging.getLogger("settings-test"))
+ 
+diff --git a/tests/settings_control/test_bootstrap.py b/tests/settings_control/test_bootstrap.py
+index 3ad7f32b79c23025ef966e0a7afa58b0247c245e..4e303071cc4ea967d62617eca2f39edac39ac35c 100644
+--- a/tests/settings_control/test_bootstrap.py
++++ b/tests/settings_control/test_bootstrap.py
+@@ -15,10 +15,9 @@ def test_disabled_no_store_access_or_creation(tmp_path, monkeypatch):
+     assert not (tmp_path / "not-created.sqlite3").exists()
+ 
+ 
+-def test_unavailable_parent_fallback_and_no_mkdir(tmp_path):
+-    boot = stack(tmp_path, settings_db_path=str(tmp_path / "missing" / "settings.sqlite3"))
+-    assert boot.feature_enabled and boot.store_state == "unavailable"
+-    assert boot.resolved_snapshot.generation_id is None and boot.activation_service is None
++def test_unavailable_parent_fails_closed_and_no_mkdir(tmp_path):
++    with pytest.raises(SettingsError, match="settings_store_unavailable"):
++        stack(tmp_path, settings_db_path=str(tmp_path / "missing" / "settings.sqlite3"))
+     assert not (tmp_path / "missing").exists()
+ 
+ 
+diff --git a/tests/settings_control/test_controller_stage3.py b/tests/settings_control/test_controller_stage3.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8aa98f83fb25d3776197ffb2c5f2a88fa599714a
+--- /dev/null
++++ b/tests/settings_control/test_controller_stage3.py
+@@ -0,0 +1,282 @@
++"""Disposable Stage-3 migration/typing/domain proof; no Controller or production I/O."""
++import json
++import logging
++import sqlite3
++import uuid
++from dataclasses import asdict
++from types import SimpleNamespace
++
++import pytest
++
++from app.admin_web.controller_settings import ControllerConfigurationReadService
++from app.admin_web.models import AdminPrincipal
++from app.controllers.omada_config import build_omada_runtime_config, public_omada_snapshot
++from app.settings_control.bootstrap import bootstrap_settings_control
++from app.settings_control.definitions import SettingsDefinitionRegistry
++from app.settings_control.models import SettingsError
++from app.settings_control.repository import SettingsRepository, _V1_DDL, _TRIGGERS
++from app.settings_control.resolver import resolve_settings
++from app.settings_control.services import parse_changes
++from . import CONTROLLER_BASE, stack, mutation
++
++SECRET = "AS03_unique_sentinel_NOT_IN_NEW_PERSISTENCE_x9"
++PRINCIPAL = AdminPrincipal("operator")
++
++
++def write(boot, changes=None, *, generation=0, key=None, domain="controller"):
++    return boot.admin_context.mutation_service.mutate(json.dumps({"changes": changes or [
++        {"key": "OMADA_URL", "operation": "set", "value": " https://new.invalid:8043/ "}]}),
++        principal=PRINCIPAL, source_ip="127.0.0.1", request_id=str(uuid.uuid4()),
++        idempotency_key=key or str(uuid.uuid4()), expected_generation=generation, domain=domain)
++
++
++def read(boot):
++    return ControllerConfigurationReadService(public_omada_snapshot(build_omada_runtime_config(boot.runtime_settings),
++        frozenset(), boot.resolved_snapshot), boot.admin_context.read_service).read(str(uuid.uuid4()))
++
++
++def v1_database(path):
++    # The exact accepted Stage-1 DDL retained by the repository migration boundary.
++    with sqlite3.connect(path) as db:
++        db.execute("PRAGMA foreign_keys=ON")
++        for sql in (*_V1_DDL, *_TRIGGERS):
++            db.execute(sql)
++        db.execute("PRAGMA user_version=1")
++        db.execute("INSERT INTO settings_generations VALUES(0,NULL,'global','2026-10-06T00:00:00.000Z','system','settings_bootstrap',NULL)")
++        db.execute("INSERT INTO settings_generations VALUES(7,0,'global','2026-10-06T01:00:00.000Z','platform_operator','operator','request')")
++        db.execute("INSERT INTO settings_overrides VALUES(7,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',123)")
++        db.execute("INSERT INTO settings_target_state VALUES('captive-portal.service',7,'2026-10-06T02:00:00.000Z')")
++        db.execute("INSERT INTO settings_activation_events VALUES(3,7,'captive-portal.service','2026-10-06T02:00:00.000Z','adopted',7,NULL)")
++        db.execute("INSERT INTO settings_activation_events VALUES(4,7,'captive-portal.service','2026-10-06T03:00:00.000Z','failed',7,'settings_validation_failed')")
++        db.execute("""INSERT INTO settings_mutation_audit VALUES(2,7,0,'platform_operator','operator',
++            '127.0.0.1','request','identity','2026-10-06T01:00:00.000Z','global',NULL,
++            'WEB_ADMIN_DEVICE_PAGE_SIZE','set',NULL,123,100,123,'main_service_restart','captive-portal.service')""")
++        body = '{ "changed": true, "configured_generation": 7, "original": "body preserved" }'
++        db.execute("INSERT INTO settings_idempotency VALUES(5,'platform_operator','operator','global','identity','hash',201,?,7,1,'2026-10-06T01:00:00.000Z')", (body,))
++    return body
++
++
++def test_v1_migration_preserves_all_history_and_replay_bytes(tmp_path):
++    path = tmp_path / "v1.sqlite3"
++    original = v1_database(path)
++    with sqlite3.connect(path) as db:
++        histories = {name: db.execute("SELECT * FROM " + name).fetchall() for name in
++                     ("settings_generations", "settings_target_state", "settings_activation_events")}
++        old_audit = db.execute("SELECT * FROM settings_mutation_audit").fetchone()
++    repository = SettingsRepository(path)
++    assert repository.configured() == (7, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 123})
++    with repository.transaction() as db:
++        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
++        for name, rows in histories.items():
++            assert [tuple(row) for row in db.execute("SELECT * FROM " + name)] == rows
++        audit = db.execute("SELECT * FROM settings_mutation_audit").fetchone()
++        v1_columns = [sql for sql in _V1_DDL if sql.startswith("CREATE TABLE settings_mutation_audit")][0]
++        assert "setting_domain" not in v1_columns
++        assert tuple(audit[name] for name in audit.keys() if name not in ("setting_domain", "value_type")) == old_audit
++        assert audit["setting_domain"] == "general" and audit["value_type"] == "integer"
++        replay = db.execute("SELECT * FROM settings_idempotency").fetchone()
++        assert replay["result_response_json"] == original and replay["mutation_domain"] == "general"
++        assert db.execute("SELECT string_value FROM settings_overrides").fetchone()[0] is None
++    SettingsRepository(path)  # Reopening v2 is idempotent.
++
++
++def test_migration_failure_rolls_back_schema_and_history(tmp_path, monkeypatch):
++    path = tmp_path / "v1.sqlite3"
++    v1_database(path)
++    old = SettingsRepository._migrate_v1
++    def fail(db):
++        old(db)
++        raise SettingsError("settings_store_unavailable")
++    monkeypatch.setattr(SettingsRepository, "_migrate_v1", staticmethod(fail))
++    before = path.read_bytes()
++    with pytest.raises(SettingsError):
++        SettingsRepository(path)
++    assert path.read_bytes() == before
++    with sqlite3.connect(path) as db:
++        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
++        assert len(db.execute("PRAGMA table_info(settings_overrides)").fetchall()) == 4
++
++
++@pytest.mark.parametrize("row", [
++    ("OMADA_URL", "binary", None, "https://a.invalid"),
++    ("OMADA_URL", "string", 3, "https://a.invalid"),
++    ("OMADA_URL", "string", None, None),
++    ("WEB_ADMIN_DEVICE_PAGE_SIZE", "integer", None, "3"),
++])
++def test_typed_ddl_rejects_invalid_rows(tmp_path, row):
++    repository = SettingsRepository(tmp_path / "settings.sqlite3")
++    with pytest.raises(SettingsError):
++        with repository.transaction(write=True) as db:
++            db.execute("INSERT INTO settings_overrides VALUES(0,?,?,?,?)", row)
++
++
++@pytest.mark.parametrize("key,value", [("OMADA_CLIENT_SECRET", SECRET), ("VERIFY_SSL", "true"), ("OMADA_ID", " raw ")])
++def test_repository_refuses_unadmitted_or_noncanonical_override(tmp_path, key, value):
++    repository = SettingsRepository(tmp_path / "settings.sqlite3")
++    with pytest.raises(SettingsError):
++        with repository.transaction(write=True) as db:
++            repository.create_generation(db, parent=0, principal=PRINCIPAL, request_id="request",
++                created_at="2026-10-07T00:00:00.000Z", overrides={key: value})
++    assert repository.configured() == (0, {})
++
++
++def test_typed_coexistence_atomic_ownership_noop_clear_and_replay(tmp_path):
++    boot = stack(tmp_path, client_secret=SECRET)
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    key = str(uuid.uuid4())
++    first = write(boot, key=key)
++    assert first.status == 201 and first.body["changed_keys"] == ["OMADA_URL"]
++    assert set(first.body) == {"api_version", "request_id", "scope", "resource", "changed", "changed_keys",
++        "configured_generation", "effective_generation", "activation_state", "restart_required"}
++    assert "https://new.invalid" not in json.dumps(first.body)
++    noop = write(boot, generation=1)
++    assert noop.status == 200 and noop.body["changed"] is False and noop.body["changed_keys"] == []
++    mutation(boot, generation=1, key=key)  # Same UUID, different domain is independent.
++    assert write(boot, key=key).body == first.body  # Stale CAS replays original receipt.
++    with pytest.raises(SettingsError, match="idempotency_conflict"):
++        write(boot, key=key, changes=[{"key": "OMADA_ID", "operation": "set", "value": "new"}])
++    repository = boot.admin_context.read_service.repository
++    assert repository.configured() == (2, {"OMADA_URL": "https://new.invalid:8043", "WEB_ADMIN_DEVICE_PAGE_SIZE": 120})
++    cleared = write(boot, generation=2, changes=[{"key": "OMADA_URL", "operation": "clear_override"}])
++    assert cleared.status == 201 and repository.configured() == (3, {"WEB_ADMIN_DEVICE_PAGE_SIZE": 120})
++    with repository.transaction() as db:
++        for table in ("settings_overrides", "settings_mutation_audit", "settings_idempotency", "settings_activation_events"):
++            assert SECRET not in repr([tuple(row) for row in db.execute("SELECT * FROM " + table)])
++        assert db.execute("SELECT COUNT(*) FROM settings_idempotency WHERE idempotency_key=?", (key,)).fetchone()[0] == 2
++
++
++def test_explicit_same_environment_scalar_is_ownership_change(tmp_path):
++    boot = stack(tmp_path)
++    result = write(boot, changes=[{"key": "OMADA_ID", "operation": "set", "value": " installation "}])
++    assert result.body["changed"] and result.body["configured_generation"] == 1
++
++
++def test_shadowed_invalid_lower_value_and_clear_are_fail_closed(tmp_path):
++    boot = stack(tmp_path)
++    write(boot, changes=[{"key": "OMADA_URL", "operation": "set", "value": "https://new.invalid"}])
++    masked = stack(tmp_path, omada_url="invalid-base")
++    assert masked.runtime_settings["omada_url"] == "https://new.invalid"
++    before = masked.admin_context.read_service.repository.configured()
++    with pytest.raises(SettingsError, match="validation_failed"):
++        write(masked, generation=1, changes=[{"key": "OMADA_URL", "operation": "clear_override"}])
++    assert masked.admin_context.read_service.repository.configured() == before
++
++
++def test_failed_receipt_persistence_rolls_back_everything(tmp_path, monkeypatch):
++    boot = stack(tmp_path)
++    import app.settings_control.repository as repository_module
++    monkeypatch.setattr(repository_module, "canonical_json", lambda _body: "x" * 65537)
++    with pytest.raises(SettingsError) as error:
++        write(boot)
++    assert (error.value.code, error.value.status) == ("internal_error", 500)
++    repository = boot.admin_context.read_service.repository
++    assert repository.configured() == (0, {})
++    with repository.transaction() as db:
++        for table in ("settings_overrides", "settings_mutation_audit", "settings_idempotency"):
++            assert db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0] == 0
++
++
++def test_effective_generation_source_pending_and_store_outage(tmp_path):
++    boot = stack(tmp_path, client_secret=SECRET)
++    boot.activation_service.adopt(boot.runtime_settings, None)
++    initial = read(boot)
++    assert initial["api_version"] == "admin.settings.controller.v2"
++    mutation(boot)
++    general_pending = read(boot)
++    assert general_pending["restart_required"] and general_pending["pending_controller_setting_count"] == 0
++    write(boot, generation=1)
++    pending = read(boot)
++    assert pending["pending_controller_setting_count"] == 1
++    assert pending["fields"]["controller_url"]["pending_source"] == "persisted_override"
++    newer = stack(tmp_path, client_secret=SECRET)
++    newer.activation_service.adopt(newer.runtime_settings, None)
++    adopted = read(newer)
++    assert adopted["effective_generation"] == 2 and adopted["pending_controller_setting_count"] == 0
++    assert adopted["fields"]["controller_url"]["effective_source"] == "persisted_override"
++    newer.admin_context.read_service.repository.db_path = str(tmp_path / "missing" / "broken.sqlite3")
++    outage = read(newer)
++    assert outage["store_state"] == "unavailable" and outage["configured_generation"] is None
++    assert outage["effective_generation"] == 2
++    for name in ("controller_url", "controller_id", "client_id"):
++        assert all(outage["fields"][name][key] is None for key in
++            ("configured_value", "configured_source", "persisted_override_value", "pending_value", "pending_source"))
++    assert SECRET not in json.dumps(outage)
++    assert SECRET not in repr(public_omada_snapshot(build_omada_runtime_config(newer.runtime_settings), frozenset()))
++
++
++@pytest.mark.parametrize("key", ["WEB_ADMIN_DEVICE_PAGE_SIZE", "OMADA_CLIENT_SECRET", "VERIFY_SSL", "UNKNOWN"])
++def test_controller_domain_rejects_other_keys(key):
++    with pytest.raises(SettingsError, match="invalid_request"):
++        parse_changes(json.dumps({"changes": [{"key": key, "operation": "set", "value": "bad"}]}), domain="controller")
++
++
++@pytest.mark.parametrize("value", [False, 1, None, [], {}])
++def test_controller_set_requires_string(value):
++    with pytest.raises(SettingsError, match="invalid_request"):
++        parse_changes(json.dumps({"changes": [{"key": "OMADA_ID", "operation": "set", "value": value}]}), domain="controller")
++
++
++@pytest.mark.parametrize("value", ["", " ", "https://a.invalid:0", "https://a.invalid/path", "https://user@a.invalid", "https://a.invalid?x", "https://a.invalid#x", "https://a.invalid:bad", "https://a .invalid"])
++def test_canonical_validation_rejects_invalid_urls_without_echo(value):
++    with pytest.raises(SettingsError, match="validation_failed") as error:
++        parse_changes(json.dumps({"changes": [{"key": "OMADA_URL", "operation": "set", "value": value}]}), domain="controller")
++    assert all(set(detail) == {"key", "reason"} for detail in error.value.details)
++
++
++@pytest.mark.parametrize("scheme", ["http", "https"])
++def test_one_validator_canonicalizes_runtime_and_settings(scheme):
++    value = f" {scheme}://a.invalid:8043/ "
++    change = parse_changes(json.dumps({"changes": [{"key": "OMADA_URL", "operation": "set", "value": value}]}), domain="controller")[0]
++    runtime = build_omada_runtime_config({**CONTROLLER_BASE, "omada_url": value})
++    assert change.value == runtime.controller_url == value.strip()[:-1]
++
++
++def test_secret_prerequisite_failure_is_safe_and_atomic(tmp_path):
++    boot = stack(tmp_path, client_secret=SECRET)
++    read_service = boot.admin_context.read_service
++    read_service.base_settings = {**read_service.base_settings, "client_secret": ""}
++    with pytest.raises(SettingsError, match="validation_failed") as error:
++        mutation(boot)
++    assert error.value.details == ({"key": None, "reason": "controller_prerequisite_invalid"},)
++    assert read_service.repository.configured() == (0, {})
++
++
++def test_multi_field_invalidity_is_atomic_and_general_rejects_controller(tmp_path):
++    boot = stack(tmp_path)
++    with pytest.raises(SettingsError, match="validation_failed"):
++        write(boot, changes=[{"key": "OMADA_ID", "operation": "set", "value": "valid"},
++                             {"key": "OMADA_URL", "operation": "set", "value": "invalid"}])
++    with pytest.raises(SettingsError, match="invalid_request"):
++        write(boot, domain="general")
++    assert boot.admin_context.read_service.repository.configured() == (0, {})
++
++
++@pytest.mark.parametrize("key,internal", [("OMADA_ID", "omada_id"), ("OMADA_CLIENT_ID", "client_id")])
++def test_no_new_id_charset_case_or_length_semantics_and_invalid_clear(tmp_path, key, internal):
++    boot = stack(tmp_path)
++    value = "MiXeD 中文 /: " + "x" * 16000
++    write(boot, changes=[{"key": key, "operation": "set", "value": " " + value + " "}])
++    assert boot.admin_context.read_service.repository.configured()[1][key] == value
++    masked = stack(tmp_path, **{internal: ""})
++    with pytest.raises(SettingsError, match="validation_failed"):
++        write(masked, generation=1, changes=[{"key": key, "operation": "clear_override"}])
++    assert masked.admin_context.read_service.repository.configured()[0] == 1
++
++
++def test_replay_skips_candidate_validation(tmp_path, monkeypatch):
++    boot = stack(tmp_path)
++    key = str(uuid.uuid4())
++    original = write(boot, key=key)
++    monkeypatch.setattr(boot.admin_context.mutation_service.validation, "validate", lambda _: pytest.fail("replay validation"))
++    assert write(boot, key=key).body == original.body
++
++
++def test_corrupt_migration_shape_fails_without_recreation(tmp_path):
++    path = tmp_path / "v1.sqlite3"
++    v1_database(path)
++    with sqlite3.connect(path) as db:
++        db.execute("ALTER TABLE settings_overrides ADD COLUMN unexpected TEXT")
++    before = path.read_bytes()
++    with pytest.raises(SettingsError, match="settings_store_unavailable"):
++        SettingsRepository(path)
++    assert path.read_bytes() == before
+diff --git a/tests/settings_control/test_definitions.py b/tests/settings_control/test_definitions.py
+index c30a7c1851b51601b09d52dad841749376a10e3d..87c4f396e92460fdfbb44804416e714761fa11cf 100644
+--- a/tests/settings_control/test_definitions.py
++++ b/tests/settings_control/test_definitions.py
+@@ -19,7 +19,12 @@ def test_exact_ordered_definitions_and_shared_defaults():
+         ("HOME_AP_24H_REFRESH_SECONDS", 120, 60, 600, "home_ap_24h_enabled", "home_ap_24h"),
+     ]
+     registry = SettingsDefinitionRegistry()
+-    assert len(registry.definitions) == 12
++    assert len(registry.definitions) == 15
++    assert len(registry.for_domain("general")) == 12
++    assert [item.key for item in registry.for_domain("controller")] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
++    assert registry.get("OMADA_CLIENT_ID").settings_dict_key == "client_id"
++    assert registry.get("OMADA_CLIENT_SECRET") is None
++    assert registry.get("VERIFY_SSL") is None
+     for index, (definition, (suffix, default, minimum, maximum, consumer, validator)) in enumerate(zip(registry, expected)):
+         key = "WEB_ADMIN_" + suffix
+         assert definition.key == definition.environment_variable_name == key
+diff --git a/tests/settings_control/test_repository.py b/tests/settings_control/test_repository.py
+index 636ab0f16d2087f243edc80190cae14c92bffd35..22e7098d279e3ff53c55ff36cb04f3d15b666ea3 100644
+--- a/tests/settings_control/test_repository.py
++++ b/tests/settings_control/test_repository.py
+@@ -11,7 +11,7 @@ def test_physical_bootstrap_identity_and_idempotent_schema(tmp_path):
+     repository = SettingsRepository(tmp_path / "settings.sqlite3")
+     SettingsRepository(repository.db_path)
+     with repository.transaction() as db:
+-        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
++        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+         assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+         assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 1000
+         root = db.execute("SELECT * FROM settings_generations").fetchone()
+@@ -33,14 +33,14 @@ def test_incompatible_store_is_not_recreated(tmp_path, mode):
+         repository = SettingsRepository(path)
+         with sqlite3.connect(path) as db:
+             if mode == "newer":
+-                db.execute("PRAGMA user_version=2")
++                db.execute("PRAGMA user_version=3")
+             elif mode == "old_nonempty":
+                 db.execute("PRAGMA user_version=0")
+             elif mode == "shape":
+                 db.execute("ALTER TABLE settings_target_state ADD COLUMN unexpected TEXT")
+             else:
+                 db.execute("INSERT INTO settings_generations VALUES(1,0,'global','2026-10-06T00:00:00.000Z','platform_operator','operator','request')")
+-                db.execute("INSERT INTO settings_overrides VALUES(1,'UNKNOWN','integer',100)")
++                db.execute("INSERT INTO settings_overrides VALUES(1,'UNKNOWN','integer',100,NULL)")
+     before = path.read_bytes()
+     with pytest.raises(SettingsError):
+         SettingsRepository(path)
+@@ -53,8 +53,8 @@ def test_history_immutability_fk_and_uniqueness(tmp_path):
+     repository = boot.admin_context.read_service.repository
+     for sql in ("DELETE FROM settings_generations", "UPDATE settings_overrides SET integer_value=99",
+                 "DELETE FROM settings_mutation_audit", "UPDATE settings_idempotency SET result_changed=0",
+-                "INSERT INTO settings_overrides VALUES(999,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100)",
+-                "INSERT INTO settings_overrides VALUES(1,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100)"):
++                "INSERT INTO settings_overrides VALUES(999,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100,NULL)",
++                "INSERT INTO settings_overrides VALUES(1,'WEB_ADMIN_DEVICE_PAGE_SIZE','integer',100,NULL)"):
+         with pytest.raises(SettingsError):
+             with repository.transaction(write=True) as db:
+                 db.execute(sql)
+diff --git a/tests/settings_control/test_resolver.py b/tests/settings_control/test_resolver.py
+index 04e3ed00b5e6901002350095dc87e49a67170442..e05daf379e4d4b217c10272f048a0a01519f0dc0 100644
+--- a/tests/settings_control/test_resolver.py
++++ b/tests/settings_control/test_resolver.py
+@@ -1,18 +1,19 @@
+ import pytest
+ from app.settings_control.resolver import resolve_settings
+ from app.settings_control.models import SettingsError
++from . import CONTROLLER_BASE
+ 
+ 
+ def test_override_environment_default_and_clear():
+     key = "WEB_ADMIN_DEVICE_PAGE_SIZE"
+-    base = {key.lower(): "125"}
++    base = {**CONTROLLER_BASE, key.lower(): "125"}
+     env = {key}
+     override = resolve_settings(base, env, {key: 150}, 1)
+     assert override.values[key.lower()] == 150
+     assert override.base_value_by_key[key] == 125 and override.base_source_by_key[key] == "environment"
+     cleared = resolve_settings(base, env, {}, 2)
+     assert cleared.values[key.lower()] == 125 and cleared.persisted_override_by_key[key] is None
+-    default = resolve_settings({}, {}, {}, 0)
++    default = resolve_settings(CONTROLLER_BASE, {}, {}, 0)
+     assert default.values[key.lower()] == 100 and default.base_source_by_key[key] == "repository_default"
+     with pytest.raises(TypeError):
+         default.values[key.lower()] = 42
+diff --git a/tests/settings_control/test_run_integration.py b/tests/settings_control/test_run_integration.py
+index 699a0aeb2068b37d3436f5a8865ee55b8cf3a225..dcd07dedbd4aea7fc9fdbda7bcf939bbfbe37c4d 100644
+--- a/tests/settings_control/test_run_integration.py
++++ b/tests/settings_control/test_run_integration.py
+@@ -37,6 +37,7 @@ def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch,
+         with pytest.raises(SettingsError):
+             runtime.main()
+         assert not app.run_calls
++        assert "collector.start" not in events
+         if failure == "configuration":
+             repository = boot.activation_service.repository
+             with repository.transaction() as db:
+@@ -46,3 +47,73 @@ def test_exact_snapshot_durable_adoption_precedes_serving(tmp_path, monkeypatch,
+         runtime.main()
+         assert events.index("durable_adoption") < events.index("app.run")
+         assert boot.admin_context.read_service._adopted
++
++
++@pytest.mark.parametrize("failure", [None, "durable_write", "provider", "projection", "worker"])
++def test_all_controller_consumers_follow_adoption(tmp_path, monkeypatch, failure):
++    events, controller, collector, registry, app, observed = _prepare_main(monkeypatch)
++    monkeypatch.setattr(runtime, "capture_loaded_artifact_identity", lambda *_:
++        SimpleNamespace(json_line=lambda: "synthetic Stage3 identity"))
++    boot = stack(tmp_path, host="127.0.0.1", port=8088, debug=False)
++    monkeypatch.setattr(runtime, "bootstrap_settings_control", lambda **_: boot)
++    original = boot.activation_service.repository.activation
++    def activation(*args, **kwargs):
++        if failure == "durable_write":
++            raise SettingsError("settings_store_unavailable")
++        result = original(*args, **kwargs)
++        events.append("committed_adoption" if args[1] else "failed_attestation")
++        return result
++    monkeypatch.setattr(boot.activation_service.repository, "activation", activation)
++    def start(name):
++        def invoke(*args):
++            assert boot.admin_context.read_service._adopted, "Controller I/O before adoption"
++            events.append(name)
++            if failure == "worker":
++                raise RuntimeError("synthetic worker failure")
++        return invoke
++    monkeypatch.setattr(collector, "start", start("collector.start"))
++    pending = SimpleNamespace(start=start("pending.start"), stop=lambda *_: None)
++    observation = SimpleNamespace(start=start("observation.start"), stop=lambda: None)
++    current = SimpleNamespace(start=start("current.start"), stop=lambda: None, read_service=None)
++    monkeypatch.setattr(runtime, "create_pending_session_cleaner", lambda **_: pending)
++    monkeypatch.setattr(runtime, "create_observation_foundation", lambda **_: observation)
++    monkeypatch.setattr(runtime, "_configure_current_state", lambda *_: setattr(runtime, "_current_state_runtime", current))
++    monkeypatch.setattr(runtime, "_configure_admin_web", lambda *_: setattr(runtime, "_admin_web_runtime", None))
++    if failure == "provider":
++        monkeypatch.setattr(runtime, "create_controller", lambda _: (_ for _ in ()).throw(RuntimeError("composition failure")))
++    if failure == "projection":
++        monkeypatch.setattr(runtime, "public_omada_snapshot", lambda *_: (_ for _ in ()).throw(RuntimeError("projection failure")))
++    monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **k: pytest.fail("live I/O"))
++    if failure in ("durable_write", "provider"):
++        with pytest.raises(Exception):
++            runtime.main()
++        assert not app.run_calls
++        assert not any(name in events for name in ("pending.start", "observation.start", "current.start", "collector.start"))
++        with boot.admin_context.read_service.repository.transaction() as db:
++            assert boot.admin_context.read_service.repository.effective(db) is None
++    else:
++        runtime.main()
++        for name in ("pending.start", "observation.start", "current.start", "collector.start", "app.run"):
++            assert events.index("committed_adoption") < events.index(name)
++        with boot.admin_context.read_service.repository.transaction() as db:
++            assert boot.admin_context.read_service.repository.effective(db) == 0
++            assert [row[0] for row in db.execute("SELECT activation_result FROM settings_activation_events")] == ["adopted"]
++
++
++@pytest.mark.parametrize("failure", ["store", "configuration"])
++def test_enabled_bootstrap_failure_precedes_provider(tmp_path, monkeypatch, failure):
++    events, *_ = _prepare_main(monkeypatch)
++    monkeypatch.setattr(runtime, "capture_loaded_artifact_identity", lambda *_:
++        SimpleNamespace(json_line=lambda: "synthetic Stage3 identity"))
++    from . import CONTROLLER_BASE
++    settings = {**CONTROLLER_BASE, "web_admin_settings_enabled": True,
++                "settings_db_path": str(tmp_path / "settings.sqlite3")}
++    if failure == "store":
++        settings["settings_db_path"] = str(tmp_path / "missing" / "bad.sqlite3")
++    else:
++        settings["omada_url"] = "invalid"
++    monkeypatch.setattr(runtime, "get_settings", lambda: settings)
++    with pytest.raises(SettingsError):
++        runtime.main()
++    assert "create_controller" not in events
++    assert "create_app" not in events
+diff --git a/tests/settings_control/test_validation.py b/tests/settings_control/test_validation.py
+index 9e72b409d3c428a4fd06a3e35e4e27e011f4e48a..de17729fd74a4368abe9ec42eb7b565e9acdcfd1 100644
+--- a/tests/settings_control/test_validation.py
++++ b/tests/settings_control/test_validation.py
+@@ -4,11 +4,12 @@ from app.settings_control.resolver import resolve_settings
+ from app.settings_control.validation import SettingsValidationService
+ from app.settings_control.models import SettingsError
+ import app.settings_control.validation as validators
++from . import CONTROLLER_BASE
+ 
+ 
+ @pytest.mark.parametrize("value", [True, 0, 501, 1.5, "100"])
+ def test_primitive_validation_even_when_disabled(value):
+-    snapshot = resolve_settings({}, {}, {}, 0)
++    snapshot = resolve_settings(CONTROLLER_BASE, {}, {}, 0)
+     snapshot = replace(snapshot, values={**snapshot.values, "web_admin_device_page_size": value})
+     with pytest.raises(SettingsError, match="validation_failed"):
+         SettingsValidationService().validate(snapshot)
+@@ -22,12 +23,12 @@ def test_existing_semantic_authorities_called(monkeypatch):
+             calls.append(_name)
+             return _function(*args, **kwargs)
+         monkeypatch.setattr(validators, name + "_config_from_settings", wrapper)
+-    SettingsValidationService().validate(resolve_settings({}, {}, {}, 0))
++    SettingsValidationService().validate(resolve_settings(CONTROLLER_BASE, {}, {}, 0))
+     assert calls == ["admin_web", "home_activity", "home_health", "home_ap_24h"]
+ 
+ 
+ def test_cross_setting_validation_remains_authoritative():
+     from tests.admin_web.conftest import enabled_settings
+-    snapshot = resolve_settings(enabled_settings(web_admin_home_live_request_timeout_seconds="5"), {}, {}, 0)
++    snapshot = resolve_settings({**CONTROLLER_BASE, **enabled_settings(web_admin_home_live_request_timeout_seconds="5")}, {}, {}, 0)
+     with pytest.raises(SettingsError, match="validation_failed"):
+         SettingsValidationService().validate(snapshot)
+diff --git a/tests/test_admin_controller_settings.py b/tests/test_admin_controller_settings.py
+index 6b6a80d8272502646b4e75afb6f09a0f5ae353d2..8afc767f59f30549d6071dc70b920076bd9c43b6 100644
+--- a/tests/test_admin_controller_settings.py
++++ b/tests/test_admin_controller_settings.py
+@@ -102,7 +102,7 @@ def test_public_projection_provenance_membership_and_secret_absence():
+     assert SECRET not in json.dumps(asdict(explicit)) + repr(explicit) + str(explicit)
+     assert set(asdict(explicit)) == {"controller_url", "controller_url_source", "controller_id",
+         "controller_id_source", "client_id", "client_id_source", "client_secret_presence",
+-        "client_secret_source", "tls_certificate_verification", "tls_certificate_verification_source"}
++        "client_secret_source", "tls_certificate_verification", "tls_certificate_verification_source", "effective_generation"}
+     with pytest.raises(FrozenInstanceError):
+         explicit.controller_url = "changed"
+     with pytest.raises(ValueError):
+@@ -116,13 +116,13 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
+     response = get(client)
+     assert response.status_code == 200
+     model = response.json
+-    assert model["api_version"] == "admin.settings.controller.v1"
++    assert model["api_version"] == "admin.settings.controller.v2"
+     assert str(uuid.UUID(model["request_id"])) == model["request_id"]
+     assert model["scope"] == {"type": "global"}
+     assert model["resource"] == {"type": "omada_controller", "scope": "installation"}
+-    assert model["management_mode"] == "deployment_controlled"
++    assert model["management_mode"] == "hybrid"
+     assert model["configuration_state"] == "configured"
+-    assert model["fields"] == {
++    expected_effective = {
+         "controller_url": {"display_label": "Controller URL", "value_type": "url",
+             "effective_value": "https://controller.invalid:8043", "effective_source": "environment"},
+         "controller_id": {"display_label": "Controller ID", "value_type": "string",
+@@ -133,6 +133,14 @@ def test_api_exact_contract_no_secret_or_store_dependency(monkeypatch, caplog):
+             "effective_presence": "configured", "effective_source": "environment"},
+         "tls_certificate_verification": {"display_label": "TLS certificate verification", "value_type": "boolean",
+             "effective_value": False, "effective_source": "repository_default"}}
++    assert set(model["fields"]) == set(expected_effective)
++    for name, expected in expected_effective.items():
++        assert {key: model["fields"][name][key] for key in expected} == expected
++    assert model["store_state"] == "unavailable"
++    assert model["configured_generation"] is None
++    for name in ("controller_url", "controller_id", "client_id"):
++        assert model["fields"][name]["configured_value"] is None
++    assert not model["fields"]["client_secret"]["editable"]
+     assert runtime.settings_store_state == "unavailable" and runtime.controller_settings_state == "active"
+     assert response.mimetype == "application/json"
+     assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
+@@ -182,7 +190,7 @@ def test_controller_get_rejects_nonempty_body_without_parsing_or_reading_config(
+     runtime.controller_settings_read_service = SimpleNamespace(read=read)
+     response = client.get(API, data=body, content_type=content_type, base_url="https://localhost")
+     assert response.status_code == 400 and response.json["error"]["code"] == "invalid_request"
+-    assert response.json["api_version"] == "admin.settings.controller.v1"
++    assert response.json["api_version"] == "admin.settings.controller.v2"
+     assert response.headers["Cache-Control"] == "no-store" and response.headers["Pragma"] == "no-cache"
+     assert SECRET not in response.text + caplog.text
+     read.assert_not_called()
+@@ -204,7 +212,7 @@ def test_controller_canonical_heading_provider_and_status_wording():
+     assert "Controller configuration is unavailable." in unavailable.text
+     root = Path(__file__).resolve().parents[1]
+     source = (root / "app/admin_web/static/controller_settings.js").read_text(encoding="utf-8")
+-    assert 'state.textContent = "Read-only effective startup configuration.";' in source
++    assert '"Current configured and effective Controller configuration."' in source
+     assert 'state.textContent = "Controller configuration is unavailable.";' in source
+ 
+ 
+@@ -245,7 +253,7 @@ def test_global_policy_and_no_site_resolution(monkeypatch):
+     assert policy.authorize_global(AdminPrincipal("operator"), "admin.read.settings.controller")
+     assert not policy.authorize_global(AdminPrincipal("operator", "site_operator"), "admin.read.settings.controller")
+     assert not policy.authorize_global(None, "admin.read.settings.controller")
+-    assert "admin.write.settings.controller" not in GLOBAL_SETTINGS_CAPABILITIES
++    assert "admin.write.settings.controller" in GLOBAL_SETTINGS_CAPABILITIES
+     _, client, _ = controller_app()
+     monkeypatch.setattr("app.admin_web.policy.AdminSiteContextResolver.resolve", lambda *a: pytest.fail("site"))
+     monkeypatch.setattr("app.admin_web.policy.AdminSiteContextResolver.default", lambda *a: pytest.fail("site"))
+@@ -276,20 +284,21 @@ def test_internal_response_failure_is_sanitized():
+     runtime.controller_settings_read_service = SimpleNamespace(read=lambda _: {"invalid": object()})
+     response = get(client)
+     assert response.status_code == 500 and response.json["error"]["code"] == "internal_error"
+-    assert response.json["api_version"] == "admin.settings.controller.v1"
++    assert response.json["api_version"] == "admin.settings.controller.v2"
+ 
+ 
+-def test_frontend_read_only_and_allowlist_unchanged():
++def test_frontend_nonsecret_writable_and_general_allowlist_unchanged():
+     root = Path(__file__).resolve().parents[1]
+     source = (root / "app/admin_web/static/controller_settings.js").read_text(encoding="utf-8")
+-    for forbidden in ("innerHTML", "localStorage", "sessionStorage", "POST", "systemctl", "console."):
++    for forbidden in ("innerHTML", "localStorage", "sessionStorage", "systemctl", "console."):
+         assert forbidden not in source
+-    assert source.count("fetch(") == 1 and f'fetch("{API}"' in source
++    assert source.count("fetch(") == 2 and f'fetch("{API}"' in source
+     assert 'method: "GET"' in source and 'credentials: "same-origin"' in source
+     assert "Configured" in source and "Not configured" in source
+     registry = tuple(SettingsDefinitionRegistry())
+-    assert len(registry) == 12
+-    assert all("OMADA" not in item.key for item in registry)
++    assert len(registry) == 15
++    assert len([item for item in registry if item.domain == "general"]) == 12
++    assert [item.key for item in registry if item.domain == "controller"] == ["OMADA_URL", "OMADA_ID", "OMADA_CLIENT_ID"]
+ 
+ 
+ @pytest.mark.parametrize("injected_settings", [True, False])
+@@ -348,12 +357,12 @@ def test_main_shared_config_single_environment_capture_and_projection_isolation(
+         return controller
+     monkeypatch.setattr(run, "create_controller", factory)
+     projector = public_omada_snapshot
+-    def project(config, names):
++    def project(config, names, settings_snapshot=None):
+         assert config is captured["config"]
+         assert names is captured["environment_names"]
+         if projection_failure:
+             raise RuntimeError(SECRET)
+-        return projector(config, names)
++        return projector(config, names, settings_snapshot)
+     monkeypatch.setattr(run, "public_omada_snapshot", project)
+     def admin(actual_app, actual_settings, registry, context, public_snapshot):
+         captured["public_snapshot"] = public_snapshot
+diff --git a/tests/visitor_registry/test_snapshot_runtime.py b/tests/visitor_registry/test_snapshot_runtime.py
+index 446c6c847df7e825a059bb5a8dc86f76c8790f43..9f49934e22a689ce821265dc65c6e8d39d2e67b4 100644
+--- a/tests/visitor_registry/test_snapshot_runtime.py
++++ b/tests/visitor_registry/test_snapshot_runtime.py
+@@ -225,7 +225,7 @@ def _prepare_main(
+     return events, controller, collector, registry, app, observed
+ 
+ 
+-def test_main_wires_one_provider_and_starts_collector_before_app(
++def test_main_wires_one_provider_and_starts_collector_after_composition(
+     monkeypatch,
+ ):
+     events, controller, collector, registry, app, observed = _prepare_main(
+@@ -255,13 +255,11 @@ def test_main_wires_one_provider_and_starts_collector_before_app(
+         "create_visitor_snapshot_collector"
+     ) < events.index("create_app")
+     assert events.index("create_app") < events.index("collector.start")
+-    assert events.index("collector.start") < events.index(
+-        "create_visitor_registry"
+-    )
+     assert events.index("create_visitor_registry") < events.index(
+         "registry.start"
+     )
+-    assert events.index("registry.start") < events.index("app.run")
++    assert events.index("registry.start") < events.index("collector.start")
++    assert events.index("collector.start") < events.index("app.run")
+     assert app.run_calls == [{
+         "host": "127.0.0.1",
+         "port": 8088,

@@ -114,9 +114,10 @@ def _expected_signatures():
 
 def validate_core_schema_v2(connection):
     expected, _ = _expected_signatures()
-    # A strict old Core V2 remains readable during the additive index rollout.
-    # Presence is not sufficient: a present index must match its exact SQL.
-    expected = _with_installed_visit_index(connection, expected)
+    _validate_core_schema_v2(connection, expected)
+
+
+def _validate_core_schema_v2(connection, expected):
     names = {row[1] for row in expected}
     actual = tuple(row for row in signature(connection) if row[1] in names)
     rows = connection.execute("SELECT * FROM network_metadata_projection_schema").fetchall()
@@ -160,11 +161,16 @@ def validate_service_recognition_extension_v1(connection):
 
 
 def validate_schema(connection, *, integrity=False):
+    core, _ = _expected_signatures()
+    return _validate_schema(connection, core, integrity=integrity)
+
+
+def _validate_schema(connection, core, *, integrity):
+    """Shared strict validator; only the maintenance operation supplies old core."""
     try:
-        validate_core_schema_v2(connection)
+        _validate_core_schema_v2(connection, core)
         present = validate_service_recognition_extension_v1(connection)
-        core, extension = _expected_signatures()
-        core = _with_installed_visit_index(connection, core)
+        _, extension = _expected_signatures()
         if signature(connection) != tuple(sorted(core + (extension if present else ()))):
             raise ValueError
         if integrity and (connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
@@ -173,10 +179,3 @@ def validate_schema(connection, *, integrity=False):
         return "CORE_PLUS_EXTENSION_V1" if present else "CORE_ONLY"
     except Exception:
         raise ProjectionUnavailable() from None
-
-
-def _with_installed_visit_index(connection, core):
-    name = "idx_projection_mac_family_event_latest"
-    if connection.execute("SELECT 1 FROM sqlite_schema WHERE name=?", (name,)).fetchone() is None:
-        return tuple(row for row in core if row[1] != name)
-    return core

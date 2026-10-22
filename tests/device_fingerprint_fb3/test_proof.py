@@ -1,15 +1,27 @@
 """Real Task-01 cleanup boundary proof at two configured retention lengths."""
 
 from datetime import timedelta
+import sqlite3
+import uuid
 
 import pytest
 
+from app.device_fingerprint.schema import SCHEMA_SQL
 from app.device_fingerprint.validation import parse_utc
 from research.device_fingerprint_fb3.proof import run_f_b3_proof
 
 
 @pytest.mark.parametrize("days", [30, 90])
 def test_repository_retains_exact_predecessor_and_deletes_older_rows(tmp_path, days):
+    # The repository is existing-store-only. Provision ONLY this isolated
+    # test fixture, never re-enable runtime auto-create.
+    target = tmp_path / f"fb3-retention-{days}.sqlite3"
+    with sqlite3.connect(target) as db:
+        db.executescript(SCHEMA_SQL)
+        db.execute(
+            "INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)",
+            (str(uuid.uuid4()),),
+        )
     report = run_f_b3_proof(tmp_path, evidence_retention_days=days)
     assert report["derived_health_anchor_margin_seconds"] == 600
     assert report["max_family_freshness_seconds"] == 600

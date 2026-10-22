@@ -51,26 +51,6 @@ IP_RE = re.compile(
 )
 ONLINE_RE = re.compile(r"\bwent\s+online\b", re.IGNORECASE)
 OFFLINE_RE = re.compile(r"\bwent\s+offline\b", re.IGNORECASE)
-ROAMING_ANNOUNCEMENT_RE = re.compile(
-    r"\bis\s+roaming\s+from\b", re.IGNORECASE,
-)
-QUOTED_VALUE_RE = re.compile(r'"[^"\r\n]*"')
-BRACKETED_BLOCK_RE = re.compile(r"\[[^\[\]]*\]")
-AP_MARKER_RE = re.compile(r"\[ap\b", re.IGNORECASE)
-LOOSE_CLIENT_PREFIX_RE = re.compile(r"\A\[?client(?=[:\s])", re.IGNORECASE)
-ROAMING_FROM_AP_RE = re.compile(
-    r"\bis\s+roaming\s+from\s+\[?ap(?=[:\s-])", re.IGNORECASE,
-)
-ROAMING_RE = re.compile(
-    r"\A\s*\[client:(?P<client>[^\[\]\r\n]*)\]"
-    r"\s+is\s+roaming\s+from\s+"
-    r"\[ap:(?P<source_ap>[^\[\]\r\n]*)\]"
-    r"(?:\s*\[channel(?P<source_channel>(?:[ \t]+[^\[\]\r\n]*)?)\])?"
-    r"\s+to\s+\[ap:(?P<destination_ap>[^\[\]\r\n]*)\]"
-    r"(?:\s*\[channel(?P<destination_channel>(?:[ \t]+[^\[\]\r\n]*)?)\])?"
-    r'\s+with\s+SSID\s+"(?P<ssid>[^"\r\n]*)"\s*\Z',
-    re.IGNORECASE,
-)
 UNAUTHORIZED_RE = re.compile(
     r"\bwas\s+unauthorized\s+by\s+Main\s+Administrator\b",
     re.IGNORECASE,
@@ -154,37 +134,6 @@ LEGACY_ATTEMPTS_RECENTLY_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Only complete, positionally validated display fields become placeholders.
-# Full-match grammar below proves the controller clause; masking alone does not.
-CONNECTION_PREFIX = (
-    r'\A\s*\[client:\]\s+'
-    r'(?:\(\s*IP\s*:\s*(?P<ip>[^()\[\]"\r\n]*)\)\s+)?'
-)
-CONNECTION_PREFIX_RE = re.compile(CONNECTION_PREFIX, re.I)
-CONNECTION_CHANNEL = r'(?:\s+on\s+channel\s+[^\s.\[\]"()]+)?'
-TRUSTED_CONNECTION_GRAMMARS = (
-    ("omada.client_online", re.compile(
-        CONNECTION_PREFIX + r'went\s+online\s+on\s+\[ap:\]'
-        r'\s+with\s+SSID\s+""' + CONNECTION_CHANNEL + r'(?:\s*\.)?\Z', re.I)),
-    ("omada.client_offline", re.compile(
-        CONNECTION_PREFIX + r'went\s+offline\s+from\s+SSID\s+""'
-        r'(?:\s+on\s+\[ap:\])?'
-        r'(?P<tail>[^\[\]"]*)\Z', re.I)),
-    ("omada.client_connection_failed", re.compile(
-        CONNECTION_PREFIX + r'failed\s+to\s+connect\s+to\s+\[ap:\]'
-        r'\s+with\s+SSID\s+""' + CONNECTION_CHANNEL
-        + r'\s+because\s+the\s+(?:password\s+was\s+wrong|'
-        r'user\s+was\s+blocked\s+by\s+MAC\s+block\s*/\s*MAC\s+Filter\s*/\s*Lock\s+To\s+AP)'
-        r'(?P<tail>[^\[\]"]*)\Z', re.I)),
-    ("omada.client_unauthorized", re.compile(
-        CONNECTION_PREFIX + r'was\s+unauthorized\s+by\s+Main\s+Administrator'
-        r'(?:\s+[^\s\[\]"()][^\[\]"()]*)?\Z', re.I)),
-)
-CONNECTION_VERB_RE = re.compile(
-    r'\b(?:went\s+(?:online|offline)|failed\s+to\s+connect|'
-    r'was\s+unauthorized\s+by\s+Main\s+Administrator|is\s+roaming\s+from)\b', re.I,
-)
-
 TRAFFIC_MULTIPLIERS = {
     "B": 1,
     "KB": 1024,
@@ -216,172 +165,6 @@ class EventHandler(NamedTuple):
 
     def matches(self, raw_text: str) -> bool:
         return self.matcher(raw_text)
-
-
-class _ConnectionProof(NamedTuple):
-    event_name: str
-    client_mac: str | None
-    shape: str
-    subjects: tuple[tuple[str, str], ...]
-    ssids: tuple[str, ...]
-    ip_raw: str | None
-
-
-def _trusted_connection(raw_text: Any) -> _ConnectionProof | None:
-    """Pure, bounded structural proof, never a search through display values."""
-    if not isinstance(raw_text, str):
-        return None
-    projected, subjects, ssids = [], [], []
-    position = 0
-    while position < len(raw_text):
-        character = raw_text[position]
-        if character == "[":
-            end = raw_text.find("]", position + 1)
-            if end < 0:
-                return None
-            body = raw_text[position + 1:end]
-            if "[" in body or "\r" in body or "\n" in body or body.count('"') % 2:
-                return None
-            tag, separator, value = body.partition(":")
-            subject = tag.lower()
-            if not separator or subject not in {"client", "ap"}:
-                return None
-            subjects.append((subject, value))
-            projected.append(f"[{subject}:]")
-            position = end + 1
-        elif character == '"':
-            end = raw_text.find('"', position + 1)
-            if end < 0 or any(c in raw_text[position + 1:end] for c in "\r\n"):
-                return None
-            ssids.append(raw_text[position + 1:end])
-            projected.append('""')
-            position = end + 1
-        elif character == "]":
-            return None
-        else:
-            projected.append(character)
-            position += 1
-    shape = "".join(projected).strip()
-    prefix = CONNECTION_PREFIX_RE.match(shape)
-    if prefix is None or sum(1 for _ in CONNECTION_VERB_RE.finditer(shape, prefix.end())) != 1:
-        return None
-    for event_name, grammar in TRUSTED_CONNECTION_GRAMMARS:
-        match = grammar.fullmatch(shape)
-        if match is None:
-            continue
-        if event_name == "omada.client_connection_failed" and not _is_technical_occurrence_tail(match.group("tail")):
-            return None
-        if event_name == "omada.client_offline" and not _trusted_offline_tail(match.group("tail")):
-            return None
-        client_mac = _parse_named_mac(subjects[0][1], subject="client")["client_mac"]
-        if event_name == "omada.client_offline" and client_mac is None:
-            return None
-        return _ConnectionProof(event_name, client_mac, shape, tuple(subjects), tuple(ssids), prefix.group("ip"))
-    return None
-
-
-def _trusted_offline_tail(tail: str) -> bool:
-    """Recognize the optional report without nested/backtracking scans."""
-    tail = tail.strip()
-    if tail.endswith("."):
-        tail = tail[:-1].rstrip()
-    if not tail:
-        return True
-    if not tail.startswith("(") or not tail.endswith(")"):
-        return False
-    report = tail[1:-1]
-    if "(" in report or ")" in report:
-        return False
-    duration, _, _traffic = report.partition(",")
-    parts = duration.rsplit(None, 1)
-    return len(parts) == 2 and parts[1].casefold() == "connected"
-
-
-def _context_matcher(event_name: str) -> EventMatcher:
-    def matches(raw_text: str) -> bool:
-        proof = _trusted_connection(raw_text)
-        return proof is not None and proof.event_name == event_name
-    return matches
-
-
-def _parse_proven_connection(
-    proof: _ConnectionProof, parser: EventParser,
-) -> tuple[dict[str, Any], list[str]]:
-    """Keep canonical DTO converters, with only controller-region input.
-
-    Names and SSIDs are opaque slots, never input to another field's regex.
-    Restore them only to their own fields after conversion. Even an invalid
-    optional IP cannot supply a channel, reason, or reported value.
-    """
-    parser_text = proof.shape
-    client_ip = None
-    if proof.ip_raw is not None:
-        try:
-            client_ip = str(ip_address(proof.ip_raw.strip()))
-        except ValueError:
-            pass
-        prefix = CONNECTION_PREFIX_RE.match(parser_text)
-        assert prefix is not None
-        start, end = prefix.span("ip")
-        parser_text = parser_text[:start] + (client_ip or "invalid") + parser_text[end:]
-    subjects = [(subject, _parse_named_mac(body, subject=subject)) for subject, body in proof.subjects]
-    for subject, named in subjects:
-        parser_text = parser_text.replace(f"[{subject}:]", f'[{subject}:{named[f"{subject}_mac"] or ""}]', 1)
-    fields, warnings = parser(parser_text)
-    for _subject, named in subjects:
-        fields.update({key: value for key, value in named.items() if key in fields})
-    if proof.ssids and "ssid" in fields:
-        fields["ssid"] = proof.ssids[0]
-    if "client_ip" in fields:
-        fields["client_ip"] = client_ip
-        warnings = [value for value in warnings if value not in {"CLIENT_IP_MISSING", "INVALID_CLIENT_IP"}]
-        if client_ip is None:
-            reason = "CLIENT_IP_MISSING" if proof.ip_raw is None else "INVALID_CLIENT_IP"
-            warnings.insert(1 if "INVALID_CLIENT_MAC" in warnings else 0, reason)
-    return fields, warnings
-
-
-def offline_event_proof(raw_text: Any) -> dict[str, Any] | None:
-    """Prove raw offline provenance for normalizer and legacy JSONL readers.
-
-    No IO, envelope trust, new serialized fields or consumer-owned regexes.
-    Optional-field warnings do not invalidate a genuine controller clause.
-    """
-    proof = _trusted_connection(raw_text)
-    if proof is None or proof.event_name != "omada.client_offline":
-        return None
-    fields, _ = _parse_proven_connection(proof, _parse_offline)
-    return fields
-
-
-def offline_record_matches_proof(record: dict[str, Any], proof: dict[str, Any]) -> bool:
-    """Check consumed identities/values against raw proof, not a stored label.
-
-    Absent optional legacy fields stay absent; invalid optional numbers remain
-    subject to each consumer's existing skip/invalid-value policy, not trusted.
-    """
-    if record.get("parse_status") not in (None, "parsed", "partial"):
-        return False
-    if normalize_mac(record.get("client_mac")) != proof["client_mac"]:
-        return False
-    ap = record.get("ap_mac")
-    if ap is not None and normalize_mac(ap) != proof["ap_mac"]:
-        return False
-    ssid = record.get("ssid")
-    if isinstance(ssid, str) and ssid.strip() and ssid != proof["ssid"]:
-        return False
-    client_ip = record.get("client_ip")
-    if isinstance(client_ip, str):
-        try:
-            if str(ip_address(client_ip)) != proof["client_ip"]:
-                return False
-        except ValueError:
-            pass  # Existing consumer invalid-IP handling remains unchanged.
-    for key in ("reported_connected_seconds", "reported_traffic_bytes_estimate"):
-        value = record.get(key)
-        if type(value) is int and value >= 0 and value != proof[key]:
-            return False
-    return True
 
 
 def _regex_matcher(pattern: re.Pattern[str]) -> EventMatcher:
@@ -517,20 +300,6 @@ def _normalize_text_item(
     text_index: int,
     text_count: int,
 ) -> dict[str, Any]:
-    # Reject roaming-shaped grammar errors as well as invalid identities,
-    # before display names can select a business-consumed legacy event.
-    if (
-        _is_roaming_announcement(raw_text)
-        and not _matches_roaming(raw_text)
-    ):
-        return _diagnostic_event(
-            raw_record,
-            site_resolution=site_resolution,
-            reason="UNKNOWN_TEXT_FORMAT",
-            text_index=text_index,
-            text_count=text_count,
-            raw_text=raw_text,
-        )
     handler = next(
         (
             candidate
@@ -549,13 +318,7 @@ def _normalize_text_item(
             raw_text=raw_text,
         )
 
-    proof = _trusted_connection(raw_text)
-    if proof is not None and proof.event_name == handler.event_name:
-        fields, warnings = _parse_proven_connection(proof, handler.parser)
-    else:
-        # Roaming and authentication-expired retain their existing captured
-        # field grammar/parsers; no business-action or schema redesign.
-        fields, warnings = handler.parser(raw_text)
+    fields, warnings = handler.parser(raw_text)
 
     time_fields, time_warnings = _controller_time_fields(raw_record)
     warnings = _unique(warnings + time_warnings)
@@ -574,101 +337,6 @@ def _normalize_text_item(
     )
     event.update(fields)
     return event
-
-
-def _is_roaming_announcement(raw_text: str) -> bool:
-    """Recognize the event-level verb without accepting the full grammar.
-
-    Complete bracket/quoted blocks hide names/SSIDs, not event verbs. If the
-    client block is damaged, inspect the prefix before the first AP marker.
-    If all opening markers are damaged, require a leading client field and
-    a roaming-from-AP clause, preserving genuine top-level legacy events.
-    Each scan is bounded by the ingress text size, with no nested repeats.
-    """
-    without_quotes = QUOTED_VALUE_RE.sub(" ", raw_text)
-    outside_blocks = BRACKETED_BLOCK_RE.sub(" ", without_quotes).lstrip()
-    if ROAMING_ANNOUNCEMENT_RE.match(outside_blocks) is not None:
-        return True
-    if (
-        LOOSE_CLIENT_PREFIX_RE.match(without_quotes.lstrip()) is not None
-        and ROAMING_FROM_AP_RE.search(without_quotes) is not None
-    ):
-        # A missing client terminator can make an AP's closing bracket look
-        # like the client terminator. Inspect the unmasked structure too.
-        # Conversely, a complete real legacy header must keep its name/SSID
-        # text, even when the name imitates an entire roaming clause.
-        client_text = without_quotes.lstrip()
-        client = CLIENT_BLOCK_RE.match(client_text)
-        if client is not None:
-            tail = client_text[client.end():].lstrip()
-            ip = IP_RE.match(tail)
-            if ip is not None:
-                tail = tail[ip.end():].lstrip()
-            if any(pattern.match(tail) is not None for pattern in (
-                ONLINE_RE, OFFLINE_RE, UNAUTHORIZED_RE, FAILED_TO_CONNECT_RE,
-            )) or AUTHENTICATION_EXPIRED_RE.fullmatch(raw_text) is not None:
-                return False
-        return True
-    first_ap = AP_MARKER_RE.search(without_quotes)
-    if first_ap is None:
-        return False
-    prefix = BRACKETED_BLOCK_RE.sub(" ", without_quotes[:first_ap.start()])
-    return ROAMING_ANNOUNCEMENT_RE.search(prefix) is not None
-
-
-def _roaming_match(raw_text: str) -> re.Match[str] | None:
-    """Reject invalid required identities before handler dispatch."""
-    match = ROAMING_RE.fullmatch(raw_text)
-    if match is None or not match.group("ssid").strip():
-        return None
-    for subject in ("client", "source_ap", "destination_ap"):
-        fields = _parse_named_mac(match.group(subject), subject=subject)
-        if fields[f"{subject}_mac"] is None:
-            return None
-    return match
-
-
-def _matches_roaming(raw_text: str) -> bool:
-    return _roaming_match(raw_text) is not None
-
-
-def _parse_roaming(raw_text: str) -> tuple[dict[str, Any], list[str]]:
-    match = _roaming_match(raw_text)
-    if match is None:
-        raise ValueError("not a valid roaming event")
-
-    fields: dict[str, Any] = {"ssid": match.group("ssid")}
-    warnings: list[str] = []
-    for subject in ("client", "source_ap", "destination_ap"):
-        named = _parse_named_mac(match.group(subject), subject=subject)
-        if not named[f"{subject}_name"]:
-            # Empty names and MAC fallbacks are not invented display names.
-            named[f"{subject}_name"] = None
-            named[f"{subject}_name_raw"] = (
-                named[f"{subject}_name_raw"] or None
-            )
-            named[f"{subject}_name_available"] = False
-            warnings.append(f"{subject.upper()}_NAME_MISSING")
-        fields.update(named)
-
-    for subject in ("source", "destination"):
-        field = f"{subject}_channel"
-        raw_channel = match.group(field)
-        fields[field] = None
-        if raw_channel is None:
-            warnings.append(f"{subject.upper()}_CHANNEL_MISSING")
-            continue
-        value = raw_channel.strip()
-        if re.fullmatch(r"[0-9]+", value) is not None:
-            try:
-                channel = int(value)
-            except ValueError:
-                channel = 0
-            if channel > 0:
-                fields[field] = channel
-                continue
-        warnings.append(f"{subject.upper()}_CHANNEL_INVALID")
-    return fields, warnings
 
 
 def _parse_online(raw_text: str) -> tuple[dict[str, Any], list[str]]:
@@ -823,7 +491,13 @@ def _match_connection_failure_reason(
 
 
 def _matches_connection_failed(raw_text: str) -> bool:
-    return _context_matcher("omada.client_connection_failed")(raw_text)
+    try:
+        _, reason_match = _match_connection_failure_reason(raw_text)
+    except ValueError:
+        return False
+    return _is_technical_occurrence_tail(
+        raw_text[reason_match.end():],
+    )
 
 
 def _is_technical_occurrence_tail(raw_tail: str) -> bool:
@@ -841,13 +515,8 @@ def _is_technical_occurrence_tail(raw_tail: str) -> bool:
 # one local registry entry; the central dispatch remains unchanged.
 EVENT_HANDLERS: tuple[EventHandler, ...] = (
     EventHandler(
-        "omada.client_roaming",
-        _matches_roaming,
-        _parse_roaming,
-    ),
-    EventHandler(
         "omada.client_unauthorized",
-        _context_matcher("omada.client_unauthorized"),
+        _regex_matcher(UNAUTHORIZED_RE),
         _parse_unauthorized,
     ),
     EventHandler(
@@ -857,12 +526,12 @@ EVENT_HANDLERS: tuple[EventHandler, ...] = (
     ),
     EventHandler(
         "omada.client_online",
-        _context_matcher("omada.client_online"),
+        _regex_matcher(ONLINE_RE),
         _parse_online,
     ),
     EventHandler(
         "omada.client_offline",
-        _context_matcher("omada.client_offline"),
+        _regex_matcher(OFFLINE_RE),
         _parse_offline,
     ),
     EventHandler(

@@ -1,0 +1,282 @@
+diff --git a/app/device_fingerprint/network_schemas.py b/app/device_fingerprint/network_schemas.py
+index 60e92501684d5ee93fc3ace3a5747b9013675515..aa58b011c3b2f037463ebee28c9699dc8df05701 100644
+--- a/app/device_fingerprint/network_schemas.py
++++ b/app/device_fingerprint/network_schemas.py
+@@ -175,6 +175,7 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
+             if declared is not None or available != 0 or record["structure_state"] != "well_formed":
+                 _fail()
+         else:
++            physical_remaining_after_length = 0
+             if declared is None:
+                 if offset != option_length or available != 0 or not last:
+                     _fail()
+@@ -184,6 +185,7 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
+                 if not _integer(declared, 0, 255) or offset >= option_length:
+                     _fail()
+                 offset += 1  # physically observed length byte
++                physical_remaining_after_length = option_length - offset
+                 if declared < 2:
+                     if available != 0 or not last:
+                         _fail()
+@@ -208,21 +210,21 @@ def validate_tcp_syn_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
+             if record["structure_state"] != expected_state:
+                 _fail()
+             if kind == 2:
+-                if available >= 2:
++                if physical_remaining_after_length >= 2:
+                     if not _integer(record["mss"], 0, 65535):
+                         _fail()
+                 elif record["mss"] is not None:
+                     _fail()
+             elif kind == 3:
+-                if available >= 1:
++                if physical_remaining_after_length >= 1:
+                     if not _integer(record["window_scale_raw"], 0, 255):
+                         _fail()
+                 elif record["window_scale_raw"] is not None:
+                     _fail()
+             elif kind == 8:
+                 for name, present in (
+-                    ("timestamp_value_zero", available >= 4),
+-                    ("timestamp_echo_nonzero", available >= 8),
++                    ("timestamp_value_zero", physical_remaining_after_length >= 4),
++                    ("timestamp_echo_nonzero", physical_remaining_after_length >= 8),
+                 ):
+                     if (present and type(record[name]) is not bool) or (not present and record[name] is not None):
+                         _fail()
+diff --git a/app/device_fingerprint_sensor/tcp_syn.py b/app/device_fingerprint_sensor/tcp_syn.py
+index d13ee40fb3e5b6ed442807e8af500f2c3f01584e..ce6a22db4e15dfb88246ee1b2d4c642b4b3287f3 100644
+--- a/app/device_fingerprint_sensor/tcp_syn.py
++++ b/app/device_fingerprint_sensor/tcp_syn.py
+@@ -87,8 +87,9 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
+         length = raw[offset] if offset < len(raw) else None
+         if length is not None:
+             offset += 1
++        semantic_value_start = offset
++        physical_remaining = len(raw) - semantic_value_start if length is not None else 0
+         available = min(length - 2, len(raw) - offset) if length is not None and length >= 2 else 0
+-        value = raw[offset:offset + available]
+         offset += available
+         expected_length = {2: 4, 3: 3, 4: 2, 8: 10}.get(kind)
+         complete = length is not None and length >= 2 and available == length - 2
+@@ -101,12 +102,21 @@ def _options(raw: bytes) -> list[dict[str, Any]]:
+             ),
+         }
+         if kind == 2:
+-            record["mss"] = int.from_bytes(value[:2], "big") if available >= 2 else None
++            record["mss"] = (
++                int.from_bytes(raw[semantic_value_start:semantic_value_start + 2], "big")
++                if physical_remaining >= 2 else None
++            )
+         elif kind == 3:
+-            record["window_scale_raw"] = value[0] if available >= 1 else None
++            record["window_scale_raw"] = raw[semantic_value_start] if physical_remaining >= 1 else None
+         elif kind == 8:
+-            record["timestamp_value_zero"] = value[:4] == b"\0" * 4 if available >= 4 else None
+-            record["timestamp_echo_nonzero"] = value[4:8] != b"\0" * 4 if available >= 8 else None
++            record["timestamp_value_zero"] = (
++                raw[semantic_value_start:semantic_value_start + 4] == b"\0" * 4
++                if physical_remaining >= 4 else None
++            )
++            record["timestamp_echo_nonzero"] = (
++                raw[semantic_value_start + 4:semantic_value_start + 8] != b"\0" * 4
++                if physical_remaining >= 8 else None
++            )
+         records.append(record)
+         if not complete:
+             break
+diff --git a/tests/device_fingerprint/test_network_schemas.py b/tests/device_fingerprint/test_network_schemas.py
+index c5b3624cddc46f60d8770ebca11e18415fbc64e3..d3403f08584fa42034f178a2682f2f5ab512edb0 100644
+--- a/tests/device_fingerprint/test_network_schemas.py
++++ b/tests/device_fingerprint/test_network_schemas.py
+@@ -217,3 +217,96 @@ def test_tcp_v2_missing_keys_and_impossible_option_sequence_fail():
+         validate_tcp_syn_v2(tcp_v2(tcp_option_records=[]))
+     with pytest.raises(DeviceFingerprintValidationError):
+         validate_tcp_syn_v2(tcp_v2(tcp_option_records=tcp_v2()["tcp_option_records"] * 2))
++
++
++def test_tcp_v2_malformed_mss_validator_uses_physical_remaining_bytes():
++    mss = {
++        "record_type": "mss", "kind": 2, "declared_length": 1,
++        "available_value_length": 0, "structure_state": "malformed_but_observable",
++        "mss": 1200,
++    }
++    assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=[mss]))["tcp_option_records"] == [mss]
++    for invalid in (None, True, 65536):
++        with pytest.raises(DeviceFingerprintValidationError):
++            validate_tcp_syn_v2(tcp_v2(tcp_option_records=[{**mss, "mss": invalid}]))
++    nop = {
++        "record_type": "nop", "kind": 1, "declared_length": None,
++        "available_value_length": 0, "structure_state": "well_formed",
++    }
++    for prefix in ([nop], [nop, nop]):
++        missing = {**mss, "mss": None}
++        assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=[*prefix, missing]))
++        with pytest.raises(DeviceFingerprintValidationError):
++            validate_tcp_syn_v2(tcp_v2(tcp_option_records=[*prefix, mss]))
++
++
++def test_tcp_v2_malformed_window_scale_validator_uses_physical_remaining_byte():
++    ws = {
++        "record_type": "window_scale", "kind": 3, "declared_length": 1,
++        "available_value_length": 0, "structure_state": "malformed_but_observable",
++        "window_scale_raw": 255,
++    }
++    assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=[ws]))["tcp_option_records"] == [ws]
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[{**ws, "window_scale_raw": None}]))
++    nop = {
++        "record_type": "nop", "kind": 1, "declared_length": None,
++        "available_value_length": 0, "structure_state": "well_formed",
++    }
++    missing = {**ws, "window_scale_raw": None}
++    assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=[nop, nop, missing]))
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[nop, nop, ws]))
++
++
++@pytest.mark.parametrize("nop_count,header_length,zero,echo", [
++    (3, 28, None, None),
++    (2, 28, True, None),
++    (2, 32, True, False),
++])
++def test_tcp_v2_malformed_timestamp_validator_uses_physical_remaining_bytes(
++    nop_count, header_length, zero, echo,
++):
++    nop = {
++        "record_type": "nop", "kind": 1, "declared_length": None,
++        "available_value_length": 0, "structure_state": "well_formed",
++    }
++    timestamp = {
++        "record_type": "timestamp", "kind": 8, "declared_length": 1,
++        "available_value_length": 0, "structure_state": "malformed_but_observable",
++        "timestamp_value_zero": zero, "timestamp_echo_nonzero": echo,
++    }
++    def payload(record):
++        return tcp_v2(
++            tcp_header_length_bytes=header_length,
++            tcp_option_records=[*[nop] * nop_count, record],
++        )
++    assert validate_tcp_syn_v2(payload(timestamp))
++    for name, value in (("timestamp_value_zero", zero), ("timestamp_echo_nonzero", echo)):
++        wrong = False if value is None else None
++        with pytest.raises(DeviceFingerprintValidationError):
++            validate_tcp_syn_v2(payload({**timestamp, name: wrong}))
++
++
++@pytest.mark.parametrize("kind,record_type,fields,invalid_field", [
++    (2, "mss", {"mss": None}, {"mss": 1200}),
++    (3, "window_scale", {"window_scale_raw": None}, {"window_scale_raw": 255}),
++    (8, "timestamp", {"timestamp_value_zero": None, "timestamp_echo_nonzero": None},
++     {"timestamp_value_zero": True}),
++])
++def test_tcp_v2_known_option_without_length_has_no_semantic_value(
++    kind, record_type, fields, invalid_field,
++):
++    nop = {
++        "record_type": "nop", "kind": 1, "declared_length": None,
++        "available_value_length": 0, "structure_state": "well_formed",
++    }
++    record = {
++        "record_type": record_type, "kind": kind, "declared_length": None,
++        "available_value_length": 0, "structure_state": "malformed_but_observable",
++        **fields,
++    }
++    records = [nop, nop, nop, record]
++    assert validate_tcp_syn_v2(tcp_v2(tcp_option_records=records))
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_tcp_syn_v2(tcp_v2(tcp_option_records=[*records[:-1], {**record, **invalid_field}]))
+diff --git a/tests/device_fingerprint_sensor/test_tcp_syn.py b/tests/device_fingerprint_sensor/test_tcp_syn.py
+index fc798ded23a3d010d656be0e8bc8ae9f78fdbfa9..f5c597049c995a8402c84c322b6a4b2dab9234c0 100644
+--- a/tests/device_fingerprint_sensor/test_tcp_syn.py
++++ b/tests/device_fingerprint_sensor/test_tcp_syn.py
+@@ -216,10 +216,10 @@ def test_oracle_eol_layouts_have_distinct_canonical_tcp_v2_payloads():
+ 
+ 
+ @pytest.mark.parametrize("options,expected_type,available,extra", [
+-    (b"\x02\x03\x01\x01", "mss", 1, {"mss": None}),
++    (b"\x02\x03\x01\x01", "mss", 1, {"mss": 257}),
+     (b"\x01\x01\x02\x04", "mss", 0, {"mss": None}),
+     (b"\x01\x01\x01\x02", "mss", 0, {"declared_length": None}),
+-    (b"\x03\x02\x01\x01", "window_scale", 0, {"window_scale_raw": None}),
++    (b"\x03\x02\x01\x01", "window_scale", 0, {"window_scale_raw": 1}),
+     (b"\x04\x03\0\x01", "sack_permitted", 1, {}),
+     (b"\x08\x09" + b"\0" * 6, "timestamp", 6, {
+         "timestamp_value_zero": True, "timestamp_echo_nonzero": None,
+@@ -243,6 +243,76 @@ def test_malformed_option_is_retained_as_partial(options, expected_type, availab
+     assert events[0].document["feature_schema_version"] == 2
+ 
+ 
++@pytest.mark.parametrize("options,declared,available,state,mss,layout", [
++    (b"\x01\x01\x02\x01", 1, 0, "malformed_but_observable", None, ["nop", "nop", "mss"]),
++    (b"\x01\x02\x01\x04", 1, 0, "malformed_but_observable", None, ["nop", "mss"]),
++    (b"\x02\x00\x04\xb0", 0, 0, "malformed_but_observable", 1200, ["mss"]),
++    (b"\x02\x01\x04\xb0", 1, 0, "malformed_but_observable", 1200, ["mss"]),
++    (b"\x02\x01\x05\xb4", 1, 0, "malformed_but_observable", 1460, ["mss"]),
++    (b"\x02\x02\x04\xb0", 2, 0, "malformed_but_observable", 1200, ["mss", "sack_permitted"]),
++    (b"\x02\x03\x04\xb0", 3, 1, "malformed_but_observable", 1200, ["mss", "unknown"]),
++    (b"\x02\x04\x04\xb0", 4, 2, "well_formed", 1200, ["mss"]),
++    (b"\x02\x05\x04\xb0", 5, 2, "malformed_but_observable", 1200, ["mss"]),
++])
++def test_mss_physical_value_is_independent_of_declared_extent(
++    options, declared, available, state, mss, layout,
++):
++    records = parsed(options)["tcp_option_records"]
++    record = next(record for record in records if record["record_type"] == "mss")
++    assert (record["declared_length"], record["available_value_length"]) == (declared, available)
++    assert (record["structure_state"], record["mss"]) == (state, mss)
++    assert [record["record_type"] for record in records] == layout
++
++
++def test_malformed_mss_oracle_pair_has_distinct_canonical_payloads():
++    first = parsed(b"\x02\x01\x04\xb0")
++    second = parsed(b"\x02\x01\x05\xb4")
++    assert first["tcp_option_records"][0]["mss"] == 1200
++    assert second["tcp_option_records"][0]["mss"] == 1460
++    assert {**first["tcp_option_records"][0], "mss": 1460} == second["tcp_option_records"][0]
++    assert canonical_json(first) != canonical_json(second)
++    assert canonical_sha256(canonical_json(first)) != canonical_sha256(canonical_json(second))
++
++
++@pytest.mark.parametrize("options,expected", [
++    (b"\x01\x01\x03\x01", None),
++    (b"\x01\x03\x01\xff", 255),
++    (b"\x03\x01\xff\x01", 255),
++])
++def test_malformed_window_scale_uses_physical_byte_without_changing_traversal(options, expected):
++    records = parsed(options)["tcp_option_records"]
++    record = next(record for record in records if record["record_type"] == "window_scale")
++    assert record["declared_length"] == 1
++    assert record["available_value_length"] == 0
++    assert record["structure_state"] == "malformed_but_observable"
++    assert record["window_scale_raw"] == expected
++
++
++@pytest.mark.parametrize("prefix,value_bytes,expected_zero,expected_echo", [
++    (b"\x01" * 3, b"\0" * 3, None, None),
++    (b"\x01" * 2, b"\0" * 4, True, None),
++    (b"\x01" * 3, b"\0" * 7, True, None),
++    (b"\x01" * 2, b"\0" * 8, True, False),
++    (b"", b"\0\0\0\x01\0\0\0\x02\x01\x01", False, True),
++])
++def test_malformed_timestamp_uses_only_bounded_physical_boolean_facts(
++    prefix, value_bytes, expected_zero, expected_echo,
++):
++    options = prefix + b"\x08\x01" + value_bytes
++    assert len(options) % 4 == 0
++    records = parsed(options)["tcp_option_records"]
++    record = next(record for record in records if record["record_type"] == "timestamp")
++    assert record["declared_length"] == 1
++    assert record["available_value_length"] == 0
++    assert record["structure_state"] == "malformed_but_observable"
++    assert record["timestamp_value_zero"] is expected_zero
++    assert record["timestamp_echo_nonzero"] is expected_echo
++    assert set(record) == {
++        "record_type", "kind", "declared_length", "available_value_length",
++        "structure_state", "timestamp_value_zero", "timestamp_echo_nonzero",
++    }
++
++
+ def test_ordered_mixed_options_and_known_mismatch_continue_at_safe_boundary():
+     value = parsed(b"\x01\x02\x05\x05\xb4\x00\x03\x03\x0f\x04\x02\x00")
+     assert [record["record_type"] for record in value["tcp_option_records"]] == [

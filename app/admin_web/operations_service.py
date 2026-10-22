@@ -14,8 +14,17 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from .operations_inventory import SERVICES, STORES, topology_snapshot
+from .sensor_metadata import SensorMetadataReader, SENSOR_STORES, project_store
+from app.device_fingerprint_sensor.operations_metadata import boot_ns
+from .operations_health import SensorHealthEvidence, project as project_health, sensor_store_metadata
+from app.operations_health import unknown_evidence
+from app.network_metadata_projection.operations_health import HealthReader, PROVENANCE
+from app.operations_health import NI02_UNIT
+from .operations_verification import OwnerChecks
+from app.operations_verification import opaque_identity,project as project_verification
 
 API_VERSION = "admin.operations.db-services.v1"
+API_VERSION_V2 = "admin.operations.db-services.v2"
 RESAMPLE_SECONDS = 30.0
 STALE_SECONDS = 90.0
 FIRST_WAIT_SECONDS = 0.250
@@ -180,7 +189,7 @@ def service_row(item, intent, record, now):
     return row
 
 
-def store_row(item, intent, path, now, lstat, *, deadline, monotonic, cancel):
+def store_row(item, intent, path, now, lstat, *, deadline, monotonic, cancel, identity_available=True):
     row = dict(id=item.id, label=item.label, filename=PurePosixPath(path).name,
         purpose=item.purpose, writer_owner_component_ids=list(item.writers), writer_service_ids=list(item.services),
         reader_service_ids=list(item.readers), store_kind=item.kind, expected_mode=intent,
@@ -206,9 +215,12 @@ def store_row(item, intent, path, now, lstat, *, deadline, monotonic, cancel):
                     reason = "stat_unavailable"
                 else:
                     state, size = "present", metadata.st_size
-                    identity = (metadata.st_dev, metadata.st_ino)
+                    if identity_available:
+                        identity = (metadata.st_dev, metadata.st_ino)
             except FileNotFoundError:
                 state, size = "absent", 0
+            except PermissionError:
+                reason = "metadata_permission_boundary" if item.id in {"network_attribution", "sensor_spool"} else "stat_unavailable"
             except OSError:
                 reason = "stat_unavailable"
         row[key] = size
@@ -258,9 +270,15 @@ def summarize(services, databases):
 
 
 class AdminOperationsReadService:
-    def __init__(self, inventory, *, acquire=acquire_systemd, lstat=os.lstat, monotonic=time.monotonic, now=utc_now):
+    def __init__(self, inventory, *, acquire=acquire_systemd, lstat=os.lstat, monotonic=time.monotonic, now=utc_now,
+                 sensor_metadata=None, ni02_health=None,owner_checks=None):
         self.inventory, self._acquire, self._lstat = inventory, acquire, lstat
         self._monotonic, self._now = monotonic, now
+        self._sensor_metadata = sensor_metadata if sensor_metadata is not None else SensorMetadataReader()
+        self._sensor_health = SensorHealthEvidence(self._sensor_metadata)
+        self._ni02_report = ni02_health if ni02_health is not None else HealthReader()
+        self._ni02_health = SensorHealthEvidence(self._ni02_report,unit=NI02_UNIT,source=PROVENANCE)
+        self._owner_checks=owner_checks if owner_checks is not None else OwnerChecks()
         self._condition = threading.Condition()
         self._cancel = threading.Event()
         self._busy = False
@@ -273,7 +291,9 @@ class AdminOperationsReadService:
             self._cancel.set()
             self._condition.notify_all()
 
-    def read(self, request_id):
+    def read(self, request_id, *, version=1):
+        if version not in (1, 2):
+            raise OperationsError()
         with self._condition:
             now = self._monotonic()
             if self._cancel.is_set():
@@ -297,6 +317,16 @@ class AdminOperationsReadService:
             sample, started_mono = self._cache
             result = copy.deepcopy(sample)
             age = max(0.0, self._monotonic() - started_mono)
+        source_expiry = result.pop("_sensor_expires_boottime_ns", None)
+        health_records = result.pop("_health_records", {})
+        sensor_report = result.pop("_sensor_report", {})
+        check_records=result.pop('_verification_records',{})
+        if source_expiry is not None and boot_ns() > source_expiry:
+            for row in result["databases"]:
+                if row["id"] in SENSOR_STORES:
+                    row.update(operational_state="stale", file_presence="unknown", main_file_bytes=None,
+                        wal_bytes=None, shm_bytes=None, total_footprint_bytes=None, reason_code="metadata_stale")
+            result["snapshot_state"] = "partial"
         stale = age > STALE_SECONDS
         if stale:
             for row in result["services"]:
@@ -309,6 +339,38 @@ class AdminOperationsReadService:
             sample_status="stale" if stale else "fresh")
         result["summary"] = summarize(result["services"], result["databases"])
         result["topology"] = topology_snapshot()
+        if version == 2:
+            result["api_version"] = API_VERSION_V2
+            for row in result["services"]:
+                record = health_records.get(row["id"])
+                evidence = project_health(record, stale=stale, boottime=boot_ns) if record else unknown_evidence()
+                row.update(application_health=evidence["state"], application_health_evidence=evidence)
+            for row in result["databases"]:
+                record=check_records.get(row['id'])
+                expires=None if record is None else record['expires']
+                expired=expires is not None and boot_ns()>expires
+                row['store_verification']=project_verification(row['id'],record,
+                    None if record is None else record['current_id'],intent=row['expected_mode'],
+                    source_current=record is not None and record['source_current'],
+                    stale=stale or expired,
+                    binding_current=not stale and (row['id'] not in SENSOR_STORES or
+                        record is not None and record['source_current'] and not expired and row['file_presence']=='present'))
+                row["metadata_evidence"], row["journal_bytes"] = (
+                    sensor_store_metadata(sensor_report, row["id"], boottime=boot_ns) if row["id"] in SENSOR_STORES
+                    else (dict(source="sampler_lstat", state="stale" if stale else "fresh",
+                               age=round(age, 3), ttl=int(STALE_SECONDS)), None))
+                if row["file_presence"] == "unknown":
+                    row["metadata_evidence"]["state"] = "unknown"
+            result["summary"]["application_health"] = {state: sum(row["application_health"] == state for row in result["services"])
+                for state in ("healthy", "degraded", "unavailable", "unknown", "stale")}
+            result["summary"]["problems"] = dict(
+                established=sum(r["operational_state"] in {"degraded", "failed"}
+                    or r["operational_state"] == "stopped" and r["expected_mode"] == "run"
+                    or r["application_health"] in {"degraded", "unavailable"} for r in result["services"])
+                    + sum(r["operational_state"] in {"degraded", "unavailable", "incompatible"} for r in result["databases"]),
+                unknown_or_stale=sum(r["operational_state"] in {"unknown", "stale"}
+                    or r["application_health"] in {"unknown", "stale"} for r in result["services"])
+                    + result["summary"]["databases"]["unknown_or_stale"])
         if len(json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_LIMIT:
             raise OperationsError()
         return result
@@ -344,6 +406,27 @@ class AdminOperationsReadService:
             if row["reason_code"] == "probe_unavailable":
                 failure("service_state", row["id"], "probe_unavailable")
         deadline = min(started + SAMPLE_SECONDS, self._monotonic() + FS_SECONDS)
+        sensor = next(row for row in services if row["id"] == "fingerprint_sensor")
+        try:
+            sensor_report = self._sensor_metadata.read(sensor, self._now(), deadline=deadline,
+                monotonic=self._monotonic, cancel=self._cancel)
+        except Exception:
+            sensor_report = {"status": "unknown", "reason": "metadata_unavailable", "stores": None}
+        if type(sensor_report) is not dict or sensor_report.get("status") not in {"fresh", "stale", "unknown"}:
+            sensor_report = {"status": "unknown", "reason": "metadata_unavailable", "stores": None}
+        expiry = sensor_report.get("expires_boottime_ns")
+        if sensor_report["status"] == "fresh" and (type(expiry) is not int or expiry < 0):
+            sensor_report = {"status": "unknown", "reason": "metadata_unavailable", "stores": None}
+            expiry = None
+        health_records = {"fingerprint_sensor": self._sensor_health.collect(sensor_report, sensor, self._now())}
+        ni02 = next(row for row in services if row["id"] == "network_metadata_projection")
+        try:
+            ni02_report = self._ni02_report.read(ni02,self._now(),deadline=deadline,monotonic=self._monotonic,cancel=self._cancel)
+        except Exception:
+            ni02_report = dict(status="unknown")
+        health_records["network_metadata_projection"] = self._ni02_health.collect(ni02_report,ni02,self._now())
+        verification=self._owner_checks.collect(services,sensor_report,ni02_report,self._now(),
+            deadline=deadline,monotonic=self._monotonic,cancel=self._cancel)
         databases, storage_ids = [], {}
         sampled_files = {}
         def sample_file(path):
@@ -357,9 +440,19 @@ class AdminOperationsReadService:
                 raise value
             return value
         for item in STORES:
-            row, identities, partial = store_row(item, self.inventory.store_intents[item.id], self.inventory.paths[item.id],
-                self._now(), sample_file, deadline=deadline, monotonic=self._monotonic, cancel=self._cancel)
+            if item.id in SENSOR_STORES:
+                row, partial = project_store(item, self.inventory.store_intents[item.id], self.inventory.paths[item.id],
+                    self._now(), sensor_report, store_row, deadline=deadline, monotonic=self._monotonic, cancel=self._cancel)
+                identities = []
+            else:
+                row, identities, partial = store_row(item, self.inventory.store_intents[item.id], self.inventory.paths[item.id],
+                    self._now(), sample_file, deadline=deadline, monotonic=self._monotonic, cancel=self._cancel)
             databases.append(row)
+            if item.id in verification:
+                current_id=(verification[item.id]['row']['observed_store_id'] if item.id in SENSOR_STORES
+                    else opaque_identity(sampled_files[self.inventory.paths[item.id]])
+                    if not isinstance(sampled_files.get(self.inventory.paths[item.id]),(OSError,type(None))) else None)
+                verification[item.id]['current_id']=current_id if row['file_presence']=='present' else None
             if partial:
                 failure("db_stat", row["id"], row["reason_code"] or "stat_unavailable")
             for identity in identities:
@@ -371,9 +464,11 @@ class AdminOperationsReadService:
                 row.update(operational_state="unknown", file_presence="unknown", main_file_bytes=None,
                            wal_bytes=None, shm_bytes=None, total_footprint_bytes=None, reason_code="storage_collision")
                 failure("inventory", row["id"], "storage_collision")
+                if row['id'] in verification:verification[row['id']]['current_id']=None
         # A successful absence is evidence too; all unknowns are not a snapshot.
         if not any(r["reason_code"] != "probe_unavailable" for r in services) and not any(r["file_presence"] != "unknown" for r in databases):
             raise OperationsError()
         return dict(snapshot_state="partial" if failures else "complete", sampling_started_at_utc=timestamp(began),
                     sampling_completed_at_utc=timestamp(self._now()), services=services, databases=databases,
-                    partial_failures=failures)
+                    partial_failures=failures, _sensor_expires_boottime_ns=expiry,
+                    _health_records=health_records, _sensor_report=sensor_report,_verification_records=verification)

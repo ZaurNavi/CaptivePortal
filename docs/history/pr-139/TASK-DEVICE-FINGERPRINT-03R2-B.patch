@@ -1,0 +1,199 @@
+diff --git a/app/device_fingerprint/portal_schemas.py b/app/device_fingerprint/portal_schemas.py
+index a7cbf3b1ee4f48960edda47ab6e20f4a24738c2b..cf26ca1ac6bf06e0aa0f76c9c0af098be61ad23a 100644
+--- a/app/device_fingerprint/portal_schemas.py
++++ b/app/device_fingerprint/portal_schemas.py
+@@ -16,6 +16,12 @@ PORTAL_HEADER_KEYS = frozenset({
+     "sec_ch_ua_platform_present", "sec_ch_ua_mobile_present",
+ })
+ 
++PORTAL_HEADER_V2_KEYS = frozenset({
++    "model_family", "os_major", "form_factor_mobile", "form_factor_tablet",
++    "form_factor_desktop", "model_source", "os_major_source",
++    "form_factors_source",
++})
++
+ _PLATFORMS = frozenset({"android", "ios", "windows", "macos", "chromeos", "linux"})
+ _RUNTIMES = frozenset({"android_webview", "chromium", "firefox", "safari_webkit"})
+ _CONTEXTS = frozenset({"android_webview", "captive_helper"})
+@@ -89,6 +95,55 @@ def validate_portal_headers_v1(value: Mapping[str, Any]) -> Mapping[str, Any]:
+     return dict(value)
+ 
+ 
++def validate_portal_headers_v2(value: Mapping[str, Any]) -> Mapping[str, Any]:
++    """Validate only the admitted normalized Client-Hints semantic payload.
++
++    This standalone contract does not register or emit ``portal_headers/2``.
++    Raw headers are parsed by the separate acquisition boundary, not here.
++    """
++    if not isinstance(value, Mapping) or set(value) != PORTAL_HEADER_V2_KEYS:
++        _fail()
++
++    model = value["model_family"]
++    _nullable_enum(value["model_source"], frozenset({"sec_ch_ua_model"}))
++    if (model is None) != (value["model_source"] is None):
++        _fail()
++    if model is not None and (
++        not isinstance(model, str)
++        or _MODEL.fullmatch(model) is None
++        or re.sub(r"[ \t]+", " ", model).strip() != model
++        or _MAC_LIKE.search(model) is not None
++        or _UUID_LIKE.search(model) is not None
++        or re.search(r"\bBuild[/ _-]", model, re.IGNORECASE) is not None
++        or any(ord(character) < 0x20 or ord(character) > 0x7E for character in model)
++    ):
++        _fail()
++
++    major = value["os_major"]
++    _nullable_enum(value["os_major_source"], frozenset({"sec_ch_ua_platform_version"}))
++    if (major is None) != (value["os_major_source"] is None):
++        _fail()
++    if major is not None and (type(major) is not int or not 0 <= major <= 999):
++        _fail()
++
++    _nullable_enum(value["form_factors_source"], frozenset({"sec_ch_ua_form_factors"}))
++    factors = (
++        value["form_factor_mobile"], value["form_factor_tablet"],
++        value["form_factor_desktop"],
++    )
++    if value["form_factors_source"] is None:
++        if any(factor is not None for factor in factors):
++            _fail()
++    elif any(type(factor) is not bool for factor in factors) or not any(factors):
++        _fail()
++
++    if all(value[source] is None for source in (
++        "model_source", "os_major_source", "form_factors_source",
++    )):
++        _fail()
++    return dict(value)
++
++
+ def _nullable_enum(value: Any, allowed: frozenset[str]) -> None:
+     if value is not None and (not isinstance(value, str) or value not in allowed):
+         _fail()
+diff --git a/tests/device_fingerprint/test_portal_schema.py b/tests/device_fingerprint/test_portal_schema.py
+index 399b315321ad37e38a4cd89239981a861d389518..9098f3f9d4f0c27cb001602d9a63a55ffb611593 100644
+--- a/tests/device_fingerprint/test_portal_schema.py
++++ b/tests/device_fingerprint/test_portal_schema.py
+@@ -2,8 +2,13 @@ from copy import deepcopy
+ 
+ import pytest
+ 
+-from app.device_fingerprint.models import DeviceFingerprintValidationError
+-from app.device_fingerprint.portal_schemas import PORTAL_HEADER_KEYS, validate_portal_headers_v1
++from app.device_fingerprint.models import DeviceFingerprintUnsupportedSchema, DeviceFingerprintValidationError
++from app.device_fingerprint.portal_schemas import (
++    PORTAL_HEADER_KEYS,
++    PORTAL_HEADER_V2_KEYS,
++    validate_portal_headers_v1,
++    validate_portal_headers_v2,
++)
+ from app.device_fingerprint.schema_registry import build_production_schema_registry
+ 
+ 
+@@ -46,3 +51,105 @@ def test_invalid_or_cross_field_portal_schema_is_rejected(mutation):
+     mutation(value)
+     with pytest.raises(DeviceFingerprintValidationError):
+         validate_portal_headers_v1(value)
++
++
++def payload_v2():
++    return {
++        "model_family": "Nokia G21",
++        "os_major": 13,
++        "form_factor_mobile": True,
++        "form_factor_tablet": False,
++        "form_factor_desktop": False,
++        "model_source": "sec_ch_ua_model",
++        "os_major_source": "sec_ch_ua_platform_version",
++        "form_factors_source": "sec_ch_ua_form_factors",
++    }
++
++
++def test_exact_normalized_v2_contract_is_valid_but_not_production_registered():
++    value = payload_v2()
++    assert set(value) == PORTAL_HEADER_V2_KEYS
++    assert validate_portal_headers_v2(value) == value
++    with pytest.raises(DeviceFingerprintUnsupportedSchema):
++        build_production_schema_registry().validate("portal_headers", 2, value)
++
++
++@pytest.mark.parametrize("mutation", [
++    lambda value: value.update(model_family=None, model_source=None),
++    lambda value: value.update(os_major=None, os_major_source=None),
++    lambda value: value.update(form_factor_mobile=None, form_factor_tablet=None,
++                               form_factor_desktop=None, form_factors_source=None),
++    lambda value: value.update(model_family=None, model_source=None,
++                               form_factor_mobile=None, form_factor_tablet=None,
++                               form_factor_desktop=None, form_factors_source=None),
++    lambda value: value.update(os_major=None, os_major_source=None,
++                               form_factor_mobile=None, form_factor_tablet=None,
++                               form_factor_desktop=None, form_factors_source=None),
++    lambda value: value.update(model_family=None, model_source=None,
++                               os_major=None, os_major_source=None),
++    lambda value: value.update(form_factor_mobile=True, form_factor_tablet=True),
++    lambda value: value.update(model_family="SM-S918B"),
++    lambda value: value.update(model_family="NovelModel X9"),
++    lambda value: value.update(model_family="A" * 64),
++    lambda value: value.update(os_major=0),
++    lambda value: value.update(os_major=999),
++])
++def test_independent_normalized_v2_groups_and_edges_are_accepted(mutation):
++    value = payload_v2()
++    mutation(value)
++    assert validate_portal_headers_v2(value) == value
++
++
++@pytest.mark.parametrize("mutation", [
++    lambda value: value.update(raw_user_agent="PRIVATE_RAW_UA_CANARY"),
++    lambda value: value.update(**{"Sec-CH-UA-Model": '"PRIVATE_RAW_CH_CANARY"'}),
++    lambda value: value.pop("model_family"),
++    lambda value: value.update(model_family=""),
++    lambda value: value.update(model_family="A" * 65),
++    lambda value: value.update(model_family="Nokia\nG21"),
++    lambda value: value.update(model_family="Nokia\tG21"),
++    lambda value: value.update(model_family="Nokía G21"),
++    lambda value: value.update(model_family="AA:BB:CC:DD:EE:FF"),
++    lambda value: value.update(model_family="123e4567-e89b-12d3-a456-426614174000"),
++    lambda value: value.update(model_family="Nokia Build ABC"),
++    lambda value: value.update(model_family="Nokia  G21"),
++    lambda value: value.update(model_family="Nokia G21 "),
++    lambda value: value.update(model_family=None),
++    lambda value: value.update(model_source=None),
++    lambda value: value.update(model_source="user_agent"),
++    lambda value: value.update(os_major=-1),
++    lambda value: value.update(os_major=1000),
++    lambda value: value.update(os_major=True),
++    lambda value: value.update(os_major="13"),
++    lambda value: value.update(os_major=None),
++    lambda value: value.update(os_major_source=None),
++    lambda value: value.update(os_major_source="sec_ch_ua_platform"),
++    lambda value: value.update(form_factor_mobile=False),
++    lambda value: value.update(form_factor_mobile=None),
++    lambda value: value.update(form_factor_mobile=1),
++    lambda value: value.update(form_factor_mobile=False, form_factor_tablet=False,
++                               form_factor_desktop=False),
++    lambda value: value.update(form_factors_source=None),
++    lambda value: value.update(form_factors_source="user_agent"),
++    lambda value: value.update(form_factor_mobile=None, form_factor_tablet=None,
++                               form_factor_desktop=None),
++    lambda value: value.update(model_family=None, model_source=None,
++                               os_major=None, os_major_source=None,
++                               form_factor_mobile=None, form_factor_tablet=None,
++                               form_factor_desktop=None, form_factors_source=None),
++])
++def test_invalid_normalized_v2_shapes_and_provenance_fail_closed(mutation):
++    value = deepcopy(payload_v2())
++    mutation(value)
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_portal_headers_v2(value)
++
++
++def test_v1_payload_and_registry_semantics_remain_independent_of_v2():
++    value = payload()
++    assert validate_portal_headers_v1(value) == value
++    assert build_production_schema_registry().validate("portal_headers", 1, value) == value
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_portal_headers_v1(payload_v2())
++    with pytest.raises(DeviceFingerprintValidationError):
++        validate_portal_headers_v2(value)

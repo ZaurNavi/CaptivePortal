@@ -3,6 +3,11 @@ Description=CaptivPortal dedicated passive fingerprint Suricata
 After=fingerprint-sensor.service
 BindsTo=fingerprint-sensor.service
 PartOf=fingerprint-sensor.service
+ConditionPathExists=!/run/ssr01b-fingerprint-pair-maintenance.hold
+ConditionPathExists=!/run/ssr01b-fingerprint-suricata-maintenance.hold
+StartLimitIntervalSec=750
+StartLimitBurst=5
+StartLimitAction=none
 
 [Service]
 Type=simple
@@ -13,12 +18,13 @@ RuntimeDirectory=fingerprint-suricata
 RuntimeDirectoryMode=0750
 ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0
 ExecStartPre=/usr/bin/test -r /etc/captive-portal/device-fingerprint/suricata.yaml
-ExecStartPre=/usr/bin/timeout 1830 /bin/sh -c 'until test -S /run/captive-portal/fingerprint-sensor/suricata-eve.sock; do sleep 1; done'
+ExecStartPre=/usr/bin/python3 -c 'import socket, sys, time\ndeadline = time.monotonic() + 30.0\nwhile True:\n    remaining = deadline - time.monotonic()\n    if remaining <= 0:\n        sys.exit("ssr01b: live EVE socket unavailable")\n    try:\n        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as probe:\n            probe.settimeout(min(0.25, remaining))\n            probe.connect("/run/captive-portal/fingerprint-sensor/suricata-eve.sock")\n        break\n    except (OSError, ValueError):\n        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))'
 ExecStartPre=/bin/sh -c '/usr/bin/suricata --build-info | /bin/grep -q "^This is Suricata version 8.0.6 RELEASE"'
 ExecStartPre=/usr/bin/suricata -T -c /etc/captive-portal/device-fingerprint/suricata.yaml
 ExecStart=/usr/bin/suricata -c /etc/captive-portal/device-fingerprint/suricata.yaml --af-packet=enp8s0 --runmode=workers
 Restart=on-failure
 RestartSec=30
+TimeoutStartSec=90
 AmbientCapabilities=CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_RAW
 NoNewPrivileges=true

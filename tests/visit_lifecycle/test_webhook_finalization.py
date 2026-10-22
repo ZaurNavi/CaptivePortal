@@ -40,13 +40,6 @@ def _record(event_id="webhook:0", **changes):
         "reported_traffic_bytes_estimate": 123456,
     }
     value.update(changes)
-    value.setdefault("raw_text", (
-        f'[client:Lab:{value.get("client_mac") or MAC}] (IP: {value.get("client_ip") or "192.0.2.20"}) '
-        f'went offline from SSID "{value.get("ssid") or ""}" '
-        f'on [ap:Lab:{value.get("ap_mac") or "02:FF:EE:DD:CC:BB"}] '
-        f'({value.get("reported_connected_seconds", 300)}s connected, '
-        f'{value.get("reported_traffic_bytes_estimate", 123456)}B).'
-    ))
     return value
 
 
@@ -72,58 +65,6 @@ def _source(repository, event_id):
             "SELECT * FROM visit_source_events WHERE event_id=?",
             (event_id,),
         ).fetchone()
-
-
-@pytest.mark.parametrize("mutation", ["missing-raw", "failed-connect", "identity-mismatch"])
-def test_context230_forged_offline_cannot_close_matching_open_visit(
-    visit_config, visit_repository, visit_service, mutation,
-):
-    opened = visit_service.submit_authorized(make_request())
-    record = _record()
-    if mutation == "missing-raw":
-        record.pop("raw_text")
-    elif mutation == "failed-connect":
-        record["raw_text"] = (
-            f'[client:Guest went offline:{MAC}] failed to connect to '
-            '[ap:Lab:02:FF:EE:DD:CC:BB] with SSID "Zefer_Parki" '
-            'on channel 6 because the password was wrong.(1 time in the last minute)'
-        )
-    else:
-        record["raw_text"] = record["raw_text"].replace(MAC, "02:11:22:33:44:99")
-    _write(visit_config.webhook_source, record)
-    assert _reader(visit_config, visit_repository, visit_service).scan_once() is True
-    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
-    source = _source(visit_repository, "webhook:0")
-    assert source is None or source["processing_result"] == "invalid"
-    states = visit_repository.get_reader_states()
-    assert len(states) == 1
-    assert next(iter(states.values())).source_offset == os.path.getsize(visit_config.webhook_source)
-
-
-@pytest.mark.parametrize("fragment", ['Guest from SSID "Wrong"', "Guest (30m connected, 99MB)",
-                                     "Guest (IP: 203.0.113.12)"])
-def test_context230_R2_real_normalized_offline_with_distracting_name_still_finalizes(
-    visit_config, visit_repository, visit_service, fragment,
-):
-    from app.integrations.omada.webhook_normalizer import normalize_webhook
-    from app.integrations.omada.webhook_site_mapping import load_webhook_site_id_mapping
-    opened = visit_service.submit_authorized(make_request())
-    text = _record()["raw_text"].replace("[client:Lab:", f"[client:{fragment}:")
-    at = datetime(2026, 8, 13, 10, 5, tzinfo=timezone.utc)
-    event = normalize_webhook({
-        "webhook_id": "r2-real-offline", "received_at": "2026-08-13T10:05:01.000Z",
-        "source_ip": "192.0.2.1", "parsed_payload": {"Site": "Lab", "timestamp": int(at.timestamp() * 1000), "text": [text]},
-    }, site_id_mapping=load_webhook_site_id_mapping('{"Lab":"site-a"}'))[0]
-    assert event["event"] == "omada.client_offline" and event["parse_status"] == "parsed"
-    _write(visit_config.webhook_source, event)
-    assert _reader(visit_config, visit_repository, visit_service).scan_once() is True
-    visit = visit_repository.get_visit("site-a", opened.visit_id)
-    assert visit.status == "closed"
-    assert visit.final_ssid == "Zefer_Parki"
-    assert visit.final_ip == "192.0.2.20"
-    assert visit.reported_connected_seconds == 300
-    assert visit.reported_traffic_total_bytes == 123456
-    assert _source(visit_repository, event["normalized_event_id"])["processing_result"] == "closed"
 
 
 def test_resolved_offline_closes_exact_site_mac_with_reported_context(

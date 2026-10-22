@@ -1,0 +1,1327 @@
+diff --git a/research/device_fingerprint_fa4/__main__.py b/research/device_fingerprint_fa4/__main__.py
+index 3175acfd124171cd851f5253d0293752a7887034..1aa667322fed23b51893e09b5c463b0112178c1f 100644
+--- a/research/device_fingerprint_fa4/__main__.py
++++ b/research/device_fingerprint_fa4/__main__.py
+@@ -6,6 +6,7 @@ import argparse
+ from pathlib import Path
+ 
+ from .measurement import InspectionCase, failed_report, inspect_read_only, write_report_file
++from .semantic_accounting import load_semantic_accounting_dependencies
+ from .workload import StressCase, run_disposable_stress
+ 
+ 
+@@ -16,6 +17,8 @@ def main() -> int:
+     parser.add_argument("--commit-sha", required=True)
+     parser.add_argument("--tree-sha", required=True)
+     parser.add_argument("--page-size", type=int, required=True)
++    parser.add_argument("--binding-timeline-payload")
++    parser.add_argument("--binding-clock-policy-payload")
+     modes = parser.add_subparsers(dest="mode", required=True)
+     inspect = modes.add_parser("inspect", help="read-only inspection of an existing DB")
+     inspect.add_argument("--db", required=True)
+@@ -32,21 +35,30 @@ def main() -> int:
+     stress.add_argument("--rows-per-writer-batch", type=int, required=True)
+     stress.add_argument("--temporary-parent")
+     args = parser.parse_args()
++    if bool(args.binding_timeline_payload) != bool(args.binding_clock_policy_payload):
++        parser.error("Both final F-B1 semantic payload files are required together")
+     if args.mode == "inspect" and Path(args.db).resolve() == Path(args.output).resolve():
+         parser.error("Report output cannot overwrite the inspected database")
+     try:
++        semantic_dependencies = None
++        if args.binding_timeline_payload:
++            semantic_dependencies = load_semantic_accounting_dependencies(
++                args.binding_timeline_payload,
++                args.binding_clock_policy_payload,
++            )
+         if args.mode == "inspect":
+             report = inspect_read_only(InspectionCase(
+                 args.case_id, args.db, args.site, args.mac, args.from_utc,
+                 args.to_utc, tuple(tuple(scope) for scope in args.health_scope),
+                 args.page_size, args.commit_sha, args.tree_sha,
+-            ))
++            ), semantic_dependencies=semantic_dependencies)
+         else:
+             report = run_disposable_stress(StressCase(
+                 args.case_id, args.evidence_rows, args.health_rows,
+                 args.page_size, args.writer_batches, args.rows_per_writer_batch,
+                 args.commit_sha, args.tree_sha,
+-            ), temporary_parent=args.temporary_parent)
++            ), temporary_parent=args.temporary_parent,
++                semantic_dependencies=semantic_dependencies)
+     except Exception as exc:
+         write_report_file(failed_report(args.commit_sha, args.tree_sha, args.case_id,
+                                         args.mode.upper(), type(exc).__name__), args.output)
+diff --git a/research/device_fingerprint_fa4/measurement.py b/research/device_fingerprint_fa4/measurement.py
+index b5fdcdfe95f7d6abe06a008f67c791104f6d52e1..8c36667041e03caeb51682127af3cad88c68be76 100644
+--- a/research/device_fingerprint_fa4/measurement.py
++++ b/research/device_fingerprint_fa4/measurement.py
+@@ -16,11 +16,28 @@ from typing import Any
+ from unittest.mock import patch
+ 
+ from app.device_fingerprint.artifact_content import canonical_artifact_json
++from app.device_fingerprint.models import DeviceFingerprintValidationError
+ from app.device_fingerprint.payload_integrity import verify_persisted_payload
+ from app.device_fingerprint.read_service import DeviceFingerprintReadService
+ from app.device_fingerprint.repository import DeviceFingerprintRepository
+ from app.device_fingerprint.schema_registry import build_production_schema_registry
+-from app.device_fingerprint.validation import parse_utc, validate_mac, validate_site_id
++from app.device_fingerprint.validation import (
++    format_utc, parse_utc, validate_mac, validate_site_id,
++)
++
++from .semantic_accounting import (
++    SemanticAccountingDependencies,
++    applicable_binding_epochs,
++    authorized_descriptor,
++    binding_descriptor_bytes,
++    complete_semantic_byte_accounting,
++    health_anchor_descriptor,
++    required_health_scopes,
++    semantic_dependency_descriptor,
++    semantic_dependency_reference_bytes,
++    validate_complete_health_scopes,
++    validate_semantic_accounting_dependencies,
++)
+ 
+ _SHA = re.compile(r"[0-9a-f]{40}")
+ _EVIDENCE_FIELDS = (
+@@ -80,10 +97,11 @@ def _duration(start: int) -> dict[str, int]:
+     return {"duration_ns": ns, "duration_ms": ns // 1_000_000}
+ 
+ 
+-def _plans(connection: Any, case: InspectionCase, watermark: int) -> list[dict[str, Any]]:
++def _plans(connection: Any, case: InspectionCase, watermark: int,
++           health_scopes: tuple[tuple[str, str, str], ...]) -> list[dict[str, Any]]:
+     """Mirror the current read-session SELECT/WHERE/ORDER/LIMIT shapes."""
+     site, mac = case.site_id, validate_mac(case.observed_mac)
+-    producer, capture, kind = case.health_scopes[0]
++    producer, capture, kind = health_scopes[0]
+     evidence_where = "site_id=? AND observed_mac=? AND observed_at>=? AND observed_at<? AND ingest_sequence<=?"
+     evidence_params: tuple[Any, ...] = (site, mac, case.from_utc, case.to_utc, watermark)
+     health_where = ("site_id=? AND producer_id=? AND capture_source_id=? AND source_kind=? "
+@@ -147,9 +165,15 @@ def _rss() -> tuple[int | None, bool]:
+         return None, False
+ 
+ 
+-def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
++def inspect_read_only(
++    case: InspectionCase,
++    *,
++    semantic_dependencies: SemanticAccountingDependencies | None = None,
++) -> dict[str, Any]:
+     """Measure one fully exhausted pinned snapshot without writing to its DB."""
+     _validate(case)
++    if semantic_dependencies is not None:
++        validate_semantic_accounting_dependencies(semantic_dependencies)
+     cpu_start, total_start = time.process_time_ns(), _ns()
+     tracemalloc.start()
+     service = DeviceFingerprintReadService(case.db_path, retention_days=case.retention_days)
+@@ -173,7 +197,20 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+             connection = snapshot._connection  # instrumentation of this exact read transaction
+             if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                 raise RuntimeError("Snapshot connection is not query-only")
+-            query_plans = _plans(connection, case, watermark.max_committed_ingest_sequence)
++            if semantic_dependencies is None:
++                applicable_epochs: list[dict[str, Any]] = []
++                measurement_health_scopes = case.health_scopes
++            else:
++                applicable_epochs = applicable_binding_epochs(
++                    semantic_dependencies, case.site_id, case.from_utc, case.to_utc,
++                )
++                measurement_health_scopes = validate_complete_health_scopes(
++                    case.health_scopes, required_health_scopes(applicable_epochs),
++                )
++            query_plans = _plans(
++                connection, case, watermark.max_committed_ingest_sequence,
++                measurement_health_scopes,
++            )
+             database_summary = {
+                 "schema_version": int(connection.execute("PRAGMA user_version").fetchone()[0]),
+                 "evidence_rows_all_devices": _count_rows(connection, "device_fingerprint_evidence"),
+@@ -184,6 +221,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+             verified_count = materialized_count = unsupported_count = 0
+             verified_bytes = materialized_bytes = largest_payload = 0
+             evidence_descriptor_bytes = health_descriptor_bytes = 0
++            health_descriptors: dict[str, dict[str, Any]] = {}
+             grouped: Counter[tuple[str, int, str]] = Counter()
+             verify_ns = 0
+             page_start = _ns()
+@@ -197,9 +235,12 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+                 for row in page["items"]:
+                     evidence_count += 1
+                     grouped[(row["source_kind"], row["feature_schema_version"], row["quality_state"])] += 1
+-                    evidence_descriptor_bytes += len(canonical_artifact_json({
+-                        field: row[field] for field in _EVIDENCE_FIELDS
+-                    }))
++                    descriptor = {field: row[field] for field in _EVIDENCE_FIELDS}
++                    if semantic_dependencies is not None:
++                        descriptor, _epoch = authorized_descriptor(
++                            row, _EVIDENCE_FIELDS, semantic_dependencies,
++                        )
++                    evidence_descriptor_bytes += len(canonical_artifact_json(descriptor))
+                     verify_start = _ns()
+                     verified = verify_persisted_payload(
+                         row["source_kind"], row["feature_schema_version"],
+@@ -219,7 +260,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+                     break
+             evidence_timing = _duration(page_start)
+             health_start = _ns()
+-            for producer, capture, kind in case.health_scopes:
++            for producer, capture, kind in measurement_health_scopes:
+                 cursor = None
+                 while True:
+                     page = snapshot.list_source_health(
+@@ -228,15 +269,64 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+                     )
+                     health_pages += 1
+                     for row in page["items"]:
+-                        health_count += 1
+-                        health_descriptor_bytes += len(canonical_artifact_json({
+-                            field: row[field] for field in _HEALTH_FIELDS
+-                        }))
++                        descriptor = {field: row[field] for field in _HEALTH_FIELDS}
++                        if semantic_dependencies is not None:
++                            descriptor, _epoch = authorized_descriptor(
++                                row, _HEALTH_FIELDS, semantic_dependencies,
++                            )
++                            existing = health_descriptors.get(row["source_health_id"])
++                            if (existing is not None
++                                    and canonical_artifact_json(existing)
++                                    != canonical_artifact_json(descriptor)):
++                                raise DeviceFingerprintValidationError(
++                                    "Conflicting source-health descriptor identity"
++                                )
++                            health_descriptors[row["source_health_id"]] = descriptor
++                        else:
++                            health_count += 1
++                            health_descriptor_bytes += len(canonical_artifact_json(descriptor))
+                     cursor = page["next_cursor"]
+                     if cursor is None:
+                         break
+-                snapshot.latest_source_health(
+-                    case.site_id, producer, capture, kind, through_utc=case.to_utc,
++                if semantic_dependencies is None:
++                    snapshot.latest_source_health(
++                        case.site_id, producer, capture, kind, through_utc=case.to_utc,
++                    )
++            if semantic_dependencies is not None:
++                window_start = parse_utc(case.from_utc)
++                for epoch in applicable_epochs:
++                    epoch_start = parse_utc(epoch["effective_from_utc"])
++                    segment_start = format_utc(max(window_start, epoch_start))
++                    anchor = snapshot.latest_source_health(
++                        case.site_id,
++                        epoch["producer_id"],
++                        epoch["capture_source_id"],
++                        epoch["source_kind"],
++                        through_utc=segment_start,
++                    )
++                    if anchor is None:
++                        continue
++                    descriptor = health_anchor_descriptor(
++                        anchor,
++                        _HEALTH_FIELDS,
++                        epoch,
++                        semantic_dependencies.binding_timeline,
++                        semantic_dependencies.binding_clock_policy,
++                    )
++                    if descriptor is None:
++                        continue
++                    existing = health_descriptors.get(anchor["source_health_id"])
++                    if (existing is not None
++                            and canonical_artifact_json(existing)
++                            != canonical_artifact_json(descriptor)):
++                        raise DeviceFingerprintValidationError(
++                            "Conflicting source-health descriptor identity"
++                        )
++                    health_descriptors[anchor["source_health_id"]] = descriptor
++                health_count = len(health_descriptors)
++                health_descriptor_bytes = sum(
++                    len(canonical_artifact_json(descriptor))
++                    for descriptor in health_descriptors.values()
+                 )
+             health_timing = _duration(health_start)
+         reader_timing = _duration(transaction_start)
+@@ -244,6 +334,47 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+         _current, peak = tracemalloc.get_traced_memory()
+         tracemalloc.stop()
+     rss, rss_available = _rss()
++    if semantic_dependencies is None:
++        semantic_accounting = {
++            "task01_evidence_descriptor_bytes": evidence_descriptor_bytes,
++            "verified_payload_bytes": verified_bytes,
++            "materialized_payload_bytes": materialized_bytes,
++            "task01_health_descriptor_bytes": health_descriptor_bytes,
++            "known_measurable_input_bytes": evidence_descriptor_bytes + verified_bytes
++            + materialized_bytes + health_descriptor_bytes,
++            "descriptor_scope": "task01_durable_fields_only_binding_epoch_pending",
++            "final_binding_and_dependency_overhead_status": "PENDING_FOUNDATION_DEPENDENCIES",
++        }
++    else:
++        binding_bytes, binding_count = binding_descriptor_bytes(applicable_epochs)
++        dependency_bytes = semantic_dependency_reference_bytes(semantic_dependencies)
++        semantic_accounting = complete_semantic_byte_accounting({
++            "authorized_evidence_descriptor_bytes": evidence_descriptor_bytes,
++            "verified_payload_bytes": verified_bytes,
++            "materialized_payload_bytes": materialized_bytes,
++            "authorized_health_descriptor_bytes": health_descriptor_bytes,
++            "binding_descriptor_bytes": binding_bytes,
++            "semantic_dependency_reference_bytes": dependency_bytes,
++        })
++        semantic_accounting.update({
++            "binding_epoch_count": binding_count,
++            "semantic_dependency_artifact_ids": {
++                "evidence_source_binding_timeline": (
++                    semantic_dependencies.binding_timeline.artifact_id
++                ),
++                "binding_clock_policy": semantic_dependencies.binding_clock_policy.artifact_id,
++                "evidence_schema_registry_contract": (
++                    semantic_dependencies.schema_registry_contract.artifact_id
++                ),
++                "ttl_capture_placement_proof": (
++                    semantic_dependencies.ttl_capture_placement_proof.artifact_id
++                ),
++                "origin_runtime_admission": semantic_dependency_descriptor(
++                    semantic_dependencies
++                )["origin_runtime_admission"]["artifact_id"],
++            },
++            "origin_runtime_admission_status": "PRE_F_ADMIT_SIZING_ONLY",
++        })
+     report = {
+         "report_schema_version": 1,
+         "candidate_identity": {
+@@ -275,16 +406,7 @@ def inspect_read_only(case: InspectionCase) -> dict[str, Any]:
+             "materialized_payload_bytes": materialized_bytes,
+             "unsupported_intact_row_count": unsupported_count,
+         },
+-        "semantic_byte_accounting": {
+-            "task01_evidence_descriptor_bytes": evidence_descriptor_bytes,
+-            "verified_payload_bytes": verified_bytes,
+-            "materialized_payload_bytes": materialized_bytes,
+-            "task01_health_descriptor_bytes": health_descriptor_bytes,
+-            "known_measurable_input_bytes": evidence_descriptor_bytes + verified_bytes
+-            + materialized_bytes + health_descriptor_bytes,
+-            "descriptor_scope": "task01_durable_fields_only_binding_epoch_pending",
+-            "final_binding_and_dependency_overhead_status": "PENDING_FOUNDATION_DEPENDENCIES",
+-        },
++        "semantic_byte_accounting": semantic_accounting,
+         "timing": {"open_snapshot_transaction": open_timing,
+                    "watermark_capture": {"duration_ns": watermark_capture_ns,
+                                          "duration_ms": watermark_capture_ns // 1_000_000},
+diff --git a/research/device_fingerprint_fa4/semantic_accounting.py b/research/device_fingerprint_fa4/semantic_accounting.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..72b3917aaa47ae9f6005a818c2315974017b3d8f
+--- /dev/null
++++ b/research/device_fingerprint_fa4/semantic_accounting.py
+@@ -0,0 +1,341 @@
++"""Exact R14 semantic-byte accounting dependencies for F-A4 measurement."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Iterable
++
++from app.device_fingerprint.artifact_content import (
++    ArtifactContent,
++    ArtifactRef,
++    canonical_artifact_json,
++    canonical_set,
++    decode_artifact_json,
++    make_artifact_content,
++)
++from app.device_fingerprint.binding_contracts import (
++    make_binding_clock_policy,
++    make_evidence_source_binding_timeline,
++    resolve_authoritative_binding,
++)
++from app.device_fingerprint.foundation_schema_artifacts import (
++    build_foundation_schema_artifacts,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.source_health_emitter_contracts import (
++    build_source_health_emitter_contracts,
++)
++from app.device_fingerprint.validation import parse_utc, validate_site_id
++
++ACCEPTED_BINDING_TIMELINE_ID = (
++    "EvidenceSourceBindingTimeline:v1:sha256:"
++    "820c5d43aca36b2284fe43cf4bbc4ce380300901c7adf9a0808353d28004a357"
++)
++ACCEPTED_BINDING_CLOCK_POLICY_ID = (
++    "BindingClockPolicy:v1:sha256:"
++    "4d825299e26819129ab5c357f12e7c5a54fa06999df02cf1cc87ccb1ae45ca66"
++)
++ACCEPTED_SCHEMA_REGISTRY_ID = (
++    "EvidenceSchemaRegistryContract:v1:sha256:"
++    "090d763e99247ca3b10be34976069e4e7e708be0899e21a15c6e103a015f7814"
++)
++ACCEPTED_TTL_PROOF_ID = (
++    "TTLCapturePlacementProof:v1:sha256:"
++    "c47c4235ddb2fd55c9851484f2fc242fe49a31e6b08d8ac44388368266989e1f"
++)
++ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC = "2026-09-18T10:43:29.014Z"
++
++_SOURCE_ORIGINS = {
++    "dhcp": "dhcp",
++    "portal_headers": "portal",
++    "tcp_syn": "tcp",
++    "tls_client": "tls",
++    "quic_client": "quic",
++}
++_BYTE_CATEGORIES = frozenset({
++    "authorized_evidence_descriptor_bytes",
++    "verified_payload_bytes",
++    "materialized_payload_bytes",
++    "authorized_health_descriptor_bytes",
++    "binding_descriptor_bytes",
++    "semantic_dependency_reference_bytes",
++})
++
++
++def _fail(message: str) -> None:
++    raise DeviceFingerprintValidationError(message)
++
++
++def _ref(content: ArtifactContent) -> dict[str, str]:
++    return ArtifactRef(content.artifact_id, content.content_sha256).as_dict()
++
++
++@dataclass(frozen=True, slots=True)
++class SemanticAccountingDependencies:
++    """Exact accepted dependencies required for COMPLETE F-A4 accounting."""
++
++    binding_timeline: ArtifactContent
++    binding_clock_policy: ArtifactContent
++    schema_registry_contract: ArtifactContent
++    ttl_capture_placement_proof: ArtifactRef
++
++
++def build_semantic_accounting_dependencies(
++    binding_timeline_payload: dict[str, Any],
++    binding_clock_policy_payload: dict[str, Any],
++) -> SemanticAccountingDependencies:
++    """Rematerialize and validate the accepted F-B1/F-A5/F-C3 inputs."""
++    timeline = make_evidence_source_binding_timeline(
++        binding_timeline_payload, build_source_health_emitter_contracts(),
++    )
++    clock = make_binding_clock_policy(binding_clock_policy_payload)
++    registry = build_foundation_schema_artifacts()["EvidenceSchemaRegistryContract"]
++    dependencies = SemanticAccountingDependencies(
++        timeline,
++        clock,
++        registry,
++        ArtifactRef(
++            ACCEPTED_TTL_PROOF_ID,
++            ACCEPTED_TTL_PROOF_ID.rsplit(":", 1)[1],
++        ),
++    )
++    validate_semantic_accounting_dependencies(dependencies)
++    return dependencies
++
++
++def load_semantic_accounting_dependencies(
++    binding_timeline_path: str,
++    binding_clock_policy_path: str,
++) -> SemanticAccountingDependencies:
++    """Load semantic payload JSON files without accepting artifact-ID assertions."""
++    try:
++        timeline = decode_artifact_json(
++            Path(binding_timeline_path).read_text(encoding="utf-8")
++        )
++        clock = decode_artifact_json(
++            Path(binding_clock_policy_path).read_text(encoding="utf-8")
++        )
++        canonical_artifact_json(timeline)
++        canonical_artifact_json(clock)
++    except (OSError, UnicodeError) as exc:
++        raise DeviceFingerprintValidationError("Invalid F-A4 dependency input") from exc
++    if not isinstance(timeline, dict) or not isinstance(clock, dict):
++        _fail("Invalid F-A4 dependency payload")
++    return build_semantic_accounting_dependencies(timeline, clock)
++
++
++def validate_semantic_accounting_dependencies(
++    dependencies: SemanticAccountingDependencies,
++) -> None:
++    if not isinstance(dependencies, SemanticAccountingDependencies):
++        _fail("Missing F-A4 semantic dependencies")
++    expected = (
++        (dependencies.binding_timeline, "EvidenceSourceBindingTimeline",
++         ACCEPTED_BINDING_TIMELINE_ID),
++        (dependencies.binding_clock_policy, "BindingClockPolicy",
++         ACCEPTED_BINDING_CLOCK_POLICY_ID),
++        (dependencies.schema_registry_contract, "EvidenceSchemaRegistryContract",
++         ACCEPTED_SCHEMA_REGISTRY_ID),
++    )
++    for content, artifact_type, artifact_id in expected:
++        if (not isinstance(content, ArtifactContent)
++                or content.artifact_type != artifact_type
++                or content.artifact_id != artifact_id
++                or content.content_sha256 != artifact_id.rsplit(":", 1)[1]):
++            _fail(f"Wrong accepted {artifact_type} identity")
++    proof = dependencies.ttl_capture_placement_proof
++    if (not isinstance(proof, ArtifactRef)
++            or proof.artifact_id != ACCEPTED_TTL_PROOF_ID
++            or proof.content_sha256 != ACCEPTED_TTL_PROOF_ID.rsplit(":", 1)[1]):
++        _fail("Wrong accepted TTLCapturePlacementProof identity")
++
++
++def resolve_row_binding(
++    row: dict[str, Any],
++    timeline: ArtifactContent,
++    clock_policy: ArtifactContent,
++) -> dict[str, Any]:
++    """Resolve and verify one exact row authority without fallback."""
++    source_kind = row.get("source_kind")
++    origin_group = _SOURCE_ORIGINS.get(source_kind)
++    if origin_group is None:
++        _fail("No exact origin mapping for source kind")
++    result = resolve_authoritative_binding(
++        timeline,
++        clock_policy,
++        row.get("site_id"),
++        origin_group,
++        source_kind,
++        row.get("observed_at"),
++    )
++    if result["status"] != "AUTHORIZED" or result["binding_epoch"] is None:
++        _fail("Snapshot row has no unambiguous authoritative binding")
++    epoch = result["binding_epoch"]
++    if (row.get("producer_id") != epoch["producer_id"]
++            or row.get("capture_source_id") != epoch["capture_source_id"]):
++        _fail("Snapshot row does not match authoritative binding")
++    return epoch
++
++
++def authorized_descriptor(
++    row: dict[str, Any],
++    fields: Iterable[str],
++    dependencies: SemanticAccountingDependencies,
++) -> tuple[dict[str, Any], dict[str, Any]]:
++    """Return one exact R14 descriptor plus its authoritative binding epoch."""
++    epoch = resolve_row_binding(
++        row, dependencies.binding_timeline, dependencies.binding_clock_policy,
++    )
++    try:
++        descriptor = {field: row[field] for field in fields}
++    except KeyError as exc:
++        raise DeviceFingerprintValidationError("Incomplete snapshot descriptor") from exc
++    descriptor["binding_epoch_id"] = epoch["binding_epoch_id"]
++    return descriptor, epoch
++
++
++def applicable_binding_epochs(
++    dependencies: SemanticAccountingDependencies,
++    site_id: str,
++    window_start_utc: str,
++    window_end_utc: str,
++) -> list[dict[str, Any]]:
++    """Return every site epoch whose half-open interval intersects the window."""
++    validate_semantic_accounting_dependencies(dependencies)
++    validate_site_id(site_id)
++    start = parse_utc(window_start_utc)
++    end = parse_utc(window_end_utc)
++    valid_from = parse_utc(ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC)
++    if start < valid_from:
++        _fail("Snapshot window starts before classification foundation valid-from")
++    if start >= end:
++        _fail("Invalid snapshot window")
++    applicable = []
++    for epoch in dependencies.binding_timeline.semantic_payload["binding_epochs"]:
++        epoch_start = parse_utc(epoch["effective_from_utc"])
++        epoch_end = (
++            None if epoch["effective_to_utc"] is None
++            else parse_utc(epoch["effective_to_utc"])
++        )
++        if (epoch["site_id"] == site_id
++                and epoch_start < end
++                and (epoch_end is None or start < epoch_end)):
++            applicable.append(epoch)
++    return ordered_binding_descriptors(applicable)
++
++
++def required_health_scopes(
++    applicable_epochs: Iterable[dict[str, Any]],
++) -> tuple[tuple[str, str, str], ...]:
++    scopes = {
++        (epoch["producer_id"], epoch["capture_source_id"], epoch["source_kind"])
++        for epoch in applicable_epochs
++    }
++    return tuple(sorted(scopes))
++
++
++def validate_complete_health_scopes(
++    supplied_scopes: tuple[tuple[str, str, str], ...],
++    required_scopes: tuple[tuple[str, str, str], ...],
++) -> tuple[tuple[str, str, str], ...]:
++    if (not isinstance(supplied_scopes, tuple)
++            or len(supplied_scopes) != len(set(supplied_scopes))
++            or tuple(sorted(supplied_scopes)) != required_scopes):
++        _fail("Complete measurement health scopes do not match applicable bindings")
++    return required_scopes
++
++
++def health_anchor_descriptor(
++    row: dict[str, Any],
++    fields: Iterable[str],
++    target_epoch: dict[str, Any],
++    timeline: ArtifactContent,
++    clock_policy: ArtifactContent,
++) -> dict[str, Any] | None:
++    """Keep an anchor only when it is authoritative for this exact epoch."""
++    epoch = resolve_row_binding(row, timeline, clock_policy)
++    if epoch["binding_epoch_id"] != target_epoch["binding_epoch_id"]:
++        return None
++    try:
++        descriptor = {field: row[field] for field in fields}
++    except KeyError as exc:
++        raise DeviceFingerprintValidationError("Incomplete health anchor descriptor") from exc
++    descriptor["binding_epoch_id"] = epoch["binding_epoch_id"]
++    return descriptor
++
++
++def ordered_binding_descriptors(epochs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
++    """Deduplicate by epoch ID and apply the exact R14 binding ordering tuple."""
++    by_id: dict[str, dict[str, Any]] = {}
++    for epoch in epochs:
++        epoch_id = epoch.get("binding_epoch_id") if isinstance(epoch, dict) else None
++        if not isinstance(epoch_id, str) or not epoch_id:
++            _fail("Invalid binding descriptor")
++        previous = by_id.get(epoch_id)
++        if previous is not None and canonical_artifact_json(previous) != canonical_artifact_json(epoch):
++            _fail("Conflicting binding descriptor identity")
++        by_id[epoch_id] = epoch
++    return canonical_set(list(by_id.values()), lambda epoch: (
++        epoch["effective_from_utc"],
++        epoch["origin_group"],
++        epoch["source_kind"],
++        epoch["capture_source_id"],
++        epoch["producer_id"],
++        epoch["binding_epoch_id"],
++    ))
++
++
++def binding_descriptor_bytes(epochs: Iterable[dict[str, Any]]) -> tuple[int, int]:
++    ordered = ordered_binding_descriptors(epochs)
++    return sum(len(canonical_artifact_json(epoch)) for epoch in ordered), len(ordered)
++
++
++def semantic_dependency_descriptor(
++    dependencies: SemanticAccountingDependencies,
++) -> dict[str, Any]:
++    """Build the exact PRE-F-ADMIT snapshot dependency structures for sizing."""
++    validate_semantic_accounting_dependencies(dependencies)
++    proof_ref = dependencies.ttl_capture_placement_proof.as_dict()
++    origin_payload = {
++        "origin_runtime_admission_contract_version": 1,
++        "tcp_state": "ENABLED",
++        "tcp_reason_code": "TTL_PROOF_VALID",
++        "ttl_capture_placement_proof": proof_ref,
++    }
++    origin = make_artifact_content("OriginRuntimeAdmission", origin_payload)
++    return {
++        "evidence_source_binding_timeline": _ref(dependencies.binding_timeline),
++        "binding_clock_policy": _ref(dependencies.binding_clock_policy),
++        "evidence_schema_registry_contract": _ref(dependencies.schema_registry_contract),
++        "origin_runtime_admission": {
++            "artifact_id": origin.artifact_id,
++            "content_sha256": origin.content_sha256,
++            "tcp_state": origin_payload["tcp_state"],
++            "tcp_reason_code": origin_payload["tcp_reason_code"],
++            "ttl_capture_placement_proof": proof_ref,
++        },
++        "classification_foundation_valid_from_utc": (
++            ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC
++        ),
++    }
++
++
++def semantic_dependency_reference_bytes(
++    dependencies: SemanticAccountingDependencies,
++) -> int:
++    return len(canonical_artifact_json(semantic_dependency_descriptor(dependencies)))
++
++
++def complete_semantic_byte_accounting(categories: dict[str, Any]) -> dict[str, Any]:
++    """Complete the exact six-category formula, or fail closed."""
++    if not isinstance(categories, dict) or set(categories) != _BYTE_CATEGORIES:
++        _fail("Incomplete semantic byte accounting categories")
++    if any(type(value) is not int or value < 0 for value in categories.values()):
++        _fail("Invalid semantic byte accounting category")
++    return {
++        **categories,
++        "total_semantic_input_bytes": sum(categories.values()),
++        "descriptor_scope": "r14_snapshot_semantic_descriptors_complete",
++        "final_binding_and_dependency_overhead_status": "COMPLETE",
++    }
+diff --git a/research/device_fingerprint_fa4/workload.py b/research/device_fingerprint_fa4/workload.py
+index ecb53d3b0bd8fc51144a8897d478c5d8aebad112..87deda927bc75b892e63f9fd4feece64c63a35f7 100644
+--- a/research/device_fingerprint_fa4/workload.py
++++ b/research/device_fingerprint_fa4/workload.py
+@@ -21,9 +21,14 @@ from app.device_fingerprint.service import DeviceFingerprintService
+ from app.device_fingerprint.validation import format_utc
+ 
+ from .measurement import InspectionCase, inspect_read_only, _duration, _ns, _rss
++from .semantic_accounting import (
++    SemanticAccountingDependencies,
++    applicable_binding_epochs,
++    required_health_scopes,
++)
+ 
+ UTC = timezone.utc
+-FIXED_NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
++FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+ FIXED_SITE = "6a64f17630da7c70d232187a"
+ FIXED_MAC = "AA:BB:CC:DD:EE:FF"
+ 
+@@ -89,8 +94,13 @@ def _wal_bytes(path: Path) -> int:
+     return wal.stat().st_size if wal.exists() else 0
+ 
+ 
+-def run_disposable_stress(case: StressCase, *, temporary_parent: str | None = None,
+-                          target_db_path: str | None = None) -> dict[str, Any]:
++def run_disposable_stress(
++    case: StressCase,
++    *,
++    temporary_parent: str | None = None,
++    target_db_path: str | None = None,
++    semantic_dependencies: SemanticAccountingDependencies | None = None,
++) -> dict[str, Any]:
+     """Never stress a supplied/existing database; create a new private temp DB."""
+     if target_db_path is not None:
+         raise ValueError("Stress target must be internally created and disposable")
+@@ -122,13 +132,18 @@ def run_disposable_stress(case: StressCase, *, temporary_parent: str | None = No
+             service = DeviceFingerprintService(config, repo, build_production_schema_registry(), now=lambda: FIXED_NOW)
+             _seed(service, producer, case.evidence_row_count, _evidence, "evidence_batch")
+             _seed(service, producer, case.health_row_count, _health, "source_health_batch")
++            from_utc = format_utc(FIXED_NOW - timedelta(seconds=1))
++            to_utc = format_utc(FIXED_NOW + timedelta(seconds=1))
++            health_scopes = ((producer.producer_id, producer.capture_source_id, "dhcp"),)
++            if semantic_dependencies is not None:
++                health_scopes = required_health_scopes(applicable_binding_epochs(
++                    semantic_dependencies, FIXED_SITE, from_utc, to_utc,
++                ))
+             inspection = inspect_read_only(InspectionCase(
+                 case.measurement_case_id, str(path), FIXED_SITE, FIXED_MAC,
+-                format_utc(FIXED_NOW - timedelta(seconds=1)),
+-                format_utc(FIXED_NOW + timedelta(seconds=1)),
+-                ((producer.producer_id, producer.capture_source_id, "dhcp"),),
++                from_utc, to_utc, health_scopes,
+                 case.page_size, case.repository_commit_sha, case.repository_tree_sha,
+-            ))
++            ), semantic_dependencies=semantic_dependencies)
+             before = _wal_bytes(path)
+             reader_start = _ns()
+             cpu_start = time.process_time_ns()
+diff --git a/tests/device_fingerprint_fa4/conftest.py b/tests/device_fingerprint_fa4/conftest.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3161a54e23d7966b70c41e3456449b1a05b60f3e
+--- /dev/null
++++ b/tests/device_fingerprint_fa4/conftest.py
+@@ -0,0 +1,87 @@
++"""Exact accepted F-B1 semantic inputs for F-A4 accounting tests."""
++
++import pytest
++
++from research.device_fingerprint_fa4.semantic_accounting import (
++    build_semantic_accounting_dependencies,
++)
++
++SITE_ID = "6a64f17630da7c70d232187a"
++EFFECTIVE_FROM = "2026-09-18T10:43:29.014Z"
++NETWORK_EMITTER = {
++    "artifact_id": (
++        "SourceHealthEmitterContract:v1:sha256:"
++        "45fb264bca5acd33e2202ea3048038cf59218c3c802610ed95d36c5d35022e56"
++    ),
++    "content_sha256": "45fb264bca5acd33e2202ea3048038cf59218c3c802610ed95d36c5d35022e56",
++}
++PORTAL_EMITTER = {
++    "artifact_id": (
++        "SourceHealthEmitterContract:v1:sha256:"
++        "568c6738c30c6d3c3ba8ddecea937b6289e37479c8d453810cc4b0884b2f8ee8"
++    ),
++    "content_sha256": "568c6738c30c6d3c3ba8ddecea937b6289e37479c8d453810cc4b0884b2f8ee8",
++}
++
++
++def binding_epoch(origin: str, source_kind: str, producer: str, capture: str,
++                  emitter: dict[str, str], *, suffix: str = "v1",
++                  effective_from: str = EFFECTIVE_FROM,
++                  effective_to: str | None = None) -> dict:
++    return {
++        "binding_epoch_id": f"zefer-{origin}-{suffix}-20260918T104329014Z",
++        "site_id": SITE_ID,
++        "origin_group": origin,
++        "source_kind": source_kind,
++        "capture_source_id": capture,
++        "producer_id": producer,
++        "source_health_emitter_contract": emitter,
++        "effective_from_utc": effective_from,
++        "effective_to_utc": effective_to,
++    }
++
++
++def accepted_timeline_payload() -> dict:
++    return {
++        "binding_timeline_contract_version": 1,
++        "binding_epochs": [
++            binding_epoch("dhcp", "dhcp", "sensor-zefer-01", "zefer-span-01",
++                          NETWORK_EMITTER),
++            binding_epoch("portal", "portal_headers", "portal-zefer-01",
++                          "zefer-portal-http-01", PORTAL_EMITTER),
++            binding_epoch("quic", "quic_client", "sensor-zefer-01", "zefer-span-01",
++                          NETWORK_EMITTER),
++            binding_epoch("tcp", "tcp_syn", "sensor-zefer-01", "zefer-span-01",
++                          NETWORK_EMITTER),
++            binding_epoch("tls", "tls_client", "sensor-zefer-01", "zefer-span-01",
++                          NETWORK_EMITTER),
++        ],
++    }
++
++
++def accepted_clock_payload() -> dict:
++    domain = (
++        "linux-realtime:local.domain.az:boot:39b7ba86-0a72-4e44-9091-f72d50385e97:"
++        "time:[4026531834]"
++    )
++    return {
++        "binding_clock_policy_version": 1,
++        "producer_clock_domains": [
++            {"clock_domain_id": domain, "producer_id": "portal-zefer-01"},
++            {"clock_domain_id": domain, "producer_id": "sensor-zefer-01"},
++        ],
++        "task01_clock_domain_id": domain,
++        "measured_max_relative_clock_offset_ms": 0,
++        "measurement_method_id": "shared-linux-time-namespace-identity-v1",
++        "measurement_evidence_ref": (
++            "sha256:b2a188c881d94e70dedbe5abd2100c9f0f90d48cc2850377a088db065fb8f482"
++        ),
++        "cutover_guard_seconds": 0,
++    }
++
++
++@pytest.fixture
++def accepted_dependencies():
++    return build_semantic_accounting_dependencies(
++        accepted_timeline_payload(), accepted_clock_payload(),
++    )
+diff --git a/tests/device_fingerprint_fa4/test_measurement.py b/tests/device_fingerprint_fa4/test_measurement.py
+index 7650aeee240a633f664d056c1ee8a219f04770ef..95113cf1458cdf87d713e4f6c9207880f992de9e 100644
+--- a/tests/device_fingerprint_fa4/test_measurement.py
++++ b/tests/device_fingerprint_fa4/test_measurement.py
+@@ -2,6 +2,7 @@
+ 
+ import hashlib
+ import json
++from dataclasses import replace
+ from datetime import timedelta
+ from pathlib import Path
+ 
+@@ -11,10 +12,15 @@ from app.device_fingerprint.models import DeviceFingerprintValidationError
+ from app.device_fingerprint.repository import DeviceFingerprintRepository
+ from app.device_fingerprint.schema_registry import build_production_schema_registry
+ from app.device_fingerprint.service import DeviceFingerprintService
+-from app.device_fingerprint.validation import canonical_json, canonical_sha256, format_utc
++from app.device_fingerprint.validation import (
++    canonical_json, canonical_sha256, format_utc, parse_utc,
++)
+ from research.device_fingerprint_fa4.measurement import (
+     InspectionCase, failed_report, inspect_read_only, report_json, write_report_file,
+ )
++from research.device_fingerprint_fa4.semantic_accounting import (
++    applicable_binding_epochs, required_health_scopes,
++)
+ from research.device_fingerprint_fa4.workload import FIXED_MAC, FIXED_NOW, _evidence, _health
+ from tests.device_fingerprint import config, producer
+ 
+@@ -49,6 +55,13 @@ def _fingerprint(path):
+             hashlib.sha256(wal.read_bytes()).hexdigest() if wal.exists() else None)
+ 
+ 
++def _complete_case(case, dependencies):
++    epochs = applicable_binding_epochs(
++        dependencies, case.site_id, case.from_utc, case.to_utc,
++    )
++    return replace(case, health_scopes=required_health_scopes(epochs))
++
++
+ def test_read_only_pages_exhaust_and_report_query_plans_without_mutation(tmp_path):
+     cfg, repo, _svc, case = _fixture(tmp_path)
+     before = _fingerprint(cfg.db_path)
+@@ -76,6 +89,111 @@ def test_read_only_pages_exhaust_and_report_query_plans_without_mutation(tmp_pat
+     repo.close()
+ 
+ 
++def test_complete_semantic_accounting_uses_exact_six_category_formula_and_is_private(
++    tmp_path, accepted_dependencies,
++):
++    _cfg, repo, _svc, case = _fixture(tmp_path, count=2)
++    case = _complete_case(case, accepted_dependencies)
++    report = inspect_read_only(case, semantic_dependencies=accepted_dependencies)
++    accounting = report["semantic_byte_accounting"]
++    categories = (
++        "authorized_evidence_descriptor_bytes",
++        "verified_payload_bytes",
++        "materialized_payload_bytes",
++        "authorized_health_descriptor_bytes",
++        "binding_descriptor_bytes",
++        "semantic_dependency_reference_bytes",
++    )
++    assert accounting["total_semantic_input_bytes"] == sum(
++        accounting[field] for field in categories
++    )
++    assert accounting["descriptor_scope"] == "r14_snapshot_semantic_descriptors_complete"
++    assert accounting["final_binding_and_dependency_overhead_status"] == "COMPLETE"
++    assert accounting["binding_epoch_count"] == 5
++    serialized = report_json(report)
++    for forbidden in (
++        FIXED_MAC, FIXED_MAC.lower(), "192.168.8.10", "payload_json",
++        "android-dhcp-13", "LAB-ONLY-NOT-RETAINED", "Bearer", "User-Agent",
++        "Sec-CH-UA-Model",
++    ):
++        assert forbidden not in serialized
++    repo.close()
++
++
++@pytest.mark.parametrize("scope_variant", ["missing", "extra", "duplicate"])
++def test_complete_health_scope_set_fails_closed_when_not_exact(
++    tmp_path, accepted_dependencies, scope_variant,
++):
++    _cfg, repo, _svc, case = _fixture(tmp_path, count=1)
++    exact = _complete_case(case, accepted_dependencies)
++    if scope_variant == "missing":
++        candidate = replace(exact, health_scopes=exact.health_scopes[:-1])
++    elif scope_variant == "extra":
++        candidate = replace(
++            exact,
++            health_scopes=exact.health_scopes + (("extra-producer", "extra-capture", "dhcp"),),
++        )
++    else:
++        candidate = replace(
++            exact,
++            health_scopes=exact.health_scopes + (exact.health_scopes[0],),
++        )
++    with pytest.raises((DeviceFingerprintValidationError, ValueError)):
++        inspect_read_only(candidate, semantic_dependencies=accepted_dependencies)
++    repo.close()
++
++
++def _insert_health(svc, number, observed_at):
++    event = _health(number)
++    event["observed_at"] = observed_at
++    assert svc.source_health_batch(producer(), {
++        "producer_id": producer().producer_id, "events": [event],
++    }).inserted == 1
++
++
++def test_complete_health_includes_same_epoch_predecessor_before_window(
++    tmp_path, accepted_dependencies,
++):
++    _cfg, repo, svc, case = _fixture(tmp_path, count=0)
++    predecessor_at = format_utc(parse_utc(case.from_utc) - timedelta(milliseconds=1))
++    _insert_health(svc, 100, predecessor_at)
++    report = inspect_read_only(
++        _complete_case(case, accepted_dependencies),
++        semantic_dependencies=accepted_dependencies,
++    )
++    assert report["cardinality"]["total_relevant_health_rows"] == 1
++    assert report["semantic_byte_accounting"]["authorized_health_descriptor_bytes"] > 0
++    repo.close()
++
++
++def test_complete_health_boundary_row_is_counted_once(
++    tmp_path, accepted_dependencies,
++):
++    _cfg, repo, svc, case = _fixture(tmp_path, count=0)
++    _insert_health(svc, 101, case.from_utc)
++    report = inspect_read_only(
++        _complete_case(case, accepted_dependencies),
++        semantic_dependencies=accepted_dependencies,
++    )
++    assert report["cardinality"]["total_relevant_health_rows"] == 1
++    repo.close()
++
++
++def test_complete_health_without_predecessor_does_not_fabricate_row(
++    tmp_path, accepted_dependencies,
++):
++    _cfg, repo, _svc, case = _fixture(tmp_path, count=0)
++    report = inspect_read_only(
++        _complete_case(case, accepted_dependencies),
++        semantic_dependencies=accepted_dependencies,
++    )
++    assert report["cardinality"]["total_relevant_health_rows"] == 0
++    assert report["semantic_byte_accounting"]["authorized_health_descriptor_bytes"] == 0
++    assert report["semantic_byte_accounting"]["binding_epoch_count"] == 5
++    assert report["semantic_byte_accounting"]["binding_descriptor_bytes"] > 0
++    repo.close()
++
++
+ def test_reader_transaction_lifetime_includes_open_and_all_pagination(tmp_path):
+     _cfg, repo, _svc, case = _fixture(tmp_path)
+     timing = inspect_read_only(case)["timing"]
+diff --git a/tests/device_fingerprint_fa4/test_semantic_accounting.py b/tests/device_fingerprint_fa4/test_semantic_accounting.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..86beaf3daa8aea2a7bbcc1687ba39529e30764cb
+--- /dev/null
++++ b/tests/device_fingerprint_fa4/test_semantic_accounting.py
+@@ -0,0 +1,322 @@
++"""R14 COMPLETE semantic-byte accounting dependency proofs."""
++
++import json
++from dataclasses import replace
++
++import pytest
++
++from app.device_fingerprint.artifact_content import (
++    ArtifactRef,
++    canonical_artifact_json,
++    make_artifact_content,
++)
++from app.device_fingerprint.binding_contracts import (
++    make_binding_clock_policy,
++    make_evidence_source_binding_timeline,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.source_health_emitter_contracts import (
++    build_source_health_emitter_contracts,
++)
++from research.device_fingerprint_fa4.measurement import _EVIDENCE_FIELDS, _HEALTH_FIELDS
++from research.device_fingerprint_fa4.semantic_accounting import (
++    ACCEPTED_BINDING_CLOCK_POLICY_ID,
++    ACCEPTED_BINDING_TIMELINE_ID,
++    ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,
++    ACCEPTED_SCHEMA_REGISTRY_ID,
++    ACCEPTED_TTL_PROOF_ID,
++    applicable_binding_epochs,
++    authorized_descriptor,
++    binding_descriptor_bytes,
++    complete_semantic_byte_accounting,
++    health_anchor_descriptor,
++    load_semantic_accounting_dependencies,
++    ordered_binding_descriptors,
++    resolve_row_binding,
++    semantic_dependency_descriptor,
++    semantic_dependency_reference_bytes,
++    validate_semantic_accounting_dependencies,
++)
++
++from .conftest import (
++    EFFECTIVE_FROM,
++    NETWORK_EMITTER,
++    SITE_ID,
++    accepted_clock_payload,
++    accepted_timeline_payload,
++    binding_epoch,
++)
++
++
++def _evidence_row(observed_at: str = "2026-09-18T10:43:30.000Z") -> dict:
++    return {
++        "evidence_id": "00000000-0000-4000-8000-000000000001",
++        "ingest_sequence": 1,
++        "producer_id": "sensor-zefer-01",
++        "source_kind": "dhcp",
++        "source_subtype": None,
++        "capture_source_id": "zefer-span-01",
++        "extractor_name": "dhcp-v1",
++        "extractor_version": "1.0.0",
++        "feature_schema_version": 1,
++        "rule_version": None,
++        "site_id": SITE_ID,
++        "observed_at": observed_at,
++        "ingested_at": "2026-09-18T10:43:31.000Z",
++        "observed_mac": "AA:BB:CC:DD:EE:FF",
++        "privacy_class": "device_fingerprint_restricted",
++        "quality_state": "valid",
++        "payload_sha256": "a" * 64,
++    }
++
++
++def _health_row() -> dict:
++    return {
++        "source_health_id": "00000000-0000-4000-8000-000000000002",
++        "ingest_sequence": 2,
++        "producer_id": "sensor-zefer-01",
++        "source_kind": "dhcp",
++        "capture_source_id": "zefer-span-01",
++        "site_id": SITE_ID,
++        "status": "available",
++        "reason_code": None,
++        "observed_at": "2026-09-18T10:43:30.000Z",
++        "ingested_at": "2026-09-18T10:43:31.000Z",
++        "content_sha256": "b" * 64,
++    }
++
++
++def test_exact_accepted_dependency_identities_are_rematerialized(accepted_dependencies):
++    assert accepted_dependencies.binding_timeline.artifact_id == ACCEPTED_BINDING_TIMELINE_ID
++    assert accepted_dependencies.binding_clock_policy.artifact_id == ACCEPTED_BINDING_CLOCK_POLICY_ID
++    assert accepted_dependencies.schema_registry_contract.artifact_id == ACCEPTED_SCHEMA_REGISTRY_ID
++    validate_semantic_accounting_dependencies(accepted_dependencies)
++
++
++def test_dependency_payload_files_are_rematerialized_not_trusted(tmp_path):
++    timeline_path = tmp_path / "timeline.json"
++    clock_path = tmp_path / "clock.json"
++    timeline_path.write_text(json.dumps(accepted_timeline_payload()), encoding="utf-8")
++    clock_path.write_text(json.dumps(accepted_clock_payload()), encoding="utf-8")
++    loaded = load_semantic_accounting_dependencies(str(timeline_path), str(clock_path))
++    assert loaded.binding_timeline.artifact_id == ACCEPTED_BINDING_TIMELINE_ID
++    assert loaded.binding_clock_policy.artifact_id == ACCEPTED_BINDING_CLOCK_POLICY_ID
++
++    wrong = accepted_clock_payload()
++    wrong["measurement_method_id"] = "unaccepted-clock-proof"
++    clock_path.write_text(json.dumps(wrong), encoding="utf-8")
++    with pytest.raises(DeviceFingerprintValidationError, match="Wrong accepted"):
++        load_semantic_accounting_dependencies(str(timeline_path), str(clock_path))
++
++
++def test_dependency_payload_import_rejects_duplicate_json_keys(tmp_path):
++    timeline_path = tmp_path / "timeline.json"
++    clock_path = tmp_path / "clock.json"
++    timeline_path.write_text('{"duplicate":1,"duplicate":2}', encoding="utf-8")
++    clock_path.write_text(json.dumps(accepted_clock_payload()), encoding="utf-8")
++    with pytest.raises(DeviceFingerprintValidationError, match="Duplicate"):
++        load_semantic_accounting_dependencies(str(timeline_path), str(clock_path))
++
++
++@pytest.mark.parametrize("invalid_payload", [
++    "{",
++    "[]",
++    '{"\u00e9":1,"e\u0301":2}',
++])
++def test_dependency_payload_import_rejects_invalid_nonobject_and_nfc_collision(
++    tmp_path, invalid_payload,
++):
++    timeline_path = tmp_path / "timeline.json"
++    clock_path = tmp_path / "clock.json"
++    timeline_path.write_text(invalid_payload, encoding="utf-8")
++    clock_path.write_text(json.dumps(accepted_clock_payload()), encoding="utf-8")
++    with pytest.raises(DeviceFingerprintValidationError):
++        load_semantic_accounting_dependencies(str(timeline_path), str(clock_path))
++
++
++def test_evidence_and_health_descriptor_bytes_include_exact_binding_epoch(accepted_dependencies):
++    evidence, evidence_epoch = authorized_descriptor(
++        _evidence_row(), _EVIDENCE_FIELDS, accepted_dependencies,
++    )
++    health, health_epoch = authorized_descriptor(
++        _health_row(), _HEALTH_FIELDS, accepted_dependencies,
++    )
++    assert evidence["binding_epoch_id"] == health["binding_epoch_id"]
++    assert evidence_epoch == health_epoch
++    assert b'"binding_epoch_id":"zefer-dhcp-v1-20260918T104329014Z"' in (
++        canonical_artifact_json(evidence)
++    )
++    assert b'"binding_epoch_id":"zefer-dhcp-v1-20260918T104329014Z"' in (
++        canonical_artifact_json(health)
++    )
++
++
++def test_missing_binding_fails_closed(accepted_dependencies):
++    with pytest.raises(DeviceFingerprintValidationError, match="no unambiguous"):
++        authorized_descriptor(
++            _evidence_row("2026-09-18T10:43:29.013Z"),
++            _EVIDENCE_FIELDS,
++            accepted_dependencies,
++        )
++
++
++@pytest.mark.parametrize("row_factory,fields", [
++    (_evidence_row, _EVIDENCE_FIELDS),
++    (_health_row, _HEALTH_FIELDS),
++])
++@pytest.mark.parametrize("field,value", [
++    ("producer_id", "wrong-producer"),
++    ("capture_source_id", "wrong-capture"),
++])
++def test_row_authority_mismatch_fails_closed(
++    accepted_dependencies, row_factory, fields, field, value,
++):
++    row = row_factory()
++    row[field] = value
++    with pytest.raises(DeviceFingerprintValidationError, match="authoritative binding"):
++        authorized_descriptor(row, fields, accepted_dependencies)
++
++
++def test_cutover_ambiguity_fails_closed():
++    first = binding_epoch(
++        "dhcp", "dhcp", "sensor-zefer-01", "zefer-span-01", NETWORK_EMITTER,
++        effective_from=EFFECTIVE_FROM,
++        effective_to="2026-09-18T10:44:00.000Z",
++    )
++    second = {
++        **first,
++        "binding_epoch_id": "zefer-dhcp-v2-20260918T104400000Z",
++        "effective_from_utc": "2026-09-18T10:44:00.000Z",
++        "effective_to_utc": None,
++    }
++    timeline = make_evidence_source_binding_timeline(
++        {"binding_timeline_contract_version": 1, "binding_epochs": [first, second]},
++        build_source_health_emitter_contracts(),
++    )
++    clock_payload = accepted_clock_payload()
++    clock_payload["cutover_guard_seconds"] = 1
++    clock = make_binding_clock_policy(clock_payload)
++    with pytest.raises(DeviceFingerprintValidationError, match="no unambiguous"):
++        resolve_row_binding(_evidence_row("2026-09-18T10:44:00.000Z"), timeline, clock)
++
++
++def test_previous_epoch_health_anchor_is_not_inherited_across_cutover():
++    first = binding_epoch(
++        "dhcp", "dhcp", "sensor-zefer-01", "zefer-span-01", NETWORK_EMITTER,
++        effective_from=EFFECTIVE_FROM,
++        effective_to="2026-09-18T10:44:00.000Z",
++    )
++    second = {
++        **first,
++        "binding_epoch_id": "zefer-dhcp-v2-20260918T104400000Z",
++        "effective_from_utc": "2026-09-18T10:44:00.000Z",
++        "effective_to_utc": None,
++    }
++    timeline = make_evidence_source_binding_timeline(
++        {"binding_timeline_contract_version": 1, "binding_epochs": [first, second]},
++        build_source_health_emitter_contracts(),
++    )
++    clock = make_binding_clock_policy(accepted_clock_payload())
++    row = _health_row()
++    row["observed_at"] = "2026-09-18T10:43:59.999Z"
++    assert health_anchor_descriptor(row, _HEALTH_FIELDS, second, timeline, clock) is None
++
++
++@pytest.mark.parametrize("field,artifact_type", [
++    ("binding_timeline", "EvidenceSourceBindingTimeline"),
++    ("binding_clock_policy", "BindingClockPolicy"),
++    ("schema_registry_contract", "EvidenceSchemaRegistryContract"),
++])
++def test_wrong_dependency_identity_is_rejected(accepted_dependencies, field, artifact_type):
++    wrong = make_artifact_content(artifact_type, {"wrong": True})
++    with pytest.raises(DeviceFingerprintValidationError, match="Wrong accepted"):
++        validate_semantic_accounting_dependencies(
++            replace(accepted_dependencies, **{field: wrong}),
++        )
++
++
++def test_wrong_ttl_proof_identity_is_rejected(accepted_dependencies):
++    assert accepted_dependencies.ttl_capture_placement_proof.artifact_id == ACCEPTED_TTL_PROOF_ID
++    wrong = ArtifactRef(
++        "TTLCapturePlacementProof:v1:sha256:" + "0" * 64,
++        "0" * 64,
++    )
++    with pytest.raises(DeviceFingerprintValidationError, match="TTLCapturePlacementProof"):
++        validate_semantic_accounting_dependencies(
++            replace(accepted_dependencies, ttl_capture_placement_proof=wrong),
++        )
++
++
++@pytest.mark.parametrize("window_start", [
++    ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC,
++    "2026-09-18T10:43:29.015Z",
++])
++def test_complete_window_at_or_after_valid_from_is_allowed(
++    accepted_dependencies, window_start,
++):
++    assert len(applicable_binding_epochs(
++        accepted_dependencies,
++        SITE_ID,
++        window_start,
++        "2026-09-18T10:43:30.000Z",
++    )) == 5
++
++
++def test_complete_window_before_valid_from_fails_closed(accepted_dependencies):
++    with pytest.raises(DeviceFingerprintValidationError, match="valid-from"):
++        applicable_binding_epochs(
++            accepted_dependencies,
++            SITE_ID,
++            "2026-09-18T10:43:29.013Z",
++            "2026-09-18T10:43:30.000Z",
++        )
++
++
++def test_binding_epoch_dedup_and_canonical_order_are_exact(accepted_dependencies):
++    epochs = accepted_dependencies.binding_timeline.semantic_payload["binding_epochs"]
++    reversed_with_duplicate = list(reversed(epochs)) + [epochs[0]]
++    ordered = ordered_binding_descriptors(reversed_with_duplicate)
++    assert len(ordered) == len(epochs) == 5
++    assert [(row["effective_from_utc"], row["origin_group"], row["source_kind"],
++             row["capture_source_id"], row["producer_id"], row["binding_epoch_id"])
++            for row in ordered] == sorted(
++                (row["effective_from_utc"], row["origin_group"], row["source_kind"],
++                 row["capture_source_id"], row["producer_id"], row["binding_epoch_id"])
++                for row in epochs
++            )
++    byte_count, epoch_count = binding_descriptor_bytes(reversed_with_duplicate)
++    assert epoch_count == 5
++    assert byte_count == sum(len(canonical_artifact_json(row)) for row in ordered)
++
++
++def test_semantic_dependency_reference_bytes_are_exact_pre_admission_structure(
++    accepted_dependencies,
++):
++    descriptor = semantic_dependency_descriptor(accepted_dependencies)
++    assert descriptor["classification_foundation_valid_from_utc"] == (
++        ACCEPTED_CLASSIFICATION_FOUNDATION_VALID_FROM_UTC
++    )
++    assert descriptor["origin_runtime_admission"]["tcp_state"] == "ENABLED"
++    assert descriptor["origin_runtime_admission"]["tcp_reason_code"] == "TTL_PROOF_VALID"
++    assert semantic_dependency_reference_bytes(accepted_dependencies) == len(
++        canonical_artifact_json(descriptor)
++    )
++
++
++def test_complete_status_requires_every_exact_byte_category():
++    categories = {
++        "authorized_evidence_descriptor_bytes": 101,
++        "verified_payload_bytes": 102,
++        "materialized_payload_bytes": 103,
++        "authorized_health_descriptor_bytes": 104,
++        "binding_descriptor_bytes": 105,
++        "semantic_dependency_reference_bytes": 106,
++    }
++    complete = complete_semantic_byte_accounting(categories)
++    assert complete["total_semantic_input_bytes"] == sum(categories.values())
++    assert complete["final_binding_and_dependency_overhead_status"] == "COMPLETE"
++    for missing in categories:
++        incomplete = dict(categories)
++        incomplete.pop(missing)
++        with pytest.raises(DeviceFingerprintValidationError, match="Incomplete"):
++            complete_semantic_byte_accounting(incomplete)
+diff --git a/tests/device_fingerprint_fa4/test_workload.py b/tests/device_fingerprint_fa4/test_workload.py
+index ae590cd907a5f07217d72a86b4a5a02446d93113..3315919db305167a40f43070f5a61743ac2d0ee0 100644
+--- a/tests/device_fingerprint_fa4/test_workload.py
++++ b/tests/device_fingerprint_fa4/test_workload.py
+@@ -21,16 +21,25 @@ def test_stress_rejects_any_external_db_target(tmp_path):
+     assert path.read_bytes() == b"sensitive database"
+ 
+ 
+-def test_disposable_stress_is_deterministic_in_semantics_and_measures_wal(tmp_path):
+-    first = run_disposable_stress(_case(), temporary_parent=str(tmp_path))
+-    second = run_disposable_stress(_case(), temporary_parent=str(tmp_path))
++def test_disposable_stress_is_deterministic_in_semantics_and_measures_wal(
++    tmp_path, accepted_dependencies,
++):
++    first = run_disposable_stress(
++        _case(), temporary_parent=str(tmp_path),
++        semantic_dependencies=accepted_dependencies,
++    )
++    second = run_disposable_stress(
++        _case(), temporary_parent=str(tmp_path),
++        semantic_dependencies=accepted_dependencies,
++    )
+     assert first["result"] == second["result"] == "MEASUREMENT_COMPLETE"
+     assert first["measurement_case"]["mode"] == "DISPOSABLE_STRESS"
+     for field in ("cardinality", "pagination", "payload_accounting", "semantic_byte_accounting"):
+         assert first[field] == second[field]
++    assert first["semantic_byte_accounting"]["final_binding_and_dependency_overhead_status"] == "COMPLETE"
+     assert first["cardinality"]["total_evidence_rows"] == 5
+     assert first["cardinality"]["total_relevant_health_rows"] == 5
+-    assert first["pagination"] == {"evidence_pages": 3, "health_pages": 3}
++    assert first["pagination"] == {"evidence_pages": 3, "health_pages": 7}
+     assert first["retention_latency"]["deleted_evidence_rows"] == 9
+     assert first["retention_latency"]["deleted_health_rows"] == 5
+     assert len(first["writer_latency"]["batches"]) == 2

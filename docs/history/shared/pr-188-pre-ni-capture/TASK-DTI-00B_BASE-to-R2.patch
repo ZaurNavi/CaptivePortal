@@ -1,0 +1,2401 @@
+diff --git a/research/dti_00b/README.md b/research/dti_00b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5b41eb098151d828965822b1eebb3f68c6438ca
+--- /dev/null
++++ b/research/dti_00b/README.md
+@@ -0,0 +1,264 @@
++# DTI-00B offline meter prototype 0.1.0
++
++Research only, baseline `c8d8d620dfed06caee92a498b891bf2faa37a6a9` /
++`be3470c378180aa215d527c6de6b686583ae0d79`. No app imports, third-party
++dependencies, service, database, Auth, Visit writes, Fingerprint changes or
++production activation. Offline commands never access a capture interface;
++R2 adds an explicitly selected Linux research live adapter (below). This is not DTI-01 and does not
++declare DTI-00 accepted. Suricata counters are never an accounting fallback.
++
++## Input and native basis
++
++Local classic PCAP v2.4, Ethernet link type 1, either byte order, microseconds or
++nanoseconds. Ordered timestamps are mandatory; malformed framing aborts the
++attempt. One explicit synthetic subject MAC/site scope per manifest. At most
++two VLAN tags. Unicast IPv4/IPv6 only; broadcast, multicast, ARP, other L2 and
++subject-to-itself frames are outside accounting. IPv6 base Next Header is exposed;
++extension-chain interpretation and jumbograms are not supported. Zero IPv6 payload
++length is conservatively rejected (including valid empty IPv6): **degraded**, not
++a healthy zero. These limitations are prototype-only, not a final scope freeze.
++
++IPv4 bytes are total_length; IPv6 bytes are 40 + payload_length. Captured length,
++Ethernet length and application bytes are not the metric. Header-only snaplen is
++accepted when complete L2/IP headers and original wire length corroborate the IP
++length. Known bad/truncated headers degrade their interval. Structural PCAP errors,
++unsorted timestamps and hard limits block the overall attempt, even if earlier
++rows were emitted. Never ingest a partial output as a COMPLETE replay.
++
++Reader retains at most 82 Ethernet/IP header bytes per packet and discards remaining
++record bytes in <=4096-byte blocks without interpreting/retaining payload. Generated
++fixtures contain Ethernet/IP headers only, with declared wire lengths; no actual
++visitor captures, TCP/application data or arbitrary visitor history are generated.
++PCAPNG is intentionally unsupported.
++
++Format references: [classic PCAP draft](https://www.ietf.org/archive/id/draft-ietf-opsawg-pcap-05.html)
++(descriptive draft, not a production standard freeze),
++[IPv4 RFC 791](https://www.rfc-editor.org/rfc/rfc791),
++[IPv6 RFC 8200](https://www.rfc-editor.org/rfc/rfc8200).
++
++## Coverage and output
++
++Closed `coverage.json`: capture_source_id, test_scope, subject_mac,
++coverage_start_utc, coverage_end_utc, capture_quality_intervals. Each interval has
++start_utc/end_utc/state and the ordered intervals exactly partition coverage.
++States: healthy, partial, degraded, source_unavailable, prototype_unavailable.
++Optional synthetic_visit_boundary_utc and synthetic_duplicate_records are
++research fixture metadata, NOT final production fields. Source/site identities
++are explicitly supplied, never guessed from IP addresses. Canonical UTC times
++are represented with nine fractional digits, so nanoseconds do not round across
++half-open boundaries.
++
++Default slices are UTC epoch-aligned [start,end), 5 seconds. Partial coverage edges
++are incomplete, not zeros. Optional Visit T divides a bucket into two declared
++experimental subintervals, conserving counts; normal cadence remains 5 seconds.
++`stop_at` in the Python API simulates restart: the open bucket is partial, later
++buckets prototype_unavailable; a new Coverage/run UUID resumes separately.
++Sequence resets per run; durable restart/ingest policy is not implemented.
++
++Every JSONL slice contains schema_version=1, prototype_version=0.1.0,
++capture_source_id, test_scope, subject_key, slice_start_utc, slice_end_utc,
++slice_id, run_session_id, source_sequence, upload_packets, download_packets,
++upload_bytes_native, download_bytes_native, first_packet_at, last_packet_at,
++capture_quality_state, quality_reasons, complete_accounting,
++upload_bytes_per_second, download_bytes_per_second,
++healthy_absence_of_subject_traffic. No raw IP/header/payload is emitted.
++
++Counts in incomplete intervals mean **observed lower-bound counts**, not complete
++traffic totals. Rates are null unless healthy. Healthy zero needs proven coverage;
++missing/degraded capture and prototype gaps never assert idle. Slice end/packet
++times permit future activity/freshness decisions, without freezing product policy.
++Rate is emitted when a bucket completes, not when its flow terminates.
++
++slice_id is SHA256 of canonical semantic identity: schema/source/scope/subject/
++start/end. Semantic accounting payload excludes run UUID/sequence. Repeated bounded
++input gives REPLAY even with a new UUID; same slice ID with changed accounting or
++quality is CONFLICT, never a second valid increment. Output ingestion is future scope.
++
++## Duplicates: explicit limitation, not a production PASS
++
++Raw native counters count all observed in-scope records before dedup. No TCP
++sequence/header/timestamp similarity heuristic suppresses packets. Real retransmission
++is counted, even with identical IP headers. Without explicit provenance every record
++counts, including a potential mirrored repeat. Classic PCAP headers alone cannot
++prove mirror origin rather than a legitimate second transmission.
++
++The exact synthetic duplicate fixture declares repeated ordinal -> original ordinal
++in synthetic_duplicate_records. This is a trusted independent generator assertion of
++**one original transmission**, not inferred by the meter. It is corroborated by equal
++bounded headers/native length and a retained original within the configured horizon.
++Default horizon 1 second, cache max 4096 entries (both configurable downward).
++Eviction/expired/nonmatching provenance retains the packet and degrades quality.
++The full payload is deliberately not hashed/required; equal headers cannot establish
++full-frame equality. Thus the assertion must come from trusted synthetic provenance.
++Untrusted/ordinary real PCAP cannot use this assertion as production dedup authority.
++
++False positive risk: a wrong provenance assertion could suppress a real transmission
++with equal headers. False negative risk: without provenance, or beyond the horizon/
++cache bound, duplicates remain counted. Provenance uncertainty is never hidden as
++healthy dedup. Counters include raw_packets_seen, raw_packets_in_scope,
++raw_bytes_native, accounted_packets/bytes, duplicate_candidates,
++deduplicated_packets, dedup_cache_entries/peak/evictions,
++duplicate_provenance_unresolved, rejected/out-of-scope/outside-coverage records.
++**General mirror-duplicate admission remains PARTIAL (G26 unresolved).** Do not claim
++the complete DTI-00B admission PASS based only on the synthetic case.
++
++## Resource bounds and degradation candidate
++
++One subject, one current bucket, one packet lookahead, synchronous backpressure;
++no unbounded queue or retained output list. Input snaplen/record max 65535, at most
++2,000,000 records per replay, coverage <=24h, <=4096 quality intervals/duplicate
++declarations, manifest <=1MiB, dedup <=4096 metadata-only entries, output <=16MiB.
++Hard bounds configurable downward. Replay sink is exclusive-create, flushes every
++row, and fails closed on short write, disk full or byte ceiling. No retry, silent
++discard, overwrite or fallback counter. Source errors block COMPLETE output. A
++partial attempt file may remain for diagnosis; it is not accepted accounting.
++Unknown drops cannot be discovered from a PCAP: capture quality must be independently
++supplied. Offline capture/kernel drops = NOT_APPLICABLE, never a claimed zero.
++
++Paced load supports 19000 pps (~156.56 Mbit/s native), 38000 pps (~313.12 Mbit/s),
++1..30 seconds. It includes synthetic generation and parsing in CPU cost, samples
++current process RSS every <=190 records, tracks pacing/emission drift, queue/buffer,
++processed/rejected counts and normalized output rate. Bounded <=190-record chunks
++contain only headers. No source startup/packet consumer or production host is used.
++The test's 1-second runs are smoke checks, not sustainability evidence. Longer local
++10-second runs characterize this Windows implementation, not production coexistence
++or an official Linux PERF gate. RSS is sampled, not a hard CPU/RAM enforcement.
++
++Provisional resource-budget candidate: one pending record, <=190 replay staging
++records, one subject, one bucket; no capture queue. Any rejected input degrades,
++any structural input/output error blocks; synchronous output provides backpressure.
++Single-subject modeled storage = measured bytes per emitted slice / 5 seconds
++(86400 seconds/day). Site-wide subject cardinality and production CPU/RAM ceilings
++remain UNRESOLVED; measured Windows envelopes cannot freeze Linux systemd limits.
++
++## Runbook (offline only)
++
++From the exact candidate checkout, use the existing Python interpreter. No install:
++
++```powershell
++$env:PYTHONPYCACHEPREFIX='C:\CaptivPortal-Lab\tmp\dti-00b-pyc'
++$python='C:\CaptivPortal-UI-Preview\.venv\Scripts\python.exe'
++& $python -m pytest tests/dti_00b -q --basetemp C:\CaptivPortal-Lab\tmp\dti-00b-target-01
++& $python -m compileall -q research/dti_00b tests/dti_00b
++& $python -m research.dti_00b identity
++& $python -m research.dti_00b fixture G C:\CaptivPortal-Lab\tmp\dti-00b-fixture-G-01
++& $python -m research.dti_00b replay C:\CaptivPortal-Lab\tmp\dti-00b-fixture-G-01\headers.pcap C:\CaptivPortal-Lab\tmp\dti-00b-fixture-G-01\coverage.json C:\CaptivPortal-Lab\tmp\dti-00b-fixture-G-01\slices.jsonl --split-visit
++& $python -m research.dti_00b reconcile --report C:\CaptivPortal-Lab\artifacts\TASK-DTI-00B-reconciliation-R1.json
++& $python -m research.dti_00b paced --pps 19000 --seconds 10 --report C:\CaptivPortal-Lab\artifacts\TASK-DTI-00B-paced-19000-R1.json
++& $python -m research.dti_00b paced --pps 38000 --seconds 10 --report C:\CaptivPortal-Lab\artifacts\TASK-DTI-00B-paced-38000-R1.json
++```
++
++Use new output/run paths per attempt; all outputs are outside Git. Stop on BLOCKED
++or nonzero exit. Do not reuse partial output or overwrite retained evidence.
++Independent reference comes from Transmission declarations before PCAP encoding,
++not parse_header/read_pcap; scenario rows retain separate expected integer totals.
++Tests also pin literal rates/bytes/half-open boundaries. A..P cover the complete
++requested synthetic scenario inventory. They do not pretend to be live-client proof.
++
++Cleanup after TechLead/Owner evidence acceptance: remove only the explicitly named
++disposable fixture directory/partial outputs through native filesystem operations;
++retain reviewed evidence according to Owner decision. No production rollback is
++needed because nothing was attached or activated. No auto-cleaner/service included.
++
++## Admission routing
++
++This package reports implementation self-check/reconciliation only. TechLead owns
++acceptance. Generic mirror provenance, Linux resource envelopes/cardinality and
++DTI01 budget remain review inputs, not fabricated PASSs. If final parser allocation
++uses production enp8s0 directly, separate Owner-authorized coexistence admission is
++mandatory (packet stealing, Fingerprint function/source health, sustained drops,
++CPU/RAM, clean detach). Offline NOT_APPLICABLE does not close that gate. DTI-01 HOLD.
++
++## R2 Linux research live adapter (r2.0)
++
++The R2 directive freezes the first placement **candidate** as an independent
++direct consumer; it does not authorize Coder to attach to any production interface.
++Coder's R2 checks use fake sockets, frames, sysfs fixtures and controlled clocks
++only. No live interface was opened during implementation/testing. Official Linux/
++production coexistence admission remains Sysadmin + Owner/TechLead responsibility.
++
++The live CLI requires explicit interface, subject MAC, capture_source_id, test
++scope, finite duration (1..300 integer seconds) and exclusive output path. There
++is no default interface or indefinite capture. Later separately authorized Lab
++operator example (NOT a command Coder executed):
++
++```sh
++python -m research.dti_00b live \
++  --interface lab0 --subject-mac 02:00:00:00:00:01 \
++  --capture-source-id controlled-linux-lab --test-scope isolated-controlled-client \
++  --duration-seconds 30 --output /absolute/disposable/new-live-slices.jsonl
++```
++
++The operator supplies an existing authorized Ethernet interface and sufficient
++CAP_NET_RAW permissions. Adapter checks Linux, Ethernet type, admin-UP and carrier
++through read-only sysfs; it does not set promiscuous mode, interface flags, BPF,
++NIC/offloads/rings, fanout/group membership or any other consumer's configuration.
++Socket creation is AF_PACKET/SOCK_RAW/protocol=0 (no reception before bind), then
++binds the supplied interface with ETH_P_ALL. No transmit path, ring, service or
++daemon installation. Nothing is imported/composed by app or run.py.
++
++It receives into one 82-byte prefix buffer using recvmsg_into + MSG_TRUNC, reuses
++parse_header, counts native IP length from corroborating original wire length,
++and zeroes the receive buffer afterwards. Only bounded parsed L2/IP metadata is
++passed onward; application payload is neither parsed nor retained. The accepted
++R1 accounting/parser/model/slice identity code is unchanged. Kernel receive
++timestamps use SO_TIMESTAMPNS_NEW when available, then OLD fallback. Missing/
++invalid/truncated timestamp metadata is explicitly degraded, never silently
++treated as exact event time. Host UTC seeds epoch-aligned 5-second boundaries;
++monotonic execution deadlines govern all waits and finite lifetime. Real-time
++clock discontinuity >250ms, receive backlog >250ms and output delay >250ms qualify
++the run; these are prototype diagnostic bounds, not final product thresholds.
++
++Timer completion occurs even with no packets. A fully covered healthy idle bucket
++can therefore be zero. Initial/final open buckets are partial. Source open/bind/
++receive/link failure yields source_unavailable, never healthy zero, with finite
++unavailable slices during the remaining requested run. Missing drop observability
++or detected kernel drops yield degraded quality. Polling is <=250ms; drop stats
++are also read before sealing. PACKET_STATISTICS counters reset on read and are
++accumulated for this socket alone. Actual SO_RCVBUF is reported (kernel may double/
++clamp requested capacity); requested <=4MiB, actual <=8MiB. Kernel queue readability
++at a seal is recorded/qualified; exact queue packet/byte depth is **not** claimed.
++No userspace packet queue, frame batch, pending slice list or live dedup cache.
++
++**NO_HEURISTIC_DEDUP / COUNT_AMBIGUOUS_OBSERVATIONS.** Live has no synthetic repeat
++map and never suppresses packet similarity. Every qualifying received observation
++counts, including repeats and retransmissions; output explicitly states
++`accounting_qualification=AMBIGUOUS_OBSERVATIONS_COUNTED_NOT_UNIQUE_TRANSMISSIONS`.
++This is the Architect-frozen qualification, not a claim of unique transmission
++counts. R1's optional trusted synthetic provenance experiment remains unchanged
++for offline compatibility; it is not a live dedup authority.
++
++Late/future event timestamps are not assigned to nearest buckets. Unassignable
++frames/native bytes and last unassigned timestamp are explicit run evidence,
++and run quality is degraded. Because already emitted slices cannot be retroactively
++rewritten, consumers must check the **whole run summary**, especially drops/late
++events/status; an earlier healthy row alone is not complete-run admission proof.
++Output errors block the attempt, never imply accepted partial JSONL. Synchronous
++backpressure is measured, not hidden or replaced by a queue. An output syscall can
++block; finite duration bounds the requested capture lifetime, not a guarantee on
++filesystem flush latency. Actual adapter stop and accounting coverage end are
++reported separately. No real-time scheduling or CPU/cgroup enforcement is claimed.
++
++SIGINT/SIGTERM request controlled stop. Finite/controlled completion obtains final
++socket statistics/queue evidence and closes the socket **before** final interval
++output. The last open interval is partial (or the more severe detected quality).
++Handlers are restored on exit; socket also closes on output/parser/resource errors.
++No future interval is fabricated after stopping; fresh runs use distinct UUIDs,
++sequence restarts, stable semantic slice IDs and existing conflict semantics.
++
++CLI prints a bounded run summary: socket open/bind/close, received/rejected/out-of-
++scope/unassigned frames, native bytes, cumulative kernel packet/drop evidence,
++receive-buffer allocation, queue-at-seal observations, timestamp mode, start/stop,
++coverage end, receive/clock/emission/output delays and quality reasons. COMPLETE
++or controlled STOPPED exits 0; DEGRADED exits 2. Exit 0 is execution status,
++**not** formal coexistence/admission PASS. Socket/output exceptions print BLOCKED.
++All existing data/output limits remain enforced. Cleanup is only the explicitly
++named disposable output after evidence acceptance; there is no installed state.
++
++R2 verification remains `pytest tests/dti_00b -q`, package compileall and diff-check
++only. No broad suite, real socket run, production action or official gate by Coder.
++
++Implementation references:
++[Linux packet socket semantics](https://man7.org/linux/man-pages/man7/packet.7.html),
++[kernel receive timestamp ABI](https://docs.kernel.org/networking/timestamping.html),
++[read-only link/carrier ABI](https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-class-net).
+diff --git a/research/dti_00b/__init__.py b/research/dti_00b/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d17aaaadbd463f67db34de52b73e3d4b788d873
+--- /dev/null
++++ b/research/dti_00b/__init__.py
+@@ -0,0 +1,3 @@
++"""Offline DTI-00B prototype. Never imported by production composition roots."""
++
++VERSION = "0.1.0"
+diff --git a/research/dti_00b/__main__.py b/research/dti_00b/__main__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..04d77c48f8ad1162984852760c43e4584d7feecd
+--- /dev/null
++++ b/research/dti_00b/__main__.py
+@@ -0,0 +1,86 @@
++"""Research CLI. Only explicit 'live' selects Linux capture; never at import."""
++
++import argparse
++import json
++from pathlib import Path
++
++from .benchmark import paced_replay
++from .admission import reconciliation, source_identity
++from .fixtures import scenarios, write_pcap
++from .model import Limits, canonical
++from .replay import replay
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    sub = parser.add_subparsers(dest="command", required=True)
++    fixture = sub.add_parser("fixture")
++    fixture.add_argument("scenario", choices=tuple(scenarios()))
++    fixture.add_argument("directory", type=Path)
++    read = sub.add_parser("replay")
++    read.add_argument("input")
++    read.add_argument("manifest")
++    read.add_argument("output")
++    read.add_argument("--split-visit", action="store_true")
++    read.add_argument("--max-output-bytes", type=int, default=Limits().max_output_bytes)
++    load = sub.add_parser("paced")
++    load.add_argument("--pps", type=int, required=True)
++    load.add_argument("--seconds", type=int, default=10)
++    load.add_argument("--report", type=Path)
++    admission = sub.add_parser("reconcile")
++    admission.add_argument("--report", type=Path, required=True)
++    sub.add_parser("identity")
++    live = sub.add_parser("live", help="Linux research capture; separate host authorization required")
++    live.add_argument("--interface", required=True)
++    live.add_argument("--subject-mac", required=True)
++    live.add_argument("--capture-source-id", required=True)
++    live.add_argument("--test-scope", required=True)
++    live.add_argument("--duration-seconds", type=int, required=True)
++    live.add_argument("--output", type=Path, required=True)
++    live.add_argument("--receive-buffer-bytes", type=int, default=1024 * 1024)
++    live.add_argument("--max-output-bytes", type=int, default=Limits().max_output_bytes)
++    args = parser.parse_args()
++    try:
++        if args.command == "fixture":
++            case = scenarios()[args.scenario]
++            args.directory.mkdir(parents=True, exist_ok=False)
++            with (args.directory / "headers.pcap").open("xb") as stream:
++                write_pcap(stream, case.events)
++            with (args.directory / "coverage.json").open("x", encoding="utf-8", newline="\n") as stream:
++                stream.write(canonical(case.coverage.as_dict()) + "\n")
++            print(canonical(dict(status="SYNTHETIC_FIXTURE_CREATED", scenario=args.scenario, production=False)))
++        elif args.command == "paced":
++            report = paced_replay(args.pps, args.seconds)
++            if args.report:
++                with args.report.open("x", encoding="utf-8", newline="\n") as stream:
++                    stream.write(canonical(report) + "\n")
++            print(canonical(report))
++        elif args.command == "reconcile":
++            report = reconciliation()
++            with args.report.open("x", encoding="utf-8", newline="\n") as stream:
++                stream.write(canonical(report) + "\n")
++            print(canonical(dict(status="RECONCILIATION_REPORTED", all_sixteen_reconciled=report["all_sixteen_reconciled"],
++                                 report=str(args.report), official_acceptance=False)))
++        elif args.command == "identity":
++            print(canonical(source_identity()))
++        elif args.command == "live":
++            from .live import live_to_file
++            from .live_capture import LiveConfig
++            config = LiveConfig(args.interface, args.subject_mac, args.capture_source_id, args.test_scope,
++                                args.duration_seconds, args.receive_buffer_bytes,
++                                Limits(max_output_bytes=args.max_output_bytes))
++            report = live_to_file(config, args.output)
++            print(canonical(report))
++            return 0 if report["status"] in ("COMPLETE", "STOPPED") else 2
++        else:
++            print(canonical(replay(args.input, args.manifest, args.output,
++                                   limits=Limits(max_output_bytes=args.max_output_bytes), split_visit=args.split_visit)))
++        return 0
++    except (ValueError, OSError) as exc:
++        print(json.dumps(dict(status="BLOCKED", capture_quality_state="prototype_unavailable",
++                              reason=str(exc), completed_accounting=False)))
++        return 2
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/research/dti_00b/admission.py b/research/dti_00b/admission.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ca4ac0e37e384d1c745cc3082fc769e069c97a4
+--- /dev/null
++++ b/research/dti_00b/admission.py
+@@ -0,0 +1,53 @@
++"""Reproducible offline reconciliation evidence, not independent formal acceptance."""
++
++import hashlib
++import io
++from dataclasses import asdict
++from pathlib import Path
++
++from . import VERSION
++from .fixtures import scenarios, write_pcap
++from .meter import slices
++from .model import Counters, Limits, instant, semantic_payload
++from .pcap import read_pcap
++
++ACCOUNTING = ("upload_packets", "download_packets", "upload_bytes_native", "download_bytes_native")
++
++
++def source_identity():
++    files = {}
++    root = Path(__file__).parent
++    for name in ("__init__.py", "__main__.py", "model.py", "pcap.py", "meter.py", "fixtures.py", "replay.py", "benchmark.py", "admission.py", "live.py", "live_capture.py", "README.md"):
++        files[name] = hashlib.sha256((root / name).read_bytes()).hexdigest()
++    # Identity of the exact source package, excluding generated evidence and pycache.
++    from .model import canonical
++    return dict(version=VERSION, files=files, package_sha256=hashlib.sha256(canonical(files).encode()).hexdigest())
++
++
++def reconciliation():
++    result = []
++    for letter, case in scenarios().items():
++        counters = Counters()
++        pcap = io.BytesIO()
++        write_pcap(pcap, case.events)
++        pcap.seek(0)
++        actual = list(slices(read_pcap(pcap, Limits(), counters), case.coverage, counters=counters,
++                             stop_at=case.stop_at, split_visit=letter == "G"))
++        reference = case.reference(split_visit=letter == "G")
++        equal = len(actual) == len(reference) and all(
++            all(row[k] == truth[k] for k in ACCOUNTING)
++            and instant(row["slice_start_utc"]) == truth["start"]
++            and instant(row["slice_end_utc"]) == truth["end"] for row, truth in zip(actual, reference))
++        result.append(dict(scenario=letter, name=case.name, reference_packets=sum(r["upload_packets"] + r["download_packets"] for r in reference),
++                           meter_packets=sum(r["upload_packets"] + r["download_packets"] for r in actual),
++                           reference_bytes=sum(r["upload_bytes_native"] + r["download_bytes_native"] for r in reference),
++                           meter_bytes=sum(r["upload_bytes_native"] + r["download_bytes_native"] for r in actual),
++                           timing_and_accounting_verdict="PASS" if equal else "FAIL",
++                           quality=[r["capture_quality_state"] for r in actual],
++                           counters=asdict(counters), coverage_manifest=case.coverage.as_dict(),
++                           reference_truth=reference, semantic_slices=[semantic_payload(r) for r in actual]))
++    return dict(task="TASK-DTI-00B", execution_mode="OFFLINE_LAB", source_identity=source_identity(),
++                independent_reference="DECLARED_LOGICAL_TRANSMISSIONS_BEFORE_ENCODING; NOT METER PARSER",
++                scenarios=result, all_sixteen_reconciled=all(r["timing_and_accounting_verdict"] == "PASS" for r in result),
++                arbitrary_mirror_duplicate_admission="PARTIAL: explicit synthetic provenance only; no header heuristic",
++                production_access=False, official_acceptance=False)
+diff --git a/research/dti_00b/benchmark.py b/research/dti_00b/benchmark.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..667a047866b3820bc1eb88372c94757f6fa24349
+--- /dev/null
++++ b/research/dti_00b/benchmark.py
+@@ -0,0 +1,100 @@
++"""Bounded paced synthetic replay. Not a production or official Lab gate."""
++
++import ctypes
++import io
++import os
++import time
++from dataclasses import asdict
++
++from .fixtures import EPOCH, SUBJECT, Transmission, write_pcap
++from .meter import slices
++from .model import SECOND, Limits, Counters, Coverage, QualityInterval, instant
++from .pcap import read_pcap
++from .replay import BoundedSink
++
++
++if os.name == "nt":
++    from ctypes import wintypes
++
++    class _ProcessMemory(ctypes.Structure):
++        _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD)] + [
++            (name, ctypes.c_size_t) for name in ("peak", "rss", "paged_peak", "paged", "nonpaged_peak", "nonpaged", "pagefile", "pagefile_peak")]
++
++    # Define once: ctypes POINTER caches types, so per-sample class creation leaks.
++    _kernel = ctypes.WinDLL("kernel32", use_last_error=True)
++    _kernel.GetCurrentProcess.restype = wintypes.HANDLE
++    _psapi = ctypes.WinDLL("psapi", use_last_error=True)
++    _psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessMemory), wintypes.DWORD]
++
++
++def rss_bytes():
++    if os.name == "nt":
++        memory = _ProcessMemory()
++        memory.cb = ctypes.sizeof(memory)
++        if not _psapi.GetProcessMemoryInfo(_kernel.GetCurrentProcess(), ctypes.byref(memory), memory.cb):
++            raise OSError(ctypes.get_last_error(), "process_memory_query_failed")
++        return memory.rss
++    # Linux current RSS, not historical resource.ru_maxrss units.
++    with open("/proc/self/statm", "r", encoding="ascii") as stream:
++        return int(stream.read(256).split()[1]) * os.sysconf("SC_PAGE_SIZE")
++
++
++class DiscardSink:
++    def write(self, data):
++        return len(data)
++
++    def flush(self):
++        pass
++
++
++def paced_replay(pps, duration_seconds=10):
++    if type(pps) is not int or not 1 <= pps <= 38000 or type(duration_seconds) is not int or not 1 <= duration_seconds <= 30:
++        raise ValueError("bounded paced fixture: 1..38000 pps, 1..30 seconds")
++    count = pps * duration_seconds
++    coverage = Coverage("paced-synthetic", "offline-load-only", SUBJECT, EPOCH, EPOCH + duration_seconds * SECOND,
++                        (QualityInterval(EPOCH, EPOCH + duration_seconds * SECOND, "healthy"),))
++    limits, counters = Limits(), Counters()
++    rss_start = rss_bytes()
++    peak = rss_start
++    wall_start, cpu_start = time.perf_counter(), time.process_time()
++    maximum_drift = 0.0
++    emission_drifts = []
++    # Native average 1030 bytes approximates 156.6 Mbit/s at 19000 pps.
++    # Each chunk is bounded to 190 records (~10 KiB header-only PCAP).
++    chunk_records = min(190, pps)
++    def packets():
++        nonlocal peak, maximum_drift
++        for first in range(0, count, chunk_records):
++            size = min(chunk_records, count - first)
++            target = wall_start + first / pps
++            remaining = target - time.perf_counter()
++            if remaining > 0:
++                time.sleep(remaining)
++            maximum_drift = max(maximum_drift, time.perf_counter() - target)
++            block = io.BytesIO()
++            write_pcap(block, (Transmission(i * SECOND // pps, length=1030, transmission_id=i) for i in range(first, first + size)))
++            block.seek(0)
++            for packet in read_pcap(block, limits, counters):
++                yield packet
++            peak = max(peak, rss_bytes())
++    sink = BoundedSink(DiscardSink(), limits.max_output_bytes)
++    for row in slices(packets(), coverage, limits=limits, counters=counters):
++        sink.write(row)
++        emission_drifts.append(max(0.0, time.perf_counter() - wall_start - (instant(row["slice_end_utc"]) - EPOCH) / SECOND))
++    # Consume the final pacing interval before claiming the offered rate.
++    remaining = wall_start + duration_seconds - time.perf_counter()
++    if remaining > 0:
++        time.sleep(remaining)
++    elapsed, cpu = time.perf_counter() - wall_start, time.process_time() - cpu_start
++    return dict(execution_mode="OFFLINE_LAB", offered_pps=pps, native_mbit_per_second=pps * 1030 * 8 / 1_000_000,
++                duration_seconds=duration_seconds, elapsed_seconds=elapsed, cpu_seconds=cpu,
++                single_core_cpu_percent=100 * cpu / elapsed, rss_start_bytes=rss_start,
++                rss_peak_sampled_bytes=peak, incremental_rss_bytes=max(0, peak - rss_start),
++                generation_included_in_cpu=True, buffer_chunk_records=chunk_records, queue_peak_records=1,
++                maximum_pacing_drift_seconds=maximum_drift, output_bytes=sink.bytes_written,
++                slice_emission_drift_seconds=emission_drifts,
++                slice_emissions_per_second=counters.slices_emitted / elapsed,
++                output_bytes_per_second=sink.bytes_written / elapsed, counters=asdict(counters),
++                accounted_exactly=counters.accounted_packets == count and counters.accounted_bytes_native == count * 1030,
++                sustained_for_fixture=maximum_drift < 0.25 and counters.accounted_packets == count,
++                capture_drops="NOT_APPLICABLE_OFFLINE", production_admission=False)
+diff --git a/research/dti_00b/fixtures.py b/research/dti_00b/fixtures.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a57e4bc38c3b57c77d82652394e6869693fa3d49
+--- /dev/null
++++ b/research/dti_00b/fixtures.py
+@@ -0,0 +1,109 @@
++"""Independent logical sender timelines -> header-only PCAP + expected totals.
++
++Truth is computed from declared transmissions, not from parsed PCAP/meter output.
++All addresses are synthetic; these are not actual controlled-client captures.
++"""
++
++import ipaddress
++import struct
++from dataclasses import dataclass
++
++from .model import SECOND, CADENCE, Coverage, QualityInterval
++
++SUBJECT = "02:00:00:00:00:01"
++PEER = "02:00:00:00:00:02"
++EPOCH = 1_800_000_000 * SECOND  # ordinary synthetic data, not an admission anchor
++
++
++@dataclass(frozen=True)
++class Transmission:
++    offset_ns: int
++    direction: str = "upload"
++    ip_version: int = 4
++    length: int = 100
++    transmission_id: int = 1
++    duplicate_of: int = None
++
++
++@dataclass(frozen=True)
++class Fixture:
++    name: str
++    events: tuple
++    coverage: Coverage
++    stop_at: int = None
++
++    def reference(self, split_visit=False):
++        """Independent arithmetic oracle over logical transmissions and declared T."""
++        boundaries = list(range(self.coverage.start // CADENCE * CADENCE,
++                                ((self.coverage.end + CADENCE - 1) // CADENCE) * CADENCE + 1, CADENCE))
++        if split_visit and self.coverage.visit_boundary is not None:
++            boundaries = sorted(set(boundaries + [self.coverage.visit_boundary]))
++        rows = []
++        for start, end in zip(boundaries, boundaries[1:]):
++            events = [e for e in self.events if e.duplicate_of is None
++                      and max(start, self.coverage.start) <= EPOCH + e.offset_ns < min(end, self.coverage.end)
++                      and (self.stop_at is None or EPOCH + e.offset_ns < self.stop_at)]
++            rows.append(dict(start=start, end=end,
++                             upload_packets=sum(e.direction == "upload" for e in events),
++                             download_packets=sum(e.direction == "download" for e in events),
++                             upload_bytes_native=sum(e.length for e in events if e.direction == "upload"),
++                             download_bytes_native=sum(e.length for e in events if e.direction == "download")))
++        return rows
++
++
++def header(event, vlan=False):
++    src, dst = (SUBJECT, PEER) if event.direction == "upload" else (PEER, SUBJECT)
++    layer2 = bytes.fromhex(dst.replace(":", "")) + bytes.fromhex(src.replace(":", ""))
++    ethertype = 0x0800 if event.ip_version == 4 else 0x86DD
++    layer2 += struct.pack("!HHH", 0x8100, 20, ethertype) if vlan else struct.pack("!H", ethertype)
++    if event.ip_version == 4:
++        src_ip, dst_ip = ("192.0.2.1", "192.0.2.2") if event.direction == "upload" else ("192.0.2.2", "192.0.2.1")
++        layer3 = struct.pack("!BBHHHBBH4s4s", 0x45, 0, event.length, event.transmission_id % 65536,
++                             0, 64, 6, 0, ipaddress.ip_address(src_ip).packed, ipaddress.ip_address(dst_ip).packed)
++    else:
++        src_ip, dst_ip = ("2001:db8::1", "2001:db8::2") if event.direction == "upload" else ("2001:db8::2", "2001:db8::1")
++        layer3 = struct.pack("!IHBB16s16s", 6 << 28, event.length - 40, 6, 64,
++                             ipaddress.ip_address(src_ip).packed, ipaddress.ip_address(dst_ip).packed)
++    return layer2 + layer3  # No transport/application payload is produced or retained.
++
++
++def write_pcap(stream, events, *, endian="<", nanos=True, vlan=False):
++    stream.write(struct.pack(endian + "IHHIIII", 0xA1B23C4D if nanos else 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
++    for event in events:
++        packet_header = header(event, vlan)
++        seconds, fraction = divmod(EPOCH + event.offset_ns, SECOND)
++        stream.write(struct.pack(endian + "IIII", seconds, fraction if nanos else fraction // 1000,
++                                 len(packet_header), event.length + (18 if vlan else 14)))
++        stream.write(packet_header)
++
++
++def scenarios():
++    def fixture(name, events, end=20, states=None, boundary=None, stop=None):
++        rows = tuple(events)
++        intervals = tuple(QualityInterval(EPOCH + a * SECOND, EPOCH + b * SECOND, state)
++                          for a, b, state in (states or [(0, end, "healthy")]))
++        return Fixture(name, rows, Coverage("synthetic-rspan", "offline-synthetic-only", SUBJECT,
++                       EPOCH, EPOCH + end * SECOND, intervals,
++                       None if boundary is None else EPOCH + boundary * SECOND,
++                       tuple((i, e.duplicate_of) for i, e in enumerate(rows) if e.duplicate_of is not None)),
++                       None if stop is None else EPOCH + stop * SECOND)
++    long = tuple(Transmission(t * SECOND, "upload" if t % 2 else "download", length=1200, transmission_id=t) for t in range(-1, 23))
++    return {
++        "A": fixture("short_completed", [Transmission(SECOND), Transmission(2 * SECOND, "download", length=140)]),
++        "B": fixture("long_lived", long),
++        "C": fixture("idle", []),
++        "D": fixture("burst", [Transmission(SECOND + i * 1000, length=900, transmission_id=i) for i in range(100)]),
++        "E": fixture("active_before_start", long),
++        "F": fixture("ends_after_end", long),
++        "G": fixture("visit_cutover", long, boundary=7),
++        "H": fixture("restart", long, stop=7),
++        "I": fixture("replay", long),
++        "J": fixture("mirror_duplicate", [Transmission(SECOND), Transmission(SECOND, duplicate_of=0)]),
++        "K": fixture("retransmission", [Transmission(SECOND), Transmission(2 * SECOND)]),
++        "L": fixture("capture_quality", [Transmission(SECOND)], states=[(0, 5, "healthy"), (5, 10, "degraded"),
++                                   (10, 15, "source_unavailable"), (15, 20, "prototype_unavailable")]),
++        "M": fixture("ipv4", [Transmission(SECOND, length=60)]),
++        "N": fixture("ipv6", [Transmission(SECOND, ip_version=6, length=1280)]),
++        "O": fixture("upload", [Transmission(SECOND, length=500)]),
++        "P": fixture("download", [Transmission(SECOND, "download", length=750)]),
++    }
+diff --git a/research/dti_00b/live.py b/research/dti_00b/live.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae4f281bdc11c82af5a761560d02699af241fffd
+--- /dev/null
++++ b/research/dti_00b/live.py
+@@ -0,0 +1,261 @@
++"""Timer-driven bounded live orchestration, separate from offline EOF semantics."""
++
++import signal
++import socket
++import threading
++import uuid
++from collections import OrderedDict
++from contextlib import contextmanager
++from dataclasses import asdict
++
++from .live_capture import Clock, LinuxPacketSource, POLL_NS, HEADER_BYTES
++from .meter import account
++from .model import SECOND, CADENCE, Coverage, QualityInterval, Counters, QUALITIES, make_slice, utc
++from .replay import BoundedSink
++
++LIVE_ADAPTER_VERSION = "r2.0"
++
++
++class LiveWindow:
++    def __init__(self, config, start, run_id):
++        self.coverage = Coverage(config.capture_source_id, config.test_scope, config.subject_mac,
++                                 start, start + config.duration_seconds * SECOND,
++                                 (QualityInterval(start, start + config.duration_seconds * SECOND, "healthy"),))
++        self.limits = config.limits
++        self.counters = Counters()
++        self.run_id = run_id
++        self.start = start // CADENCE * CADENCE
++        self.sequence = 0
++        self.sticky_reasons = set()
++        self.all_reasons = set()
++        self.unavailable = False
++        self.late_frames = 0
++        self.unassigned_native_bytes = 0
++        self.last_unassigned_event_utc = None
++        self.reset()
++
++    @property
++    def end(self):
++        return self.start + CADENCE
++
++    def reset(self):
++        self.counts = dict(upload_packets=0, download_packets=0, upload_bytes_native=0,
++                           download_bytes_native=0, first_packet_at=None, last_packet_at=None)
++        self.reasons = set()
++        self.state = "healthy"
++
++    def qualify(self, reason, *, sticky=False, unavailable=False):
++        self.all_reasons.add(reason)
++        (self.sticky_reasons if sticky else self.reasons).add(reason)
++        self.state = max((self.state, "source_unavailable" if unavailable else "degraded"), key=QUALITIES.index)
++        self.unavailable = self.unavailable or unavailable
++
++    def push(self, packet, reasons):
++        self.counters.raw_packets_seen += 1
++        if self.counters.raw_packets_seen > self.limits.max_records:
++            raise OSError("live record limit exceeded")
++        for reason in reasons:
++            self.qualify(reason, sticky=True)
++        if packet.timestamp >= self.coverage.end and self.start >= self.coverage.end:
++            # A receive waking exactly at the finite capture end is out of coverage.
++            self.counters.outside_coverage_packets += 1
++            return
++        if packet.error:
++            self.counters.rejected_packets += 1
++            self.qualify("rejected_header")
++            return
++        if packet.timestamp < self.coverage.start or not self.start <= packet.timestamp < self.end:
++            # Never assign a late/future event to a nearest/current bucket.
++            self.late_frames += 1
++            self.unassigned_native_bytes += packet.native_length
++            self.last_unassigned_event_utc = utc(packet.timestamp)
++            self.counters.outside_coverage_packets += 1
++            self.qualify("event_outside_open_interval", sticky=True)
++            return
++        subject = self.coverage.subject_mac
++        if packet.src_mac == subject and packet.dst_mac != subject:
++            direction = "upload"
++        elif packet.dst_mac == subject and packet.src_mac != subject:
++            direction = "download"
++        else:
++            self.counters.out_of_scope_packets += 1
++            return
++        # Same accepted R1 arithmetic; no provenance map, no heuristic dedup/cache.
++        self.state = account(packet, direction, self.counts, self.state, self.reasons,
++                             self.coverage, self.limits, self.counters, OrderedDict(), {}, set())
++
++    def emit(self, sink, *, final_partial=False):
++        state = self.state
++        reasons = self.reasons | self.sticky_reasons
++        if self.sticky_reasons:
++            state = max((state, "degraded"), key=QUALITIES.index)
++        if self.unavailable:
++            state = "source_unavailable"
++        if (self.start < self.coverage.start or final_partial) and state == "healthy":
++            state = "partial"
++        if self.start < self.coverage.start:
++            reasons.add("adapter_started_inside_interval")
++        if final_partial:
++            reasons.add("adapter_stopped_inside_interval")
++        self.sequence += 1
++        row = make_slice(self.coverage, self.start, self.end, self.run_id, self.sequence,
++                         self.counts, state, reasons)
++        row["mirror_policy"] = "NO_HEURISTIC_DEDUP"
++        row["accounting_qualification"] = "AMBIGUOUS_OBSERVATIONS_COUNTED_NOT_UNIQUE_TRANSMISSIONS"
++        sink.write(row)
++        self.counters.slices_emitted += 1
++        self.start += CADENCE
++        self.reset()
++
++
++def run_live(config, sink, *, clock=None, stop_event=None, run_id=None, socket_factory=socket.socket,
++             platform=None, link_probe=None, queue_probe=None):
++    clock = clock or Clock()
++    stop_event = stop_event or threading.Event()
++    run_id = run_id or str(uuid.uuid4())
++    if str(uuid.UUID(run_id)) != run_id:
++        raise ValueError("canonical run UUID required")
++    options = dict(socket_factory=socket_factory, platform=platform)
++    if link_probe is not None:
++        options["link_probe"] = link_probe
++    if queue_probe is not None:
++        options["queue_probe"] = queue_probe
++    source = LinuxPacketSource(config, clock, **options)
++    open_error = None
++    try:
++        source.open()
++    except OSError as exc:
++        open_error = str(exc)[:256]
++    anchor_mono = clock.monotonic_ns()
++    anchor_utc = clock.utc_ns()
++    window = LiveWindow(config, anchor_utc, run_id)
++    stop_mono = anchor_mono + config.duration_seconds * SECOND
++    next_poll = anchor_mono
++    maximum_delay = maximum_drift = maximum_lag = maximum_write_latency = 0
++    controlled_stop = False
++    if open_error:
++        window.qualify("socket_open_or_bind_failed", sticky=True, unavailable=True)
++
++    def poll(sealing=False):
++        nonlocal next_poll
++        if source.sock is not None:
++            try:
++                for reason in source.health(sealing=sealing):
++                    # Drops cannot be assigned retrospectively to exact sealed buckets.
++                    window.qualify(reason, sticky=True)
++            except OSError:
++                window.qualify("capture_source_failed", sticky=True, unavailable=True)
++                source.close()
++        next_poll = clock.monotonic_ns() + POLL_NS
++
++    def mapped_utc(mono):
++        return anchor_utc + mono - anchor_mono
++
++    def advance(mono):
++        nonlocal maximum_delay, maximum_write_latency
++        while window.end <= min(mapped_utc(mono), window.coverage.end):
++            poll(sealing=True)
++            delay = max(0, mapped_utc(clock.monotonic_ns()) - window.end)
++            maximum_delay = max(maximum_delay, delay)
++            if delay > POLL_NS:
++                window.qualify("slice_emission_delayed", sticky=True)
++            closing_end = window.end
++            before_write = clock.monotonic_ns()
++            window.emit(sink)
++            after_write = clock.monotonic_ns()
++            maximum_write_latency = max(maximum_write_latency, after_write - before_write)
++            maximum_delay = max(maximum_delay, mapped_utc(after_write) - closing_end)
++            if after_write - before_write > POLL_NS:
++                window.qualify("output_backpressure_delay", sticky=True)
++
++    try:
++        while clock.monotonic_ns() < stop_mono and not stop_event.is_set():
++            now = clock.monotonic_ns()
++            drift = abs(clock.utc_ns() - mapped_utc(now))
++            maximum_drift = max(maximum_drift, drift)
++            if drift > POLL_NS:
++                window.qualify("realtime_clock_discontinuity", sticky=True)
++            if now >= next_poll:
++                poll()
++            advance(now)  # Timer completion NEVER waits for another packet.
++            now = clock.monotonic_ns()
++            if now >= stop_mono or stop_event.is_set():
++                break
++            boundary_mono = anchor_mono + window.end - anchor_utc
++            wait_ns = max(1, min(POLL_NS, stop_mono - now, boundary_mono - now))
++            if source.sock is None:
++                clock.sleep(wait_ns / SECOND)
++                continue
++            try:
++                packet, reasons = source.receive(wait_ns / SECOND)
++            except (socket.timeout, InterruptedError):
++                continue
++            except OSError:
++                window.qualify("capture_receive_failed", sticky=True, unavailable=True)
++                source.close()
++                continue
++            mono = clock.monotonic_ns()
++            lag = max(0, mapped_utc(mono) - packet.timestamp)
++            maximum_lag = max(maximum_lag, lag)
++            if lag > POLL_NS:
++                window.qualify("capture_backlog_delay", sticky=True)
++            # At a boundary, account an already received previous-bucket packet first.
++            if packet.timestamp >= window.end:
++                advance(mono)
++            window.push(packet, reasons)
++        controlled_stop = stop_event.is_set()
++        final_mono = min(clock.monotonic_ns(), stop_mono)
++        # Final statistics/queue observation, then detach BEFORE final output flush.
++        poll(sealing=True)
++        source.close()
++        advance(final_mono)
++        if window.start < mapped_utc(final_mono):
++            before_write = clock.monotonic_ns()
++            window.emit(sink, final_partial=True)
++            latency = clock.monotonic_ns() - before_write
++            maximum_write_latency = max(maximum_write_latency, latency)
++            if latency > POLL_NS:
++                window.qualify("output_backpressure_delay", sticky=True)
++    finally:
++        source.close()
++    return dict(status="DEGRADED" if window.all_reasons or window.unavailable else ("STOPPED" if controlled_stop else "COMPLETE"),
++                execution_mode="RESEARCH_LIVE", interface=config.interface, run_session_id=run_id,
++                live_adapter_version=LIVE_ADAPTER_VERSION,
++                adapter_start_utc=utc(anchor_utc), adapter_stop_utc=utc(mapped_utc(clock.monotonic_ns())),
++                accounting_coverage_end_utc=utc(mapped_utc(final_mono)),
++                bounded_duration_seconds=config.duration_seconds, controlled_stop=controlled_stop,
++                open_error=open_error, capture=source.evidence, counters=asdict(window.counters),
++                maximum_realtime_drift_ns=maximum_drift, maximum_slice_emission_delay_ns=maximum_delay,
++                maximum_output_write_latency_ns=maximum_write_latency,
++                maximum_receive_lag_ns=maximum_lag, unassigned_frames=window.late_frames,
++                unassigned_bytes_native=window.unassigned_native_bytes,
++                last_unassigned_event_utc=window.last_unassigned_event_utc,
++                run_quality_reasons=sorted(window.all_reasons),
++                frame_buffer_bound_bytes=HEADER_BYTES, user_packet_queue_bound=0, dedup_cache_entries=0,
++                packet_delivery_model="INDEPENDENT_PACKET_SOCKET_NO_FANOUT_CONFIGURED",
++                packet_stealing_admission="NOT_PROVEN_BY_CODER", production_activation=False)
++
++
++@contextmanager
++def controlled_signals(stop_event):
++    """CLI main thread only; restore handlers, install no persistent state."""
++    previous = {}
++    def stop(signum, frame):
++        stop_event.set()
++    try:
++        for signum in (signal.SIGINT, signal.SIGTERM):
++            previous[signum] = signal.signal(signum, stop)
++        yield
++    finally:
++        for signum, handler in previous.items():
++            signal.signal(signum, handler)
++
++
++def live_to_file(config, output_path):
++    stop_event = threading.Event()
++    # Preflight output BEFORE any packet socket/interface operation.
++    with open(output_path, "xb") as target, controlled_signals(stop_event):
++        sink = BoundedSink(target, config.limits.max_output_bytes)
++        report = run_live(config, sink, stop_event=stop_event)
++        report.update(output_bytes=sink.bytes_written, output_sha256=sink.digest.hexdigest())
++        return report
+diff --git a/research/dti_00b/live_capture.py b/research/dti_00b/live_capture.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..643aa009a2c0c270ca8f72d8842f848833c51526
+--- /dev/null
++++ b/research/dti_00b/live_capture.py
+@@ -0,0 +1,205 @@
++"""Linux independent raw packet socket; no transmit, fanout, ring or NIC changes."""
++
++import re
++import select
++import socket
++import struct
++import sys
++import time
++from dataclasses import dataclass
++from pathlib import Path
++
++from .model import SECOND, Limits
++from .pcap import parse_header
++
++# Linux UAPI values, also usable by injected socket doubles on non-Linux hosts.
++AF_PACKET = 17
++SOL_PACKET = 263
++PACKET_STATISTICS = 6
++SO_TIMESTAMPNS_NEW = 64
++SO_TIMESTAMPNS_OLD = 35
++ETH_P_ALL = 3
++HEADER_BYTES = 82
++ANCILLARY_BYTES = 128
++POLL_NS = SECOND // 4
++
++
++class Clock:
++    utc_ns = staticmethod(time.time_ns)
++    monotonic_ns = staticmethod(time.monotonic_ns)
++    sleep = staticmethod(time.sleep)
++
++
++@dataclass(frozen=True)
++class LiveConfig:
++    interface: str
++    subject_mac: str
++    capture_source_id: str
++    test_scope: str
++    duration_seconds: int
++    receive_buffer_bytes: int = 1024 * 1024
++    limits: Limits = Limits()
++
++    def __post_init__(self):
++        if not isinstance(self.limits, Limits):
++            raise ValueError("accepted bounded Limits required")
++        if (not isinstance(self.interface, str) or self.interface in (".", "..")
++                or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", self.interface)):
++            raise ValueError("explicit Linux interface required")
++        if type(self.duration_seconds) is not int or not 1 <= self.duration_seconds <= 300:
++            raise ValueError("explicit finite duration: 1..300 integer seconds")
++        if type(self.receive_buffer_bytes) is not int or not 4096 <= self.receive_buffer_bytes <= 4 * 1024 * 1024:
++            raise ValueError("receive buffer bound: 4KiB..4MiB")
++        # Reuse the accepted source/scope/subject validation, without a new schema.
++        from .model import Coverage, QualityInterval
++        Coverage(self.capture_source_id, self.test_scope, self.subject_mac, 0, SECOND,
++                 (QualityInterval(0, SECOND, "healthy"),))
++
++
++def link_ready(interface, *, sysfs_root=Path("/sys/class/net")):
++    root = sysfs_root / interface
++    try:
++        with (root / "flags").open("r", encoding="ascii") as stream:
++            flags = int(stream.read(64).strip(), 16)
++        with (root / "type").open("r", encoding="ascii") as stream:
++            hardware_type = int(stream.read(64).strip())
++        with (root / "carrier").open("r", encoding="ascii") as stream:
++            carrier = int(stream.read(64).strip())
++    except (ValueError, OSError) as exc:
++        raise OSError("capture_link_probe_failed") from exc
++    # sysfs dev->flags need not contain the synthesized ioctl IFF_RUNNING bit.
++    return hardware_type == 1 and bool(flags & 1) and carrier == 1
++
++
++def queue_readable(sock):
++    return bool(select.select([sock], [], [], 0)[0])
++
++
++class LinuxPacketSource:
++    def __init__(self, config, clock, *, socket_factory=socket.socket,
++                 platform=None, link_probe=link_ready, queue_probe=queue_readable):
++        self.config, self.clock = config, clock
++        self.factory = socket_factory
++        self.platform = sys.platform if platform is None else platform
++        self.link_probe, self.queue_probe = link_probe, queue_probe
++        self.sock = None
++        self.buffer = bytearray(HEADER_BYTES)
++        self.timestamp_option = None
++        self.ordinal = 0
++        self.evidence = dict(socket_open=False, socket_bound=False, socket_closed=False,
++                             packets_received=0, kernel_packets=0, kernel_drops=0,
++                             statistics_polls=0, kernel_statistics_available=None,
++                             receive_buffer_requested_bytes=config.receive_buffer_bytes,
++                             receive_buffer_effective_bytes=None, timestamp_mode="UNAVAILABLE",
++                             queue_readable_at_seal=0, link_checks=0)
++
++    def open(self):
++        if not self.platform.startswith("linux"):
++            raise OSError("live capture is Linux-only")
++        try:
++            if not self.link_probe(self.config.interface):
++                raise OSError("Ethernet interface not UP/carrier-ready")
++            # Protocol zero prevents reception on arbitrary interfaces before bind.
++            self.sock = self.factory(AF_PACKET, socket.SOCK_RAW, 0)
++            self.evidence["socket_open"] = True
++            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.config.receive_buffer_bytes)
++            effective = self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
++            if not 0 < effective <= 8 * 1024 * 1024:
++                raise OSError("kernel receive buffer exceeds prototype bound")
++            self.evidence["receive_buffer_effective_bytes"] = effective
++            for option in (SO_TIMESTAMPNS_NEW, SO_TIMESTAMPNS_OLD):
++                try:
++                    self.sock.setsockopt(socket.SOL_SOCKET, option, 1)
++                    self.timestamp_option = option
++                    self.evidence["timestamp_mode"] = "KERNEL_UTC_NS_NEW" if option == SO_TIMESTAMPNS_NEW else "KERNEL_UTC_NS_OLD"
++                    break
++                except OSError:
++                    continue
++            # Python's AF_PACKET bind protocol argument is host-order ETH_P_ALL.
++            self.sock.bind((self.config.interface, ETH_P_ALL))
++            self.evidence["socket_bound"] = True
++        except BaseException:
++            self.close()
++            raise
++
++    def receive(self, timeout_seconds):
++        self.sock.settimeout(timeout_seconds)
++        try:
++            size, ancillary, flags, address = self.sock.recvmsg_into(
++                [self.buffer], ANCILLARY_BYTES, getattr(socket, "MSG_TRUNC", 0x20))
++            self.evidence["packets_received"] += 1
++            ordinal = self.ordinal
++            self.ordinal += 1
++            timestamp, reasons = self.clock.utc_ns(), set()
++            found = []
++            for level, kind, data in ancillary:
++                if level == socket.SOL_SOCKET and kind == self.timestamp_option:
++                    layout = "=qq" if kind == SO_TIMESTAMPNS_NEW else "@ll"
++                    if len(data) == struct.calcsize(layout):
++                        seconds, nanos = struct.unpack(layout, data)
++                        if seconds >= 0 and 0 <= nanos < SECOND:
++                            found.append(seconds * SECOND + nanos)
++            if len(found) == 1:
++                timestamp = found[0]
++            else:
++                reasons.add("kernel_timestamp_missing_or_invalid")
++            if flags & getattr(socket, "MSG_CTRUNC", 8):
++                reasons.add("timestamp_control_truncated")
++            if len(address) < 4 or address[0] != self.config.interface or address[3] != 1:
++                reasons.add("unexpected_capture_interface_or_link_type")
++                header = b""
++            elif size > self.config.limits.max_record_bytes:
++                reasons.add("frame_wire_length_limit")
++                header = b""
++            else:
++                header = bytes(self.buffer[:min(size, HEADER_BYTES)])
++            # MSG_TRUNC is intentional header-only capture, not loss of IP bytes:
++            # the kernel returns original wire length and parser retains headers only.
++            packet = parse_header(ordinal, timestamp, header, size)
++            return packet, reasons
++        finally:
++            # Do not leave transport/application prefix bytes in the receive buffer.
++            self.buffer[:] = b"\0" * HEADER_BYTES
++
++    def health(self, *, sealing=False):
++        reasons = set()
++        self.evidence["link_checks"] += 1
++        if not self.link_probe(self.config.interface):
++            raise OSError("capture link no longer UP/carrier-ready")
++        if self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR):
++            raise OSError("packet socket error")
++        self.evidence["statistics_polls"] += 1
++        try:
++            raw = self.sock.getsockopt(SOL_PACKET, PACKET_STATISTICS, 8)
++            if len(raw) != 8:
++                raise OSError("invalid packet statistics")
++            packets, drops = struct.unpack("=II", raw)
++            # PACKET_STATISTICS resets on read; retain cumulative run evidence.
++            self.evidence["kernel_packets"] += packets
++            self.evidence["kernel_drops"] += drops
++            self.evidence["kernel_statistics_available"] = True
++            if drops:
++                reasons.add("kernel_receive_drops")
++        except OSError:
++            self.evidence["kernel_statistics_available"] = False
++            reasons.add("kernel_drop_evidence_unavailable")
++        if self.timestamp_option is None:
++            reasons.add("kernel_timestamp_unavailable")
++        if sealing:
++            try:
++                if self.queue_probe(self.sock):
++                    self.evidence["queue_readable_at_seal"] += 1
++                    reasons.add("kernel_queue_not_drained_at_seal")
++            except OSError:
++                reasons.add("kernel_queue_evidence_unavailable")
++        # Queue readability is observable, but byte/packet queue depth is not claimed.
++        return reasons
++
++    def close(self):
++        if self.sock is not None:
++            try:
++                self.sock.close()
++            finally:
++                self.sock = None
++                self.evidence["socket_closed"] = True
++                self.buffer[:] = b"\0" * HEADER_BYTES
+diff --git a/research/dti_00b/meter.py b/research/dti_00b/meter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..59c823ed99547fabb62e7cd97cae0ad2259cb096
+--- /dev/null
++++ b/research/dti_00b/meter.py
+@@ -0,0 +1,104 @@
++"""One subject, one current slice, one lookahead and a bounded provenance cache."""
++
++import uuid
++from collections import OrderedDict
++
++from .model import CADENCE, QUALITIES, Limits, Counters, make_slice, utc
++
++
++def slices(packets, coverage, *, limits=None, counters=None, run_id=None, stop_at=None, split_visit=False):
++    limits = limits or Limits()
++    counters = counters or Counters()
++    run_id = run_id or str(uuid.uuid4())
++    if str(uuid.UUID(run_id)) != run_id:
++        raise ValueError("canonical run UUID required")
++    if stop_at is not None and not coverage.start < stop_at <= coverage.end:
++        raise ValueError("restart stop must be inside coverage")
++    duplicates = dict(coverage.duplicate_records)
++    originals = set(duplicates.values())
++    cache = OrderedDict()
++    iterator = iter(packets)
++    pending = next(iterator, None)
++    start = coverage.start // CADENCE * CADENCE
++    final = ((coverage.end + CADENCE - 1) // CADENCE) * CADENCE
++    sequence, previous = 0, -1
++    while start < final:
++        end = min(start + CADENCE - start % CADENCE, final)
++        if split_visit and coverage.visit_boundary is not None and start < coverage.visit_boundary < end:
++            end = coverage.visit_boundary
++        state = coverage.quality(start, end)
++        reasons = set()
++        if stop_at is not None:
++            if start >= stop_at:
++                state = "prototype_unavailable"
++                reasons.add("restart_gap")
++            elif stop_at < end:
++                state = max((state, "partial"), key=QUALITIES.index)
++                reasons.add("open_interval_at_restart")
++        counts = dict(upload_packets=0, download_packets=0, upload_bytes_native=0, download_bytes_native=0,
++                      first_packet_at=None, last_packet_at=None)
++        while pending is not None and pending.timestamp < end:
++            packet = pending
++            if packet.timestamp < previous:
++                raise ValueError("event_time_order_required")
++            previous = packet.timestamp
++            counters.raw_packets_seen += 1
++            if not coverage.start <= packet.timestamp < coverage.end or (stop_at is not None and packet.timestamp >= stop_at):
++                counters.outside_coverage_packets += 1
++            elif packet.error:
++                counters.rejected_packets += 1
++                state = max((state, "degraded"), key=QUALITIES.index)
++                reasons.add("rejected_header")
++            elif packet.src_mac == coverage.subject_mac and packet.dst_mac != coverage.subject_mac:
++                state = account(packet, "upload", counts, state, reasons, coverage, limits, counters, cache, duplicates, originals)
++            elif packet.dst_mac == coverage.subject_mac and packet.src_mac != coverage.subject_mac:
++                state = account(packet, "download", counts, state, reasons, coverage, limits, counters, cache, duplicates, originals)
++            else:
++                counters.out_of_scope_packets += 1
++            pending = next(iterator, None)
++        sequence += 1
++        counters.slices_emitted += 1
++        yield make_slice(coverage, start, end, run_id, sequence, counts, state, reasons)
++        start = end
++    # Consume the tail to validate framing/order; it must never enter accounting.
++    while pending is not None:
++        if pending.timestamp < previous:
++            raise ValueError("event_time_order_required")
++        previous = pending.timestamp
++        counters.raw_packets_seen += 1
++        counters.outside_coverage_packets += 1
++        pending = next(iterator, None)
++
++
++def account(packet, direction, counts, state, reasons, coverage, limits, counters, cache, duplicates, originals):
++    counters.raw_packets_in_scope += 1
++    counters.raw_bytes_native += packet.native_length
++    while cache and packet.timestamp - next(iter(cache.values())).timestamp > limits.dedup_horizon_ns:
++        cache.popitem(last=False)
++        counters.dedup_evictions += 1
++    if packet.ordinal in duplicates:
++        counters.duplicate_candidates += 1
++        original = cache.get(duplicates[packet.ordinal])
++        if original is not None and (original.header_identity, original.native_length) == (packet.header_identity, packet.native_length):
++            counters.deduplicated_packets += 1
++            counters.dedup_cache_entries = len(cache)
++            return state
++        # Never drop a packet when the trusted fixture claim cannot be corroborated.
++        counters.duplicate_provenance_unresolved += 1
++        reasons.add("duplicate_provenance_unresolved")
++        state = max((state, "degraded"), key=QUALITIES.index)
++    if packet.ordinal in originals:
++        cache[packet.ordinal] = packet
++        if len(cache) > limits.dedup_entries:
++            cache.popitem(last=False)
++            counters.dedup_evictions += 1
++    counters.dedup_cache_entries = len(cache)
++    counters.dedup_peak_entries = max(counters.dedup_peak_entries, len(cache))
++    counters.accounted_packets += 1
++    counters.accounted_bytes_native += packet.native_length
++    counts[direction + "_packets"] += 1
++    counts[direction + "_bytes_native"] += packet.native_length
++    if counts["first_packet_at"] is None:
++        counts["first_packet_at"] = utc(packet.timestamp)
++    counts["last_packet_at"] = utc(packet.timestamp)
++    return state
+diff --git a/research/dti_00b/model.py b/research/dti_00b/model.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bfe523824907302aecc3ccb29e5b7c7eab1b3d27
+--- /dev/null
++++ b/research/dti_00b/model.py
+@@ -0,0 +1,168 @@
++"""Prototype-only coverage and output contracts; no final DTI schema freeze."""
++
++import hashlib
++import json
++import re
++from dataclasses import dataclass
++from datetime import datetime, timezone
++
++from . import VERSION
++
++SECOND = 1_000_000_000
++CADENCE = 5 * SECOND
++QUALITIES = ("healthy", "partial", "degraded", "source_unavailable", "prototype_unavailable")
++
++
++def canonical(value):
++    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
++
++
++def utc(ns):
++    seconds, fraction = divmod(ns, SECOND)
++    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + f".{fraction:09d}Z"
++
++
++def instant(value):
++    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z", value):
++        raise ValueError("canonical UTC required")
++    head, _, tail = value[:-1].partition(".")
++    seconds = int(datetime.strptime(head, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
++    return seconds * SECOND + int(tail.ljust(9, "0") or "0")
++
++
++@dataclass(frozen=True)
++class QualityInterval:
++    start: int
++    end: int
++    state: str
++
++
++@dataclass(frozen=True)
++class Coverage:
++    capture_source_id: str
++    test_scope: str
++    subject_mac: str
++    start: int
++    end: int
++    intervals: tuple
++    visit_boundary: int = None
++    # Trusted synthetic fixture provenance ONLY: repeated record ordinal -> original.
++    duplicate_records: tuple = ()
++
++    def __post_init__(self):
++        if not all(isinstance(v, str) and 0 < len(v) <= 128 for v in (self.capture_source_id, self.test_scope)):
++            raise ValueError("source/scope required and bounded")
++        if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", self.subject_mac) or int(self.subject_mac[:2], 16) & 1:
++            raise ValueError("canonical unicast subject required")
++        if self.end <= self.start or self.end - self.start > 86400 * SECOND:
++            raise ValueError("coverage must be positive and at most 24 hours")
++        if len(self.intervals) > 4096 or len(self.duplicate_records) > 4096:
++            raise ValueError("manifest bound exceeded")
++        cursor = self.start
++        for interval in self.intervals:
++            if interval.start != cursor or interval.end <= cursor or interval.state not in QUALITIES:
++                raise ValueError("quality intervals must exactly partition coverage")
++            cursor = interval.end
++        if cursor != self.end:
++            raise ValueError("quality coverage incomplete")
++        if self.visit_boundary is not None and not self.start < self.visit_boundary < self.end:
++            raise ValueError("Visit boundary must be inside coverage")
++        seen = set()
++        for repeated, original in self.duplicate_records:
++            if type(repeated) is not int or type(original) is not int or not 0 <= original < repeated or repeated in seen:
++                raise ValueError("invalid duplicate provenance")
++            seen.add(repeated)
++
++    def quality(self, start, end):
++        if start < self.start or end > self.end:
++            return "partial"
++        return max((q.state for q in self.intervals if q.start < end and start < q.end), key=QUALITIES.index)
++
++    def as_dict(self):
++        return dict(capture_source_id=self.capture_source_id, test_scope=self.test_scope,
++                    subject_mac=self.subject_mac, coverage_start_utc=utc(self.start), coverage_end_utc=utc(self.end),
++                    capture_quality_intervals=[dict(start_utc=utc(q.start), end_utc=utc(q.end), state=q.state) for q in self.intervals],
++                    synthetic_visit_boundary_utc=None if self.visit_boundary is None else utc(self.visit_boundary),
++                    synthetic_duplicate_records=[list(pair) for pair in self.duplicate_records])
++
++    @classmethod
++    def from_dict(cls, value):
++        required = {"capture_source_id", "test_scope", "subject_mac", "coverage_start_utc", "coverage_end_utc", "capture_quality_intervals"}
++        if not required <= value.keys() or value.keys() - required - {"synthetic_visit_boundary_utc", "synthetic_duplicate_records"}:
++            raise ValueError("closed coverage manifest")
++        rows = value["capture_quality_intervals"]
++        if not isinstance(rows, list) or len(rows) > 4096:
++            raise ValueError("quality interval limit")
++        intervals = []
++        for row in rows:
++            if set(row) != {"start_utc", "end_utc", "state"}:
++                raise ValueError("closed quality interval")
++            intervals.append(QualityInterval(instant(row["start_utc"]), instant(row["end_utc"]), row["state"]))
++        boundary = value.get("synthetic_visit_boundary_utc")
++        return cls(value["capture_source_id"], value["test_scope"], value["subject_mac"],
++                   instant(value["coverage_start_utc"]), instant(value["coverage_end_utc"]), tuple(intervals),
++                   None if boundary is None else instant(boundary), tuple(tuple(p) for p in value.get("synthetic_duplicate_records", ())))
++
++
++@dataclass(frozen=True)
++class Limits:
++    max_record_bytes: int = 65535
++    max_records: int = 2_000_000
++    dedup_entries: int = 4096
++    dedup_horizon_ns: int = SECOND
++    max_output_bytes: int = 16 * 1024 * 1024
++
++    def __post_init__(self):
++        for name in ("max_record_bytes", "max_records", "dedup_entries", "dedup_horizon_ns", "max_output_bytes"):
++            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
++                raise ValueError("positive integer limits required")
++        if self.max_record_bytes > 65535 or self.dedup_entries > 4096 or self.max_records > 2_000_000 or self.max_output_bytes > 16 * 1024 * 1024:
++            raise ValueError("prototype hard ceiling exceeded")
++
++
++@dataclass
++class Counters:
++    raw_packets_seen: int = 0
++    raw_packets_in_scope: int = 0
++    raw_bytes_native: int = 0
++    accounted_packets: int = 0
++    accounted_bytes_native: int = 0
++    rejected_packets: int = 0
++    out_of_scope_packets: int = 0
++    outside_coverage_packets: int = 0
++    duplicate_candidates: int = 0
++    deduplicated_packets: int = 0
++    dedup_cache_entries: int = 0
++    dedup_peak_entries: int = 0
++    dedup_evictions: int = 0
++    duplicate_provenance_unresolved: int = 0
++    slices_emitted: int = 0
++    input_buffer_peak_bytes: int = 0
++    queue_peak_records: int = 1
++
++
++def make_slice(coverage, start, end, run_id, sequence, packets, state, reasons):
++    identity = dict(schema_version=1, capture_source_id=coverage.capture_source_id,
++                    test_scope=coverage.test_scope, subject_key=coverage.subject_mac,
++                    slice_start_utc=utc(start), slice_end_utc=utc(end))
++    output = dict(identity, prototype_version=VERSION,
++                  slice_id=hashlib.sha256(canonical(identity).encode()).hexdigest(),
++                  run_session_id=run_id, source_sequence=sequence,
++                  capture_quality_state=state, quality_reasons=sorted(reasons), **packets)
++    complete = state == "healthy"
++    output["complete_accounting"] = complete
++    # Observed counts remain inspectable in incomplete slices, never asserted as zero traffic.
++    output["upload_bytes_per_second"] = packets["upload_bytes_native"] * SECOND / (end - start) if complete else None
++    output["download_bytes_per_second"] = packets["download_bytes_native"] * SECOND / (end - start) if complete else None
++    output["healthy_absence_of_subject_traffic"] = complete and not (packets["upload_packets"] + packets["download_packets"])
++    return output
++
++
++def semantic_payload(slice_value):
++    return {k: v for k, v in slice_value.items() if k not in {"run_session_id", "source_sequence"}}
++
++
++def replay_relation(previous, current):
++    if previous["slice_id"] != current["slice_id"]:
++        return "DISTINCT"
++    return "REPLAY" if semantic_payload(previous) == semantic_payload(current) else "CONFLICT"
+diff --git a/research/dti_00b/pcap.py b/research/dti_00b/pcap.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e02a4fe85d9adf71937bbeba5fb2094a5705af0
+--- /dev/null
++++ b/research/dti_00b/pcap.py
+@@ -0,0 +1,117 @@
++"""Streaming classic-PCAP reader: retain Ethernet/IP headers, discard other bytes."""
++
++import ipaddress
++import struct
++from dataclasses import dataclass
++
++from .model import SECOND
++
++
++class CaptureError(ValueError):
++    """No success report may be published after a structurally broken input."""
++
++
++@dataclass(frozen=True)
++class Packet:
++    ordinal: int
++    timestamp: int
++    src_mac: str = None
++    dst_mac: str = None
++    src_ip: str = None
++    dst_ip: str = None
++    protocol: int = None
++    native_length: int = 0
++    # Only bounded Ethernet/IP header bytes; never TCP/application payload.
++    header_identity: bytes = b""
++    error: str = None
++
++
++def parse_header(ordinal, timestamp, header, original_length):
++    if len(header) < 14:
++        return Packet(ordinal, timestamp, error="truncated_ethernet_header")
++    dst = ":".join(f"{v:02x}" for v in header[:6])
++    src = ":".join(f"{v:02x}" for v in header[6:12])
++    if header[0] & 1 or header[6] & 1:
++        return Packet(ordinal, timestamp)  # Non-unicast scope is intentionally not frozen.
++    offset, ether_type = 14, int.from_bytes(header[12:14], "big")
++    tags = 0
++    while ether_type in (0x8100, 0x88A8):
++        if tags == 2 or len(header) < offset + 4:
++            return Packet(ordinal, timestamp, error="unsupported_or_truncated_vlan")
++        ether_type = int.from_bytes(header[offset + 2:offset + 4], "big")
++        offset += 4
++        tags += 1
++    ip = header[offset:]
++    try:
++        if ether_type == 0x0800:
++            if len(ip) < 20 or ip[0] >> 4 != 4:
++                raise ValueError("truncated_or_invalid_ipv4")
++            width = (ip[0] & 15) * 4
++            length = int.from_bytes(ip[2:4], "big")
++            if width < 20 or len(ip) < width or length < width:
++                raise ValueError("invalid_ipv4_lengths")
++            src_ip, dst_ip = str(ipaddress.IPv4Address(ip[12:16])), str(ipaddress.IPv4Address(ip[16:20]))
++            protocol = ip[9]
++        elif ether_type == 0x86DD:
++            if len(ip) < 40 or ip[0] >> 4 != 6:
++                raise ValueError("truncated_or_invalid_ipv6")
++            width = 40
++            payload = int.from_bytes(ip[4:6], "big")
++            if payload == 0:
++                # Jumbogram interpretation needs an extension-header contract, out of scope.
++                raise ValueError("ipv6_zero_payload_or_jumbogram_unsupported")
++            length = 40 + payload
++            src_ip, dst_ip = str(ipaddress.IPv6Address(ip[8:24])), str(ipaddress.IPv6Address(ip[24:40]))
++            protocol = ip[6]  # IPv6 base-header Next Header; no application parsing.
++        else:
++            return Packet(ordinal, timestamp)
++        if original_length < offset + length:
++            raise ValueError("wire_length_smaller_than_declared_ip")
++        if ipaddress.ip_address(dst_ip).is_multicast:
++            return Packet(ordinal, timestamp)
++        return Packet(ordinal, timestamp, src, dst, src_ip, dst_ip, protocol, length, header[:offset + width])
++    except ValueError as exc:
++        return Packet(ordinal, timestamp, error=str(exc))
++
++
++def read_pcap(stream, limits, counters):
++    global_header = stream.read(24)
++    magic = {b"\xd4\xc3\xb2\xa1": ("<", 1000), b"\xa1\xb2\xc3\xd4": (">", 1000),
++             b"\x4d\x3c\xb2\xa1": ("<", 1), b"\xa1\xb2\x3c\x4d": (">", 1)}
++    if len(global_header) != 24 or global_header[:4] not in magic:
++        raise CaptureError("classic_pcap_required")
++    endian, scale = magic[global_header[:4]]
++    major, minor, _, _, snaplen, link = struct.unpack(endian + "HHIIII", global_header[4:])
++    if (major, minor) != (2, 4) or link != 1 or not 0 < snaplen <= limits.max_record_bytes:
++        raise CaptureError("unsupported_pcap_header")
++    previous = -1
++    ordinal = 0
++    while True:
++        record_header = stream.read(16)
++        if not record_header:
++            return
++        if len(record_header) != 16:
++            raise CaptureError("truncated_record_header")
++        sec, fraction, captured, original = struct.unpack(endian + "IIII", record_header)
++        if fraction >= SECOND // scale or captured > snaplen or captured > original:
++            raise CaptureError("invalid_record_header")
++        if ordinal >= limits.max_records:
++            raise CaptureError("record_limit_exceeded")
++        timestamp = sec * SECOND + fraction * scale
++        if timestamp < previous:
++            raise CaptureError("event_time_order_required")
++        previous = timestamp
++        # At most 22 L2 + 60 IPv4 / 40 IPv6 bytes are retained.
++        keep = min(captured, 82)
++        header = stream.read(keep)
++        if len(header) != keep:
++            raise CaptureError("truncated_record_data")
++        remaining = captured - keep
++        while remaining:
++            discarded = stream.read(min(4096, remaining))
++            if not discarded:
++                raise CaptureError("truncated_record_data")
++            remaining -= len(discarded)
++        counters.input_buffer_peak_bytes = max(counters.input_buffer_peak_bytes, keep + min(4096, max(0, captured - keep)))
++        yield parse_header(ordinal, timestamp, header, original)
++        ordinal += 1
+diff --git a/research/dti_00b/replay.py b/research/dti_00b/replay.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e15b3f340fd509b76c2f1e404f37a527672509c3
+--- /dev/null
++++ b/research/dti_00b/replay.py
+@@ -0,0 +1,67 @@
++"""Exclusive bounded JSONL output; errors leave a clearly incomplete attempt."""
++
++import hashlib
++import json
++import time
++from dataclasses import asdict
++
++from .meter import slices
++from .model import Limits, Counters, Coverage, canonical
++from .pcap import read_pcap
++
++
++class OutputUnavailable(OSError):
++    pass
++
++
++class BoundedSink:
++    def __init__(self, stream, max_bytes):
++        self.stream = stream
++        self.max_bytes = max_bytes
++        self.bytes_written = 0
++        self.digest = hashlib.sha256()
++
++    def write(self, value):
++        data = (canonical(value) + "\n").encode("utf-8")
++        if self.bytes_written + len(data) > self.max_bytes:
++            raise OutputUnavailable("output_limit_exceeded: prototype_unavailable")
++        try:
++            if self.stream.write(data) != len(data):
++                raise OutputUnavailable("short_output_write: prototype_unavailable")
++            self.stream.flush()
++        except OSError as exc:
++            raise OutputUnavailable("output_unavailable: prototype_unavailable") from exc
++        self.bytes_written += len(data)
++        self.digest.update(data)
++
++
++def load_coverage(path):
++    with open(path, "rb") as stream:
++        raw = stream.read(1024 * 1024 + 1)
++    if len(raw) > 1024 * 1024:
++        raise ValueError("manifest_byte_limit")
++    def unique(pairs):
++        value = {}
++        for key, item in pairs:
++            if key in value:
++                raise ValueError("duplicate_json_key")
++            value[key] = item
++        return value
++    return Coverage.from_dict(json.loads(raw, object_pairs_hook=unique))
++
++
++def replay(input_path, manifest_path, output_path, *, limits=None, run_id=None, split_visit=False):
++    limits = limits or Limits()
++    coverage = load_coverage(manifest_path)
++    counters = Counters()
++    start = time.perf_counter()
++    with open(input_path, "rb") as source, open(output_path, "xb") as target:
++        sink = BoundedSink(target, limits.max_output_bytes)
++        for row in slices(read_pcap(source, limits, counters), coverage, limits=limits, counters=counters,
++                          run_id=run_id, split_visit=split_visit):
++            sink.write(row)
++        return dict(status="COMPLETE", execution_mode="OFFLINE_LAB", counters=asdict(counters),
++                    output_bytes=sink.bytes_written, output_sha256=sink.digest.hexdigest(),
++                    elapsed_seconds=time.perf_counter() - start,
++                    dedup_authority="EXPLICIT_SYNTHETIC_RECORD_PROVENANCE_ONLY",
++                    arbitrary_mirror_dedup_admission="UNRESOLVED", production_access=False)
+diff --git a/tests/dti_00b/__init__.py b/tests/dti_00b/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d035592fc12706ea96d8857d0ef6d690b44b196
+--- /dev/null
++++ b/tests/dti_00b/__init__.py
+@@ -0,0 +1 @@
++"""Focused offline DTI-00B checks only."""
+diff --git a/tests/dti_00b/test_live.py b/tests/dti_00b/test_live.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..11f7a3947fde9615554fd257086bc68fc1d8eb51
+--- /dev/null
++++ b/tests/dti_00b/test_live.py
+@@ -0,0 +1,411 @@
++"""Fake sockets/clocks only. No root, real AF_PACKET socket or host interface."""
++
++import ast
++import io
++import signal
++import socket
++import struct
++import threading
++from collections import deque
++from dataclasses import replace
++from pathlib import Path
++
++import pytest
++
++from research.dti_00b.fixtures import EPOCH, SUBJECT, Transmission, header, scenarios
++from research.dti_00b.live import controlled_signals, live_to_file, run_live
++from research.dti_00b.live_capture import (AF_PACKET, ETH_P_ALL, SOL_PACKET, PACKET_STATISTICS,
++                                         SO_TIMESTAMPNS_NEW, HEADER_BYTES, LiveConfig, LinuxPacketSource, link_ready)
++from research.dti_00b.model import SECOND, Limits, make_slice, replay_relation
++from research.dti_00b.replay import BoundedSink, OutputUnavailable
++
++RUN1 = "d27fe2da-2031-4f5d-b030-a559d3d8f001"
++RUN2 = "d27fe2da-2031-4f5d-b030-a559d3d8f002"
++
++
++class FakeClock:
++    def __init__(self):
++        self.now = 0
++        self.wall_offset = 0
++        self.after_sleep = None
++
++    def utc_ns(self):
++        return EPOCH + self.now + self.wall_offset
++
++    def monotonic_ns(self):
++        return self.now
++
++    def sleep(self, seconds):
++        self.now += round(seconds * SECOND)
++        if self.after_sleep:
++            self.after_sleep()
++
++
++class FakeSocket:
++    def __init__(self, clock, events=()):
++        self.clock = clock
++        self.events = deque(events)
++        self.options = []
++        self.binding = None
++        self.closed = False
++        self.timeout = 0
++        self.receive_calls = 0
++        self.drop_at = None
++        self.drop_reported = False
++        self.statistics_error = False
++        self.bind_error = False
++        self.timestamp_missing = False
++
++    def setsockopt(self, *arguments):
++        self.options.append(arguments)
++
++    def getsockopt(self, level, option, size=None):
++        if level == SOL_PACKET and option == PACKET_STATISTICS:
++            if self.statistics_error:
++                raise OSError("stats unavailable")
++            drops = 0
++            if self.drop_at is not None and self.clock.now >= self.drop_at and not self.drop_reported:
++                drops, self.drop_reported = 3, True
++            return struct.pack("=II", 0, drops)
++        return 2 * 1024 * 1024 if option == socket.SO_RCVBUF else 0
++
++    def bind(self, address):
++        if self.bind_error:
++            raise OSError("bind failed")
++        self.binding = address
++
++    def settimeout(self, timeout):
++        self.timeout = timeout
++
++    def recvmsg_into(self, buffers, ancillary_size, flags):
++        assert len(buffers) == 1 and len(buffers[0]) == HEADER_BYTES
++        assert ancillary_size == 128
++        assert flags == getattr(socket, "MSG_TRUNC", 0x20)
++        self.receive_calls += 1
++        deadline = self.clock.now + round(self.timeout * SECOND)
++        if not self.events or self.events[0][0] > deadline:
++            self.clock.sleep(self.timeout)
++            raise socket.timeout()
++        event_at, event = self.events.popleft()
++        self.clock.sleep(max(0, event_at - self.clock.now) / SECOND)
++        if isinstance(event, Exception):
++            raise event
++        data = header(event) if isinstance(event, Transmission) else event
++        buffers[0][:len(data)] = data
++        wire_length = event.length + 14 if isinstance(event, Transmission) else len(data)
++        ancillary = [] if self.timestamp_missing else [(socket.SOL_SOCKET, SO_TIMESTAMPNS_NEW,
++                            struct.pack("=qq", (EPOCH + event_at) // SECOND, event_at % SECOND))]
++        return wire_length, ancillary, getattr(socket, "MSG_TRUNC", 0x20), ("lab0", ETH_P_ALL, 3, 1, b"")
++
++    def close(self):
++        self.closed = True
++
++
++class Rows:
++    def __init__(self, clock):
++        self.rows = []
++        self.at = []
++        self.clock = clock
++
++    def write(self, row):
++        self.rows.append(row)
++        self.at.append(self.clock.now)
++
++
++def config(seconds=10):
++    return LiveConfig("lab0", SUBJECT, "synthetic-live-source", "offline-fake-socket-only", seconds)
++
++
++def exercise(events=(), *, cfg=None, clock=None, sock=None, sink=None, run=RUN1, stop=None, link=None, queue=None):
++    clock = clock or FakeClock()
++    sock = sock or FakeSocket(clock, events)
++    sink = sink or Rows(clock)
++    creations = []
++    def factory(*args):
++        creations.append(args)
++        return sock
++    result = run_live(cfg or config(), sink, clock=clock, run_id=run, stop_event=stop,
++                      platform="linux-test-double", socket_factory=factory,
++                      link_probe=link or (lambda interface: interface == "lab0"),
++                      queue_probe=queue or (lambda source: bool(source.events and source.events[0][0] <= clock.now)))
++    return sink, result, sock, creations
++
++
++def test_idle_timer_emits_at_boundary_without_next_packet_and_socket_is_independent():
++    rows, result, sock, creations = exercise()
++    assert rows.at == [5 * SECOND, 10 * SECOND]
++    assert all(r["capture_quality_state"] == "healthy" and r["healthy_absence_of_subject_traffic"] for r in rows.rows)
++    assert all(r["upload_bytes_per_second"] == 0 for r in rows.rows)
++    assert sock.closed and result["capture"]["socket_closed"]
++    assert creations == [(AF_PACKET, socket.SOCK_RAW, 0)]
++    assert sock.binding == ("lab0", ETH_P_ALL)
++    assert all(level == socket.SOL_SOCKET for level, option, value in sock.options)
++    assert result["capture"]["kernel_statistics_available"]
++
++
++def test_existing_accounting_upload_download_and_l3_lengths_preserved():
++    rows, result, _, _ = exercise([(SECOND, Transmission(SECOND, length=100)),
++                                  (2 * SECOND, Transmission(2 * SECOND, "download", 6, 1280))])
++    first, idle = rows.rows
++    assert (first["upload_packets"], first["download_packets"]) == (1, 1)
++    assert (first["upload_bytes_native"], first["download_bytes_native"]) == (100, 1280)
++    assert first["download_bytes_per_second"] == 256
++    assert idle["healthy_absence_of_subject_traffic"]
++    assert result["counters"]["accounted_bytes_native"] == 1380
++
++
++def test_exact_half_open_boundary_and_duration_end_never_count_into_unemitted_bucket():
++    rows, result, _, _ = exercise([(5 * SECOND, Transmission(5 * SECOND)),
++                                  (10 * SECOND, Transmission(10 * SECOND))])
++    assert [r["upload_packets"] for r in rows.rows] == [0, 1]
++    assert result["counters"]["accounted_packets"] == 1
++    assert result["counters"]["outside_coverage_packets"] == 1
++
++
++def test_duplicate_ambiguity_is_counted_and_qualified_without_dedup():
++    rows, result, _, _ = exercise([(SECOND, Transmission(SECOND)), (SECOND, Transmission(SECOND)),
++                                  (2 * SECOND, Transmission(2 * SECOND))])
++    assert rows.rows[0]["upload_packets"] == 3
++    assert rows.rows[0]["mirror_policy"] == "NO_HEURISTIC_DEDUP"
++    assert "NOT_UNIQUE_TRANSMISSIONS" in rows.rows[0]["accounting_qualification"]
++    assert result["counters"]["deduplicated_packets"] == 0
++    assert result["dedup_cache_entries"] == 0
++
++
++def test_source_failure_is_unavailable_not_healthy_zero_and_closes_socket():
++    rows, result, sock, _ = exercise([(SECOND, OSError("input failed"))])
++    assert all(r["capture_quality_state"] == "source_unavailable" for r in rows.rows)
++    assert all(not r["healthy_absence_of_subject_traffic"] and r["upload_bytes_per_second"] is None for r in rows.rows)
++    assert result["status"] == "DEGRADED" and sock.closed
++
++
++def test_parser_error_degrades_bucket_and_is_exposed_in_summary():
++    rows, result, _, _ = exercise([(SECOND, b"bad")])
++    assert rows.rows[0]["capture_quality_state"] == "degraded"
++    assert result["counters"]["rejected_packets"] == 1
++    assert result["status"] == "DEGRADED"
++    assert rows.rows[1]["healthy_absence_of_subject_traffic"]
++
++
++@pytest.mark.parametrize("failure", ["statistics_error", "timestamp_missing", "drops"])
++def test_missing_timing_drop_evidence_or_observed_drops_degrade_not_zero(failure):
++    clock = FakeClock()
++    sock = FakeSocket(clock, [(SECOND, Transmission(SECOND))])
++    if failure == "drops":
++        sock.drop_at = 2 * SECOND
++    else:
++        setattr(sock, failure, True)
++    rows, result, _, _ = exercise(clock=clock, sock=sock)
++    assert not rows.rows[0]["complete_accounting"]
++    assert result["status"] == "DEGRADED"
++    if failure == "drops":
++        assert result["capture"]["kernel_drops"] == 3  # reset-on-read not multiplied
++
++
++def test_link_down_is_detected_during_idle():
++    clock = FakeClock()
++    rows, result, sock, _ = exercise(clock=clock, link=lambda interface: clock.now < SECOND)
++    assert rows.rows[0]["capture_quality_state"] == "source_unavailable"
++    assert sock.closed and not rows.rows[0]["healthy_absence_of_subject_traffic"]
++
++
++def test_bind_failure_cleanup_and_no_normal_zero():
++    clock = FakeClock()
++    sock = FakeSocket(clock)
++    sock.bind_error = True
++    rows, result, _, _ = exercise(clock=clock, sock=sock)
++    assert sock.closed and result["open_error"] == "bind failed"
++    assert all(r["capture_quality_state"] == "source_unavailable" for r in rows.rows)
++
++
++def test_controlled_shutdown_partial_window_closes_and_no_extra_empty_bucket():
++    clock = FakeClock()
++    stop = threading.Event()
++    clock.after_sleep = lambda: stop.set() if clock.now >= 3 * SECOND else None
++    rows, result, sock, _ = exercise(clock=clock, stop=stop)
++    assert len(rows.rows) == 1
++    assert rows.rows[0]["capture_quality_state"] == "partial"
++    assert "adapter_stopped_inside_interval" in rows.rows[0]["quality_reasons"]
++    assert result["controlled_stop"] and sock.closed
++
++
++def test_duration_inside_bucket_is_explicit_partial_and_startup_edge_not_zero():
++    rows, result, _, _ = exercise(cfg=config(7))
++    assert [r["capture_quality_state"] for r in rows.rows] == ["healthy", "partial"]
++    clock = FakeClock()
++    clock.now = SECOND
++    rows, _, _, _ = exercise(clock=clock, cfg=config(4))
++    assert len(rows.rows) == 1 and rows.rows[0]["capture_quality_state"] == "partial"
++    assert not rows.rows[0]["healthy_absence_of_subject_traffic"]
++
++
++def test_run_uuid_separate_and_existing_slice_identity_preserved():
++    first, _, _, _ = exercise(run=RUN1)
++    second, _, _, _ = exercise(run=RUN2)
++    assert all(replay_relation(a, b) == "REPLAY" for a, b in zip(first.rows, second.rows))
++    coverage = replace(scenarios()["C"].coverage, capture_source_id=config().capture_source_id, test_scope=config().test_scope)
++    expected = make_slice(coverage, EPOCH, EPOCH + 5 * SECOND, RUN1, 1,
++                          {k: first.rows[0][k] for k in ("upload_packets", "download_packets", "upload_bytes_native",
++                             "download_bytes_native", "first_packet_at", "last_packet_at")}, "healthy", set())
++    assert first.rows[0]["slice_id"] == expected["slice_id"]
++
++
++def test_kernel_queue_not_empty_at_seal_qualifies_coverage():
++    rows, result, _, _ = exercise(queue=lambda sock: True)
++    assert result["capture"]["queue_readable_at_seal"] >= 2
++    assert all(not r["healthy_absence_of_subject_traffic"] for r in rows.rows)
++
++
++def test_monotonic_duration_survives_realtime_clock_step():
++    clock = FakeClock()
++    clock.after_sleep = lambda: setattr(clock, "wall_offset", 20 * SECOND) if clock.now >= SECOND else None
++    rows, result, _, _ = exercise(clock=clock)
++    assert rows.at == [5 * SECOND, 10 * SECOND]
++    assert result["maximum_realtime_drift_ns"] == 20 * SECOND
++    assert "realtime_clock_discontinuity" in rows.rows[0]["quality_reasons"]
++
++
++def test_bounded_streaming_many_frames_no_retained_frame_queue_and_record_limit():
++    events = [(i * 1000, Transmission(i * 1000)) for i in range(1, 1001)]
++    rows, result, sock, _ = exercise(events)
++    assert result["counters"]["accounted_packets"] == 1000
++    assert result["user_packet_queue_bound"] == 0 and result["frame_buffer_bound_bytes"] == 82
++    assert sock.closed
++    clock = FakeClock()
++    sock = FakeSocket(clock, events)
++    with pytest.raises(OSError, match="record limit"):
++        exercise(clock=clock, sock=sock, cfg=replace(config(), limits=Limits(max_records=1)))
++    assert sock.closed
++
++
++def test_sink_failure_always_closes_socket_and_does_not_claim_success():
++    clock = FakeClock()
++    sock = FakeSocket(clock)
++    sink = BoundedSink(io.BytesIO(), 1)
++    with pytest.raises(OutputUnavailable):
++        exercise(clock=clock, sock=sock, sink=sink)
++    assert sock.closed
++
++
++def test_linux_only_guard_never_calls_socket_factory_on_windows():
++    source = LinuxPacketSource(config(), FakeClock(), platform="win32",
++                               socket_factory=lambda *args: pytest.fail("real socket must not be contacted"))
++    with pytest.raises(OSError, match="Linux-only"):
++        source.open()
++
++
++@pytest.mark.parametrize("change", [dict(interface=""), dict(interface="../net"), dict(duration_seconds=0),
++                                  dict(duration_seconds=301), dict(receive_buffer_bytes=99999999)])
++def test_explicit_config_hard_bounds(change):
++    with pytest.raises(ValueError):
++        replace(config(), **change)
++
++
++def test_signal_handlers_only_request_stop_and_are_restored(monkeypatch):
++    handlers = {signal.SIGINT: "previous-int", signal.SIGTERM: "previous-term"}
++    def install(signum, handler):
++        previous = handlers[signum]
++        handlers[signum] = handler
++        return previous
++    monkeypatch.setattr(signal, "signal", install)
++    event = threading.Event()
++    with controlled_signals(event):
++        handlers[signal.SIGTERM](signal.SIGTERM, None)
++        assert event.is_set()
++    assert handlers == {signal.SIGINT: "previous-int", signal.SIGTERM: "previous-term"}
++
++
++def test_output_preflight_precedes_interface_operation(tmp_path, monkeypatch):
++    from research.dti_00b import live
++    path = tmp_path / "existing.jsonl"
++    path.write_bytes(b"historical")
++    monkeypatch.setattr(live, "run_live", lambda *a, **kw: pytest.fail("no socket before output preflight"))
++    with pytest.raises(FileExistsError):
++        live_to_file(config(), path)
++    assert path.read_bytes() == b"historical"
++
++
++def test_source_has_no_fanout_or_interface_mutation_configuration_path():
++    import research.dti_00b.live_capture as capture
++    tree = ast.parse(Path(capture.__file__).read_text(encoding="utf-8"))
++    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
++    options = [node for node in calls if node.func.attr == "setsockopt"]
++    assert len(options) == 2
++    assert all(isinstance(node.args[0], ast.Attribute) and node.args[0].attr == "SOL_SOCKET" for node in options)
++    assert not any(node.func.attr in ("send", "sendto", "sendmsg", "ioctl") for node in calls)
++    # All executable capture tests inject a FakeSocket, interface lab0, clock/probes.
++
++
++def test_late_event_is_not_assigned_to_nearest_bucket_and_loss_is_exposed():
++    clock = FakeClock()
++    sock = FakeSocket(clock, [(6 * SECOND, Transmission(4 * SECOND))])
++    original_receive = sock.recvmsg_into
++    def late(*args):
++        size, anc, flags, address = original_receive(*args)
++        return size, [(socket.SOL_SOCKET, SO_TIMESTAMPNS_NEW,
++                      struct.pack("=qq", EPOCH // SECOND + 4, 0))], flags, address
++    sock.recvmsg_into = late
++    rows, result, _, _ = exercise(clock=clock, sock=sock)
++    assert sum(r["upload_packets"] for r in rows.rows) == 0
++    assert result["unassigned_frames"] == 1
++    assert result["unassigned_bytes_native"] == 100
++    assert result["status"] == "DEGRADED"
++    assert not rows.rows[1]["healthy_absence_of_subject_traffic"]
++
++
++def test_output_backpressure_delay_measured_without_buffering_slices():
++    clock = FakeClock()
++    class Slow(Rows):
++        def write(self, row):
++            super().write(row)
++            if len(self.rows) == 1:
++                self.clock.sleep(1)
++    rows, result, _, _ = exercise(clock=clock, sink=Slow(clock))
++    assert len(rows.rows) == 2
++    assert result["maximum_output_write_latency_ns"] == SECOND
++    assert result["maximum_slice_emission_delay_ns"] >= SECOND
++    assert result["status"] == "DEGRADED"
++    assert "output_backpressure_delay" in rows.rows[1]["quality_reasons"]
++
++
++def test_partial_shutdown_detaches_socket_before_final_output():
++    clock = FakeClock()
++    sock = FakeSocket(clock)
++    class DetachmentChecked(Rows):
++        def write(self, row):
++            assert sock.closed
++            super().write(row)
++    rows, result, _, _ = exercise(clock=clock, sock=sock, cfg=config(3), sink=DetachmentChecked(clock))
++    assert len(rows.rows) == 1 and result["capture"]["socket_closed"]
++
++
++def test_live_cli_requires_finite_explicit_arguments_and_uses_only_injected_entry(monkeypatch, tmp_path):
++    from research.dti_00b import __main__, live
++    import sys
++    monkeypatch.setattr(sys, "argv", ["dti", "live", "--interface", "lab0"])
++    with pytest.raises(SystemExit) as missing:
++        __main__.main()
++    assert missing.value.code == 2
++    calls = []
++    def fake_file(cfg, path):
++        calls.append((cfg, path))
++        return {"status": "COMPLETE", "execution_mode": "INJECTED_ONLY"}
++    monkeypatch.setattr(live, "live_to_file", fake_file)
++    monkeypatch.setattr(sys, "argv", ["dti", "live", "--interface", "lab0", "--subject-mac", SUBJECT,
++                                     "--capture-source-id", "fake", "--test-scope", "synthetic", "--duration-seconds", "5",
++                                     "--output", str(tmp_path / "fake.jsonl")])
++    assert __main__.main() == 0
++    assert calls[0][0].duration_seconds == 5 and calls[0][0].interface == "lab0"
++    assert not (tmp_path / "fake.jsonl").exists()
++
++
++@pytest.mark.parametrize("flags,carrier,hardware,ready", [("0x1003", "1", "1", True),
++                                                        ("0x1003", "0", "1", False),
++                                                        ("0x1002", "1", "1", False),
++                                                        ("0x1003", "1", "772", False)])
++def test_readonly_linux_link_probe_uses_admin_up_and_carrier_not_volatile_running_bit(tmp_path, flags, carrier, hardware, ready):
++    root = tmp_path / "lab0"
++    root.mkdir()
++    for name, value in (("flags", flags), ("carrier", carrier), ("type", hardware)):
++        (root / name).write_text(value, encoding="ascii")
++    assert link_ready("lab0", sysfs_root=tmp_path) is ready
+diff --git a/tests/dti_00b/test_meter.py b/tests/dti_00b/test_meter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e4998efce2db9bc92be1c92210b9460bb87e2fd
+--- /dev/null
++++ b/tests/dti_00b/test_meter.py
+@@ -0,0 +1,246 @@
++import io
++import struct
++from dataclasses import replace
++
++import pytest
++
++from research.dti_00b.fixtures import EPOCH, SUBJECT, Transmission, header, scenarios, write_pcap
++from research.dti_00b.meter import slices
++from research.dti_00b.model import CADENCE, SECOND, Counters, Coverage, Limits, QualityInterval, instant, replay_relation, semantic_payload
++from research.dti_00b.pcap import CaptureError, read_pcap
++
++RUN1 = "d27fe2da-2031-4f5d-b030-a559d3d8f001"
++RUN2 = "d27fe2da-2031-4f5d-b030-a559d3d8f002"
++ACCOUNTING = ("upload_packets", "download_packets", "upload_bytes_native", "download_bytes_native")
++
++
++def execute(case, *, limits=None, split=False, run=RUN1, endian="<", nanos=True, vlan=False):
++    stream = io.BytesIO()
++    write_pcap(stream, case.events, endian=endian, nanos=nanos, vlan=vlan)
++    stream.seek(0)
++    limits = limits or Limits()
++    counters = Counters()
++    result = list(slices(read_pcap(stream, limits, counters), case.coverage, limits=limits, counters=counters,
++                         run_id=run, stop_at=case.stop_at, split_visit=split))
++    return result, counters
++
++
++@pytest.mark.parametrize("scenario", tuple(scenarios()))
++def test_independent_logical_reference_for_all_sixteen_scenarios(scenario):
++    case = scenarios()[scenario]
++    actual, counters = execute(case)
++    expected = case.reference()
++    assert len(actual) == len(expected)
++    for row, reference in zip(actual, expected):
++        assert instant(row["slice_start_utc"]) == reference["start"]
++        assert instant(row["slice_end_utc"]) == reference["end"]
++        assert {key: row[key] for key in ACCOUNTING} == {key: reference[key] for key in ACCOUNTING}
++        assert instant(row["slice_start_utc"]) % CADENCE == 0
++        assert row["capture_source_id"] == "synthetic-rspan"
++        assert row["subject_key"] == SUBJECT
++    assert counters.raw_packets_seen == len(case.events)
++    assert counters.rejected_packets == 0
++
++
++@pytest.mark.parametrize("endian,nanos", [("<", True), (">", True), ("<", False), (">", False)])
++def test_classic_pcap_endianness_and_timestamp_resolution(endian, nanos):
++    case = replace(scenarios()["M"], events=(Transmission(1_123_456_000, length=60),))
++    rows, _ = execute(case, endian=endian, nanos=nanos)
++    assert rows[0]["first_packet_at"].endswith(".123456000Z")
++    assert rows[0]["upload_bytes_native"] == 60
++
++
++@pytest.mark.parametrize("scenario,expected", [("M", 60), ("N", 1280)])
++def test_header_only_vlan_capture_counts_l3_not_captured_or_ethernet_length(scenario, expected):
++    case = scenarios()[scenario]
++    rows, _ = execute(case, vlan=True)
++    assert rows[0]["upload_bytes_native"] == expected
++    assert len(header(case.events[0], vlan=True)) < expected
++    stream = io.BytesIO()
++    write_pcap(stream, case.events, vlan=True)
++    stream.seek(0)
++    packet = next(read_pcap(stream, Limits(), Counters()))
++    assert packet.src_mac == SUBJECT
++    assert packet.src_ip in ("192.0.2.1", "2001:db8::1")
++    assert packet.protocol == 6
++    assert len(packet.header_identity) <= 82
++
++
++def test_visit_boundary_inside_continuing_flow_exact_conservation():
++    case = scenarios()["G"]
++    whole, _ = execute(case)
++    split, _ = execute(case, split=True)
++    reference = case.reference(split_visit=True)
++    assert len(split) == 5
++    assert instant(split[1]["slice_end_utc"]) == EPOCH + 7 * SECOND
++    assert instant(split[2]["slice_start_utc"]) == EPOCH + 7 * SECOND
++    for key in ACCOUNTING:
++        assert sum(r[key] for r in whole) == sum(r[key] for r in split) == sum(r[key] for r in reference)
++    # Half-open ownership: packet exactly at T belongs only to the following partition.
++    assert split[2]["first_packet_at"].endswith("07.000000000Z")
++
++
++def test_rate_does_not_wait_for_flow_termination_and_idle_is_recent_coverage():
++    rows, _ = execute(scenarios()["B"])
++    assert rows[0]["upload_bytes_per_second"] == 480
++    assert rows[0]["download_bytes_per_second"] == 720
++    burst, _ = execute(scenarios()["D"])
++    assert burst[0]["upload_bytes_per_second"] == 18000
++    assert burst[1]["upload_bytes_per_second"] == 0
++    assert burst[1]["healthy_absence_of_subject_traffic"]
++    assert burst[1]["last_packet_at"] is None
++    assert instant(burst[1]["slice_end_utc"]) == EPOCH + 10 * SECOND
++    # Staleness is derivable from slice_end_utc/quality, no final product policy here.
++
++
++def test_incremental_completed_slice_emitted_before_continuing_flow_ends():
++    case = scenarios()["B"]
++    stream = io.BytesIO()
++    write_pcap(stream, case.events)
++    stream.seek(0)
++    counters = Counters()
++    generator = slices(read_pcap(stream, Limits(), counters), case.coverage, counters=counters, run_id=RUN1)
++    assert next(generator)["complete_accounting"]
++    assert counters.raw_packets_seen < len(case.events)
++
++
++def test_replay_ids_ignore_run_uuid_but_conflicting_accounting_is_not_new_generation():
++    first, _ = execute(scenarios()["I"], run=RUN1)
++    second, _ = execute(scenarios()["I"], run=RUN2)
++    assert first[0]["run_session_id"] != second[0]["run_session_id"]
++    assert [semantic_payload(r) for r in first] == [semantic_payload(r) for r in second]
++    assert all(replay_relation(a, b) == "REPLAY" for a, b in zip(first, second))
++    changed = dict(second[0], upload_bytes_native=999)
++    assert replay_relation(first[0], changed) == "CONFLICT"
++    other = dict(second[0], slice_id="different")
++    assert replay_relation(first[0], other) == "DISTINCT"
++
++
++def test_restart_open_slice_partial_sequence_resets_and_gap_is_unavailable():
++    case = scenarios()["H"]
++    first, _ = execute(case)
++    assert [r["capture_quality_state"] for r in first] == ["healthy", "partial", "prototype_unavailable", "prototype_unavailable"]
++    assert first[1]["upload_bytes_per_second"] is None
++    assert not first[2]["healthy_absence_of_subject_traffic"]
++    restarted = replace(case, coverage=replace(case.coverage, start=EPOCH + 10 * SECOND,
++                         intervals=(QualityInterval(EPOCH + 10 * SECOND, EPOCH + 20 * SECOND, "healthy"),)), stop_at=None)
++    resumed, _ = execute(restarted, run=RUN2)
++    assert resumed[0]["source_sequence"] == 1
++    assert resumed[0]["run_session_id"] != first[0]["run_session_id"]
++    assert replay_relation(first[2], resumed[0]) == "CONFLICT"
++
++
++def test_quality_never_converts_missing_or_degraded_source_to_normal_zero():
++    rows, _ = execute(scenarios()["L"])
++    assert [r["capture_quality_state"] for r in rows] == ["healthy", "degraded", "source_unavailable", "prototype_unavailable"]
++    for row in rows[1:]:
++        assert not row["complete_accounting"]
++        assert not row["healthy_absence_of_subject_traffic"]
++        assert row["upload_bytes_per_second"] is None
++
++
++def test_partial_coverage_edges_are_not_normal_zero():
++    case = scenarios()["C"]
++    coverage = replace(case.coverage, start=EPOCH + SECOND, end=EPOCH + 9 * SECOND,
++                       intervals=(QualityInterval(EPOCH + SECOND, EPOCH + 9 * SECOND, "healthy"),))
++    rows, _ = execute(replace(case, coverage=coverage))
++    assert [r["capture_quality_state"] for r in rows] == ["partial", "partial"]
++    assert all(not r["healthy_absence_of_subject_traffic"] for r in rows)
++
++
++def test_mirror_duplicate_requires_explicit_fixture_provenance_retransmissions_count():
++    rows, counters = execute(scenarios()["J"])
++    assert rows[0]["upload_packets"] == 1
++    assert counters.raw_packets_in_scope == 2
++    assert counters.raw_bytes_native == 200
++    assert counters.duplicate_candidates == counters.deduplicated_packets == 1
++    assert counters.accounted_bytes_native == 100
++    retransmission, counter = execute(scenarios()["K"])
++    assert retransmission[0]["upload_packets"] == 2
++    assert counter.deduplicated_packets == 0
++    # Even indistinguishable timestamp/header packets are NOT suppressed without provenance.
++    unknown = replace(scenarios()["J"], coverage=replace(scenarios()["J"].coverage, duplicate_records=()))
++    retained, counter = execute(unknown)
++    assert retained[0]["upload_packets"] == 2
++    assert counter.deduplicated_packets == 0
++
++
++@pytest.mark.parametrize("limits", [Limits(dedup_horizon_ns=1), Limits(dedup_entries=1)])
++def test_unresolved_duplicate_is_counted_and_degrades_quality_not_silently_lost(limits):
++    case = replace(scenarios()["J"], events=(Transmission(SECOND), Transmission(2 * SECOND, transmission_id=2),
++                                           Transmission(2 * SECOND + 1000, duplicate_of=0)),
++                   coverage=replace(scenarios()["J"].coverage, duplicate_records=((2, 0), (3, 1))))
++    rows, counters = execute(case, limits=limits)
++    assert rows[0]["upload_packets"] == 3
++    assert rows[0]["capture_quality_state"] == "degraded"
++    assert counters.duplicate_provenance_unresolved == 1
++    assert counters.dedup_peak_entries <= limits.dedup_entries
++    assert counters.dedup_evictions >= 1
++
++
++def test_nonmatching_duplicate_claim_never_drops_packet():
++    case = replace(scenarios()["J"], events=(Transmission(SECOND), Transmission(SECOND, length=120, duplicate_of=0)))
++    rows, counters = execute(case)
++    assert rows[0]["upload_bytes_native"] == 220
++    assert rows[0]["capture_quality_state"] == "degraded"
++    assert counters.deduplicated_packets == 0
++
++
++def raw_pcap(frame, original=None):
++    return io.BytesIO(struct.pack("<IHHIIII", 0xA1B23C4D, 2, 4, 0, 0, 65535, 1)
++                      + struct.pack("<IIII", EPOCH // SECOND + 1, 0, len(frame), original or len(frame)) + frame)
++
++
++@pytest.mark.parametrize("frame", [b"bad", header(Transmission(SECOND))[:25],
++                                  header(Transmission(SECOND))[:14] + b"\x40" + b"\0" * 19])
++def test_bad_observed_header_rejects_packet_and_marks_slice_degraded(frame):
++    counters = Counters()
++    rows = list(slices(read_pcap(raw_pcap(frame, 114), Limits(), counters), scenarios()["M"].coverage, counters=counters))
++    assert rows[0]["capture_quality_state"] == "degraded"
++    assert counters.rejected_packets == 1
++    assert not rows[0]["healthy_absence_of_subject_traffic"]
++
++
++@pytest.mark.parametrize("kind", ["multicast", "arp", "unrelated", "ip_multicast"])
++def test_out_of_scope_traffic_is_not_subject_accounting(kind):
++    frame = bytearray(header(Transmission(SECOND)))
++    if kind == "multicast":
++        frame[0] |= 1
++    elif kind == "arp":
++        frame[12:14] = b"\x08\x06"
++    elif kind == "unrelated":
++        frame[11] = 3
++    else:
++        frame[30:34] = bytes([224, 0, 0, 1])
++    counters = Counters()
++    rows = list(slices(read_pcap(raw_pcap(frame, 114), Limits(), counters), scenarios()["M"].coverage, counters=counters))
++    assert counters.out_of_scope_packets == 1
++    assert rows[0]["upload_packets"] == rows[0]["download_packets"] == 0
++
++
++@pytest.mark.parametrize("data", [b"", b"\x0a\x0d\x0d\x0a" + b"\0" * 20,
++                                 struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 101),
++                                 struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1) + b"bad"])
++def test_broken_framing_or_unsupported_input_aborts_not_successful_empty_capture(data):
++    with pytest.raises(CaptureError):
++        list(read_pcap(io.BytesIO(data), Limits(), Counters()))
++
++
++def test_record_limit_and_unsorted_event_time_fail_closed():
++    with pytest.raises(CaptureError, match="record_limit"):
++        execute(scenarios()["K"], limits=Limits(max_records=1))
++    case = replace(scenarios()["K"], events=(Transmission(2 * SECOND), Transmission(SECOND)))
++    with pytest.raises(CaptureError, match="event_time_order"):
++        execute(case)
++
++
++def test_coverage_manifest_closed_partitioned_and_bounded():
++    value = scenarios()["L"].coverage.as_dict()
++    assert Coverage.from_dict(value) == scenarios()["L"].coverage
++    with pytest.raises(ValueError, match="closed"):
++        Coverage.from_dict(dict(value, invented=True))
++    value["capture_quality_intervals"][1]["start_utc"] = value["coverage_start_utc"]
++    with pytest.raises(ValueError, match="partition"):
++        Coverage.from_dict(value)
++    with pytest.raises(ValueError):
++        Limits(dedup_entries=1000000)
+diff --git a/tests/dti_00b/test_replay.py b/tests/dti_00b/test_replay.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c04f1d7412140f345b3dcea4dd0b64f855be8b5
+--- /dev/null
++++ b/tests/dti_00b/test_replay.py
+@@ -0,0 +1,110 @@
++import json
++import subprocess
++import sys
++
++import pytest
++
++from research.dti_00b.benchmark import paced_replay, rss_bytes
++from research.dti_00b.admission import reconciliation
++from research.dti_00b.fixtures import scenarios, write_pcap
++from research.dti_00b.model import Limits, canonical
++from research.dti_00b.replay import BoundedSink, OutputUnavailable, load_coverage, replay
++
++
++def files(tmp_path):
++    pcap, manifest, output = [tmp_path / name for name in ("headers.pcap", "coverage.json", "slices.jsonl")]
++    with pcap.open("wb") as stream:
++        write_pcap(stream, scenarios()["B"].events)
++    manifest.write_text(canonical(scenarios()["B"].coverage.as_dict()), encoding="utf-8")
++    return pcap, manifest, output
++
++
++def test_file_replay_exclusive_bounded_output_and_no_payload(tmp_path):
++    pcap, manifest, output = files(tmp_path)
++    result = replay(pcap, manifest, output)
++    assert result["status"] == "COMPLETE"
++    assert result["counters"]["accounted_packets"] == 20
++    assert result["output_bytes"] == output.stat().st_size
++    rows = [json.loads(row) for row in output.read_text().splitlines()]
++    assert len(rows) == 4
++    assert all("src_ip" not in row and "payload" not in row for row in rows)
++    with pytest.raises(FileExistsError):
++        replay(pcap, manifest, output)
++
++
++def test_output_ceiling_blocks_before_overflow(tmp_path):
++    pcap, manifest, output = files(tmp_path)
++    with pytest.raises(OutputUnavailable, match="output_limit"):
++        replay(pcap, manifest, output, limits=Limits(max_output_bytes=100))
++    assert output.stat().st_size == 0
++
++
++@pytest.mark.parametrize("mode", ["disk_full", "short_write"])
++def test_sink_io_failure_never_success_or_retry_without_accounting(mode):
++    class BrokenSink:
++        def write(self, data):
++            if mode == "disk_full":
++                raise OSError("no space left")
++            return 1
++
++        def flush(self):
++            pass
++    sink = BoundedSink(BrokenSink(), 100)
++    with pytest.raises(OutputUnavailable, match="prototype_unavailable"):
++        sink.write({"slice_id": "synthetic"})
++    assert sink.bytes_written == 0
++
++
++def test_duplicate_manifest_keys_and_oversized_manifest_rejected(tmp_path):
++    manifest = tmp_path / "manifest.json"
++    manifest.write_text('{"a":1,"a":2}')
++    with pytest.raises(ValueError, match="duplicate_json_key"):
++        load_coverage(manifest)
++    manifest.write_bytes(b" " * (1024 * 1024 + 1))
++    with pytest.raises(ValueError, match="manifest_byte_limit"):
++        load_coverage(manifest)
++
++
++def test_cli_local_file_only_import_and_replay(tmp_path):
++    pcap, manifest, output = files(tmp_path)
++    completed = subprocess.run([sys.executable, "-m", "research.dti_00b", "replay", str(pcap), str(manifest), str(output)],
++                               capture_output=True, text=True, check=False)
++    assert completed.returncode == 0, completed.stderr
++    assert json.loads(completed.stdout)["production_access"] is False
++
++
++@pytest.mark.parametrize("pps", [19000, 38000])
++def test_bounded_baseline_and_double_load_paced_smoke(pps):
++    result = paced_replay(pps, 1)
++    assert result["accounted_exactly"]
++    assert result["counters"]["rejected_packets"] == 0
++    assert result["queue_peak_records"] == 1
++    assert result["buffer_chunk_records"] <= 190
++    assert result["rss_peak_sampled_bytes"] > 0
++    assert result["cpu_seconds"] >= 0
++    assert result["elapsed_seconds"] >= 1
++    assert not result["production_admission"]
++
++
++def test_pacing_configuration_bounded():
++    with pytest.raises(ValueError):
++        paced_replay(38001)
++    with pytest.raises(ValueError):
++        paced_replay(19000, 31)
++
++
++def test_reconciliation_report_keeps_independent_truth_and_no_formal_acceptance():
++    report = reconciliation()
++    assert report["all_sixteen_reconciled"]
++    assert len(report["scenarios"]) == 16
++    assert not report["official_acceptance"]
++    assert report["arbitrary_mirror_duplicate_admission"].startswith("PARTIAL")
++    assert len(report["source_identity"]["package_sha256"]) == 64
++
++
++def test_memory_observer_does_not_create_a_new_cached_ctypes_type_per_sample():
++    import ctypes
++    before = set(ctypes._pointer_type_cache)
++    for _ in range(100):
++        assert rss_bytes() > 0
++    assert set(ctypes._pointer_type_cache) == before

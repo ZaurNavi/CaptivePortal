@@ -1,9 +1,9 @@
 # Visit Lifecycle
 
 Status: current module contract
-Updated: 2026-10-22
-Implementation base: `captivprod/main@ba882e22b0be4e35cf1046d041997add01b86b8b`
-Schema: v5 (explicit read/recovery admission: v2/v3/v4/v5)
+Updated: 2026-08-26
+Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+Schema: v2
 
 ## Purpose
 
@@ -34,128 +34,6 @@ Current schema includes:
 - durable reader state/checkpoint.
 
 Schema v2 adds offline source facts including client IP, SSID, AP MAC, reported connected seconds and reported traffic total bytes.
-
-### Visit-owned NI03/NI04 history (#296, Owner decision v3)
-
-V3 adds the NI03 protocol summary. V4 adds NI04 memberships, service summaries
-and one atomic delivery checkpoint in this same Visit DB. These confirmed
-children live **as long as their authoritative parent Visit**. No close-age
-14/30/365-day cutoff applies to attached memberships or summaries. Physical
-parent deletion cascades to both NI03 and NI04 children; this task adds no
-Visit auto-purger. NI04 Device 60m/24h presentation and NI02/NI04 raw retention
-remain independent and unchanged.
-
-Historical V5 removes the obsolete `history_ttl_days` checkpoint policy and adds nullable
-`pending_since` and `linkage_attached_at` to membership, plus bounded review and
-detached-expiry indexes. A durable detached-row count in the same checkpoint
-enforces capacity without a population scan on each incoming fact.
-V6 adds optional `first_credit_floor_utc` to that same checkpoint and includes
-all detached states in the expiry index. Exact V4/V5 admission, quick/FK checks,
-the cutover and output signature verification run in one startup transaction.
-Consumer ID, stream ID, sequence/hash, source head and all linked history are
-preserved. V4 cannot distinguish an earlier pending interval for an attached
-row: migration conservatively seeds its earliest known durable `created_at`
-clock and marks already-attached rows as previously linked. It never grants
-an old fact a fresh hour and emits no invented historical linkage samples.
-
-On V4/V5 cutover **only existing unlinked memberships** are removed, atomically
-with a durable UTC event-time floor F and resetting their detached count to zero.
-F is the cutover UTC, checked to cover every removed original event time. An
-invalid/future legacy event or inconsistent checkpoint/count fails migration
-without partial cleanup. Linked memberships, summaries, NI03 and source outbox
-are not removed. Without legacy detached rows (including a fresh V6 DB), F is
-NULL. Startup on V6 never advances or recomputes F.
-
-For a **new canonical fact**, including direct association with an existing
-Visit, first credit requires `0 <= evaluation_utc - observed_at < 3600s` and,
-when F exists, `observed_at > F`. Exact 3600s or pre-cutover facts are discarded
-without membership/tombstone; the valid source delivery and checkpoint advance
-atomically. Future/invalid event time or stream/hash conflict fails closed.
-Owner explicitly accepts that late recognition/backfill reaching Visit for the
-first time after one hour cannot earn first Visit credit. This does not delete
-NI04 source data or change Device 60m/24h results.
-
-Detached facts (`visit_id IS NULL`) may newly attach only **before 3600s**
-from their first durable staging timestamp, with unchanged exact
-Site/Device/MAC/auth-snapshot/event-time/lineage checks. At 3600s they are
-ineligible even if physical expiration was deferred during source outage.
-New direct attachments have no pending clock until a first actual detachment;
-replay, restart and later detach/reattach never reset an established clock.
-An attached provisional child is not expired merely because it is old.
-The independent closed-Visit 15-minute sealing/grace is unchanged.
-
-Indexed GC physically deletes at most 25 detached rows per writer transaction
-after their original pending hour has elapsed, and only when original E is
-already outside first-credit eligibility (or covered by F). Canonical pending
-clocks must satisfy E <= P <= current UTC. GC happens before admission and
-decrements the durable detached count in the same transaction. No permanent
-expired guards remain; expired states produced by bounded re-review are only
-transient until GC. Capacity 100,000 bounds **currently present** detached/
-in-flight rows, not cumulative historical identities. True concurrent overflow
-fails closed without checkpoint advance; expiry frees space for later events.
-Replay of the same original E after GC cannot recreate a new waiting window.
-Source-unacknowledged outbox data is never discarded to satisfy staging TTL.
-Source ack/hash/floor verification and bounded sole-writer pruning are unchanged.
-
-The supported trust boundary is the canonical NI02 reader (immutable source
-edge/semantic digest/identity) plus NI01-to-NI02 evidence equivalence in the
-normal NI04 worker evaluator. Live, backfill and binding/generation replay use
-that same path; original observed_at comes from the validated fact. The private
-positive-outbox helper is not a standalone ingestion authority. No perpetual
-identity-time ledger, repeated NI02 cross-DB lookup by Visit, or new producer
-protocol is added to authenticate manually fabricated internal helper input.
-
-### Explicit activation and paired recovery
-
-Both sides are inert by default. Visit composition requires the existing NI03
-feature gate plus strict startup `VISIT_SERVICE_HISTORY_ENABLED=true` and a
-valid NI04 source path. NI04 producer requires explicit `--visit-history-db`
-pointing to that Visit DB. There is no new Settings surface.
-`VISIT_SERVICE_HISTORY_RETENTION_DAYS` is ignored and
-`--visit-history-ttl-days` is no longer accepted: no fake TTL is needed.
-NI04 ack accepts the exact V6 consumer without a policy-equality gate; all
-consumer/stream/sequence/hash/floor safeguards remain mandatory.
-
-Before any separately approved migration, stop coordinated writers and take
-consistent **paired NI04 V2 + Visit V4/V5/V6 backups**, including SQLite WAL
-state using the established backup procedure. Rehearse migration/restore in
-Lab and verify exact signatures, checkpoint/hash/floor and child counts.
-Old V4/V5 binaries cannot open V6. Rollback of code needs the matching paired
-pre-migration backups; never restore Visit alone below an already-pruned
-source floor, drop history tables, fake user_version or reset checkpoints.
-Disabling activation stops future work, not a schema downgrade. Coder does
-not migrate production, change services or authorize rollout.
-
-### Linkage latency operational samples
-
-The existing reconciler exports `visit.service_linkage_sample` at most once
-per 60 monotonic seconds, through existing `VisitTelemetry`. It reports only
-committed unique staging/linkage/expiry transitions, coarse rejection classes,
-committed batches/failures and a bounded unresolved population sample. A
-population read failure sets `unresolved_sample_valid=0`, not a healthy zero;
-`population_capped` identifies a >100,000 legacy population. No event carries
-IP, MAC, Visit/device ID, endpoint, source payload or per-fact log.
-`rejected_old_first_delivery` separately counts committed discarded canonical
-identities per batch (repeated deliveries in later batches may count again);
-it is not a lifetime unique population or a claim of complete source coverage.
-`expired_detached_unique` tracks committed pending expiry, distinct from these
-old-first-delivery rejections. Saved history remains honestly incomplete when
-source coverage or late first delivery cannot be established.
-
-Disjoint linkage buckets are <=30s, (30,60]s, (60,300]s, (300,900]s,
-(900,1800]s and (1800,3600)s, measured from persisted `pending_since` to the
-first committed linkage. `linkage_attached_at` prevents reattachment/replay
-from counting as another unique success. Direct attachment is not a delayed
-linkage. Expired and still-unresolved are distinct from linked; no overall
-percentage/p95/p99 or production linkage rate is inferred from these counters.
-
-Counters are process-local interval deltas. Each export declares interval,
-first-process sample, restart-gap possibility, export/sample failures and
-saturation. Failed exports retain deltas until a later attempt. Crashes can
-lose unexported deltas, including the commit-to-observer gap; these samples
-are not continuous 7–14d evidence without external restart/gap reconciliation.
-Sampling adds a bounded read, never a SQLite heartbeat write/commit. No new
-worker, timer, logging route or frontend polling is introduced.
 
 ## Concurrency
 

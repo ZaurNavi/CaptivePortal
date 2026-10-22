@@ -11,21 +11,7 @@ from typing import Any
 from app.common.mac import format_mac_colon
 
 
-SCHEMA_VERSION = 6
-COMPATIBLE_VISIT_SCHEMA_VERSIONS = (2, 3, 4, 5, 6)
-
-
-def compatible_visit_schema_version(value):
-    return type(value) is int and value in COMPATIBLE_VISIT_SCHEMA_VERSIONS
-
-
-def protocol_visit_guard(visit):
-    """Exact authoritative identity/bounds revision, not current MAC guessing."""
-    import hashlib
-    import json
-    return hashlib.sha256(json.dumps([getattr(visit, key) for key in (
-        'visit_id', 'site_id', 'client_mac', 'device_id', 'initial_snapshot_id',
-        'started_at', 'closed_at', 'status', 'updated_at')], separators=(',', ':')).encode()).hexdigest()
+SCHEMA_VERSION = 2
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
 

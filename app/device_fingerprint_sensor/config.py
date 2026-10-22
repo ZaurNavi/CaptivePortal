@@ -57,7 +57,7 @@ def _build(enabled: bool, env: Mapping[str, str]) -> SensorConfig:
     site = value("SITE_ID", SITE_ID)
     if _MACHINE.fullmatch(producer) is None or _MACHINE.fullmatch(capture) is None or _SITE.fullmatch(site) is None:
         raise SensorConfigError("Sensor identity is invalid")
-    cidrs = _cidrs(value("GUEST_CIDRS", GUEST_CIDRS))
+    cidrs = parse_guest_cidrs(value("GUEST_CIDRS", GUEST_CIDRS))
     server = _ipv4(value("DHCP_SERVER_AUTHORITY", DHCP_SERVER_AUTHORITY))
     option54 = _ipv4(value("DHCP_OPTION54_AUTHORITY", DHCP_OPTION54_AUTHORITY))
     base_url = _evidence_url(value("EVIDENCE_BASE_URL", EVIDENCE_BASE_URL))
@@ -123,8 +123,32 @@ def _decimal(env: Mapping[str, str], name: str, default: float, minimum: float, 
     return result
 
 
-def _cidrs(raw: str) -> tuple[object, ...]:
+def validate_guest_cidrs(value: tuple[ipaddress.IPv4Network, ...]) -> tuple[ipaddress.IPv4Network, ...]:
+    """Validate typed callers too; never repair, merge or reorder their scope."""
     try:
+        if type(value) is not tuple or not 1 <= len(value) <= 16:
+            raise ValueError
+        checked = []
+        for network in value:
+            if type(network) is not ipaddress.IPv4Network or network.prefixlen == 0:
+                raise ValueError
+            canonical = ipaddress.IPv4Network(str(network), strict=True)
+            if (network.network_address != canonical.network_address or network.netmask != canonical.netmask
+                    or network.broadcast_address != canonical.broadcast_address):
+                raise ValueError
+            checked.append(canonical)
+        if any(first.overlaps(second) for index, first in enumerate(checked) for second in checked[index + 1:]):
+            raise ValueError
+    except (ValueError, TypeError, AttributeError):
+        raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid") from None
+    return value
+
+
+def parse_guest_cidrs(raw: str) -> tuple[ipaddress.IPv4Network, ...]:
+    """Pure shared CSV parser; does not enable Sensor or reread environment."""
+    try:
+        if type(raw) is not str or len(raw) > 1024:
+            raise ValueError
         items = raw.split(",")
         if not 1 <= len(items) <= 16:
             raise ValueError
@@ -134,9 +158,12 @@ def _cidrs(raw: str) -> tuple[object, ...]:
             raise ValueError
         if any(first.overlaps(second) for index, first in enumerate(result) for second in result[index + 1:]):
             raise ValueError
-    except ValueError:
+    except (ValueError, TypeError):
         raise SensorConfigError("DEVICE_FINGERPRINT_SENSOR_GUEST_CIDRS is invalid") from None
-    return result
+    return validate_guest_cidrs(result)
+
+
+_cidrs = parse_guest_cidrs  # Preserve the old private pure-parser seam.
 
 
 def _ipv4(raw: str) -> str:

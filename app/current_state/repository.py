@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from app.operations_verification import startup_check
 import sqlite3
 import stat
 import threading
@@ -160,6 +161,8 @@ class CurrentStateRepository:
         self.db_path = Path(config.db_path)
         self._write_lock = threading.RLock()
 
+    @startup_check('current_state',lambda self:self.db_path,
+        lambda created:() if created else ('schema_version','schema_signature','quick_check'),failures=(CurrentStateSchemaError,))
     def initialize(self) -> bool:
         """Create only an absent database, otherwise validate exact schema v1."""
         path = self._validate_path()

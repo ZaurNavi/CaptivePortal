@@ -1086,6 +1086,29 @@ Foundation accepted/admitted
 
 ## 36. Current source-of-truth map
 
+Issue #244 makes the raw Sensor filter site-independent using the already parsed
+immutable `SensorConfig.guest_cidrs`, not another source of scope. Runtime passes
+that same tuple to RawCapture; opening/reopening capture never rereads environment.
+The renderer preserves the legacy expression for `192.168.8.0/22`, canonicalizes
+render order for multiple networks, and changes only the TCP source-net arm.
+Global DHCP ports 67/68 and downstream evidence/health/spool semantics are unchanged.
+
+The installed fixed-path root-trusted BPF must exactly match that tuple. It is
+verified before socket construction and independently before compilation/attach.
+The packet socket is created with protocol zero and activated only after filter
+attachment, by binding the configured interface with Python tuple protocol `3`.
+Linux [packet(7)](https://man7.org/linux/man-pages/man7/packet.7.html) specifies
+that protocol zero receives no packets; the isolated-netns kernel regression
+checks the Python tuple ABI and real packet admission, not just call order.
+Any setup failure closes the socket without publishing capture availability.
+No generic expression/path override, unfiltered fallback or runtime artifact
+generation is supported. See [configuration](../configuration.md#sensor-raw-capture-bpf-scope-issue-244).
+
+This is only the raw capture boundary. Suricata's independent HOME_NET/BPF and
+interface agreement remains an explicit #243 prerequisite for another deployment.
+No classification, Evidence, Source Health, NI or guest authorization semantics
+are changed; no spool scope/identity migration is implicit.
+
 | Topic | Current owner/reference |
 |---|---|
 | normalized evidence/store | `app/device_fingerprint/` Task-01 code |
@@ -1100,3 +1123,34 @@ Foundation accepted/admitted
 | production worker | `fingerprint-classification.service` deployment artifact |
 | Admin projection | `app/admin_web/device_fingerprint_presentation.py`, `docs/modules/admin-web.md` |
 | R14 normative semantics | registered FINAL R14 architecture decision |
+
+## 37. Explicit empty Evidence v2 provisioning — Issue #245 Part A
+
+The offline `python3 -m app.device_fingerprint.cli provision-empty-v2` command is
+first-install authority only after separate operator approval. It never changes
+the existing-store-only repository initialize contract, migrations, recovery,
+runtime WAL/NORMAL, schema or ingest lifecycle. It reads strictly validated DB/lock
+paths and configured storage cap from effective application settings while the
+service may remain disabled, without requiring Site/producers/TLS configuration.
+
+The existing protected writer lock is retained through transactional creation of
+the authoritative `SCHEMA_SQL` and fresh UUIDv4/sequence-zero singleton, verification
+of two empty event tables, bounded new-file integrity checks, file fsync,
+no-clobber same-directory publication, directory fsync and final verification.
+There is no copy/migration of historical events and no overwrite, automatic repair,
+extra marker DB or runtime auto-bootstrap. Every preexisting target is refused
+without a content/generation rewrite. Unknown sidecars, unsafe parents, lock
+contention and ambiguous publication failures require reconciliation. Quarantined
+private stages cannot be automatically promoted into the authoritative path.
+
+Only the Linux local filesystem implementation is admitted by the command;
+Windows returns a typed unsupported-platform HOLD. Existing run/migrate/recover
+behavior is unchanged. Installation needs a clean source artifact and intended
+writer identity; result includes the exact Git artifact SHA/tree for provenance.
+
+The .99 nested-path exception is not full consumer compatibility: Admin Inventory
+admission and privileged manifest, Integration/Observed Hints/Network Metadata
+effective path parity, actual role ACLs, WAL/SHM lifecycle and #243 first-start
+approval remain independent HOLDs. This command does not configure them. Disposable
+test UID/GID and ACL evidence does not attest installed service identities.
+See [configuration](../configuration.md#explicit-empty-v2-first-installation-issue-245-part-a).

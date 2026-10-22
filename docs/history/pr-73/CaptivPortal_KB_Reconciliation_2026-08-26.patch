@@ -1,0 +1,824 @@
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -22,4 +22,4 @@
+-| Repository / documentation checkpoint | `main@b55dcabeea22cbb802b044c263a0887123771c7d` |
+-| Runtime code checkpoint described by the current KB | `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7` |
+-| Why two SHAs? | PR #63 was documentation-only; it changed no runtime code |
++| Repository / current-state checkpoint | `main@53f617b3ac0155d0d647e58e98309927f9a4d318` |
++| Production deployed HEAD | `53f617b3ac0155d0d647e58e98309927f9a4d318` |
++| Home Activity production state | Implemented, merged, deployed; core production acceptance PASS |
+ | Omada Controller family used by the project | Omada Software Controller 5.14.31 |
+@@ -39,3 +39,3 @@
+ | Home Traffic / Current Traffic | Implemented |
+-| Next approved change-intent | **Home Activity — Visits and Traffic** |
++| Home Activity — Visits and Traffic | **Implemented / deployed** |
+ | Multi-Site / Tenant / RBAC | Future evolution, intentionally not prematurely implemented |
+@@ -70,3 +70,3 @@
+     I --> J[Home Traffic]
+-    J --> K{{NEXT: Home Activity}}
+-    K --> L[Deeper product views]
++    J --> K[Home Activity]
++    K --> L{{NEXT: Deeper product views}}
+@@ -94,3 +94,3 @@
+-The next increment is not another collector. It is a **human-facing use of already persisted facts**: Home Activity.
++Home Activity is now a **current deployed product view over persisted facts**. It was finalized through PR #67–#72 without introducing a new collector.
+ 
+ ---
+@@ -118,3 +118,4 @@
+ - Home Live current client/AP summary;
+ - Home Traffic based on persisted AP Observation facts;
++- Home Activity with independent Authorized Visits and completed-session Traffic coverage;
+ - internal Grafana/Loki observability kept separate from the product UI.
+@@ -635,3 +635,3 @@
+-## NEXT — Home Activity: Visits and Traffic
++## Home Activity: Visits and Traffic
+ 
+-The approved next change-intent is a Home panel comparing:
++Home Activity is implemented, merged and deployed. The Home panel compares:
+@@ -651,3 +651,10 @@
+-At the current documented runtime checkpoint this feature is **not yet current code**. Its FINAL specification is approved and has no unresolved Owner product decision, but it must not be listed as implemented until its implementation is merged into `main`.
++Current implementation checkpoint: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`.
+ 
+-Conceptual architecture:
++Production evidence on 2026-08-26 proves the Visit source chain after
++`2026-08-26T17:46:55.982Z` (`21:46:55.982 +04`, Asia/Baku). In the validated
++range 14 of 14 Visits were guest-scope verified with zero opening-evidence
++integrity anomalies and zero unproven-scope rows. `traffic_coverage_from_utc`
++remains `null`; Traffic coverage must not be claimed complete merely because
++time passes.
++
++Current architecture:
+@@ -710,3 +710,3 @@
+ | Home Traffic | ✅ Current, default disabled | Home presentation of Current Traffic |
+-| Home Activity | ⏭️ Approved change-intent | Next human-facing Home increment |
++| Home Activity | ✅ Current, default disabled | Visits and completed-session Traffic with independent coverage |
+ | GitHub Actions release CI | ⚠️ Not present | Release gate remains process debt |
+@@ -785,3 +785,3 @@
+     L --> T[Home Traffic]:::done
+-    T --> HA[Home Activity]:::next
+-    HA --> D[Deeper product views]:::future
++    T --> HA[Home Activity]:::done
++    HA --> D[Deeper product views]:::next
+@@ -1000,9 +1000,10 @@
+-Confirmed baseline from **26 August 2026**:
++Confirmed exact-artifact baseline from **26 August 2026**:
+ 
+ ```text
+-Strict suite: 1985 passed / 30 skipped / 0 strict regressions
++Artifact: 53f617b3ac0155d0d647e58e98309927f9a4d318
++Production Python: 3.10.12
++Strict suite: 2100 passed / 30 skipped / 5 deselected
++STRICT_REGRESSIONS: 0
+ Compatibility: 5 exact cases → 2 WARN / 3 PASS
+-compileall: PASS
+-git diff --check: PASS
+ RESULT: PASS
+ ```
+diff --git a/README_RU.md b/README_RU.md
+--- a/README_RU.md
++++ b/README_RU.md
+@@ -22,4 +22,4 @@
+-| Repository / documentation checkpoint | `main@b55dcabeea22cbb802b044c263a0887123771c7d` |
+-| Runtime code checkpoint, описываемый текущей KB | `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7` |
+-| Почему два SHA? | PR #63 был documentation-only и не менял runtime code |
++| Repository / current-state checkpoint | `main@53f617b3ac0155d0d647e58e98309927f9a4d318` |
++| Production deployed HEAD | `53f617b3ac0155d0d647e58e98309927f9a4d318` |
++| Home Activity production state | Реализован, merged, deployed; core production acceptance PASS |
+ | Семейство Omada Controller в проекте | Omada Software Controller 5.14.31 |
+@@ -39,3 +39,3 @@
+ | Home Traffic / Current Traffic | Реализован |
+-| Ближайший approved change-intent | **Home Activity — Visits and Traffic** |
++| Home Activity — Visits and Traffic | **Реализован / deployed** |
+ | Multi-Site / Tenant / RBAC | Будущая эволюция; намеренно не реализуется преждевременно |
+@@ -70,3 +70,3 @@
+     I --> J[Home Traffic]
+-    J --> K{{СЛЕДУЮЩИЙ: Home Activity}}
+-    K --> L[Более глубокие product views]
++    J --> K[Home Activity]
++    K --> L{{СЛЕДУЮЩИЙ: Deeper product views}}
+@@ -94,3 +94,3 @@
+-Следующий increment — **не новый collector**, а человеческое отображение уже накопленных фактов: Home Activity.
++Home Activity теперь является **current deployed product view поверх persisted facts**. Финализация прошла через PR #67–#72 без добавления нового collector.
+ 
+ ---
+@@ -118,3 +118,4 @@
+ - Home Live с текущими clients/AP;
+ - Home Traffic на persisted AP Observation facts;
++- Home Activity с независимыми Authorized Visits и completed-session Traffic coverage;
+ - Grafana/Loki для engineering observability, отдельно от product UI.
+@@ -635,3 +635,3 @@
+-## СЛЕДУЮЩИЙ — Home Activity: Visits and Traffic
++## Home Activity: Visits and Traffic
+ 
+-Approved next change-intent — Home panel:
++Home Activity реализован, merged и deployed. Home panel:
+@@ -651,3 +651,9 @@
+-На текущем documented runtime checkpoint эта feature **ещё не является current code**. FINAL specification утверждена и не содержит unresolved Owner product decisions, но feature нельзя переносить в Current Features до merge implementation в `main`.
++Current implementation checkpoint: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`.
+ 
+-Conceptual architecture:
++Production evidence 26.08.2026 подтверждает Visit source chain после
++`2026-08-26T17:46:55.982Z` (`21:46:55.982 +04`, Asia/Baku). В проверенном
++диапазоне 14 из 14 Visits были guest-scope verified, без opening-evidence
++integrity anomalies и без unproven-scope rows. `traffic_coverage_from_utc`
++остаётся `null`; Traffic нельзя объявлять Complete только из-за течения времени.
++
++Current architecture:
+@@ -710,3 +710,3 @@
+ | Home Traffic | ✅ Current, default disabled | Home presentation Current Traffic |
+-| Home Activity | ⏭️ Approved change-intent | Следующий human-facing Home increment |
++| Home Activity | ✅ Current, default disabled | Visits и completed-session Traffic с independent coverage |
+ | GitHub Actions release CI | ⚠️ Отсутствует | Process debt |
+@@ -785,3 +785,3 @@
+     L --> T[Home Traffic]:::done
+-    T --> HA[Home Activity]:::next
+-    HA --> D[Deeper product views]:::future
++    T --> HA[Home Activity]:::done
++    HA --> D[Deeper product views]:::next
+@@ -998,9 +998,10 @@
+-Подтверждённый baseline от **26 августа 2026 года**:
++Подтверждённый exact-artifact baseline от **26 августа 2026 года**:
+ 
+ ```text
+-Strict suite: 1985 passed / 30 skipped / 0 strict regressions
++Artifact: 53f617b3ac0155d0d647e58e98309927f9a4d318
++Production Python: 3.10.12
++Strict suite: 2100 passed / 30 skipped / 5 deselected
++STRICT_REGRESSIONS: 0
+ Compatibility: 5 точечных cases → 2 WARN / 3 PASS
+-compileall: PASS
+-git diff --check: PASS
+ RESULT: PASS
+ ```
+diff --git a/docs/README.md b/docs/README.md
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -1,5 +1,5 @@
+ Status: current
+-Updated: 2026-08-25
+-Current-state baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Current-state baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ Эта страница — навигация. Она не дублирует архитектуру.
+@@ -30,2 +30,3 @@
+ | Handoff format | `agents/handoff.md` |
++| Home Activity postmortem | `postmortems/TASK-HOME-ACTIVITY-01-2026-08-26.md` |
+ | Historical/superseded material | `archive/` |
+@@ -46,4 +46,5 @@
+ - `modules/analytics.md`
+ - `modules/admin-web.md`
++- `modules/home-activity.md`
+ 
+ ## Current vs planned
+@@ -52,5 +52,7 @@
+-Home Live and Home Traffic находятся в current `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`.
++Home Live, Home Traffic и Home Activity находятся в current `main@53f617b3ac0155d0d647e58e98309927f9a4d318`.
+ 
+-Home Activity не находится в коде этого baseline и не должен описываться как current implementation. Если approved TASK для него передан вне repository, он остаётся change-intent до merge соответствующего runtime change.
++`TASK-HOME-ACTIVITY-01` имеет состояние: Implemented → Merged → Central Lab PASS → Production deployed → Core production acceptance PASS.
++
++Текущий incident/postmortem: `postmortems/TASK-HOME-ACTIVITY-01-2026-08-26.md`.
+ 
+ ## Контекстная экономия
+diff --git a/docs/architecture.md b/docs/architecture.md
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -1,5 +1,5 @@
+ Status: current
+-Updated: 2026-08-25
+-Runtime baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Runtime baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ ## 1. Mental model
+@@ -42,3 +42,8 @@
+ CAPPORT is discovery/identity resolution, not a second auth engine.
+ 
++Ingress SSID evidence has one no-guess contract:
++- CAPPORT preserves Omada `/clients` `ssid` through `CapportClient.ssid → PortalClientContext.ssid → AuthSession.ssid → VisitStartRequest.portal_ssid`;
++- External Portal uses canonical `ssidName`, with legacy `ssid` fallback;
++- conflicting non-empty `ssidName` and `ssid` produce unproven SSID rather than a silent choice.
++
+ Auth success is verified state, not successful POST:
+@@ -103,4 +103,4 @@
+ AnalyticsSourceGateway
+         ↓
+-Quality / Wireless / Visit / CurrentTraffic services
++Quality / Wireless / Visit / CurrentTraffic / HomeActivity services
+ ```
+@@ -147,3 +147,3 @@
+-Home Live reads Current State. Home Traffic reads Current Traffic. Both are optional and fail independently.
++Home Live reads Current State. Home Traffic reads Current Traffic. Home Activity reads persisted Visit Lifecycle facts and reuses the canonical Current State guest SSID scope. All are optional/fail-open relative to guest authorization; Home Activity Visits and Traffic expose independent status/coverage.
+ 
+ ## 9. Shared OmadaProvider invariant
+diff --git a/docs/configuration.md b/docs/configuration.md
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -1,5 +1,5 @@
+ Status: current repository contract
+-Updated: 2026-08-25
+-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ Authoritative code: `app/config.py`, `app/settings.py`, `.env.example`.
+@@ -120,4 +120,22 @@
+ 
+ Controls refresh/request timeout/page size plus fresh/stale age and maximum AP skew.
+ 
++### Home Activity
++
++Prefix: `WEB_ADMIN_HOME_ACTIVITY_*`.
++
++Repository default: `WEB_ADMIN_HOME_ACTIVITY_ENABLED=false`.
++
++Current contract:
++- requires Admin Web + Home Live + enabled Current State scope when activated;
++- guest SSIDs come from canonical `CURRENT_STATE_CLIENT_SSIDS_JSON`; no second Activity SSID list exists;
++- `WEB_ADMIN_HOME_ACTIVITY_SITE_CONTEXT_JSON` supplies per-Site `timezone`, `visits_coverage_from_utc`, `traffic_coverage_from_utc`;
++- Activity-only invalid configuration fails open relative to the rest of Admin/guest authorization.
++
++Confirmed production Site context on 2026-08-26:
++- Site `6a64f17630da7c70d232187a`;
++- timezone `Asia/Baku`;
++- Visits coverage `2026-08-26T17:46:55.982Z`;
++- Traffic coverage `null`.
++
+ ### Pending Session Cleaner
+diff --git a/docs/deployment.md b/docs/deployment.md
+--- a/docs/deployment.md
++++ b/docs/deployment.md
+@@ -1,6 +1,6 @@
+ Status: current contract; production details remain host-verified
+ Updated: 2026-08-26
+-Runtime repository baseline documented by KB: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+-Test-workflow update baseline: `main@8e36132398398b13d7503f624ef19c26d0057566`
++Current repository baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
++Confirmed production deployed HEAD: `53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ ## Repository vs production
+@@ -39,3 +39,9 @@
+ Do not activate/deploy changes that break bounded shutdown.
+ 
++## First-restart acceptance
++
++A production startup/retry change is not accepted merely because a later restart succeeds. Capture the **first restart** after deployment: service state plus component-specific persisted/telemetry evidence. Do not use a second restart to mask a startup defect.
++
++For the 2026-08-26 rollout at `main@53f617b3`, only one restart was performed (`22:55:39 +04`). Service, CAPPORT, webhook and Observation were active; Current State persisted 4/4 successful client cycles and 4/4 successful AP cycles with no non-success result. First-restart startup acceptance: **PASS**.
++
+ ## Testing responsibility
+diff --git a/docs/logging.md b/docs/logging.md
+--- a/docs/logging.md
++++ b/docs/logging.md
+@@ -1,5 +1,5 @@
+ Status: current
+-Updated: 2026-08-25
+-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ ## Separation
+@@ -26,3 +26,7 @@
+ Their telemetry does not replace their persisted source data.
+ 
++### Current State startup telemetry gap
++
++On the accepted 2026-08-26 first restart, persisted Current State cycles proved successful runtime operation, but the expected `current_state.runtime_started` event was not found in the inspected journal. This is an **observability/telemetry gap**, not an active Current State runtime defect. Track any telemetry correction separately from the closed startup defect.
++
+ ## Safety
+diff --git a/docs/module-index.md b/docs/module-index.md
+--- a/docs/module-index.md
++++ b/docs/module-index.md
+@@ -1,5 +1,5 @@
+ Status: current
+-Updated: 2026-08-25
+-Runtime baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Runtime baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ `Repository status` describes code/defaults, not production enabled-state.
+@@ -25,7 +25,8 @@
+ | Home Traffic | current; default disabled | `app/admin_web/` | `modules/admin-web.md` | none | no |
++| Home Activity | current; default disabled | `app/analytics/home_activity.py`, `app/admin_web/` | `modules/home-activity.md` | reads Visit Lifecycle | no |
+ 
+-## Not current implementation
++## Current production evidence
+ 
+-**Home Activity** is not present in `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`. It may be an approved external change-intent, but must not be described as merged/current until the implementation is present in `main`.
++Home Activity is merged/deployed. Visits coverage is production-proven from `2026-08-26T17:46:55.982Z`; Traffic coverage start remains unproven (`null`).
+ 
+ ## Production evidence rule
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -1,5 +1,5 @@
+ Status: current module contract
+-Updated: 2026-08-25
+-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ ## Boundary
+@@ -12,7 +12,8 @@
+ Current optional Home increments:
+ - Home Live — Current State;
+-- Home Traffic — Current Traffic.
++- Home Traffic — Current Traffic;
++- Home Activity — Authorized Visits + completed-session Traffic.
+ 
+-Home Activity is not current code at this baseline.
++Home Activity is current code. Repository default remains disabled; production activation is a separate fact.
+ 
+ ## Browser data path
+@@ -52,3 +52,12 @@
++## Home Activity
++
++Reads `HomeActivityReadService` through the Admin query boundary. The UI must preserve independent Visits/Traffic status and coverage. `Unknown/unproven guest scope != 0`. Today/selected ranges are Site-timezone aware; no artificial 31/90-day Activity limit exists.
++
++Confirmed production Site context on 2026-08-26:
++- Site `6a64f17630da7c70d232187a`, timezone `Asia/Baku`;
++- Visits coverage from `2026-08-26T17:46:55.982Z`;
++- Traffic coverage start remains `null`.
++
+ ## Lifecycle
+ 
+ Admin Web has no business worker. Shutdown clears process-local security/session state.
+diff --git a/docs/modules/analytics.md b/docs/modules/analytics.md
+--- a/docs/modules/analytics.md
++++ b/docs/modules/analytics.md
+@@ -1,5 +1,5 @@
+ Status: current module contract
+-Updated: 2026-08-25
+-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ ## Purpose
+@@ -22,4 +22,11 @@
+ - `VisitAnalyticsService`;
+-- optional `CurrentTrafficReadService`.
++- optional `CurrentTrafficReadService`;
++- `HomeActivityReadService`.
++
++## Home Activity
++
++Read-only aggregate over persisted Visit Lifecycle facts. Authorized Visits use one verified Visit-opening authorization per Visit, not AuthSession count. Guest scope is the canonical Current State SSID scope. Unproven guest membership is unavailable, never a synthetic zero.
++
++Traffic is an independent estimated completed-session metric from persisted offline source events, attributed to `completed_session_end`. It is not WAN/billing/Current State traffic. Visits and Traffic retain independent status/coverage. There is no artificial 31/90-day Activity ceiling.
+ 
+ ## Current Traffic
+diff --git a/docs/modules/capport.md b/docs/modules/capport.md
+--- a/docs/modules/capport.md
++++ b/docs/modules/capport.md
+@@ -1,5 +1,5 @@
+ Status: current
+-Updated: 2026-08-25
+-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ ## Purpose
+@@ -12,3 +12,9 @@
+ When the client is not yet discoverable, CAPPORT returns a bounded discovery mode and the existing page performs sequential same-page polling. No AuthSession/AuthWorker is created until client identity is resolved.
+ 
++SSID evidence is preserved from the existing Omada client lookup:
++
++`Omada /clients ssid → CapportClient.ssid → PortalClientContext.ssid → AuthSession.ssid → VisitStartRequest.portal_ssid → Visit Lifecycle`.
++
++Missing/malformed SSID remains unproven; CAPPORT does not infer it from Site or configuration and does not add an extra Omada request.
++
+ ## Identity/discovery safeguards
+diff --git a/docs/modules/current-state.md b/docs/modules/current-state.md
+--- a/docs/modules/current-state.md
++++ b/docs/modules/current-state.md
+@@ -1,4 +1,4 @@
+ Status: current module contract
+-Updated: 2026-08-25
+-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ Schema: v1
+@@ -45,1 +45,18 @@
+ Failure is fail-open relative to guest authorization.
++
++## Startup integrity and SQLite compatibility
++
++Final current behavior:
++- a self-imposed `PRAGMA quick_check` progress-handler timeout is classified as retryable `CurrentStateStorageError`;
++- unrelated SQLite `interrupted`, schema mismatch and `quick_check != ok` remain schema/integrity errors;
++- runtime retry policy was not redesigned;
++- Python 3.10 does not require `sqlite3.SQLITE_BUSY` / `sqlite3.SQLITE_LOCKED` module constants;
++- stable primary result codes are BUSY=`5`, LOCKED=`6`;
++- integer `sqlite_errorcode` is normalized with `code & 0xFF`, so extended codes such as 261/262 map to BUSY/LOCKED;
++- message fallback `database is locked` / `database is busy` remains.
++
++## Production first-restart evidence — 2026-08-26
++
++One restart at `22:55:39 +04`; no second restart. Client cycles: 4 success / 0 errors. AP cycles: 4 success / 0 errors. All inspected cycles were `complete=1`, `result=success`, `failure_category=None`.
++
++Verdict: **Current State first-restart startup acceptance PASS**.
+diff --git a/docs/modules/portal-entry.md b/docs/modules/portal-entry.md
+--- a/docs/modules/portal-entry.md
++++ b/docs/modules/portal-entry.md
+@@ -1,4 +1,4 @@
+ Status: active
+-Updated: 2026-08-10
++Updated: 2026-08-26
+ 
+ ## 1. Назначение
+@@ -14,5 +14,11 @@
+ ## 4. Входные данные
+ 
+-site, clientMac или clientIp, apMac, ssid, redirectUrl, radioId.
++External Portal: `site`, `clientMac` или `clientIp`, `apMac`, canonical `ssidName`, legacy fallback `ssid`, `redirectUrl`, `radioId`.
++
++SSID contract:
++- valid `ssidName` wins when legacy `ssid` is absent;
++- legacy `ssid` remains fallback;
++- if both non-empty values exist and conflict, SSID is left unproven (`None`) rather than guessed;
++- the resulting SSID is propagated through PortalClientContext/AuthSession into Visit opening evidence.
+ 
+ ## 5. Выходные данные
+diff --git a/docs/modules/visit-lifecycle.md b/docs/modules/visit-lifecycle.md
+--- a/docs/modules/visit-lifecycle.md
++++ b/docs/modules/visit-lifecycle.md
+@@ -1,4 +1,4 @@
+ Status: current module contract
+-Updated: 2026-08-25
+-Baseline: `main@dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Updated: 2026-08-26
++Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
+ Schema: v2
+@@ -15,3 +15,5 @@
+ `confirmed AUTHORIZED AuthRun → VisitStartRequest → LocalVisitStartSubmitter → VisitLifecycleService → visits.sqlite3`
+ 
++Opening evidence includes the ingress `portal_ssid` when proven. CAPPORT and External Portal must preserve their actual ingress SSID context; Visit Lifecycle does not reconstruct missing SSID from Site/configuration.
++
+ Auth success is fail-open with respect to Visit persistence: failure to persist Visit history must not revoke otherwise verified guest authorization.
+diff --git a/docs/project-inventory.md b/docs/project-inventory.md
+--- a/docs/project-inventory.md
++++ b/docs/project-inventory.md
+@@ -1,7 +1,7 @@
+ Status: current runtime snapshot
+ Updated: 2026-08-26
+ Branch: `main`
+-Runtime commit: `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
+-Commit source: merge PR #62, 2026-08-24
++Runtime commit: `53f617b3ac0155d0d647e58e98309927f9a4d318`
++Commit source: merge PR #72, 2026-08-26
+ 
+-Этот документ описывает repository implementation указанного commit. Production state не выводится из Git. Historical acceptance не является live health.
++Этот документ описывает repository implementation указанного commit. Production evidence ниже относится только к явно указанной контрольной точке; repository defaults и production activation остаются разными фактами.
+@@ -75,4 +75,5 @@
+ | Current Traffic | `app/analytics/current_traffic.py` | persisted AP Observation facts | none | no |
+ | Home Traffic | Admin Web | `CurrentTrafficReadService` | none | no |
++| Home Activity | `app/analytics/home_activity.py`, Admin Web | Visit Lifecycle persisted facts + Current State guest scope | none | no |
+ 
+ ## 5. Observation vs Current State
+@@ -145,4 +145,6 @@
+ - short client history default retention: 48 hours.
+ - no Admin request polls Omada through this service.
++- startup `PRAGMA quick_check` self-timeout is retryable storage contention only when the repository itself interrupted that quick_check; unrelated `interrupted`, schema mismatch and `quick_check != ok` remain schema/integrity failures.
++- SQLite contention detection is Python-3.10 compatible: primary BUSY/LOCKED codes are `5`/`6`; integer `sqlite_errorcode` is normalized with `code & 0xFF`, with message fallback for `database is locked` / `database is busy`.
+ 
+ ## 10. Analytics current contract
+@@ -166,4 +166,5 @@
+ - visit analytics;
+-- optional `CurrentTrafficReadService`.
++- optional `CurrentTrafficReadService`;
++- `HomeActivityReadService`.
+ 
+ Protected internal API prefix:
+@@ -198,5 +198,6 @@
+ Home has optional current sections:
+ - Home Live via `CurrentStateReadService`;
+-- Home Traffic via `CurrentTrafficReadService`.
++- Home Traffic via `CurrentTrafficReadService`;
++- Home Activity via `HomeActivityReadService` with independent Visits/Traffic coverage.
+ 
+ Browser flow:
+@@ -253,4 +253,4 @@
+ Groups:
+-Core/Omada, Portal/CAPPORT, telemetry, counters, Snapshot, Registry, Webhook, Cleaner, Visit, Observation, Current State, Analytics/API, Admin Web/Home Live/Home Traffic.
++Core/Omada, Portal/CAPPORT, telemetry, counters, Snapshot, Registry, Webhook, Cleaner, Visit, Observation, Current State, Analytics/API, Admin Web/Home Live/Home Traffic/Home Activity.
+ 
+ Repository feature defaults are not production proof.
+@@ -318,9 +318,9 @@
+-Confirmed 2026-08-26 Windows evidence:
++Confirmed 2026-08-26 Windows evidence for exact artifact `53f617b3ac0155d0d647e58e98309927f9a4d318` on the production-compatible Python family:
+ 
+ ```text
+-strict suite: 1985 passed / 30 skipped / 0 strict regressions
++production Python: 3.10.12
++strict suite: 2100 passed / 30 skipped / 5 deselected
++STRICT_REGRESSIONS: 0
+ compatibility: 2 WARN + 3 PASS (five exact tracked cases)
+-compileall: PASS
+-git diff --check: PASS
+ overall Windows Local Gate: PASS
+ ```
+@@ -340,10 +340,16 @@
+ - Current State
+ - Home Live
+ - Current Traffic/Home Traffic
++- Home Activity
+ 
+-Not current at this baseline:
+-- Home Activity implementation.
++Production evidence at `main@53f617b3`:
++- production HEAD equals repository main and working tree is clean;
++- Home Activity is deployed;
++- Visits coverage starts at `2026-08-26T17:46:55.982Z`;
++- 14/14 post-boundary Visits were verified guest, with 0 integrity anomalies and 0 unproven scope;
++- `traffic_coverage_from_utc=null`;
++- first-restart Current State acceptance PASS: 4/4 client cycles and 4/4 AP cycles success, no non-success cycle.
+ 
+-Historical production numbers (device counts, test snapshots, individual acceptance counters) must remain labelled historical and must not be presented as current counters.
++Historical production numbers outside an explicitly dated evidence block remain historical and must not be presented as current counters.
+ 
+ ## 20. Repository-only unknowns
+diff --git a/docs/testing.md b/docs/testing.md
+--- a/docs/testing.md
++++ b/docs/testing.md
+@@ -1,6 +1,6 @@
+ Status: current
+ Updated: 2026-08-26
+-Documentation/workflow baseline: `main@8e36132398398b13d7503f624ef19c26d0057566`
+-Runtime code checkpoint described by the current KB: `dfc62b43712301b05baf9f6e5dd843e13eaa9fc7`
++Documentation/current-state baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
++Production deployed HEAD: `53f617b3ac0155d0d647e58e98309927f9a4d318`
+ 
+ ## Responsibility model
+@@ -71,7 +71,10 @@
+-Strict-suite result:
++Strict-suite result for exact artifact `53f617b3ac0155d0d647e58e98309927f9a4d318`:
+ 
+ ```text
+-1985 passed
++2100 passed
+ 30 skipped
+-0 strict regressions
++5 deselected
++STRICT_REGRESSIONS=0
+ ```
++
++Production Python used by the deployed runtime: `3.10.12`. Compatibility evidence must cover the production Python version/family rather than assuming newer `sqlite3` module attributes are universal.
+@@ -112,3 +112,5 @@
+-The numeric baseline above is evidence from the confirmed 2026-08-26 run. After runtime/test changes, a new official exact-artifact baseline must be generated before the old numbers are presented as current.
++The numeric baseline above is evidence from the confirmed 2026-08-26 run on exact local HEAD. Before accepting any Central Lab result, verify that the tested repository SHA equals the artifact being promoted. A stale PASS from an earlier HEAD is historical evidence only.
++
++Production startup changes additionally require a first-restart acceptance gate. A second restart must not be used to hide a first-start defect; if a second restart occurs, preserve the first-restart evidence separately.
+ 
+ ## Linux / production-compatible gate
+diff --git a/docs/modules/home-activity.md b/docs/modules/home-activity.md
+new file mode 100644
+--- /dev/null
++++ b/docs/modules/home-activity.md
+@@ -0,0 +1,112 @@
++# Home Activity — Visits and Traffic
++
++Status: current module contract
++Updated: 2026-08-26
++Baseline: `main@53f617b3ac0155d0d647e58e98309927f9a4d318`
++TASK: `TASK-HOME-ACTIVITY-01`
++
++## Status
++
++Implemented. Merged. Central Lab PASS. Production deployed. Core production acceptance PASS.
++
++Repository default remains `WEB_ADMIN_HOME_ACTIVITY_ENABLED=false`; repository default and production activation are separate facts.
++
++## Purpose
++
++Home Activity is a read-only Home panel comparing **Today** with a selected period using two independent product metrics:
++
++- Authorized Visits;
++- Traffic.
++
++No Activity HTTP request polls Omada and no new collector is introduced.
++
++## Authorized Visits
++
++Canonical unit: one qualifying Visit opened by one successful Visit-opening authorization.
++
++Not:
++- AuthSession count;
++- authorization-row count;
++- people count.
++
++Source: persisted Visit Lifecycle facts.
++
++Guest scope: canonical `CURRENT_STATE_CLIENT_SSIDS_JSON`.
++
++If guest scope cannot be proven, the result is `unavailable` with `guest_scope_unproven`. Unknown/unproven membership is never converted to numeric zero. Opening-evidence integrity anomalies remain visible.
++
++## Traffic
++
++Source: persisted Visit Lifecycle offline source events.
++
++Semantics:
++- estimated;
++- completed guest sessions only;
++- attribution: `completed_session_end`;
++- active sessions appear only after offline evidence;
++- not WAN/Internet traffic;
++- not billing traffic;
++- not Current State traffic.
++
++Visits and Traffic have independent status/coverage.
++
++There is no artificial 31-day or 90-day Home Activity ceiling.
++
++## Ingress SSID evidence
++
++CAPPORT:
++`Omada /clients ssid → CapportClient.ssid → PortalClientContext.ssid → AuthSession.ssid → VisitStartRequest.portal_ssid → Visit Lifecycle`.
++
++External Portal:
++- canonical parameter: `ssidName`;
++- legacy fallback: `ssid`;
++- conflicting valid non-empty values: do not guess; SSID/scope remains unproven.
++
++## Production coverage — 2026-08-26
++
++Site: `6a64f17630da7c70d232187a`
++Timezone: `Asia/Baku`
++
++```text
++visits_coverage_from_utc  = 2026-08-26T17:46:55.982Z
++traffic_coverage_from_utc = null
++```
++
++Visits safe boundary in Asia/Baku:
++`2026-08-26 21:46:55.982 +04`.
++
++Production aggregate after the safe boundary:
++
++```text
++range: 2026-08-26T17:46:55.982Z — 2026-08-26T19:02:10.407Z
++total_visits: 14
++verified_guest: 14
++integrity_anomalies: 0
++unproven_scope: 0
++first_visit: 2026-08-26T17:49:27.214Z
++latest_visit: 2026-08-26T19:01:55.320Z
++```
++
++Verdict: Visit source chain after the boundary is production-proven.
++
++Traffic coverage is **not** proven while `traffic_coverage_from_utc=null`.
++
++## Time-based UI interpretation
++
++These are coverage semantics, not defects:
++
++- on the evening of 2026-08-26, Today begins before the Visits safe boundary and may legitimately be partial/unavailable;
++- from 2026-08-27 00:00 Asia/Baku, Today begins after the Visits coverage boundary;
++- Last 24h is fully inside the proven Visits history only after 2026-08-27 21:46:55 Asia/Baku;
++- Last 7d / Last 30d require natural accumulation of full history;
++- Traffic does not become Complete merely with time while its coverage start is null.
++
++The time-based confirmations are not deployment blockers and require no new deploy.
++
++## APIs
++
++Current Admin API family includes Today, selected-period and range-preview Activity reads under the authenticated Site-scoped `/admin/api/v1` boundary.
++
++## Open evidence boundary
++
++Traffic coverage start remains unresolved. Treat it as an evidence/coverage gap, not as permission to fabricate zero or Complete status.
+diff --git a/docs/postmortems/TASK-HOME-ACTIVITY-01-2026-08-26.md b/docs/postmortems/TASK-HOME-ACTIVITY-01-2026-08-26.md
+new file mode 100644
+--- /dev/null
++++ b/docs/postmortems/TASK-HOME-ACTIVITY-01-2026-08-26.md
+@@ -0,0 +1,128 @@
++# Postmortem — TASK-HOME-ACTIVITY-01 finalization
++
++Status: historical incident / lessons retained
++Date: 2026-08-26
++Final current artifact: `53f617b3ac0155d0d647e58e98309927f9a4d318`
++
++## Scope
++
++This document records the defect/fix chain during Home Activity production finalization. These are **history**, not current behavior.
++
++## Final outcome
++
++- Home Activity implemented and merged through PR #67–#72.
++- Central Lab exact-artifact gate: PASS.
++- Production deployed HEAD: `53f617b3ac0155d0d647e58e98309927f9a4d318`.
++- Core production acceptance: PASS.
++- Current State first-restart startup acceptance: PASS.
++- Visits safe coverage boundary established.
++- Traffic coverage start remains an independent open evidence boundary.
++
++## Failure mode 1 — unknown scope became false zero
++
++Initial Home Activity could produce a numeric zero when guest-scoped Visit membership was not provable.
++
++Correction: PR #68. Final rule: `Unknown/unproven != Zero`; `guest_scope_unproven → unavailable`. Visits and Traffic remain independent.
++
++## Failure mode 2 — CAPPORT SSID propagation missing
++
++CAPPORT already read client context but did not preserve authoritative SSID through Visit opening evidence.
++
++Correction: PR #69.
++
++Final chain:
++`Omada /clients ssid → CapportClient.ssid → PortalClientContext.ssid → AuthSession.ssid → VisitStartRequest.portal_ssid`.
++
++## Failure mode 3 — External Portal contract mismatch
++
++External Portal ingress used legacy `ssid`, while Omada's canonical redirect parameter is `ssidName`.
++
++Correction: PR #70.
++
++Final rule:
++- canonical `ssidName`;
++- legacy `ssid` fallback;
++- conflicting non-empty values remain unproven; never silently choose one.
++
++## Failure mode 4 — Current State own quick_check timeout misclassification
++
++A repository-imposed `PRAGMA quick_check` progress-handler timeout was treated as a permanent schema failure during startup.
++
++Correction: PR #71.
++
++Final rule: only the repository's own quick_check interruption is retryable storage failure. Unrelated `interrupted`, schema mismatch and non-`ok` quick_check remain schema/integrity failures. Runtime retry policy was not redesigned.
++
++## Failure mode 5 — Python 3.10 SQLite compatibility omission
++
++The first correction assumed `sqlite3.SQLITE_BUSY` / `sqlite3.SQLITE_LOCKED` module constants were universally available. Production uses Python `3.10.12`.
++
++Correction: PR #72.
++
++Final rule:
++- stable primary codes: BUSY=5, LOCKED=6;
++- integer `sqlite_errorcode → code & 0xFF`;
++- extended BUSY/LOCKED result codes therefore normalize safely;
++- string fallback remains.
++
++## Central Lab evidence lesson
++
++A prior green run on a stale artifact is not evidence for a newer PR.
++
++Official final evidence is the run after exact local HEAD was confirmed:
++
++```text
++artifact: 53f617b3ac0155d0d647e58e98309927f9a4d318
++2100 passed
++30 skipped
++5 deselected
++STRICT_REGRESSIONS=0
++compatibility=2 WARN / 3 PASS
++RESULT=PASS
++```
++
++Known WARN:
++- SQLite infinity edge case;
++- Node async harness timing.
++
++Known compatibility PASS:
++- Visitor Registry long-audit timing;
++- previous-ready timing;
++- previous-stopping timing.
++
++## Production first-restart evidence
++
++Restart: `2026-08-26 22:55:39 +04`.
++
++No second restart was performed.
++
++After that first restart:
++- service active;
++- CAPPORT operational;
++- Omada webhook operational;
++- Observation operational;
++- Current State persisted client/AP cycles;
++- client: 4 cycles / 4 success / 0 errors;
++- AP: 4 cycles / 4 success / 0 errors;
++- no non-success cycle;
++- all inspected cycles `complete=1`, `result=success`, `failure_category=None`.
++
++Verdict: PASS.
++
++## Process improvements retained
++
++1. production-shaped fixtures;
++2. ingress contract matrix;
++3. explicit `Unknown != Zero` tests;
++4. cross-ingress parity tests;
++5. first-restart production gate;
++6. exact-SHA Central Lab verification before accepting evidence;
++7. production-version compatibility coverage;
++8. explicit startup telemetry verification.
++
++## Observability gap
++
++Persisted Current State evidence proved runtime success, but expected `current_state.runtime_started` telemetry was not found in the inspected journal.
++
++Classification: observability/telemetry gap, **not** active runtime defect.
++
++If fixed, use a separate debt/TASK so telemetry work is not confused with the already-closed startup defect.

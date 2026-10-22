@@ -1,0 +1,2078 @@
+diff --git a/app/admin_web/config.py b/app/admin_web/config.py
+index 66826c7c0b73c0e5ee893832bb1302185694c2cd..f43ba9e3c47c76b40bc271bb10a68a90b5d0c3b0 100644
+--- a/app/admin_web/config.py
++++ b/app/admin_web/config.py
+@@ -92,6 +92,7 @@ class AdminWebConfig:
+     traffic_request_timeout_seconds: int
+     global_capabilities: frozenset[str] = frozenset()
+     device_protocol_intelligence_enabled: bool = False
++    traffic_partial_coverage_enabled: bool = False
+ 
+     def __repr__(self) -> str:
+         return (
+@@ -152,6 +153,10 @@ def admin_web_config_from_settings(
+         settings.get("web_admin_traffic_enabled", "false"),
+         "WEB_ADMIN_TRAFFIC_ENABLED",
+     )
++    traffic_partial_coverage_enabled = _exact_bool(
++        settings.get("web_admin_traffic_partial_coverage_enabled", "false"),
++        "WEB_ADMIN_TRAFFIC_PARTIAL_COVERAGE_ENABLED",
++    )
+     traffic_history_enabled = _exact_bool(
+         settings.get("web_admin_traffic_history_enabled", "false"),
+         "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED",
+@@ -295,6 +300,7 @@ def admin_web_config_from_settings(
+         device_current_context_enabled=device_current_context_enabled,
+         home_traffic_enabled=home_traffic_enabled,
+         traffic_enabled=traffic_enabled,
++        traffic_partial_coverage_enabled=traffic_partial_coverage_enabled,
+         traffic_history_enabled=traffic_history_enabled,
+         traffic_statistics_enabled=traffic_statistics_enabled,
+         traffic_peak_enabled=traffic_peak_enabled,
+diff --git a/app/admin_web/current_traffic_serialization.py b/app/admin_web/current_traffic_serialization.py
+index 7810548becfcf6ee717b154277c034f4c76ef713..e43f2eeafad690298f613ce901b628e034c9c2cb 100644
+--- a/app/admin_web/current_traffic_serialization.py
++++ b/app/admin_web/current_traffic_serialization.py
+@@ -7,7 +7,11 @@ import re
+ from datetime import datetime
+ from typing import Any
+ 
+-from app.analytics.models import CurrentApTrafficPage, CurrentSiteTraffic
++from app.analytics.models import (
++    CurrentApTrafficPage, CurrentSiteTraffic, CoverageAwareCurrentSiteTrafficV1,
++    CoverageAwareCurrentApTrafficPageV1,
++)
++from collections.abc import Mapping
+ from app.analytics.validation import AnalyticsQueryValidationError, format_utc, parse_utc
+ 
+ 
+@@ -40,6 +44,193 @@ _LATEST_STATES = frozenset({"none", "running", "completed", "abandoned"})
+ _LATEST_RESULTS = frozenset({"success", "partial", "failed", "shutdown"})
+ _MAC_PATTERN = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
+ 
++_PARTIAL_REASONS = frozenset({
++    "complete_installed_population", "complete_confirmed_online_population", "confirmed_offline_excluded",
++    "online_measurement_missing", "other_status_measurement_missing", "unknown_status_measurement_missing",
++    "status_evidence_stale", "status_evidence_unavailable", "population_mismatch", "no_valid_rate",
++    "missing_direction", "no_baseline", "counter_reset", "gap_too_large", "source_unavailable",
++    "invalid_elapsed", "temporal_skew", "source_cycle_partial", "source_cycle_failed",
++    "source_integrity_unavailable", "status_measurement_conflict", "clock_anomaly", "age_exceeded",
++})
++_PARTIAL_SELECTION = frozenset({
++    "no_complete_snapshot", "primary_full_observation_coverage", "fallback_full_observation_coverage",
++    "primary_full_online_coverage", "fallback_full_online_coverage", "fallback_higher_measured_coverage",
++    "primary_preferred_tie_or_higher",
++})
++
++
++def _plain(value):
++    if isinstance(value, Mapping):
++        return {key: _plain(item) for key, item in value.items()}
++    if isinstance(value, tuple):
++        return [_plain(item) for item in value]
++    return value
++
++
++def _closed(value, keys):
++    if not isinstance(value, dict) or set(value) != set(keys.split()):
++        raise CurrentTrafficSerializationError("partial current fields are invalid")
++
++
++def serialize_partial_current_summary(value, site_id):
++    try:
++        return _serialize_partial_current_summary(value, site_id)
++    except CurrentTrafficSerializationError:
++        raise
++    except (KeyError, TypeError, ValueError, OverflowError) as exc:
++        raise CurrentTrafficSerializationError("partial current source is malformed") from exc
++
++
++def _serialize_partial_current_summary(value, site_id):
++    if not isinstance(value, CoverageAwareCurrentSiteTrafficV1) or value.site_id != site_id:
++        raise CurrentTrafficSerializationError("partial current identity is invalid")
++    if value.metric_version != "network_traffic_current_partial_coverage.v1":
++        raise CurrentTrafficSerializationError("partial metric is invalid")
++    if {"complete_installed": "installed", "complete_online_population": "confirmed_online",
++        "partial_measured": "measured_only", "unavailable": "none"}.get(value.measurement_state) != value.population_scope:
++        raise CurrentTrafficSerializationError("partial population state is invalid")
++    _timestamp(value.evaluated_at_utc)
++    snapshot, coverage, selection, status, traffic = map(_plain, (
++        value.snapshot, value.coverage, value.source_selection, value.status_evidence, value.traffic,
++    ))
++    _closed(snapshot, "cycle_id started_at finished_at source_result source_complete latest_attempt_state latest_attempt_result latest_attempt_at using_previous_snapshot observed_at newest_observed_at age_seconds source_skew_seconds freshness_status freshness_reason")
++    for key in ("started_at", "finished_at", "latest_attempt_at", "observed_at", "newest_observed_at"):
++        _timestamp(snapshot[key], optional=True)
++    if snapshot["cycle_id"] is not None and (not isinstance(snapshot["cycle_id"], str) or not 1 <= len(snapshot["cycle_id"]) <= 128):
++        raise CurrentTrafficSerializationError("partial cycle identity is invalid")
++    if snapshot["cycle_id"] is None:
++        if any(snapshot[key] is not None for key in ("started_at", "finished_at", "source_result")) or snapshot["source_complete"]:
++            raise CurrentTrafficSerializationError("missing partial cycle has facts")
++    elif snapshot["started_at"] is None or snapshot["finished_at"] is None or snapshot["started_at"] > snapshot["finished_at"]:
++        raise CurrentTrafficSerializationError("partial cycle interval is invalid")
++    for key in ("age_seconds", "source_skew_seconds"):
++        _number(snapshot[key], optional=True, nonnegative=True)
++    if snapshot["freshness_status"] not in _FRESHNESS or snapshot["freshness_reason"] not in _FRESHNESS_REASONS:
++        raise CurrentTrafficSerializationError("partial freshness is invalid")
++    if type(snapshot["source_complete"]) is not bool or type(snapshot["using_previous_snapshot"]) is not bool:
++        raise CurrentTrafficSerializationError("partial snapshot is invalid")
++    if snapshot["source_result"] not in {None, "success", "partial"}:
++        raise CurrentTrafficSerializationError("partial source result is invalid")
++    _latest_attempt(snapshot["latest_attempt_state"], snapshot["latest_attempt_result"], snapshot["latest_attempt_at"])
++    _closed(selection, "primary_source selected_source selection_reason source_mixing_allowed wired_pair_valid_ap_count lan_pair_valid_ap_count")
++    if (selection["primary_source"] != "wired" or selection["selected_source"] not in _SOURCES | {None}
++        or selection["selection_reason"] not in _PARTIAL_SELECTION or selection["source_mixing_allowed"] is not False):
++        raise CurrentTrafficSerializationError("partial selection is invalid")
++    _closed(coverage, "observation_ap_count installed_ap_count online_ap_count offline_ap_count other_ap_count unknown_ap_count measured_pair_ap_count measured_download_ap_count measured_upload_ap_count required_measurement_ap_count missing_required_ap_count offline_excluded_ap_count observation_only_ap_count inventory_only_ap_count population_match_state coverage_reasons")
++    nullable = {"installed_ap_count", "online_ap_count", "offline_ap_count", "other_ap_count", "unknown_ap_count", "required_measurement_ap_count", "missing_required_ap_count"}
++    for key, count in coverage.items():
++        if key.endswith("_count") and not (key in nullable and count is None):
++            _count(count)
++    for key in ("wired_pair_valid_ap_count", "lan_pair_valid_ap_count"):
++        if _count(selection[key]) > coverage["observation_ap_count"]:
++            raise CurrentTrafficSerializationError("partial selection counts are invalid")
++    for key in ("measured_pair_ap_count", "measured_download_ap_count", "measured_upload_ap_count", "offline_excluded_ap_count"):
++        if coverage[key] > coverage["observation_ap_count"]:
++            raise CurrentTrafficSerializationError("partial coverage exceeds population")
++    if coverage["measured_pair_ap_count"] > min(coverage["measured_download_ap_count"], coverage["measured_upload_ap_count"]):
++        raise CurrentTrafficSerializationError("partial directional counts are invalid")
++    if coverage["installed_ap_count"] is not None:
++        if any(coverage[key] is None for key in nullable) or sum(coverage[key] for key in ("online_ap_count", "offline_ap_count", "other_ap_count", "unknown_ap_count")) != coverage["installed_ap_count"]:
++            raise CurrentTrafficSerializationError("partial installed counts are invalid")
++        if (coverage["required_measurement_ap_count"] != coverage["installed_ap_count"] - coverage["offline_excluded_ap_count"]
++            or coverage["missing_required_ap_count"] > coverage["required_measurement_ap_count"]):
++            raise CurrentTrafficSerializationError("partial required counts are invalid")
++    elif any(coverage[key] is not None for key in nullable):
++        raise CurrentTrafficSerializationError("unproven inventory counts are invalid")
++    if coverage["population_match_state"] not in {"matched", "observation_only", "inventory_only", "mismatch", "status_unavailable"}:
++        raise CurrentTrafficSerializationError("partial population match is invalid")
++    reasons = coverage["coverage_reasons"]
++    if not isinstance(reasons, list) or reasons != sorted(set(reasons)) or any(reason not in _PARTIAL_REASONS for reason in reasons):
++        raise CurrentTrafficSerializationError("partial coverage reasons are invalid")
++    _closed(status, "state cycle_id capture_started_at capture_finished_at age_at_traffic_seconds source_scope_hash")
++    if status["state"] not in {"aligned_fresh", "stale", "unavailable", "population_mismatch"}:
++        raise CurrentTrafficSerializationError("partial status evidence is invalid")
++    for key in ("capture_started_at", "capture_finished_at"):
++        _timestamp(status[key], optional=True)
++    _number(status["age_at_traffic_seconds"], optional=True, nonnegative=True)
++    if status["source_scope_hash"] is not None and re.fullmatch(r"[0-9a-f]{64}", status["source_scope_hash"]) is None:
++        raise CurrentTrafficSerializationError("partial status scope is invalid")
++    if status["state"] in {"aligned_fresh", "population_mismatch"}:
++        if any(status[key] is None for key in ("cycle_id", "capture_started_at", "capture_finished_at", "age_at_traffic_seconds", "source_scope_hash")) or status["capture_finished_at"] > snapshot["finished_at"]:
++            raise CurrentTrafficSerializationError("future or missing status evidence")
++    if status["cycle_id"] is not None and (not isinstance(status["cycle_id"], str) or not 1 <= len(status["cycle_id"]) <= 128):
++        raise CurrentTrafficSerializationError("partial status identity is invalid")
++    _closed(traffic, "download_mbps upload_mbps total_mbps unit")
++    if traffic["unit"] != "Mbps":
++        raise CurrentTrafficSerializationError("partial traffic unit is invalid")
++    down, up, total = (_number(traffic[key], optional=True, nonnegative=True) for key in ("download_mbps", "upload_mbps", "total_mbps"))
++    _total_consistent(down, up, total)
++    if value.measurement_state == "unavailable" or snapshot["freshness_status"] == "unavailable":
++        if any(number is not None for number in (down, up, total)):
++            raise CurrentTrafficSerializationError("unavailable partial traffic has numbers")
++    elif down is None and up is None:
++        raise CurrentTrafficSerializationError("partial traffic has no measurements")
++    if value.measurement_state == "complete_online_population":
++        if (status["state"] != "aligned_fresh" or coverage["population_match_state"] != "matched"
++            or coverage["other_ap_count"] or coverage["unknown_ap_count"]
++            or coverage["measured_pair_ap_count"] != coverage["online_ap_count"]
++            or coverage["measured_download_ap_count"] != coverage["online_ap_count"]
++            or coverage["measured_upload_ap_count"] != coverage["online_ap_count"]
++            or coverage["offline_excluded_ap_count"] != coverage["offline_ap_count"]
++            or "status_measurement_conflict" in reasons):
++            raise CurrentTrafficSerializationError("unproven complete-online population")
++    if value.measurement_state == "complete_installed":
++        if (coverage["measured_pair_ap_count"] != coverage["observation_ap_count"]
++            or coverage["population_match_state"] == "mismatch"
++            or not (status["state"] == "aligned_fresh" and coverage["population_match_state"] == "matched"
++                    or snapshot["source_complete"] and snapshot["source_result"] == "success")):
++            raise CurrentTrafficSerializationError("unproven installed population")
++    return {"metric_version": value.metric_version, "site_id": value.site_id,
++            "evaluated_at_utc": value.evaluated_at_utc, "measurement_state": value.measurement_state,
++            "population_scope": value.population_scope, "snapshot": snapshot, "traffic": traffic,
++            "source_selection": selection, "coverage": coverage, "status_evidence": status}
++
++
++def serialize_partial_current_ap_page(value, site_id, *, cycle_id, limit):
++    try:
++        return _serialize_partial_current_ap_page(value, site_id, cycle_id=cycle_id, limit=limit)
++    except CurrentTrafficSerializationError:
++        raise
++    except (KeyError, TypeError, ValueError, OverflowError) as exc:
++        raise CurrentTrafficSerializationError("partial current AP source is malformed") from exc
++
++
++def _serialize_partial_current_ap_page(value, site_id, *, cycle_id, limit):
++    if not isinstance(value, CoverageAwareCurrentApTrafficPageV1) or value.metric_version != "network_traffic_current_ap_partial_coverage.v1":
++        raise CurrentTrafficSerializationError("partial AP page is invalid")
++    result = serialize_partial_current_summary(value.summary, site_id)
++    if value.page.cycle_id != cycle_id or value.page.limit != limit or not 1 <= limit <= 250 or len(value.items) > limit or value.page.selected_source != result["source_selection"]["selected_source"]:
++        raise CurrentTrafficSerializationError("partial AP page context is invalid")
++    items = _plain(value.items)
++    seen = set()
++    for item in items:
++        _closed(item, "ap_mac name selected_source download_mbps upload_mbps total_mbps download_reason upload_reason rate_status coverage_role status_classification observed_at")
++        if not isinstance(item["ap_mac"], str) or _MAC_PATTERN.fullmatch(item["ap_mac"]) is None or item["ap_mac"] in seen:
++            raise CurrentTrafficSerializationError("partial AP identity is invalid")
++        seen.add(item["ap_mac"])
++        if item["name"] is not None and not isinstance(item["name"], str):
++            raise CurrentTrafficSerializationError("partial AP name is invalid")
++        if item["selected_source"] != value.page.selected_source or item["rate_status"] not in _RATE_STATUS or item["coverage_role"] not in {"measured", "offline_excluded", "missing", "required_unknown", "population_conflict"} or item["status_classification"] not in {None, "online", "offline", "other", "unknown"}:
++            raise CurrentTrafficSerializationError("partial AP role is invalid")
++        for direction in ("download", "upload"):
++            if item[f"{direction}_reason"] not in _RATE_REASONS:
++                raise CurrentTrafficSerializationError("partial AP rate reason is invalid")
++            number = _number(item[f"{direction}_mbps"], optional=True, nonnegative=True)
++            if number is not None and item[f"{direction}_reason"] != "ok":
++                raise CurrentTrafficSerializationError("partial AP rate shape is invalid")
++        total = _number(item["total_mbps"], optional=True, nonnegative=True)
++        _total_consistent(item["download_mbps"], item["upload_mbps"], total)
++        expected_status = "valid" if item["download_mbps"] is not None and item["upload_mbps"] is not None else "partial" if item["download_mbps"] is not None or item["upload_mbps"] is not None else "unavailable"
++        if item["rate_status"] != expected_status:
++            raise CurrentTrafficSerializationError("partial AP rate status is inconsistent")
++        _timestamp(item["observed_at"], optional=True)
++        if item["coverage_role"] == "offline_excluded" and (item["status_classification"] != "offline" or item["download_reason"] != "source_unavailable" or item["upload_reason"] != "source_unavailable" or any(item[key] is not None for key in ("download_mbps", "upload_mbps", "total_mbps"))):
++            raise CurrentTrafficSerializationError("Offline AP is not excluded")
++    result["metric_version"] = value.metric_version
++    result["items"] = items
++    return result, {"limit": limit, "cycle_id": cycle_id, "selected_source": value.page.selected_source,
++                    "next_cursor": value.page.next_cursor}
++
+ 
+ def serialize_current_traffic_summary(
+     value: CurrentSiteTraffic,
+diff --git a/app/admin_web/query_service.py b/app/admin_web/query_service.py
+index 3592ea19a431093a687b87d8233f45fddf09e147..205c74a52d399874b34c02ad1c5ffb4ea3f189bc 100644
+--- a/app/admin_web/query_service.py
++++ b/app/admin_web/query_service.py
+@@ -83,6 +83,8 @@ from .current_state_serialization import (
+     serialize_client_summary,
+ )
+ from .current_traffic_serialization import (
++    serialize_partial_current_summary,
++    serialize_partial_current_ap_page,
+     CurrentTrafficSerializationError,
+     serialize_current_ap_traffic_page,
+     serialize_current_traffic_summary,
+@@ -640,27 +642,38 @@ class AdminQueryService:
+ 
+         return self._run(query)
+ 
+-    def current_traffic_summary(self, principal, site_id):
+-        self._authorize(principal, "admin.read.overview", site_id)
++    def current_traffic_summary(self, principal, site_id, *, coverage_mode=None, capability="admin.read.overview"):
++        partial = self._partial_current_mode(coverage_mode)
++        self._authorize(principal, capability if partial else "admin.read.overview", site_id)
+ 
+         def query(deadline):
+             value = self._traffic_call(
+                 deadline,
+                 "summary",
+-                "get_current_site_traffic",
++                "get_current_site_traffic_partial_coverage" if partial else "get_current_site_traffic",
+                 site_id,
++                **({"status_read_service": self._current_state} if partial else {}),
+                 fresh_max_age_seconds=self._config.home_traffic_fresh_max_age_seconds,
+                 stale_max_age_seconds=self._config.home_traffic_stale_max_age_seconds,
+                 max_ap_skew_seconds=self._config.home_traffic_max_ap_skew_seconds,
+             )
+             try:
+-                result = serialize_current_traffic_summary(value, site_id)
++                result = (serialize_partial_current_summary if partial else serialize_current_traffic_summary)(value, site_id)
+             except CurrentTrafficSerializationError as exc:
+                 raise AdminQueryUnavailable() from exc
+             return AdminQueryResponse(result)
+ 
+         return self._run(query)
+ 
++    def _partial_current_mode(self, mode):
++        if mode is None:
++            return False
++        if mode != "partial_v1":
++            raise AdminQueryValidationError()
++        if not self._config.traffic_partial_coverage_enabled:
++            raise AdminQueryUnavailable()
++        return True
++
+     def _read_current_site_raw(self, site_id, *, evaluated_at_utc, deadline):
+         options = {
+             "fresh_max_age_seconds": self._config.home_traffic_fresh_max_age_seconds,
+@@ -880,9 +893,10 @@ class AdminQueryService:
+             raise AdminQueryUnavailable() from exc
+ 
+     def list_current_ap_traffic(
+-        self, principal, site_id, *, cycle_id, limit=None, cursor=None,
++        self, principal, site_id, *, cycle_id, limit=None, cursor=None, coverage_mode=None,
+     ):
+         self._authorize(principal, "admin.read.observations", site_id)
++        partial = self._partial_current_mode(coverage_mode)
+         selected_cycle = self._current_cycle(cycle_id)
+         if selected_cycle is None:
+             raise AdminQueryValidationError()
+@@ -893,8 +907,9 @@ class AdminQueryService:
+             value = self._traffic_call(
+                 deadline,
+                 "page",
+-                "list_current_ap_traffic",
++                "list_current_ap_traffic_partial_coverage" if partial else "list_current_ap_traffic",
+                 site_id,
++                **({"status_read_service": self._current_state} if partial else {}),
+                 cycle_id=selected_cycle,
+                 fresh_max_age_seconds=self._config.home_traffic_fresh_max_age_seconds,
+                 stale_max_age_seconds=self._config.home_traffic_stale_max_age_seconds,
+@@ -903,7 +918,7 @@ class AdminQueryService:
+                 cursor=selected_cursor,
+             )
+             try:
+-                result, page = serialize_current_ap_traffic_page(
++                result, page = (serialize_partial_current_ap_page if partial else serialize_current_ap_traffic_page)(
+                     value,
+                     site_id,
+                     cycle_id=selected_cycle,
+diff --git a/app/admin_web/routes.py b/app/admin_web/routes.py
+index 1aff2dcdc9147e8c970531b58acfd21fb831ed2e..6aa552be6fda32687d22b633b90c4ef6cf2406da 100644
+--- a/app/admin_web/routes.py
++++ b/app/admin_web/routes.py
+@@ -158,6 +158,14 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+ 
+         return wrapped
+ 
++    @blueprint.context_processor
++    def current_partial_coverage_context():
++        return {
++            "traffic_partial_coverage_enabled": config.traffic_partial_coverage_enabled,
++            "traffic_fresh_max_age_seconds": config.home_traffic_fresh_max_age_seconds,
++            "traffic_stale_max_age_seconds": config.home_traffic_stale_max_age_seconds,
++        }
++
+     @blueprint.context_processor
+     def settings_navigation():
+         enabled = getattr(runtime, "settings_feature_enabled", False)
+@@ -1166,17 +1174,18 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             route_name="current_traffic_summary",
+             capability="admin.read.overview",
+             feature_enabled=config.home_traffic_enabled,
+-            allowed_parameters=frozenset(),
++            allowed_parameters=frozenset({"coverage_mode"}),
+             required_parameters=frozenset(),
+             operation=lambda service, selected: service.current_traffic_summary(
+-                g.admin_principal, selected
++                g.admin_principal, selected,
++                **({"coverage_mode": request.args["coverage_mode"]} if "coverage_mode" in request.args else {}),
+             ),
+         )
+ 
+     @blueprint.get("/admin/api/v1/sites/<site_id>/current-traffic/aps")
+     @authenticated
+     def api_current_traffic_aps(site_id: str) -> Response:
+-        allowed = frozenset({"cycle_id", "limit", "cursor"})
++        allowed = frozenset({"cycle_id", "limit", "cursor", "coverage_mode"})
+         return _current_traffic_query(
+             site_id,
+             route_name="current_traffic_ap_page",
+@@ -1187,7 +1196,7 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             operation=lambda service, selected: service.list_current_ap_traffic(
+                 g.admin_principal,
+                 selected,
+-                **{key: request.args.get(key) for key in allowed},
++                **{key: request.args.get(key) for key in allowed if key != "coverage_mode" or key in request.args},
+             ),
+         )
+ 
+@@ -1199,10 +1208,11 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+             route_name="traffic_current",
+             capability="admin.read.context",
+             feature_enabled=config.traffic_enabled,
+-            allowed_parameters=frozenset(),
++            allowed_parameters=frozenset({"coverage_mode"}),
+             required_parameters=frozenset(),
+             operation=lambda service, selected: service.current_traffic_summary(
+-                g.admin_principal, selected
++                g.admin_principal, selected,
++                **({"coverage_mode": request.args["coverage_mode"], "capability": "admin.read.context"} if "coverage_mode" in request.args else {}),
+             ),
+         )
+ 
+@@ -1625,6 +1635,15 @@ def create_admin_web_blueprint(runtime: Any, *, logger: logging.Logger) -> Bluep
+                 response = make_response(_error("invalid_request", 400))
+                 reason = "invalid_request"
+                 return response
++            if "coverage_mode" in allowed_parameters and "coverage_mode" in keys:
++                if request.args["coverage_mode"] != "partial_v1":
++                    response = make_response(_error("invalid_request", 400))
++                    reason = "invalid_request"
++                    return response
++                if not config.traffic_partial_coverage_enabled:
++                    response = make_response(_error("not_found", 404))
++                    reason = "feature_disabled"
++                    return response
+             service = runtime.query_service
+             if service is None:
+                 response = make_response(_error("source_unavailable", 503))
+diff --git a/app/admin_web/static/admin.js b/app/admin_web/static/admin.js
+index 57d2f4249ce5c0695014986de87d9f0054e875bf..334bceac980cb2a79a2b3a77c7127e3ad1f1c266 100644
+--- a/app/admin_web/static/admin.js
++++ b/app/admin_web/static/admin.js
+@@ -1017,6 +1017,91 @@
+   configure();
+ }());
+ 
++/* CURRENT_PARTIAL_COVERAGE_START */
++(function () {
++  "use strict";
++  const states = {complete_installed: "installed", complete_online_population: "confirmed_online", partial_measured: "measured_only", unavailable: "none"};
++  const sources = new Set(["wired", "lan"]);
++  const selections = new Set(["no_complete_snapshot", "primary_full_observation_coverage", "fallback_full_observation_coverage", "primary_full_online_coverage", "fallback_full_online_coverage", "fallback_higher_measured_coverage", "primary_preferred_tie_or_higher"]);
++  const reasons = new Set(["complete_installed_population", "complete_confirmed_online_population", "confirmed_offline_excluded", "online_measurement_missing", "other_status_measurement_missing", "unknown_status_measurement_missing", "status_evidence_stale", "status_evidence_unavailable", "population_mismatch", "no_valid_rate", "missing_direction", "no_baseline", "counter_reset", "gap_too_large", "source_unavailable", "invalid_elapsed", "temporal_skew", "source_cycle_partial", "source_cycle_failed", "source_integrity_unavailable", "status_measurement_conflict", "clock_anomaly", "age_exceeded"]);
++  const rateReasons = new Set(["ok", "no_baseline", "counter_reset", "gap_too_large", "invalid_elapsed", "source_unavailable"]);
++  const object = (v) => v && typeof v === "object" && !Array.isArray(v);
++  const number = (v) => v === null || typeof v === "number" && Number.isFinite(v) && v >= 0;
++  const count = (v) => Number.isSafeInteger(v) && v >= 0;
++  const utc = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString() === v;
++  const optionalUtc = (v) => v === null || utc(v);
++  const keys = (v, expected) => object(v) && Object.keys(v).sort().join(" ") === expected.split(" ").sort().join(" ");
++  const totalValid = (v) => number(v.download_mbps) && number(v.upload_mbps) && number(v.total_mbps)
++    && (v.download_mbps !== null && v.upload_mbps !== null ? v.total_mbps !== null && Math.abs(v.total_mbps - v.download_mbps - v.upload_mbps) <= 1e-6 : v.total_mbps === null);
++  function summary(payload, site, metric = "network_traffic_current_partial_coverage.v1") {
++    if (!object(payload) || payload.api_version !== "admin.read.v1" || payload.site_id !== site || !object(payload.result)) return null;
++    const r = payload.result, s = r.snapshot, c = r.coverage, e = r.status_evidence, source = r.source_selection;
++    if (r.metric_version !== metric || r.site_id !== site || !utc(r.evaluated_at_utc) || !Object.hasOwn(states, r.measurement_state) || states[r.measurement_state] !== r.population_scope
++      || !keys(s, "cycle_id started_at finished_at source_result source_complete latest_attempt_state latest_attempt_result latest_attempt_at using_previous_snapshot observed_at newest_observed_at age_seconds source_skew_seconds freshness_status freshness_reason")
++      || !["fresh", "stale", "unavailable"].includes(s.freshness_status)
++      || !["within_freshness_window", "within_stale_window", "age_exceeded", "clock_anomaly", "no_complete_snapshot", "source_unavailable"].includes(s.freshness_reason)
++      || ![null, "success", "partial"].includes(s.source_result) || typeof s.source_complete !== "boolean" || typeof s.using_previous_snapshot !== "boolean"
++      || !["none", "running", "completed", "abandoned"].includes(s.latest_attempt_state) || ![null, "success", "partial", "failed", "shutdown"].includes(s.latest_attempt_result)
++      || ![s.started_at, s.finished_at, s.latest_attempt_at, s.observed_at, s.newest_observed_at].every(optionalUtc) || !number(s.age_seconds) || !number(s.source_skew_seconds)
++      || !keys(source, "primary_source selected_source selection_reason source_mixing_allowed wired_pair_valid_ap_count lan_pair_valid_ap_count") || source.primary_source !== "wired" || source.source_mixing_allowed !== false
++      || !(source.selected_source === null || sources.has(source.selected_source)) || !selections.has(source.selection_reason) || !count(source.wired_pair_valid_ap_count) || !count(source.lan_pair_valid_ap_count)
++      || !keys(c, "observation_ap_count installed_ap_count online_ap_count offline_ap_count other_ap_count unknown_ap_count measured_pair_ap_count measured_download_ap_count measured_upload_ap_count required_measurement_ap_count missing_required_ap_count offline_excluded_ap_count observation_only_ap_count inventory_only_ap_count population_match_state coverage_reasons")
++      || !["matched", "mismatch", "observation_only", "inventory_only", "status_unavailable"].includes(c.population_match_state)
++      || !Array.isArray(c.coverage_reasons) || c.coverage_reasons.some((v) => !reasons.has(v)) || new Set(c.coverage_reasons).size !== c.coverage_reasons.length
++      || !keys(e, "state cycle_id capture_started_at capture_finished_at age_at_traffic_seconds source_scope_hash") || !["aligned_fresh", "stale", "unavailable", "population_mismatch"].includes(e.state)
++      || !optionalUtc(e.capture_started_at) || !optionalUtc(e.capture_finished_at) || !number(e.age_at_traffic_seconds)
++      || !keys(r.traffic, "download_mbps upload_mbps total_mbps unit") || r.traffic.unit !== "Mbps" || !totalValid(r.traffic)) return null;
++    const nullable = new Set(["installed_ap_count", "online_ap_count", "offline_ap_count", "other_ap_count", "unknown_ap_count", "required_measurement_ap_count", "missing_required_ap_count"]);
++    for (const [k, v] of Object.entries(c)) if (k.endsWith("_count") && !(nullable.has(k) && v === null) && !count(v)) return null;
++    if ([c.measured_pair_ap_count, c.measured_download_ap_count, c.measured_upload_ap_count, c.offline_excluded_ap_count, source.wired_pair_valid_ap_count, source.lan_pair_valid_ap_count].some((v) => v > c.observation_ap_count)) return null;
++    if (c.installed_ap_count !== null && c.online_ap_count + c.offline_ap_count + c.other_ap_count + c.unknown_ap_count !== c.installed_ap_count) return null;
++    if ((r.measurement_state === "unavailable" || s.freshness_status === "unavailable") && [r.traffic.download_mbps, r.traffic.upload_mbps, r.traffic.total_mbps].some((v) => v !== null)) return null;
++    if (r.measurement_state === "complete_online_population" && (e.state !== "aligned_fresh" || c.population_match_state !== "matched" || c.other_ap_count !== 0 || c.unknown_ap_count !== 0 || c.measured_pair_ap_count !== c.online_ap_count || c.offline_excluded_ap_count !== c.offline_ap_count || c.coverage_reasons.includes("status_measurement_conflict"))) return null;
++    return r;
++  }
++  function page(payload, site, expected) {
++    const r = summary(payload, site, "network_traffic_current_ap_partial_coverage.v1");
++    if (!r || !object(payload.page) || !Array.isArray(r.items) || !count(payload.page.limit) || payload.page.limit < 1 || payload.page.limit > 250 || r.items.length > payload.page.limit
++      || payload.page.cycle_id !== expected.snapshot.cycle_id || r.snapshot.cycle_id !== expected.snapshot.cycle_id
++      || payload.page.selected_source !== expected.source_selection.selected_source || r.source_selection.selected_source !== expected.source_selection.selected_source
++      || r.status_evidence.cycle_id !== expected.status_evidence.cycle_id || r.status_evidence.source_scope_hash !== expected.status_evidence.source_scope_hash
++      || !(payload.page.next_cursor === null || typeof payload.page.next_cursor === "string" && payload.page.next_cursor.length > 0 && payload.page.next_cursor.length <= 1024)) return null;
++    const seen = new Set();
++    for (const item of r.items) {
++      if (!keys(item, "ap_mac name selected_source download_mbps upload_mbps total_mbps download_reason upload_reason rate_status coverage_role status_classification observed_at")
++        || typeof item.ap_mac !== "string" || !/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(item.ap_mac) || seen.has(item.ap_mac) || !(item.name === null || typeof item.name === "string") || !totalValid(item)
++        || item.selected_source !== expected.source_selection.selected_source || !["valid", "partial", "unavailable"].includes(item.rate_status) || !["measured", "offline_excluded", "missing", "required_unknown", "population_conflict"].includes(item.coverage_role)
++        || ![null, "online", "offline", "other", "unknown"].includes(item.status_classification) || !optionalUtc(item.observed_at) || !rateReasons.has(item.download_reason) || !rateReasons.has(item.upload_reason)
++        || item.download_mbps !== null && item.download_reason !== "ok" || item.upload_mbps !== null && item.upload_reason !== "ok"
++        || item.coverage_role === "offline_excluded" && (item.status_classification !== "offline" || item.download_mbps !== null || item.upload_mbps !== null)) return null;
++      seen.add(item.ap_mac);
++    }
++    return payload;
++  }
++  function copy(r, freshness = r.snapshot.freshness_status) {
++    const c = r.coverage;
++    const measured = c.measured_pair_ap_count;
++    const total = c.installed_ap_count === null ? c.observation_ap_count : c.installed_ap_count;
++    if (freshness === "unavailable" || r.measurement_state === "unavailable") return {title: "No reliable traffic data", coverage: "Coverage unavailable", message: "No reliable traffic data", tone: "error", label: ""};
++    const partial = r.measurement_state === "partial_measured";
++    const label = partial ? "Measured traffic" : "Total traffic";
++    const rate = r.traffic.total_mbps === null ? "—" : `${Number(r.traffic.total_mbps.toFixed(2))} Mbps`;
++    const coverage = r.measurement_state === "complete_installed" ? `Complete AP coverage · ${measured} of ${total} APs measured`
++      : r.measurement_state === "complete_online_population" ? `${c.online_ap_count} Online / ${total} total · ${c.offline_excluded_ap_count} Offline excluded`
++      : `Partial data · ${measured} of ${total} APs measured`;
++    return {title: freshness === "stale" ? "Traffic is stale" : `${label}: ${rate}`, coverage,
++      message: r.measurement_state === "complete_online_population" ? "All confirmed Online APs are measured." : coverage,
++      tone: freshness === "stale" || partial ? "warning" : "ready", label};
++  }
++  function apCopy(item) {
++    if (item.coverage_role === "offline_excluded") return "Offline · excluded from online traffic scope";
++    if (item.rate_status !== "valid") return item.status_classification === "online" ? "Online · traffic measurement unavailable" : "Status unknown · traffic measurement unavailable";
++    return `Traffic · ${item.rate_status}`;
++  }
++  if (typeof window !== "undefined") window.CaptivPortalCurrentPartialCoverage = Object.freeze({summary, page, copy, apCopy});
++}());
++/* CURRENT_PARTIAL_COVERAGE_END */
++
+ (function () {
+   "use strict";
+   if (typeof window === "undefined" || typeof document === "undefined") return;
+@@ -1460,6 +1545,7 @@
+     updated: document.getElementById("traffic-current-updated"),
+   };
+   if (Object.values(elements).some((value) => !value)) return;
++  const partialMode = elements.panel.dataset.partialCoverage === "true";
+ 
+   const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
+   const COVERAGE = new Set(["complete", "partial", "none"]);
+@@ -1481,6 +1567,11 @@
+   }
+ 
+   function validate(payload, siteId) {
++    if (partialMode) {
++      const result = window.CaptivPortalCurrentPartialCoverage.summary(payload, siteId);
++      if (!result) throw new Error("Invalid partial current Traffic response");
++      return result;
++    }
+     if (!object(payload) || payload.api_version !== "admin.read.v1" || payload.site_id !== siteId
+         || !object(payload.result)) throw new Error("Invalid current Traffic response");
+     const result = payload.result;
+@@ -1534,6 +1625,18 @@
+   }
+ 
+   function render(value) {
++    if (partialMode) {
++      const copy = window.CaptivPortalCurrentPartialCoverage.copy(value);
++      elements.state.dataset.state = copy.tone;
++      elements.title.textContent = copy.title;
++      elements.message.textContent = copy.message;
++      setMetrics(value.traffic);
++      elements.source.textContent = value.source_selection.selected_source === "wired" ? "Wired" : value.source_selection.selected_source === "lan" ? "LAN fallback" : "Source unavailable";
++      elements.freshness.textContent = value.snapshot.freshness_status;
++      elements.coverage.textContent = copy.coverage;
++      elements.updated.textContent = `Evaluated ${formatTime(value.evaluated_at_utc)} · observed ${formatTime(value.snapshot.observed_at)}`;
++      return;
++    }
+     const unavailable = value.snapshot.freshness_status === "unavailable"
+       || value.coverage.coverage_status === "none";
+     const degraded = !unavailable && (value.snapshot.freshness_status === "stale"
+@@ -1571,7 +1674,7 @@
+     key: "current-network-throughput",
+     autoRefresh: true,
+     load: async (context) => validate(
+-      await context.requestJson(`${context.apiBase}/traffic/current`),
++      await context.requestJson(`${context.apiBase}/traffic/current${partialMode ? "?coverage_mode=partial_v1" : ""}`),
+       context.siteId,
+     ),
+     render,
+@@ -5153,7 +5256,8 @@
+       row.append(devices);
+       if (trafficEnabled) {
+         const rate = traffic.get(item.ap_mac);
+-        row.append(createNode("p", "live-detail", `Traffic · ${rate ? rate.rate_status : "—"}`));
++        row.append(createNode("p", "live-detail", rate && rate.coverage_role
++          ? window.CaptivPortalCurrentPartialCoverage.apCopy(rate) : `Traffic · ${rate ? rate.rate_status : "—"}`));
+         const rates = createNode("div", "ap-traffic-rates");
+         for (const [label, key] of [["Download ↓", "download_mbps"], ["Upload ↑", "upload_mbps"], ["Total ↓↑", "total_mbps"]]) {
+           const metric = createNode("div", "ap-traffic-rate");
+@@ -5776,7 +5880,8 @@
+   }
+   function trafficDisplay(result, effectiveFreshness) {
+     if (!result || effectiveFreshness === "unavailable") return {download: "—", upload: "—", total: "—", downloadTone: null, uploadTone: null, totalTone: null, label: "", downloadLabel: "", uploadLabel: "", totalLabel: "", state: "Unavailable"};
+-    const partial = result.coverage.coverage_status === "partial";
++    const isCoverageAware = result.metric_version === "network_traffic_current_partial_coverage.v1";
++    const partial = isCoverageAware ? result.measurement_state === "partial_measured" : result.coverage.coverage_status === "partial";
+     const download = trafficMetricPresentation(result.traffic.download_mbps, "↓");
+     const upload = trafficMetricPresentation(result.traffic.upload_mbps, "↑");
+     const total = trafficMetricPresentation(result.traffic.total_mbps, "↓↑");
+@@ -5784,9 +5889,9 @@
+       download: download.value, upload: upload.value, total: total.value,
+       downloadTone: download.tone, uploadTone: upload.tone, totalTone: total.tone,
+       label: partial ? "Observed subtotal" : "",
+-      downloadLabel: partial && result.traffic.download_mbps !== null ? "Observed subtotal" : "",
+-      uploadLabel: partial && result.traffic.upload_mbps !== null ? "Observed subtotal" : "",
+-      totalLabel: partial && result.traffic.total_mbps !== null ? "Observed subtotal" : "",
++      downloadLabel: partial && result.traffic.download_mbps !== null ? (isCoverageAware ? "Measured traffic" : "Observed subtotal") : "",
++      uploadLabel: partial && result.traffic.upload_mbps !== null ? (isCoverageAware ? "Measured traffic" : "Observed subtotal") : "",
++      totalLabel: isCoverageAware ? window.CaptivPortalCurrentPartialCoverage.copy(result, effectiveFreshness).label : partial && result.traffic.total_mbps !== null ? "Observed subtotal" : "",
+       state: effectiveFreshness === "stale" ? "Stale" : "Current",
+     };
+   }
+@@ -5911,6 +6016,9 @@
+   const siteId = root.dataset.siteId;
+   const currentBase = root.dataset.apiBase + "/current-state";
+   const trafficBase = root.dataset.apiBase + "/current-traffic";
++  const trafficPanel = document.getElementById("home-traffic");
++  const partialMode = Boolean(trafficPanel && trafficPanel.dataset.partialCoverage === "true");
++  const partialPolicy = partialMode ? {fresh_max_age_seconds: Number(trafficPanel.dataset.freshMaxAgeSeconds), unavailable_after_seconds: Number(trafficPanel.dataset.staleMaxAgeSeconds)} : null;
+   const trafficEnabled = root.dataset.homeTrafficEnabled === "true";
+   const liveRefresh = Number(root.dataset.homeLiveRefreshSeconds);
+   const trafficRefresh = Number(root.dataset.homeTrafficRefreshSeconds);
+@@ -6021,6 +6129,7 @@
+   }
+   function trafficParams(summary, cursor) {
+     const value = new URLSearchParams({cycle_id: summary.snapshot.cycle_id, limit: String(trafficPageSize)});
++    if (partialMode) value.set("coverage_mode", "partial_v1");
+     if (cursor) value.set("cursor", cursor);
+     return value;
+   }
+@@ -6140,6 +6249,18 @@
+     document.getElementById("traffic-download-label").textContent = shown.downloadLabel;
+     document.getElementById("traffic-upload-label").textContent = shown.uploadLabel;
+     document.getElementById("traffic-total-label").textContent = shown.totalLabel;
++    if (partialMode && result) {
++      const copy = window.CaptivPortalCurrentPartialCoverage.copy(result, effective);
++      const age = trafficAge(result.snapshot, sources.traffic.acceptedAt, performance.now());
++      document.getElementById("traffic-freshness").textContent = `${effective === "stale" ? "Traffic is stale" : effective === "fresh" ? "Fresh" : "Unavailable"} · age ${age === null ? "—" : Math.floor(age)}s · observed ${result.snapshot.observed_at || "—"}`;
++      document.getElementById("traffic-coverage").textContent = copy.coverage;
++      const c = result.coverage, total = c.installed_ap_count === null ? c.observation_ap_count : c.installed_ap_count;
++      document.getElementById("traffic-download-coverage").textContent = `Download ${c.measured_download_ap_count}/${total} APs`;
++      document.getElementById("traffic-upload-coverage").textContent = `Upload ${c.measured_upload_ap_count}/${total} APs`;
++      document.getElementById("traffic-both-coverage").textContent = `Both ${c.measured_pair_ap_count}/${total} APs`;
++      setTrafficState(copy.title, copy.message, copy.tone);
++      return;
++    }
+     if (!result || effective === "unavailable") { clearTrafficCurrent("Traffic snapshot is unavailable."); setTrafficState("Traffic unavailable", "Persisted AP traffic cannot currently describe the Site.", "warning"); return; }
+     const age = trafficAge(result.snapshot, sources.traffic.acceptedAt, performance.now());
+     document.getElementById("traffic-freshness").textContent = `${effective === "stale" ? "STALE" : "Fresh"} · age ${Math.floor(age)}s · observed ${result.snapshot.observed_at || "—"}`;
+@@ -6211,8 +6332,9 @@
+     const source = sources.traffic; source.generation = generation;
+     if (!trafficEnabled || stopped || document.hidden || coordinator.pending || source.disabled) return {cleanRefresh: false};
+     try {
+-      const payload = await requestJson(`${trafficBase}/summary`, source, generation, trafficTimeout);
+-      const summary = validateTrafficSummary(payload, siteId);
++      const payload = await requestJson(`${trafficBase}/summary${partialMode ? "?coverage_mode=partial_v1" : ""}`, source, generation, trafficTimeout);
++      const validated = partialMode ? window.CaptivPortalCurrentPartialCoverage.summary(payload, siteId) : validateTrafficSummary(payload, siteId);
++      const summary = validated && partialMode ? {...validated, freshness_policy: partialPolicy} : validated;
+       if (!summary) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+       if (source.generation !== generation) return {cleanRefresh: false};
+       acceptTrafficSummary(source, summary, performance.now());
+@@ -6228,7 +6350,7 @@
+             const params = trafficParams(summary, cursor);
+             const pagePayload = await requestJson(`${trafficBase}/aps?${params.toString()}`, source, generation, trafficTimeout);
+             if (source.generation !== generation || coordinator.pending || stopped || document.hidden) return {cleanRefresh: false};
+-            const valid = validateTrafficPage(pagePayload, siteId, summary);
++            const valid = partialMode ? window.CaptivPortalCurrentPartialCoverage.page(pagePayload, siteId, summary) : validateTrafficPage(pagePayload, siteId, summary);
+             if (!valid) throw {liveFailure: {global: false, retryable: true, kind: "unexpected", retryAfter: 0, status: 200}};
+             for (const item of valid.result.items) {
+               if (seenMacs.has(item.ap_mac)) throw {liveFailure: {global: false, kind: "unexpected", retryAfter: 0, status: 200}};
+diff --git a/app/admin_web/templates/admin/home.html b/app/admin_web/templates/admin/home.html
+index a54675b4c1907a251aeb6575ff7c066f7de9d423..939e5e7d6e4b69f1a9178704a2a61d77b30b12c3 100644
+--- a/app/admin_web/templates/admin/home.html
++++ b/app/admin_web/templates/admin/home.html
+@@ -52,7 +52,10 @@
+   <div class="pagination"><button id="live-client-more" class="button button-secondary" type="button" hidden>Load more devices</button></div>
+ </section>
+ {% if home_traffic_enabled %}
+-<section id="home-traffic" aria-labelledby="traffic-now-title">
++<section id="home-traffic" aria-labelledby="traffic-now-title"
++  data-partial-coverage="{{ 'true' if traffic_partial_coverage_enabled else 'false' }}"
++  data-fresh-max-age-seconds="{{ traffic_fresh_max_age_seconds }}"
++  data-stale-max-age-seconds="{{ traffic_stale_max_age_seconds }}">
+   <div class="section-heading">
+     <div><h2 id="traffic-now-title">Traffic Now</h2><p class="live-detail">Derived from persisted AP traffic counters. May include local/service traffic and is not an Internet-only measurement.</p></div>
+   </div>
+diff --git a/app/admin_web/templates/admin/traffic.html b/app/admin_web/templates/admin/traffic.html
+index b37254f12a955406acc6801dcaec60b5008b8d4c..c5aa8aa3ff224668e148b6b37f5f7929aa965fd7 100644
+--- a/app/admin_web/templates/admin/traffic.html
++++ b/app/admin_web/templates/admin/traffic.html
+@@ -20,7 +20,8 @@
+   </div>
+ </div>
+ <div id="traffic-panels" class="content-grid" aria-live="polite">
+-  <section id="traffic-current-panel" class="card card-wide" aria-labelledby="traffic-current-heading">
++  <section id="traffic-current-panel" class="card card-wide" aria-labelledby="traffic-current-heading"
++    data-partial-coverage="{{ 'true' if traffic_partial_coverage_enabled else 'false' }}">
+     <div class="card-heading">
+       <div>
+         <p class="eyebrow">Live estimate</p>
+diff --git a/app/analytics/current_traffic.py b/app/analytics/current_traffic.py
+index d405ae4d12cb8cff891b04f5f5bf66496fa223da..55a188725504cc04dd59e1cb68ab3350c3d15222 100644
+--- a/app/analytics/current_traffic.py
++++ b/app/analytics/current_traffic.py
+@@ -6,11 +6,14 @@ import base64
+ import json
+ import math
+ import re
++import sqlite3
+ from dataclasses import replace
+ from datetime import datetime, timezone
+ from typing import Any, Mapping
+ 
+ from .models import (
++    CoverageAwareCurrentSiteTrafficV1,
++    CoverageAwareCurrentApTrafficPageV1,
+     CurrentApTrafficItem,
+     CurrentApTrafficPage,
+     CurrentSiteTraffic,
+@@ -196,6 +199,314 @@ class CurrentTrafficReadService:
+                 "Current traffic source is unavailable"
+             ) from exc
+ 
++    def get_current_site_traffic_partial_coverage(
++        self, site_id: str, *, status_read_service=None,
++        evaluated_at_utc: str | None = None,
++        fresh_max_age_seconds: float, stale_max_age_seconds: float,
++        max_ap_skew_seconds: float, deadline: QueryDeadline | None = None,
++    ) -> CoverageAwareCurrentSiteTrafficV1:
++        summary, _items = self._partial_read(
++            site_id, None, status_read_service, evaluated_at_utc,
++            fresh_max_age_seconds, stale_max_age_seconds, max_ap_skew_seconds,
++            deadline or QueryDeadline.after(10.0),
++        )
++        return summary
++
++    def list_current_ap_traffic_partial_coverage(
++        self, site_id: str, *, cycle_id: str, status_read_service=None,
++        evaluated_at_utc: str | None = None,
++        fresh_max_age_seconds: float, stale_max_age_seconds: float,
++        max_ap_skew_seconds: float, limit: int = 100, cursor: str | None = None,
++        deadline: QueryDeadline | None = None,
++    ) -> CoverageAwareCurrentApTrafficPageV1:
++        site, cycle, size = _site(site_id), _cycle_id(cycle_id), _limit(limit)
++        summary, items = self._partial_read(
++            site, cycle, status_read_service, evaluated_at_utc,
++            fresh_max_age_seconds, stale_max_age_seconds, max_ap_skew_seconds,
++            deadline or QueryDeadline.after(10.0),
++        )
++        if summary.snapshot["cycle_id"] is None:
++            raise CurrentTrafficValidationError("traffic cycle is unavailable")
++        source = summary.source_selection["selected_source"]
++        # A distinct cursor namespace pins both traffic and aligned status.
++        context = {"kind": "partial_current_aps_v1", "site_id": site,
++                   "cycle_id": cycle, "selected_source": source,
++                   "status_cycle_id": summary.status_evidence["cycle_id"],
++                   "source_scope_hash": summary.status_evidence["source_scope_hash"]}
++        if cursor is not None:
++            try:
++                if not isinstance(cursor, str) or len(cursor) > _MAX_CURSOR_LENGTH:
++                    raise ValueError()
++                decoded = json.loads(base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True))
++                if set(decoded) != set(context) | {"last_ap_mac"} or any(decoded[k] != v for k, v in context.items()):
++                    raise ValueError()
++                if not isinstance(decoded["last_ap_mac"], str) or _MAC_PATTERN.fullmatch(decoded["last_ap_mac"]) is None:
++                    raise ValueError()
++                if _partial_cursor(decoded) != cursor:
++                    raise ValueError()
++                items = tuple(item for item in items if item["ap_mac"] > decoded["last_ap_mac"])
++            except (ValueError, TypeError, KeyError, UnicodeError) as exc:
++                raise CurrentTrafficValidationError("traffic cursor context mismatch") from exc
++        visible = items[:size]
++        next_cursor = _partial_cursor({**context, "last_ap_mac": visible[-1]["ap_mac"]}) if len(items) > size else None
++        return CoverageAwareCurrentApTrafficPageV1(
++            summary, visible, CurrentTrafficPageMetadata(size, next_cursor, cycle, source),
++        )
++
++    def _partial_read(self, site_id, cycle_id, status_reader, evaluated_text,
++                      fresh, stale, skew, deadline):
++        site = _site(site_id)
++        evaluated, text = _evaluation(evaluated_text)
++        policy = _policy(fresh, stale, skew)
++        try:
++            data = self._gateway.read_current_partial_traffic_evidence(
++                site_id=site, cycle_id=cycle_id, deadline=deadline,
++            )
++        except AnalyticsSourceUnavailable as exc:
++            raise CurrentTrafficSourceUnavailable("Current traffic source is unavailable") from exc
++        try:
++            cycle = dict(data["cycle"]) if data["cycle"] is not None else None
++            latest = dict(data["latest"]) if data["latest"] is not None else None
++            attempt = _latest_attempt(latest)
++            if cycle is None:
++                return _partial_unavailable(site, text, None, attempt, "no_valid_rate"), ()
++            rows = tuple(dict(row) for row in data["rows"])
++            _validate_partial_cycle(site, cycle, rows, data.get("row_count", len(rows)))
++        except (CurrentTrafficIntegrityUnavailable, AnalyticsQueryValidationError, KeyError, TypeError, ValueError, OverflowError):
++            # Never select an older cycle after integrity failure.
++            return _partial_unavailable(site, text, None, ("none", None, None), "source_integrity_unavailable"), ()
++        from app.current_state.models import (
++            CurrentApStatusEvidenceV1, CurrentStateStorageError,
++            CurrentStateSchemaError, CurrentStateValidationError,
++        )
++        status = CurrentApStatusEvidenceV1(site)
++        if status_reader is not None:
++            try:
++                status = status_reader.read_ap_status_evidence_at(site, cycle["finished_at"], deadline=deadline)
++            except (sqlite3.ProgrammingError, sqlite3.InterfaceError):
++                raise
++            except (CurrentStateStorageError, CurrentStateSchemaError, CurrentStateValidationError,
++                    sqlite3.Error, OSError):
++                # Status storage failure disables Offline promotion, not rates.
++                # The shared deadline below still rejects interrupted/late reads.
++                pass
++        deadline.require_remaining()
++        if not isinstance(status, CurrentApStatusEvidenceV1) or status.site_id != site:
++            status = CurrentApStatusEvidenceV1(site)
++        try:
++            return _partial_evaluate(site, text, evaluated, policy, cycle, latest, rows, status)
++        except (CurrentTrafficIntegrityUnavailable, OverflowError):
++            return _partial_unavailable(site, text, None, attempt, "source_integrity_unavailable"), ()
++
++
++def _partial_cursor(payload):
++    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
++    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
++
++
++def _validate_partial_cycle(site, cycle, rows, actual_count):
++    started, finished = parse_utc(cycle["started_at"], "cycle started_at"), parse_utc(cycle["finished_at"], "cycle finished_at")
++    count = cycle["items_stored"]
++    if (
++        cycle["site_id"] != site or cycle["kind"] != "ap_dynamic"
++        or cycle["state"] != "completed" or cycle["result"] not in {"success", "partial"}
++        or type(count) is not int or count <= 0 or actual_count != count or len(rows) != count
++        or started > finished or cycle["items_seen"] != count or cycle["source_rows_reported"] != count
++        or cycle["items_skipped"] != 0 or cycle["data_quality_warning_count"] != 0
++        or type(cycle["error_count"]) is not int or cycle["error_count"] < 0
++        or cycle["complete"] not in (0, 1)
++    ):
++        raise ValueError("Invalid partial traffic cycle")
++    seen = set()
++    for row in rows:
++        mac = row["ap_mac"]
++        if (row["site_id"] != site or row["cycle_id"] != cycle["cycle_id"]
++            or not isinstance(mac, str) or _MAC_PATTERN.fullmatch(mac) is None or mac in seen
++            or row["name"] is not None and not isinstance(row["name"], str)
++            or any(row[key] not in (0, 1) for key in (
++                "partial", "overview_ok", "wired_uplink_ok", "lan_traffic_ok", "radios_ok"))):
++            raise ValueError("Invalid AP identity")
++        seen.add(mac)
++        for source in ("wired", "lan"):
++            down, up, dr, ur, at = _partial_values(row, source)
++            for value, reason in ((down, dr), (up, ur)):
++                if reason not in RATE_REASONS:
++                    raise ValueError("Invalid rate reason")
++                if reason == "ok":
++                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
++                        raise ValueError("Invalid rate value")
++                    if not started <= parse_utc(at, "source observed_at") <= finished:
++                        raise ValueError("Invalid rate timestamp")
++                elif value is not None:
++                    raise ValueError("Non-ok numeric rate")
++            if at is not None:
++                parse_utc(at, "source observed_at")
++
++
++def _partial_values(row, source):
++    if source == "wired":
++        keys = ("wired_download_mbps", "wired_upload_mbps", "wired_download_rate_reason", "wired_upload_rate_reason", "wired_observed_at")
++    else:
++        keys = ("lan_rx_mbps", "lan_tx_mbps", "lan_rx_rate_reason", "lan_tx_rate_reason", "lan_observed_at")
++    return tuple(row[key] for key in keys)
++
++
++def _partial_unavailable(site, text, cycle, attempt, reason):
++    return CoverageAwareCurrentSiteTrafficV1(
++        site, text, "unavailable", "none",
++        {"cycle_id": None, "started_at": None, "finished_at": None, "source_result": None,
++         "source_complete": False, "latest_attempt_state": attempt[0], "latest_attempt_result": attempt[1],
++         "latest_attempt_at": attempt[2], "using_previous_snapshot": False,
++         "observed_at": None, "newest_observed_at": None, "age_seconds": None,
++         "source_skew_seconds": None, "freshness_status": "unavailable",
++         "freshness_reason": "no_complete_snapshot" if reason == "no_valid_rate" else "source_unavailable"},
++        {"download_mbps": None, "upload_mbps": None, "total_mbps": None, "unit": "Mbps"},
++        {"primary_source": "wired", "selected_source": None, "selection_reason": "no_complete_snapshot",
++         "source_mixing_allowed": False, "wired_pair_valid_ap_count": 0, "lan_pair_valid_ap_count": 0},
++        {"observation_ap_count": 0, "installed_ap_count": None, "online_ap_count": None,
++         "offline_ap_count": None, "other_ap_count": None, "unknown_ap_count": None,
++         "measured_pair_ap_count": 0, "measured_download_ap_count": 0, "measured_upload_ap_count": 0,
++         "required_measurement_ap_count": None, "missing_required_ap_count": None,
++         "offline_excluded_ap_count": 0, "observation_only_ap_count": 0, "inventory_only_ap_count": 0,
++         "population_match_state": "status_unavailable", "coverage_reasons": [reason]},
++        {"state": "unavailable", "cycle_id": None, "capture_started_at": None,
++         "capture_finished_at": None, "age_at_traffic_seconds": None, "source_scope_hash": None},
++    )
++
++
++def _partial_evaluate(site, text, evaluated, policy, cycle, latest, rows, status):
++    r = {row["ap_mac"] for row in rows}
++    aligned = status.state == "aligned_fresh"
++    i = set(status.statuses) if aligned else set()
++    online = {mac for mac in i if status.statuses[mac] == "online"}
++    offline = {mac for mac in i if status.statuses[mac] == "offline"}
++    other = {mac for mac in i if status.statuses[mac] == "other"}
++    unknown = i - online - offline - other
++    matched = aligned and r == i
++    pairs = {source: {row["ap_mac"] for row in rows if _partial_values(row, source)[2:4] == ("ok", "ok")} for source in ("wired", "lan")}
++    if pairs["wired"] == r:
++        source, reason = "wired", "primary_full_observation_coverage"
++    elif pairs["lan"] == r:
++        source, reason = "lan", "fallback_full_observation_coverage"
++    elif matched and not (other | unknown) and online <= pairs["wired"]:
++        source, reason = "wired", "primary_full_online_coverage"
++    elif matched and not (other | unknown) and online <= pairs["lan"]:
++        source, reason = "lan", "fallback_full_online_coverage"
++    elif len(pairs["lan"]) > len(pairs["wired"]):
++        source, reason = "lan", "fallback_higher_measured_coverage"
++    else:
++        source, reason = "wired", "primary_preferred_tie_or_higher"
++    values = {row["ap_mac"]: _partial_values(row, source) for row in rows}
++    d = {mac for mac in r if values[mac][2] == "ok"}
++    u = {mac for mac in r if values[mac][3] == "ok"}
++    p = d & u
++    excluded = {mac for mac in offline & r if values[mac][:4] == (None, None, "source_unavailable", "source_unavailable")}
++    conflicts = offline & r - excluded
++    reasons = set()
++    if cycle["result"] == "partial":
++        reasons.add("source_cycle_partial")
++    if latest and latest["result"] in {"failed", "shutdown"}:
++        reasons.add("source_cycle_failed")
++    if not aligned:
++        reasons.add("status_evidence_stale" if status.state == "stale" else "status_evidence_unavailable")
++    if aligned and not matched:
++        reasons.add("population_mismatch")
++    if conflicts:
++        reasons.add("status_measurement_conflict")
++    for members, label in ((online, "online"), (other, "other_status"), (unknown, "unknown_status")):
++        if members - p:
++            reasons.add(f"{label}_measurement_missing")
++    for mac in r - p - excluded:
++        reasons.update(reason for reason in values[mac][2:4] if reason != "ok")
++    if d != u:
++        reasons.add("missing_direction")
++    # Legacy installed proof is strict, not merely the complete bit.
++    strict = (cycle["complete"] == 1 and cycle["result"] == "success" and cycle["error_count"] == 0
++              and all(row["partial"] == 0 and all(row[key] == 1 for key in (
++                  "overview_ok", "wired_uplink_ok", "lan_traffic_ok", "radios_ok")) for row in rows))
++    if (matched and p == i) or (strict and p == r and not aligned):
++        state, scope = "complete_installed", "installed"
++        reasons.add("complete_installed_population")
++    elif matched and not (other | unknown) and p == online and excluded == offline:
++        state, scope = "complete_online_population", "confirmed_online"
++        reasons.update(("complete_confirmed_online_population", "confirmed_offline_excluded"))
++    elif d or u:
++        state, scope = "partial_measured", "measured_only"
++    else:
++        state, scope = "unavailable", "none"
++        reasons.add("no_valid_rate")
++    times = [parse_utc(values[mac][4], "source observed_at") for mac in d | u]
++    oldest, newest = (min(times), max(times)) if times else (None, None)
++    age = (evaluated - oldest).total_seconds() if oldest else None
++    skew = (newest - oldest).total_seconds() if times else None
++    freshness, freshness_reason = "unavailable", "source_unavailable"
++    if times:
++        if newest > evaluated or parse_utc(cycle["finished_at"], "cycle finished_at") > evaluated:
++            freshness_reason = "clock_anomaly"
++            reasons.add("clock_anomaly")
++        elif skew > policy.max_ap_skew_seconds:
++            reasons.add("temporal_skew")
++        elif age > policy.stale_max_age_seconds:
++            freshness_reason = "age_exceeded"
++            reasons.add("age_exceeded")
++        else:
++            freshness = "fresh" if age <= policy.fresh_max_age_seconds else "stale"
++            freshness_reason = "within_freshness_window" if freshness == "fresh" else "within_stale_window"
++    down = math.fsum(values[mac][0] for mac in sorted(d)) if d else None
++    up = math.fsum(values[mac][1] for mac in sorted(u)) if u else None
++    if down is not None and not math.isfinite(down) or up is not None and not math.isfinite(up):
++        raise CurrentTrafficIntegrityUnavailable("Current traffic sum is not finite")
++    if freshness == "unavailable":
++        down, up, state, scope = None, None, "unavailable", "none"
++    total = down + up if down is not None and up is not None else None
++    if total is not None and not math.isfinite(total):
++        raise CurrentTrafficIntegrityUnavailable("Current traffic total is not finite")
++    attempt = _latest_attempt(latest)
++    previous = bool(latest and (latest["started_at"], latest["cycle_id"]) > (cycle["started_at"], cycle["cycle_id"]))
++    required = i - excluded if aligned else None
++    summary = CoverageAwareCurrentSiteTrafficV1(
++        site, text, state, scope,
++        {"cycle_id": cycle["cycle_id"], "started_at": cycle["started_at"], "finished_at": cycle["finished_at"],
++         "source_result": cycle["result"], "source_complete": bool(cycle["complete"]),
++         "latest_attempt_state": attempt[0], "latest_attempt_result": attempt[1], "latest_attempt_at": attempt[2],
++         "using_previous_snapshot": previous,
++         "observed_at": format_utc(oldest) if oldest else None, "newest_observed_at": format_utc(newest) if newest else None,
++         "age_seconds": max(age, 0) if age is not None else None, "source_skew_seconds": skew,
++         "freshness_status": freshness, "freshness_reason": freshness_reason},
++        {"download_mbps": down, "upload_mbps": up, "total_mbps": total, "unit": "Mbps"},
++        {"primary_source": "wired", "selected_source": source, "selection_reason": reason,
++         "source_mixing_allowed": False, "wired_pair_valid_ap_count": len(pairs["wired"]), "lan_pair_valid_ap_count": len(pairs["lan"])},
++        {"observation_ap_count": len(r), "installed_ap_count": len(i) if aligned else None,
++         "online_ap_count": len(online) if aligned else None, "offline_ap_count": len(offline) if aligned else None,
++         "other_ap_count": len(other) if aligned else None, "unknown_ap_count": len(unknown) if aligned else None,
++         "measured_pair_ap_count": len(p), "measured_download_ap_count": len(d), "measured_upload_ap_count": len(u),
++         "required_measurement_ap_count": len(required) if required is not None else None,
++         "missing_required_ap_count": len(required - p) if required is not None else None,
++         "offline_excluded_ap_count": len(excluded), "observation_only_ap_count": len(r - i) if aligned else 0,
++         "inventory_only_ap_count": len(i - r) if aligned else 0,
++         "population_match_state": "matched" if matched else "mismatch" if aligned else "status_unavailable",
++         "coverage_reasons": sorted(reasons)},
++        {"state": "population_mismatch" if aligned and not matched else status.state,
++         "cycle_id": status.cycle_id, "capture_started_at": status.capture_started_at,
++         "capture_finished_at": status.capture_finished_at, "age_at_traffic_seconds": status.age_at_traffic_seconds,
++         "source_scope_hash": status.source_scope_hash},
++    )
++    items = []
++    for row in rows:
++        mac = row["ap_mac"]
++        down, up, dr, ur, observed = values[mac]
++        at = parse_utc(observed, "source observed_at") if observed is not None else None
++        if at is None or at > evaluated or (evaluated - at).total_seconds() > policy.stale_max_age_seconds:
++            down, up = None, None
++        rate_status = "valid" if down is not None and up is not None else "partial" if down is not None or up is not None else "unavailable"
++        role = "population_conflict" if aligned and mac not in i else "offline_excluded" if mac in excluded else "measured" if mac in p else "required_unknown" if not aligned or mac in other | unknown else "missing"
++        items.append({"ap_mac": mac, "name": row["name"], "selected_source": source,
++                      "download_mbps": down, "upload_mbps": up, "total_mbps": down + up if down is not None and up is not None else None,
++                      "download_reason": dr, "upload_reason": ur, "rate_status": rate_status,
++                      "coverage_role": role, "status_classification": status.statuses.get(mac) if aligned else None,
++                      "observed_at": observed})
++    return summary, tuple(items)
++
+ 
+ def _context_or_unavailable(*args: Any, **kwargs: Any) -> dict[str, Any]:
+     try:
+diff --git a/app/analytics/models.py b/app/analytics/models.py
+index 4fba45522154cfc4532d2c2f7165a25bb5be05d0..ff93f2e11091d11f39b1a11c1363a8376d8f4f0f 100644
+--- a/app/analytics/models.py
++++ b/app/analytics/models.py
+@@ -28,6 +28,37 @@ def freeze(value: Any) -> Any:
+     return value
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class CoverageAwareCurrentSiteTrafficV1:
++    """Separate opt-in contract; legacy CurrentSiteTraffic is untouched."""
++
++    site_id: str
++    evaluated_at_utc: str
++    measurement_state: str
++    population_scope: str
++    snapshot: Mapping[str, Any]
++    traffic: Mapping[str, Any]
++    source_selection: Mapping[str, Any]
++    coverage: Mapping[str, Any]
++    status_evidence: Mapping[str, Any]
++    metric_version: str = "network_traffic_current_partial_coverage.v1"
++
++    def __post_init__(self):
++        for name in ("snapshot", "traffic", "source_selection", "coverage", "status_evidence"):
++            object.__setattr__(self, name, freeze(getattr(self, name)))
++
++
++@dataclass(frozen=True, slots=True)
++class CoverageAwareCurrentApTrafficPageV1:
++    summary: CoverageAwareCurrentSiteTrafficV1
++    items: tuple[Mapping[str, Any], ...]
++    page: "CurrentTrafficPageMetadata"
++    metric_version: str = "network_traffic_current_ap_partial_coverage.v1"
++
++    def __post_init__(self):
++        object.__setattr__(self, "items", freeze(self.items))
++
++
+ @dataclass(frozen=True, slots=True)
+ class AnalyticsQuality:
+     quality_mode: str
+diff --git a/app/analytics/source_gateway.py b/app/analytics/source_gateway.py
+index eeb47d04a23a6a6cb1138dab795c0e9184fb563c..53c7e0fedd3d6c56ca49dd2e4c6a5ebd83a45a3f 100644
+--- a/app/analytics/source_gateway.py
++++ b/app/analytics/source_gateway.py
+@@ -10,6 +10,7 @@ from dataclasses import dataclass
+ from typing import Any, Iterable, Iterator, Mapping, Sequence
+ 
+ from app.observations.read_service import ObservationReadService
++from app.observations.config import MAX_AP_ROWS
+ from app.visit_lifecycle.read_service import VisitLifecycleReadService
+ from app.visitor_registry.registry_read_service import (
+     VisitorRegistryReadService,
+@@ -1905,6 +1906,51 @@ class AnalyticsSourceGateway:
+             finally:
+                 connection.rollback()
+ 
++    def read_current_partial_traffic_evidence(
++        self, *, site_id: str, cycle_id: str | None, deadline: QueryDeadline,
++    ) -> Mapping[str, Any]:
++        """One coherent read of the newest completed candidate, even if corrupt.
++
++        Do not filter integrity fields in SQL: a corrupt newest cycle must not
++        silently expose older numbers. Reads remain under the query deadline.
++        """
++        with self._connection("observations", deadline) as connection:
++            connection.execute("BEGIN")
++            try:
++                clause = "" if cycle_id is None else " AND cycle_id=?"
++                cycle = self._one(connection, f"""
++                    SELECT * FROM observation_cycles
++                    WHERE site_id=? AND kind='ap_dynamic' AND state='completed'
++                      AND result IN ('success','partial'){clause}
++                    ORDER BY started_at DESC, cycle_id DESC LIMIT 1
++                    """, (site_id,) if cycle_id is None else (site_id, cycle_id), deadline)
++                latest = self._one(connection, """
++                    SELECT cycle_id, state, result, started_at, finished_at
++                    FROM observation_cycles WHERE site_id=? AND kind='ap_dynamic'
++                    ORDER BY started_at DESC, cycle_id DESC LIMIT 1
++                    """, (site_id,), deadline)
++                if cycle is None:
++                    return {"cycle": None, "latest": latest, "rows": ()}
++                count = self._one(connection, "SELECT COUNT(*) AS n FROM ap_observations WHERE cycle_id=?",
++                                  (cycle["cycle_id"],), deadline)["n"]
++                # Bound corrupt/cross-generation storage before materialization;
++                # the public page size is not a bound on this coherent read.
++                if count > MAX_AP_ROWS or count != cycle["items_stored"]:
++                    return {"cycle": cycle, "latest": latest, "rows": (), "row_count": count}
++                rows = self._all(connection, """
++                    SELECT cycle_id, site_id, ap_mac, name,
++                           partial, overview_ok, wired_uplink_ok, lan_traffic_ok, radios_ok,
++                           wired_observed_at, wired_download_mbps, wired_upload_mbps,
++                           wired_download_rate_reason, wired_upload_rate_reason,
++                           lan_observed_at, lan_rx_mbps, lan_tx_mbps,
++                           lan_rx_rate_reason, lan_tx_rate_reason
++                    FROM ap_observations WHERE cycle_id=? ORDER BY ap_mac LIMIT ?
++                    """, (cycle["cycle_id"], count + 1), deadline)
++                deadline.require_remaining()
++                return {"cycle": cycle, "latest": latest, "rows": tuple(rows), "row_count": count}
++            finally:
++                connection.rollback()
++
+     def _historical_boundary_candidates(
+         self,
+         connection: sqlite3.Connection,
+diff --git a/app/config.py b/app/config.py
+index 52647480c0762247f5545b1aa6da8874eab195eb..43b4db22d5272056581837bd378038133ef6ac4f 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -691,6 +691,9 @@ WEB_ADMIN_HOME_AP_24H_TELEMETRY_INTERVAL_SECONDS = os.getenv(
+     "WEB_ADMIN_HOME_AP_24H_TELEMETRY_INTERVAL_SECONDS", "120"
+ )
+ WEB_ADMIN_TRAFFIC_ENABLED = os.getenv("WEB_ADMIN_TRAFFIC_ENABLED", "false")
++WEB_ADMIN_TRAFFIC_PARTIAL_COVERAGE_ENABLED = os.getenv(
++    "WEB_ADMIN_TRAFFIC_PARTIAL_COVERAGE_ENABLED", "false"
++)
+ WEB_ADMIN_TRAFFIC_HISTORY_ENABLED = os.getenv(
+     "WEB_ADMIN_TRAFFIC_HISTORY_ENABLED", "false"
+ )
+diff --git a/app/current_state/models.py b/app/current_state/models.py
+index f0fc9aa37ea7b3dfda9a57d6e02f036373f0f535..b9d37efa28085c8090dae43d580a03557c395449 100644
+--- a/app/current_state/models.py
++++ b/app/current_state/models.py
+@@ -3,7 +3,7 @@
+ from __future__ import annotations
+ 
+ import re
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from datetime import datetime, timezone
+ from types import MappingProxyType
+ from typing import Any, Mapping
+@@ -35,6 +35,23 @@ class CurrentStateStorageError(RuntimeError):
+     """A sanitized Current State SQLite operation failed."""
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class CurrentApStatusEvidenceV1:
++    """Exact, time-aligned AP inventory; unavailable is never inferred Offline."""
++
++    site_id: str
++    state: str = "unavailable"
++    cycle_id: str | None = None
++    capture_started_at: str | None = None
++    capture_finished_at: str | None = None
++    age_at_traffic_seconds: float | None = None
++    source_scope_hash: str | None = None
++    statuses: Mapping[str, str] = field(default_factory=dict)
++
++    def __post_init__(self):
++        object.__setattr__(self, "statuses", MappingProxyType(dict(self.statuses or {})))
++
++
+ @dataclass(frozen=True, slots=True, repr=False)
+ class CurrentStateConfig:
+     enabled: bool
+diff --git a/app/current_state/read_service.py b/app/current_state/read_service.py
+index bbf9a0ef2ef3d81bb0b813343f90ac8d8046bec8..03ae3a0bfe74db9137a5b019de6813a61fc5f273 100644
+--- a/app/current_state/read_service.py
++++ b/app/current_state/read_service.py
+@@ -14,6 +14,7 @@ from app.common.mac import format_mac_colon
+ 
+ from .models import (
+     CurrentApBucket,
++    CurrentApStatusEvidenceV1,
+     CurrentApPage,
+     CurrentApState,
+     CurrentApSummary,
+@@ -109,6 +110,87 @@ class CurrentStateReadService:
+         with self.repository.read_connection() as connection:
+             yield connection
+ 
++    def read_ap_status_evidence_at(
++        self, site_id: str, traffic_finished_at: str, *, deadline=None,
++    ) -> CurrentApStatusEvidenceV1:
++        """Read a bounded prior successful inventory, never a future snapshot.
++
++        Corrupt newest evidence is unavailable, not a license to seek an older
++        convenient Offline classification. Nothing is written to Current State.
++        """
++        site = require_site_id(site_id)
++        if site not in self.config.site_ids:
++            raise CurrentStateValidationError("site_id is not configured")
++        at = parse_utc(traffic_finished_at, "traffic_finished_at")
++        unavailable = CurrentApStatusEvidenceV1(site)
++        scope_json, scope_hash = canonical_scope("ap", site, ())
++        with self.repository.read_connection() as connection:
++            if deadline is not None:
++                deadline.require_remaining()
++                connection.set_progress_handler(lambda: int(deadline.expired()), 1000)
++            try:
++                connection.execute("BEGIN")
++                cycle = connection.execute(
++                    """SELECT * FROM current_state_cycles
++                       WHERE site_id=? AND kind='ap' AND result='success'
++                         AND complete=1 AND capture_finished_at<=?
++                       ORDER BY capture_finished_at DESC, cycle_id DESC LIMIT 1""",
++                    (site, traffic_finished_at),
++                ).fetchone()
++                if cycle is None:
++                    return unavailable
++                rows = connection.execute(
++                    """SELECT cycle_id, site_id, ap_mac, observed_at,
++                              status_classification FROM current_ap_state
++                       WHERE cycle_id=? ORDER BY ap_mac LIMIT ?""",
++                    (cycle["cycle_id"], self.config.ap_max_rows + 1),
++                ).fetchall()
++                if deadline is not None:
++                    deadline.require_remaining()
++                try:
++                    started = parse_utc(cycle["capture_started_at"])
++                    finished = parse_utc(cycle["capture_finished_at"])
++                    age = (at - finished).total_seconds()
++                    if (
++                        started > finished or age < 0
++                        or cycle["source_scope_version"] != 1
++                        or cycle["source_scope_json"] != scope_json
++                        or cycle["source_scope_hash"] != scope_hash
++                        or cycle["source_rows_reported"] != len(rows)
++                        or cycle["items_seen"] != len(rows)
++                        or cycle["items_stored"] != len(rows)
++                        or len(rows) > self.config.ap_max_rows
++                        or any(cycle[key] != 0 for key in (
++                            "items_skipped", "unidentified_count", "duplicate_identity_count",
++                            "error_count", "data_quality_warning_count",
++                        ))
++                    ):
++                        return unavailable
++                    statuses = {}
++                    for row in rows:
++                        mac = row["ap_mac"]
++                        if (
++                            row["site_id"] != site or row["cycle_id"] != cycle["cycle_id"]
++                            or not isinstance(mac, str) or format_mac_colon(mac) != mac
++                            or mac in statuses
++                            or row["status_classification"] not in {"online", "offline", "other", "unknown"}
++                            or not started <= parse_utc(row["observed_at"]) <= finished
++                        ):
++                            return unavailable
++                        statuses[mac] = row["status_classification"]
++                    if cycle["unknown_status_count"] != sum(value == "unknown" for value in statuses.values()):
++                        return unavailable
++                    return CurrentApStatusEvidenceV1(
++                        site, "aligned_fresh" if age <= self.config.ap_fresh_max_age_seconds else "stale",
++                        cycle["cycle_id"], cycle["capture_started_at"], cycle["capture_finished_at"],
++                        age, scope_hash, statuses,
++                    )
++                except (ValueError, TypeError, KeyError):
++                    return unavailable
++            finally:
++                connection.rollback()
++                connection.set_progress_handler(None, 0)
++
+     def get_current_client(
+         self,
+         site_id: str,
+diff --git a/app/settings.py b/app/settings.py
+index 910bc1f3cc5924be8fee847ffb2acc3f3776f26c..37f79fabc0a3d5e868e8670d388f4dd43d0e15c7 100644
+--- a/app/settings.py
++++ b/app/settings.py
+@@ -190,6 +190,7 @@ from app.config import (
+     WEB_ADMIN_HOME_AP_24H_TELEMETRY_INITIAL_DELAY_SECONDS,
+     WEB_ADMIN_HOME_AP_24H_TELEMETRY_INTERVAL_SECONDS,
+     WEB_ADMIN_TRAFFIC_ENABLED,
++    WEB_ADMIN_TRAFFIC_PARTIAL_COVERAGE_ENABLED,
+     WEB_ADMIN_TRAFFIC_HISTORY_ENABLED,
+     WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED,
+     WEB_ADMIN_TRAFFIC_PEAK_ENABLED,
+@@ -672,6 +673,7 @@ def get_settings() -> dict:
+         "web_admin_home_ap_24h_telemetry_initial_delay_seconds": WEB_ADMIN_HOME_AP_24H_TELEMETRY_INITIAL_DELAY_SECONDS,
+         "web_admin_home_ap_24h_telemetry_interval_seconds": WEB_ADMIN_HOME_AP_24H_TELEMETRY_INTERVAL_SECONDS,
+         "web_admin_traffic_enabled": WEB_ADMIN_TRAFFIC_ENABLED,
++        "web_admin_traffic_partial_coverage_enabled": WEB_ADMIN_TRAFFIC_PARTIAL_COVERAGE_ENABLED,
+         "web_admin_traffic_history_enabled": WEB_ADMIN_TRAFFIC_HISTORY_ENABLED,
+         "web_admin_traffic_statistics_enabled": WEB_ADMIN_TRAFFIC_STATISTICS_ENABLED,
+         "web_admin_traffic_peak_enabled": WEB_ADMIN_TRAFFIC_PEAK_ENABLED,
+diff --git a/tests/admin_web/test_current_partial_coverage.py b/tests/admin_web/test_current_partial_coverage.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a23fe510cad1cda7f96d744e6d4430a3ee1f60d6
+--- /dev/null
++++ b/tests/admin_web/test_current_partial_coverage.py
+@@ -0,0 +1,262 @@
++"""Opt-in API and browser contract; the default strict path stays separate."""
++import copy
++import json
++import logging
++import shutil
++import sqlite3
++import subprocess
++from dataclasses import replace
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++from flask import Flask
++from werkzeug.middleware.proxy_fix import ProxyFix
++
++from app.analytics.current_traffic import CurrentTrafficReadService
++from app.admin_web.current_traffic_serialization import (
++    serialize_partial_current_summary, serialize_partial_current_ap_page, CurrentTrafficSerializationError,
++)
++from app.admin_web.config import admin_web_config_from_settings, AdminWebConfigError
++from app.settings_control.features import AdminFeaturePlanV1
++from app.settings_control.models import ResolvedSettingsSnapshot
++from app.admin_web import create_admin_web_runtime
++from tests.analytics.conftest import analytics_stack
++from tests.analytics.test_current_partial_coverage import retained, publish, summary, page, SITE, EVALUATED
++from .conftest import enabled_settings, login
++
++API_CYCLE = "10000000-0000-4000-8000-000000000001"
++
++
++class ClockedTraffic(CurrentTrafficReadService):
++    """Only the explicit caller evaluation clock is fixed for disposable data."""
++    def get_current_site_traffic(self, site_id, **kwargs):
++        return super().get_current_site_traffic(site_id, evaluated_at_utc=EVALUATED, **kwargs)
++
++    def get_current_site_traffic_partial_coverage(self, site_id, **kwargs):
++        return super().get_current_site_traffic_partial_coverage(site_id, evaluated_at_utc=EVALUATED, **kwargs)
++
++    def list_current_ap_traffic_partial_coverage(self, site_id, **kwargs):
++        return super().list_current_ap_traffic_partial_coverage(site_id, evaluated_at_utc=EVALUATED, **kwargs)
++
++
++def app_for(retained, *, flag="true"):
++    stack, status = retained
++    settings = enabled_settings(web_admin_home_live_enabled="true", web_admin_home_traffic_enabled="true",
++                                web_admin_traffic_enabled="true", web_admin_traffic_partial_coverage_enabled=flag)
++    plan = AdminFeaturePlanV1.from_snapshot(ResolvedSettingsSnapshot(None, settings, {}, {}, {}))
++    runtime = create_admin_web_runtime(
++        settings, SimpleNamespace(state="active", visit_service=object(), current_traffic_service=ClockedTraffic(stack.gateway)),
++        stack.gateway._registry, stack.gateway._visits, stack.gateway._observations, logging.getLogger("partial-traffic-test"),
++        feature_plan=plan, current_state_read_service=status,
++    )
++    assert runtime.state == "active"
++    app = Flask(__name__)
++    app.config["TESTING"] = True
++    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
++    app.register_blueprint(runtime.blueprint)
++    return app
++
++
++@pytest.mark.parametrize("route", ["current-traffic/summary", f"current-traffic/aps?cycle_id={API_CYCLE}", "traffic/current"])
++def test_A_T12_explicit_mode_guard_acl_and_dispatch(retained, route):
++    publish(retained, cycle_id=API_CYCLE, missing="source_unavailable", fourth="offline")
++    app = app_for(retained)
++    client = app.test_client()
++    path = f"/admin/api/v1/sites/{SITE}/{route}"
++    delimiter = "&" if "?" in path else "?"
++    assert client.get(path + delimiter + "coverage_mode=partial_v1", base_url="https://localhost").status_code == 401
++    assert login(client).status_code == 302
++    response = client.get(path + delimiter + "coverage_mode=partial_v1", base_url="https://localhost")
++    assert response.status_code == 200
++    data = response.get_json()["result"]
++    assert data["measurement_state"] == "complete_online_population" and data["traffic"]["total_mbps"] == 21
++    for extra in ("coverage_mode=wrong", "coverage_mode=", "coverage_mode=partial_v1&coverage_mode=partial_v1"):
++        assert client.get(path + delimiter + extra, base_url="https://localhost").status_code == 400
++    forbidden = path.replace(SITE, "b" * 24) + delimiter + "coverage_mode=partial_v1"
++    assert client.get(forbidden, base_url="https://localhost").status_code == 403
++    disabled = app_for(retained, flag="false").test_client()
++    assert login(disabled).status_code == 302
++    assert disabled.get(path + delimiter + "coverage_mode=partial_v1", base_url="https://localhost").status_code == 404
++
++
++def test_A_T12_strict_response_unchanged_and_history_mode_not_admitted(retained):
++    publish(retained, result="success")
++    clients = []
++    for flag in ("false", "true"):
++        client = app_for(retained, flag=flag).test_client()
++        login(client)
++        clients.append(client)
++    path = f"/admin/api/v1/sites/{SITE}/current-traffic/summary"
++    responses = [c.get(path, base_url="https://localhost").get_json()["result"] for c in clients]
++    assert responses[0] == responses[1]
++    assert "measurement_state" not in responses[0] and "metric_version" not in responses[0]
++    assert responses[0]["traffic"]["total_mbps"] == 24
++    for c in clients:
++        assert c.get(f"/admin/api/v1/sites/{SITE}/current-traffic/aps?cycle_id=incident&limit=251&coverage_mode=partial_v1", base_url="https://localhost").status_code in (400, 404)
++        assert c.get(f"/admin/api/v1/sites/{SITE}/traffic/history?range=24h&coverage_mode=partial_v1", base_url="https://localhost").status_code != 200
++
++
++@pytest.mark.parametrize("route", ["current-traffic/summary", f"current-traffic/aps?cycle_id={API_CYCLE}", "traffic/current"])
++@pytest.mark.parametrize("error", [sqlite3.OperationalError("database is locked"), PermissionError("synthetic-private-status-path")])
++def test_R1_P1_status_open_failure_is_safe_partial_200(retained, monkeypatch, route, error):
++    publish(retained, cycle_id=API_CYCLE, missing="source_unavailable", fourth="offline")
++    app = app_for(retained)
++    def fail_open(*, write):
++        assert write is False
++        raise error
++    monkeypatch.setattr(retained[1].repository, "_connect", fail_open)
++    client = app.test_client()
++    assert login(client).status_code == 302
++    path = f"/admin/api/v1/sites/{SITE}/{route}"
++    response = client.get(path + ("&" if "?" in path else "?") + "coverage_mode=partial_v1", base_url="https://localhost")
++    assert response.status_code == 200
++    value = response.get_json()["result"]
++    assert value["measurement_state"] == "partial_measured"
++    assert value["traffic"]["total_mbps"] == 21
++    assert value["status_evidence"]["state"] == "unavailable"
++    assert "status_evidence_unavailable" in value["coverage"]["coverage_reasons"]
++    assert value["coverage"]["offline_excluded_ap_count"] == 0
++    assert str(error) not in response.get_data(as_text=True)
++
++
++def test_flag_default_and_exact_boolean():
++    assert admin_web_config_from_settings(enabled_settings()).traffic_partial_coverage_enabled is False
++    assert admin_web_config_from_settings(enabled_settings(web_admin_traffic_partial_coverage_enabled=True)).traffic_partial_coverage_enabled is True
++    for invalid in ("yes", "TRUE", "1", " false "):
++        with pytest.raises(AdminWebConfigError):
++            admin_web_config_from_settings(enabled_settings(web_admin_traffic_partial_coverage_enabled=invalid))
++
++
++def test_A_T13_templates_deliver_flag_and_current_clock_without_history_modification(retained):
++    for flag in ("false", "true"):
++        c = app_for(retained, flag=flag).test_client()
++        login(c)
++        for suffix, hook in (("/", "home-traffic"), ("/traffic", "traffic-current-panel")):
++            response = c.get(f"/admin/sites/{SITE}{suffix}", base_url="https://localhost")
++            assert response.status_code == 200
++            text = response.get_data(as_text=True)
++            assert f'data-partial-coverage="{flag}"' in text and text.count(f'id="{hook}"') == 1
++
++
++@pytest.mark.parametrize("section,key,value", [
++    ("traffic", "total_mbps", 0), ("source_selection", "source_mixing_allowed", True),
++    ("coverage", "installed_ap_count", 3), ("coverage", "offline_excluded_ap_count", 0),
++    ("status_evidence", "state", "unavailable"), ("snapshot", "freshness_status", "unavailable"),
++])
++def test_new_serializer_rejects_inconsistent_payload(retained, section, key, value):
++    publish(retained, missing="source_unavailable", fourth="offline")
++    actual = summary(retained)
++    bad = dict(getattr(actual, section)) | {key: value}
++    with pytest.raises(CurrentTrafficSerializationError):
++        serialize_partial_current_summary(replace(actual, **{section: bad}), SITE)
++
++
++def test_A_T13_real_frontend_validator_labels_and_offline_details(retained, tmp_path):
++    publish(retained, missing="source_unavailable", fourth="offline")
++    actual = summary(retained)
++    wire = {"api_version": "admin.read.v1", "site_id": SITE, "result": serialize_partial_current_summary(actual, SITE)}
++    result, metadata = serialize_partial_current_ap_page(page(retained), SITE, cycle_id="incident", limit=100)
++    wire_page = {"api_version": "admin.read.v1", "site_id": SITE, "result": result, "page": metadata}
++    source = Path("app/admin_web/static/admin.js").read_text(encoding="utf-8")
++    script = tmp_path / "partial-current.cjs"
++    script.write_text("global.window={};\n" + source + "\nconst wire=" + json.dumps(wire) + ";\nconst wirePage=" + json.dumps(wire_page) + ";\n" + r'''
++const api = window.CaptivPortalCurrentPartialCoverage;
++const legacy = window.CaptivPortalHomeTrafficTest;
++const assert = (v, reason) => {if (!v) throw new Error(reason);};
++const clone = (v) => JSON.parse(JSON.stringify(v));
++assert(api.summary(wire, wire.site_id), 'real summary accepted');
++assert(api.page(wirePage, wire.site_id, wire.result), 'real page accepted');
++assert(!legacy.validateTrafficSummary(wire, wire.site_id), 'new DTO never misread by strict validator');
++let c = api.copy(wire.result);
++assert(c.title === 'Total traffic: 21 Mbps', 'complete online title');
++assert(c.coverage === '3 Online / 4 total · 1 Offline excluded', 'online denominator');
++assert(c.message === 'All confirmed Online APs are measured.', 'online message');
++assert(api.apCopy(wirePage.result.items[3]) === 'Offline · excluded from online traffic scope', 'offline explanation');
++const partial = clone(wire.result);
++partial.measurement_state = 'partial_measured'; partial.population_scope = 'measured_only';
++c = api.copy(partial);
++assert(c.title === 'Measured traffic: 21 Mbps' && c.coverage === 'Partial data · 3 of 4 APs measured', 'partial copy');
++const complete = clone(wire.result);
++complete.measurement_state = 'complete_installed'; complete.coverage.measured_pair_ap_count = 4; complete.traffic.total_mbps = 24;
++c = api.copy(complete);
++assert(c.title === 'Total traffic: 24 Mbps' && c.coverage === 'Complete AP coverage · 4 of 4 APs measured', 'installed copy');
++assert(api.copy(complete, 'stale').title === 'Traffic is stale', 'stale copy');
++assert(api.copy(partial, 'unavailable').title === 'No reliable traffic data', 'unavailable copy');
++for (const mutate of [r => r.traffic.total_mbps=0, r=>r.source_selection.source_mixing_allowed=true,
++    r=>r.status_evidence.state='stale', r=>r.coverage.offline_excluded_ap_count=0,
++    r=>r.coverage.coverage_reasons.push('fabricated')]) {
++  const b=clone(wire); mutate(b.result); assert(api.summary(b, wire.site_id)===null, 'invalid DTO fail closed');
++}
++const b=clone(wirePage); b.result.status_evidence.cycle_id='future';
++assert(api.page(b,wire.site_id,wire.result)===null, 'page status context pinned');
++const missing=clone(wirePage.result.items[3]); missing.coverage_role='missing'; missing.status_classification='online';
++assert(api.apCopy(missing)==='Online · traffic measurement unavailable', 'online missing copy');
++missing.status_classification='unknown';
++assert(api.apCopy(missing)==='Status unknown · traffic measurement unavailable', 'unknown copy');
++assert(legacy.formatMbps(0)==='0.00 Mbps' && legacy.formatMbps(null)==='—', 'zero/null');
++class Node {
++  constructor(tag,text='') {this.tag=tag;this.textContent=text;this.children=[];this.dataset={};this.style={};}
++  append(...items) {this.children.push(...items);}
++  replaceChildren(...items) {this.children=items;}
++}
++const node=(tag,cls,text)=>new Node(tag,text||'');
++const target=node('div'), footer=node('p');
++const roster=wirePage.result.items.map(item=>({...item,product_status_classification:item.status_classification}));
++window.CaptivPortalHomeLiveTest.renderAccessPointRoster(node,target,footer,roster,null,false,wirePage.result.items,true,true,legacy.formatMbps);
++const texts=n=>[n.textContent,...n.children.flatMap(texts)];
++assert(texts(target.children[3]).includes('Offline · excluded from online traffic scope'),'real roster offline text');
++assert(texts(target.children[3]).filter(t=>t==='—').length===3,'real roster missing directions not zero');
++''', encoding="utf-8")
++    node = shutil.which("node")
++    assert node, "Node is required for this focused browser contract"
++    completed = subprocess.run([node, str(script)], capture_output=True, text=True)
++    assert completed.returncode == 0, completed.stdout + completed.stderr
++
++
++@pytest.mark.parametrize("flag", [False, True])
++def test_current_panel_uses_coordinator_opt_in_and_server_measurement_state(retained, tmp_path, flag):
++    publish(retained, missing="source_unavailable" if flag else None, fourth="offline" if flag else "online", result="partial" if flag else "success")
++    if flag:
++        result = serialize_partial_current_summary(summary(retained), SITE)
++    else:
++        from app.admin_web.current_traffic_serialization import serialize_current_traffic_summary
++        result = serialize_current_traffic_summary(ClockedTraffic(retained[0].gateway).get_current_site_traffic(SITE, fresh_max_age_seconds=90, stale_max_age_seconds=180, max_ap_skew_seconds=60), SITE)
++    source = Path("app/admin_web/static/admin.js").read_text(encoding="utf-8")
++    helper = source.split("/* CURRENT_PARTIAL_COVERAGE_START */", 1)[1].split("/* CURRENT_PARTIAL_COVERAGE_END */", 1)[0]
++    panel = source.split("/* TRAFFIC_CURRENT_PANEL_START */", 1)[1].split("/* TRAFFIC_CURRENT_PANEL_END */", 1)[0]
++    script = tmp_path / "partial-panel.cjs"
++    setup = r'''
++const elements=new Map();
++const ids=['admin-page','traffic-current-panel','traffic-current-state','traffic-current-state-title','traffic-current-state-message','traffic-current-download','traffic-current-upload','traffic-current-total','traffic-current-source','traffic-current-freshness','traffic-current-coverage','traffic-current-updated'];
++ids.forEach(id=>elements.set(id,{dataset:{},textContent:''}));
++elements.get('admin-page').dataset={page:'traffic',trafficEnabled:'true'};
++const registered=[];
++global.window={CaptivPortalTrafficCoordinator:{registerPanel:s=>registered.push(s)}};
++global.document={getElementById:id=>elements.get(id)||null};
++'''
++    assertions = r'''
++(async()=>{
++ if (registered.length!==1) throw new Error('one existing coordinator registration');
++ let url;
++ const spec=registered[0];
++ const value=await spec.load({apiBase:'/site',siteId:wire.site_id,requestJson:async u=>{url=u;return wire;}});
++ if (url !== '/site/traffic/current'+(flag?'?coverage_mode=partial_v1':'')) throw new Error('opt-in request');
++ spec.render(value);
++ if (elements.get('traffic-current-total').textContent!==(flag?'21.00 Mbps':'24.00 Mbps')) throw new Error('rendered backend total');
++ if (flag && (elements.get('traffic-current-state-title').textContent!=='Total traffic: 21 Mbps'
++   || elements.get('traffic-current-coverage').textContent!=='3 Online / 4 total · 1 Offline excluded')) throw new Error('real renderer exact copy');
++})().catch(e=>{console.error(e);process.exitCode=1;});
++'''
++    script.write_text(setup + "\nconst flag=" + json.dumps(flag) + ";\nconst wire=" + json.dumps({"api_version": "admin.read.v1", "site_id": SITE, "result": result})
++                      + ";\nelements.get('traffic-current-panel').dataset.partialCoverage=String(flag);\n" + helper + panel + assertions, encoding="utf-8")
++    completed = subprocess.run([shutil.which("node"), str(script)], capture_output=True, text=True)
++    assert completed.returncode == 0, completed.stdout + completed.stderr
++
++
++def test_A_T15_history_js_block_is_byte_identical_to_baseline():
++    candidate = Path("app/admin_web/static/admin.js").read_text(encoding="utf-8")
++    baseline = subprocess.run(["git", "show", "e8061de9fbd6da8be5cd269779070a4db4d59d64:app/admin_web/static/admin.js"], capture_output=True, text=True, encoding="utf-8", check=True).stdout
++    for marker in ("TRAFFIC_HISTORY_PANEL", "TRAFFIC_NETWORK_RANGE_CONTEXT", "TRAFFIC_ONLINE_GUESTS_PANEL", "TRAFFIC_COMPLETED_SESSIONS_PANEL", "TRAFFIC_EVIDENCE_PANEL"):
++        segment = lambda text: text.split(f"/* {marker}_START */", 1)[1].split(f"/* {marker}_END */", 1)[0]
++        assert segment(candidate) == segment(baseline), marker
+diff --git a/tests/admin_web/test_web_ux_pack_02.py b/tests/admin_web/test_web_ux_pack_02.py
+index ff90a7b14f08db196591ffcc662b883c6aa23f68..adb3fae0ffe6fb840db0b87d8f00773c553440ca 100644
+--- a/tests/admin_web/test_web_ux_pack_02.py
++++ b/tests/admin_web/test_web_ux_pack_02.py
+@@ -306,6 +306,7 @@ const start=source.indexOf('  async function refreshTraffic(generation)');
+ const end=source.indexOf('  function nextDelay()',start);
+ global.document={hidden:false};global.coordinator={pending:false};global.stopped=false;
+ global.trafficEnabled=true;global.trafficBase='/traffic';global.trafficTimeout=1;global.trafficRefresh=1;global.siteId='SITE';
++global.partialMode=false;
+ global.sources={traffic:{rows:['old'],generation:1}};
+ const pending=[],urls=[];global.requestJson=url=>{urls.push(url);return new Promise((resolve,reject)=>pending.push({resolve,reject}))};
+ global.validateTrafficSummary=x=>x;global.acceptTrafficSummary=(s,v)=>{s.summary=v};
+diff --git a/tests/analytics/test_current_partial_coverage.py b/tests/analytics/test_current_partial_coverage.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..67c222022362a4bf161f48e073ba51c5500b7422
+--- /dev/null
++++ b/tests/analytics/test_current_partial_coverage.py
+@@ -0,0 +1,421 @@
++"""Stage A canaries exercise actual retained Observation / Current State reads."""
++from dataclasses import replace
++from datetime import datetime, timedelta, timezone
++import sqlite3
++
++import pytest
++
++from app.analytics.current_traffic import CurrentTrafficReadService, CurrentTrafficValidationError
++from app.analytics.source_gateway import QueryDeadline, AnalyticsQueryDeadlineExceeded
++from app.observations.config import MAX_AP_ROWS
++from app.current_state.config import current_state_config_from_settings
++from app.current_state.repository import CurrentStateRepository
++from app.current_state.read_service import CurrentStateReadService
++from app.admin_web.current_traffic_serialization import serialize_partial_current_summary, serialize_partial_current_ap_page
++from tests.current_state.conftest import cycle as status_cycle, ap_row
++from tests.analytics.test_current_traffic import _row
++
++SITE = "0123456789abcdef01234567"
++OTHER = "b" * 24
++START = "2026-01-01T12:00:00.000Z"
++OBSERVED = "2026-01-01T12:00:30.000Z"
++FINISHED = "2026-01-01T12:00:40.000Z"
++EVALUATED = "2026-01-01T12:01:00.000Z"
++MACS = [f"02:AA:BB:CC:DD:0{n}" for n in range(1, 5)]
++POLICY = dict(fresh_max_age_seconds=90, stale_max_age_seconds=180, max_ap_skew_seconds=60)
++MISSING = (None, None, "source_unavailable", "source_unavailable")
++
++
++@pytest.fixture
++def retained(analytics_stack, tmp_path):
++    config = current_state_config_from_settings({
++        "current_state_enabled": "true", "current_state_db_path": str(tmp_path / "status.sqlite3"),
++        "current_state_site_ids": SITE + "," + OTHER,
++        "current_state_client_ssids_json": '["test"]',
++    })
++    repository = CurrentStateRepository(config)
++    repository.initialize()
++    return analytics_stack, CurrentStateReadService(repository)
++
++
++def publish(retained, *, cycle_id="incident", missing=None, fourth="online", result="partial", site=SITE,
++            status_at=OBSERVED, inventory=None, wired=None, lan=None, timestamps=None, started=START, finished=FINISHED):
++    stack, status = retained
++    rows = []
++    for index, mac in enumerate(MACS):
++        pair = [(10, 1), (5, 1), (3, 1), (2, 1)][index]
++        rates = (*pair, "ok", "ok")
++        if index == 3 and missing is not None:
++            rates = (None, None, missing, missing)
++        item = _row(cycle_id, mac, wired=rates if wired is None else wired[index],
++                    lan=MISSING if lan is None else lan[index], observed=(timestamps or [OBSERVED] * 4)[index])
++        item["site_id"] = site
++        if result == "partial":
++            item.update(partial=True, radios_ok=False)
++        rows.append(item)
++    stack.observations.create_cycle(kind="ap_dynamic", site_id=site, started_at=started, cycle_id=cycle_id)
++    stack.observations.insert_ap_batch([(item, ()) for item in rows])
++    stack.observations.finalize_cycle(cycle_id, finished_at=finished, complete=result == "success", result=result,
++                                      source_rows_reported=4, items_seen=4, items_stored=4, error_count=2 if result == "partial" else 0)
++    if status_at is not None:
++        codes = {"online": 1, "offline": 0, "other": 2, "unknown": None}
++        states = inventory or dict(zip(MACS, ["online", "online", "online", fourth]))
++        sr = [ap_row(cycle_id="status-" + cycle_id, site_id=site, mac=mac, observed_at=status_at,
++                     status_classification=classification, status_code=codes[classification]) for mac, classification in states.items()]
++        parent = replace(status_cycle(kind="ap", cycle_id="status-" + cycle_id, site_id=site, started=status_at, items_stored=len(sr)),
++                         unknown_status_count=sum(row["status_classification"] == "unknown" for row in sr))
++        status.repository.publish_cycle(parent, ap_rows=sr)
++    return rows
++
++
++def summary(retained, *, site=SITE, **options):
++    stack, status = retained
++    return CurrentTrafficReadService(stack.gateway).get_current_site_traffic_partial_coverage(
++        site, status_read_service=status, evaluated_at_utc=options.pop("evaluated_at_utc", EVALUATED), **(POLICY | options))
++
++
++def page(retained, *, cycle_id="incident", **options):
++    stack, status = retained
++    return CurrentTrafficReadService(stack.gateway).list_current_ap_traffic_partial_coverage(
++        SITE, cycle_id=cycle_id, status_read_service=status, evaluated_at_utc=EVALUATED, **(POLICY | options))
++
++
++def test_A_T01_all_four_pairs_prove_installed_even_when_global_partial(retained):
++    publish(retained)
++    value = summary(retained)
++    assert value.measurement_state == "complete_installed"
++    assert dict(value.traffic) == dict(download_mbps=20, upload_mbps=4, total_mbps=24, unit="Mbps")
++    assert value.snapshot["source_result"] == "partial" and value.snapshot["source_complete"] is False
++    assert serialize_partial_current_summary(value, SITE)["population_scope"] == "installed"
++    with pytest.raises(TypeError):
++        value.coverage["installed_ap_count"] = 0
++
++
++def test_A_T02_AP4_incident_exact_null_not_zero_and_pinned_page(retained):
++    publish(retained, missing="source_unavailable", fourth="offline")
++    value = summary(retained)
++    assert value.measurement_state == "complete_online_population"
++    assert value.population_scope == "confirmed_online"
++    assert (value.traffic["download_mbps"], value.traffic["upload_mbps"], value.traffic["total_mbps"]) == (18, 3, 21)
++    assert value.coverage["online_ap_count"] == 3 and value.coverage["installed_ap_count"] == 4
++    assert value.coverage["offline_excluded_ap_count"] == 1
++    first = page(retained, limit=2)
++    second = page(retained, limit=2, cursor=first.page.next_cursor)
++    assert first.summary == second.summary == value
++    last = second.items[-1]
++    assert last["coverage_role"] == "offline_excluded" and last["status_classification"] == "offline"
++    assert last["download_mbps"] is None and last["upload_mbps"] is None and last["total_mbps"] is None
++    result, metadata = serialize_partial_current_ap_page(second, SITE, cycle_id="incident", limit=2)
++    assert metadata["next_cursor"] is None and result["items"][-1]["total_mbps"] is None
++    with pytest.raises(CurrentTrafficValidationError):
++        page(retained, cycle_id="other", cursor=first.page.next_cursor)
++
++
++@pytest.mark.parametrize("fourth,status_at,reason", [
++    ("online", OBSERVED, "online_measurement_missing"),
++    ("other", OBSERVED, "other_status_measurement_missing"),
++    ("unknown", OBSERVED, "unknown_status_measurement_missing"),
++    ("offline", "2026-01-01T11:58:00.000Z", "status_evidence_stale"),
++    ("offline", None, "status_evidence_unavailable"),
++    ("offline", "2026-01-01T12:00:41.000Z", "status_evidence_unavailable"),
++])
++def test_A_T03_T04_no_unproven_offline_exclusion(retained, fourth, status_at, reason):
++    publish(retained, missing="source_unavailable", fourth=fourth, status_at=status_at)
++    value = summary(retained)
++    assert value.measurement_state == "partial_measured" and value.traffic["total_mbps"] == 21
++    assert reason in value.coverage["coverage_reasons"]
++    assert value.coverage["offline_excluded_ap_count"] == 0
++
++
++@pytest.mark.parametrize("rates,expected", [(MISSING, None), ((0, 0, "ok", "ok"), 0)])
++def test_A_T05_actual_zero_vs_no_measurements(retained, rates, expected):
++    publish(retained, wired=[rates] * 4)
++    value = summary(retained)
++    assert value.traffic["total_mbps"] == expected
++    assert value.measurement_state == ("unavailable" if expected is None else "complete_installed")
++
++
++def test_A_T06_T14_original_incident_replay_and_automatic_recovery(retained):
++    replay = []
++    for index, (missing, fourth, expected) in enumerate([
++        (None, "online", "complete_installed"),
++        ("source_unavailable", "offline", "complete_online_population"),
++        ("no_baseline", "online", "partial_measured"),
++        ("counter_reset", "online", "partial_measured"),
++        (None, "online", "complete_installed"),
++    ]):
++        at = datetime(2026, 1, 1, 12, tzinfo=timezone.utc) + timedelta(minutes=index)
++        stamp = lambda seconds: (at + timedelta(seconds=seconds)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
++        publish(retained, cycle_id=f"replay-{index}", missing=missing, fourth=fourth, status_at=stamp(30),
++                started=stamp(0), finished=stamp(40), timestamps=[stamp(30)] * 4)
++        value = summary(retained, evaluated_at_utc=stamp(60))
++        assert value.snapshot["cycle_id"] == f"replay-{index}"
++        assert value.measurement_state == expected
++        replay.append(value.traffic["total_mbps"])
++    assert replay == [24, 21, 21, 21, 24]
++
++
++def test_A_T07_population_mismatch_and_site_isolation(retained):
++    inventory = dict(zip(MACS[:3] + ["02:AA:BB:CC:DD:99"], ["online"] * 3 + ["offline"]))
++    publish(retained, missing="source_unavailable", inventory=inventory)
++    value = summary(retained)
++    assert value.measurement_state == "partial_measured" and value.coverage["population_match_state"] == "mismatch"
++    assert value.coverage["inventory_only_ap_count"] == value.coverage["observation_only_ap_count"] == 1
++    assert value.status_evidence["state"] == "population_mismatch"
++    assert summary(retained, site=OTHER).measurement_state == "unavailable"
++
++
++@pytest.mark.parametrize("evaluated,expected", [
++    (EVALUATED, "fresh"), ("2026-01-01T12:02:01.000Z", "stale"),
++    ("2026-01-01T12:03:31.000Z", "unavailable"), ("2026-01-01T12:00:29.000Z", "unavailable"),
++])
++def test_A_T08_freshness_clock_boundaries(retained, evaluated, expected):
++    publish(retained)
++    value = summary(retained, evaluated_at_utc=evaluated)
++    assert value.snapshot["freshness_status"] == expected
++    if expected == "unavailable":
++        assert value.traffic["total_mbps"] is None
++
++
++def test_A_T08_temporal_skew_suppresses_sum_not_diagnostic_AP_pairs(retained):
++    publish(retained, timestamps=[START, OBSERVED, OBSERVED, OBSERVED])
++    value = summary(retained, max_ap_skew_seconds=29)
++    assert value.measurement_state == "unavailable" and value.traffic["total_mbps"] is None
++    assert "temporal_skew" in value.coverage["coverage_reasons"]
++    assert page(retained, max_ap_skew_seconds=29).items[0]["rate_status"] == "valid"
++
++
++@pytest.mark.parametrize("wired,lan,missing,fourth,source,reason", [
++    (4, 4, None, "online", "wired", "primary_full_observation_coverage"),
++    (3, 4, None, "online", "lan", "fallback_full_observation_coverage"),
++    (3, 3, None, "offline", "wired", "primary_full_online_coverage"),
++    (2, 3, None, "offline", "lan", "fallback_full_online_coverage"),
++    (1, 2, None, "online", "lan", "fallback_higher_measured_coverage"),
++    (2, 2, None, "online", "wired", "primary_preferred_tie_or_higher"),
++])
++def test_A_T09_exact_source_priority_no_family_mixing(retained, wired, lan, missing, fourth, source, reason):
++    publish(retained, fourth=fourth,
++            wired=[(10, 1, "ok", "ok") if n < wired else MISSING for n in range(4)],
++            lan=[(20, 2, "ok", "ok") if n < lan else MISSING for n in range(4)])
++    value = summary(retained)
++    assert value.source_selection["selected_source"] == source
++    assert value.source_selection["selection_reason"] == reason
++    assert value.source_selection["source_mixing_allowed"] is False
++    assert value.traffic["total_mbps"] == (wired * 11 if source == "wired" else lan * 22)
++
++
++@pytest.mark.parametrize("field,value", [("items_skipped", 1), ("source_rows_reported", 3),
++                                         ("items_seen", 3), ("data_quality_warning_count", 1)])
++def test_A_T10_newest_corrupt_cycle_no_old_numeric_fallback(retained, field, value):
++    publish(retained, cycle_id="old", result="success")
++    publish(retained, cycle_id="new", started="2026-01-01T12:00:01.000Z")
++    with sqlite3.connect(retained[0].observations.db_path) as connection:
++        connection.execute(f"UPDATE observation_cycles SET {field}=? WHERE cycle_id='new'", (value,))
++    current = summary(retained)
++    assert current.measurement_state == "unavailable" and current.traffic["total_mbps"] is None
++    assert "source_integrity_unavailable" in current.coverage["coverage_reasons"]
++
++
++@pytest.mark.parametrize("missing", ["counter_reset", "no_baseline", "gap_too_large", "invalid_elapsed", None])
++def test_A_T11_offline_conflict_not_silently_excluded(retained, missing):
++    publish(retained, fourth="offline", missing=missing)
++    value = summary(retained)
++    assert "status_measurement_conflict" in value.coverage["coverage_reasons"]
++    assert value.measurement_state != "complete_online_population"
++    assert value.coverage["offline_excluded_ap_count"] == 0
++
++
++def test_partial_all_observed_pairs_without_installed_proof_not_complete(retained):
++    publish(retained, status_at=None)
++    assert summary(retained).measurement_state == "partial_measured"
++
++
++def test_strict_success_full_population_retains_installed_proof(retained):
++    publish(retained, result="success", status_at=None)
++    assert summary(retained).measurement_state == "complete_installed"
++
++
++def test_directional_sums_do_not_invent_missing_total(retained):
++    publish(retained, wired=[(1, None, "ok", "source_unavailable")] * 4)
++    value = summary(retained)
++    assert value.measurement_state == "partial_measured"
++    assert (value.traffic["download_mbps"], value.traffic["upload_mbps"], value.traffic["total_mbps"]) == (4, None, None)
++
++
++def test_failed_attempt_keeps_prior_numbers_with_truthful_metadata(retained):
++    publish(retained)
++    repository = retained[0].observations
++    repository.create_cycle(kind="ap_dynamic", site_id=SITE, started_at="2026-01-01T12:00:41.000Z", cycle_id="failed")
++    repository.finalize_cycle("failed", finished_at="2026-01-01T12:00:42.000Z", complete=False, result="failed")
++    value = summary(retained)
++    assert value.snapshot["cycle_id"] == "incident" and value.snapshot["using_previous_snapshot"] is True
++    assert value.snapshot["latest_attempt_result"] == "failed" and value.traffic["total_mbps"] == 24
++
++
++def test_deadline_is_not_swallowed_as_incomplete_measurement(retained):
++    with pytest.raises(AnalyticsQueryDeadlineExceeded):
++        summary(retained, deadline=QueryDeadline.after(0))
++
++
++def test_same_mac_other_site_cannot_supply_missing_status_or_rate(retained):
++    publish(retained, cycle_id="local", missing="source_unavailable", status_at=None)
++    publish(retained, cycle_id="foreign", site=OTHER, fourth="offline", missing="source_unavailable")
++    local = summary(retained)
++    foreign = summary(retained, site=OTHER)
++    assert local.measurement_state == "partial_measured" and local.status_evidence["state"] == "unavailable"
++    assert foreign.measurement_state == "complete_online_population"
++
++
++@pytest.mark.parametrize("field,value", [
++    ("wired_download_mbps", -1), ("wired_download_mbps", None),
++    ("wired_download_rate_reason", "counter_reset"),
++    ("wired_observed_at", "2026-01-01T11:59:59.000Z"),
++    ("wired_observed_at", "2026-01-01T12:00:41.000Z"),
++    ("ap_mac", "02:aa:bb:cc:dd:01"), ("site_id", OTHER),
++])
++def test_A_T10_retained_shape_corruption_fail_closed(retained, field, value):
++    publish(retained)
++    # Read payload comes from the real SQLite gateway; corruption is injected
++    # only at the read boundary to cover shapes that storage constraints reject.
++    data = retained[0].gateway.read_current_partial_traffic_evidence(site_id=SITE, cycle_id=None, deadline=QueryDeadline.after(2))
++    rows = [dict(row) for row in data["rows"]]
++    rows[0][field] = value
++    class Gateway:
++        def read_current_partial_traffic_evidence(self, **kwargs):
++            return dict(data) | {"rows": rows}
++    result = CurrentTrafficReadService(Gateway()).get_current_site_traffic_partial_coverage(
++        SITE, status_read_service=retained[1], evaluated_at_utc=EVALUATED, **POLICY)
++    assert result.measurement_state == "unavailable" and result.traffic["total_mbps"] is None
++    assert "source_integrity_unavailable" in result.coverage["coverage_reasons"]
++
++
++def test_strict_success_inventory_conflict_is_still_not_complete(retained):
++    publish(retained, result="success", inventory=dict(zip(MACS[:3], ["online"] * 3)))
++    result = summary(retained)
++    assert result.measurement_state == "partial_measured" and "population_mismatch" in result.coverage["coverage_reasons"]
++
++
++def test_partial_current_reads_do_not_write_source_databases(retained):
++    import hashlib
++    publish(retained, missing="source_unavailable", fourth="offline")
++    paths = [retained[0].observations.db_path, retained[1].repository.db_path]
++    for path in paths:
++        with sqlite3.connect(path) as connection:
++            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
++    before = [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths]
++    summary(retained)
++    page(retained)
++    assert [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths] == before
++
++
++@pytest.mark.parametrize("error", [
++    sqlite3.OperationalError("database is locked"),
++    sqlite3.DatabaseError("database disk image is malformed"),
++    PermissionError("synthetic status path is inaccessible"),
++    FileNotFoundError("synthetic status path is missing"),
++    OSError("synthetic status I/O failure"),
++])
++def test_R1_P1_status_storage_failure_preserves_measured_partial(retained, monkeypatch, error):
++    publish(retained, missing="source_unavailable", fourth="offline")
++    def fail_open(*, write):
++        assert write is False
++        raise error
++    monkeypatch.setattr(retained[1].repository, "_connect", fail_open)
++    value = summary(retained)
++    assert value.measurement_state == "partial_measured"
++    assert value.population_scope == "measured_only"
++    assert dict(value.traffic) == dict(download_mbps=18, upload_mbps=3, total_mbps=21, unit="Mbps")
++    assert value.status_evidence["state"] == "unavailable"
++    assert "status_evidence_unavailable" in value.coverage["coverage_reasons"]
++    assert value.coverage["offline_excluded_ap_count"] == 0
++    assert serialize_partial_current_summary(value, SITE)["traffic"]["total_mbps"] == 21
++    assert page(retained).items[-1]["coverage_role"] != "offline_excluded"
++
++
++@pytest.mark.parametrize("interrupted", [False, True])
++def test_R1_P1_status_timeout_is_not_partial_fallback(retained, interrupted):
++    publish(retained, missing="source_unavailable", fourth="offline")
++    clock = [0.0]
++    deadline = QueryDeadline.after(1, monotonic=lambda: clock[0])
++    class StatusReader:
++        def read_ap_status_evidence_at(self, site, finished, *, deadline):
++            clock[0] = 1.0
++            if interrupted:
++                raise sqlite3.OperationalError("interrupted")
++            deadline.require_remaining()
++    with pytest.raises(AnalyticsQueryDeadlineExceeded):
++        CurrentTrafficReadService(retained[0].gateway).get_current_site_traffic_partial_coverage(
++            SITE, status_read_service=StatusReader(), evaluated_at_utc=EVALUATED,
++            deadline=deadline, **POLICY)
++
++
++@pytest.mark.parametrize("error", [RuntimeError("synthetic programming defect"),
++                                  sqlite3.ProgrammingError("synthetic programming defect"),
++                                  sqlite3.InterfaceError("synthetic programming defect")])
++def test_R1_P1_status_programming_error_is_not_swallowed(retained, error):
++    publish(retained, missing="source_unavailable", fourth="offline")
++    class StatusReader:
++        def read_ap_status_evidence_at(self, *args, **kwargs):
++            raise error
++    with pytest.raises(type(error), match="synthetic programming defect"):
++        CurrentTrafficReadService(retained[0].gateway).get_current_site_traffic_partial_coverage(
++            SITE, status_read_service=StatusReader(), evaluated_at_utc=EVALUATED, **POLICY)
++
++
++@pytest.mark.parametrize("count", [MAX_AP_ROWS + 1, 1_000_000_000])
++def test_R1_P2_oversized_count_never_materializes_rows(retained, monkeypatch, count):
++    publish(retained, result="success", cycle_id="old")
++    publish(retained, cycle_id="new", started="2026-01-01T12:00:01.000Z")
++    gateway = retained[0].gateway
++    original_one = gateway._one
++    def counted(connection, sql, parameters, deadline):
++        value = original_one(connection, sql, parameters, deadline)
++        if "SELECT COUNT(*) AS n FROM ap_observations" in sql:
++            return {"n": count}
++        if "SELECT * FROM observation_cycles" in sql:
++            return dict(value) | {"items_stored": count, "items_seen": count, "source_rows_reported": count}
++        return value
++    def forbidden_bulk_fetch(*args, **kwargs):
++        pytest.fail("oversized current cycle must not request bulk AP rows")
++    monkeypatch.setattr(gateway, "_one", counted)
++    monkeypatch.setattr(gateway, "_all", forbidden_bulk_fetch)
++    value = summary(retained)
++    assert value.measurement_state == "unavailable"
++    assert value.traffic["total_mbps"] is None
++    assert "source_integrity_unavailable" in value.coverage["coverage_reasons"]
++
++
++@pytest.mark.parametrize("count", [MAX_AP_ROWS, MAX_AP_ROWS + 1])
++def test_R1_P2_retained_rows_at_hard_limit_and_above(retained, monkeypatch, count):
++    repository = retained[0].observations
++    repository.create_cycle(kind="ap_dynamic", site_id=SITE, started_at=START, cycle_id="large")
++    def mac(index):
++        suffix = f"{index:08X}"
++        return "02:AA:" + ":".join(suffix[i:i + 2] for i in range(0, 8, 2))
++    repository.insert_ap_batch([
++        (_row("large", mac(index), wired=(1, 2, "ok", "ok"), lan=MISSING, observed=OBSERVED) | {"site_id": SITE}, ())
++        for index in range(count)
++    ])
++    repository.finalize_cycle("large", finished_at=FINISHED, complete=False, result="partial",
++                              source_rows_reported=count, items_seen=count, items_stored=count, error_count=2)
++    gateway = retained[0].gateway
++    original_all = gateway._all
++    calls = []
++    def bounded_all(connection, sql, parameters, deadline):
++        calls.append(tuple(parameters))
++        assert parameters[-1] <= MAX_AP_ROWS + 1
++        return original_all(connection, sql, parameters, deadline)
++    monkeypatch.setattr(gateway, "_all", bounded_all)
++    value = summary(retained)
++    if count > MAX_AP_ROWS:
++        assert calls == []
++        assert value.measurement_state == "unavailable" and value.traffic["total_mbps"] is None
++        assert "source_integrity_unavailable" in value.coverage["coverage_reasons"]
++    else:
++        assert calls == [("large", MAX_AP_ROWS + 1)]
++        assert value.measurement_state == "partial_measured"
++        assert value.coverage["measured_pair_ap_count"] == MAX_AP_ROWS
++        assert value.traffic["total_mbps"] == 3 * MAX_AP_ROWS
++        first = page(retained, cycle_id="large", limit=250)
++        assert len(first.items) == 250 and first.page.next_cursor is not None
++        assert first.summary == value
+diff --git a/tests/current_state/test_ap_status_evidence.py b/tests/current_state/test_ap_status_evidence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..03445f2be0c616edd5ff03628d04032bc42f93df
+--- /dev/null
++++ b/tests/current_state/test_ap_status_evidence.py
+@@ -0,0 +1,79 @@
++"""Read-only prior AP inventory authority for current traffic."""
++from dataclasses import replace
++import hashlib
++import sqlite3
++
++import pytest
++
++from app.current_state.repository import CurrentStateRepository
++from app.current_state.read_service import CurrentStateReadService
++from app.current_state.models import CurrentStateValidationError
++from .conftest import cycle, ap_row, SITE, OTHER_SITE, NOW
++
++
++@pytest.fixture
++def reader(config):
++    repository = CurrentStateRepository(config)
++    repository.initialize()
++    return CurrentStateReadService(repository)
++
++
++def publish(reader, *, cycle_id="ap", started=NOW, finished=NOW, result="success", site=SITE):
++    rows = [ap_row(cycle_id=cycle_id, site_id=site, mac=f"AA:BB:CC:DD:EE:0{n}", observed_at=started,
++                   status_classification=status, status_code=code)
++            for n, status, code in ((1, "online", 1), (2, "offline", 0), (3, "unknown", None))]
++    parent = replace(cycle(kind="ap", cycle_id=cycle_id, site_id=site, started=started, result=result, items_stored=3),
++                     capture_finished_at=finished, unknown_status_count=1)
++    reader.repository.publish_cycle(parent, ap_rows=rows)
++
++
++@pytest.mark.parametrize("at,state,age", [
++    (NOW, "aligned_fresh", 0), ("2026-08-23T10:01:30.000Z", "aligned_fresh", 90),
++    ("2026-08-23T10:01:30.001Z", "stale", 90.001),
++])
++def test_A_T08_status_age_measured_from_finish_at_exact_threshold(reader, at, state, age):
++    publish(reader, started="2026-08-23T09:59:40.000Z")
++    value = reader.read_ap_status_evidence_at(SITE, at)
++    assert value.state == state and value.age_at_traffic_seconds == age
++    assert value.statuses["AA:BB:CC:DD:EE:02"] == "offline"
++    with pytest.raises(TypeError):
++        value.statuses["AA:BB:CC:DD:EE:02"] = "online"
++
++
++def test_future_partial_snapshot_not_used_and_no_cross_site_join(reader):
++    publish(reader, cycle_id="prior")
++    publish(reader, cycle_id="future", started="2026-08-23T10:00:31.000Z", finished="2026-08-23T10:00:31.000Z")
++    publish(reader, cycle_id="partial", started="2026-08-23T10:00:20.000Z", finished="2026-08-23T10:00:20.000Z", result="partial")
++    value = reader.read_ap_status_evidence_at(SITE, "2026-08-23T10:00:30.000Z")
++    assert value.cycle_id == "prior"
++    assert reader.read_ap_status_evidence_at(SITE, "2026-08-23T09:59:59.000Z").state == "unavailable"
++    if OTHER_SITE in reader.config.site_ids:
++        assert reader.read_ap_status_evidence_at(OTHER_SITE, NOW).state == "unavailable"
++    else:
++        with pytest.raises(CurrentStateValidationError):
++            reader.read_ap_status_evidence_at(OTHER_SITE, NOW)
++
++
++@pytest.mark.parametrize("field,value", [
++    ("source_scope_hash", "0" * 64), ("source_rows_reported", 2), ("items_seen", 2),
++    ("unknown_status_count", 0), ("error_count", 1), ("data_quality_warning_count", 1),
++])
++def test_corrupt_newest_status_does_not_fallback_to_older(reader, field, value):
++    publish(reader, cycle_id="old", started="2026-08-23T09:59:50.000Z", finished="2026-08-23T09:59:50.000Z")
++    publish(reader, cycle_id="new")
++    with sqlite3.connect(reader.repository.db_path) as connection:
++        if field == "items_seen":
++            connection.execute("UPDATE current_state_cycles SET items_seen=?, items_stored=? WHERE cycle_id='new'", (value, value))
++        else:
++            connection.execute(f"UPDATE current_state_cycles SET {field}=? WHERE cycle_id='new'", (value,))
++    assert reader.read_ap_status_evidence_at(SITE, NOW).state == "unavailable"
++
++
++def test_reader_leaves_database_exact_bytes_unchanged(reader):
++    publish(reader)
++    path = reader.repository.db_path
++    with sqlite3.connect(path) as connection:
++        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
++    before = hashlib.sha256(path.read_bytes()).hexdigest()
++    reader.read_ap_status_evidence_at(SITE, NOW)
++    assert hashlib.sha256(path.read_bytes()).hexdigest() == before

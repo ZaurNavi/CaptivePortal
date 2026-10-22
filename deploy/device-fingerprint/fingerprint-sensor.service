@@ -1,6 +1,8 @@
 [Unit]
 Description=CaptivPortal passive device fingerprint sensor
 After=captive-portal.service
+Wants=fingerprint-suricata.service
+ConditionPathExists=!/run/ssr01b-fingerprint-pair-maintenance.hold
 
 [Service]
 Type=simple

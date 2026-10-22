@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from app.operations_verification import startup_check
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -56,6 +57,7 @@ class SensorSpool:
             except Exception:
                 pass  # Notification is never capacity/SQLite authority.
 
+    @startup_check('sensor_spool',lambda self:self.path,('schema_version','quick_check'),failures=(SensorSpoolError,))
     def initialize(self) -> None:
         with self._lock:
             self.next_possible_stale_at_utc = _UNKNOWN
@@ -110,6 +112,7 @@ class SensorSpool:
             return 0
         if len(values) > MAX_TRANSACTION_ROWS:
             raise SensorSpoolError("spool transaction is too large")
+        atomic_existing_list = len(values) >= 2
         if atomic_coalesced and (
                 len(values) > _MAX_COALESCED_ROWS or any(event.endpoint != "evidence" for event in values)):
             raise SensorSpoolError("invalid coalesced evidence group")
@@ -137,7 +140,8 @@ class SensorSpool:
         before = int(connection.execute("SELECT COUNT(*) FROM sensor_spool").fetchone()[0])
         statement = "INSERT OR IGNORE INTO sensor_spool(endpoint,event_id,source_kind,observed_at,payload_json,created_at) VALUES(?,?,?,?,?,?)"
         try:
-            if atomic_coalesced:
+            if atomic_coalesced or atomic_existing_list:
+                # Already-supplied rows commit before return; no cross-call buffering.
                 self._insert_coalesced_rows(connection, statement, rows)
             else:
                 with connection:

@@ -666,14 +666,6 @@
       ["Duration (s)", item.duration_seconds], ["SSID", item.final_ssid || item.start_ssid],
       ["AP", item.final_ap_mac || item.start_ap_mac], ["Traffic", formatDeviceBytes(item.reported_traffic_total_bytes)],
     ]));
-    // VISIT-NETWORK-296:BEGIN
-    const network = node("section", "visit-network-results");
-    network.dataset.visitId = item.visit_id || "";
-    network.dataset.deviceId = item.device_id || "";
-    network.dataset.visitStatus = item.status || "";
-    network.setAttribute("aria-label", "Visit network results");
-    value.append(network);
-    // VISIT-NETWORK-296:END
     return value;
   }
 

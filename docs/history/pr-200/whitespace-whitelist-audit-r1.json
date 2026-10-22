@@ -1,0 +1,18 @@
+{
+  "schema": "ni04.local.whitespace_whitelist_audit.v1",
+  "candidate_tree": "a91f9ed93a3602a91473a15b98f1a85c634c7b66",
+  "native_check": "git diff --cached --check (external temporary index)",
+  "native_check_exit": 2,
+  "native_check_result": "FAIL_WITH_APPROVED_EXACT_EXCEPTION",
+  "approval": "TECHLEAD22-TASK-DTI-NI-04-UNIFIED55-PATCH-REVIEW-R1.md section 1",
+  "complete_native_output_matches_exact_expected_findings_and_original_lines": true,
+  "findings": [
+    {"path": "docs/network-service-recognition/lane-a-evidence-pack-v1.md", "line": 4, "trailing_ascii_spaces": 2},
+    {"path": "docs/network-service-recognition/lane-a-evidence-pack-v1.md", "line": 5, "trailing_ascii_spaces": 2},
+    {"path": "docs/network-service-recognition/lane-a-evidence-pack-v1.md", "line": 6, "trailing_ascii_spaces": 2}
+  ],
+  "other_findings": 0,
+  "evidence_pack_raw_sha256": "5b57eedbe0dd60194e25d22f18e9701102f7893cf443649de2b406a0b1ef540a",
+  "whitelist_audit": "PASS",
+  "whitespace_configuration_changed": false
+}

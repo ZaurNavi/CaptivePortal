@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from .config import visit_config_from_settings
-from .models import VisitLifecycleConfigError, SCHEMA_VERSION
+from .models import VisitLifecycleConfigError
 from .read_service import VisitLifecycleReadService
 from .reconciliation import VisitLinkReconciler
 from .repository import VisitRepository
@@ -65,8 +65,6 @@ class VisitLifecycleRuntime:
         config: Any,
         repository: VisitRepository,
         telemetry: VisitTelemetry,
-        protocol_reader=None,
-        service_history_path=None,
     ):
         self.config = config
         self.repository = repository
@@ -85,8 +83,6 @@ class VisitLifecycleRuntime:
         self._reconciler: VisitLinkReconciler | None = None
         self._reader_healthy = True
         self._started_emitted = False
-        self.protocol_reader = protocol_reader
-        self.service_history_path=service_history_path
         self.webhook_reader = VisitLifecycleWebhookReader(
             config=config,
             repository=repository,
@@ -130,7 +126,7 @@ class VisitLifecycleRuntime:
         if should_emit:
             self.telemetry.emit(
                 "visit.runtime_started",
-                schema_version=SCHEMA_VERSION,
+                schema_version=2,
             )
         return reader_started or reconciler_started
 
@@ -143,8 +139,6 @@ class VisitLifecycleRuntime:
                 repository=self.repository,
                 registry_read_service=registry_read_service,
                 telemetry=self.telemetry,
-                protocol_reader=self.protocol_reader,
-                service_history_path=self.service_history_path,
             )
             self._reconciler = reconciler
         started = reconciler.start()
@@ -245,37 +239,8 @@ def create_visit_lifecycle(
             error_type=type(exc).__name__,
         )
         return UNAVAILABLE_VISIT_LIFECYCLE_RUNTIME
-    protocol_reader = None
-    service_history_path=None
-    try:
-        from .config import _strict_bool
-        network_enabled=_strict_bool(settings.get('web_admin_device_protocol_intelligence_enabled',False),
-            'WEB_ADMIN_DEVICE_PROTOCOL_INTELLIGENCE_ENABLED')
-    except Exception:
-        network_enabled=False
-    if network_enabled:
-        try:
-            from app.network_metadata_projection.config import projection_config_from_env
-            from app.network_metadata_projection.read_service import DeviceNetworkMetadataReadService
-            source_config = projection_config_from_env()
-            protocol_reader = DeviceNetworkMetadataReadService(source_config.db_path, enabled=source_config.enabled,
-                max_db_bytes=source_config.max_db_bytes, idle_write_reduction_enabled=source_config.idle_write_reduction_enabled)
-        except Exception:
-            telemetry.emit('visit.runtime_unavailable', 'warning', stage='protocol_source_configuration')
-        try:
-            import os
-            from pathlib import Path
-            enabled=_strict_bool(os.environ.get('VISIT_SERVICE_HISTORY_ENABLED','false'),'VISIT_SERVICE_HISTORY_ENABLED')
-            if enabled:
-                source_path=settings.get('network_service_materialization_db_path')
-                if not isinstance(source_path,str) or not Path(source_path).is_absolute():raise ValueError()
-                service_history_path=source_path
-        except Exception:
-            telemetry.emit('visit.runtime_unavailable','warning',stage='service_history_policy')
     return VisitLifecycleRuntime(
         config=config,
         repository=repository,
         telemetry=telemetry,
-        protocol_reader=protocol_reader,
-        service_history_path=service_history_path,
     )

@@ -1,0 +1,107 @@
+
+===== PRE-RESCUE STATE =====
+2026-10-03T14:52:17+04:00
+MainPID=0
+Result=exit-code
+NRestarts=7
+ExecMainStatus=0
+ActiveState=activating
+SubState=auto-restart
+MainPID=3602244
+NRestarts=0
+ActiveState=active
+SubState=running
+MainPID=2760947
+NRestarts=0
+ActiveState=active
+SubState=running
+
+===== FAILED START EVIDENCE =====
+Oct 03 14:46:38 local.domain.az systemd[1]: Stopping CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:46:38 local.domain.az suricata[2761003]: i: suricata: Signal Received.  Stopping engine.
+Oct 03 14:46:55 local.domain.az suricata[2761003]: W: output-json: 734390 events were dropped due to slow or disconnected socket
+Oct 03 14:46:55 local.domain.az suricata[2761003]: E: logopenfile: There were 875377 output errors to /run/fingerprint-suricata/diag-eve.json
+Oct 03 14:47:03 local.domain.az suricata[2761003]: i: device: enp8s0: packets: 929044852, drops: 101768 (0.01%), invalid chksum: 228
+Oct 03 14:47:03 local.domain.az suricata[2761003]: W: ioctl: enp8s0: failed to set SIOCETHTOOL ioctl: Operation not permitted
+Oct 03 14:47:03 local.domain.az suricata[2761003]: W: ioctl: enp8s0: failed to set SIOCETHTOOL ioctl: Operation not permitted
+Oct 03 14:47:03 local.domain.az suricata[2761003]: W: ioctl: enp8s0: failed to set SIOCETHTOOL ioctl: Operation not permitted
+Oct 03 14:47:03 local.domain.az suricata[2761003]: W: ioctl: enp8s0: failed to set SIOCETHTOOL ioctl: Operation not permitted
+Oct 03 14:47:04 local.domain.az systemd[1]: fingerprint-suricata.service: Deactivated successfully.
+Oct 03 14:47:04 local.domain.az systemd[1]: Stopped CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:47:04 local.domain.az systemd[1]: fingerprint-suricata.service: Consumed 3h 21min 37.655s CPU time.
+Oct 03 14:48:32 local.domain.az systemd[1]: Starting CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:48:33 local.domain.az suricata[3603155]: i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+Oct 03 14:48:34 local.domain.az suricata[3603155]: E: suricata: The logging directory "/run/captive-portal/fingerprint-sensor" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) is not writable. Shutting down the engine
+Oct 03 14:48:34 local.domain.az systemd[1]: fingerprint-suricata.service: Control process exited, code=exited, status=1/FAILURE
+Oct 03 14:48:34 local.domain.az systemd[1]: fingerprint-suricata.service: Failed with result 'exit-code'.
+Oct 03 14:48:34 local.domain.az systemd[1]: Failed to start CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:49:04 local.domain.az systemd[1]: fingerprint-suricata.service: Scheduled restart job, restart counter is at 1.
+Oct 03 14:49:04 local.domain.az systemd[1]: Stopped CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:49:04 local.domain.az systemd[1]: Starting CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:49:04 local.domain.az suricata[3603795]: i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+Oct 03 14:49:05 local.domain.az suricata[3603795]: E: suricata: The logging directory "/run/captive-portal/fingerprint-sensor" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) is not writable. Shutting down the engine
+Oct 03 14:49:05 local.domain.az systemd[1]: fingerprint-suricata.service: Control process exited, code=exited, status=1/FAILURE
+Oct 03 14:49:05 local.domain.az systemd[1]: fingerprint-suricata.service: Failed with result 'exit-code'.
+Oct 03 14:49:05 local.domain.az systemd[1]: Failed to start CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:49:35 local.domain.az systemd[1]: fingerprint-suricata.service: Scheduled restart job, restart counter is at 2.
+Oct 03 14:49:35 local.domain.az systemd[1]: Stopped CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:49:35 local.domain.az systemd[1]: Starting CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:49:35 local.domain.az suricata[3604281]: i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+Oct 03 14:49:36 local.domain.az suricata[3604281]: E: suricata: The logging directory "/run/captive-portal/fingerprint-sensor" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) is not writable. Shutting down the engine
+Oct 03 14:49:36 local.domain.az systemd[1]: fingerprint-suricata.service: Control process exited, code=exited, status=1/FAILURE
+Oct 03 14:49:36 local.domain.az systemd[1]: fingerprint-suricata.service: Failed with result 'exit-code'.
+Oct 03 14:49:36 local.domain.az systemd[1]: Failed to start CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:50:06 local.domain.az systemd[1]: fingerprint-suricata.service: Scheduled restart job, restart counter is at 3.
+Oct 03 14:50:06 local.domain.az systemd[1]: Stopped CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:50:06 local.domain.az systemd[1]: Starting CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:50:06 local.domain.az suricata[3605334]: i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+Oct 03 14:50:06 local.domain.az suricata[3605334]: E: suricata: The logging directory "/run/captive-portal/fingerprint-sensor" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) is not writable. Shutting down the engine
+Oct 03 14:50:06 local.domain.az systemd[1]: fingerprint-suricata.service: Control process exited, code=exited, status=1/FAILURE
+Oct 03 14:50:06 local.domain.az systemd[1]: fingerprint-suricata.service: Failed with result 'exit-code'.
+Oct 03 14:50:06 local.domain.az systemd[1]: Failed to start CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:50:36 local.domain.az systemd[1]: fingerprint-suricata.service: Scheduled restart job, restart counter is at 4.
+Oct 03 14:50:36 local.domain.az systemd[1]: Stopped CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:50:36 local.domain.az systemd[1]: Starting CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:50:37 local.domain.az suricata[3605907]: i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+Oct 03 14:50:37 local.domain.az suricata[3605907]: E: suricata: The logging directory "/run/captive-portal/fingerprint-sensor" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) is not writable. Shutting down the engine
+Oct 03 14:50:37 local.domain.az systemd[1]: fingerprint-suricata.service: Control process exited, code=exited, status=1/FAILURE
+Oct 03 14:50:37 local.domain.az systemd[1]: fingerprint-suricata.service: Failed with result 'exit-code'.
+Oct 03 14:50:37 local.domain.az systemd[1]: Failed to start CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:51:07 local.domain.az systemd[1]: fingerprint-suricata.service: Scheduled restart job, restart counter is at 5.
+Oct 03 14:51:07 local.domain.az systemd[1]: Stopped CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:51:07 local.domain.az systemd[1]: Starting CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:51:08 local.domain.az suricata[3606386]: i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+Oct 03 14:51:08 local.domain.az suricata[3606386]: E: suricata: The logging directory "/run/captive-portal/fingerprint-sensor" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) is not writable. Shutting down the engine
+Oct 03 14:51:08 local.domain.az systemd[1]: fingerprint-suricata.service: Control process exited, code=exited, status=1/FAILURE
+Oct 03 14:51:08 local.domain.az systemd[1]: fingerprint-suricata.service: Failed with result 'exit-code'.
+Oct 03 14:51:08 local.domain.az systemd[1]: Failed to start CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:51:38 local.domain.az systemd[1]: fingerprint-suricata.service: Scheduled restart job, restart counter is at 6.
+Oct 03 14:51:38 local.domain.az systemd[1]: Stopped CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:51:38 local.domain.az systemd[1]: Starting CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:51:39 local.domain.az suricata[3607057]: i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+Oct 03 14:51:39 local.domain.az suricata[3607057]: E: suricata: The logging directory "/run/captive-portal/fingerprint-sensor" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) is not writable. Shutting down the engine
+Oct 03 14:51:39 local.domain.az systemd[1]: fingerprint-suricata.service: Control process exited, code=exited, status=1/FAILURE
+Oct 03 14:51:39 local.domain.az systemd[1]: fingerprint-suricata.service: Failed with result 'exit-code'.
+Oct 03 14:51:39 local.domain.az systemd[1]: Failed to start CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:52:09 local.domain.az systemd[1]: fingerprint-suricata.service: Scheduled restart job, restart counter is at 7.
+Oct 03 14:52:09 local.domain.az systemd[1]: Stopped CaptivPortal dedicated passive fingerprint Suricata.
+Oct 03 14:52:09 local.domain.az systemd[1]: Starting CaptivPortal dedicated passive fingerprint Suricata...
+Oct 03 14:52:10 local.domain.az suricata[3607807]: i: suricata: This is Suricata version 8.0.6 RELEASE running in SYSTEM mode
+Oct 03 14:52:10 local.domain.az suricata[3607807]: E: suricata: The logging directory "/run/captive-portal/fingerprint-sensor" supplied by /etc/captive-portal/device-fingerprint/suricata.yaml (default-log-dir) is not writable. Shutting down the engine
+Oct 03 14:52:10 local.domain.az systemd[1]: fingerprint-suricata.service: Control process exited, code=exited, status=1/FAILURE
+Oct 03 14:52:10 local.domain.az systemd[1]: fingerprint-suricata.service: Failed with result 'exit-code'.
+Oct 03 14:52:10 local.domain.az systemd[1]: Failed to start CaptivPortal dedicated passive fingerprint Suricata.
+
+===== VERIFY SOCKET-ONLY CONFIG IS KEPT =====
+46:      filetype: unix_dgram
+47:      filename: /run/captive-portal/fingerprint-sensor/suricata-eve.sock
+SOCKET_ONLY_CONFIG=PASS
+
+===== ROLL BACK ONLY SYSTEMD READONLY BOUNDARY =====
+/lib/systemd/system/snapd.service:23: Unknown key name 'RestartMode' in section 'Service', ignoring.
+READONLY_RUN_BOUNDARY_ROLLED_BACK=YES
+SOCKET_ONLY_CONFIG_PRESERVED=YES
+
+===== START SURICATA =====
+Job for fingerprint-suricata.service failed because the control process exited with error code.
+See "systemctl status fingerprint-suricata.service" and "journalctl -xeu fingerprint-suricata.service" for details.

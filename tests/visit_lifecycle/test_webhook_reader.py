@@ -47,80 +47,11 @@ def _offline(event_id, **changes):
         "received_at": "2026-08-13T10:05:01.000Z",
     }
     value.update(changes)
-    value.setdefault("raw_text", (
-        f'[client:Lab:{value.get("client_mac") or "02:11:22:33:44:55"}] '
-        f'(IP: {value.get("client_ip") or "192.0.2.1"}) '
-        f'went offline from SSID "{value.get("ssid") or "Lab"}" '
-        f'on [ap:Lab:{value.get("ap_mac") or "02:AA:BB:CC:DD:01"}] '
-        f'({value.get("reported_connected_seconds", 60)}s connected, '
-        f'{value.get("reported_traffic_bytes_estimate", 1234)}B).'
-    ))
     return value
 
 
 def _line(value):
     return json.dumps(value, separators=(",", ":")) + "\n"
-
-
-@pytest.mark.parametrize("mutation", ["missing-raw", "not-text", "client-name-only", "ap-name-only",
-    "ssid-only", "failed-connect", "conflicting-verb", "wrong-client", "wrong-ap", "wrong-ssid",
-    "wrong-duration", "wrong-traffic", "wrong-ip", "unclassified-status"])
-def test_context230_reader_rejects_false_or_mismatched_legacy_offline_provenance(mutation):
-    record = _offline("legacy:0")
-    if mutation == "missing-raw":
-        record.pop("raw_text")
-    elif mutation == "not-text":
-        record["raw_text"] = {"event": "went offline"}
-    elif mutation in {"client-name-only", "ap-name-only", "ssid-only", "failed-connect"}:
-        client = "Guest went offline" if mutation in {"client-name-only", "failed-connect"} else "Guest"
-        ap = "AP went offline" if mutation == "ap-name-only" else "AP"
-        ssid = "Lab went offline" if mutation == "ssid-only" else "Lab"
-        clause = "failed to connect to" if mutation == "failed-connect" else "associated with"
-        record["raw_text"] = (f'[client:{client}:02:11:22:33:44:55] {clause} '
-            f'[ap:{ap}:02:AA:BB:CC:DD:01] with SSID "{ssid}" '
-            'on channel 6 because the password was wrong.(1 time in the last minute)')
-    elif mutation == "conflicting-verb":
-        record["raw_text"] += " went online"
-    else:
-        key, value = {
-            "wrong-client": ("client_mac", "02:11:22:33:44:99"),
-            "wrong-ap": ("ap_mac", "02:AA:BB:CC:DD:99"),
-            "wrong-ssid": ("ssid", "Not-Lab"),
-            "wrong-duration": ("reported_connected_seconds", 300),
-            "wrong-traffic": ("reported_traffic_bytes_estimate", 9876),
-            "wrong-ip": ("client_ip", "192.0.2.99"),
-            "unclassified-status": ("parse_status", "unclassified"),
-        }[mutation]
-        record[key] = value
-    evidence = reader_module._offline_evidence(record)
-    assert evidence is None or evidence.invalid_reason is not None
-
-
-@pytest.mark.parametrize("parse_status", ["parsed", "partial", None])
-def test_context230_legacy_reader_accepts_raw_proof_not_parse_status(parse_status):
-    record = _offline("legacy:0", parse_status=parse_status)
-    evidence = reader_module._offline_evidence(record)
-    assert evidence.invalid_reason is None
-    assert evidence.client_mac == "02:11:22:33:44:55"
-    assert evidence.event_id == "legacy:0"
-
-
-def test_context230_legacy_jsonl_invalid_proof_advances_checkpoint_without_business_evidence(
-    visit_config, visit_repository, visit_service,
-):
-    source = visit_config.webhook_source
-    valid = _offline("legacy:valid", parse_status="partial")
-    unsupported = _offline("legacy:unsupported", raw_text="went offline")
-    missing = _offline("legacy:missing")
-    missing.pop("raw_text")
-    for record in (unsupported, valid, missing, valid):
-        _append(source, record)
-    reader = _reader(visit_config, visit_repository, visit_service)
-    assert reader.scan_once() is True
-    assert _event_count(visit_repository) == 1
-    assert _state(visit_repository).source_offset == os.path.getsize(source)
-    assert reader.scan_once() is True
-    assert _event_count(visit_repository) == 1
 
 
 def _append(path, value):

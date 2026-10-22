@@ -400,6 +400,8 @@ input[type="radio"] { width: auto; min-height: 0; }
 
 /* DB-SERVICES-01: global Operations page only. */
 #db-services-page { min-width: 0; }
+#db-services-page .ops-verification { grid-column: 1 / -1; display: grid; gap: .3rem; padding: .65rem .8rem; border-left: 3px solid var(--line); background: var(--surface-soft); border-radius: .4rem; font-size: .78rem; line-height: 1.5; }
+#db-services-page .ops-verification small { color: var(--muted); }
 #db-services-page .ops-status { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; margin-bottom: 1rem; color: var(--muted, #64748b); }
 #db-services-page .ops-status strong { color: var(--text, #172b4d); }
 #db-services-page .ops-warning { padding: .75rem 1rem; border: 1px solid #d9b96b; background: #fffbeb; border-radius: .65rem; color: #7c570d; }
@@ -429,7 +431,9 @@ input[type="radio"] { width: auto; min-height: 0; }
 #db-services-page .ops-badge[data-state="degraded"] { background: #fff4d5; color: #795508; }
 #db-services-page .ops-badge[data-state="unavailable"], #db-services-page .ops-badge[data-state="incompatible"], #db-services-page .ops-badge[data-state="failed"], #db-services-page .ops-badge[data-state="stopped"] { background: #fcebec; color: #a42936; }
 #db-services-page .ops-badge[data-family="database"][data-state="available"], #db-services-page .ops-badge[data-family="application"][data-state="healthy"] { background: #e4f5ec; color: #216947; }
-#db-services-page .ops-badge[data-family="service"][data-state="running"] { background: #edf3fb; color: #375a83; }
+#db-services-page .ops-badge[data-family="service"][data-state="running"], #db-services-page .ops-badge[data-family="condition"][data-state="operating"] { background: #e4f5ec; color: #216947; }
+#db-services-page .ops-service { border-left: 3px solid #7288aa; }
+#db-services-page .ops-database { border-left: 3px solid #829e99; }
 #db-services-page[data-outdated="true"] .ops-badge { background: #edf1f5; color: #43546a; }
 #db-services-page .ops-details { grid-column: 1 / -1; font-size: .75rem; }
 #db-services-page .ops-details > summary { width: fit-content; cursor: pointer; color: #486b91; padding: .2rem 0; }
@@ -454,19 +458,22 @@ input[type="radio"] { width: auto; min-height: 0; }
 #db-services-page .ops-legend-feed::before, #db-services-page .ops-legend-write::before, #db-services-page .ops-legend-read::before { content: ""; display: inline-block; width: 1.5rem; border-top: 1px solid #8c9bad; }
 #db-services-page .ops-legend-write::before { border-top-width: 2px; }
 #db-services-page .ops-legend-read::before { border-top-style: dashed; }
-#db-services-page .ops-topology-board { position: relative; padding-right: 80px; min-width: 0; isolation: isolate; }
-#db-services-page .ops-flow-lane { position: relative; padding: 0 14px 32px; margin-bottom: 12px; min-width: 0; border: 1px solid var(--border, #dce3eb); border-radius: .7rem; background: var(--surface, #fff); }
-#db-services-page .ops-lane-title { min-height: 48px; display: flex; align-items: center; margin: 0 0 18px; font-size: .83rem; letter-spacing: .015em; border-bottom: 1px solid var(--border, #dce3eb); }
-#db-services-page .ops-flow-stages { display: grid; grid-template-columns: repeat(var(--ops-stages), minmax(0, 1fr)); gap: 16px; align-items: start; }
-#db-services-page .ops-flow-stage { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
-#db-services-page .ops-stage-title { margin: 0 0 3px; min-height: 24px; font-weight: 500; color: var(--muted, #64748b); font-size: .62rem; text-transform: uppercase; letter-spacing: .04em; overflow-wrap: anywhere; }
+#db-services-page .ops-topology-board { position: relative; padding: 22px 48px; min-width: 0; isolation: isolate; }
+#db-services-page .ops-flow-level { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 18px; align-items: stretch; margin-bottom: 40px; min-width: 0; }
+#db-services-page .ops-flow-level:last-child { margin-bottom: 0; }
+#db-services-page .ops-flow-controls { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; margin: .8rem 0; }
+#db-services-page .ops-condition-legend { display: flex; flex-wrap: wrap; gap: .5rem; }
+#db-services-page .ops-problems-toggle { background: var(--surface,#fff); color: var(--text,#172b4d); border: 1px solid #bac8d7; border-radius: .5rem; padding: .6rem 1rem; cursor: pointer; font: inherit; }
+#db-services-page .ops-problems-toggle[aria-pressed="true"] { border-color: #8b671c; background: #fff4d5; }
+#db-services-page .ops-problems-toggle:focus-visible { outline: 2px solid #416d9d; outline-offset: 3px; }
 #db-services-page .ops-flow-node { position: relative; z-index: 2; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; padding: 10px; min-width: 0; width: 100%; border: 1px solid #bac8d7; border-radius: .4rem; color: var(--text, #172b4d); background: var(--surface, #fff); text-align: left; cursor: pointer; overflow-wrap: anywhere; font: inherit; }
-#db-services-page .ops-flow-node strong { font-size: .73rem; line-height: 1.4; font-weight: 600; }
-#db-services-page .ops-flow-node small { font-size: .62rem; line-height: 1.45; color: var(--muted, #64748b); overflow-wrap: anywhere; }
-#db-services-page .ops-flow-node .ops-badge { font-size: .59rem; padding: .15rem .3rem; }
-#db-services-page .ops-node-type { color: var(--muted, #64748b); font-size: .55rem; text-transform: uppercase; letter-spacing: .06em; }
+#db-services-page .ops-flow-node strong { font-size: .88rem; line-height: 1.4; font-weight: 600; }
+#db-services-page .ops-flow-node small { font-size: .75rem; line-height: 1.45; color: var(--muted, #64748b); overflow-wrap: anywhere; }
+#db-services-page .ops-flow-node .ops-badge { font-size: .72rem; padding: .2rem .4rem; }
+#db-services-page .ops-node-type { color: var(--muted, #64748b); font-size: .65rem; letter-spacing: .025em; }
 #db-services-page .ops-flow-node[data-node-type="source"] { border-style: dashed; }
-#db-services-page .ops-flow-node[data-node-type="database"] { border-radius: .7rem .7rem .3rem .3rem; border-top-width: 3px; }
+#db-services-page .ops-flow-node[data-node-type="service"] { border-top: 3px solid #7288aa; }
+#db-services-page .ops-flow-node[data-node-type="database"] { border-radius: .7rem .7rem .3rem .3rem; border-top: 3px solid #829e99; }
 #db-services-page .ops-flow-node[data-node-type="consumer"] { border-width: 2px; }
 #db-services-page .ops-flow-node:focus-visible, #db-services-page .ops-row:focus { outline: 2px solid #416d9d; outline-offset: 3px; }
 #db-services-page .ops-flow-node.ops-emphasized { outline: 2px solid #5f7690; outline-offset: 2px; }
@@ -476,31 +483,26 @@ input[type="radio"] { width: auto; min-height: 0; }
 #db-services-page .ops-flow-edge.ops-relation-writes_to { stroke-width: 1.7; }
 #db-services-page .ops-flow-edge.ops-relation-read_by { stroke-dasharray: 4 3; }
 #db-services-page .ops-arrowhead { fill: #8c9bad; }
-#db-services-page .ops-flow-edge.ops-emphasized { stroke: #4b627c; stroke-width: 2.2; }
+#db-services-page .ops-flow-edge[data-condition="operating"] { stroke: #36805b; }
+#db-services-page .ops-flow-edge[data-condition="degraded"] { stroke: #a57a1c; }
+#db-services-page .ops-flow-edge[data-condition="failed"] { stroke: #b54b57; }
+#db-services-page marker[data-condition="operating"] .ops-arrowhead { fill: #36805b; }
+#db-services-page marker[data-condition="degraded"] .ops-arrowhead { fill: #a57a1c; }
+#db-services-page marker[data-condition="failed"] .ops-arrowhead { fill: #b54b57; }
+#db-services-page .ops-flow-edge.ops-emphasized { stroke-width: 2.2; }
 #db-services-page .ops-flow-edge.ops-subdued { opacity: .2; }
+#db-services-page .ops-flow-node.ops-normal-dim { opacity: .4; }
+#db-services-page .ops-flow-edge.ops-normal-dim { opacity: .12; }
+#db-services-page .ops-flow-node:focus, #db-services-page .ops-flow-node:hover, #db-services-page .ops-flow-node.ops-emphasized, #db-services-page .ops-flow-edge.ops-emphasized { opacity: 1; }
 #db-services-page .ops-flow-context { min-height: 2.8em; font-size: .74rem; line-height: 1.6; color: var(--muted, #64748b); overflow-wrap: anywhere; }
 #db-services-page .ops-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 760px) {
-  #db-services-page .ops-topology-board { padding-right: 52px; }
-  #db-services-page .ops-flow-stages { grid-template-columns: minmax(0, 1fr); gap: 22px; }
-  #db-services-page .ops-flow-lane { padding: 0 24px 30px 10px; }
-  #db-services-page .ops-lane-title { min-height: 48px; font-size: .8rem; }
+  #db-services-page .ops-topology-board { padding: 20px 32px; }
+  #db-services-page .ops-flow-level { grid-template-columns: minmax(0, 1fr); gap: 28px; }
   #db-services-page .ops-flow-node { padding: 12px; gap: 7px; min-height: 72px; }
   #db-services-page .ops-flow-node strong { font-size: .82rem; }
   #db-services-page .ops-flow-node small, #db-services-page .ops-flow-node .ops-badge { font-size: .68rem; }
 }
-
-/* #296: two independent materialized sections inside the actual Visit card. */
-.visit-network-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; width: 100%; margin-top: 1rem; }
-.visit-network-results .visit-network-section { grid-column: auto; min-width: 0; padding: 1rem; }
-.visit-network-results h3 { margin: 0 0 .75rem; font-size: 1rem; }
-.visit-network-results .state-panel { margin-bottom: .75rem; }
-.visit-network-results ul { list-style: none; margin: .75rem 0; padding: 0; }
-.visit-network-results li { padding: .6rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
-.visit-network-results li p { margin: .4rem 0; }
-.visit-network-results small { display: block; overflow-wrap: anywhere; color: var(--muted); }
-.visit-network-results > button { grid-column: 1 / -1; justify-self: start; }
-@media (max-width: 760px) { .visit-network-results { grid-template-columns: minmax(0, 1fr); } }
 
 #device-service-intelligence { min-width: 0; margin-top: 1.25rem; padding: 1.25rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow-wrap: anywhere; }
 #device-service-intelligence .section-heading > div { min-width: 0; }

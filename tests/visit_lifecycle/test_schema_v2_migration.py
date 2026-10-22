@@ -139,11 +139,11 @@ def _seed_v1(path, *, pending=False):
     return visit_id, session_id
 
 
-def test_new_database_is_created_directly_as_current_schema(visit_config):
+def test_new_database_is_created_directly_as_schema_v2(visit_config):
     repository = VisitRepository(visit_config)
     assert repository.initialize() is True
     with sqlite3.connect(visit_config.db_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
     assert V2_COLUMNS <= _columns(visit_config.db_path)
 
 
@@ -155,7 +155,7 @@ def test_exact_v1_migrates_and_preserves_rows_with_null_context(visit_config):
 
     with sqlite3.connect(visit_config.db_path) as connection:
         connection.row_factory = sqlite3.Row
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         assert connection.execute(
             "SELECT visit_id FROM visits"
         ).fetchone()[0] == visit_id
@@ -271,11 +271,11 @@ def test_foreign_version_zero_schema_is_rejected_unchanged(visit_config):
 def test_newer_schema_version_is_rejected_unchanged(visit_config):
     with sqlite3.connect(visit_config.db_path) as connection:
         connection.execute("CREATE TABLE future_data (value TEXT)")
-        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+        connection.execute("PRAGMA user_version=3")
     with pytest.raises(VisitSchemaError, match="newer"):
         VisitRepository(visit_config).initialize()
     with sqlite3.connect(visit_config.db_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION + 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert connection.execute(
             "SELECT COUNT(*) FROM future_data"
         ).fetchone()[0] == 0
@@ -357,7 +357,7 @@ def test_v2_with_extra_schema_object_is_rejected_unchanged(
         VisitRepository(visit_config).initialize()
 
     with sqlite3.connect(visit_config.db_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         assert connection.execute(
             "SELECT sql FROM sqlite_master WHERE name=?",
             (name,),

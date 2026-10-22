@@ -515,7 +515,7 @@ def test_missing_singleton_and_newer_schema_fail_closed(tmp_path):
 
 
 @pytest.mark.parametrize("corruption", ["invalid_generation", "low_allocator", "cross_family_duplicate"])
-def test_corrupt_generation_or_sequence_fails_closed(tmp_path, corruption):
+def test_corrupt_generation_or_sequence_fails_closed(tmp_path, monkeypatch, corruption):
     cfg, repo, svc = service(tmp_path)
     _batch_evidence(svc, evidence_event())
     _batch_health(svc, health_event())
@@ -529,5 +529,29 @@ def test_corrupt_generation_or_sequence_fails_closed(tmp_path, corruption):
         connection.execute("UPDATE device_fingerprint_source_health_events SET ingest_sequence=1")
     connection.commit()
     connection.close()
-    with pytest.raises(DeviceFingerprintStorageCorrupt):
-        DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()
+    if corruption == "invalid_generation":
+        with pytest.raises(DeviceFingerprintStorageCorrupt):
+            DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes).initialize()
+        return
+    from app.device_fingerprint.audit_runner import EvidenceAuditor, StatusStore
+    # Fast admission is bounded metadata checking, not a full-history attestation.
+    monkeypatch.setattr(DeviceFingerprintRepository, "_validate_connection",
+        lambda *_args: pytest.fail("historical validator must not run on startup"))
+    fast = DeviceFingerprintRepository(cfg.db_path, max_db_bytes=cfg.max_db_bytes)
+    fast.initialize()
+    fast.validate_runtime_health()
+    fast.close()
+    directory = tmp_path / "audit"
+    directory.mkdir(mode=0o700)
+    resources = dict(mem_total=16*1024**3, mem_available=12*1024**3,
+        cgroup_headroom=12*1024**3, address_headroom=None, containment=True,
+        swap_active=False, swap_counters=dict(pswpin=0, pswpout=0),
+        reclaim_counters=dict(pgscan_direct=0, pgsteal_direct=0), peak_rss_bytes=128*1024**2,
+        memory_psi=None, io_psi=None)
+    before = Path(cfg.db_path).read_bytes()
+    record, code = EvidenceAuditor(cfg.db_path,
+        status=StatusStore(directory / "fingerprint_evidence.json"), resources=lambda: resources).run()
+    assert code != 0 and record["status"] == "failed"
+    assert record["category_code"] == "integrity_suspect"
+    assert record["status"] != "passed"
+    assert Path(cfg.db_path).read_bytes() == before

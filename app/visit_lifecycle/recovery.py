@@ -15,9 +15,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .models import SCHEMA_VERSION, compatible_visit_schema_version
+from .models import SCHEMA_VERSION
 from .repository import (
-    expected_visit_signature,
+    _expected_v2_signature,
     _format_utc,
     _parse_utc,
     _schema_signature,
@@ -126,7 +126,7 @@ def recover(
             connection.rollback()
         return {
             "resolved_db_path": str(resolved),
-            "schema_version": int(connection.execute('PRAGMA user_version').fetchone()[0]),
+            "schema_version": SCHEMA_VERSION,
             "mode": "apply" if apply else "dry-run",
             "site_id": site,
             "evaluated_at": evaluated_at,
@@ -165,10 +165,7 @@ def backup_database(*, db_path: str, backup_to: str) -> dict[str, Any]:
     source = _connect(source_path, mode="ro")
     created = False
     try:
-        # Pin metadata and Backup to one read view, including WAL sources.
-        source.execute('BEGIN')
         _validate_source(source)
-        source_version = int(source.execute('PRAGMA user_version').fetchone()[0])
         destination_connection = sqlite3.connect(str(destination))
         created = True
         try:
@@ -182,18 +179,17 @@ def backup_database(*, db_path: str, backup_to: str) -> dict[str, Any]:
             version = int(
                 verification.execute("PRAGMA user_version").fetchone()[0]
             )
-            if quick_value != "ok" or version != source_version:
+            if quick_value != "ok" or version != SCHEMA_VERSION:
                 raise RecoveryError("Visit recovery backup verification failed")
-            if _schema_signature(verification) != expected_visit_signature(version):
+            if _schema_signature(verification) != _expected_v2_signature():
                 raise RecoveryError("Visit recovery backup schema is invalid")
-            _validate_source(verification)
         finally:
             verification.close()
         return {
             "resolved_db_path": str(source_path),
             "resolved_backup_path": str(destination),
             "mode": "backup",
-            "source_schema_version": source_version,
+            "source_schema_version": SCHEMA_VERSION,
             "backup_schema_version": version,
             "quick_check": quick_value,
         }
@@ -438,12 +434,12 @@ def _remaining_open_count(
 
 def _validate_source(connection: sqlite3.Connection) -> None:
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if not compatible_visit_schema_version(version):
+    if version != SCHEMA_VERSION:
         raise RecoveryError("Visit recovery source schema version is invalid")
     quick = connection.execute("PRAGMA quick_check").fetchone()
     if not quick or str(quick[0]) != "ok":
         raise RecoveryError("Visit recovery source health check failed")
-    if _schema_signature(connection) != expected_visit_signature(version):
+    if _schema_signature(connection) != _expected_v2_signature():
         raise RecoveryError("Visit recovery source schema is invalid")
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
         raise RecoveryError("Visit recovery source foreign keys are invalid")

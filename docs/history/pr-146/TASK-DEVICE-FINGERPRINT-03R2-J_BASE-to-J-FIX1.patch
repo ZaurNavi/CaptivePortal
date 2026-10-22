@@ -1,0 +1,383 @@
+diff --git a/app/device_fingerprint/config.py b/app/device_fingerprint/config.py
+index 114a6821c0a3fc512594c7b24b09cc2ec0c399cd..3a2c20a709271a7b0a8a5962d86d3b44d61cbd8e 100644
+--- a/app/device_fingerprint/config.py
++++ b/app/device_fingerprint/config.py
+@@ -25,6 +25,7 @@ RETENTION_SCAN_INTERVAL_SECONDS = 300
+ RETENTION_DELETE_CHUNK_ROWS = 500
+ MAX_RETENTION_CHUNKS_PER_PASS = 20
+ SOURCE_HEALTH_RETENTION_DAYS = 30
++SOURCE_HEALTH_RETENTION_MARGIN_SECONDS = 600
+ SHUTDOWN_TIMEOUT_SECONDS = 20.0
+ 
+ DEFAULT_DB_PATH = "/opt/CaptivePortal/data/device_fingerprint_evidence.sqlite3"
+diff --git a/app/device_fingerprint/health_retention_contract.py b/app/device_fingerprint/health_retention_contract.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2c2ebb04f9c7a7080fba9f9cdc2bb86edb6d69b
+--- /dev/null
++++ b/app/device_fingerprint/health_retention_contract.py
+@@ -0,0 +1,74 @@
++"""Immutable F-B3 Task-01 health-retention capability and admission check."""
++
++from __future__ import annotations
++
++from .artifact_content import ArtifactContent, ArtifactRef, make_artifact_content
++from .config import SOURCE_HEALTH_RETENTION_MARGIN_SECONDS
++from .models import DeviceFingerprintValidationError
++from .source_health_policy import build_current_source_health_policy
++
++_FROZEN_FRESHNESS_MS = frozenset({0, 180_000, 600_000})
++_CLOCK_UNCERTAINTY_MS = 0
++
++
++def final_source_health_policy() -> ArtifactContent:
++    """Construct the current F-B3 candidate, without activating it."""
++    return build_current_source_health_policy(
++        health_anchor_margin_seconds=SOURCE_HEALTH_RETENTION_MARGIN_SECONDS,
++    )
++
++
++def derive_health_anchor_margin_seconds(policy: ArtifactContent) -> int:
++    """Prove the frozen freshness maximum plus accepted clock uncertainty."""
++    if not isinstance(policy, ArtifactContent) or policy.artifact_type != "SourceHealthPolicy":
++        raise DeviceFingerprintValidationError("Invalid SourceHealthPolicy")
++    timeouts = {rule["freshness"]["freshness_timeout_ms"]
++                for rule in policy.semantic_payload["emitter_source_family_rules"]}
++    if timeouts != _FROZEN_FRESHNESS_MS:
++        raise DeviceFingerprintValidationError("SourceHealthPolicy freshness mismatch")
++    required_ms = max(timeouts) + _CLOCK_UNCERTAINTY_MS
++    if required_ms % 1000:
++        raise DeviceFingerprintValidationError("Health retention margin is not whole seconds")
++    required_seconds = required_ms // 1000
++    if required_seconds != SOURCE_HEALTH_RETENTION_MARGIN_SECONDS:
++        raise DeviceFingerprintValidationError("Task-01 health retention capability mismatch")
++    return required_seconds
++
++
++def make_task01_health_retention_contract(
++        policy: ArtifactContent, *, retained_evidence_horizon_seconds: int,
++        retained_health_horizon_seconds: int,
++) -> ArtifactContent:
++    """Bind explicit retained horizons to the final policy and actual cleanup."""
++    final = final_source_health_policy()
++    if (not isinstance(policy, ArtifactContent)
++            or policy.artifact_id != final.artifact_id
++            or policy.content_sha256 != final.content_sha256):
++        raise DeviceFingerprintValidationError("Task-01 contract requires final SourceHealthPolicy")
++    margin = derive_health_anchor_margin_seconds(policy)
++    for value in (retained_evidence_horizon_seconds, retained_health_horizon_seconds):
++        if type(value) is not int or not 0 <= value <= 2**63 - 1:
++            raise DeviceFingerprintValidationError("Invalid retained horizon")
++    if retained_health_horizon_seconds < retained_evidence_horizon_seconds + margin:
++        raise DeviceFingerprintValidationError("Insufficient retained health history")
++    if retained_health_horizon_seconds != retained_evidence_horizon_seconds + margin:
++        raise DeviceFingerprintValidationError("Retained horizon differs from Task-01 cleanup")
++    return make_artifact_content("Task01HealthRetentionContract", {
++        "contract_version": 1,
++        "source_health_policy": ArtifactRef(policy.artifact_id, policy.content_sha256).as_dict(),
++        "required_health_anchor_margin_seconds": margin,
++        "preserve_predecessor_anchor": True,
++        "retained_evidence_horizon_seconds": retained_evidence_horizon_seconds,
++        "retained_health_horizon_seconds": retained_health_horizon_seconds,
++        "retention_compatibility_status": "PASS",
++    })
++
++
++def activation_margin_compatible(
++        candidate_required_margin_seconds: int, preserved_margin_capability_seconds: int,
++) -> bool:
++    """A later policy cannot claim predecessor history already cleaned up."""
++    for value in (candidate_required_margin_seconds, preserved_margin_capability_seconds):
++        if type(value) is not int or not 0 <= value <= 2**63 - 1:
++            raise DeviceFingerprintValidationError("Invalid health retention margin")
++    return candidate_required_margin_seconds <= preserved_margin_capability_seconds
+diff --git a/app/device_fingerprint/repository.py b/app/device_fingerprint/repository.py
+index 9e1b11d67679dab9b499ec0fd5eaaf5bfc267883..dbf8eb9a2c7a179a5ca0d48ec4450aea5c851a8a 100644
+--- a/app/device_fingerprint/repository.py
++++ b/app/device_fingerprint/repository.py
+@@ -17,7 +17,7 @@ from .config import (
+     JOURNAL_SIZE_LIMIT_BYTES,
+     MAX_RETENTION_CHUNKS_PER_PASS,
+     RETENTION_DELETE_CHUNK_ROWS,
+-    SOURCE_HEALTH_RETENTION_DAYS,
++    SOURCE_HEALTH_RETENTION_MARGIN_SECONDS,
+     WAL_AUTOCHECKPOINT_PAGES,
+ )
+ from .models import (
+@@ -237,9 +237,12 @@ class DeviceFingerprintRepository:
+         return BatchResult(len(values), inserted, duplicate)
+ 
+     def cleanup(self, *, now: datetime, evidence_retention_days: int) -> Mapping[str, int]:
++        evidence_cutoff = now.astimezone(UTC) - timedelta(days=evidence_retention_days)
+         cutoffs = {
+-            "device_fingerprint_evidence": format_utc(now.astimezone(UTC) - timedelta(days=evidence_retention_days)),
+-            "device_fingerprint_source_health_events": format_utc(now.astimezone(UTC) - timedelta(days=SOURCE_HEALTH_RETENTION_DAYS)),
++            "device_fingerprint_evidence": format_utc(evidence_cutoff),
++            "device_fingerprint_source_health_events": format_utc(
++                evidence_cutoff - timedelta(seconds=SOURCE_HEALTH_RETENTION_MARGIN_SECONDS)
++            ),
+         }
+         ids = {
+             "device_fingerprint_evidence": "evidence_id",
+diff --git a/research/device_fingerprint_fb3/__init__.py b/research/device_fingerprint_fb3/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..eaa2c71e3d60de7ffe5aa4a75a3d50d77ced224d
+--- /dev/null
++++ b/research/device_fingerprint_fb3/__init__.py
+@@ -0,0 +1 @@
++"""Disposable F-B3 Task-01 retention proof."""
+diff --git a/research/device_fingerprint_fb3/proof.py b/research/device_fingerprint_fb3/proof.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e657bd6cbab60b24e240c9414557bfb7e7b87e7c
+--- /dev/null
++++ b/research/device_fingerprint_fb3/proof.py
+@@ -0,0 +1,107 @@
++"""Deterministic F-B3 proof against actual Task-01 repository cleanup."""
++
++from __future__ import annotations
++
++import hashlib
++import inspect
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++from uuid import UUID
++
++from app.device_fingerprint.config import SOURCE_HEALTH_RETENTION_MARGIN_SECONDS
++from app.device_fingerprint.health_retention_contract import (
++    activation_margin_compatible, derive_health_anchor_margin_seconds,
++    final_source_health_policy,
++)
++from app.device_fingerprint.models import ValidatedEvidence, ValidatedSourceHealth
++from app.device_fingerprint.repository import DeviceFingerprintRepository
++from app.device_fingerprint.validation import format_utc
++
++_NOW = datetime(2026, 9, 18, 12, tzinfo=timezone.utc)
++_PAYLOAD = "{}"
++_PAYLOAD_SHA = hashlib.sha256(_PAYLOAD.encode("utf-8")).hexdigest()
++
++
++def _identifier(number: int) -> str:
++    return str(UUID(int=number))
++
++
++def _evidence(number: int, observed_at: str) -> ValidatedEvidence:
++    return ValidatedEvidence(
++        producer_id="sensor-zefer-01", source_event_id=_identifier(number),
++        source_kind="dhcp", source_subtype=None, extractor_name="dhcp-v1",
++        extractor_version="1.0.0", feature_schema_version=1, rule_version=None,
++        site_id="6a64f17630da7c70d232187a", capture_source_id="zefer-span-01",
++        observed_at=observed_at, observed_mac="aa-bb-cc-dd-ee-ff", observed_ip=None,
++        privacy_class="P1", quality_state="valid", payload_json=_PAYLOAD,
++        payload_sha256=_PAYLOAD_SHA,
++    )
++
++
++def _health(number: int, observed_at: str) -> ValidatedSourceHealth:
++    return ValidatedSourceHealth(
++        producer_id="sensor-zefer-01", source_health_event_id=_identifier(number),
++        site_id="6a64f17630da7c70d232187a", capture_source_id="zefer-span-01",
++        source_kind="dhcp", status="available", reason_code=None,
++        observed_at=observed_at, content_sha256="0" * 64,
++    )
++
++
++def run_f_b3_proof(directory: Path, *, evidence_retention_days: int) -> dict[str, object]:
++    """Use an isolated new SQLite DB; no live data, clocks, or binding lookup."""
++    if type(evidence_retention_days) is not int or not 1 <= evidence_retention_days <= 90:
++        raise ValueError("Unsupported evidence retention fixture")
++    policy = final_source_health_policy()
++    margin = derive_health_anchor_margin_seconds(policy)
++    if margin != SOURCE_HEALTH_RETENTION_MARGIN_SECONDS:
++        raise AssertionError("Policy and Task-01 capability differ")
++    evidence_cutoff = _NOW - timedelta(days=evidence_retention_days)
++    health_cutoff = evidence_cutoff - timedelta(seconds=margin)
++    repo = DeviceFingerprintRepository(
++        str(directory / f"fb3-retention-{evidence_retention_days}.sqlite3"),
++        max_db_bytes=67_108_864,
++    )
++    repo.initialize()
++    try:
++        repo.ingest_evidence([
++            _evidence(1, format_utc(evidence_cutoff)),
++            _evidence(2, format_utc(evidence_cutoff - timedelta(milliseconds=1))),
++        ], ingested_at=format_utc(_NOW))
++        repo.ingest_source_health([
++            _health(3, format_utc(health_cutoff)),
++            _health(4, format_utc(health_cutoff - timedelta(milliseconds=1))),
++        ], ingested_at=format_utc(_NOW))
++        deleted = repo.cleanup(now=_NOW, evidence_retention_days=evidence_retention_days)
++        evidence_remaining = {row[0] for row in repo.connection.execute(
++            "SELECT observed_at FROM device_fingerprint_evidence")}
++        health_remaining = {row[0] for row in repo.connection.execute(
++            "SELECT observed_at FROM device_fingerprint_source_health_events")}
++    finally:
++        repo.close()
++    if (deleted != {"device_fingerprint_evidence": 1,
++                    "device_fingerprint_source_health_events": 1}
++            or evidence_remaining != {format_utc(evidence_cutoff)}
++            or health_remaining != {format_utc(health_cutoff)}):
++        raise AssertionError("Task-01 cleanup boundary proof failed")
++    cleanup_source = inspect.getsource(DeviceFingerprintRepository.cleanup)
++    topology_tokens = ("BindingTimeline", "binding_epoch", "producer_id",
++                       "capture_source_id", "source_kind")
++    if any(token in cleanup_source for token in topology_tokens):
++        raise AssertionError("Cleanup consulted binding topology")
++    return {
++        "derived_health_anchor_margin_seconds": margin,
++        "max_family_freshness_seconds": 600,
++        "clock_uncertainty_seconds": 0,
++        "evidence_retention_days": evidence_retention_days,
++        "evidence_retention_seconds": evidence_retention_days * 86_400,
++        "source_health_retention_seconds": evidence_retention_days * 86_400 + margin,
++        "evidence_cutoff": format_utc(evidence_cutoff),
++        "health_cutoff": format_utc(health_cutoff),
++        "oldest_evidence_retained": True,
++        "required_predecessor_retained": True,
++        "older_health_row_deleted": True,
++        "older_evidence_row_deleted": True,
++        "cleanup_parses_binding_timeline": False,
++        "activation_600_with_600": activation_margin_compatible(600, 600),
++        "activation_601_with_600": activation_margin_compatible(601, 600),
++    }
+diff --git a/tests/device_fingerprint/test_health_retention_contract.py b/tests/device_fingerprint/test_health_retention_contract.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c14585cc5795c31729448cea78d2c5269c15ec0
+--- /dev/null
++++ b/tests/device_fingerprint/test_health_retention_contract.py
+@@ -0,0 +1,82 @@
++"""Exact F-B3 immutable policy and Task-01 retention capability."""
++
++import pytest
++
++from app.device_fingerprint.config import SOURCE_HEALTH_RETENTION_MARGIN_SECONDS
++from app.device_fingerprint.health_retention_contract import (
++    activation_margin_compatible, derive_health_anchor_margin_seconds,
++    final_source_health_policy, make_task01_health_retention_contract,
++)
++from app.device_fingerprint.models import DeviceFingerprintValidationError
++from app.device_fingerprint.source_health_policy import build_current_source_health_policy
++
++
++def test_final_policy_margin_and_exact_task01_contract_shape():
++    policy = final_source_health_policy()
++    assert SOURCE_HEALTH_RETENTION_MARGIN_SECONDS == 600
++    assert derive_health_anchor_margin_seconds(policy) == 600
++    assert policy.semantic_payload["health_anchor_margin_seconds"] == 600
++    assert {rule["freshness"]["freshness_timeout_ms"] for rule in
++            policy.semantic_payload["emitter_source_family_rules"]} == {0, 180_000, 600_000}
++    assert policy.semantic_payload["task01_timestamp_skew_contract_ref"] == (
++        "Task01TimestampSkewContract:v1:max_future_source_event_skew_seconds=120")
++    assert policy.semantic_payload["task01_delayed_event_contract_ref"] == (
++        "Task01DelayedEventContract:v1:max_delayed_event_age_seconds=86400")
++    contract = make_task01_health_retention_contract(
++        policy, retained_evidence_horizon_seconds=2_592_000,
++        retained_health_horizon_seconds=2_592_600,
++    )
++    assert contract.semantic_payload == {
++        "contract_version": 1,
++        "source_health_policy": {
++            "artifact_id": policy.artifact_id, "content_sha256": policy.content_sha256,
++        },
++        "required_health_anchor_margin_seconds": 600,
++        "preserve_predecessor_anchor": True,
++        "retained_evidence_horizon_seconds": 2_592_000,
++        "retained_health_horizon_seconds": 2_592_600,
++        "retention_compatibility_status": "PASS",
++    }
++
++
++def test_old_test_candidate_remains_reproducible_but_is_not_final():
++    old = build_current_source_health_policy(health_anchor_margin_seconds=0)
++    assert old.artifact_id == (
++        "SourceHealthPolicy:v1:sha256:"
++        "6b16ae4496a5d87679045daa88b9a32f5059782febf2019e6a8edf6076118157")
++    assert old.artifact_id != final_source_health_policy().artifact_id
++    with pytest.raises(DeviceFingerprintValidationError):
++        make_task01_health_retention_contract(
++            old, retained_evidence_horizon_seconds=2_592_000,
++            retained_health_horizon_seconds=2_592_600,
++        )
++
++
++def test_ninety_day_horizon_is_exact_and_insufficient_history_fails_closed():
++    policy = final_source_health_policy()
++    contract = make_task01_health_retention_contract(
++        policy, retained_evidence_horizon_seconds=7_776_000,
++        retained_health_horizon_seconds=7_776_600,
++    )
++    assert contract.semantic_payload["retained_evidence_horizon_seconds"] == 7_776_000
++    assert contract.semantic_payload["retained_health_horizon_seconds"] == 7_776_600
++    for health_horizon in (7_776_599, 7_776_601):
++        with pytest.raises(DeviceFingerprintValidationError):
++            make_task01_health_retention_contract(
++                policy, retained_evidence_horizon_seconds=7_776_000,
++                retained_health_horizon_seconds=health_horizon,
++            )
++
++
++@pytest.mark.parametrize("required,preserved,expected", [
++    (0, 600, True), (180, 600, True), (600, 600, True), (601, 600, False),
++])
++def test_future_activation_margin_is_bounded_by_preserved_history(required, preserved, expected):
++    assert activation_margin_compatible(required, preserved) is expected
++
++
++@pytest.mark.parametrize("required,preserved", [(-1, 600), (600, -1), (True, 600),
++                                                (600, 2**63)])
++def test_activation_margin_invalid_inputs_fail_closed(required, preserved):
++    with pytest.raises(DeviceFingerprintValidationError):
++        activation_margin_compatible(required, preserved)
+diff --git a/tests/device_fingerprint/test_repository.py b/tests/device_fingerprint/test_repository.py
+index 2223079fe6c903b7795f53e08af2222a0d3a339a..165dd1c692f432f767a098ee387e7e7743187693 100644
+--- a/tests/device_fingerprint/test_repository.py
++++ b/tests/device_fingerprint/test_repository.py
+@@ -43,7 +43,8 @@ def test_schema_v2_exact_tables_indexes_pragmas_and_read_only(tmp_path):
+     assert (constants.BUSY_TIMEOUT_MS, constants.WAL_AUTOCHECKPOINT_PAGES,
+             constants.JOURNAL_SIZE_LIMIT_BYTES, constants.RETENTION_DELETE_CHUNK_ROWS,
+             constants.MAX_RETENTION_CHUNKS_PER_PASS,
+-            constants.SOURCE_HEALTH_RETENTION_DAYS) == (500, 1000, 67_108_864, 500, 20, 30)
++            constants.SOURCE_HEALTH_RETENTION_DAYS,
++            constants.SOURCE_HEALTH_RETENTION_MARGIN_SECONDS) == (500, 1000, 67_108_864, 500, 20, 30, 600)
+     cfg, repo = initialized(tmp_path)
+     connection = repo.connection
+     assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+diff --git a/tests/device_fingerprint_fb3/__init__.py b/tests/device_fingerprint_fb3/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfbbb25f4f7379d303841b9908946a034680c51c
+--- /dev/null
++++ b/tests/device_fingerprint_fb3/__init__.py
+@@ -0,0 +1 @@
++"""F-B3 disposable retention tests."""
+diff --git a/tests/device_fingerprint_fb3/test_proof.py b/tests/device_fingerprint_fb3/test_proof.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..912e99f18da08f215a6daa257aaa581820ca7086
+--- /dev/null
++++ b/tests/device_fingerprint_fb3/test_proof.py
+@@ -0,0 +1,28 @@
++"""Real Task-01 cleanup boundary proof at two configured retention lengths."""
++
++from datetime import timedelta
++
++import pytest
++
++from app.device_fingerprint.validation import parse_utc
++from research.device_fingerprint_fb3.proof import run_f_b3_proof
++
++
++@pytest.mark.parametrize("days", [30, 90])
++def test_repository_retains_exact_predecessor_and_deletes_older_rows(tmp_path, days):
++    report = run_f_b3_proof(tmp_path, evidence_retention_days=days)
++    assert report["derived_health_anchor_margin_seconds"] == 600
++    assert report["max_family_freshness_seconds"] == 600
++    assert report["clock_uncertainty_seconds"] == 0
++    assert report["evidence_retention_days"] == days
++    assert report["evidence_retention_seconds"] == days * 86_400
++    assert report["source_health_retention_seconds"] == days * 86_400 + 600
++    assert parse_utc(report["evidence_cutoff"]) - parse_utc(report["health_cutoff"]) == (
++        timedelta(seconds=600))
++    assert report["oldest_evidence_retained"] is True
++    assert report["required_predecessor_retained"] is True
++    assert report["older_health_row_deleted"] is True
++    assert report["older_evidence_row_deleted"] is True
++    assert report["cleanup_parses_binding_timeline"] is False
++    assert report["activation_600_with_600"] is True
++    assert report["activation_601_with_600"] is False

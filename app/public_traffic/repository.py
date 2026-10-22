@@ -352,9 +352,29 @@ class PublicTrafficRepository:
         retired_completed: bool,
         now_utc: str,
         source_checkpoint: str | None,
+        stable_retired_eof: Callable[[], bool] | None = None,
     ) -> None:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if stable_retired_eof is not None and retired_completed:
+                # Never authorize this from the reader's scan-time snapshot.
+                # Serialize the seven-field comparison with every other writer.
+                current = connection.execute(
+                    """
+                    SELECT source_identity, source_path, source_offset,
+                           source_checkpoint, last_observed_size,
+                           retired_completed, missing_warning_emitted
+                    FROM reader_state WHERE source_identity = ?
+                    """,
+                    (source_identity,),
+                ).fetchone()
+                expected = (
+                    source_identity, source_path, source_offset,
+                    source_checkpoint, observed_size, 1, 0,
+                )
+                if current == expected and stable_retired_eof() is True:
+                    connection.commit()
+                    return
             self._upsert_reader_state(
                 connection,
                 source_identity=source_identity,

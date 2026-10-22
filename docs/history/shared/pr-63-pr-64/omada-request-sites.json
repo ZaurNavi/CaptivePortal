@@ -1,0 +1,134 @@
+[
+  {
+    "file": "app/controllers/omada.py",
+    "original_line": 50,
+    "new_line": 279,
+    "function": "_request_token_uncached",
+    "method": "POST",
+    "url_expression": "f'{self._omada_url}/openapi/authorize/token?grant_type=client_credentials'",
+    "timeout": "(5, 10)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada.py",
+    "original_line": 267,
+    "new_line": 498,
+    "function": "get_sites",
+    "method": "GET",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites?page=1&pageSize=100'",
+    "timeout": "(5, 10)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada.py",
+    "original_line": 310,
+    "new_line": 544,
+    "function": "get_clients",
+    "method": "GET",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id.strip()}/clients'",
+    "timeout": "(5, 10)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada.py",
+    "original_line": 639,
+    "new_line": 872,
+    "function": "authorize",
+    "method": "POST",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id}/hotspot/clients/{client_mac}/auth'",
+    "timeout": "(5, 10)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada.py",
+    "original_line": 694,
+    "new_line": 926,
+    "function": "unauthorize",
+    "method": "POST",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id}/hotspot/clients/{client_mac}/unauth'",
+    "timeout": "(5, 10)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada.py",
+    "original_line": 755,
+    "new_line": 986,
+    "function": "get_client",
+    "method": "GET",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id}/clients/{client_mac}'",
+    "timeout": "(5, 10)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada.py",
+    "original_line": 904,
+    "new_line": 1134,
+    "function": "get_client_snapshot",
+    "method": "GET",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id.strip()}/clients/{endpoint_mac}'",
+    "timeout": "(request_timeout, request_timeout)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada_pending_sessions.py",
+    "original_line": 178,
+    "new_line": 178,
+    "function": "list_active_clients",
+    "method": "GET",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id.strip()}/clients'",
+    "timeout": "(timeout, timeout)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada_pending_sessions.py",
+    "original_line": 287,
+    "new_line": 286,
+    "function": "get_pending_client_state",
+    "method": "GET",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id.strip()}/clients/{endpoint_mac}'",
+    "timeout": "(timeout, timeout)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada_pending_sessions.py",
+    "original_line": 372,
+    "new_line": 370,
+    "function": "reconnect_client",
+    "method": "POST",
+    "url_expression": "f'{self._omada_url}/openapi/v1/{self._omada_id}/sites/{site_id.strip()}/clients/{endpoint_mac}/reconnect'",
+    "timeout": "(timeout, timeout)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada_observations.py",
+    "original_line": 131,
+    "new_line": 131,
+    "function": "_request_page",
+    "method": "GET",
+    "url_expression": "f'{provider._omada_url}/openapi/v1/{provider._omada_id}/sites/{site_id}/clients'",
+    "timeout": "(timeout, timeout)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  },
+  {
+    "file": "app/controllers/omada_observations.py",
+    "original_line": 420,
+    "new_line": 419,
+    "function": "_request_observation_result",
+    "method": "GET",
+    "url_expression": "url",
+    "timeout": "(timeout, timeout)",
+    "payload_headers_params_timeout_preserved_ast": true,
+    "transport": "OmadaProvider._request -> _OmadaVerifiedTransport.request"
+  }
+]

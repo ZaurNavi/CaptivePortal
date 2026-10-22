@@ -31,11 +31,21 @@ class NetworkMetadataProjectionService:
         self._retry_counts = dict.fromkeys(RETRY_COUNTER_FIELDS, 0)
         self._authority_failed_in_batch = False
         self._scope_admission = None if not config.enabled else ScopeAdmission(config.scope_admission_json)
+        self._operations_source = self._operations_commit = self._operations_pending = None
+        self._operations_failed = False
+        self._operations_publisher = None
+        try:
+            from .operations_health import HealthPublisher
+            self._operations_publisher = HealthPublisher(db_path=config.db_path)
+        except Exception:
+            pass  # Optional informational output never changes projection.
         if config.telemetry_aggregation_enabled and telemetry is not None:
             telemetry.enable_aggregation(monotonic=monotonic)
             repository.telemetry = telemetry
 
     def emit(self, event, **fields):
+        if event in {"projection_conflict", "projection_unavailable", "source_unavailable"}:
+            self._operations_failed = True
         if self.telemetry is not None:
             self.telemetry.emit(event, **fields)
 
@@ -71,6 +81,11 @@ class NetworkMetadataProjectionService:
 
     def _emit_retry_counters(self):
         pending, age = self.repository.pending_metrics()
+        try:
+            if self._operations_publisher is not None and self._operations_publisher.enabled:
+                self._operations_pending = pending, timestamp(self.repository.clock()), self.monotonic()
+        except Exception:
+            self._operations_pending = None
         values = dict(self._retry_counts)
         values.update(pending_attribution_count=min(MAX_COUNTER, pending),
                       pending_oldest_age_seconds=min(MAX_COUNTER, age))
@@ -290,6 +305,7 @@ class NetworkMetadataProjectionService:
                     if self.stop_event.is_set():
                         return ()
                     self.repository.commit_dispositions(prepared, evaluations, self.run_id, checkpoint={"after": after})
+                    self._operations_source_confirmed()
                     self.emit("batch_committed", count=len(prepared))
                     if self.repository.live_state.startswith("capacity_"):
                         self.emit("projection_unavailable", reason_code=self.repository.live_reason)
@@ -299,6 +315,7 @@ class NetworkMetadataProjectionService:
             else:
                 with self.repository.transaction():
                     self.repository.success_state(source_verified=True, last_source_poll_at=timestamp(self.repository.clock()))
+            self._operations_source_confirmed()
             if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
                 self.telemetry.observe_success(idle_poll_count=1)
         except NetworkMetadataProjectionScopeUntrusted:
@@ -333,6 +350,46 @@ class NetworkMetadataProjectionService:
         if not (unchanged and fresh and elapsed is not None and 0 <= elapsed < 10):
             with repo.transaction():
                 repo.success_state(source_verified=True, last_source_poll_at=timestamp(now))
+
+    def _operations_source_confirmed(self):
+        """Observe an ALREADY successful poll/commit; no extra query or write."""
+        try:
+            if self._operations_publisher is None or not self._operations_publisher.enabled:
+                return
+            at, tick = timestamp(self.repository.clock()), self.monotonic()
+            self._operations_source = at, tick
+            committed = (self.repository.last_durable_source_poll_at
+                if self.config.idle_write_reduction_enabled else at)
+            if committed is not None:
+                self._operations_commit = committed
+            self._operations_failed = False
+        except Exception:
+            self._operations_source = self._operations_commit = None
+
+    def _publish_operations_health(self):
+        try:
+            from app.operations_health import ni02_health
+            from app.device_fingerprint_sensor.operations_metadata import stamp, MAXIMUM
+            publisher = self._operations_publisher
+            if publisher is None or not publisher.enabled or self.stop_event.is_set():
+                return
+            tick = self.monotonic()
+            recent = self._operations_source is not None and 0 <= tick-self._operations_source[1] <= 30
+            pending = self._operations_pending
+            if pending is not None and not 0 <= tick-pending[2] <= 180:
+                pending = None
+            count = min(MAXIMUM,pending[0]) if pending is not None and type(pending[0]) is int and pending[0] >= 0 else None
+            state = "degraded" if self._operations_failed and self.repository.live_state == "usable" else self.repository.live_state
+            commit_age = None if self._operations_commit is None else (self.repository.clock()-ni_timestamp(self._operations_commit,canonical=True)).total_seconds()
+            value = ni02_health(state,dict(source=recent,writer=self.run_id is not None and commit_age is not None and 0 <= commit_age <= 180,
+                attribution=self.repository.attribution_read_state == "available",registry=state == "usable",pending=count is not None),count)
+            if state == "usable" and not recent:
+                value.update(state="unknown",reason="source_poll_stale")
+            def converted(value):return None if value is None else stamp(ni_timestamp(value,canonical=True))
+            publisher.publish(value,dict(source_confirmed_at=converted(self._operations_source[0]) if self._operations_source else None,
+                writer_committed_at=converted(self._operations_commit),pending_observed_at=converted(pending[1]) if count is not None else None),self.stop_event)
+        except Exception:
+            pass  # No report-driven retries, telemetry changes, DB fallback or worker failure.
 
     def retry(self):
         selected = self.repository.pending()
@@ -428,6 +485,7 @@ class NetworkMetadataProjectionService:
         try:
             while not self.stop_event.is_set():
                 self.tick()
+                self._publish_operations_health()
                 if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
                     self.telemetry.flush_due()
                 self.stop_event.wait(self.config.poll_interval_seconds)

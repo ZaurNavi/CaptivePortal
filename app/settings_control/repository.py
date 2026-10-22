@@ -1,6 +1,7 @@
 """SQLite-only SettingsStore: bounded connections, immutable history, one writer."""
 import json
 import sqlite3
+from app.operations_verification import startup_check
 from pathlib import Path
 from contextlib import contextmanager
 from .definitions import SettingsDefinitionRegistry
@@ -179,6 +180,8 @@ class SettingsRepository:
             if connection is not None:
                 connection.close()
 
+    @startup_check('settings',lambda self:self.db_path,
+        ('schema_version','schema_signature','quick_check','foreign_key_check'),failures=(SettingsError,))
     def initialize(self):
         with self.transaction(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]

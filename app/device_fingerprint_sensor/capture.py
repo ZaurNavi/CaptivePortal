@@ -13,8 +13,8 @@ from typing import Callable
 
 from app.device_fingerprint.validation import format_utc
 
-from .capture_filter import attach_frozen_filter
-from .models import SensorPreflightError
+from .capture_filter import attach_frozen_filter, load_deployed_filter, render_raw_capture_filter, DEFAULT_GUEST_CIDRS
+from .models import SensorPreflightError, SensorError
 
 SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)
 RECEIVE_POLL_SECONDS = 1.0
@@ -119,22 +119,28 @@ class InterfacePreflight:
 
 
 class RawCapture:
-    def __init__(self, interface: str, *, socket_factory=socket.socket) -> None:
+    def __init__(self, interface: str, guest_cidrs=DEFAULT_GUEST_CIDRS, *, socket_factory=socket.socket) -> None:
         self.interface = interface
+        self.guest_cidrs = guest_cidrs
         self._socket_factory = socket_factory
         self.socket: socket.socket | None = None
 
     def open(self) -> None:
+        if self.socket is not None:
+            raise SensorError("raw capture is already open")
+        expected = render_raw_capture_filter(self.guest_cidrs)
+        if load_deployed_filter(self.guest_cidrs) != expected:
+            raise SensorError("raw capture filter artifact is invalid")
         raw = self._socket_factory(
             socket.AF_PACKET,
             socket.SOCK_RAW,
-            socket.htons(0x0003),
+            0,  # AF_PACKET protocol 0 cannot receive until the filtered bind.
         )
         try:
             raw.settimeout(RECEIVE_POLL_SECONDS)
             raw.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
-            attach_frozen_filter(raw)
-            raw.bind((self.interface, 0))
+            attach_frozen_filter(raw, self.guest_cidrs)
+            raw.bind((self.interface, 0x0003))  # Python converts sll_protocol to network order.
         except Exception:
             raw.close()
             raise

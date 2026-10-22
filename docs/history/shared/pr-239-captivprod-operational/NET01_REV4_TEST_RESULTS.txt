@@ -1,0 +1,77 @@
+NET01 REV4 Offline validation — 2026-10-14
+mode=DISPOSABLE_MOCKS_AND_SYNTHETIC_SYSTEMD_NO_PRODUCTION_ACCESS
+
+Bash syntax:
+PASS bash -n firewall/net01-clear-hold-review-only.sh
+PASS bash -n firewall/net01-clear-maintenance-review-only.sh
+PASS bash -n firewall/net01-fw-install.sh
+PASS bash -n firewall/net01-fw-rollback.sh
+PASS bash -n firewall/net01-maintenance-enter.sh
+PASS bash -n firewall/net01-start-admit.sh
+PASS bash -n tests/test_systemd_verify_offline.sh
+
+Python syntax:
+PASS py_compile firewall/net01-hold-and-stop.py
+PASS py_compile firewall/net01-maintenance-state.py
+PASS py_compile firewall/net01-mark-hold.py
+PASS py_compile firewall/net01-marker-unlink.py
+PASS py_compile firewall/net01-quiescent.py
+PASS py_compile firewall/net01-runtime-watchdog.py
+PASS py_compile firewall/net01-verify.py
+PASS py_compile tests/rev4_fixture.py
+PASS py_compile tests/test_guard_offline.py
+PASS py_compile tests/test_identity_offline.py
+PASS py_compile tests/test_rev3_emergency_offline.py
+PASS py_compile tests/test_rev3_rollback_offline.py
+PASS py_compile tests/test_rev4_guard_latches.py
+PASS py_compile tests/test_rev4_negative_offline.py
+PASS py_compile tests/test_runtime_offline.py
+
+Synthetic systemd syntax:
+OFFLINE_SYSTEMD_ANALYZE_VERIFY=PASS root_fixture=YES running_systemd_test=NO
+
+Complete offline fixtures (pytest -q -s):
+NET01_WATCHDOG_INITIAL_HOLD=initial-docker-unavailable
+FIREWALL_FAIL_CLOSED=PASS
+PASS baseline
+HOLD_AS_EXPECTED ipv4_extra_i
+HOLD_AS_EXPECTED ipv4_extra_s
+HOLD_AS_EXPECTED ipv4_extra_d
+HOLD_AS_EXPECTED ipv4_inverted_match
+HOLD_AS_EXPECTED ipv6_extra_loopback_source
+HOLD_AS_EXPECTED ipv6_extra_interface
+HOLD_AS_EXPECTED ipv6_inverted_match
+HOLD_AS_EXPECTED ipv4_reordered_input
+HOLD_AS_EXPECTED ipv6_reordered_input
+HOLD_AS_EXPECTED missing_terminal_reject
+HOLD_AS_EXPECTED extra_allow
+HOLD_AS_EXPECTED extra_chain_allow_match
+HOLD_AS_EXPECTED extra_ipv4_hook
+HOLD_AS_EXPECTED extra_tcp_module_ipv4
+HOLD_AS_EXPECTED unknown_extra_condition
+HOLD_AS_EXPECTED extra_external_jump
+OFFLINE_FIREWALL_GUARD_FIXTURES=PASS positive=1 negative=16
+DOCKER_IDENTITY=PASS
+PASS observed_equal_digests
+DOCKER_IDENTITY=PASS
+PASS manifest_and_image_id_can_differ
+HOLD_AS_EXPECTED config_ref_tampered
+HOLD_AS_EXPECTED container_image_id_tampered
+HOLD_AS_EXPECTED local_image_id_tampered
+HOLD_AS_EXPECTED oci_descriptor_tampered
+HOLD_AS_EXPECTED repo_manifest_tampered
+HOLD_AS_EXPECTED endpoint_mac_tampered
+HOLD_AS_EXPECTED extra_bridge_member
+HOLD_AS_EXPECTED bridge_gateway_tampered
+OFFLINE_IDENTITY_FIXTURES=PASS positives=2 negatives=8
+OFFLINE_RUNTIME_WATCHDOG_TESTS=PASS positive=1 negatives=4
+.NET01_RUNTIME_DRIFT=guard-reported-drift
+.NET01_WATCHDOG_NOTIFY_FAILURE
+............NET01_EMERGENCY_HOLD_AND_STOP_CONFIRMED
+..........NET01_GUARD=HOLD: NET01 MAINTENANCE active; no backend startup
+..NET01_GUARD=HOLD: NET01 sticky HOLD marker present; operator action required
+...................................................................
+93 passed in 7.79s
+
+REAL_SYSTEMD_PID1=NOT_TESTED
+PRODUCTION_MODIFICATIONS=NONE

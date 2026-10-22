@@ -11,9 +11,9 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Mapping
 
-MANIFEST_PATH = "/etc/captive-portal/admin-db-services-v1.json"
+MANIFEST_PATH = "/etc/captiveportal/admin-db-services-v1.json"
 MANIFEST_MAX_BYTES = 32768
-APPROVED_ROOTS = ("/opt/CaptivePortal/data", "/var/lib/captivprod-sensor", "/var/lib/captivprod-evidence")
+APPROVED_ROOTS = ("/opt/CaptivePortal/data", "/var/lib/captive-portal/fingerprint-sensor")
 SERVICE_INTENTS = frozenset({"run", "disabled", "maintenance", "unknown"})
 STORE_INTENTS = frozenset({"expected", "optional_disabled", "unknown"})
 
@@ -57,7 +57,7 @@ STORES = (
     Store("observations", "observations.sqlite3", "Observations", "Historical client and AP observations", ("observation_foundation",), ("portal_core",), "authoritative", ("traffic_projection",)),
     Store("current_state", "current_state.sqlite3", "Current State", "Current and recent materialized snapshots", ("current_state",), ("portal_core",), "materialized_snapshot"),
     Store("traffic_projection", "traffic_projection.sqlite3", "Traffic Projection", "Derived historical traffic", ("traffic_projection",), ("traffic_projection",), "derived"),
-    Store("fingerprint_evidence", "evidence.sqlite3", "Fingerprint Evidence", "Normalized evidence and source health", ("fingerprint_evidence",), ("fingerprint_evidence",), "authoritative", ("fingerprint_classification",)),
+    Store("fingerprint_evidence", "device_fingerprint_evidence.sqlite3", "Fingerprint Evidence", "Normalized evidence and source health", ("fingerprint_evidence",), ("fingerprint_evidence",), "authoritative", ("fingerprint_classification",)),
     Store("fingerprint_classification", "device_fingerprint_classification.sqlite3", "Fingerprint Classification", "Persisted classification output", ("fingerprint_classification",), ("fingerprint_classification",), "materialized_snapshot"),
     Store("fingerprint_control_plane", "device_fingerprint_control_plane.sqlite3", "Fingerprint Control Plane", "Protected admission and activation configuration", ("fingerprint_control_plane",), (), "configuration", ("fingerprint_classification",)),
     Store("fingerprint_integration", "device_fingerprint_integration.sqlite3", "Fingerprint Integration", "Durable post-auth integration jobs and links", ("fingerprint_integration_submitter", "fingerprint_integration_worker"), ("portal_core", "fingerprint_classification"), "durable_queue", ("fingerprint_classification",)),
@@ -209,7 +209,6 @@ def parse_inventory(raw: bytes) -> Inventory:
             if type(items) is not list or len(items) != len(catalog):
                 raise InventoryUnavailable()
             known = {item.id for item in catalog}
-            filenames = {item.id: item.filename for item in STORES}
             values = {}
             for item in items:
                 expected_keys = {"id", "intent"} | ({"path"} if key == "databases" else set())
@@ -227,17 +226,11 @@ def parse_inventory(raw: bytes) -> Inventory:
                         raise InventoryUnavailable()
                     path = PurePosixPath(value)
                     if (not path.is_absolute() or path.as_posix() != value or ".." in path.parts
-                            or str(path.parent) not in APPROVED_ROOTS
-                            or path.name != filenames[identity]
+                            or (str(path.parent) not in APPROVED_ROOTS and not (
+                                identity == "fingerprint_evidence"
+                                and str(path.parent) == "/opt/CaptivePortal/data/evidence"))
                             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", path.name) is None
                             or value in paths.values()):
-                        raise InventoryUnavailable()
-                    # These three deployment bindings are explicitly attested;
-                    # never silently read a legacy default or a copied DB.
-                    fixed_root = {"fingerprint_evidence": APPROVED_ROOTS[2],
-                                  "network_attribution": APPROVED_ROOTS[1],
-                                  "sensor_spool": APPROVED_ROOTS[1]}.get(identity)
-                    if fixed_root is not None and str(path.parent) != fixed_root:
                         raise InventoryUnavailable()
                     paths[identity] = value
             intents[key] = MappingProxyType(values)

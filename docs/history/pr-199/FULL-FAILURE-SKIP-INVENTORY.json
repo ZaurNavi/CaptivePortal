@@ -1,0 +1,913 @@
+{
+  "candidate_commit": "2097d4b971555bc7f6a747faa6562ef4ac59e02a",
+  "candidate_tree": "a783d1cb3b2f33107ba64878ae5d3d8b80463f38",
+  "full_tests": 6896,
+  "passed": 6674,
+  "failed": 186,
+  "skipped": 36,
+  "errors": 0,
+  "deselected": 0,
+  "seconds": 807.559,
+  "baseline_failed_ids": 186,
+  "failure_set_delta_vs_original_baseline": [],
+  "failure_set_delta_vs_stage_a": [],
+  "skipped_id_and_reason_delta_vs_stage_a": [],
+  "focused_full_cases": 549,
+  "focused_full_failures": 0,
+  "new_stage_b_full_cases": 56,
+  "new_stage_b_full_nonpass": 0,
+  "stage_a_full_cases": 94,
+  "stage_a_full_nonpass": 0,
+  "failures": [
+    {
+      "junit_identity": "tests.network_metadata.test_capacity::test_3000_temporary_observation_capacity",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_conflict_health_owns_new_prefix_and_stops_evaluation[False-source_record_identity_conflict]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_conflict_health_owns_new_prefix_and_stops_evaluation[False-normalizer_determinism_conflict]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_conflict_health_owns_new_prefix_and_stops_evaluation[False-replay_identity_evidence_expired]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_conflict_health_owns_new_prefix_and_stops_evaluation[True-source_record_identity_conflict]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_conflict_health_owns_new_prefix_and_stops_evaluation[True-normalizer_determinism_conflict]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_conflict_health_owns_new_prefix_and_stops_evaluation[True-replay_identity_evidence_expired]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_all_five_crash_boundaries[before_observation_insert]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_all_five_crash_boundaries[after_observation_insert_before_commit]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_all_five_crash_boundaries[before_checkpoint_update]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_all_five_crash_boundaries[after_checkpoint_update_before_commit]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_all_five_crash_boundaries[after_commit]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_partial_health_rolls_back_or_commits_with_entire_batch[before_observation_insert]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_partial_health_rolls_back_or_commits_with_entire_batch[after_observation_insert_before_commit]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_partial_health_rolls_back_or_commits_with_entire_batch[before_checkpoint_update]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_partial_health_rolls_back_or_commits_with_entire_batch[after_checkpoint_update_before_commit]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_final_partial_health_rolls_back_or_commits_with_entire_batch[after_commit]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_block_establishment_rollback_has_no_successful_claim",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_checkpoint_crash::test_expired_event_aggregate_checkpoint_and_health_commit_atomically",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_cli::test_enabled_clean_stop_and_signal_binding",
+      "message": "AssertionError: assert 1 == 0\n +  where 1 = <function main at 0x00000251C573FE20>(['run'])\n +    where <function main at 0x00000251C573FE20> = cli.main"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_cli::test_writer_lock_failure_safe",
+      "message": "ModuleNotFoundError: No module named 'fcntl'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_health_not_per_observation_and_heartbeat",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_fault_transition_source_order_and_clean_interval_recovery",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_newer_then_older_commits_never_regress_health_after_reload",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_replay_output_and_ingest_separation_after_reload[duplicate_noop]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_replay_output_and_ingest_separation_after_reload[source_record_identity_conflict]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_replay_output_and_ingest_separation_after_reload[normalizer_determinism_conflict]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_replay_output_and_ingest_separation_after_reload[replay_identity_evidence_expired]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_expired_filter_advances_output_without_ingested_time",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_all_new_observations_reference_final_partial_batch_health[False-invalid_json]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_all_new_observations_reference_final_partial_batch_health[False-schema_invalid]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_all_new_observations_reference_final_partial_batch_health[True-invalid_json]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_all_new_observations_reference_final_partial_batch_health[True-schema_invalid]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_clean_batch_reuses_health_ref_but_advances_in_memory_watermarks[2]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_clean_batch_reuses_health_ref_but_advances_in_memory_watermarks[100]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_replayed_observation_keeps_original_health_and_all_first_ingest_provenance",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_fault_only_batch_persists_one_final_transition_snapshot[invalid_json]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_fault_only_batch_persists_one_final_transition_snapshot[schema_invalid]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_health::test_fault_only_batch_persists_one_final_transition_snapshot[record_too_large]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_privacy::test_transient_fault_digest_never_retained_or_logged",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_privacy::test_diagnostic_tables_and_fault_errors_exclude_sensitive_values",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_read_service::test_keyset_order_site_isolation_and_privacy",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_read_service::test_family_projection_no_sni[tls]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_read_service::test_family_projection_no_sni[quic]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[invalid_utf8]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[invalid_json]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[duplicate_json_member]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[non_object_json]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[schema_invalid]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[unexpected_family]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[pre_binding_event]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[outside_intended_scope]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[unsupported_address_family_for_scope]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[record_too_large]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[same_raw_non_normalized]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_all_complete_replay_outcomes_obey_source_identity_precedence[expired_non_normalized]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_exact_schema_pragmas_spine_and_provenance",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_second_posix_writer_rejected",
+      "message": "ModuleNotFoundError: No module named 'fcntl'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_duplicate_noop_preserves_all_fields",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_conflicts_are_durable_and_atomic[source_record_identity_conflict]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_conflicts_are_durable_and_atomic[normalizer_determinism_conflict]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_conflicts_are_durable_and_atomic[replay_identity_evidence_expired]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_blocked_cannot_be_closed_in_schema_or_model",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_blocked_startup_consistency_corruption[UPDATE network_metadata_source_generations SET blocked_record_start_byte_offset=1]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_blocked_startup_consistency_corruption[UPDATE network_metadata_checkpoint SET committed_byte_offset=1,continuity_anchor_length=1,continuity_anchor_sha256='0000000000000000000000000000000000000000000000000000000000000000']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_blocked_startup_consistency_corruption[UPDATE network_metadata_checkpoint SET source_generation_id='aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_blocked_startup_consistency_corruption[DELETE FROM network_metadata_checkpoint]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_fault_aggregation_processing_clock_bucket",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_repository::test_bounded_wal_maintenance_with_held_reader",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age0-dns]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age0-tls]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age0-quic]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age1-dns]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age1-tls]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age1-quic]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age2-dns]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age2-tls]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age2-quic]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age3-dns]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age3-tls]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age3-quic]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age4-dns]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age4-tls]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_first_ingest_exact_retention_boundaries[age4-quic]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_never_observed_sensitive_stays_not_observed[dns]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_never_observed_sensitive_stays_not_observed[tls]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_late_never_observed_sensitive_stays_not_observed[quic]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_touched_identity_retention_preserves_proven_disposition[duplicate_noop-15]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_touched_identity_retention_preserves_proven_disposition[duplicate_noop-31]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_touched_identity_retention_preserves_proven_disposition[source_record_identity_conflict-15]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_touched_identity_retention_preserves_proven_disposition[source_record_identity_conflict-31]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_touched_identity_retention_preserves_proven_disposition[normalizer_determinism_conflict-15]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_touched_identity_retention_preserves_proven_disposition[normalizer_determinism_conflict-31]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_touched_identity_retention_preserves_proven_disposition[replay_identity_evidence_expired-15]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_touched_identity_retention_preserves_proven_disposition[replay_identity_evidence_expired-31]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_sensitive_then_core_retention[dns]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_sensitive_then_core_retention[tls]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_sensitive_then_core_retention[quic]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_not_observed_does_not_turn_expired",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_retention::test_block_survives_46_day_diagnostic_expiry_and_restart",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_blocked_restart_never_opens_source_or_resolves[restart]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_blocked_restart_never_opens_source_or_resolves[replacement]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_blocked_restart_never_opens_source_or_resolves[boot]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_blocked_restart_never_opens_source_or_resolves[binding]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_blocked_restart_never_opens_source_or_resolves[missing]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_blocked_restart_never_opens_source_or_resolves[retention]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_absent_alive_then_append",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_live_rotation_drains_tail_without_raw_persistence",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_binding_cutover_has_no_rewind",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_reboot_closes_old_generation_before_source_inspection[valid]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_reboot_closes_old_generation_before_source_inspection[absent]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_reboot_closes_old_generation_before_source_inspection[nonregular]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_reboot_closes_old_generation_before_source_inspection[stat]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_reboot_closes_old_generation_before_source_inspection[open]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_disappears_and_same_inode_returns",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_runtime_storage_rollback_then_recovery",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_runnable_restart_source_transitions[replacement-source_replaced_while_reader_down]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_runnable_restart_source_transitions[truncation-observed_truncation]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_runnable_restart_source_transitions[anchor-continuity_anchor_mismatch]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_runnable_restart_source_transitions[boot-host_reboot_source_lost]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_oversized_tail_closes_once_without_oversized_fault",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_oversized_terminated_dedicated_checkpoint",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_unavailable_preserves_checkpoint_and_safe_health[nonregular]",
+      "message": "PermissionError: [WinError 32] The process cannot access the file because it is being used by another process: 'C:\\\\CaptivPortal-Lab\\\\tmp\\\\partial-coverage-stage-b-full\\\\test_source_unavailable_preser0\\\\source.jsonl' -> 'C:\\\\CaptivPortal-Lab\\\\tmp\\\\partial-coverage-stage-b-full\\\\test_source_unavailable_preser0\\\\held-source'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_unavailable_preserves_checkpoint_and_safe_health[fstat]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_unavailable_preserves_checkpoint_and_safe_health[read]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_pending_reboot_gap_survives_absence_and_restart[False]",
+      "message": "PermissionError: [WinError 32] The process cannot access the file because it is being used by another process: 'C:\\\\CaptivPortal-Lab\\\\tmp\\\\partial-coverage-stage-b-full\\\\test_pending_reboot_gap_surviv0\\\\source.jsonl'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_pending_reboot_gap_survives_absence_and_restart[True]",
+      "message": "PermissionError: [WinError 32] The process cannot access the file because it is being used by another process: 'C:\\\\CaptivPortal-Lab\\\\tmp\\\\partial-coverage-stage-b-full\\\\test_pending_reboot_gap_surviv1\\\\source.jsonl'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_first_source_and_clean_live_rotation_have_no_gap",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_partial_restart_preserved_until_clean_heartbeat[False]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_partial_restart_preserved_until_clean_heartbeat[True]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_continuity_gap_partial_preserved_on_same_generation_restart",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_100_timestamp_only_batches_then_exact_heartbeat",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_anchor_failure_is_not_sqlite_failure[resume]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_anchor_failure_is_not_sqlite_failure[cutover]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_anchor_failure_is_not_sqlite_failure[ingest_anchor]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_failure_keeps_heartbeat_and_due_retention[dns]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_failure_keeps_heartbeat_and_due_retention[tls]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_source_failure_keeps_heartbeat_and_due_retention[quic]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_real_sqlite_transaction_failure_remains_storage_failure",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[live_rotation-source_rotated_live-False-False]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[live_rotation-source_rotated_live-False-True]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[running_truncation-observed_truncation-True-False]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[running_truncation-observed_truncation-True-True]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[running_anchor-continuity_anchor_mismatch-True-False]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[running_anchor-continuity_anchor_mismatch-True-True]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[down_replacement-source_replaced_while_reader_down-True-False]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[down_replacement-source_replaced_while_reader_down-True-True]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[down_truncation-observed_truncation-True-False]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_terminal_discontinuity_closes_before_failed_open_and_recovers[down_truncation-observed_truncation-True-True]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_same_identity_open_failure_before_anchor_preserves_authority",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_reader_down_anchor_mismatch_one_open_one_atomic_transition[False]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_reader_down_anchor_mismatch_one_open_one_atomic_transition[True]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_close_transaction_failure_retains_owned_old_reader",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_absent_path_pauses_unread_records_then_full_reappearance_decision[same]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_absent_path_pauses_unread_records_then_full_reappearance_decision[different]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_absent_path_pauses_unread_records_then_full_reappearance_decision[truncated]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_absent_path_pauses_unread_records_then_full_reappearance_decision[anchor]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_canonical_absence_keeps_heartbeat_retention_and_wal[dns]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_canonical_absence_keeps_heartbeat_retention_and_wal[tls]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_service::test_canonical_absence_keeps_heartbeat_retention_and_wal[quic]",
+      "message": "AttributeError: module 'os' has no attribute 'O_NONBLOCK'"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_source::test_reader_append_partial_and_crlf",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_source::test_oversize_discard_and_final_tail_bounded",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_source::test_prefix_before_oversize_dedicated_batch",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_source::test_reader_restart_checkpoint_and_anchor",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata.test_source::test_discard_hash_streams_across_bounded_polls_without_retaining_tail",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_exact_source_record_batch_offset_zero_and_retention",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[PRAGMA user_version=2]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[CREATE TABLE extra(value)]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[DELETE FROM network_metadata_sensitive_endpoints]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[UPDATE network_metadata_capture_scope_bindings SET ipv4_cidrs_json='[\"10.74.0.0/24\"]']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[UPDATE network_metadata_observations SET source_event_identity='bad']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[UPDATE network_metadata_observations SET event_at='2026-10-07T12:00:00.123Z']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[UPDATE network_metadata_observations SET site_id='ffffffffffffffffffffffff']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[UPDATE network_metadata_source_generations SET logical_source_id='other-source']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[DELETE FROM network_metadata_capture_scope_bindings]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[DELETE FROM network_metadata_source_health]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[DELETE FROM network_metadata_ingest_runs]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[UPDATE network_metadata_source_health SET source_generation_id=NULL]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[UPDATE network_metadata_source_health SET capture_source_id='different-source']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_untrusted_source_fails_without_mutation[UPDATE network_metadata_ingest_runs SET normalizer_version='different-version']",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_source_connections_read_only_and_no_raw_payload_tables[list_source_generations]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_source_connections_read_only_and_no_raw_payload_tables[read_projection_batch]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_source_connections_read_only_and_no_raw_payload_tables[get_projection_source_record]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_source_connections_read_only_and_no_raw_payload_tables[get_source_progress]",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_not_observed_does_not_reconstruct_endpoints",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_projection_source::test_source_generation_order_is_opened_time_then_identity",
+      "message": "AttributeError: module 'os' has no attribute 'pread'. Did you mean: 'read'?"
+    }
+  ],
+  "skips": [
+    {
+      "junit_identity": "tests.analytics.test_api_performance::test_168_hourly_buckets_250_authenticated_requests_p95_under_100ms",
+      "reason": "opt-in Analytics HTTP performance benchmark"
+    },
+    {
+      "junit_identity": "tests.current_state.test_repository::test_target_symlink_rejected",
+      "reason": "symlink creation is unavailable"
+    },
+    {
+      "junit_identity": "tests.current_state.test_repository::test_symlink_parent_rejected",
+      "reason": "symlink creation is unavailable"
+    },
+    {
+      "junit_identity": "tests.current_state.test_repository::test_publicly_accessible_parent_is_rejected",
+      "reason": "POSIX parent mode contract"
+    },
+    {
+      "junit_identity": "tests.current_state.test_repository::test_database_and_sidecars_use_0640",
+      "reason": "POSIX mode contract"
+    },
+    {
+      "junit_identity": "tests.integrations.omada.test_webhook_backfill::test_backfill_output_mode_is_0640",
+      "reason": "POSIX file mode only"
+    },
+    {
+      "junit_identity": "tests.integrations.omada.test_webhook_normalizer::test_normalized_journal_mode_is_0640",
+      "reason": "POSIX file mode only"
+    },
+    {
+      "junit_identity": "tests.integrations.omada.test_webhook_receiver::test_journal_file_mode_is_0640_on_posix",
+      "reason": "POSIX file mode only"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_capacity_config::test_held_reader_pressure_defers_checkpoint_then_recovers",
+      "reason": "Mandatory Linux writer/WAL proof"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_capacity_config::test_post_commit_pressure_keeps_durable_disposition_and_auto_recovers",
+      "reason": "Mandatory Linux post-commit capacity proof"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_capacity_config::test_maximum_256_observation_transaction_growth_under_fixed_headroom[False]",
+      "reason": "Mandatory Linux fixed 16 MiB growth proof"
+    },
+    {
+      "junit_identity": "tests.network_metadata_projection.test_capacity_config::test_maximum_256_observation_transaction_growth_under_fixed_headroom[True]",
+      "reason": "Mandatory Linux fixed 16 MiB growth proof"
+    },
+    {
+      "junit_identity": "tests.observations.test_repository::test_database_uses_0640_on_posix",
+      "reason": "POSIX file mode only"
+    },
+    {
+      "junit_identity": "tests.settings_control.test_controller_secret_crypto::test_opened_object_nofollow_no_repairs",
+      "reason": "Linux no-follow boundary"
+    },
+    {
+      "junit_identity": "tests.settings_control.test_secret_recovery::test_default_recovery_identity_ignores_spoofed_environment",
+      "reason": "Linux effective UID identity"
+    },
+    {
+      "junit_identity": "tests.visit_lifecycle.test_repository::test_visit_database_uses_0640_on_posix",
+      "reason": "POSIX file mode contract"
+    },
+    {
+      "junit_identity": "tests.visit_lifecycle.test_repository::test_existing_database_symlink_is_rejected",
+      "reason": "POSIX symlink contract"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_approved_missing_parent_is_created_with_0750",
+      "reason": "POSIX directory mode only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_existing_registry_parent_requires_private_posix_mode[511-False]",
+      "reason": "POSIX directory mode only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_existing_registry_parent_requires_private_posix_mode[493-False]",
+      "reason": "POSIX directory mode only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_existing_registry_parent_requires_private_posix_mode[488-True]",
+      "reason": "POSIX directory mode only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_existing_registry_parent_requires_private_posix_mode[448-True]",
+      "reason": "POSIX directory mode only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_existing_database_symlink_is_rejected[temporary]",
+      "reason": "POSIX symlink only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_existing_database_symlink_is_rejected[public_tree]",
+      "reason": "POSIX symlink only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_existing_database_fifo_is_rejected",
+      "reason": "POSIX FIFO only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_registry_database_uses_0640_on_posix",
+      "reason": "POSIX file mode only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_registry_parent_blocks_other_access_to_database_wal_and_shm",
+      "reason": "POSIX file mode only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_directory_source_candidate_is_ignored_without_scan_failure",
+      "reason": "POSIX source types only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_fifo_source_candidate_does_not_block_and_is_ignored",
+      "reason": "POSIX FIFO only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_unix_socket_source_candidate_is_ignored",
+      "reason": "Unix socket only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_device_source_candidate_is_ignored",
+      "reason": "POSIX device only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_cli_status_rejects_fifo_without_blocking",
+      "reason": "POSIX FIFO only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_cli_status_rejects_database_symlink[dangling]",
+      "reason": "POSIX symlink only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_device_registry::test_cli_status_rejects_database_symlink[directory]",
+      "reason": "POSIX symlink only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_snapshot_writer::test_writer_uses_0640_on_posix",
+      "reason": "POSIX file mode only"
+    },
+    {
+      "junit_identity": "tests.visitor_registry.test_snapshot_writer::test_writer_restores_0640_after_rotation",
+      "reason": "POSIX file mode only"
+    }
+  ]
+}

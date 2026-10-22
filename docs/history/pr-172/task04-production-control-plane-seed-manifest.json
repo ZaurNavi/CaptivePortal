@@ -1,0 +1,27 @@
+﻿{
+    "manifest_version":  1,
+    "generated_at_utc":  "2026-10-03T11:29:32.3447610Z",
+    "source_control_db":  "C:\\CaptivPortal-Lab\\foundation-control-plane\\device-fingerprint-control-plane.sqlite3",
+    "source_control_db_sha256":  "76e6d233f7a2e18a7e4f32548753501277465e73e153f0c75b72f2bcae22c038",
+    "taccept_lock":  "C:\\CaptivPortal-Lab\\official-runs\\task04\\taccept\\official-run-20261003T072401Z-TACCEPT-A1-R6-01\\taccept-lock.json",
+    "taccept_lock_sha256":  "cf23d5f1b52581bab096e13c9c12e18722feca3297ab79f1f6955a90d4e39d12",
+    "taccept_lock_control_db_sha256_after":  "76e6d233f7a2e18a7e4f32548753501277465e73e153f0c75b72f2bcae22c038",
+    "seed_db":  "C:\\CaptivPortal-Lab\\artifacts\\TASK04-PROD-ACTIVATION-SEED-20261003T112931Z\\task04-production-control-plane-seed.sqlite3",
+    "seed_db_sha256":  "091334a08bde5099c26c5f53252fb83d656f9c71b8ee28f4b0a03db46483ba28",
+    "seed_byte_identical_to_source":  false,
+    "quick_check":  "ok",
+    "foundation_pointer_count":  1,
+    "foundation_runtime_profile_id":  "FoundationRuntimeProfile:v1:sha256:9287f48e01426a0440c06644821ebbbdf8f052f08d930968748f3bf6c3e9f4d5",
+    "classification_pointer_count":  0,
+    "classification_active":  false,
+    "required_artifacts":  [
+                               "ClassificationRuntimeProfile:v1:sha256:1d3a563e7ce3a8afb2ff259e596328b14f5ff5ce9940db703cbb93b12c2cbf6c",
+                               "Task04AcceptanceManifest:v1:sha256:ca2712fbd643b332594990e67dc95ec017507d2d4d51d61f549d357bad18ca54",
+                               "RuntimeProfileAdmissionManifest:v1:sha256:7873028b2c3a85bf152c9bc4ea057e476591ab87d3c3a52b8cdff654beb8c98b",
+                               "FoundationRuntimeProfile:v1:sha256:9287f48e01426a0440c06644821ebbbdf8f052f08d930968748f3bf6c3e9f4d5",
+                               "RuntimeProfileAdmissionManifest:v1:sha256:95231fa3dee79b8d0b00a4f645664d3d80d3d4b1b6ca48fc4865191d24b12db6",
+                               "FoundationAdmissionManifest:v1:sha256:44f2b26b297c7c126a7b224b8db8f88873893a0cc6819e4e18f6106af00de4ff"
+                           ],
+    "production_activation":  false,
+    "status":  "ACTIVATION_SEED_PREPARED_INACTIVE"
+}

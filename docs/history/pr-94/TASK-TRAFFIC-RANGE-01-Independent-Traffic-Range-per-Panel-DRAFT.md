@@ -1,0 +1,2313 @@
+# TASK-TRAFFIC-RANGE-01 — Independent Traffic Range per Panel — DRAFT
+
+**Project:** CaptivPortal  
+**Area:** Admin Console → Traffic  
+**Type:** orchestration / API request-scope / frontend state separation  
+**Status:** `DRAFT — FOR OWNER + TECH LEAD ARCHITECTURAL REVIEW`  
+**Implementation authorization:** `NOT GRANTED`  
+**Code / PR / merge / deploy / activation:** `NOT AUTHORIZED`  
+**Prepared:** 2026-08-31
+
+---
+
+# 0. Executive decision
+
+This TASK changes only Traffic request orchestration, API projection scope, and frontend range state.
+
+It does **not** change Network Traffic metric semantics.
+
+The following historical Traffic products receive independent `24h | 7d` selectors:
+
+- Network Traffic History
+- Period Statistics
+- Peak Load
+- Traffic by AP
+
+Target state example:
+
+```text
+History          = 24h
+Statistics       = 7d
+Peak Load        = 24h
+Traffic by AP    = 7d
+```
+
+Each panel owns its own:
+
+```text
+selected range
+applied range
+request state
+last successful payload
+error state
+```
+
+Permanent objective:
+
+```text
+a 7d intent for one panel
+MUST NOT automatically require
+all other historical Traffic products to run at 7d
+```
+
+Recommended architecture:
+
+```text
+per-panel range state
+        ↓
+Traffic Historical Request Broker
+        ↓
+existing Traffic Coordinator request lifecycle
+        ↓
+one historical request in flight at a time
+        ↓
+existing /traffic/history endpoint
+with exact product projection
+        ↓
+HistoricalTrafficReadService
+same semantic owner
+```
+
+No timeout/deadline increase.
+
+---
+
+# 1. Current repository baseline
+
+Repository was re-fetched before this DRAFT.
+
+```text
+origin/main =
+8a5c4db899406eeb1f737abe63495247be1ee75a
+
+tree =
+6837dd729dedb0df6414b3f979657a3f6f55d0ab
+```
+
+Current main is:
+
+```text
+Merge PR #93
+TASK-TRAFFIC-05: Traffic by AP
+```
+
+This repository baseline already contains:
+
+```text
+Traffic by AP implementation
+WEB_ADMIN_TRAFFIC_BY_AP_ENABLED
+combined History/Statistics/Peak/AP request model
+```
+
+Before eventual FINAL and again before implementation authorization:
+
+```text
+re-fetch origin/main
+re-pin SHA/tree
+perform impact review
+```
+
+Mandatory impact review if newer main touches:
+
+```text
+app/analytics/**
+app/admin_web/**
+app/observations/**
+app/config.py
+app/settings.py
+```
+
+---
+
+# 2. Production symptom motivating this TASK
+
+Owner reports production after TRAFFIC-05 activation:
+
+```text
+24h:
+History PASS
+Statistics PASS
+Peak PASS
+Traffic by AP PASS
+all APs visible
+```
+
+On shared range switch to `7d`, the current combined persisted History request reaches the existing server-side query deadline and returns:
+
+```text
+503 query_deadline
+```
+
+The service remains healthy.
+
+The browser correctly retains previously accepted data.
+
+This TASK does not reinterpret that 503 as a service crash.
+
+---
+
+# 3. Explicit non-solution
+
+This TASK is **not**:
+
+```text
+increase QueryDeadline
+increase browser timeout
+increase Admin concurrency
+```
+
+The product idea is:
+
+```text
+scope expensive 7d work
+to the panel the user actually asked to inspect
+```
+
+---
+
+# 4. Current implementation facts
+
+Current Traffic page has one shared:
+
+```text
+CaptivPortalTrafficNetworkRange
+```
+
+with:
+
+```text
+24h
+7d
+```
+
+The selector is currently rendered in the Network Traffic History panel.
+
+Statistics, Peak and Traffic by AP consume the same applied History range.
+
+Current backend:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/history
+```
+
+accepts:
+
+```text
+range
+include
+```
+
+Current exact include forms include:
+
+```text
+statistics
+statistics,peak
+aps
+statistics,aps
+statistics,peak,aps
+```
+
+Current route calls `AdminQueryService.historical_traffic_history(...)` once with include flags.
+
+---
+
+# 5. Current semantic owner
+
+Canonical historical semantic owner remains:
+
+```text
+HistoricalTrafficReadService
+```
+
+Current method supports:
+
+```text
+include_period_statistics
+include_peak_load
+include_ap_traffic
+```
+
+TRAFFIC-05 also composes Current AP evidence through:
+
+```text
+CurrentTrafficReadService
+```
+
+No new semantic owner is required by this TASK.
+
+---
+
+# 6. Panels that receive independent range selectors
+
+Exactly these current historical Traffic products receive their own selector:
+
+```text
+Network Traffic History
+Period Statistics
+Peak Load
+Traffic by AP
+```
+
+Each gets:
+
+```text
+24h | 7d
+```
+
+---
+
+# 7. Panel that does NOT receive a selector
+
+`Current Network Throughput` does not receive 24h/7d controls.
+
+Reason:
+
+```text
+it is a Current Traffic product,
+not a selected historical range product
+```
+
+Its refresh lifecycle remains unchanged.
+
+---
+
+# 8. UX placement
+
+Each historical panel places its selector in that panel header:
+
+```text
+[Panel title]                     [24h] [7d]
+```
+
+Example:
+
+```text
+Network Traffic History           [24h] [7d]
+Period Statistics                 [24h] [7d]
+Peak Load                         [24h] [7d]
+Traffic by AP                     [24h] [7d]
+```
+
+No shared page-level historical selector remains visible when independent ranges are active.
+
+---
+
+# 9. Default range
+
+On a fresh Traffic page load:
+
+```text
+History selected = 24h
+Statistics selected = 24h
+Peak selected = 24h
+AP selected = 24h
+```
+
+Default remains `24h` for every historical panel.
+
+---
+
+# 10. Panel state model
+
+Every range-sensitive panel has independent state:
+
+```text
+product_id
+selected_range
+applied_range
+phase
+last_successful_payload
+last_error
+intent_generation
+```
+
+Allowed selected/applied ranges:
+
+```text
+24h
+7d
+```
+
+---
+
+# 11. Panel phases
+
+Recommended machine phases:
+
+```text
+initial
+waiting
+loading
+ready
+error_with_previous
+error_empty
+```
+
+Product payload semantic status remains separate, e.g.:
+
+```text
+ok
+partial
+insufficient_data
+unsupported_population
+```
+
+Request phase and product semantic status must not be merged.
+
+---
+
+# 12. Selected range
+
+`selected_range` means the user's latest desired range for that panel.
+
+Selector `aria-pressed` follows `selected_range`.
+
+Changing one panel's selected range does not mutate another panel.
+
+---
+
+# 13. Applied range
+
+`applied_range` means the range identity of that panel's last successfully accepted payload.
+
+It changes only after:
+
+```text
+safe HTTP 200
++
+valid product DTO
++
+panel intent-generation check
+```
+
+It is never changed merely because the user pressed a button.
+
+---
+
+# 14. Selected/applied mismatch
+
+Example:
+
+```text
+Statistics selected = 7d
+Statistics applied = 24h
+```
+
+This is valid during waiting/loading or after a failed 7d request.
+
+Old statistics remain explicitly labelled:
+
+```text
+Applied range · Last 24 hours
+```
+
+until 7d succeeds.
+
+---
+
+# 15. Initial loading
+
+Before first successful payload:
+
+```text
+selected = 24h
+applied = null
+phase = initial/loading
+```
+
+No fake zero metrics.
+
+---
+
+# 16. Range-switch loading
+
+Example:
+
+```text
+AP applied = 24h
+user selects AP 7d
+```
+
+When the request is actually admitted:
+
+```text
+AP phase = loading
+selected = 7d
+applied = 24h
+```
+
+Previously accepted 24h AP data may remain visible and must remain labelled 24h.
+
+---
+
+# 17. Waiting vs Loading
+
+Because historical requests are serialized:
+
+`waiting` means:
+
+```text
+user selected a range
+but this product's request has not started
+```
+
+`loading` means:
+
+```text
+an actual HTTP request containing this product
+is in flight
+```
+
+Do not show `Loading 7d` while only queued.
+
+---
+
+# 18. Failure with previous data
+
+If requested 7d returns 429/503/network failure and the panel already has accepted 24h data:
+
+```text
+selected = 7d
+applied = 24h
+phase = error_with_previous
+```
+
+UI meaning:
+
+```text
+7d could not be loaded.
+Showing the previously accepted 24h result.
+```
+
+Do not call the old historical result stale unless an existing historical contract defines staleness.
+
+---
+
+# 19. Failure without previous data
+
+If first load fails:
+
+```text
+applied = null
+phase = error_empty
+```
+
+No numeric fabricated result.
+
+Other panels remain usable.
+
+---
+
+# 20. Successful retry
+
+If selected remains 7d and retry succeeds:
+
+```text
+applied = 7d
+phase = ready
+```
+
+Only that panel's payload changes.
+
+---
+
+# 21. Product semantic states remain authoritative
+
+Examples:
+
+```text
+Statistics 7d HTTP 200 / partial
+→ applied Statistics = 7d
+→ show Partial
+
+AP 7d HTTP 200 / unsupported_population
+→ applied AP = 7d
+→ show unsupported_population
+
+History 7d HTTP 200 / insufficient_data
+→ applied History = 7d
+```
+
+HTTP 200 does not imply product `ok`.
+
+---
+
+# 22. Persistence decision
+
+Recommended v1:
+
+```text
+panel range state exists only for the lifetime of the open Traffic page
+```
+
+Do not persist in:
+
+```text
+localStorage
+sessionStorage
+cookies
+server profile
+URL query string
+```
+
+A full page reload resets every historical panel to 24h.
+
+---
+
+# 23. Why no persistence in v1
+
+Remembering 7d could make a later reload automatically recreate expensive 7d work without fresh user intent.
+
+The primary goal is:
+
+```text
+explicit user-controlled expensive work
+```
+
+Therefore v1 does not restore old 7d preferences.
+
+---
+
+# 24. API architecture alternatives
+
+## Option A — four dedicated endpoints
+
+```text
+/traffic/history
+/traffic/statistics
+/traffic/peak
+/traffic/aps
+```
+
+Pros: clear API, strong product isolation.
+
+Cons: duplicated routes and poor same-range coalescing.
+
+## Option B — current `include` only
+
+Pros: minimal backend changes.
+
+Cons: current include contract encodes old coupling; Peak requires Statistics, and AP transport assumes outer History context.
+
+## Option C — RECOMMENDED
+
+Keep the existing endpoint and add explicit product projection:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/history
+?range=<24h|7d>
+&products=<canonical product subset>
+```
+
+This DRAFT selects Option C.
+
+---
+
+# 25. Existing endpoint remains canonical
+
+Keep:
+
+```text
+GET /admin/api/v1/sites/<site_id>/traffic/history
+```
+
+This preserves:
+
+```text
+Site-scoped security
+historical telemetry boundary
+HistoricalTrafficReadService ownership
+```
+
+---
+
+# 26. New `products` parameter
+
+Canonical product identifiers:
+
+```text
+history
+statistics
+peak
+aps
+```
+
+Examples:
+
+```text
+range=7d&products=history
+range=7d&products=statistics
+range=7d&products=peak
+range=7d&products=aps
+range=24h&products=history,peak
+```
+
+---
+
+# 27. Canonical product ordering
+
+Multiple products use fixed order:
+
+```text
+history
+statistics
+peak
+aps
+```
+
+Any non-empty subset in that order is allowed.
+
+Invalid examples:
+
+```text
+peak,history
+aps,statistics
+duplicate token
+unknown token
+empty products
+whitespace variants
+```
+
+→ `400 invalid_request`.
+
+---
+
+# 28. Backward-compatible `include`
+
+Existing `include` forms remain accepted for backward compatibility.
+
+New per-panel frontend uses `products`.
+
+`include` + `products` together:
+
+```text
+400 invalid_request
+```
+
+No silent precedence.
+
+---
+
+# 29. History product projection
+
+`products=history` returns common historical context plus History buckets.
+
+It does not calculate/serialize Period Statistics, Peak Load or Traffic by AP except internal canonical foundation work strictly required by the historical owner.
+
+---
+
+# 30. Statistics product projection
+
+`products=statistics` returns common historical context plus `period_statistics`.
+
+It must not calculate Peak Load temporal products or Traffic by AP.
+
+Unrelated History chart serialization is not required.
+
+---
+
+# 31. Peak product projection
+
+`products=peak` returns common historical context plus `peak_load`.
+
+It must not require the client to request `statistics` in the same HTTP request.
+
+---
+
+# 32. Peak/Statistics request decoupling
+
+Current implementation requires:
+
+```text
+include_peak_load
+requires
+include_period_statistics
+```
+
+This is request orchestration coupling, not permanent metric semantics.
+
+This TASK may remove that request-level dependency while preserving exact existing Peak formulas and identity.
+
+---
+
+# 33. Shared internal Peak-values primitive
+
+Recommended internal refactor:
+
+```text
+accepted canonical Site samples
+        ↓
+shared internal PeakValues primitive
+```
+
+Consumers:
+
+```text
+Period Statistics Peak values
+Peak Load
+```
+
+Statistics-only computes Average + shared PeakValues.
+
+Peak-only computes shared PeakValues + temporal Peak products, without Period Average.
+
+If both are requested, shared PeakValues are computed once.
+
+---
+
+# 34. AP product projection
+
+`products=aps` returns common historical context plus `ap_traffic` and a compact AP bucket-axis context.
+
+It must not calculate Period Statistics, Peak Load, or full Site History chart serialization.
+
+---
+
+# 35. AP aligned-series transport
+
+Current AP encoding:
+
+```text
+outer_history_bucket_aligned_du.v1
+```
+
+must become self-contained for AP-only requests.
+
+This TASK allows a transport-only context extension:
+
+```text
+ap_bucket_axis
+```
+
+without changing `network_traffic_by_ap.v1` metric semantics.
+
+---
+
+# 36. AP bucket-axis contract
+
+Recommended:
+
+```text
+ap_bucket_axis:
+  bucket_count
+  bucket_seconds
+  bucket_start_utc[]
+```
+
+Exact lengths:
+
+```text
+24h → 288
+7d → 672
+```
+
+Every AP series index aligns to the corresponding bucket-axis index.
+
+If History+AP are coalesced, serializer must prove the AP axis matches History bucket starts.
+
+---
+
+# 37. Common historical context
+
+Every successful product-scoped response keeps one canonical:
+
+```text
+range
+coverage
+quality
+```
+
+Only requested product fields appear.
+
+---
+
+# 38. No metric-semantic change
+
+This TASK must not alter:
+
+```text
+History bucket aggregation
+Period Average
+Period Peak
+Peak Load methods/timestamps/ties
+Busiest Bucket
+Busiest 60 Minutes
+Traffic by AP population
+12-AP bound
+unsupported_population
+AP Average
+AP Peak
+AP Coverage
+AP Site-source inheritance
+```
+
+Only request scope and panel orchestration change.
+
+---
+
+# 39. Site isolation remains permanent
+
+Every product-scoped request remains bound to one authorized canonical Site.
+
+Broker must never coalesce across different Site IDs.
+
+---
+
+# 40. Frontend architecture
+
+Introduce a page-local:
+
+```text
+Traffic Historical Request Broker
+```
+
+It is not a semantic owner.
+
+It owns only:
+
+```text
+panel request intents
+same-range coalescing
+pending queue
+mapping response products to panel states
+```
+
+Network lifecycle remains owned by:
+
+```text
+CaptivPortalTrafficCoordinator
+```
+
+---
+
+# 41. Why a broker is required
+
+Four independently registered heavy loaders could create concurrent:
+
+```text
+History 7d
+Statistics 7d
+Peak 7d
+AP 7d
+```
+
+and recreate request storm / 429 / deadline pressure.
+
+The broker prevents this.
+
+---
+
+# 42. Historical request concurrency
+
+Permanent client-side bound:
+
+```text
+maximum historical Traffic HTTP requests in flight
+from one Traffic page
+=
+1
+```
+
+This does not change server Admin concurrency.
+
+Current Network Throughput remains independent.
+
+---
+
+# 43. Broker pending state
+
+Broker keeps latest pending intent per product:
+
+```text
+history
+statistics
+peak
+aps
+```
+
+---
+
+# 44. Same-range coalescing
+
+Pending products with the same range may coalesce.
+
+Example:
+
+```text
+History 24h
+Peak 24h
+```
+
+→
+
+```text
+range=24h&products=history,peak
+```
+
+and:
+
+```text
+Statistics 7d
+AP 7d
+```
+
+→
+
+```text
+range=7d&products=statistics,aps
+```
+
+Requests execute sequentially.
+
+---
+
+# 45. Single-panel intent
+
+If user only changes:
+
+```text
+Traffic by AP
+24h → 7d
+```
+
+exact product request is:
+
+```text
+range=7d&products=aps
+```
+
+No History/Statistics/Peak product projection is requested.
+
+This is the central product requirement.
+
+---
+
+# 46. Initial page load coalescing
+
+Fresh load: all enabled historical panels select 24h.
+
+Broker coalesces them into one request, e.g.:
+
+```text
+range=24h&products=history,statistics,peak,aps
+```
+
+Thus working current 24h initial load remains one combined historical request.
+
+---
+
+# 47. Global Refresh
+
+Global Refresh means:
+
+```text
+refresh every enabled panel
+using that panel's selected range
+```
+
+It does not reset ranges.
+
+Example:
+
+```text
+History 24h
+Statistics 7d
+Peak 24h
+AP 7d
+```
+
+→ queued groups:
+
+```text
+24h → history,peak
+7d → statistics,aps
+```
+
+executed sequentially.
+
+---
+
+# 48. Panel range click
+
+A range button queues only that product with its selected range.
+
+It must not call `refreshAll()`.
+
+---
+
+# 49. Request ordering
+
+Recommended priority:
+
+```text
+1. explicit single-panel user intent
+2. queued global-refresh work
+```
+
+Within same priority: FIFO by first queued time.
+
+Latest pending intent per panel replaces older pending intent before dispatch.
+
+---
+
+# 50. Pending-intent collapse
+
+Example before dispatch:
+
+```text
+AP 7d
+AP 24h
+AP 7d
+```
+
+Only latest pending AP intent remains:
+
+```text
+AP 7d
+```
+
+---
+
+# 51. In-flight batch supersession
+
+A new intent for one panel must not abort a shared in-flight batch containing other products.
+
+The in-flight batch may complete.
+
+Its response applies only to products whose captured generation still matches.
+
+Superseded panel results are ignored; latest intent remains queued.
+
+---
+
+# 52. Batch-level abort
+
+Existing coordinator may still abort for:
+
+```text
+pagehide
+global shutdown
+session/auth termination
+coordinator lifecycle stop
+```
+
+Panel range supersession alone does not require shared-batch abort.
+
+---
+
+# 53. Panel intent generation
+
+Each panel increments an `intent_generation` when selected range changes or manual retry is created.
+
+A product response applies only if captured generation and selected range still match.
+
+---
+
+# 54. Request failure
+
+If one coalesced HTTP request returns 503, all products in that request fail for that generation.
+
+Other panels not in the request remain untouched.
+
+---
+
+# 55. Product-local HTTP success
+
+On HTTP 200 each requested product applies independently according to its existing semantic status.
+
+---
+
+# 56. Existing coordinator ownership
+
+`CaptivPortalTrafficCoordinator` remains owner of:
+
+```text
+same-origin request helper
+AbortController
+browser timeout
+Retry-After/backoff
+visibility/pagehide lifecycle
+global auth failure
+request error classification
+```
+
+Broker must not duplicate these.
+
+---
+
+# 57. Coordinator extension allowed
+
+A narrow coordinator/broker integration extension is allowed so coordinator can drain pending historical work without private broker timers.
+
+Principle:
+
+```text
+coordinator schedules/drains
+broker provides next pending historical batch
+```
+
+No second scheduler owner.
+
+---
+
+# 58. 429 behavior
+
+Broker does not bypass Retry-After and does not launch concurrent historical retries.
+
+Affected panels keep previous accepted data.
+
+---
+
+# 59. 503 deadline behavior
+
+If a panel-scoped 7d request still returns `503 query_deadline`, only products in that request enter request-error state.
+
+Do not:
+
+```text
+increase deadline
+silently fall back to 24h
+change applied range
+```
+
+---
+
+# 60. Important acceptance caveat
+
+Independent range orchestration reduces unnecessary work but does not prove in advance that `Traffic by AP 7d` alone fits 10 seconds.
+
+Therefore each product-scoped 7d request must be benchmarked.
+
+If AP-only 7d still fails:
+
+```text
+STOP
+→ evidence
+→ separate AP-specific PERF remediation / architecture review
+```
+
+---
+
+# 61. Historical read-layer projection model
+
+Recommended narrow extension inside `HistoricalTrafficReadService`:
+
+```text
+explicit requested product projection set
+```
+
+Exact Python signature is implementation detail.
+
+Permanent owner remains unchanged.
+
+---
+
+# 62. Common foundation work is allowed
+
+Product-scoped request does not mean one SQL statement per product.
+
+Allowed shared foundation includes:
+
+```text
+range validation
+canonical cycle selection
+source-family selection
+coverage/watermark
+canonical Site sample validation
+bucket context when mathematically required
+```
+
+Requirement is:
+
+```text
+do not compute unrelated product-specific projections
+```
+
+---
+
+# 63. Statistics-only work
+
+May compute:
+
+```text
+canonical foundation
+Period Average
+shared PeakValues required by Period Statistics
+```
+
+Must not additionally compute:
+
+```text
+Peak Load temporal products
+Traffic by AP
+```
+
+---
+
+# 64. Peak-only work
+
+May compute:
+
+```text
+canonical foundation
+shared PeakValues
+Peak timestamps
+Busiest Bucket
+Busiest 60 Minutes
+```
+
+Must not compute Period Average or AP projection unless a specific common primitive is mathematically necessary.
+
+---
+
+# 65. AP-only work
+
+May compute:
+
+```text
+canonical Site source/bucket context
+Site-scoped AP population
+AP histories
+AP Average
+AP Peak
+AP Coverage
+Current AP composition
+```
+
+Must not additionally compute Period Statistics or Peak Load temporal products.
+
+---
+
+# 66. History-only work
+
+Computes canonical Site History and History coverage/quality.
+
+Must not additionally compute Statistics, Peak or AP projection.
+
+---
+
+# 67. Feature flag
+
+Recommended:
+
+```text
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
+```
+
+Repository default false.
+
+---
+
+# 68. Feature dependencies
+
+IndependentRanges=true requires:
+
+```text
+WEB_ADMIN_ENABLED=true
+WEB_ADMIN_TRAFFIC_ENABLED=true
+WEB_ADMIN_TRAFFIC_HISTORY_ENABLED=true
+```
+
+It does not require Statistics/Peak/AP flags.
+
+---
+
+# 69. Flag disabled behavior
+
+When false:
+
+```text
+existing shared range UI remains
+existing combined include behavior remains
+```
+
+No production behavior change before activation.
+
+---
+
+# 70. Flag enabled behavior
+
+When true:
+
+```text
+shared selector removed/hidden
+each enabled historical panel gets its own selector
+new products projection model used
+broker independent state active
+```
+
+---
+
+# 71. Dormant deployment and rollback
+
+Deploy accepted code with flag=false.
+
+Dormant verification must prove current behavior unchanged.
+
+Activation is a separate Owner action.
+
+Rollback:
+
+```text
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
+```
+
+No DB rollback.
+
+---
+
+# 72. API serializer contract
+
+Common fields:
+
+```text
+range
+coverage
+quality
+```
+
+Only requested fields may appear:
+
+```text
+buckets             # history
+period_statistics   # statistics
+peak_load           # peak
+ap_traffic          # aps
+ap_bucket_axis       # AP transport context
+```
+
+Unrequested product appearing in canonical server DTO is fail-closed.
+
+---
+
+# 73. Product-list echo
+
+Recommended response metadata:
+
+```text
+requested_products
+```
+
+Serializer validates exact request/response projection identity.
+
+---
+
+# 74. Telemetry
+
+Historical telemetry should add:
+
+```text
+requested_products
+product_count
+```
+
+No raw payload/SQL/AP series logging.
+
+---
+
+# 75. Applied range comes from server
+
+Panel `applied_range` must come from validated:
+
+```text
+response.range.id
+```
+
+not from mutable selected state.
+
+---
+
+# 76. Timezone behavior
+
+No change.
+
+API remains UTC; browser formatting is presentation-only.
+
+---
+
+# 77. Metric backward compatibility
+
+This TASK preserves:
+
+```text
+network_traffic_history.v1
+network_traffic_period_statistics.v1
+network_traffic_peak_load.v1
+network_traffic_by_ap.v1
+```
+
+Transport/orchestration may change; metric semantics do not.
+
+---
+
+# 78. AP backward compatibility
+
+No change to:
+
+```text
+current accepted AP
+UNION
+validated historical AP
+per authorized canonical Site
+hard max 12
+>12 unsupported_population
+no truncation
+Average
+Peak
+Coverage
+source-family inheritance
+```
+
+---
+
+# 79. AP transport compatibility
+
+A self-contained `ap_bucket_axis` is transport context only.
+
+It must not alter AP series values or formulas.
+
+---
+
+# 80. Global auth/session failure
+
+Existing coordinator global handling remains.
+
+Session expiry is not a panel-local data error.
+
+---
+
+# 81. Route validation
+
+New independent model accepts:
+
+```text
+range
+products
+```
+
+Legacy include remains accepted in legacy shape.
+
+Unknown/duplicate params remain 400.
+
+---
+
+# 82. Product feature gates
+
+Requested product respects existing feature flag.
+
+Examples:
+
+```text
+products=statistics + Statistics disabled → 404
+products=peak + Peak disabled → 404
+products=aps + By-AP disabled → 404
+```
+
+---
+
+# 83. Product-specific failure isolation
+
+A failed AP 7d request no longer automatically marks History/Statistics/Peak failed.
+
+This is a core behavior change.
+
+---
+
+# 84. Coalesced failure trade-off
+
+If History 24h + Peak 24h are coalesced and that request fails, both requested panel generations fail.
+
+This is accepted.
+
+They may later be retried independently.
+
+---
+
+# 85. Alternative 1 — no coalescing
+
+One serialized request per panel.
+
+Pros: strongest failure isolation.
+
+Cons: initial 24h load and global refresh duplicate expensive foundation work.
+
+Not recommended.
+
+---
+
+# 86. Alternative 2 — one request containing multiple panel ranges
+
+Example:
+
+```text
+history=24h
+statistics=7d
+peak=24h
+aps=7d
+```
+
+Rejected because one 7d failure could again fail unrelated 24h products and the query would contain multiple heavy ranges.
+
+---
+
+# 87. Recommended architecture summary
+
+Use:
+
+```text
+independent panel state
++
+same-range coalescing
++
+one historical request in flight
++
+products-scoped API
++
+same HistoricalTrafficReadService
+```
+
+---
+
+# 88. Mandatory PERF variants
+
+On immutable production-size evidence measure:
+
+```text
+H24 / H7 = products=history
+S24 / S7 = products=statistics
+P24 / P7 = products=peak
+A24 / A7 = products=aps
+```
+
+Use supported AP population evidence required by TRAFFIC-05.
+
+---
+
+# 89. PERF run count
+
+Minimum:
+
+```text
+10 measured runs per variant
+8 variants
+80 measured product-scoped requests
+```
+
+Warmups unmeasured/documented.
+
+---
+
+# 90. PERF hard gates
+
+Each supported variant:
+
+```text
+0 query_deadline
+0 source-integrity failures
+0 unexpected 5xx
+
+p95 <= 8.0s
+max <= 9.0s
+```
+
+under unchanged 10s QueryDeadline.
+
+---
+
+# 91. AP 7d gate
+
+`A7` must pass current 10s deadline in controlled supported-population evidence.
+
+If not:
+
+```text
+TASK acceptance FAILS
+STOP
+→ separate AP performance review
+```
+
+---
+
+# 92. 24h backward compatibility PERF
+
+Also benchmark candidate default combined 24h:
+
+```text
+products=history,statistics,peak,aps
+```
+
+against accepted pre-change 24h combined behavior.
+
+Exact relative threshold should be rebound from latest accepted Traffic PERF baseline before FINAL.
+
+---
+
+# 93. Broker concurrency acceptance
+
+Automated acceptance proves:
+
+```text
+max simultaneous historical Traffic requests from one page = 1
+```
+
+under rapid user actions.
+
+---
+
+# 94. Rapid multi-panel scenario
+
+Rapidly select:
+
+```text
+History 7d
+Statistics 7d
+Peak 24h
+AP 7d
+```
+
+Required:
+
+```text
+never >1 historical request in flight
+same-range pending products may coalesce
+obsolete pending intents do not execute
+each panel applies matching generation only
+```
+
+---
+
+# 95. Same-panel rapid switching
+
+Example:
+
+```text
+AP 24h applied
+AP → 7d
+before completion AP → 24h
+```
+
+7d response must not replace latest 24h intent.
+
+Other products in a shared in-flight batch remain safe.
+
+---
+
+# 96. Panel failure regression
+
+Controlled AP 7d 503 must prove:
+
+```text
+AP keeps previous applied payload
+History unchanged
+Statistics unchanged
+Peak unchanged
+Current unchanged
+```
+
+---
+
+# 97. Global Refresh regression
+
+For:
+
+```text
+History 24h
+Statistics 7d
+Peak 24h
+AP 7d
+```
+
+Global Refresh produces no more than two historical range-group requests, sequentially.
+
+---
+
+# 98. Initial-load regression
+
+All historical panels default 24h.
+
+Required:
+
+```text
+one combined 24h historical request
+```
+
+not four.
+
+---
+
+# 99. Templates
+
+Remove active shared Network range control and add per-panel controls.
+
+Recommended IDs:
+
+```text
+traffic-history-range-24h
+traffic-history-range-7d
+
+traffic-statistics-range-24h
+traffic-statistics-range-7d
+
+traffic-peak-range-24h
+traffic-peak-range-7d
+
+traffic-ap-range-24h
+traffic-ap-range-7d
+```
+
+---
+
+# 100. Applied-range labels
+
+Every panel keeps its own existing `Applied range` label.
+
+No page-level applied range.
+
+---
+
+# 101. CSS
+
+Only functional styles:
+
+```text
+per-panel selector placement
+waiting/loading/error-with-previous
+selected/applied mismatch
+```
+
+No global Traffic redesign.
+
+---
+
+# 102. Frontend concepts
+
+Expected:
+
+```text
+TrafficPanelRangeState
+TrafficHistoricalRequestBroker
+product-specific render/apply functions
+```
+
+Avoid one mutable global selected range.
+
+---
+
+# 103. Legacy `CaptivPortalTrafficNetworkRange`
+
+When IndependentRanges is active, old shared singleton must not remain functional owner.
+
+It may remain only in the flag-off legacy branch.
+
+---
+
+# 104. Coordinator public contract
+
+Prefer minimal extension.
+
+Allowed:
+
+```text
+one registered historical execution lane
+that drains broker pending work
+```
+
+Do not duplicate request lifecycle mechanisms.
+
+---
+
+# 105. Expected backend files
+
+Likely MODIFY:
+
+```text
+app/analytics/historical_traffic.py
+app/analytics/source_gateway.py
+app/analytics/models.py        # only if projection metadata/internal DTO needed
+
+app/admin_web/query_service.py
+app/admin_web/routes.py
+app/admin_web/historical_traffic_serialization.py
+```
+
+No Observation acquisition changes expected.
+
+---
+
+# 106. Expected config files
+
+If feature flag accepted:
+
+```text
+app/config.py
+app/settings.py
+.env.example
+app/admin_web/config.py
+app/admin_web/pages.py
+```
+
+---
+
+# 107. Expected frontend files
+
+```text
+app/admin_web/templates/admin/traffic.html
+app/admin_web/static/admin.js
+app/admin_web/static/admin.css
+```
+
+No new library/dependency expected.
+
+---
+
+# 108. Expected unchanged areas
+
+Expected unchanged:
+
+```text
+app/observations/**
+app/current_state/**
+app/visit_lifecycle/**
+app/visitor_registry/**
+app/auth/**
+app/capport/**
+app/controllers/**
+requirements*
+```
+
+If implementation requires these, STOP for architecture review.
+
+---
+
+# 109. Backend tests — Owner + Tech Lead Lab
+
+Required:
+
+```text
+products grammar
+legacy include compatibility
+include+products rejected
+product feature gates
+History-only
+Statistics-only
+Peak-only without requested Statistics
+AP-only
+same-range combined projection
+unrequested product absent
+serializer fail-closed
+```
+
+---
+
+# 110. Semantic identity tests
+
+For same fixed Site/range/evaluation prove:
+
+```text
+Statistics-only = Statistics sub-result from combined
+Peak-only = Peak sub-result from combined
+AP-only = AP sub-result from combined
+History-only = History sub-result from combined
+```
+
+within existing contracts.
+
+This proves orchestration changed, semantics did not.
+
+---
+
+# 111. Peak decoupling tests
+
+Prove `products=peak` does not require `products=statistics`.
+
+Peak values remain equal to Period Statistics Peak values for same fixed evidence.
+
+---
+
+# 112. AP self-contained transport tests
+
+AP-only response must render every AP chart without full History product payload.
+
+Prove:
+
+```text
+axis bucket count = range bucket count
+AP arrays = axis length
+
+History+AP:
+axis matches canonical History bucket timeline
+```
+
+---
+
+# 113. Frontend state tests
+
+For each product:
+
+```text
+selected independent
+applied independent
+loading independent
+previous payload independent
+error independent
+```
+
+Changing one selector does not mutate another panel.
+
+---
+
+# 114. Broker tests
+
+Required:
+
+```text
+initial all-24h → one request
+one-panel 7d → one product request
+same-range pending products coalesce
+different ranges serialize
+max in-flight = 1
+global refresh groups by range
+latest pending intent wins
+shared response selectively applies by generation
+```
+
+---
+
+# 115. Frontend failure tests
+
+Required:
+
+```text
+AP 7d 503 → AP error_with_previous
+Statistics 7d 503 → Statistics-only request state fails
+429 → no concurrency bypass
+waiting/backoff → no fake Loading
+```
+
+---
+
+# 116. Persistence tests
+
+Fresh page starts all ranges at 24h.
+
+No range preference read/write to:
+
+```text
+localStorage
+sessionStorage
+cookies
+```
+
+---
+
+# 117. Site-isolation regression
+
+Fixture Site A + Site B proves product-scoped requests never contain cross-Site evidence.
+
+Broker group identity includes authorized Site + range.
+
+No cross-Site coalescing.
+
+---
+
+# 118. Testing governance
+
+Coder responsibility:
+
+```text
+implementation
+patch
+compileall
+node --check if JS changed
+git diff --check
+```
+
+Owner + Tech Lead Lab owns:
+
+```text
+focused pytest
+targeted regression
+Central Lab
+official PERF
+official PASS/FAIL
+```
+
+No new manual pre-publication browser gate is introduced.
+
+---
+
+# 119. Production rollout
+
+Deploy accepted Git artifact with:
+
+```text
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
+```
+
+Dormant verification:
+
+```text
+shared-range behavior unchanged
+24h unchanged
+existing products healthy
+```
+
+---
+
+# 120. Separate activation
+
+Owner separately enables:
+
+```text
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=true
+```
+
+Then production product/browser acceptance.
+
+---
+
+# 121. Production acceptance — independent ranges
+
+Verify simultaneously:
+
+```text
+History          24h
+Statistics       7d
+Peak             24h
+Traffic by AP    7d
+```
+
+Each panel visibly retains its own applied range.
+
+---
+
+# 122. Production acceptance — request scope
+
+AP 7d click must produce AP product request only.
+
+It must not request History/Statistics/Peak product projections, apart from internal canonical foundation work invisible to the product API.
+
+---
+
+# 123. Production acceptance — failure isolation
+
+If one panel 7d request fails, only that panel retains old data + error.
+
+Others remain at their own applied ranges.
+
+---
+
+# 124. Production acceptance — no request storm
+
+Rapidly change multiple selectors and verify:
+
+```text
+no more than one historical Traffic request in flight from the page
+```
+
+---
+
+# 125. Explicit non-goals
+
+This TASK does not implement:
+
+```text
+new Traffic metrics
+new Average/Peak formulas
+new AP population semantics
+Traffic Share
+new collector
+new Omada reads
+new DB/schema/index/cache/rollup
+30d
+custom dates
+calendar picker
+saved range preferences
+multi-Site combined Traffic
+Traffic redesign
+timeout/deadline/concurrency increase
+```
+
+---
+
+# 126. Stop conditions
+
+Implementation MUST STOP if it requires:
+
+```text
+new historical semantic owner
+duplicated metric formulas
+browser metric calculations
+new persistence/acquisition
+QueryDeadline increase
+browser timeout increase
+Admin concurrency increase
+AP population semantic change
+12-AP bound change
+metric version change
+cross-Site coalescing
+automatic 7d preference persistence
+more than one historical request in flight by design
+```
+
+Also STOP on material repository drift.
+
+---
+
+# 127. Architecture decisions — DRAFT
+
+1. History, Statistics, Peak and AP receive independent selectors.
+2. Current Network Throughput does not.
+3. Each historical panel defaults to 24h.
+4. State is page-lifetime only.
+5. No storage persistence v1.
+6. Each panel owns selected/applied/request/error state.
+7. Previous successful payload remains visible on failed switch.
+8. Keep existing `/traffic/history`.
+9. Add `products` projection parameter.
+10. Keep legacy `include` temporarily.
+11. `include` + `products` invalid.
+12. Statistics/Peak/AP independently requestable.
+13. Peak no longer requires client-requested Statistics.
+14. Shared internal PeakValues preserves identity.
+15. AP-only response gets compact bucket axis.
+16. HistoricalTrafficReadService remains owner.
+17. CurrentTrafficReadService remains AP Now owner.
+18. Add page-local Historical Request Broker.
+19. Existing coordinator remains network lifecycle owner.
+20. Max one historical request in flight.
+21. Same-range products may coalesce.
+22. Different ranges execute sequentially.
+23. Initial 24h stays one combined request.
+24. Global Refresh groups by range.
+25. Independent-ranges feature flag default false.
+26. No timeout/deadline/concurrency increase.
+27. Product-scoped 7d PERF mandatory.
+
+---
+
+# 128. Review questions
+
+### Q1 — API projection
+Accept `products=history|statistics|peak|aps` exact ordered subsets on existing endpoint?
+
+Architect recommendation: `ACCEPT`.
+
+### Q2 — broker concurrency
+Accept one historical request in flight per Traffic page?
+
+Architect recommendation: `ACCEPT`.
+
+### Q3 — same-range coalescing
+Accept grouping pending products by range?
+
+Architect recommendation: `ACCEPT`.
+
+### Q4 — no persistence
+Accept page-lifetime state only and reset all ranges to 24h on reload?
+
+Architect recommendation: `ACCEPT`.
+
+### Q5 — Peak request decoupling
+Accept removal of request-level `Peak requires Statistics`, preserving shared internal Peak semantics?
+
+Architect recommendation: `ACCEPT`.
+
+### Q6 — AP self-contained axis
+Accept transport-only `ap_bucket_axis` for AP-only requests?
+
+Architect recommendation: `ACCEPT`.
+
+### Q7 — feature flag
+Accept `WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false`?
+
+Architect recommendation: `ACCEPT`.
+
+---
+
+# 129. DRAFT status
+
+```text
+TASK:
+TASK-TRAFFIC-RANGE-01 — Independent Traffic Range per Panel
+
+STATUS:
+DRAFT — FOR OWNER + TECH LEAD ARCHITECTURAL REVIEW
+
+BOUND TO:
+main@8a5c4db899406eeb1f737abe63495247be1ee75a
+
+TREE:
+6837dd729dedb0df6414b3f979657a3f6f55d0ab
+
+CHANGE CLASS:
+Traffic orchestration / API projection / frontend range state
+
+METRIC SEMANTICS CHANGE:
+NO
+
+PANELS:
+History
+Statistics
+Peak
+Traffic by AP
+
+RANGES:
+24h / 7d independently per panel
+
+DEFAULT:
+24h each
+
+PERSISTENCE:
+page lifetime only
+
+RECOMMENDED API:
+existing /traffic/history
++
+products projection
+
+HISTORICAL OWNER:
+HistoricalTrafficReadService
+
+CURRENT AP OWNER:
+CurrentTrafficReadService
+
+MAX HISTORICAL REQUESTS IN FLIGHT PER PAGE:
+1
+
+SAME-RANGE COALESCING:
+YES
+
+NEW DB / SCHEMA / INDEX / CACHE / ROLLUP:
+NO
+
+QUERY DEADLINE:
+UNCHANGED
+
+BROWSER TIMEOUT:
+UNCHANGED
+
+ADMIN CONCURRENCY:
+UNCHANGED
+
+FEATURE DEFAULT:
+WEB_ADMIN_TRAFFIC_INDEPENDENT_RANGES_ENABLED=false
+
+IMPLEMENTATION AUTHORIZATION:
+NOT GRANTED
+
+PUBLICATION / MERGE / DEPLOY / ACTIVATION:
+NOT GRANTED
+```
+
+Next:
+
+```text
+Owner + Tech Lead architectural review
+→ targeted revision if required
+→ repository rebind
+→ FINAL
+→ separate Owner implementation authorization
+```
+
+Implementation MUST NOT begin from this DRAFT.

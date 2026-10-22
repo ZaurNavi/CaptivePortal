@@ -1,0 +1,1608 @@
+From d24d684d20fbc9a14191e7f7a8b803a8dc3dfb4e Mon Sep 17 00:00:00 2001
+From: ZaurNavi <zaur.navi@gmail.com>
+Date: Thu, 27 Aug 2026 14:12:51 +0400
+Subject: [PATCH] fix(visit-lifecycle): correct offline finalization drift
+
+---
+ app/visit_lifecycle/models.py                 |   4 +
+ app/visit_lifecycle/recovery.py               | 589 ++++++++++++++++++
+ app/visit_lifecycle/repository.py             |  84 ++-
+ app/visit_lifecycle/service.py                |  18 +-
+ tests/analytics/test_home_activity.py         |  45 ++
+ tests/analytics/test_visit_analytics.py       |  20 +
+ tests/visit_lifecycle/test_recovery.py        | 497 +++++++++++++++
+ .../test_webhook_finalization.py              | 176 +++++-
+ 8 files changed, 1411 insertions(+), 22 deletions(-)
+ create mode 100644 app/visit_lifecycle/recovery.py
+ create mode 100644 tests/visit_lifecycle/test_recovery.py
+
+diff --git a/app/visit_lifecycle/models.py b/app/visit_lifecycle/models.py
+index dfa8f26..a3df55d 100644
+--- a/app/visit_lifecycle/models.py
++++ b/app/visit_lifecycle/models.py
+@@ -229,6 +229,10 @@ class OfflineProcessingOutcome:
+     visit_id: str | None = None
+     reason: str | None = None
+     duplicate: bool = False
++    duration_drift_seconds: float | None = None
++    duration_drift_threshold_seconds: float | None = None
++    duration_drift_exceeded: bool = False
++    close_time_source: str | None = None
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/app/visit_lifecycle/recovery.py b/app/visit_lifecycle/recovery.py
+new file mode 100644
+index 0000000..ec407a2
+--- /dev/null
++++ b/app/visit_lifecycle/recovery.py
+@@ -0,0 +1,589 @@
++"""Bounded, explicit recovery for safely provable stale open Visits."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import sqlite3
++import stat
++import sys
++import uuid
++from collections import Counter
++from dataclasses import asdict, dataclass
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++from typing import Any, Sequence
++
++from .models import SCHEMA_VERSION
++from .repository import (
++    _expected_v2_signature,
++    _format_utc,
++    _parse_utc,
++    _schema_signature,
++)
++
++
++DEFAULT_LIMIT = 500
++MIN_LIMIT = 1
++MAX_LIMIT = 5_000
++
++
++class RecoveryError(RuntimeError):
++    """Safe operator-facing recovery validation or storage failure."""
++
++
++@dataclass(frozen=True)
++class RecoveryCandidate:
++    visit_id: str
++    client_mac: str
++    started_at: str
++    latest_authorized_at: str
++    event_id: str
++    controller_event_at: str
++    legacy_processing_result: str
++    legacy_reason: str
++    reported_duration_drift_seconds: float | None
++    semantic_duplicate_count: int = 0
++
++
++@dataclass(frozen=True)
++class _Evaluation:
++    candidate: RecoveryCandidate | None
++    reason: str | None
++
++
++def recover(
++    *,
++    db_path: str,
++    site_id: str,
++    apply: bool = False,
++    limit: int = DEFAULT_LIMIT,
++    after_started_at: str | None = None,
++    after_visit_id: str | None = None,
++    now_utc: str | None = None,
++) -> dict[str, Any]:
++    """Evaluate or apply one deterministic, Site-scoped recovery page."""
++    resolved = _database_path(db_path)
++    site = _site_id(site_id)
++    bounded_limit = _limit(limit)
++    continuation = _continuation(after_started_at, after_visit_id)
++    evaluated_at = now_utc or _utc_now()
++    _canonical_utc(evaluated_at, "now_utc")
++    mode = "rw" if apply else "ro"
++    connection = _connect(resolved, mode=mode)
++    try:
++        if not apply:
++            connection.execute("BEGIN")
++        _validate_source(connection)
++        rows = _open_page(
++            connection,
++            site_id=site,
++            limit=bounded_limit,
++            continuation=continuation,
++        )
++        examined = rows[:bounded_limit]
++        truncated = len(rows) > bounded_limit
++        open_count = int(connection.execute(
++            "SELECT COUNT(*) FROM visits WHERE site_id=? AND status='open'",
++            (site,),
++        ).fetchone()[0])
++        candidates: list[RecoveryCandidate] = []
++        skip_reasons: Counter[str] = Counter()
++        applied_count = 0
++        semantic_duplicate_count = 0
++        for visit in examined:
++            if apply:
++                evaluation = _apply_one(
++                    connection,
++                    visit_id=str(visit["visit_id"]),
++                    site_id=site,
++                    now_utc=evaluated_at,
++                )
++                if evaluation.candidate is not None:
++                    applied_count += 1
++            else:
++                evaluation = _evaluate_visit(connection, visit)
++            if evaluation.candidate is not None:
++                candidates.append(evaluation.candidate)
++                semantic_duplicate_count += (
++                    evaluation.candidate.semantic_duplicate_count
++                )
++            else:
++                skip_reasons[evaluation.reason or "no_safe_candidate"] += 1
++
++        last_key = (
++            (str(examined[-1]["started_at"]), str(examined[-1]["visit_id"]))
++            if examined
++            else continuation
++        )
++        remaining = _remaining_open_count(
++            connection,
++            site_id=site,
++            after=last_key,
++        )
++        if not apply:
++            connection.rollback()
++        return {
++            "resolved_db_path": str(resolved),
++            "schema_version": SCHEMA_VERSION,
++            "mode": "apply" if apply else "dry-run",
++            "site_id": site,
++            "evaluated_at": evaluated_at,
++            "limit": bounded_limit,
++            "examined_count": len(examined),
++            "open_visit_count": open_count,
++            "recoverable_count": len(candidates),
++            "unrecoverable_count": len(examined) - len(candidates),
++            "applied_count": applied_count,
++            "semantic_duplicate_count": semantic_duplicate_count,
++            "truncated": truncated,
++            "remaining_open_visit_count": remaining,
++            "next_after_started_at": (
++                last_key[0] if truncated and last_key is not None else None
++            ),
++            "next_after_visit_id": (
++                last_key[1] if truncated and last_key is not None else None
++            ),
++            "candidates": [asdict(value) for value in candidates],
++            "skip_reason_counts": dict(sorted(skip_reasons.items())),
++        }
++    except sqlite3.Error as exc:
++        try:
++            connection.rollback()
++        except sqlite3.Error:
++            pass
++        raise RecoveryError("Visit recovery storage operation failed") from exc
++    finally:
++        connection.close()
++
++
++def backup_database(*, db_path: str, backup_to: str) -> dict[str, Any]:
++    """Create and verify a consistent SQLite Backup API copy."""
++    source_path = _database_path(db_path)
++    destination = _backup_path(backup_to)
++    source = _connect(source_path, mode="ro")
++    created = False
++    try:
++        _validate_source(source)
++        destination_connection = sqlite3.connect(str(destination))
++        created = True
++        try:
++            source.backup(destination_connection)
++        finally:
++            destination_connection.close()
++        verification = _connect(destination, mode="ro")
++        try:
++            quick = verification.execute("PRAGMA quick_check").fetchone()
++            quick_value = str(quick[0]) if quick else ""
++            version = int(
++                verification.execute("PRAGMA user_version").fetchone()[0]
++            )
++            if quick_value != "ok" or version != SCHEMA_VERSION:
++                raise RecoveryError("Visit recovery backup verification failed")
++            if _schema_signature(verification) != _expected_v2_signature():
++                raise RecoveryError("Visit recovery backup schema is invalid")
++        finally:
++            verification.close()
++        return {
++            "resolved_db_path": str(source_path),
++            "resolved_backup_path": str(destination),
++            "mode": "backup",
++            "source_schema_version": SCHEMA_VERSION,
++            "backup_schema_version": version,
++            "quick_check": quick_value,
++        }
++    except sqlite3.Error as exc:
++        if created:
++            _remove_failed_backup(destination)
++        raise RecoveryError("Visit recovery backup failed") from exc
++    except Exception:
++        if created:
++            _remove_failed_backup(destination)
++        raise
++    finally:
++        source.close()
++
++
++def _apply_one(
++    connection: sqlite3.Connection,
++    *,
++    visit_id: str,
++    site_id: str,
++    now_utc: str,
++) -> _Evaluation:
++    connection.execute("BEGIN IMMEDIATE")
++    try:
++        visit = connection.execute(
++            "SELECT * FROM visits WHERE visit_id=? AND site_id=?",
++            (visit_id, site_id),
++        ).fetchone()
++        if visit is None or str(visit["status"]) != "open":
++            result = _Evaluation(None, "visit_changed")
++        else:
++            result = _evaluate_visit(connection, visit)
++        candidate = result.candidate
++        if candidate is None:
++            connection.rollback()
++            return result
++        event = connection.execute(
++            "SELECT * FROM visit_source_events WHERE event_id=?",
++            (candidate.event_id,),
++        ).fetchone()
++        if event is None:
++            connection.rollback()
++            return _Evaluation(None, "visit_changed")
++        updated_event = connection.execute(
++            """
++            UPDATE visit_source_events
++            SET processing_result='closed', visit_id=?, reason=NULL,
++                processed_at=?, last_match_attempt_at=?
++            WHERE event_id=? AND processing_result='unmatched'
++              AND reason='stale_or_ambiguous' AND visit_id IS NULL
++            """,
++            (visit_id, now_utc, now_utc, candidate.event_id),
++        ).rowcount
++        closed_at = str(event["controller_event_at"])
++        duration = int(
++            (
++                _parse_utc(closed_at)
++                - _parse_utc(str(visit["started_at"]))
++            ).total_seconds()
++        )
++        updated_visit = connection.execute(
++            """
++            UPDATE visits
++            SET status='closed', closed_at=?,
++                close_reason='omada_client_offline_recovered',
++                close_time_source='controller', final_ip=?, final_ssid=?,
++                final_ap_mac=?, reported_connected_seconds=?,
++                reported_traffic_total_bytes=?,
++                reported_traffic_up_bytes=NULL,
++                reported_traffic_down_bytes=NULL, duration_seconds=?,
++                offline_event_id=?, updated_at=?
++            WHERE visit_id=? AND site_id=? AND client_mac=? AND status='open'
++            """,
++            (
++                closed_at,
++                event["client_ip"],
++                event["ssid"],
++                event["ap_mac"],
++                event["reported_connected_seconds"],
++                event["reported_traffic_total_bytes"],
++                duration,
++                candidate.event_id,
++                now_utc,
++                visit_id,
++                site_id,
++                visit["client_mac"],
++            ),
++        ).rowcount
++        if updated_event != 1 or updated_visit != 1:
++            connection.rollback()
++            return _Evaluation(None, "visit_changed")
++        connection.commit()
++        return result
++    except Exception:
++        connection.rollback()
++        raise
++
++
++def _evaluate_visit(
++    connection: sqlite3.Connection,
++    visit: sqlite3.Row,
++) -> _Evaluation:
++    authorization = connection.execute(
++        """
++        SELECT COUNT(*) AS authorization_count,
++               MAX(authorized_at) AS latest_authorized_at
++        FROM visit_authorizations
++        WHERE visit_id=?
++        """,
++        (visit["visit_id"],),
++    ).fetchone()
++    if int(authorization["authorization_count"]) < 1:
++        return _Evaluation(None, "authorization_evidence_missing")
++    latest_authorized_at = authorization["latest_authorized_at"]
++    if latest_authorized_at is None:
++        return _Evaluation(None, "authorization_evidence_missing")
++    rows = connection.execute(
++        """
++        SELECT e.*,
++               EXISTS(
++                   SELECT 1 FROM visits AS used
++                   WHERE used.offline_event_id=e.event_id
++               ) AS already_linked
++        FROM visit_source_events AS e
++        WHERE e.event_type='omada.client_offline'
++          AND e.processing_result='unmatched'
++          AND e.reason='stale_or_ambiguous'
++          AND e.site_id=? AND e.client_mac=?
++          AND e.controller_event_at IS NOT NULL
++          AND e.controller_event_at>=?
++          AND e.visit_id IS NULL
++        ORDER BY e.controller_event_at ASC, e.event_id ASC
++        """,
++        (visit["site_id"], visit["client_mac"], latest_authorized_at),
++    ).fetchall()
++    if not rows:
++        return _Evaluation(None, "no_safe_offline_after_latest_authorization")
++    unlinked = [row for row in rows if not bool(row["already_linked"])]
++    if not unlinked:
++        return _Evaluation(None, "source_event_already_linked")
++    known_ssids = {
++        str(row[0])
++        for row in connection.execute(
++            "SELECT portal_ssid FROM visit_authorizations "
++            "WHERE visit_id=? AND portal_ssid IS NOT NULL",
++            (visit["visit_id"],),
++        )
++    }
++    if visit["start_ssid"] is not None:
++        known_ssids.add(str(visit["start_ssid"]))
++    safe = [
++        row for row in unlinked
++        if row["ssid"] is None
++        or not known_ssids
++        or str(row["ssid"]) in known_ssids
++    ]
++    if not safe:
++        return _Evaluation(None, "ssid_conflict")
++    earliest_at = str(safe[0]["controller_event_at"])
++    earliest = [
++        row for row in safe if str(row["controller_event_at"]) == earliest_at
++    ]
++    signature = _terminal_signature(earliest[0])
++    if any(_terminal_signature(row) != signature for row in earliest[1:]):
++        return _Evaluation(None, "ambiguous_same_timestamp_events")
++    selected = min(earliest, key=lambda row: str(row["event_id"]))
++    reported = selected["reported_connected_seconds"]
++    drift = None
++    if reported is not None:
++        reported_start = _parse_utc(earliest_at) - timedelta(seconds=int(reported))
++        drift = abs(
++            (reported_start - _parse_utc(str(visit["started_at"]))).total_seconds()
++        )
++    return _Evaluation(
++        RecoveryCandidate(
++            visit_id=str(visit["visit_id"]),
++            client_mac=str(visit["client_mac"]),
++            started_at=str(visit["started_at"]),
++            latest_authorized_at=str(latest_authorized_at),
++            event_id=str(selected["event_id"]),
++            controller_event_at=earliest_at,
++            legacy_processing_result=str(selected["processing_result"]),
++            legacy_reason=str(selected["reason"]),
++            reported_duration_drift_seconds=drift,
++            semantic_duplicate_count=max(0, len(earliest) - 1),
++        ),
++        None,
++    )
++
++
++def _terminal_signature(row: sqlite3.Row) -> tuple[Any, ...]:
++    return tuple(row[name] for name in (
++        "site_id", "client_mac", "controller_event_at", "client_ip", "ssid",
++        "ap_mac", "reported_connected_seconds", "reported_traffic_total_bytes",
++    ))
++
++
++def _open_page(
++    connection: sqlite3.Connection,
++    *,
++    site_id: str,
++    limit: int,
++    continuation: tuple[str, str] | None,
++) -> list[sqlite3.Row]:
++    clause = ""
++    params: list[Any] = [site_id]
++    if continuation is not None:
++        clause = "AND (started_at>? OR (started_at=? AND visit_id>?))"
++        params.extend((continuation[0], continuation[0], continuation[1]))
++    params.append(limit + 1)
++    return connection.execute(
++        f"""
++        SELECT * FROM visits
++        WHERE site_id=? AND status='open' {clause}
++        ORDER BY started_at ASC, visit_id ASC
++        LIMIT ?
++        """,
++        tuple(params),
++    ).fetchall()
++
++
++def _remaining_open_count(
++    connection: sqlite3.Connection,
++    *,
++    site_id: str,
++    after: tuple[str, str] | None,
++) -> int:
++    if after is None:
++        return int(connection.execute(
++            "SELECT COUNT(*) FROM visits WHERE site_id=? AND status='open'",
++            (site_id,),
++        ).fetchone()[0])
++    return int(connection.execute(
++        """
++        SELECT COUNT(*) FROM visits
++        WHERE site_id=? AND status='open'
++          AND (started_at>? OR (started_at=? AND visit_id>?))
++        """,
++        (site_id, after[0], after[0], after[1]),
++    ).fetchone()[0])
++
++
++def _validate_source(connection: sqlite3.Connection) -> None:
++    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
++    if version != SCHEMA_VERSION:
++        raise RecoveryError("Visit recovery source schema version is invalid")
++    quick = connection.execute("PRAGMA quick_check").fetchone()
++    if not quick or str(quick[0]) != "ok":
++        raise RecoveryError("Visit recovery source health check failed")
++    if _schema_signature(connection) != _expected_v2_signature():
++        raise RecoveryError("Visit recovery source schema is invalid")
++    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
++        raise RecoveryError("Visit recovery source foreign keys are invalid")
++
++
++def _connect(path: Path, *, mode: str) -> sqlite3.Connection:
++    uri = f"{path.as_uri()}?mode={mode}"
++    connection = sqlite3.connect(uri, uri=True, timeout=5.0)
++    connection.row_factory = sqlite3.Row
++    connection.execute("PRAGMA foreign_keys=ON")
++    if mode == "ro":
++        connection.execute("PRAGMA query_only=ON")
++    return connection
++
++
++def _database_path(value: str) -> Path:
++    path = Path(value)
++    if not path.is_absolute():
++        raise RecoveryError("Visit recovery database path must be absolute")
++    resolved = path.resolve(strict=False)
++    try:
++        target = os.lstat(resolved)
++    except OSError as exc:
++        raise RecoveryError("Visit recovery database does not exist") from exc
++    if not stat.S_ISREG(target.st_mode):
++        raise RecoveryError("Visit recovery database must be a regular file")
++    return resolved
++
++
++def _backup_path(value: str) -> Path:
++    path = Path(value)
++    if not path.is_absolute():
++        raise RecoveryError("Visit recovery backup path must be absolute")
++    resolved = path.resolve(strict=False)
++    if resolved.exists():
++        raise RecoveryError("Visit recovery backup destination already exists")
++    if not resolved.parent.is_dir():
++        raise RecoveryError("Visit recovery backup parent does not exist")
++    return resolved
++
++
++def _remove_failed_backup(path: Path) -> None:
++    try:
++        path.unlink(missing_ok=True)
++    except OSError:
++        pass
++
++
++def _site_id(value: str) -> str:
++    if not isinstance(value, str) or not value or value != value.strip():
++        raise RecoveryError("Visit recovery site id is invalid")
++    return value
++
++
++def _limit(value: int) -> int:
++    if type(value) is not int or not MIN_LIMIT <= value <= MAX_LIMIT:
++        raise RecoveryError("Visit recovery limit must be between 1 and 5000")
++    return value
++
++
++def _continuation(
++    started_at: str | None,
++    visit_id: str | None,
++) -> tuple[str, str] | None:
++    if (started_at is None) != (visit_id is None):
++        raise RecoveryError("Visit recovery continuation must be a complete pair")
++    if started_at is None or visit_id is None:
++        return None
++    canonical = _canonical_utc(started_at, "after_started_at")
++    try:
++        parsed = uuid.UUID(visit_id)
++    except (ValueError, AttributeError) as exc:
++        raise RecoveryError("Visit recovery continuation UUID is invalid") from exc
++    if str(parsed) != visit_id:
++        raise RecoveryError("Visit recovery continuation UUID is not canonical")
++    return canonical, visit_id
++
++
++def _canonical_utc(value: str, name: str) -> str:
++    try:
++        parsed = _parse_utc(value)
++    except (TypeError, ValueError) as exc:
++        raise RecoveryError(f"Visit recovery {name} is invalid") from exc
++    if _format_utc(parsed) != value:
++        raise RecoveryError(f"Visit recovery {name} is not canonical")
++    return value
++
++
++def _utc_now() -> str:
++    return _format_utc(datetime.now(timezone.utc))
++
++
++def _parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--db-path", required=True)
++    parser.add_argument("--site-id")
++    parser.add_argument("--limit", type=int, default=None)
++    parser.add_argument("--after-started-at")
++    parser.add_argument("--after-visit-id")
++    actions = parser.add_mutually_exclusive_group()
++    actions.add_argument("--dry-run", action="store_true")
++    actions.add_argument("--apply", action="store_true")
++    actions.add_argument("--backup-to")
++    return parser
++
++
++def main(argv: Sequence[str] | None = None) -> int:
++    parser = _parser()
++    args = parser.parse_args(argv)
++    try:
++        if args.backup_to is not None:
++            if any((
++                args.site_id is not None,
++                args.limit is not None,
++                args.after_started_at is not None,
++                args.after_visit_id is not None,
++            )):
++                parser.error("backup mode rejects Visit selection arguments")
++            result = backup_database(
++                db_path=args.db_path,
++                backup_to=args.backup_to,
++            )
++        else:
++            if args.site_id is None:
++                parser.error("--site-id is required for dry-run/apply")
++            result = recover(
++                db_path=args.db_path,
++                site_id=args.site_id,
++                apply=bool(args.apply),
++                limit=(DEFAULT_LIMIT if args.limit is None else args.limit),
++                after_started_at=args.after_started_at,
++                after_visit_id=args.after_visit_id,
++            )
++        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
++        return 0
++    except (RecoveryError, sqlite3.Error, OSError, ValueError) as exc:
++        message = (
++            str(exc)
++            if isinstance(exc, RecoveryError)
++            else "Visit recovery operation failed"
++        )
++        print(message, file=sys.stderr)
++        return 1
++
++
++if __name__ == "__main__":  # pragma: no cover
++    raise SystemExit(main())
+diff --git a/app/visit_lifecycle/repository.py b/app/visit_lifecycle/repository.py
+index 14ca154..074c658 100644
+--- a/app/visit_lifecycle/repository.py
++++ b/app/visit_lifecycle/repository.py
+@@ -108,6 +108,16 @@ class _WriteLease:
+     lock_wait_ms: int
+ 
+ 
++@dataclass(frozen=True)
++class _OfflineMatch:
++    closed_at: str | None
++    duration_seconds: int | None
++    close_time_source: str | None
++    reason: str | None
++    duration_drift_seconds: float | None = None
++    duration_drift_exceeded: bool = False
++
++
+ class PriorityWriteCoordinator:
+     """Single foreground-priority, FIFO-background writer gate."""
+ 
+@@ -1271,8 +1281,8 @@ class VisitRepository:
+             max_clock_skew_seconds=max_clock_skew_seconds,
+             max_duration_drift_seconds=max_duration_drift_seconds,
+         )
+-        if match[0] is None:
+-            reason = match[3]
++        if match.closed_at is None:
++            reason = match.reason
+             if insert_event:
+                 assert progress is not None
+                 self._insert_source_event(
+@@ -1301,7 +1311,9 @@ class VisitRepository:
+                 reason=reason,
+             )
+ 
+-        closed_at, duration_seconds, close_time_source, _ = match
++        closed_at = match.closed_at
++        duration_seconds = match.duration_seconds
++        close_time_source = match.close_time_source
+         visit_id = str(visit["visit_id"])
+         if insert_event:
+             assert progress is not None
+@@ -1360,6 +1372,10 @@ class VisitRepository:
+             processing_result="closed",
+             event_id=evidence.event_id,
+             visit_id=visit_id,
++            duration_drift_seconds=match.duration_drift_seconds,
++            duration_drift_threshold_seconds=max_duration_drift_seconds,
++            duration_drift_exceeded=match.duration_drift_exceeded,
++            close_time_source=close_time_source,
+         )
+ 
+     def _match_offline(
+@@ -1370,46 +1386,69 @@ class VisitRepository:
+         visit: sqlite3.Row,
+         max_clock_skew_seconds: float,
+         max_duration_drift_seconds: float,
+-    ) -> tuple[str | None, int | None, str | None, str | None]:
++    ) -> _OfflineMatch:
+         started = _parse_utc(str(visit["started_at"]))
+         controller = _parse_optional_utc(evidence.controller_event_at)
+         received = _parse_optional_utc(evidence.received_at)
++        authorization = connection.execute(
++            """
++            SELECT COUNT(*) AS authorization_count,
++                   MAX(authorized_at) AS latest_authorized_at
++            FROM visit_authorizations
++            WHERE visit_id=?
++            """,
++            (visit["visit_id"],),
++        ).fetchone()
++        authorization_count = int(authorization["authorization_count"])
++        latest_value = authorization["latest_authorized_at"]
++        if authorization_count < 1 or latest_value is None:
++            return _OfflineMatch(
++                None, None, None, "authorization_evidence_missing"
++            )
++        latest_authorized = _parse_utc(str(latest_value))
++        match_floor = max(started, latest_authorized)
+         close_at: datetime | None = None
+         source: str | None = None
+-        if controller is not None and controller >= started:
++        if controller is not None and controller >= match_floor:
+             close_at = controller
+             source = "controller"
+         elif controller is not None:
+-            earliest = started - timedelta(
++            earliest = match_floor - timedelta(
+                 seconds=max_clock_skew_seconds
+             )
+             if (
+-                controller >= earliest
++                authorization_count == 1
++                and controller >= earliest
+                 and received is not None
+-                and received >= started
++                and received >= match_floor
+             ):
+                 close_at = received
+                 source = "received_clock_fallback"
+             else:
+-                return None, None, None, "stale_or_ambiguous"
+-        elif received is not None and received >= started:
++                return _OfflineMatch(
++                    None, None, None, "stale_or_ambiguous"
++                )
++        elif (
++            authorization_count == 1
++            and received is not None
++            and received >= match_floor
++        ):
+             close_at = received
+             source = "received_clock_fallback"
+         else:
+-            return None, None, None, "stale_or_ambiguous"
++            return _OfflineMatch(None, None, None, "stale_or_ambiguous")
+ 
++        drift_seconds: float | None = None
++        drift_exceeded = False
+         if (
+-            source == "controller"
+-            and evidence.reported_connected_seconds is not None
++            evidence.reported_connected_seconds is not None
+             and controller is not None
+         ):
+             reported_start = controller - timedelta(
+                 seconds=evidence.reported_connected_seconds
+             )
+-            if abs((reported_start - started).total_seconds()) > (
+-                max_duration_drift_seconds
+-            ):
+-                return None, None, None, "stale_or_ambiguous"
++            drift_seconds = abs((reported_start - started).total_seconds())
++            drift_exceeded = drift_seconds > max_duration_drift_seconds
+ 
+         known_ssids = {
+             str(row[0])
+@@ -1428,9 +1467,16 @@ class VisitRepository:
+             and known_ssids
+             and evidence.ssid not in known_ssids
+         ):
+-            return None, None, None, "ssid_changed"
++            return _OfflineMatch(None, None, None, "ssid_changed")
+         duration = int((close_at - started).total_seconds())
+-        return _format_utc(close_at), duration, source, None
++        return _OfflineMatch(
++            _format_utc(close_at),
++            duration,
++            source,
++            None,
++            duration_drift_seconds=drift_seconds,
++            duration_drift_exceeded=drift_exceeded,
++        )
+ 
+     @staticmethod
+     def _open_visit_row(
+diff --git a/app/visit_lifecycle/service.py b/app/visit_lifecycle/service.py
+index cb42445..b47b1c6 100644
+--- a/app/visit_lifecycle/service.py
++++ b/app/visit_lifecycle/service.py
+@@ -118,7 +118,23 @@ class VisitLifecycleService:
+         if outcome.duplicate:
+             self.telemetry.emit("visit.offline_duplicate", **fields)
+         elif outcome.processing_result == "closed":
+-            self.telemetry.emit("visit.closed", **fields)
++            self.telemetry.emit(
++                "visit.closed",
++                close_time_source=outcome.close_time_source,
++                **fields,
++            )
++            if outcome.duration_drift_exceeded:
++                self.telemetry.emit(
++                    "visit.offline_duration_drift",
++                    "warning",
++                    duration_drift_seconds=outcome.duration_drift_seconds,
++                    duration_drift_threshold_seconds=(
++                        outcome.duration_drift_threshold_seconds
++                    ),
++                    duration_drift_exceeded=True,
++                    close_time_source=outcome.close_time_source,
++                    **fields,
++                )
+         elif outcome.processing_result == "unmatched":
+             self.telemetry.emit(
+                 "visit.offline_unmatched",
+diff --git a/tests/analytics/test_home_activity.py b/tests/analytics/test_home_activity.py
+index 5e12a59..a5d4ce7 100644
+--- a/tests/analytics/test_home_activity.py
++++ b/tests/analytics/test_home_activity.py
+@@ -241,6 +241,51 @@ def test_confident_semantic_replay_suppression_does_not_degrade_quality(
+     assert result.traffic.coverage.quality_reasons == ()
+ 
+ 
++def test_recovery_reclassification_does_not_double_count_traffic(
++    analytics_stack,
++):
++    timestamp = "2026-01-01T10:15:00.000Z"
++    _insert_source_event(
++        analytics_stack.visits,
++        event_id="recovered-event",
++        processing_result="unmatched",
++        controller_event_at=timestamp,
++        received_at=timestamp,
++        traffic=4800,
++        connected=60,
++    )
++    service = HomeActivityReadService(analytics_stack.gateway)
++    kwargs = dict(
++        site_id=SITE_A, guest_ssids=("ssid-a",), range_payload={},
++        from_utc="2026-01-01T10:00:00.000Z",
++        to_utc="2026-01-01T11:00:00.000Z",
++        evaluated_at_utc="2026-01-01T11:00:00.000Z", timezone_name="UTC",
++        visits_coverage_from_utc="2025-01-01T00:00:00.000Z",
++        traffic_coverage_from_utc="2025-01-01T00:00:00.000Z",
++        traffic_fresh_max_age_seconds=90,
++        traffic_stale_max_age_seconds=180,
++    )
++    before = service.get_activity(
++        deadline=QueryDeadline.after(5), **kwargs
++    )
++    with closing(analytics_stack.visits._connect()) as connection:  # noqa: SLF001
++        connection.execute(
++            """
++            UPDATE visit_source_events
++            SET processing_result='closed', reason=NULL
++            WHERE event_id='recovered-event'
++            """
++        )
++        connection.commit()
++    after = service.get_activity(
++        deadline=QueryDeadline.after(5), **kwargs
++    )
++
++    assert before.traffic.bytes == after.traffic.bytes == 4800
++    assert before.traffic.included_fingerprint_count == 1
++    assert after.traffic.included_fingerprint_count == 1
++
++
+ def test_activity_read_is_site_and_ssid_scoped_and_read_only(analytics_stack):
+     _seed_activity_events(analytics_stack.visits)
+     before = _fingerprint(analytics_stack.visits)
+diff --git a/tests/analytics/test_visit_analytics.py b/tests/analytics/test_visit_analytics.py
+index 2fa9504..bde6e98 100644
+--- a/tests/analytics/test_visit_analytics.py
++++ b/tests/analytics/test_visit_analytics.py
+@@ -474,6 +474,26 @@ def test_closure_keeps_reported_and_lifecycle_duration_separate(
+     assert result.value.duration_difference_seconds.p50 == 60
+ 
+ 
++def test_recovered_close_reason_remains_auditable_in_visit_analytics(
++    analytics_stack,
++):
++    with closing(analytics_stack.visits._connect()) as connection:  # noqa: SLF001
++        connection.execute(
++            "UPDATE visits SET close_reason='omada_client_offline_recovered' "
++            "WHERE visit_id=?",
++            (analytics_stack.visit_id,),
++        )
++        connection.commit()
++
++    result = _service(analytics_stack).get_closure_distribution(
++        SITE_A, FROM, TO
++    )
++
++    assert result.value.close_reasons == {
++        "omada_client_offline_recovered": 1
++    }
++
++
+ def test_coverage_summary_does_not_issue_per_visit_queries(
+     analytics_stack, monkeypatch,
+ ):
+diff --git a/tests/visit_lifecycle/test_recovery.py b/tests/visit_lifecycle/test_recovery.py
+new file mode 100644
+index 0000000..15120d4
+--- /dev/null
++++ b/tests/visit_lifecycle/test_recovery.py
+@@ -0,0 +1,497 @@
++from __future__ import annotations
++
++import json
++import sqlite3
++import uuid
++from datetime import datetime, timezone
++
++import pytest
++
++from app.visit_lifecycle.recovery import (
++    RecoveryError,
++    backup_database,
++    main,
++    recover,
++)
++
++from .conftest import make_request
++
++
++NOW = "2026-08-13T11:00:00.000Z"
++
++
++def _event(
++    repository,
++    *,
++    event_id="offline:1",
++    mac="02:11:22:33:44:55",
++    controller_at="2026-08-13T10:05:00.000Z",
++    ssid="Zefer_Parki",
++    client_ip="192.0.2.20",
++    ap_mac="02:FF:EE:DD:CC:BB",
++    reported_seconds=1800,
++    reported_bytes=123456,
++    site_id="site-a",
++    processing_result="unmatched",
++    reason="stale_or_ambiguous",
++):
++    with repository._connect() as connection:  # noqa: SLF001
++        connection.execute(
++            """
++            INSERT INTO visit_source_events (
++                event_id, event_type, site_id, client_mac,
++                controller_event_at, received_at, source_identity,
++                source_offset_start, source_offset_end,
++                processing_result, visit_id, reason,
++                first_processed_at, processed_at, pending_until,
++                last_match_attempt_at, client_ip, ssid, ap_mac,
++                reported_connected_seconds, reported_traffic_total_bytes
++            ) VALUES (?, 'omada.client_offline', ?, ?, ?, ?,
++                      'fixture', 0, 1, ?, NULL, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
++            """,
++            (
++                event_id,
++                site_id,
++                mac,
++                controller_at,
++                controller_at,
++                processing_result,
++                reason,
++                NOW,
++                NOW,
++                client_ip,
++                ssid,
++                ap_mac,
++                reported_seconds,
++                reported_bytes,
++            ),
++        )
++        connection.commit()
++
++
++def _fingerprint(repository):
++    with repository._connect(readonly=True) as connection:  # noqa: SLF001
++        return tuple(
++            connection.execute(f"SELECT * FROM {table}").fetchall()
++            for table in (
++                "visits",
++                "visit_authorizations",
++                "visit_source_events",
++                "visit_reader_state",
++            )
++        )
++
++
++def test_dry_run_is_read_only_and_reports_earliest_safe_event(
++    visit_repository,
++    visit_service,
++):
++    opened = visit_service.submit_authorized(make_request())
++    _event(
++        visit_repository,
++        event_id="offline:2",
++        controller_at="2026-08-13T10:06:00.000Z",
++    )
++    _event(visit_repository, event_id="offline:1")
++    before = _fingerprint(visit_repository)
++
++    result = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        now_utc=NOW,
++    )
++
++    assert result["mode"] == "dry-run"
++    assert result["examined_count"] == 1
++    assert result["recoverable_count"] == 1
++    assert result["candidates"][0]["visit_id"] == opened.visit_id
++    assert result["candidates"][0]["event_id"] == "offline:1"
++    assert _fingerprint(visit_repository) == before
++
++
++def test_apply_revalidates_and_closes_from_persisted_controller_evidence(
++    visit_repository,
++    visit_service,
++):
++    opened = visit_service.submit_authorized(make_request())
++    _event(visit_repository)
++    with visit_repository._connect(readonly=True) as connection:  # noqa: SLF001
++        authorization_before = tuple(
++            tuple(row) for row in connection.execute(
++                "SELECT * FROM visit_authorizations WHERE visit_id=?",
++                (opened.visit_id,),
++            ).fetchall()
++        )
++        opening_before = tuple(connection.execute(
++            """
++            SELECT start_auth_session_id, start_auth_run_number,
++                   start_final_reason, started_at
++            FROM visits WHERE visit_id=?
++            """,
++            (opened.visit_id,),
++        ).fetchone())
++        visit_count_before = connection.execute(
++            "SELECT COUNT(*) FROM visits"
++        ).fetchone()[0]
++
++    result = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        apply=True,
++        now_utc=NOW,
++    )
++
++    assert result["applied_count"] == 1
++    visit = visit_repository.get_visit("site-a", opened.visit_id)
++    assert visit.status == "closed"
++    assert visit.closed_at == "2026-08-13T10:05:00.000Z"
++    assert visit.close_reason == "omada_client_offline_recovered"
++    assert visit.close_time_source == "controller"
++    assert visit.duration_seconds == 300
++    assert visit.offline_event_id == "offline:1"
++    assert visit.reported_connected_seconds == 1800
++    with visit_repository._connect(readonly=True) as connection:  # noqa: SLF001
++        event = connection.execute(
++            "SELECT * FROM visit_source_events WHERE event_id='offline:1'"
++        ).fetchone()
++        authorization_after = tuple(
++            tuple(row) for row in connection.execute(
++                "SELECT * FROM visit_authorizations WHERE visit_id=?",
++                (opened.visit_id,),
++            ).fetchall()
++        )
++        opening_after = tuple(connection.execute(
++            """
++            SELECT start_auth_session_id, start_auth_run_number,
++                   start_final_reason, started_at
++            FROM visits WHERE visit_id=?
++            """,
++            (opened.visit_id,),
++        ).fetchone())
++        assert connection.execute("SELECT COUNT(*) FROM visits").fetchone()[0] == (
++            visit_count_before
++        )
++        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
++    assert event["processing_result"] == "closed"
++    assert event["reason"] is None
++    assert event["visit_id"] == opened.visit_id
++    assert event["first_processed_at"] == NOW
++    assert authorization_after == authorization_before
++    assert opening_after == opening_before
++
++    repeated = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        apply=True,
++        now_utc=NOW,
++    )
++    assert repeated["examined_count"] == 0
++    assert repeated["applied_count"] == 0
++
++    next_visit = visit_service.submit_authorized(make_request(
++        auth_session_id="33333333-3333-4333-8333-333333333333",
++        authorized_at=datetime(2026, 8, 13, 10, 10, tzinfo=timezone.utc),
++        auth_run_number=2,
++    ))
++    assert next_visit.status == "opened"
++    assert next_visit.visit_id != opened.visit_id
++
++
++def test_zero_authorization_visit_is_never_recovered(
++    visit_repository,
++    visit_service,
++):
++    opened = visit_service.submit_authorized(make_request())
++    with visit_repository._connect() as connection:  # noqa: SLF001
++        connection.execute(
++            "DELETE FROM visit_authorizations WHERE visit_id=?",
++            (opened.visit_id,),
++        )
++        connection.commit()
++    _event(visit_repository)
++
++    result = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        apply=True,
++        now_utc=NOW,
++    )
++
++    assert result["applied_count"] == 0
++    assert result["skip_reason_counts"] == {
++        "authorization_evidence_missing": 1
++    }
++    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
++
++
++def test_same_time_semantic_duplicates_choose_lowest_event_id(
++    visit_repository,
++    visit_service,
++):
++    visit_service.submit_authorized(make_request())
++    _event(visit_repository, event_id="offline:b")
++    _event(visit_repository, event_id="offline:a")
++
++    result = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        now_utc=NOW,
++    )
++
++    assert result["semantic_duplicate_count"] == 1
++    assert result["candidates"][0]["event_id"] == "offline:a"
++
++
++def test_same_time_conflicting_events_are_ambiguous(
++    visit_repository,
++    visit_service,
++):
++    visit_service.submit_authorized(make_request())
++    _event(visit_repository, event_id="offline:a")
++    _event(visit_repository, event_id="offline:b", client_ip="192.0.2.99")
++
++    result = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        now_utc=NOW,
++    )
++
++    assert result["recoverable_count"] == 0
++    assert result["skip_reason_counts"] == {
++        "ambiguous_same_timestamp_events": 1
++    }
++
++
++@pytest.mark.parametrize(
++    ("changes", "expected_reason"),
++    [
++        ({"site_id": "site-b"}, "no_safe_offline_after_latest_authorization"),
++        ({"mac": "02:11:22:33:44:99"}, "no_safe_offline_after_latest_authorization"),
++        (
++            {"controller_at": "2026-08-13T09:59:59.000Z"},
++            "no_safe_offline_after_latest_authorization",
++        ),
++        ({"reason": "no_open_visit"}, "no_safe_offline_after_latest_authorization"),
++        ({"reason": "ssid_changed"}, "no_safe_offline_after_latest_authorization"),
++        (
++            {"processing_result": "invalid", "reason": "invalid_event"},
++            "no_safe_offline_after_latest_authorization",
++        ),
++        ({"ssid": "other-ssid"}, "ssid_conflict"),
++    ],
++)
++def test_recovery_requires_exact_safe_persisted_evidence(
++    visit_repository,
++    visit_service,
++    changes,
++    expected_reason,
++):
++    opened = visit_service.submit_authorized(make_request())
++    _event(visit_repository, **changes)
++
++    result = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        apply=True,
++        now_utc=NOW,
++    )
++
++    assert result["recoverable_count"] == 0
++    assert result["skip_reason_counts"] == {expected_reason: 1}
++    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
++
++
++def test_limit_and_keyset_continuation_neither_repeat_nor_skip(
++    visit_repository,
++    visit_service,
++):
++    visits = []
++    for index in range(3):
++        mac = f"02:11:22:33:44:{index + 10:02X}"
++        visits.append(visit_service.submit_authorized(make_request(
++            auth_session_id=str(uuid.uuid4()),
++            client_mac=mac,
++            authorized_at=datetime(
++                2026, 8, 13, 10, index, tzinfo=timezone.utc
++            ),
++        )))
++
++    first = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        limit=2,
++        now_utc=NOW,
++    )
++    second = recover(
++        db_path=str(visit_repository.db_path.resolve()),
++        site_id="site-a",
++        limit=2,
++        after_started_at=first["next_after_started_at"],
++        after_visit_id=first["next_after_visit_id"],
++        now_utc=NOW,
++    )
++
++    assert first["examined_count"] == 2
++    assert first["truncated"] is True
++    assert first["remaining_open_visit_count"] == 1
++    assert second["examined_count"] == 1
++    assert second["truncated"] is False
++    assert second["remaining_open_visit_count"] == 0
++
++
++def test_sqlite_backup_is_consistent_verified_and_source_unchanged(
++    visit_repository,
++    visit_service,
++    tmp_path,
++):
++    visit_service.submit_authorized(make_request())
++    before = _fingerprint(visit_repository)
++    destination = tmp_path / "backup.sqlite3"
++
++    result = backup_database(
++        db_path=str(visit_repository.db_path.resolve()),
++        backup_to=str(destination.resolve()),
++    )
++
++    assert result["quick_check"] == "ok"
++    assert result["source_schema_version"] == 2
++    assert result["backup_schema_version"] == 2
++    assert destination.is_file()
++    assert _fingerprint(visit_repository) == before
++    with sqlite3.connect(destination) as connection:
++        assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
++        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
++    with pytest.raises(RecoveryError, match="already exists"):
++        backup_database(
++            db_path=str(visit_repository.db_path.resolve()),
++            backup_to=str(destination.resolve()),
++        )
++
++
++@pytest.mark.parametrize("limit", [0, 5001])
++def test_limit_bounds_are_strict(visit_repository, limit):
++    with pytest.raises(RecoveryError, match="between 1 and 5000"):
++        recover(
++            db_path=str(visit_repository.db_path.resolve()),
++            site_id="site-a",
++            limit=limit,
++        )
++
++
++def test_missing_relative_and_wrong_schema_database_are_rejected(
++    visit_repository,
++    tmp_path,
++):
++    with pytest.raises(RecoveryError, match="absolute"):
++        recover(db_path="visits.sqlite3", site_id="site-a")
++    with pytest.raises(RecoveryError, match="does not exist"):
++        recover(db_path=str((tmp_path / "missing.sqlite3").resolve()), site_id="site-a")
++    wrong = tmp_path / "wrong.sqlite3"
++    with sqlite3.connect(wrong) as connection:
++        connection.execute("CREATE TABLE unrelated(value TEXT)")
++    with pytest.raises(RecoveryError, match="version"):
++        recover(db_path=str(wrong.resolve()), site_id="site-a")
++
++
++def test_cli_action_conflicts_and_backup_selection_are_rejected(
++    visit_repository,
++    tmp_path,
++):
++    db_path = str(visit_repository.db_path.resolve())
++    with pytest.raises(SystemExit):
++        main(["--db-path", db_path, "--site-id", "site-a", "--dry-run", "--apply"])
++    with pytest.raises(SystemExit):
++        main([
++            "--db-path", db_path,
++            "--site-id", "site-a",
++            "--backup-to", str((tmp_path / "backup.sqlite3").resolve()),
++        ])
++
++
++@pytest.mark.parametrize(
++    "extra",
++    [
++        ["--limit", "1"],
++        ["--after-started-at", "2026-08-13T10:00:00.000Z"],
++        ["--after-visit-id", "11111111-1111-4111-8111-111111111111"],
++    ],
++)
++def test_backup_mode_rejects_every_recovery_selector(
++    visit_repository,
++    tmp_path,
++    extra,
++):
++    with pytest.raises(SystemExit):
++        main([
++            "--db-path", str(visit_repository.db_path.resolve()),
++            "--backup-to", str((tmp_path / "backup.sqlite3").resolve()),
++            *extra,
++        ])
++
++
++def test_no_explicit_action_is_dry_run_with_exact_default_limit(
++    visit_repository,
++    capsys,
++):
++    assert main([
++        "--db-path", str(visit_repository.db_path.resolve()),
++        "--site-id", "site-a",
++    ]) == 0
++    result = json.loads(capsys.readouterr().out)
++    assert result["mode"] == "dry-run"
++    assert result["limit"] == 500
++    assert result["resolved_db_path"] == str(visit_repository.db_path.resolve())
++    assert result["schema_version"] == 2
++
++
++def test_continuation_requires_canonical_complete_pair(visit_repository):
++    path = str(visit_repository.db_path.resolve())
++    with pytest.raises(RecoveryError, match="complete pair"):
++        recover(
++            db_path=path,
++            site_id="site-a",
++            after_started_at="2026-08-13T10:00:00.000Z",
++        )
++    with pytest.raises(RecoveryError, match="invalid|canonical"):
++        recover(
++            db_path=path,
++            site_id="site-a",
++            after_started_at="2026-08-13T10:00:00Z",
++            after_visit_id="11111111-1111-4111-8111-111111111111",
++        )
++
++
++def test_recovery_query_plan_uses_existing_v2_indexes(visit_repository):
++    with visit_repository._connect(readonly=True) as connection:  # noqa: SLF001
++        authorization = " ".join(
++            str(row[3]) for row in connection.execute(
++                "EXPLAIN QUERY PLAN SELECT COUNT(*), MAX(authorized_at) "
++                "FROM visit_authorizations WHERE visit_id=?",
++                ("11111111-1111-4111-8111-111111111111",),
++            )
++        )
++        visits = " ".join(
++            str(row[3]) for row in connection.execute(
++                "EXPLAIN QUERY PLAN SELECT * FROM visits "
++                "WHERE site_id=? AND status='open' "
++                "ORDER BY started_at ASC, visit_id ASC LIMIT 501",
++                ("site-a",),
++            )
++        )
++        events = " ".join(
++            str(row[3]) for row in connection.execute(
++                "EXPLAIN QUERY PLAN SELECT * FROM visit_source_events "
++                "WHERE site_id=? AND client_mac=? "
++                "AND controller_event_at>=? "
++                "ORDER BY controller_event_at ASC, event_id ASC",
++                (
++                    "site-a",
++                    "02:11:22:33:44:55",
++                    "2026-08-13T10:00:00.000Z",
++                ),
++            )
++        )
++
++    assert "idx_visit_auth_visit_time" in authorization
++    assert "idx_visits_site_status_started" in visits
++    assert "idx_visit_events_site_controller" in events
+diff --git a/tests/visit_lifecycle/test_webhook_finalization.py b/tests/visit_lifecycle/test_webhook_finalization.py
+index cd6f783..62ac4ce 100644
+--- a/tests/visit_lifecycle/test_webhook_finalization.py
++++ b/tests/visit_lifecycle/test_webhook_finalization.py
+@@ -144,7 +144,6 @@ def test_same_mac_other_site_is_untouched_and_pending_is_site_scoped(
+         ({"ssid": "Other_Network"}, "ssid_changed"),
+         ({"controller_timestamp": "2026-08-13T09:50:00.000Z"},
+          "stale_or_ambiguous"),
+-        ({"reported_connected_seconds": 1800}, "stale_or_ambiguous"),
+     ],
+ )
+ def test_safeguard_rejections_are_durable_unmatched(
+@@ -252,7 +251,7 @@ def test_pending_recheck_uses_only_durable_context_after_journal_disappears(
+     ("reported_seconds", "expected_result", "expected_reason"),
+     [
+         (300, "closed", None),
+-        (1800, "unmatched", "stale_or_ambiguous"),
++        (1800, "closed", None),
+     ],
+ )
+ def test_pending_restart_rechecks_durable_duration_and_can_close(
+@@ -300,6 +299,179 @@ def test_pending_restart_rechecks_durable_duration_and_can_close(
+         assert visit.reported_connected_seconds == reported_seconds
+ 
+ 
++@pytest.mark.parametrize("reported_seconds", [601, 627, 644, 670, 1800])
++def test_reported_duration_drift_is_diagnostic_and_never_blocks_close(
++    visit_config,
++    visit_repository,
++    reported_seconds,
++):
++    telemetry = CapturingTelemetry()
++    from app.visit_lifecycle.service import VisitLifecycleService
++
++    service = VisitLifecycleService(visit_repository, telemetry)
++    opened = service.submit_authorized(make_request())
++    _write(
++        visit_config.webhook_source,
++        _record(reported_connected_seconds=reported_seconds),
++    )
++    _reader(visit_config, visit_repository, service).scan_once()
++
++    visit = visit_repository.get_visit("site-a", opened.visit_id)
++    assert visit.status == "closed"
++    assert visit.reported_connected_seconds == reported_seconds
++    warnings = [
++        fields for event, level, fields in telemetry.events
++        if event == "visit.offline_duration_drift" and level == "warning"
++    ]
++    assert len(warnings) == 1
++    assert warnings[0]["duration_drift_exceeded"] is True
++    assert warnings[0]["close_time_source"] == "controller"
++
++
++@pytest.mark.parametrize(
++    ("controller_timestamp", "authorization_count", "expected"),
++    [
++        ("2026-08-13T09:59:30.000Z", 1, "closed"),
++        ("2026-08-13T10:03:30.000Z", 2, "open"),
++        (None, 1, "closed"),
++        (None, 2, "open"),
++    ],
++)
++def test_received_fallback_is_ambiguity_aware_after_latest_authorization(
++    visit_config,
++    visit_repository,
++    visit_service,
++    controller_timestamp,
++    authorization_count,
++    expected,
++):
++    opened = visit_service.submit_authorized(make_request())
++    if authorization_count == 2:
++        visit_service.submit_authorized(make_request(
++            auth_session_id="22222222-2222-4222-8222-222222222222",
++            authorized_at=datetime(2026, 8, 13, 10, 4, tzinfo=timezone.utc),
++            auth_run_number=2,
++        ))
++    _write(
++        visit_config.webhook_source,
++        _record(
++            controller_timestamp=controller_timestamp,
++            received_at="2026-08-13T10:05:01.000Z",
++        ),
++    )
++    _reader(visit_config, visit_repository, visit_service).scan_once()
++
++    visit = visit_repository.get_visit("site-a", opened.visit_id)
++    assert visit.status == expected
++    if expected == "closed":
++        assert visit.close_time_source == "received_clock_fallback"
++    else:
++        assert _source(visit_repository, "webhook:0")["reason"] == (
++            "stale_or_ambiguous"
++        )
++
++
++def test_latest_authorization_is_the_temporal_match_floor(
++    visit_config,
++    visit_repository,
++    visit_service,
++):
++    opened = visit_service.submit_authorized(make_request())
++    visit_service.submit_authorized(make_request(
++        auth_session_id="22222222-2222-4222-8222-222222222222",
++        authorized_at=datetime(2026, 8, 13, 10, 4, tzinfo=timezone.utc),
++        auth_run_number=2,
++    ))
++    _write(
++        visit_config.webhook_source,
++        _record(
++            controller_timestamp="2026-08-13T10:03:59.000Z",
++            reported_connected_seconds=999999,
++        ),
++    )
++    _reader(visit_config, visit_repository, visit_service).scan_once()
++
++    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
++    assert _source(visit_repository, "webhook:0")["reason"] == (
++        "stale_or_ambiguous"
++    )
++
++
++def test_controller_at_latest_authorization_closes_reused_visit(
++    visit_config,
++    visit_repository,
++    visit_service,
++):
++    opened = visit_service.submit_authorized(make_request())
++    visit_service.submit_authorized(make_request(
++        auth_session_id="22222222-2222-4222-8222-222222222222",
++        authorized_at=datetime(2026, 8, 13, 10, 5, tzinfo=timezone.utc),
++        auth_run_number=2,
++    ))
++    _write(visit_config.webhook_source, _record())
++    _reader(visit_config, visit_repository, visit_service).scan_once()
++
++    visit = visit_repository.get_visit("site-a", opened.visit_id)
++    assert visit.status == "closed"
++    assert visit.closed_at == "2026-08-13T10:05:00.000Z"
++
++
++@pytest.mark.parametrize(
++    "controller_timestamp",
++    ["2026-08-13T10:05:00.000Z", None],
++)
++def test_zero_authorization_visit_fails_safe_without_received_fallback(
++    visit_config,
++    visit_repository,
++    controller_timestamp,
++):
++    from app.visit_lifecycle.service import VisitLifecycleService
++
++    telemetry = CapturingTelemetry()
++    service = VisitLifecycleService(visit_repository, telemetry)
++    opened = service.submit_authorized(make_request())
++    with visit_repository._connect() as connection:  # noqa: SLF001
++        connection.execute(
++            "DELETE FROM visit_authorizations WHERE visit_id=?",
++            (opened.visit_id,),
++        )
++        connection.commit()
++    _write(
++        visit_config.webhook_source,
++        _record(controller_timestamp=controller_timestamp),
++    )
++    _reader(visit_config, visit_repository, service).scan_once()
++
++    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
++    source = _source(visit_repository, "webhook:0")
++    assert source["processing_result"] == "unmatched"
++    assert source["reason"] == "authorization_evidence_missing"
++    unmatched = [
++        fields for event, level, fields in telemetry.events
++        if event == "visit.offline_unmatched" and level == "warning"
++    ]
++    assert len(unmatched) == 1
++    assert unmatched[0]["reason"] == "authorization_evidence_missing"
++
++
++def test_other_mac_offline_does_not_touch_open_visit(
++    visit_config,
++    visit_repository,
++    visit_service,
++):
++    opened = visit_service.submit_authorized(make_request())
++    _write(
++        visit_config.webhook_source,
++        _record(client_mac="02:11:22:33:44:99"),
++    )
++    _reader(visit_config, visit_repository, visit_service).scan_once()
++
++    assert visit_repository.get_visit("site-a", opened.visit_id).status == "open"
++    assert _source(visit_repository, "webhook:0")["processing_result"] == (
++        "pending_match"
++    )
++
++
+ def test_pending_deadline_is_absolute_and_never_reconstructs_visit(
+     visit_config,
+     visit_repository,
+-- 
+2.55.0.windows.5
+

@@ -7,7 +7,6 @@ import pytest
 
 from app.network_service_recognition.binding_replay import (
     enqueue_binding_changes, read_targeted_replay_page, BindingReplayConflict)
-from app.network_service_recognition.materialization_repository import ServiceMaterializationRepository
 
 GENERATION = "10000000-0000-4000-8000-000000000010"
 DEVICE = "10000000-0000-4000-8000-000000000001"
@@ -17,8 +16,6 @@ AT = "2026-10-13T12:00:00.000000Z"
 
 class QueueFixture:
     """Only B1's two SQL contracts; full store/startup validation belongs to G3."""
-    append_visit_delivery = ServiceMaterializationRepository.append_visit_delivery
-    visit_delivery_db_path = None  # Real default-OFF path; enabled atomics tested on real store.
     def __init__(self):
         self.connection = sqlite3.connect(":memory:", isolation_level=None)
         self.connection.row_factory = sqlite3.Row

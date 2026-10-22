@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ipaddress
+import sqlite3
 import tempfile
 import threading
 import time
 import tracemalloc
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +18,7 @@ from typing import Any
 from app.device_fingerprint.models import DeviceFingerprintConfig, DeviceFingerprintProducer
 from app.device_fingerprint.read_service import DeviceFingerprintReadService
 from app.device_fingerprint.repository import DeviceFingerprintRepository
+from app.device_fingerprint.schema import SCHEMA_SQL
 from app.device_fingerprint.schema_registry import build_production_schema_registry
 from app.device_fingerprint.service import DeviceFingerprintService
 from app.device_fingerprint.validation import format_utc
@@ -127,6 +130,9 @@ def run_disposable_stress(
             max_payload_bytes=8_192, max_concurrent_ingest_requests=2,
         )
         repo = DeviceFingerprintRepository(config.db_path, max_db_bytes=config.max_db_bytes)
+        with closing(sqlite3.connect(path)) as setup, setup:
+            setup.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL)
+            setup.execute("INSERT INTO device_fingerprint_storage_state VALUES (1,?,0)", (str(uuid.uuid4()),))
         repo.initialize()
         try:
             service = DeviceFingerprintService(config, repo, build_production_schema_registry(), now=lambda: FIXED_NOW)

@@ -1,0 +1,865 @@
+diff --git a/README.md b/README.md
+index 00940b9bd27cc5c5cdb89554e744429b3ee4975d..69ca704391ac9c9166730b3e207f1e2c547a6275 100644
+--- a/README.md
++++ b/README.md
+@@ -330,7 +330,7 @@ Permanent UI rule:
+ 
+ ```text
+ Type     = fingerprint device_class
+-Platform = controller / Omada device_type
++Platform = Controller-first; resolved PRODUCTION Fingerprint fallback only
+ 
+ Type != Platform
+ Controller Platform NEVER backfills Fingerprint Type
+@@ -706,7 +706,7 @@ flowchart TD
+     AQ --> D[Device Card]
+ 
+     H --> HT["Type = Fingerprint device_class"]
+-    H --> HP["Platform = controller device_type"]
++    H --> HP["Platform = Controller-first; resolved Fingerprint fallback"]
+ 
+     D --> CP["Controller Platform"]
+     D --> FI["Fingerprint Information"]
+@@ -895,12 +895,16 @@ mapping, inference, separator collapsing or truncation.
+ The browser consumes the server-provided key. It must not derive a Device Type
+ key from raw `device_type`.
+ 
+-Android presentation is therefore strictly:
++Controller-only Android presentation (including Device Card) remains strictly:
+ 
+ ```javascript
+ device_type_key === "android"
+ ```
+ 
++Home instead uses the server-composed effective key (exact comparison
++`platform_presentation.key === "android"`), including resolved Fingerprint
++fallback. Controller lexical normalization itself is unchanged.
++
+ The earlier browser-owned `trim().toLowerCase()` Android predicate remains
+ historical evidence of TASK-WEB-ASSET-LIBRARY-01/FIX and is **superseded as a
+ current contract** by PR #119/#120.
+@@ -915,7 +919,7 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+ 
+ ## Home Online Devices — current presentation
+ 
+-Current production columns:
++Current repository Home columns (deployment is separately authorized):
+ 
+ ```text
+ Device / MAC
+@@ -934,8 +938,30 @@ Traffic
+ `Type` is the compact Device Fingerprint `device_class` presentation from the
+ latest authoritative PRODUCTION `ClassificationResult`.
+ 
+-`Platform` is the existing controller/Omada `device_type` presentation and keeps
+-the `device_type_key`/Android-icon compatibility contract.
++`Platform` uses Controller first when `device_type_key` is neither null nor
++`unknown`. Otherwise only a resolved authoritative PRODUCTION Fingerprint
++platform may supply the value. Raw `device_type` and canonical `device_type_key`
++are unchanged; no other controller keys are reinterpreted. The server returns
++`platform_presentation = {source, value, key}` with source `controller`,
++`fingerprint` or `none`. Home renders that value and uses only exact effective
++key `android` for the existing icon, without a visible provenance badge or
++browser normalization.
++
++Explicit Controller Unknown or completed unresolved Fingerprint renders
++`Unknown`; absent Controller plus no-result/unavailable Fingerprint renders
++`—`. Type never falls back to Controller. Both compact Fingerprint projections
++come from the same bounded, Site-scoped PRODUCTION batch; no second query or
++per-device read is added. Device Card continues to show Controller Platform and
++Fingerprint Platform separately, even when they disagree.
++
++`HOME-UX-REFINEMENT-01` moves Online Devices, including filters and pagination,
++before Traffic Now; the remaining panels keep their relative order. Only Home
++`.live-metrics` summary cards have denser spacing and aligned values; responsive
++breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
++independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
++Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
++page semantics are unchanged. This describes repository implementation, not a
++new production deployment or visual-acceptance claim.
+ 
+ ```text
+ Type != Platform
+diff --git a/README_RU.md b/README_RU.md
+index 67690f184ea6a391c46e4f18350775b862b8cb14..6f050c92617e67e8f6c8ec1ae9e5519f967c4dbb 100644
+--- a/README_RU.md
++++ b/README_RU.md
+@@ -328,7 +328,7 @@ Support: `none | low | medium | high`; это не probability.
+ 
+ ```text
+ Type     = fingerprint device_class
+-Platform = controller / Omada device_type
++Platform = Controller-first; resolved PRODUCTION Fingerprint fallback only
+ 
+ Type != Platform
+ Controller Platform NEVER backfills Fingerprint Type
+@@ -644,7 +644,7 @@ flowchart TD
+     AQ --> D[Device Card]
+ 
+     H --> HT["Type = Fingerprint device_class"]
+-    H --> HP["Platform = controller device_type"]
++    H --> HP["Platform = Controller-first; resolved Fingerprint fallback"]
+ 
+     D --> CP["Controller Platform"]
+     D --> FI["Fingerprint Information"]
+@@ -812,12 +812,16 @@ mapping, inference, separator collapsing or truncation.
+ The browser consumes the server-provided key. It must not derive a Device Type
+ key from raw `device_type`.
+ 
+-Android presentation is therefore strictly:
++Controller-only Android presentation (including Device Card) remains strictly:
+ 
+ ```javascript
+ device_type_key === "android"
+ ```
+ 
++Home instead uses the server-composed effective key (exact comparison
++`platform_presentation.key === "android"`), including resolved Fingerprint
++fallback. Controller lexical normalization itself is unchanged.
++
+ The earlier browser-owned `trim().toLowerCase()` Android predicate remains
+ historical evidence of TASK-WEB-ASSET-LIBRARY-01/FIX and is **superseded as a
+ current contract** by PR #119/#120.
+@@ -832,7 +836,7 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+ 
+ ## Home Online Devices — current presentation
+ 
+-Current production columns:
++Current repository Home columns (deployment is separately authorized):
+ 
+ ```text
+ Device / MAC
+@@ -851,8 +855,30 @@ Traffic
+ `Type` is the compact Device Fingerprint `device_class` presentation from the
+ latest authoritative PRODUCTION `ClassificationResult`.
+ 
+-`Platform` is the existing controller/Omada `device_type` presentation and keeps
+-the `device_type_key`/Android-icon compatibility contract.
++`Platform` uses Controller first when `device_type_key` is neither null nor
++`unknown`. Otherwise only a resolved authoritative PRODUCTION Fingerprint
++platform may supply the value. Raw `device_type` and canonical `device_type_key`
++are unchanged; no other controller keys are reinterpreted. The server returns
++`platform_presentation = {source, value, key}` with source `controller`,
++`fingerprint` or `none`. Home renders that value and uses only exact effective
++key `android` for the existing icon, without a visible provenance badge or
++browser normalization.
++
++Explicit Controller Unknown or completed unresolved Fingerprint renders
++`Unknown`; absent Controller plus no-result/unavailable Fingerprint renders
++`—`. Type never falls back to Controller. Both compact Fingerprint projections
++come from the same bounded, Site-scoped PRODUCTION batch; no second query or
++per-device read is added. Device Card continues to show Controller Platform and
++Fingerprint Platform separately, even when they disagree.
++
++`HOME-UX-REFINEMENT-01` moves Online Devices, including filters and pagination,
++before Traffic Now; the remaining panels keep their relative order. Only Home
++`.live-metrics` summary cards have denser spacing and aligned values; responsive
++breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
++independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
++Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
++page semantics are unchanged. This describes repository implementation, not a
++new production deployment or visual-acceptance claim.
+ 
+ ```text
+ Type != Platform
+diff --git a/app/admin_web/device_fingerprint_presentation.py b/app/admin_web/device_fingerprint_presentation.py
+index f8fb5cd0516a67794f80806977c98d8c9e1e993d..6e93b088d1d9cbbbd81f259890137adacc4d02f7 100644
+--- a/app/admin_web/device_fingerprint_presentation.py
++++ b/app/admin_web/device_fingerprint_presentation.py
+@@ -55,6 +55,13 @@ class FingerprintPresentation:
+         return {"state": self.state,
+                 "value": self.device_class_result.value if self.device_class_result else "—"}
+ 
++    def compact_platform(self) -> dict[str, Any]:
++        platform = self.platform_result
++        return {"state": self.state,
++                "status": platform.status if platform else None,
++                "canonical_value_id": platform.canonical_value_id if platform else None,
++                "value": platform.value if platform else "—"}
++
+     def as_dict(self) -> dict[str, Any]:
+         return {"state": self.state, "global_classification_status": self.global_classification_status,
+                 "classified_at_utc": self.classified_at_utc,
+@@ -62,6 +69,22 @@ class FingerprintPresentation:
+                    for name in _DIMENSIONS}}
+ 
+ 
++def home_platform_presentation(
++    controller_value: str | None, controller_key: str | None,
++    fingerprint_platform: dict[str, Any],
++) -> dict[str, Any]:
++    """Home-only precedence; Device Card continues to expose separate sources."""
++    if controller_key is not None and controller_key != "unknown":
++        return {"source": "controller", "value": controller_value, "key": controller_key}
++    if (fingerprint_platform["state"] == "classified"
++            and fingerprint_platform["status"] == "resolved"
++            and fingerprint_platform["canonical_value_id"] is not None):
++        return {"source": "fingerprint", "value": fingerprint_platform["value"],
++                "key": fingerprint_platform["canonical_value_id"]}
++    unresolved = controller_key == "unknown" or fingerprint_platform["state"] == "classified"
++    return {"source": "none", "value": "Unknown" if unresolved else "—", "key": None}
++
++
+ def present_classification(record: ClassificationReadRecord | None) -> FingerprintPresentation:
+     if record is None:
+         return FingerprintPresentation("no_result")
+diff --git a/app/admin_web/query_service.py b/app/admin_web/query_service.py
+index 52971665f0f39bc2ba846c2e3a27164d7135fb51..c69045e71d214701c579a265bbff8e2f3c43e598 100644
+--- a/app/admin_web/query_service.py
++++ b/app/admin_web/query_service.py
+@@ -39,7 +39,9 @@ from app.analytics import (
+ from app.analytics.validation import format_utc
+ from app.common.mac import format_mac_colon
+ from app.common.device_type import normalize_device_type_key
+-from .device_fingerprint_presentation import DeviceFingerprintPresentationService
++from .device_fingerprint_presentation import (
++    DeviceFingerprintPresentationService, home_platform_presentation,
++)
+ from app.current_state import (
+     CurrentStateSchemaError,
+     CurrentStateStorageError,
+@@ -576,7 +578,12 @@ class AdminQueryService:
+                 raise AdminQueryValidationError() from exc
+             fingerprints = self._fingerprint.get_many(site_id, tuple(item["client_mac"] for item in result["items"]))
+             for item in result["items"]:
+-                item["fingerprint_type"] = fingerprints[item["client_mac"]].compact_type()
++                fingerprint = fingerprints[item["client_mac"]]
++                item["fingerprint_type"] = fingerprint.compact_type()
++                item["fingerprint_platform"] = fingerprint.compact_platform()
++                item["platform_presentation"] = home_platform_presentation(
++                    item["device_type"], item["device_type_key"], item["fingerprint_platform"],
++                )
+             return AdminQueryResponse(result, page)
+ 
+         return self._run(query)
+diff --git a/app/admin_web/static/admin.css b/app/admin_web/static/admin.css
+index f195125f98a56b310cb91742d02fa8dccf5321f0..be39f7107ff4ebfb9151597ef6fc069e3bcd3e45 100644
+--- a/app/admin_web/static/admin.css
++++ b/app/admin_web/static/admin.css
+@@ -208,6 +208,13 @@ input[type="radio"] { width: auto; min-height: 0; }
+ .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin: 1.25rem 0 .75rem; }
+ .section-heading h2 { margin: 0; }
+ .live-metric { grid-column: auto; }
++.live-metrics > .live-metric { grid-column: auto; padding-block: .75rem; }
++.live-metrics > .live-metric h2 { min-height: 3.75em; font-size: 1rem; line-height: 1.25; margin: 0 0 .25rem; overflow-wrap: anywhere; }
++.live-metrics > .live-metric .metric { line-height: 1.15; margin: 0; }
++.live-metrics > .live-metric .live-detail { margin-top: .2rem; }
++#home-traffic .metric[data-traffic-tone="good"] { color: #15803d; }
++#home-traffic .metric[data-traffic-tone="warning"] { color: #9a6700; }
++#home-traffic .metric[data-traffic-tone="danger"] { color: var(--danger); }
+ .live-detail { margin: .35rem 0 0; color: var(--muted); font-size: .85rem; }
+ .live-section { margin-bottom: 1rem; }
+ .live-inline-state { margin: .5rem 0; color: var(--muted); }
+diff --git a/app/admin_web/static/admin.js b/app/admin_web/static/admin.js
+index ba3833d129a870e4cbaa22562191db420585a339..00d8234fa93fbd2534fb4d13506a3560fefb4fd0 100644
+--- a/app/admin_web/static/admin.js
++++ b/app/admin_web/static/admin.js
+@@ -5045,25 +5045,23 @@
+     const fingerprintType = createNode("td", "live-fingerprint-type-cell",
+       item.fingerprint_type && typeof item.fingerprint_type.value === "string" ? item.fingerprint_type.value : "—");
+     const deviceType = createNode("td", "live-device-type-cell");
+-    if (item.device_type_key === "android") {
++    const platform = item.platform_presentation;
++    const platformValue = platform && typeof platform.value === "string" ? platform.value : "—";
++    if (platform && platform.key === "android") {
+       const icon = createNode("img", "device-type-icon");
+       icon.src = "/admin/static/icons/platforms/android.svg";
+       icon.alt = "";
+       icon.width = 18;
+       icon.height = 11;
+       icon.setAttribute("aria-hidden", "true");
+-      const label = typeof item.device_type === "string" && item.device_type !== "" ? item.device_type : "Android";
++      const label = platformValue;
+       deviceType.setAttribute("aria-label", label);
+       deviceType.title = label;
+       deviceType.append(icon);
+-    } else if (item.device_type_key === null && item.device_type === null) {
+-      const missing = createNode("span", "live-device-type-null", "NULL");
+-      missing.title = "Device type unavailable";
+-      deviceType.append(missing);
+     } else {
+-      const raw = createNode("span", "live-device-type-raw", item.device_type);
+-      if (typeof item.device_type === "string" && item.device_type !== "") raw.title = item.device_type;
+-      deviceType.append(raw);
++      const value = createNode("span", "live-device-type-raw", platformValue);
++      value.title = platformValue;
++      deviceType.append(value);
+     }
+ 
+     const auth = createNode(
+@@ -5659,13 +5657,25 @@
+     return age <= policy.fresh_max_age_seconds ? "fresh" : "stale";
+   }
+   function formatMbps(value) { return value === null ? "—" : `${value.toFixed(2)} Mbps`; }
++  function trafficMetricPresentation(value, arrow) {
++    if (value === null) return {value: "—", tone: null};
++    return {value: `${arrow} ${formatMbps(value)}`,
++      tone: value <= 50 ? "good" : value <= 70 ? "warning" : "danger"};
++  }
++  function renderTrafficMetric(element, value, tone) {
++    element.textContent = value;
++    if (tone === null) delete element.dataset.trafficTone;
++    else element.dataset.trafficTone = tone;
++  }
+   function trafficDisplay(result, effectiveFreshness) {
+-    if (!result || effectiveFreshness === "unavailable") return {download: "—", upload: "—", total: "—", label: "", downloadLabel: "", uploadLabel: "", totalLabel: "", state: "Unavailable"};
++    if (!result || effectiveFreshness === "unavailable") return {download: "—", upload: "—", total: "—", downloadTone: null, uploadTone: null, totalTone: null, label: "", downloadLabel: "", uploadLabel: "", totalLabel: "", state: "Unavailable"};
+     const partial = result.coverage.coverage_status === "partial";
++    const download = trafficMetricPresentation(result.traffic.download_mbps, "↓");
++    const upload = trafficMetricPresentation(result.traffic.upload_mbps, "↑");
++    const total = trafficMetricPresentation(result.traffic.total_mbps, "↓↑");
+     return {
+-      download: formatMbps(result.traffic.download_mbps),
+-      upload: formatMbps(result.traffic.upload_mbps),
+-      total: formatMbps(result.traffic.total_mbps),
++      download: download.value, upload: upload.value, total: total.value,
++      downloadTone: download.tone, uploadTone: upload.tone, totalTone: total.tone,
+       label: partial ? "Observed subtotal" : "",
+       downloadLabel: partial && result.traffic.download_mbps !== null ? "Observed subtotal" : "",
+       uploadLabel: partial && result.traffic.upload_mbps !== null ? "Observed subtotal" : "",
+@@ -5775,6 +5785,7 @@
+       runActivityPhase, runEligiblePhasedCycle, sourceEligible,
+       trafficFailureTransition,
+       trafficAge, trafficDisplay, trafficFreshness, trafficPageEligible,
++      trafficMetricPresentation, renderTrafficMetric,
+       validateTrafficPage, validateTrafficSummary,
+       combinedCoordinatorEnabled,
+     });
+@@ -6016,7 +6027,7 @@
+     document.getElementById("traffic-state").dataset.state = state || "warning";
+   }
+   function clearTrafficCurrent(message) {
+-    ["traffic-download", "traffic-upload", "traffic-total"].forEach((id) => { document.getElementById(id).textContent = "—"; });
++    ["traffic-download", "traffic-upload", "traffic-total"].forEach((id) => { renderTrafficMetric(document.getElementById(id), "—", null); });
+     ["traffic-download-label", "traffic-upload-label", "traffic-total-label"].forEach((id) => { document.getElementById(id).textContent = ""; });
+     document.getElementById("traffic-freshness").textContent = "Unavailable";
+     document.getElementById("traffic-coverage").textContent = "Coverage unavailable";
+@@ -6030,9 +6041,9 @@
+     const result = sources.traffic.summary;
+     const effective = result ? trafficFreshness(result.snapshot, result.freshness_policy, sources.traffic.acceptedAt, performance.now()) : "unavailable";
+     const shown = trafficDisplay(result, effective);
+-    document.getElementById("traffic-download").textContent = shown.download;
+-    document.getElementById("traffic-upload").textContent = shown.upload;
+-    document.getElementById("traffic-total").textContent = shown.total;
++    renderTrafficMetric(document.getElementById("traffic-download"), shown.download, shown.downloadTone);
++    renderTrafficMetric(document.getElementById("traffic-upload"), shown.upload, shown.uploadTone);
++    renderTrafficMetric(document.getElementById("traffic-total"), shown.total, shown.totalTone);
+     document.getElementById("traffic-download-label").textContent = shown.downloadLabel;
+     document.getElementById("traffic-upload-label").textContent = shown.uploadLabel;
+     document.getElementById("traffic-total-label").textContent = shown.totalLabel;
+diff --git a/app/admin_web/templates/admin/home.html b/app/admin_web/templates/admin/home.html
+index 12b4f44d3e6b488e2033fc130cbac25b78f9bf50..a1c90e986471261d84a8b764382a64220aca0d85 100644
+--- a/app/admin_web/templates/admin/home.html
++++ b/app/admin_web/templates/admin/home.html
+@@ -37,6 +37,20 @@
+ </section>
+ <div id="live-client-warning" class="state-panel" data-state="warning" hidden><span class="state-dot" aria-hidden="true"></span><p>Latest collection attempt did not complete successfully; showing the latest complete snapshot.</p></div>
+ <div id="live-ap-warning" class="state-panel" data-state="warning" hidden><span class="state-dot" aria-hidden="true"></span><p>Latest collection attempt did not complete successfully; showing the latest complete snapshot.</p></div>
++<section class="card card-wide live-section" aria-labelledby="devices-now-title">
++  <h2 id="devices-now-title">Online Devices</h2>
++  <form id="live-client-filters" class="filter-panel" novalidate>
++    <label>Auth<select name="auth"><option value="">All</option><option value="authorized">Authorized</option><option value="pending">Waiting</option><option value="other">Other</option><option value="unknown">Unknown</option></select></label>
++    <label>AP<select name="ap"><option value="">All</option></select></label>
++    <label id="live-ssid-label" hidden>SSID<select name="ssid"><option value="">All</option></select></label>
++    <label>Sort<select name="sort"><option value="controller_traffic_total_desc">Controller trafficTotal — highest first</option><option value="controller_uptime">Controller uptime — highest first</option><option value="client_mac">MAC — ascending</option><option value="auth_status">Auth status — ascending</option><option value="ap">AP — ascending</option><option value="rssi">RSSI — highest first</option><option value="snr">SNR — highest first</option><option value="controller_traffic_down">Controller trafficDown — highest first</option><option value="controller_traffic_up">Controller trafficUp — highest first</option></select></label>
++  </form>
++  <div id="live-client-state" class="live-inline-state">Loading current clients…</div>
++  <div class="table-scroll" role="region" aria-label="Online devices table" tabindex="0">
++    <table class="live-table"><caption>Current scoped online devices</caption><thead><tr><th scope="col">Device / MAC</th><th scope="col">Auth</th><th scope="col">IP</th><th scope="col">AP</th><th scope="col">Band</th><th scope="col">RSSI</th><th scope="col">SNR</th><th scope="col">Controller facts</th></tr></thead><tbody id="live-client-rows"></tbody></table>
++  </div>
++  <div class="pagination"><button id="live-client-more" class="button button-secondary" type="button" hidden>Load more devices</button></div>
++</section>
+ {% if home_traffic_enabled %}
+ <section id="home-traffic" aria-labelledby="traffic-now-title">
+   <div class="section-heading">
+@@ -149,20 +163,6 @@
+   <h2 id="by-ap-title">Devices by AP — Now</h2>
+   <div id="live-devices-by-ap" class="live-bars"></div>
+ </section>
+-<section class="card card-wide live-section" aria-labelledby="devices-now-title">
+-  <h2 id="devices-now-title">Online Devices</h2>
+-  <form id="live-client-filters" class="filter-panel" novalidate>
+-    <label>Auth<select name="auth"><option value="">All</option><option value="authorized">Authorized</option><option value="pending">Waiting</option><option value="other">Other</option><option value="unknown">Unknown</option></select></label>
+-    <label>AP<select name="ap"><option value="">All</option></select></label>
+-    <label id="live-ssid-label" hidden>SSID<select name="ssid"><option value="">All</option></select></label>
+-    <label>Sort<select name="sort"><option value="controller_traffic_total_desc">Controller trafficTotal — highest first</option><option value="controller_uptime">Controller uptime — highest first</option><option value="client_mac">MAC — ascending</option><option value="auth_status">Auth status — ascending</option><option value="ap">AP — ascending</option><option value="rssi">RSSI — highest first</option><option value="snr">SNR — highest first</option><option value="controller_traffic_down">Controller trafficDown — highest first</option><option value="controller_traffic_up">Controller trafficUp — highest first</option></select></label>
+-  </form>
+-  <div id="live-client-state" class="live-inline-state">Loading current clients…</div>
+-  <div class="table-scroll" role="region" aria-label="Online devices table" tabindex="0">
+-    <table class="live-table"><caption>Current scoped online devices</caption><thead><tr><th scope="col">Device / MAC</th><th scope="col">Auth</th><th scope="col">IP</th><th scope="col">AP</th><th scope="col">Band</th><th scope="col">RSSI</th><th scope="col">SNR</th><th scope="col">Controller facts</th></tr></thead><tbody id="live-client-rows"></tbody></table>
+-  </div>
+-  <div class="pagination"><button id="live-client-more" class="button button-secondary" type="button" hidden>Load more devices</button></div>
+-</section>
+ <section class="card card-wide live-section" aria-labelledby="aps-now-title">
+   <h2 id="aps-now-title">Access Points Now</h2>
+   <p id="live-ap-count" class="live-detail"></p>
+diff --git a/docs/README.md b/docs/README.md
+index 52ebb7476c658bd67a339132924a066f52377de2..892ff12ab4ce439f78c8e3ed436fd4b6f33deab4 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -212,7 +212,7 @@ Current Home product terminology:
+ 
+ ```text
+ Type     = fingerprint device_class
+-Platform = controller / Omada device_type
++Platform = Controller-first; resolved PRODUCTION Fingerprint fallback only
+ ```
+ 
+ Controller Platform never backfills fingerprint Type. Device Card keeps
+@@ -281,12 +281,16 @@ mapping, inference, separator collapsing or truncation.
+ The browser consumes the server-provided key. It must not derive a Device Type
+ key from raw `device_type`.
+ 
+-Android presentation is therefore strictly:
++Controller-only Android presentation (including Device Card) remains strictly:
+ 
+ ```javascript
+ device_type_key === "android"
+ ```
+ 
++Home instead uses the server-composed effective key (exact comparison
++`platform_presentation.key === "android"`), including resolved Fingerprint
++fallback. Controller lexical normalization itself is unchanged.
++
+ The earlier browser-owned `trim().toLowerCase()` Android predicate remains
+ historical evidence of TASK-WEB-ASSET-LIBRARY-01/FIX and is **superseded as a
+ current contract** by PR #119/#120.
+@@ -301,7 +305,7 @@ SHA256=2f2411f1f05522e90049f8cbb06105fb553057efeadf772cdcc3ae24bbc8a6cc
+ 
+ ## Home Online Devices — current presentation
+ 
+-Current production columns:
++Current repository Home columns (deployment is separately authorized):
+ 
+ ```text
+ Device / MAC
+@@ -320,8 +324,30 @@ Traffic
+ `Type` is the compact Device Fingerprint `device_class` presentation from the
+ latest authoritative PRODUCTION `ClassificationResult`.
+ 
+-`Platform` is the existing controller/Omada `device_type` presentation and keeps
+-the `device_type_key`/Android-icon compatibility contract.
++`Platform` uses Controller first when `device_type_key` is neither null nor
++`unknown`. Otherwise only a resolved authoritative PRODUCTION Fingerprint
++platform may supply the value. Raw `device_type` and canonical `device_type_key`
++are unchanged; no other controller keys are reinterpreted. The server returns
++`platform_presentation = {source, value, key}` with source `controller`,
++`fingerprint` or `none`. Home renders that value and uses only exact effective
++key `android` for the existing icon, without a visible provenance badge or
++browser normalization.
++
++Explicit Controller Unknown or completed unresolved Fingerprint renders
++`Unknown`; absent Controller plus no-result/unavailable Fingerprint renders
++`—`. Type never falls back to Controller. Both compact Fingerprint projections
++come from the same bounded, Site-scoped PRODUCTION batch; no second query or
++per-device read is added. Device Card continues to show Controller Platform and
++Fingerprint Platform separately, even when they disagree.
++
++`HOME-UX-REFINEMENT-01` moves Online Devices, including filters and pagination,
++before Traffic Now; the remaining panels keep their relative order. Only Home
++`.live-metrics` summary cards have denser spacing and aligned values; responsive
++breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
++independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
++Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
++page semantics are unchanged. This describes repository implementation, not a
++new production deployment or visual-acceptance claim.
+ 
+ ```text
+ Type != Platform
+diff --git a/docs/modules/admin-web.md b/docs/modules/admin-web.md
+index e2a24ddd5f654b97502f5db36f35ce4f6df97476..a2613230d6e5f64f03d2328162ecc718ab53f031 100644
+--- a/docs/modules/admin-web.md
++++ b/docs/modules/admin-web.md
+@@ -35,11 +35,13 @@ error mapping.
+ 
+ ## Task-06 — advisory Device Fingerprint presentation
+ 
+-Home Online Devices keeps the existing controller/source `device_type` and
+-`device_type_key` normalization and Android icon, now labeled **Platform**.
++Home Online Devices keeps controller `device_type` / `device_type_key` evidence
++unchanged. **Platform** is Controller-first, with resolved PRODUCTION Fingerprint
++fallback only when the Controller key is null or `unknown`.
+ The separate **Type** column comes only from persisted PRODUCTION fingerprint
+ `device_class_result`. Controller Platform never backfills fingerprint Type.
+-Home exposes only the compact fingerprint state/value, not diagnostics.
++Home exposes compact Type and Platform projections from the same batch, not
++diagnostics; effective Platform precedence is composed on the server.
+ 
+ Device Card labels controller/source data **Controller Platform** and adds a
+ separate **Fingerprint Information** card: Status, Classified at, Type,
+@@ -59,7 +61,8 @@ All access remains within existing Site-authorized Admin APIs.
+ 
+ No authoritative result is shown as `—`; a completed unresolved dimension is
+ shown as `Unknown`, with its exact status retained in details. Fingerprint is
+-advisory: an unavailable/corrupt classification DB yields Home Type `—` and
++advisory: an unavailable/corrupt classification DB yields Home Type `—`, preserves
++usable Controller Platform (otherwise honest `Unknown` / `—`), and
+ Device Card fingerprint Status `Unavailable`, without failing core page data.
+ The UI does not classify, query integration jobs, mutate persistence or trigger
+ production activation.
+@@ -253,7 +256,7 @@ Current Home product terminology:
+ 
+ ```text
+ Type     = fingerprint device_class
+-Platform = controller / Omada device_type
++Platform = Controller-first; resolved PRODUCTION Fingerprint fallback only
+ ```
+ 
+ Controller Platform never backfills fingerprint Type. Device Card keeps
+@@ -322,12 +325,16 @@ mapping, inference, separator collapsing or truncation.
+ The browser consumes the server-provided key. It must not derive a Device Type
+ key from raw `device_type`.
+ 
+-Android presentation is therefore strictly:
++Controller-only Android presentation (including Device Card) remains strictly:
+ 
+ ```javascript
+ device_type_key === "android"
+ ```
+ 
++Home instead uses the server-composed effective key (exact comparison
++`platform_presentation.key === "android"`), including resolved Fingerprint
++fallback. Controller lexical normalization itself is unchanged.
++
+ The earlier browser-owned `trim().toLowerCase()` Android predicate remains
+ historical evidence of TASK-WEB-ASSET-LIBRARY-01/FIX and is **superseded as a
+ current contract** by PR #119/#120.
+@@ -361,7 +368,7 @@ snapshot raw type and identity raw type belong to the same Device record.
+ 
+ ## Home Online Devices — current presentation
+ 
+-Current production columns:
++Current repository Home columns (deployment is separately authorized):
+ 
+ ```text
+ Device / MAC
+@@ -380,8 +387,30 @@ Traffic
+ `Type` is the compact Device Fingerprint `device_class` presentation from the
+ latest authoritative PRODUCTION `ClassificationResult`.
+ 
+-`Platform` is the existing controller/Omada `device_type` presentation and keeps
+-the `device_type_key`/Android-icon compatibility contract.
++`Platform` uses Controller first when `device_type_key` is neither null nor
++`unknown`. Otherwise only a resolved authoritative PRODUCTION Fingerprint
++platform may supply the value. Raw `device_type` and canonical `device_type_key`
++are unchanged; no other controller keys are reinterpreted. The server returns
++`platform_presentation = {source, value, key}` with source `controller`,
++`fingerprint` or `none`. Home renders that value and uses only exact effective
++key `android` for the existing icon, without a visible provenance badge or
++browser normalization.
++
++Explicit Controller Unknown or completed unresolved Fingerprint renders
++`Unknown`; absent Controller plus no-result/unavailable Fingerprint renders
++`—`. Type never falls back to Controller. Both compact Fingerprint projections
++come from the same bounded, Site-scoped PRODUCTION batch; no second query or
++per-device read is added. Device Card continues to show Controller Platform and
++Fingerprint Platform separately, even when they disagree.
++
++`HOME-UX-REFINEMENT-01` moves Online Devices, including filters and pagination,
++before Traffic Now; the remaining panels keep their relative order. Only Home
++`.live-metrics` summary cards have denser spacing and aligned values; responsive
++breakpoints and table scrolling remain. Traffic Now adds `↓`, `↑`, `↓↑` and
++independent numeric tones: <=50 Mbps green, >50 through 70 yellow, >70 red.
++Unavailable `—` is neutral. Traffic by AP, source/freshness/coverage and Traffic
++page semantics are unchanged. This describes repository implementation, not a
++new production deployment or visual-acceptance claim.
+ 
+ ```text
+ Type != Platform
+diff --git a/docs/modules/device-fingerprint.md b/docs/modules/device-fingerprint.md
+index d84b5031a322c59120fad922d69f397a8d6308c2..0ae80c8fa4b07aedba8228f13e74d962afc8dfdf 100644
+--- a/docs/modules/device-fingerprint.md
++++ b/docs/modules/device-fingerprint.md
+@@ -860,7 +860,7 @@ transaction and bounded grouped SELECTs, not one connection/query per device row
+ 
+ **Purpose:** show the one authoritative read path shared by product surfaces.
+ **Inputs:** persisted PRODUCTION ClassificationResult.
+-**Outputs:** compact Home Type and detailed Device Card fingerprint information.
++**Outputs:** compact Home Type/Platform and detailed Device Card fingerprint information.
+ **Persistence boundary:** read-only; no UI writes/classification.
+ **Failure behavior:** fail-soft presentation on read failure.
+ **Authoritative owner/module:** classification read + Admin fingerprint presentation service.
+@@ -874,7 +874,7 @@ flowchart TD
+     AQ --> D[Device Card]
+ 
+     H --> HT["Type = Fingerprint device_class"]
+-    H --> HP["Platform = controller device_type"]
++    H --> HP["Platform = Controller-first; resolved Fingerprint fallback"]
+ 
+     D --> CP["Controller Platform"]
+     D --> FI["Fingerprint Information"]
+@@ -887,7 +887,7 @@ Current Home column semantics:
+ ```text
+ Device / MAC
+ Type       = fingerprint device_class
+-Platform   = existing controller / Omada device_type presentation
++Platform   = Controller-first; resolved PRODUCTION Fingerprint fallback only
+ Auth
+ IP
+ AP
+@@ -898,9 +898,21 @@ Uptime
+ Traffic
+ ```
+ 
+-The old backend fields remain `device_type` / `device_type_key`; their current
+-product meaning is **Controller Platform**. The existing Android icon and canonical
+-lexical key still apply to that controller value.
++Backend `device_type` / `device_type_key` remain unchanged Controller evidence.
++Home uses Controller when its key is neither null nor `unknown`; otherwise only
++resolved authoritative PRODUCTION Fingerprint Platform is eligible. Other keys
++are not heuristically reinterpreted. Both compact projections use the same
++bounded Site-scoped PRODUCTION batch. The server composes
++`platform_presentation = {source, value, key}` (`controller|fingerprint|none`);
++the browser renders its value and uses exact effective key `android` for the icon.
++No visible provenance badge or browser normalization is added.
++
++Explicit Controller Unknown or completed unresolved Fingerprint renders
++`Unknown`; absent Controller plus no-result/unavailable Fingerprint renders
++`—`. Fingerprint failures remain fail-soft and never suppress usable Controller
++data. Type never falls back to Controller; Device Card source separation below
++is unchanged. This HOME-UX-REFINEMENT-01 repository behavior does not claim a new
++production deployment.
+ 
+ Permanent product rule:
+ 
+diff --git a/tests/admin_web/test_admin_ui_frontend.py b/tests/admin_web/test_admin_ui_frontend.py
+index 4e6f4b923b646e112029f11ea0badbe1930c3715..5e6f3d90bcc23c0be70f11462555ab460e4c426d 100644
+--- a/tests/admin_web/test_admin_ui_frontend.py
++++ b/tests/admin_web/test_admin_ui_frontend.py
+@@ -213,7 +213,7 @@ assert(headerRow.cells[1].className === "live-fingerprint-type-header", "Home fi
+ assert(headerRow.cells[2].textContent === "Platform" && headerRow.cells[2].className === "live-device-type-header", "Home controller Platform stays separate");
+ api.prepareClientTableHeader({tHead: {rows: [headerRow]}});
+ assert(headerRow.cells.length === 11, "Home Type/Platform header preparation is idempotent");
+-const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null};
++const presentationBase = {auth_classification: "authorized", band: null, rssi: null, controller_uptime: null, controller_traffic_total: null, platform_presentation: {source: "controller", value: " Android ", key: "android"}};
+ const androidPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: " Android ", device_type_key: "android"});
+ assert(androidPresentation.fingerprintType.textContent === "—", "controller platform cannot backfill missing fingerprint Type");
+ const resolvedFingerprint = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "android", fingerprint_type: {state: "classified", value: "Laptop"}});
+@@ -222,12 +222,28 @@ const unknownFingerprint = api.clientPresentationCells(presentationNode, {...pre
+ assert(unknownFingerprint.fingerprintType.textContent === "Unknown", "completed unresolved Type differs from missing value");
+ assert(androidPresentation.deviceType.children.length === 1 && androidPresentation.deviceType.children[0].tag === "img", "Home Android canonical key renders SVG");
+ assert(androidPresentation.deviceType.attributes["aria-label"] === " Android ", "Home Android presentation preserves raw label");
+-const missingPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null});
+-assert(missingPresentation.deviceType.children[0].textContent === "NULL", "Home missing Type renders NULL");
+-const phonePresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "phone", device_type_key: "phone"});
++const missingPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, platform_presentation: {source: "none", value: "—", key: null}});
++assert(missingPresentation.deviceType.children[0].textContent === "—", "Home absent controller and fingerprint remain absent");
++const phonePresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "phone", device_type_key: "phone", platform_presentation: {source: "controller", value: "phone", key: "phone"}});
+ assert(phonePresentation.deviceType.children[0].textContent === "phone" && phonePresentation.deviceType.children[0].tag === "span", "Home non-Android Type renders raw value without icon");
+-const invalidAndroidKeyPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "Android"});
++const invalidAndroidKeyPresentation = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: "Android", device_type_key: "Android", platform_presentation: {source: "controller", value: "Android", key: "Android"}});
+ assert(invalidAndroidKeyPresentation.deviceType.children[0].textContent === "Android" && invalidAndroidKeyPresentation.deviceType.children[0].tag === "span", "Home non-canonical Android key does not render Android icon");
++for (const platform of [
++  {source: "controller", value: "Android", key: "android"},
++  {source: "fingerprint", value: "Android", key: "android"},
++  {source: "controller", value: "Windows", key: "windows"},
++  {source: "none", value: "Unknown", key: null},
++  {source: "none", value: "—", key: null},
++]) {
++  const rendered = api.clientPresentationCells(presentationNode, {...presentationBase,
++    device_type: "Android", device_type_key: "android", platform_presentation: platform});
++  assert((rendered.deviceType.children[0].tag === "img") === (platform.key === "android"), "icon uses effective key only, not raw controller or source");
++  assert(platform.key === "android" ? rendered.deviceType.attributes["aria-label"] === platform.value
++    : rendered.deviceType.children[0].textContent === platform.value, "server platform value is authoritative without visible provenance");
++}
++const noPlatformObject = api.clientPresentationCells(presentationNode, {...presentationBase,
++  device_type: " Android ", device_type_key: "android", platform_presentation: null});
++assert(noPlatformObject.deviceType.children[0].tag === "span" && noPlatformObject.deviceType.children[0].textContent === "—", "browser never recreates controller/fingerprint precedence");
+ const snrGood = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 25});
+ const snrGoodAbove = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 31});
+ const snrWarningLow = api.clientPresentationCells(presentationNode, {...presentationBase, device_type: null, device_type_key: null, snr: 15});
+diff --git a/tests/admin_web/test_device_fingerprint_presentation.py b/tests/admin_web/test_device_fingerprint_presentation.py
+index 8c49c75db93b2c9d689baddc4dcc3b420ae6f9ed..68d4704d28700da47646f421e3ea6cb844caf2e1 100644
+--- a/tests/admin_web/test_device_fingerprint_presentation.py
++++ b/tests/admin_web/test_device_fingerprint_presentation.py
+@@ -6,7 +6,7 @@ from types import SimpleNamespace
+ import pytest
+ 
+ from app.admin_web.device_fingerprint_presentation import (
+-    DeviceFingerprintPresentationService, present_classification,
++    DeviceFingerprintPresentationService, FingerprintPresentation, present_classification,
+ )
+ from app.admin_web.models import AdminPrincipal
+ from app.admin_web.query_service import AdminQueryForbidden
+@@ -80,6 +80,57 @@ def test_no_result_has_no_diagnostic_or_semantic_value():
+                                    "classified_at_utc": None, **dict.fromkeys(_DIMENSIONS)}
+ 
+ 
++@pytest.mark.parametrize("state", ["no_result", "unavailable"])
++def test_compact_platform_absent_states(state):
++    assert FingerprintPresentation(state).compact_platform() == {
++        "state": state, "status": None, "canonical_value_id": None, "value": "—"}
++
++
++@pytest.mark.parametrize("status", ["resolved", "unknown", "insufficient_evidence",
++                                    "conflicting_evidence", "recognized_out_of_scope"])
++def test_compact_platform_preserves_exact_dimension_status(retained, status):
++    assert present_classification(shaped(retained, status)).compact_platform() == {
++        "state": "classified", "status": status,
++        "canonical_value_id": "android" if status == "resolved" else None,
++        "value": "Android" if status == "resolved" else "Unknown"}
++
++
++@pytest.mark.parametrize("controller,status,platform,source,value,key", [
++    ("Android", "resolved", "chromeos", "controller", "Android", "android"),
++    ("Unknown", "resolved", "android", "fingerprint", "Android", "android"),
++    (None, "resolved", "android", "fingerprint", "Android", "android"),
++    ("Windows", "resolved", "android", "controller", "Windows", "windows"),
++    ("Unknown", "unknown", "android", "none", "Unknown", None),
++    (None, "conflicting_evidence", "android", "none", "Unknown", None),
++    (None, "insufficient_evidence", "android", "none", "Unknown", None),
++    (None, "recognized_out_of_scope", "android", "none", "Unknown", None),
++    (None, None, "android", "none", "—", None),
++    ("Unknown", None, "android", "none", "Unknown", None),
++    (" Android ", "resolved", "chromeos", "controller", " Android ", "android"),
++    *[(name, "resolved", "android", "controller", name, name)
++      for name in ("other", "generic", "n/a", "unavailable", "undefined", "phone", "mobile")],
++])
++def test_home_platform_precedence_uses_same_production_batch(
++    retained, controller, status, platform, source, value, key,
++):
++    class Controller(CurrentSource):
++        def list_current_clients(self, site, **kwargs):
++            return CurrentClientPage(snapshot(), (client_item(device_type=controller),), None)
++    query = service(Controller())
++    reader = ProductionReader(shaped(retained, status, platform=platform) if status else None)
++    query._fingerprint = DeviceFingerprintPresentationService(reader)
++    item = query.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
++    assert reader.calls == [(SITE_ID, (item["client_mac"],))]
++    assert item["device_type"] == controller
++    assert item["platform_presentation"] == {"source": source, "value": value, "key": key}
++    assert item["fingerprint_platform"] == (
++        present_classification(reader.record).compact_platform())
++    assert item["fingerprint_type"] == present_classification(reader.record).compact_type()
++    with pytest.raises(AdminQueryForbidden):
++        query.list_current_clients(AdminPrincipal("operator"), "f" * 24)
++    assert len(reader.calls) == 1
++
++
+ def test_adapter_rejects_unbounded_input_and_deduplicates_canonical_macs():
+     reader = ProductionReader(None)
+     adapter = DeviceFingerprintPresentationService(reader)
+@@ -124,6 +175,9 @@ def test_home_type_is_batched_separate_from_unchanged_controller(retained, statu
+     assert result["items"][1]["device_type"] == "Windows"
+     assert [item["fingerprint_type"]["value"] for item in result["items"]] == [expected, expected]
+     assert all(set(item["fingerprint_type"]) == {"state", "value"} for item in result["items"])
++    assert [item["platform_presentation"] for item in result["items"]] == [
++        {"source": "controller", "value": " Android ", "key": "android"},
++        {"source": "controller", "value": "Windows", "key": "windows"}]
+ 
+ 
+ def test_completed_production_global_unknown_stays_classified_on_home_and_device_card(retained):
+@@ -164,7 +218,8 @@ def test_completed_production_global_unknown_stays_classified_on_home_and_device
+ 
+ 
+ @pytest.mark.parametrize("failure", ["storage", "candidate", "site", "malformed", "missing_db"])
+-def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_path, failure):
++@pytest.mark.parametrize("controller", ["phone", "Unknown", None])
++def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_path, failure, controller):
+     class BadReader(ProductionReader):
+         def get_current_production_many(self, site, macs):
+             if failure == "storage":
+@@ -183,10 +238,18 @@ def test_fingerprint_failures_leave_home_and_device_core_usable(retained, tmp_pa
+         from app.device_fingerprint.classification_read import DeviceFingerprintClassificationReadService
+         reader = DeviceFingerprintClassificationReadService(tmp_path / "absent.sqlite")
+     adapter = DeviceFingerprintPresentationService(reader)
+-    home = service(CurrentSource())
++    class Controller(CurrentSource):
++        def list_current_clients(self, site, **kwargs):
++            return CurrentClientPage(snapshot(), (client_item(device_type=controller),), None)
++    home = service(Controller())
+     home._fingerprint = adapter
+     item = home.list_current_clients(AdminPrincipal("operator"), SITE_ID).result["items"][0]
+     assert item["name"] == "Phone" and item["fingerprint_type"] == {"state": "unavailable", "value": "—"}
++    assert item["fingerprint_platform"] == {
++        "state": "unavailable", "status": None, "canonical_value_id": None, "value": "—"}
++    assert item["platform_presentation"] == (
++        {"source": "controller", "value": "phone", "key": "phone"} if controller == "phone"
++        else {"source": "none", "value": "Unknown" if controller else "—", "key": None})
+     device, _, _, _ = _service()
+     device._fingerprint = adapter
+     result = device.device_detail(AdminPrincipal("operator"), SITE_ID, DEVICE_ID).result
+diff --git a/tests/admin_web/test_home_traffic.py b/tests/admin_web/test_home_traffic.py
+index cf828146805fd7123396862457c04591f5e9598e..a60e1e13b0eb6129cc8d5d4a77c929ea23a767ff 100644
+--- a/tests/admin_web/test_home_traffic.py
++++ b/tests/admin_web/test_home_traffic.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import logging
+ import threading
+ import json
++from pathlib import Path
+ from dataclasses import replace
+ from types import SimpleNamespace
+ 
+@@ -612,6 +613,27 @@ def test_home_template_delivers_traffic_only_when_enabled(tmp_path):
+     text = client.get(f"/admin/sites/{SITE_ID}/", base_url="https://localhost").get_data(as_text=True)
+     assert 'data-home-traffic-enabled="true"' in text
+     assert "Download Now" in text and "not an Internet-only measurement" in text
++    assert text.index('id="live-ap-warning"') < text.index('id="devices-now-title"') < text.index('id="home-traffic"')
++    for hook in (
++        "live-online", "live-authorized", "live-pending", "live-other-unknown", "live-ap-total",
++        "live-client-freshness", "live-other-detail", "live-ap-detail", "live-ap-freshness",
++        "live-client-filters", "live-ssid-label", "live-client-state", "live-client-rows", "live-client-more",
++        "traffic-state", "traffic-download", "traffic-upload", "traffic-total", "traffic-freshness",
++        "traffic-coverage", "traffic-ap-title", "traffic-ap-rows", "traffic-ap-more",
++    ):
++        assert text.count(f'id="{hook}"') == 1
++    assert text.index('id="traffic-now-title"') < text.index('id="traffic-ap-title"')
++    assert 'aria-label="Online devices table" tabindex="0"' in text
++    template = (Path(__file__).parents[2] / "app/admin_web/templates/admin/home.html").read_text(encoding="utf-8")
++    remaining = ["home-activity", "home-ap-24h", "by-ap-title", "aps-now-title"]
++    assert [template.index(f'id="{hook}"') for hook in remaining] == sorted(
++        template.index(f'id="{hook}"') for hook in remaining)
++    assert template.index('id="live-client-more"') < template.index('id="home-traffic"')
++    css = (Path(__file__).parents[2] / "app/admin_web/static/admin.css").read_text(encoding="utf-8")
++    assert '.live-metrics > .live-metric h2' in css
++    assert 'grid-template-columns: repeat(5, minmax(0, 1fr))' in css
++    for tone in ("good", "warning", "danger"):
++        assert f'#home-traffic .metric[data-traffic-tone="{tone}"]' in css
+     disabled = traffic_app(tmp_path, source, logging.getLogger("traffic-template-off"), traffic="false")
+     other = disabled.test_client(); assert login(other).status_code == 302
+     text = other.get(f"/admin/sites/{SITE_ID}/", base_url="https://localhost").get_data(as_text=True)
+diff --git a/tests/admin_web/test_home_traffic_frontend.py b/tests/admin_web/test_home_traffic_frontend.py
+index bf8b787905d0259018966aac71bcb468035e290b..5a7089c366fad7cf8203ce40c97d85048a987ca1 100644
+--- a/tests/admin_web/test_home_traffic_frontend.py
++++ b/tests/admin_web/test_home_traffic_frontend.py
+@@ -73,7 +73,30 @@ function page(result) {
+ const valid = summary();
+ assert(api.validateTrafficSummary(valid, site) !== null, "valid summary accepted");
+ assert(api.formatMbps(0) === "0.00 Mbps" && api.formatMbps(null) === "—", "exact zero is preserved");
+-assert(api.trafficDisplay(valid.result, "fresh").download === "42.13 Mbps", "numeric current display");
++assert(api.trafficDisplay(valid.result, "fresh").download === "↓ 42.13 Mbps", "numeric current display");
++for (const [value, tone] of [[0, "good"], [49.99, "good"], [50, "good"],
++  [50.01, "warning"], [70, "warning"], [70.01, "danger"]]) {
++  const shown = api.trafficMetricPresentation(value, "↓");
++  assert(shown.value === `↓ ${value.toFixed(2)} Mbps` && shown.tone === tone, "exact numeric threshold and zero");
++}
++const independent = copy(valid.result);
++independent.traffic = {download_mbps: 50, upload_mbps: 70, total_mbps: 120, unit: "Mbps"};
++const independentShown = api.trafficDisplay(independent, "fresh");
++assert(independentShown.download === "↓ 50.00 Mbps" && independentShown.downloadTone === "good", "download arrow and tone");
++assert(independentShown.upload === "↑ 70.00 Mbps" && independentShown.uploadTone === "warning", "upload arrow and tone");
++assert(independentShown.total === "↓↑ 120.00 Mbps" && independentShown.totalTone === "danger", "total double arrow and independent tone");
++const roundedBoundary = api.trafficMetricPresentation(50.001, "↑");
++assert(roundedBoundary.value === "↑ 50.00 Mbps" && roundedBoundary.tone === "warning", "tone comes from numeric value, not rounded text");
++const metricNode = {textContent: "", dataset: {}};
++api.renderTrafficMetric(metricNode, independentShown.total, independentShown.totalTone);
++assert(metricNode.dataset.trafficTone === "danger", "numeric line receives semantic tone");
++api.renderTrafficMetric(metricNode, "—", null);
++assert(metricNode.textContent === "—" && !Object.hasOwn(metricNode.dataset, "trafficTone"), "unavailable clears previous tone");
++for (const result of [null, valid.result]) {
++  const shown = api.trafficDisplay(result, "unavailable");
++  assert([shown.download, shown.upload, shown.total].every(value => value === "—"), "unavailable remains neutral without arrows");
++  assert([shown.downloadTone, shown.uploadTone, shown.totalTone].every(value => value === null), "unavailable has no severity");
++}
+ assert(api.trafficDisplay(valid.result, "unavailable").download === "—", "local unavailable hides numeric values");
+ assert(api.trafficFreshness(valid.result.snapshot, valid.result.freshness_policy, 1000, 73001) === "stale", "fresh progresses to stale");
+ assert(api.trafficFreshness(valid.result.snapshot, valid.result.freshness_policy, 1000, 163001) === "unavailable", "stale progresses to unavailable");
+@@ -88,6 +111,7 @@ partial.result.coverage.missing_rate_ap_count = 1;
+ partial.result.traffic.upload_mbps = null; partial.result.traffic.total_mbps = null;
+ assert(api.validateTrafficSummary(partial, site) !== null, "partial direction accepted");
+ assert(api.trafficDisplay(partial.result, "fresh").label === "Observed subtotal", "partial values are labeled");
++assert(api.trafficDisplay(partial.result, "fresh").uploadTone === null && api.trafficDisplay(partial.result, "fresh").totalTone === null, "missing directions are neutral");
+ 
+ const empty = summary();
+ empty.result.snapshot.empty_population = true;

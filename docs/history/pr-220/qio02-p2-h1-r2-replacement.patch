@@ -1,0 +1,615 @@
+diff --git a/app/public_traffic/reader.py b/app/public_traffic/reader.py
+index 8864340..d2e7992 100644
+--- a/app/public_traffic/reader.py
++++ b/app/public_traffic/reader.py
+@@ -7,6 +7,7 @@ import hmac
+ import json
+ import logging
+ import os
++import stat
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+@@ -222,6 +223,21 @@ class PublicTrafficReader:
+                 stream,
+                 final_offset,
+             )
++            stable_retired_eof = None
++            if (
++                state is not None
++                and state.retired_completed
++                and not source.is_active
++                and final_offset == final_size
++            ):
++                # Called only after BEGIN IMMEDIATE and an exact current-row
++                # comparison. Keep the scan descriptor open until it returns.
++                def stable_retired_eof():
++                    return _verify_stable_retired_eof(
++                        source, stream, opened_stat, final_offset,
++                        source_checkpoint,
++                    )
++
+             self.repository.observe_source(
+                 source_identity=source.identity,
+                 source_path=str(source.path),
+@@ -232,6 +248,7 @@ class PublicTrafficReader:
+                     not source.is_active and final_offset == final_size
+                 ),
+                 now_utc=self.service.now_iso(),
++                stable_retired_eof=stable_retired_eof,
+             )
+             return True
+ 
+@@ -372,6 +389,52 @@ def _source_identity(stat_result: os.stat_result) -> str:
+     return f"{stat_result.st_dev}:{stat_result.st_ino}"
+ 
+ 
++def _verify_stable_retired_eof(
++    source: SourceFile, stream, opened_stat, offset: int, checkpoint: str,
++) -> bool:
++    """Bounded proof under the DB writer lock, not a filesystem lock.
++
++    A change after the final check is reconciled on the next scan. As in the
++    existing checkpoint contract, same-size middle-only rewrites outside the
++    prefix/tail windows cannot be detected across scans.
++    """
++    def signature(value):
++        return (
++            value.st_dev, value.st_ino, value.st_mode, value.st_size,
++            value.st_mtime_ns, value.st_ctime_ns,
++        )
++
++    try:
++        expected = signature(opened_stat)
++        if (
++            not stat.S_ISREG(opened_stat.st_mode)
++            or _source_identity(opened_stat) != source.identity
++            or opened_stat.st_size != offset
++            or stream.tell() != offset
++            or signature(os.fstat(stream.fileno())) != expected
++            or signature(source.path.stat()) != expected
++        ):
++            return False
++        # Do not reuse BufferedReader's cached bytes to prove file freshness.
++        # Duplicate the already-open regular file, rather than reopen a path
++        # that could race to a special file and block under the writer lock.
++        # The bounded checkpoint restores the shared descriptor position.
++        with os.fdopen(os.dup(stream.fileno()), "rb", buffering=0) as proof:
++            if signature(os.fstat(proof.fileno())) != expected:
++                return False
++            if not hmac.compare_digest(
++                _source_checkpoint(proof, offset), checkpoint,
++            ):
++                return False
++            return (
++                signature(os.fstat(proof.fileno())) == expected
++                and signature(os.fstat(stream.fileno())) == expected
++                and signature(source.path.stat()) == expected
++            )
++    except (OSError, ValueError):
++        return False
++
++
+ def _source_checkpoint(stream, offset: int) -> str:
+     if type(offset) is not int or offset < 0:
+         raise ValueError("checkpoint offset must be non-negative")
+diff --git a/app/public_traffic/repository.py b/app/public_traffic/repository.py
+index 554c98c..e00cce0 100644
+--- a/app/public_traffic/repository.py
++++ b/app/public_traffic/repository.py
+@@ -352,9 +352,29 @@ class PublicTrafficRepository:
+         retired_completed: bool,
+         now_utc: str,
+         source_checkpoint: str | None,
++        stable_retired_eof: Callable[[], bool] | None = None,
+     ) -> None:
+         with closing(self._connect()) as connection:
+             connection.execute("BEGIN IMMEDIATE")
++            if stable_retired_eof is not None and retired_completed:
++                # Never authorize this from the reader's scan-time snapshot.
++                # Serialize the seven-field comparison with every other writer.
++                current = connection.execute(
++                    """
++                    SELECT source_identity, source_path, source_offset,
++                           source_checkpoint, last_observed_size,
++                           retired_completed, missing_warning_emitted
++                    FROM reader_state WHERE source_identity = ?
++                    """,
++                    (source_identity,),
++                ).fetchone()
++                expected = (
++                    source_identity, source_path, source_offset,
++                    source_checkpoint, observed_size, 1, 0,
++                )
++                if current == expected and stable_retired_eof() is True:
++                    connection.commit()
++                    return
+             self._upsert_reader_state(
+                 connection,
+                 source_identity=source_identity,
+diff --git a/tests/test_public_traffic.py b/tests/test_public_traffic.py
+index c595fda..209d5fb 100644
+--- a/tests/test_public_traffic.py
++++ b/tests/test_public_traffic.py
+@@ -1,11 +1,14 @@
+ import json
+ import logging
++import os
+ import sqlite3
++import subprocess
++import sys
+ import threading
+ import time
+ from concurrent.futures import ThreadPoolExecutor
+ from contextlib import closing
+-from datetime import datetime, timezone
++from datetime import datetime, timedelta, timezone
+ from decimal import Decimal
+ from pathlib import Path
+ from types import SimpleNamespace
+@@ -28,6 +31,7 @@ from app.public_traffic.models import (
+     TrafficEvent,
+ )
+ from app.public_traffic.reader import PublicTrafficReader
++from app.public_traffic import reader as traffic_reader_module
+ from app.public_traffic.repository import PublicTrafficRepository
+ from app.public_traffic.service import (
+     PublicTrafficService,
+@@ -142,6 +146,457 @@ def complete_backfill(worker):
+     assert worker.repository.initial_backfill_completed()
+ 
+ 
++def _h1_retired(tmp_path):
++    selected, repository, service, reader, worker, clock = stack(tmp_path)
++    archive = Path(selected.source_log_path + ".1")
++    append_lines(archive, [offline("h1-seed", traffic=7)])
++    complete_backfill(worker)
++    clock.value += timedelta(seconds=10)
++    return archive, repository, service, reader, worker, clock
++
++
++def _h1_trace(repository, monkeypatch):
++    statements = []
++    connect = repository._connect
++
++    def traced_connect():
++        connection = connect()
++        connection.set_trace_callback(statements.append)
++        return connection
++
++    monkeypatch.setattr(repository, "_connect", traced_connect)
++    return statements
++
++
++def _h1_writes(statements):
++    return [sql for sql in statements if "INSERT INTO reader_state" in sql]
++
++
++def test_H1_C01_stable_retired_seven_fields_and_timestamp_unchanged(
++    tmp_path, monkeypatch,
++):
++    _, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    before = table_rows(repository.db_path, "reader_state")
++    daily = table_rows(repository.db_path, "traffic_daily")
++    statements = _h1_trace(repository, monkeypatch)
++    assert reader.scan() is True
++    assert _h1_writes(statements) == []
++    assert not any("UPDATE reader_state" in sql for sql in statements)
++    assert statements.count("BEGIN IMMEDIATE") == 1
++    assert statements.count("COMMIT") == 1
++    assert table_rows(repository.db_path, "reader_state") == before
++    assert table_rows(repository.db_path, "traffic_daily") == daily
++
++
++def test_H1_C02_C03_active_and_new_archive_keep_legacy_writes(
++    tmp_path, monkeypatch,
++):
++    selected, repository, _, reader, _, _ = stack(tmp_path)
++    Path(selected.source_log_path).touch()
++    Path(selected.source_log_path + ".1").touch()
++    statements = _h1_trace(repository, monkeypatch)
++    assert reader.scan()
++    assert len(_h1_writes(statements)) == 2
++    statements.clear()
++    assert reader.scan()
++    assert len(_h1_writes(statements)) == 1
++    assert "retired_completed" in _h1_writes(statements)[0]
++
++
++@pytest.mark.parametrize("field,value", [
++    ("source_identity", "different-identity"),
++    ("source_path", "different-path"),
++    ("source_offset", 0),
++    ("source_checkpoint", None),
++    ("source_checkpoint", "0" * 64),
++    ("last_observed_size", None),
++    ("last_observed_size", 0),
++    ("retired_completed", 0),
++    ("missing_warning_emitted", 1),
++    ("delete", None),
++])
++def test_H1_C14_current_row_not_scan_snapshot_authorizes_noop(
++    tmp_path, monkeypatch, field, value,
++):
++    _, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    original = repository.observe_source
++
++    def changed_before_begin(**kwargs):
++        # Runs after scan's state read and EOF calculation, before writer lock.
++        with closing(sqlite3.connect(repository.db_path)) as connection:
++            if field == "delete":
++                connection.execute("DELETE FROM reader_state")
++            else:
++                connection.execute(f"UPDATE reader_state SET {field} = ?", (value,))
++            connection.commit()
++        original(**kwargs)
++
++    monkeypatch.setattr(repository, "observe_source", changed_before_begin)
++    statements = _h1_trace(repository, monkeypatch)
++    assert reader.scan()
++    assert len(_h1_writes(statements)) == 1
++
++
++def test_H1_C14_comparison_and_file_proof_hold_writer_lock(tmp_path, monkeypatch):
++    _, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    original = traffic_reader_module._verify_stable_retired_eof
++    checked = []
++
++    def proof(*args):
++        with closing(sqlite3.connect(repository.db_path, timeout=0)) as rival:
++            with pytest.raises(sqlite3.OperationalError, match="locked"):
++                rival.execute("BEGIN IMMEDIATE")
++        checked.append(True)
++        return original(*args)
++
++    monkeypatch.setattr(traffic_reader_module, "_verify_stable_retired_eof", proof)
++    assert reader.scan()
++    assert checked == [True]
++
++
++def test_H1_C11_proof_uses_bound_descriptor_without_reopening_path(tmp_path, monkeypatch):
++    _, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    original = traffic_reader_module._verify_stable_retired_eof
++
++    def proof(*args):
++        with patch.object(Path, "open", side_effect=AssertionError("must not reopen path")):
++            return original(*args)
++
++    monkeypatch.setattr(traffic_reader_module, "_verify_stable_retired_eof", proof)
++    statements = _h1_trace(repository, monkeypatch)
++    assert reader.scan()
++    assert _h1_writes(statements) == []
++
++
++def test_H1_C01_other_observe_call_keeps_default_legacy_behavior(tmp_path, monkeypatch):
++    _, repository, service, _, _, _ = _h1_retired(tmp_path)
++    state = next(iter(repository.get_reader_states().values()))
++    statements = _h1_trace(repository, monkeypatch)
++    repository.observe_source(
++        source_identity=state.source_identity, source_path=state.source_path,
++        source_offset=state.source_offset, source_checkpoint=state.source_checkpoint,
++        observed_size=state.last_observed_size, retired_completed=True,
++        now_utc=service.now_iso(),
++    )
++    assert len(_h1_writes(statements)) == 1
++    assert table_rows(repository.db_path, "reader_state")[0][-1] == service.now_iso()
++
++
++def test_H1_C04_retirement_transitions_are_not_suppressed(tmp_path, monkeypatch):
++    archive, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    statements = _h1_trace(repository, monkeypatch)
++    append_lines(archive, [b'{"event":"unrelated"}'], newline=False)
++    assert reader.scan() is False
++    assert len(_h1_writes(statements)) == 1
++    assert not next(iter(repository.get_reader_states().values())).retired_completed
++    with archive.open("ab") as stream:
++        stream.write(b"\n")
++    statements.clear()
++    assert reader.scan()
++    assert len(_h1_writes(statements)) == 2
++    assert next(iter(repository.get_reader_states().values())).retired_completed
++
++
++@pytest.mark.parametrize("records,extra_bytes,extra_sessions", [
++    ([offline("h1-zero", traffic=0)], 0, 1),
++    ([offline("h1-new", traffic=11)], 11, 1),
++    ([offline("h1-seed", traffic=7)], 0, 0),
++    ([b"not-json", b"\xff", {"event": "other"}, offline("bad", traffic=-1)], 0, 0),
++    ([offline("other", ssid="Other", traffic=4)], 0, 0),
++])
++def test_H1_C05_C06_appends_advance_and_preserve_idempotency(
++    tmp_path, records, extra_bytes, extra_sessions,
++):
++    archive, repository, service, reader, _, _ = _h1_retired(tmp_path)
++    append_lines(archive, records)
++    assert reader.scan()
++    snapshot = service.get_snapshot()
++    assert snapshot.total_bytes == 7 + extra_bytes
++    assert snapshot.completed_sessions_total == 1 + extra_sessions
++    state = next(iter(repository.get_reader_states().values()))
++    assert state.source_offset == state.last_observed_size == archive.stat().st_size
++    before = table_rows(repository.db_path, "processed_events")
++    assert reader.scan()
++    assert table_rows(repository.db_path, "processed_events") == before
++
++
++def test_H1_C07_C15_partial_archive_does_not_complete_global_scan(tmp_path, monkeypatch):
++    archive, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    other = Path(str(archive)[:-1] + "2")
++    append_lines(other, [offline("partial")], newline=False)
++    statements = _h1_trace(repository, monkeypatch)
++    assert reader.scan() is False
++    assert len(_h1_writes(statements)) == 1
++    assert any(state.retired_completed for state in repository.get_reader_states().values())
++    statements.clear()
++    assert reader.scan() is False
++    assert len(_h1_writes(statements)) == 1
++    with other.open("ab") as stream:
++        stream.write(b"\n")
++    assert reader.scan()
++
++
++@pytest.mark.parametrize("operation", ["same_size", "truncate", "replace", "rotate"])
++def test_H1_C08_C10_C11_C16_rewrite_and_rotation_recovery(tmp_path, operation):
++    archive, repository, service, reader, _, _ = _h1_retired(tmp_path)
++    replacement = archive.read_bytes().replace(b"h1-seed", b"h1-next").replace(
++        b'"reported_traffic_bytes_estimate":7', b'"reported_traffic_bytes_estimate":9',
++    )
++    if operation == "truncate":
++        archive.write_bytes(b"")
++        assert reader.scan()
++    if operation in ("replace", "rotate"):
++        archive.rename(Path(str(archive) + ".saved"))
++    archive.write_bytes(replacement)
++    assert reader.scan()
++    assert service.get_snapshot().total_bytes == 16
++    assert service.get_snapshot().completed_sessions_total == 2
++    assert all(state.retired_completed for state in repository.get_reader_states().values())
++
++
++def test_H1_C09_middle_only_rewrite_is_existing_bounded_checkpoint_limit(tmp_path, monkeypatch):
++    archive, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    archive.write_bytes(b" " * 10000 + b"\n")
++    assert reader.scan()
++    before = table_rows(repository.db_path, "reader_state")
++    with archive.open("r+b") as stream:
++        stream.seek(5000)
++        stream.write(b"x")
++    statements = _h1_trace(repository, monkeypatch)
++    assert reader.scan()
++    assert _h1_writes(statements) == []
++    assert table_rows(repository.db_path, "reader_state") == before
++
++
++@pytest.mark.parametrize("when", ["before", "during", "after"])
++def test_H1_C12_append_at_final_proof_reconciles_next_scan(tmp_path, monkeypatch, when):
++    archive, repository, service, reader, _, _ = _h1_retired(tmp_path)
++    original = traffic_reader_module._verify_stable_retired_eof
++    checkpoint = traffic_reader_module._source_checkpoint
++    injected = []
++
++    def append_once():
++        if not injected:
++            append_lines(archive, [offline("h1-race", traffic=3)])
++            injected.append(True)
++
++    def proof(*args):
++        if when == "before":
++            append_once()
++        result = original(*args)
++        if when == "after":
++            append_once()
++        return result
++
++    def changing_checkpoint(stream, offset):
++        result = checkpoint(stream, offset)
++        if when == "during" and injected == ["armed"]:
++            injected.clear()
++            append_once()
++        return result
++
++    def armed_proof(*args):
++        if when == "during":
++            injected.append("armed")
++        return proof(*args)
++
++    monkeypatch.setattr(traffic_reader_module, "_verify_stable_retired_eof", armed_proof)
++    monkeypatch.setattr(traffic_reader_module, "_source_checkpoint", changing_checkpoint)
++    statements = _h1_trace(repository, monkeypatch)
++    assert reader.scan()
++    assert bool(_h1_writes(statements)) is (when != "after")
++    monkeypatch.setattr(traffic_reader_module, "_verify_stable_retired_eof", original)
++    assert reader.scan()
++    assert service.get_snapshot().total_bytes == 10
++    assert service.get_snapshot().completed_sessions_total == 2
++
++
++@pytest.mark.parametrize("mutation", ["missing", "replace", "rename", "proof_error"])
++def test_H1_C11_C13_C16_invalid_file_proof_uses_legacy_write(
++    tmp_path, monkeypatch, mutation,
++):
++    archive, repository, service, reader, _, _ = _h1_retired(tmp_path)
++    before = table_rows(repository.db_path, "reader_state")
++    original = traffic_reader_module._verify_stable_retired_eof
++    proof_results = []
++
++    def verified(*args):
++        result = original(*args)
++        proof_results.append(result)
++        return result
++
++    def proof(*args):
++        if mutation == "proof_error":
++            with patch.object(Path, "stat", side_effect=OSError("synthetic stat failure")):
++                return verified(*args)
++        if os.name == "nt":
++            # Windows cannot unlink/rename this in-use archive. Inject the
++            # equivalent path-validation failure, not a fake validator result.
++            if mutation == "missing":
++                with patch.object(Path, "stat", side_effect=FileNotFoundError("synthetic missing path")):
++                    return verified(*args)
++            fields = {
++                name: getattr(archive.stat(), name)
++                for name in ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
++            }
++            if mutation == "replace":
++                fields["st_ino"] += 1
++            else:
++                fields["st_ctime_ns"] += 1
++            with patch.object(Path, "stat", return_value=SimpleNamespace(**fields)):
++                return verified(*args)
++        if mutation in ("replace", "rename"):
++            archive.rename(Path(str(archive) + ".saved"))
++            if mutation == "replace":
++                archive.write_bytes(b"\n")
++        else:
++            archive.unlink()
++        return verified(*args)
++
++    monkeypatch.setattr(traffic_reader_module, "_verify_stable_retired_eof", proof)
++    statements = _h1_trace(repository, monkeypatch)
++    assert reader.scan()
++    assert len(_h1_writes(statements)) == 1
++    assert proof_results == [False]
++    after = table_rows(repository.db_path, "reader_state")
++    assert [row[:-1] for row in after] == [row[:-1] for row in before]
++    assert after[0][-1] == service.now_iso()
++
++
++@pytest.mark.parametrize("phase", ["before_compare", "proof", "upsert", "after_transaction"])
++def test_H1_C17_real_process_exit_preserves_durable_state(tmp_path, phase):
++    _, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    before = table_rows(repository.db_path, "reader_state")
++    code = r'''
++import os, sys
++from app.public_traffic.repository import PublicTrafficRepository
++r = PublicTrafficRepository(sys.argv[1])
++s = next(iter(r.get_reader_states().values()))
++phase = sys.argv[2]
++if phase == "before_compare":
++    original = r._connect
++    def connect():
++        c = original()
++        def trace(sql):
++            if "SELECT source_identity" in sql:
++                os._exit(71)
++        c.set_trace_callback(trace)
++        return c
++    r._connect = connect
++if phase == "upsert":
++    original_upsert = r._upsert_reader_state
++    def upsert(*args, **kwargs):
++        original_upsert(*args, **kwargs)
++        os._exit(71)
++    r._upsert_reader_state = upsert
++def proof():
++    if phase == "proof":
++        os._exit(71)
++    return phase != "upsert"
++r.observe_source(source_identity=s.source_identity, source_path=s.source_path,
++    source_offset=s.source_offset, observed_size=s.last_observed_size,
++    retired_completed=True, now_utc="2099-01-01T00:00:00.000Z",
++    source_checkpoint=s.source_checkpoint, stable_retired_eof=proof)
++os._exit(71)
++'''
++    result = subprocess.run(
++        [sys.executable, "-c", code, str(repository.db_path), phase],
++        cwd=Path(__file__).resolve().parents[1], check=False,
++        capture_output=True, timeout=20,
++    )
++    assert result.returncode == 71, result.stderr
++    assert table_rows(repository.db_path, "reader_state") == before
++    assert reader.scan()
++
++
++def test_H1_C18_restart_reset_replay_and_history_remain_unchanged(tmp_path):
++    archive, repository, service, reader, _, _ = _h1_retired(tmp_path)
++    service.reset(ssid="Zefer_Parki")
++    before = table_rows(repository.db_path, "counter_resets")
++    reader = PublicTrafficReader(
++        source_path=str(archive)[:-2], repository=repository, service=service,
++        logger=reader.logger,
++    )
++    assert reader.scan()
++    assert service.get_snapshot().total_bytes == 0
++    archive.write_bytes(b"")
++    assert reader.scan()
++    append_lines(archive, [offline("h1-seed", traffic=7), offline("new", traffic=4)])
++    assert reader.scan()
++    assert service.get_snapshot().total_bytes == 4
++    assert table_rows(repository.db_path, "counter_resets") == before
++
++
++def test_H1_C20_busy_and_proof_exception_fail_closed(tmp_path, monkeypatch):
++    _, repository, _, reader, _, _ = _h1_retired(tmp_path)
++    before = table_rows(repository.db_path, "reader_state")
++    repository.busy_timeout_ms = 1
++    with closing(sqlite3.connect(repository.db_path)) as blocker:
++        blocker.execute("BEGIN IMMEDIATE")
++        with pytest.raises(sqlite3.OperationalError, match="locked"):
++            reader.scan()
++        blocker.rollback()
++
++    def interrupted(*args):
++        raise RuntimeError("synthetic interruption")
++
++    monkeypatch.setattr(traffic_reader_module, "_verify_stable_retired_eof", interrupted)
++    with pytest.raises(RuntimeError, match="synthetic interruption"):
++        reader.scan()
++    assert table_rows(repository.db_path, "reader_state") == before
++
++
++def test_H1_C19_identical_fixture_matches_legacy_persistence_and_counters(
++    tmp_path, monkeypatch,
++):
++    outcomes = []
++    for legacy in (True, False):
++        selected, repository, service, reader, worker, clock = stack(
++            tmp_path / ("legacy" if legacy else "h1"),
++        )
++        with monkeypatch.context() as scoped:
++            if legacy:
++                original = repository.observe_source
++
++                def observe(**kwargs):
++                    kwargs.pop("stable_retired_eof", None)
++                    return original(**kwargs)
++
++                scoped.setattr(repository, "observe_source", observe)
++            for i in range(1, 6):
++                append_lines(selected.source_log_path + f".{i}", [offline(f"seed-{i}")])
++            Path(selected.source_log_path).touch()
++            complete_backfill(worker)
++            clock.value += timedelta(seconds=10)
++            assert reader.scan()
++            append_lines(selected.source_log_path, [
++                offline("active", traffic=0), offline("seed-1"),
++                offline("invalid", traffic=-1), {"event": "other"},
++            ])
++            clock.value += timedelta(seconds=10)
++            assert reader.scan()
++        states = sorted(
++            (Path(row[1]).name, *row[2:])
++            for row in table_rows(repository.db_path, "reader_state")
++        )
++        events = sorted(
++            (*row[:7], Path(row[8]).name, *row[9:])
++            for row in table_rows(repository.db_path, "processed_events")
++        )
++        outcomes.append((states, events, service.get_snapshot(),
++            table_rows(repository.db_path, "traffic_daily"),
++            table_rows(repository.db_path, "counter_state")))
++    legacy, candidate = outcomes
++    assert legacy[1:] == candidate[1:]
++    assert [row[:-1] for row in legacy[0]] == [row[:-1] for row in candidate[0]]
++    for old, new in zip(legacy[0], candidate[0]):
++        if old[0].endswith(".log"):
++            assert old == new
++        else:
++            assert old[-1] == "2026-07-29T08:00:20.000Z"
++            assert new[-1] == "2026-07-29T08:00:00.000Z"
++
++
+ @pytest.mark.parametrize("parse_status", ["parsed", "partial"])
+ def test_valid_offline_is_counted_regardless_of_parse_status(
+     tmp_path,

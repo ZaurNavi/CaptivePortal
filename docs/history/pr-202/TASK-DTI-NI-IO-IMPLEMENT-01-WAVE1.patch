@@ -1,0 +1,794 @@
+diff --git a/app/network_metadata/config.py b/app/network_metadata/config.py
+index 644691ba69ecbc59ec682889fc13913e25096d0a..061d78d7bf3c22e4916d386acaf51d9a54236b59 100644
+--- a/app/network_metadata/config.py
++++ b/app/network_metadata/config.py
+@@ -65,6 +65,12 @@ def network_metadata_config_from_env(environ=None):
+             raise NetworkMetadataConfigError()
+         return parsed
+ 
++    def boolean(key):
++        value = env.get(key, "false")
++        if type(value) is not str or value not in {"true", "false"}:
++            raise NetworkMetadataConfigError()
++        return value == "true"
++
+     try:
+         source = absolute_path(env.get("NETWORK_METADATA_SOURCE_PATH", "/run/fingerprint-suricata/dti-ni-v1.eve.json"))
+         db = absolute_path(env.get("NETWORK_METADATA_DB_PATH", "/opt/CaptivePortal/data/network_metadata.sqlite3"))
+@@ -77,6 +83,13 @@ def network_metadata_config_from_env(environ=None):
+             record_limit, number("NETWORK_METADATA_BATCH_MAX_RECORDS", MAX_BATCH_RECORDS, 1, MAX_BATCH_RECORDS),
+             number("NETWORK_METADATA_BATCH_MAX_BYTES", MAX_BATCH_BYTES, record_limit, MAX_BATCH_BYTES),
+             number("NETWORK_METADATA_POLL_INTERVAL_SECONDS", 1, 1))
++        coalesce = boolean("NETWORK_METADATA_INGEST_COALESCE_ENABLED")
++        delay = number("NETWORK_METADATA_INGEST_COALESCE_MAX_MS", 0, 0, 500)
++        if (not coalesce and delay != 0) or (coalesce and delay not in {100, 250, 500}):
++            raise NetworkMetadataConfigError()
++        aggregation = boolean("NETWORK_METADATA_TELEMETRY_AGGREGATION_ENABLED")
++        config = replace(config, ingest_coalesce_enabled=coalesce, ingest_coalesce_max_ms=delay,
++                         telemetry_aggregation_enabled=aggregation)
+         binding_value = asdict(binding)
+         binding_value["ipv4_cidrs"] = list(binding.ipv4_cidrs)
+         configuration = {"capture_scope_binding": binding_value, "db_path": db,
+@@ -85,6 +98,10 @@ def network_metadata_config_from_env(environ=None):
+             "batch_max_bytes": config.batch_max_bytes, "normalizer_version": NORMALIZER_VERSION,
+             "poll_interval_seconds": config.poll_interval_seconds,
+             "source_contract_version": SOURCE_CONTRACT_VERSION, "source_path": source}
++        if coalesce:
++            configuration.update(ingest_coalesce_enabled=True, ingest_coalesce_max_ms=delay)
++        if aggregation:
++            configuration["telemetry_aggregation_enabled"] = True
+         return replace(config, configuration_digest=semantic_digest(configuration))
+     except NetworkMetadataValidationError:
+         raise NetworkMetadataConfigError() from None
+diff --git a/app/network_metadata/models.py b/app/network_metadata/models.py
+index 137253c6ae86d6e173e5a90074537d30def9b711..d79d65c5e7fdf030ab7c2511d477116e8f7cc29f 100644
+--- a/app/network_metadata/models.py
++++ b/app/network_metadata/models.py
+@@ -120,6 +120,9 @@ class NetworkMetadataConfig:
+     batch_max_bytes: int = MAX_BATCH_BYTES
+     poll_interval_seconds: int = 1
+     configuration_digest: str | None = None
++    ingest_coalesce_enabled: bool = False
++    ingest_coalesce_max_ms: int = 0
++    telemetry_aggregation_enabled: bool = False
+ 
+     @property
+     def writer_lock_path(self):
+diff --git a/app/network_metadata/service.py b/app/network_metadata/service.py
+index 4f228de9e82e8632f8e7526b2c6561909a7c8347..7d433b82c33c06623bb757cf3d6a4666b1d115a6 100644
+--- a/app/network_metadata/service.py
++++ b/app/network_metadata/service.py
+@@ -1,5 +1,6 @@
+ """One bounded auxiliary loop. Durable block precedes every source transition."""
+ import os
++import hashlib
+ import threading
+ import time
+ from .health import HealthController
+@@ -42,6 +43,8 @@ class NetworkMetadataService:
+         self.run_id = self.boot_id = None
+         self.started = self.storage_failed = False
+         self.last_health_tick = self.last_retention_tick = 0
++        if config.telemetry_aggregation_enabled and repository.telemetry is not None:
++            repository.telemetry.enable_aggregation(monotonic=monotonic)
+ 
+     def stop(self):
+         self.stop_event.set()
+@@ -205,6 +208,85 @@ class NetworkMetadataService:
+         # The ordinary open path starts at 0 and consults durable closed-gap lineage.
+         return self._lifecycle()
+ 
++    def _coalescing_source(self, generation, checkpoint):
++        """Read-only lifecycle probe; never transition while a prefix is buffered."""
++        try:
++            owned = os.fstat(self.fd)
++            if (physical_identity(owned) != (generation.st_dev, generation.st_ino)
++                    or owned.st_size < checkpoint.committed_byte_offset
++                    or not _source_anchor_matches(self.fd, checkpoint)):
++                raise _SourceUnavailable()
++            current = self._path_info()
++            closing = (current is None or physical_identity(current) != (generation.st_dev, generation.st_ino)
++                       or owned.st_size < self.reader.scan_offset
++                       or generation.capture_scope_binding_digest != self.config.capture_scope_binding.binding_digest)
++            return owned.st_size, closing
++        except (OSError, NetworkMetadataValidationError):
++            raise _SourceUnavailable() from None
++
++    def _verify_buffered_prefix(self, records, generation, checkpoint):
++        """Do not commit vanished/rewritten transient bytes as a successful prefix."""
++        self._coalescing_source(generation, checkpoint)
++        try:
++            for record in records:
++                position, checksum = record.start, hashlib.sha256()
++                payload_end = record.end - 1
++                while position < payload_end:
++                    data = os.pread(self.fd, min(65536, payload_end - position), position)
++                    if not data:
++                        raise OSError
++                    checksum.update(data)
++                    position += len(data)
++                if (os.pread(self.fd, 1, payload_end) != b"\n"
++                        or checksum.hexdigest() != record.source_record_sha256):
++                    raise OSError
++        except OSError:
++            raise _SourceUnavailable() from None
++
++    def _coalesced_records(self, generation, checkpoint):
++        # Start the deadline at the first complete record, not an empty/partial read.
++        reader = self.reader
++        records = reader.read_batch(1, self.config.batch_max_bytes,
++                                    retained_limit=self.config.batch_max_bytes)
++        if not records:
++            return records
++        if records[0].data is None:
++            # Oversized records keep the existing standalone hash/fault path,
++            # with no delay or retained payload coalescing.
++            return records
++        deadline = self.monotonic() + self.config.ingest_coalesce_max_ms / 1000
++        retained = sum(item.byte_length for item in records if item.data is not None)
++        while records[-1].data is not None and len(records) < self.config.batch_max_records:
++            size, closing = self._coalescing_source(generation, checkpoint)
++            if closing or self.stop_event.is_set() or self.monotonic() >= deadline:
++                break
++            remaining = self.config.batch_max_bytes - retained
++            if remaining <= reader.retained_unfinished_bytes:
++                break
++            # Fill the immediately available prefix before considering a wait.
++            extra = reader.read_batch(self.config.batch_max_records - len(records), remaining,
++                                      retained_limit=remaining)
++            if extra and extra[0].data is None:
++                # The legacy oversized-record fault is a standalone batch,
++                # never appended to a previously buffered ordinary prefix.
++                reader.reset(extra[0].start)
++                break
++            records.extend(extra)
++            retained += sum(item.byte_length for item in extra if item.data is not None)
++            if (len(records) >= self.config.batch_max_records or retained >= self.config.batch_max_bytes
++                    or records[-1].data is None):
++                break
++            size, closing = self._coalescing_source(generation, checkpoint)
++            remaining_time = deadline - self.monotonic()
++            if (closing or self.stop_event.is_set() or remaining_time <= 0
++                    or size - checkpoint.committed_byte_offset >= 4194304
++                    or retained + reader.retained_unfinished_bytes >= self.config.batch_max_bytes):
++                break
++            # No BEGIN, write lock, background thread or adaptive pacing here.
++            self.stop_event.wait(min(remaining_time, .01))
++        self._verify_buffered_prefix(records, generation, checkpoint)
++        return records
++
+     def poll_once(self):
+         if not self.started:
+             self.startup()
+@@ -237,7 +319,10 @@ class NetworkMetadataService:
+                 if not blocked and self.reader is not None and "source_absent" not in self.health.local_reasons:
+                     repo.ensure_headroom()
+                     try:
+-                        records = self.reader.read_batch(self.config.batch_max_records, self.config.batch_max_bytes)
++                        if self.config.ingest_coalesce_enabled:
++                            records = self._coalesced_records(generation, checkpoint)
++                        else:
++                            records = self.reader.read_batch(self.config.batch_max_records, self.config.batch_max_bytes)
+                     except NetworkMetadataStorageUnavailable:
+                         raise _SourceUnavailable() from None
+                     if self.health.local_reasons & {"source_absent", "source_unavailable"} and (
+@@ -310,6 +395,8 @@ class NetworkMetadataService:
+             self.startup()
+             while not self.stop_event.is_set():
+                 work = self.poll_once()
++                if self.config.telemetry_aggregation_enabled and self.repository.telemetry is not None:
++                    self.repository.telemetry.flush_due()
+                 if not work:
+                     self.stop_event.wait(self.config.poll_interval_seconds)
+         finally:
+diff --git a/app/network_metadata/source.py b/app/network_metadata/source.py
+index 5a9383a7ee2f34a7f43beab194b0df3f5607cdb5..334cd1c82ab4561a0eeef2b94efb2caedfff51a5 100644
+--- a/app/network_metadata/source.py
++++ b/app/network_metadata/source.py
+@@ -106,13 +106,32 @@ class BinarySourceReader:
+     def tail_length(self):
+         return self._count
+ 
+-    def read_batch(self, max_records, max_bytes):
++    def read_batch(self, max_records, max_bytes, *, retained_limit=None):
+         records, retained = [], 0
+         budget = max_bytes + SOURCE_READ_CHUNK_BYTES
+         self.at_eof = False
+         try:
+             while budget > 0 and len(records) < max_records:
+-                chunk = os.pread(self.fd, min(SOURCE_READ_CHUNK_BYTES, budget), self.scan_offset)
++                read_size = min(SOURCE_READ_CHUNK_BYTES, budget)
++                if retained_limit is not None and not self._discard:
++                    available = retained_limit - retained - len(self._buffer)
++                    if available <= 0:
++                        # A delimiter needs no retained payload space. A record
++                        # over the existing record ceiling retains only its hash.
++                        peek = os.pread(self.fd, 1, self.scan_offset)
++                        if not peek:
++                            self.at_eof = True
++                            break
++                        if peek == b"\n":
++                            read_size = 1
++                        elif self._count >= self.max_record_bytes:
++                            self._discard = True
++                            self._buffer.clear()
++                        else:
++                            break  # Commit the completed prefix before growing this tail.
++                    else:
++                        read_size = min(read_size, available)
++                chunk = os.pread(self.fd, read_size, self.scan_offset)
+                 if not chunk:
+                     self.at_eof = True
+                     break
+diff --git a/app/network_metadata/telemetry.py b/app/network_metadata/telemetry.py
+index f997c8babfed5dd55b88b0d89aa4769e8c5c8e87..69686d5cfcf3ac733a1b311cede626b9b445cad2 100644
+--- a/app/network_metadata/telemetry.py
++++ b/app/network_metadata/telemetry.py
+@@ -3,6 +3,7 @@ import json
+ import logging
+ import re
+ from .models import FAULT_CATEGORIES
++from .success_telemetry import SuccessCounters, MAX_COUNTER
+ 
+ EVENTS = frozenset({"service_started", "service_stopped", "source_absent", "source_generation_opened",
+     "source_generation_closed", "batch_committed", "duplicate_noop", "ingest_fault_aggregate_updated",
+@@ -21,6 +22,23 @@ class NetworkMetadataTelemetry:
+     def __init__(self, logger=None):
+         self.logger = logger or logging.getLogger("captivportal.network_metadata")
+         self.logger.propagate = False
++        self._success = None
++
++    def enable_aggregation(self, *, monotonic):
++        if self._success is None:
++            self._success = SuccessCounters(self._publish_summary, monotonic=monotonic)
++
++    def _publish_summary(self, summary):
++        self.logger.info(json.dumps(summary, sort_keys=True, separators=(",", ":")))
++
++    def observe_success(self, **counts):
++        if self._success is not None:
++            self._success.flush_due()
++            self._success.observe(**counts)
++
++    def flush_due(self):
++        if self._success is not None:
++            self._success.flush_due()
+ 
+     def emit(self, event, **fields):
+         if event not in EVENTS:
+@@ -55,6 +73,22 @@ class NetworkMetadataTelemetry:
+                     safe[key] = value
+             elif type(value) is int and value >= 0:
+                 safe[key] = value
++        if self._success is not None:
++            self._success.flush_due()
++            if event in {"batch_committed", "duplicate_noop"}:
++                counts = {"suppressed_event_count": 1}
++                if event == "batch_committed":
++                    counts["batch_count"] = 1
++                    if "count" in safe:
++                        counts["record_count"] = min(MAX_COUNTER, safe["count"])
++                elif "count" in safe:
++                    counts["duplicate_count"] = min(MAX_COUNTER, safe["count"])
++                self._success.observe(**counts)
++                return
++            if event == "ingest_fault_aggregate_updated":
++                # No category/transition identity exists in this event. Keep
++                # every fault signal immediate rather than guess it is a repeat.
++                self._success.observe(fault_aggregate_update_count=1)
+         self.logger.info(json.dumps(safe, sort_keys=True, separators=(",", ":")))
+ 
+ 
+diff --git a/app/network_metadata_projection/config.py b/app/network_metadata_projection/config.py
+index c2dd2128150d3c97d13a05efaeaa6048f7623127..d372b8889e3ee93a1f1016ed0b5ddac64e185c6a 100644
+--- a/app/network_metadata_projection/config.py
++++ b/app/network_metadata_projection/config.py
+@@ -11,7 +11,21 @@ PREFIX = "NETWORK_METADATA_PROJECTION_"
+ 
+ 
+ def configuration_digest(config):
+-    return hashlib.sha256(ni01_canonical_json(asdict(config))).hexdigest()
++    values = asdict(config)
++    # New OFF fields are absent from the original canonical configuration.
++    for name in ("idle_write_reduction_enabled", "checkpoint_opt_enabled", "telemetry_aggregation_enabled"):
++        if not values[name]:
++            values.pop(name)
++    return hashlib.sha256(ni01_canonical_json(values)).hexdigest()
++
++
++def idle_read_guard_from_env(environ=None):
++    """Reader process opt-in; must be enabled together with the writer flag."""
++    env = os.environ if environ is None else environ
++    value = env.get(PREFIX + "IDLE_WRITE_REDUCTION_ENABLED", "false")
++    if type(value) is not str or value not in {"true", "false"}:
++        raise ProjectionValidationError()
++    return value == "true"
+ 
+ 
+ def projection_config_from_env(environ=None):
+@@ -29,7 +43,12 @@ def projection_config_from_env(environ=None):
+         key = {"source_db_path": "NETWORK_METADATA_DB_PATH", "registry_db_path": "VISITOR_REGISTRY_DB_PATH"}.get(name, PREFIX + name.upper())
+         default = getattr(defaults, name)
+         value = env.get(key, str(default))
+-        if name.endswith("db_path"):
++        if type(default) is bool:
++            value = env.get(key, "true" if default else "false")
++            if type(value) is not str or value not in {"true", "false"}:
++                raise ProjectionValidationError()
++            value = value == "true"
++        elif name.endswith("db_path"):
+             if not isinstance(value, str) or not value or "\0" in value or not Path(value).is_absolute():
+                 raise ProjectionValidationError()
+         else:
+diff --git a/app/network_metadata_projection/models.py b/app/network_metadata_projection/models.py
+index d2d8dafbe53b604fac7fea2c9eee53a737bc9dab..b9ec332e23025cff590ff9ee1146edc3c011c33e 100644
+--- a/app/network_metadata_projection/models.py
++++ b/app/network_metadata_projection/models.py
+@@ -55,6 +55,9 @@ class ProjectionConfig:
+     shutdown_timeout_seconds: int = 20
+     source_db_path: str = "/opt/CaptivePortal/data/network_metadata.sqlite3"
+     registry_db_path: str = "/opt/CaptivePortal/data/visitor_registry.sqlite3"
++    idle_write_reduction_enabled: bool = False
++    checkpoint_opt_enabled: bool = False
++    telemetry_aggregation_enabled: bool = False
+ 
+ 
+ @dataclass(frozen=True, slots=True, repr=False)
+diff --git a/app/network_metadata_projection/read_service.py b/app/network_metadata_projection/read_service.py
+index 7f0b5676b421b12cc4af3cf3cba7bd70be434404..b18a0b4c1fe93f181578e5663d7e449bffb04e3a 100644
+--- a/app/network_metadata_projection/read_service.py
++++ b/app/network_metadata_projection/read_service.py
+@@ -1,5 +1,6 @@
+ """Projection-only set-based reads. No upstream calls or query-time attribution."""
+ import sqlite3
++from datetime import datetime, timezone
+ from contextlib import contextmanager
+ from pathlib import Path
+ from app.device_fingerprint.validation import validate_site_id
+@@ -11,14 +12,34 @@ from .schema import validate_schema
+ from .validation import read_window
+ from app.analytics.source_gateway import AnalyticsQueryDeadlineExceeded
+ from app.network_metadata.validation import ni_timestamp
++from .config import idle_read_guard_from_env
++from .effective_runtime_state import effective_runtime_state
+ 
+ JOIN = " FROM device_network_metadata_edges e LEFT JOIN projection_site_mac_bindings b ON b.site_id=e.site_id AND b.client_mac=e.client_mac"
+ COLUMNS = "SELECT e.*,b.site_id AS joined_site,b.device_id,b.binding_state,b.last_evaluated_at,b.authoritative_bound_at"
+ 
+ 
+ class DeviceNetworkMetadataReadService:
+-    def __init__(self, db_path, *, enabled=True, max_db_bytes=17179869184):
++    def __init__(self, db_path, *, enabled=True, max_db_bytes=17179869184,
++                 idle_write_reduction_enabled=None, clock=lambda: datetime.now(timezone.utc)):
+         self.db_path, self.enabled, self.max_db_bytes = db_path, enabled, max_db_bytes
++        if enabled and idle_write_reduction_enabled is None:
++            idle_write_reduction_enabled = idle_read_guard_from_env()
++        if idle_write_reduction_enabled is not None and type(idle_write_reduction_enabled) is not bool:
++            raise ProjectionValidationError()
++        self.idle_write_reduction_enabled = bool(enabled and idle_write_reduction_enabled)
++        self.clock = clock
++
++    def _runtime_state(self, connection):
++        if not self.idle_write_reduction_enabled:
++            row = connection.execute("SELECT runtime_state FROM projection_runtime_state WHERE singleton_id=1").fetchone()
++            if row is None:
++                raise ProjectionUnavailable()
++            return row[0]
++        row = connection.execute("SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
++        if row is None:
++            raise ProjectionUnavailable()
++        return effective_runtime_state(row, enabled=True, evaluated_at_utc=self.clock())[0]
+ 
+     @contextmanager
+     def _snapshot(self, *, deadline=None):
+@@ -59,13 +80,11 @@ class DeviceNetworkMetadataReadService:
+         except Exception:
+             raise ProjectionValidationError() from None
+         with self._snapshot(deadline=deadline) as connection:
+-            state = connection.execute("SELECT runtime_state FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+-            if state is None:
+-                raise ProjectionUnavailable()
++            state = self._runtime_state(connection)
+             binding = connection.execute(
+                 "SELECT binding_state,device_id FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?",
+                 (site_id, client_mac)).fetchone()
+-            result = dict(runtime_state=state[0], binding_state=binding[0] if binding else None,
++            result = dict(runtime_state=state, binding_state=binding[0] if binding else None,
+                           bound_device_id=binding[1] if binding else None, facts=())
+             if binding is None or binding[0] in {"not_yet_registry_resolved", "registry_unavailable"}:
+                 return result
+@@ -158,6 +177,9 @@ class DeviceNetworkMetadataReadService:
+                 row = connection.execute("SELECT * FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+                 for key in ("runtime_state", "safe_reason", "last_projection_commit_at", "last_registry_reconcile_at", "pending_attribution_count"):
+                     defaults[key] = row[key]
++                if self.idle_write_reduction_enabled:
++                    defaults["runtime_state"], defaults["safe_reason"] = effective_runtime_state(
++                        row, enabled=True, evaluated_at_utc=self.clock())
+                 defaults["checkpoint_count"] = connection.execute("SELECT count(*) FROM projection_source_checkpoints").fetchone()[0]
+                 total = 0
+                 for suffix in ("", "-wal", "-shm", "-journal"):
+diff --git a/app/network_metadata_projection/recognition_read_service.py b/app/network_metadata_projection/recognition_read_service.py
+index 0f3ad7bc7e4d58c335870fc2c9f8e7bfc50b3664..e5ad2dbabd792c096db25b2f47138a8a4e49b7cd 100644
+--- a/app/network_metadata_projection/recognition_read_service.py
++++ b/app/network_metadata_projection/recognition_read_service.py
+@@ -53,8 +53,8 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
+         except Exception:
+             raise ProjectionValidationError() from None
+         with self._snapshot(deadline=deadline) as connection:
+-            state = connection.execute("SELECT runtime_state FROM projection_runtime_state WHERE singleton_id=1").fetchone()
+-            if state is None or state[0] not in RUNTIME_STATES:
++            state = self._runtime_state(connection)
++            if state not in RUNTIME_STATES:
+                 raise ProjectionUnavailable()
+             binding = connection.execute(
+                 "SELECT binding_state,device_id FROM projection_site_mac_bindings WHERE site_id=? AND client_mac=?",
+@@ -66,7 +66,7 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
+             if identity != "authoritative":
+                 if bound is not None:
+                     raise ProjectionUnavailable()
+-                return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state[0], None, ())
++                return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state, None, ())
+             if bound != device_id:
+                 raise ProjectionUnavailable()
+             registry_identity = connection.execute(
+@@ -109,4 +109,4 @@ class DeviceNetworkMetadataRecognitionReadService(DeviceNetworkMetadataReadServi
+                     facts.append(RecognitionProjectionEdgeFactV1(**dict(row)))
+             except (ValueError, TypeError):
+                 raise ProjectionUnavailable() from None
+-            return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state[0], bound, tuple(facts))
++            return RecognitionProjectionSnapshotV1(1, site_id, device_id, identity, state, bound, tuple(facts))
+diff --git a/app/network_metadata_projection/repository.py b/app/network_metadata_projection/repository.py
+index fa4964db93a0d6331b7b2d69491629018f377596..8451996ccade31831da2d832a81c7df8ab5dd474 100644
+--- a/app/network_metadata_projection/repository.py
++++ b/app/network_metadata_projection/repository.py
+@@ -1,6 +1,7 @@
+ """Single writer, atomic dispositions, monotonic Registry joins and hard cap."""
+ import os
+ import sqlite3
++import time
+ import uuid
+ from contextlib import contextmanager
+ from datetime import datetime, timedelta, timezone
+@@ -15,12 +16,23 @@ from .validation import timestamp, semantic_digest
+ 
+ 
+ class ProjectionRepository:
+-    def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None):
++    def __init__(self, config, *, clock=lambda: datetime.now(timezone.utc), crash_point=lambda _: None,
++                 monotonic=time.monotonic):
+         self.config, self.clock, self.crash_point = config, clock, crash_point
+         self.connection = self._writer_fd = None
+         self._retention_authorized = False
+         self.live_state, self.live_reason = "initializing", None
+         self.active_run_id = None
++        self.monotonic = monotonic
++        self.source_verified_in_run = False
++        self.last_durable_source_poll_at = self.last_durable_source_poll_tick = None
++        self._transaction_source_poll_at = None
++        self._last_soft_checkpoint_tick = None
++        self.telemetry = None
++
++    def _count_success(self, **counts):
++        if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
++            self.telemetry.observe_success(**counts)
+ 
+     def footprint(self):
+         try:
+@@ -73,16 +85,31 @@ class ProjectionRepository:
+             self.close()
+             raise ProjectionUnavailable() from None
+ 
+-    def maintain_capacity(self, *, post_commit=False):
+-        """PASSIVE after every commit; TRUNCATE only under headroom pressure.
++    def maintain_capacity(self, *, post_commit=False, retention_ran=False):
++        """Legacy PASSIVE cadence or opt-in conditional soft maintenance.
+ 
+         Pinned readers defer writes, never rewind a durable disposition. Live
+         diagnostics deliberately need not be persisted when the cap forbids it.
+         """
+         try:
+-            pressure = self.footprint() + PROJECTION_TRANSACTION_HEADROOM_BYTES > self.config.max_db_bytes
++            reserved_footprint = self.footprint() + PROJECTION_TRANSACTION_HEADROOM_BYTES
++            pressure = reserved_footprint > self.config.max_db_bytes
++            if self.config.checkpoint_opt_enabled:
++                recovery = self.live_state in {"capacity_waiting_reader", "capacity_halted"}
++                try:
++                    wal_bytes = Path(self.config.db_path + "-wal").stat().st_size
++                except FileNotFoundError:
++                    wal_bytes = 0
++                soft = wal_bytes >= 16777216 or (retention_ran and wal_bytes > 0)
++                tick = self.monotonic()
++                if reserved_footprint < self.config.max_db_bytes and not recovery:
++                    if not soft or (self._last_soft_checkpoint_tick is not None
++                                    and tick - self._last_soft_checkpoint_tick < 60):
++                        return True
++                    self._last_soft_checkpoint_tick = tick
+             busy, frames, completed = self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+             reader_blocked = bool(busy or frames > completed)
++            self._count_success(checkpoint_attempt_count=1, checkpoint_busy_count=int(reader_blocked))
+             if pressure:
+                 self.connection.execute("PRAGMA busy_timeout=0")
+                 try:
+@@ -116,9 +143,15 @@ class ProjectionRepository:
+         try:
+             self.connection.execute("BEGIN IMMEDIATE")
+             self._retention_authorized = retention
++            self._transaction_source_poll_at = None
+             yield
+             self.crash_point("before_commit")
+             self.connection.execute("COMMIT")
++            if self.config.idle_write_reduction_enabled and self._transaction_source_poll_at is not None:
++                self.last_durable_source_poll_at = self._transaction_source_poll_at
++                self.last_durable_source_poll_tick = self.monotonic()
++                self.source_verified_in_run = True
++            self._count_success(commit_count=1)
+             self.crash_point("after_commit")
+         except BaseException as error:
+             if self.connection.in_transaction:
+@@ -128,8 +161,12 @@ class ProjectionRepository:
+             raise
+         finally:
+             self._retention_authorized = False
++            self._transaction_source_poll_at = None
+         # Do not turn a committed batch into a pretend rollback on pressure.
+-        self.maintain_capacity(post_commit=True)
++        if self.config.checkpoint_opt_enabled:
++            self.maintain_capacity(post_commit=True, retention_ran=retention)
++        else:
++            self.maintain_capacity(post_commit=True)
+ 
+     def insert(self, table, values):
+         if table not in TABLES:
+@@ -141,6 +178,8 @@ class ProjectionRepository:
+         digest(identity.artifact_tree, 40)
+         run_id = str(uuid.uuid4())
+         with self.transaction():
++            if self.config.idle_write_reduction_enabled and self.live_state != "blocked_conflict":
++                self.runtime("initializing")
+             self.insert("projection_runs", dict(projection_run_id=run_id, started_at_utc=timestamp(self.clock()),
+                 repository_head=identity.artifact_sha, repository_tree=identity.artifact_tree,
+                 projection_contract_version=1, projection_algorithm_version=ALGORITHM,
+@@ -199,6 +238,8 @@ class ProjectionRepository:
+                       updated_at_utc=timestamp(self.clock()), **times)
+         self.connection.execute("UPDATE projection_runtime_state SET " + ",".join(key + "=?" for key in values) +
+             ",pending_attribution_count=(SELECT count(*) FROM projection_pending_attribution) WHERE singleton_id=1", tuple(values.values()))
++        if self.config.idle_write_reduction_enabled and "last_source_poll_at" in times:
++            self._transaction_source_poll_at = times["last_source_poll_at"]
+ 
+     def set_failure(self, state, reason=None, *, observation=None):
+         self.live_state, self.live_reason = state, reason
+@@ -209,8 +250,19 @@ class ProjectionRepository:
+             # No status-only capacity exemption. Remain live fail-closed.
+             pass
+ 
++    def successful_source_state(self):
++        """Read-only candidate state; no idle UPDATE needed to evaluate it."""
++        if self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
++            return "attribution_unavailable"
++        if self.connection.execute("SELECT 1 FROM projection_site_mac_bindings WHERE binding_state='registry_unavailable' LIMIT 1").fetchone():
++            return "registry_degraded"
++        return "usable"
++
+     def success_state(self, *, source_verified=False, **times):
+-        if not source_verified and self.live_state in {"source_unavailable", "blocked_conflict"}:
++        if (self.config.idle_write_reduction_enabled and not source_verified
++                and not self.source_verified_in_run):
++            self.runtime(self.live_state, self.live_reason, **times)
++        elif not source_verified and self.live_state in {"source_unavailable", "blocked_conflict"}:
+             self.runtime(self.live_state, self.live_reason, **times)
+         elif self.connection.execute("SELECT 1 FROM projection_pending_attribution LIMIT 1").fetchone():
+             self.runtime("attribution_unavailable", **times)
+diff --git a/app/network_metadata_projection/service.py b/app/network_metadata_projection/service.py
+index 88bff4b770b9a6a765c0c5b1b95adf904ac9ed00..6343de3d0eaf5ef9e0bc9c7bc1bc1cd7430fcf00 100644
+--- a/app/network_metadata_projection/service.py
++++ b/app/network_metadata_projection/service.py
+@@ -13,6 +13,7 @@ from .models import (ALGORITHM, ATTRIBUTION_STATES, ProjectionConflict, Projecti
+                      ProjectionUnavailable, RegistryEvaluation)
+ from .models import NetworkMetadataProjectionResultV1, PreparedDisposition
+ from .validation import edge_id, semantic_digest, timestamp
++from .effective_runtime_state import effective_runtime_state
+ 
+ 
+ class NetworkMetadataProjectionService:
+@@ -23,6 +24,9 @@ class NetworkMetadataProjectionService:
+         self.telemetry, self.stop_event, self.monotonic = telemetry, stop_event or threading.Event(), monotonic
+         self.run_id = None
+         self.last_retry = self.last_reconcile = self.last_retention = None
++        if config.telemetry_aggregation_enabled and telemetry is not None:
++            telemetry.enable_aggregation(monotonic=monotonic)
++            repository.telemetry = telemetry
+ 
+     def emit(self, event, **fields):
+         if self.telemetry is not None:
+@@ -35,6 +39,9 @@ class NetworkMetadataProjectionService:
+         if not self.config.enabled:
+             return False
+         self.repository.initialize()
++        if self.config.idle_write_reduction_enabled:
++            self.repository.source_verified_in_run = False
++            self.repository.last_durable_source_poll_at = self.repository.last_durable_source_poll_tick = None
+         self.run_id = self.repository.create_run(self.identity)
+         return True
+ 
+@@ -220,8 +227,13 @@ class NetworkMetadataProjectionService:
+                     if self.repository.live_state.startswith("capacity_"):
+                         self.emit("projection_unavailable", reason_code=self.repository.live_reason)
+                     return tuple(item.result for item in prepared)  # One bounded batch, not unbounded catch-up.
+-            with self.repository.transaction():
+-                self.repository.success_state(source_verified=True, last_source_poll_at=timestamp(self.repository.clock()))
++            if self.config.idle_write_reduction_enabled:
++                self._successful_empty_poll()
++            else:
++                with self.repository.transaction():
++                    self.repository.success_state(source_verified=True, last_source_poll_at=timestamp(self.repository.clock()))
++            if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
++                self.telemetry.observe_success(idle_poll_count=1)
+         except ProjectionConflict as error:
+             self.repository.set_failure("blocked_conflict", error.reason, observation=observation)
+             self.emit("projection_conflict", reason_code=error.reason)
+@@ -232,6 +244,24 @@ class NetworkMetadataProjectionService:
+             self.repository.set_failure("source_unavailable", "source_unavailable")
+             self.emit("source_unavailable")
+ 
++    def _successful_empty_poll(self):
++        repo = self.repository
++        now = repo.clock()
++        desired = repo.successful_source_state()
++        row = repo.connection.execute(
++            "SELECT runtime_state,safe_reason,last_source_poll_at FROM projection_runtime_state WHERE singleton_id=1").fetchone()
++        if row is None:
++            raise ProjectionUnavailable()
++        unchanged = (repo.source_verified_in_run and repo.live_state == desired
++                     and row["runtime_state"] == desired and row["safe_reason"] is None
++                     and repo.live_reason is None)
++        fresh = effective_runtime_state(row, enabled=True, evaluated_at_utc=now)[0] == desired
++        previous = repo.last_durable_source_poll_tick
++        elapsed = None if previous is None else self.monotonic() - previous
++        if not (unchanged and fresh and elapsed is not None and 0 <= elapsed < 10):
++            with repo.transaction():
++                repo.success_state(source_verified=True, last_source_poll_at=timestamp(now))
++
+     def retry(self):
+         selected = self.repository.pending()
+         results = []
+@@ -302,6 +332,8 @@ class NetworkMetadataProjectionService:
+             return
+         from .retention import ProjectionRetention
+         totals = ProjectionRetention(self.repository, self.source).run()
++        if self.config.checkpoint_opt_enabled:
++            self.repository.maintain_capacity(retention_ran=True)
+         self.emit("retention_completed", count=sum(totals.values()))
+         return totals
+ 
+@@ -311,6 +343,10 @@ class NetworkMetadataProjectionService:
+         try:
+             while not self.stop_event.is_set():
+                 self.tick()
++                if self.config.telemetry_aggregation_enabled and self.telemetry is not None:
++                    self.telemetry.flush_due()
+                 self.stop_event.wait(self.config.poll_interval_seconds)
+         finally:
++            if self.config.idle_write_reduction_enabled and self.repository.live_state != "blocked_conflict":
++                self.repository.set_failure("stopping")
+             self.repository.close()
+diff --git a/app/network_metadata_projection/telemetry.py b/app/network_metadata_projection/telemetry.py
+index bb033a91f2f283624f7dd54197e5837b4b4e9235..63e68feede603c09880e1b92636f0fcae31b5ed8 100644
+--- a/app/network_metadata_projection/telemetry.py
++++ b/app/network_metadata_projection/telemetry.py
+@@ -2,6 +2,7 @@
+ import json
+ import logging
+ from .models import CONFLICTS
++from app.network_metadata.success_telemetry import SuccessCounters
+ 
+ EVENTS = frozenset({"projection_conflict", "projection_unavailable", "source_unavailable", "expired_unresolved",
+                    "projection_started", "projection_stopped", "batch_committed", "registry_reconciled", "retention_completed"})
+@@ -11,6 +12,23 @@ FIELDS = frozenset({"observation_id", "edge_id", "source_generation_id", "site_i
+ class ProjectionTelemetry:
+     def __init__(self, logger=None):
+         self.logger = logger or logging.getLogger("network_metadata_projection")
++        self._success = None
++
++    def enable_aggregation(self, *, monotonic):
++        if self._success is None:
++            self._success = SuccessCounters(self._publish_summary, monotonic=monotonic)
++
++    def _publish_summary(self, summary):
++        self.logger.info(json.dumps(summary, sort_keys=True, separators=(",", ":")))
++
++    def observe_success(self, **counts):
++        if self._success is not None:
++            self._success.flush_due()
++            self._success.observe(**counts)
++
++    def flush_due(self):
++        if self._success is not None:
++            self._success.flush_due()
+ 
+     def emit(self, event, **values):
+         if event not in EVENTS or not set(values) <= FIELDS:
+@@ -29,4 +47,12 @@ class ProjectionTelemetry:
+                 integer(value)
+             else:
+                 validate_machine_id(value)
++        if self._success is not None:
++            self._success.flush_due()
++            if event == "batch_committed":
++                counts = dict(batch_count=1, suppressed_event_count=1)
++                if "count" in values:
++                    counts["record_count"] = values["count"]
++                self._success.observe(**counts)
++                return
+         self.logger.info(json.dumps(dict(event=event, **values), sort_keys=True, separators=(",", ":")))
+diff --git a/app/network_metadata/success_telemetry.py b/app/network_metadata/success_telemetry.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..262230e46fd13e980d2b193c313675b396a0bde2
+--- /dev/null
++++ b/app/network_metadata/success_telemetry.py
+@@ -0,0 +1,34 @@
++"""Bounded process-local minute counters, not durable audit/replay authority."""
++import time
++
++SUMMARY_FIELDS = frozenset({
++    "batch_count", "record_count", "duplicate_count", "fault_aggregate_update_count",
++    "idle_poll_count", "commit_count", "checkpoint_attempt_count",
++    "checkpoint_busy_count", "suppressed_event_count",
++})
++MAX_COUNTER = 9223372036854775807
++
++
++class SuccessCounters:
++    def __init__(self, publish, *, monotonic=time.monotonic):
++        self.publish, self.monotonic = publish, monotonic
++        self.window_started = monotonic()
++        self.counts = {}
++
++    def observe(self, **counts):
++        if not set(counts) <= SUMMARY_FIELDS:
++            raise ValueError("invalid_success_counter")
++        if any(type(value) is not int or not 0 <= value <= MAX_COUNTER for value in counts.values()):
++            raise ValueError("invalid_success_counter")
++        for field, value in counts.items():
++            self.counts[field] = min(MAX_COUNTER, self.counts.get(field, 0) + value)
++
++    def flush_due(self):
++        now = self.monotonic()
++        if now - self.window_started < 60:
++            return
++        if self.counts:
++            # Closed integer fields only; raw source or identity values cannot enter.
++            self.publish(dict(event="success_summary", interval_seconds=60, **self.counts))
++            self.counts.clear()
++        self.window_started = now
+diff --git a/app/network_metadata_projection/effective_runtime_state.py b/app/network_metadata_projection/effective_runtime_state.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8c3b0146125083c27b2be8aae887888feb5859f
+--- /dev/null
++++ b/app/network_metadata_projection/effective_runtime_state.py
+@@ -0,0 +1,26 @@
++"""B1 read-only freshness policy; no DTO expansion or writer side effects."""
++from datetime import datetime, timezone
++
++from app.network_metadata.validation import ni_timestamp
++from app.network_metadata.models import NetworkMetadataValidationError
++
++SOURCE_USABLE_STATES = frozenset({"usable", "registry_degraded", "attribution_unavailable"})
++SOURCE_POLL_STALE_AFTER_SECONDS = 30
++
++
++def effective_runtime_state(row, *, enabled, evaluated_at_utc=None):
++    state, reason = row["runtime_state"], row["safe_reason"]
++    if not enabled or state not in SOURCE_USABLE_STATES:
++        return state, reason
++    try:
++        now = evaluated_at_utc if evaluated_at_utc is not None else datetime.now(timezone.utc)
++        if now.tzinfo is None or now.utcoffset() is None:
++            raise ValueError
++        last = ni_timestamp(row["last_source_poll_at"], canonical=True)
++        age = (now - last).total_seconds()
++        if 0 <= age <= SOURCE_POLL_STALE_AFTER_SECONDS:
++            return state, reason
++    except (ValueError, TypeError, AttributeError, KeyError, IndexError, OverflowError, NetworkMetadataValidationError):
++        pass
++    # Future, missing and malformed timestamps are not evidence of freshness.
++    return "source_unavailable", "source_poll_stale"

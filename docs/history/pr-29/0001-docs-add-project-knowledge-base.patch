@@ -1,0 +1,2971 @@
+From 28ddb3d5e23ec24d52ff5e44786a6a1eebb679fb Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 4 Aug 2026 06:12:48 +0000
+Subject: [PATCH] docs: add project knowledge base
+
+---
+ .github/copilot-instructions.md               |  21 +++
+ .../background-workers.instructions.md        |  17 +++
+ .../documentation.instructions.md             |  14 ++
+ .github/instructions/logging.instructions.md  |  16 ++
+ .../instructions/omada-api.instructions.md    |  16 ++
+ .../pending-sessions.instructions.md          |  14 ++
+ .github/instructions/python.instructions.md   |  15 ++
+ .github/instructions/storage.instructions.md  |  14 ++
+ .github/instructions/tests.instructions.md    |  12 ++
+ .github/pull_request_template.md              |  47 ++++++
+ AGENTS.md                                     | 119 +++++++++++++++
+ README.md                                     |  28 +---
+ README_RU.md                                  |  29 +---
+ docs/CAPPORT.md                               |   4 +
+ docs/README.md                                |  51 +++++++
+ docs/agents/handoff.md                        |  52 +++++++
+ docs/agents/model-selection.md                |  33 ++++
+ docs/agents/pilot-results.md                  |  81 ++++++++++
+ docs/agents/repository-actions.md             |  46 ++++++
+ docs/agents/task-contract.md                  |  65 ++++++++
+ docs/agents/workflow.md                       |  83 ++++++++++
+ docs/api/omada-open-api.md                    | 119 +++++++++++++++
+ docs/architecture.md                          |  97 ++++++++++++
+ docs/archive/README.md                        |  11 ++
+ docs/archive/migration-plan.md                |  56 +++++++
+ docs/auth_retry.md                            |   4 +
+ docs/auth_telemetry.md                        |   4 +
+ docs/decisions/ADR-template.md                |  22 +++
+ docs/deployment.md                            |  73 +++++++++
+ docs/logging.md                               |  51 +++++++
+ docs/module-index.md                          |  23 +++
+ docs/modules/auth-telemetry.md                |  72 +++++++++
+ docs/modules/authorization.md                 |  72 +++++++++
+ docs/modules/authorized-client-snapshot.md    |  72 +++++++++
+ docs/modules/capport.md                       |  72 +++++++++
+ docs/modules/omada-webhook-normalizer.md      |  72 +++++++++
+ docs/modules/omada-webhook-receiver.md        |  72 +++++++++
+ docs/modules/pending-session-cleaner.md       | 143 ++++++++++++++++++
+ docs/modules/portal-entry.md                  |  72 +++++++++
+ docs/modules/public-authorization-counter.md  |  72 +++++++++
+ docs/modules/public-traffic-counter.md        |  72 +++++++++
+ docs/modules/visitor-registry.md              |  72 +++++++++
+ docs/omada_webhook_normalizer.md              |   4 +
+ docs/omada_webhook_receiver.md                |   4 +
+ docs/plans/PLAN-template.md                   |  29 ++++
+ docs/portal_counter.md                        |   4 +
+ docs/project-inventory.md                     | 141 +++++++++++++++++
+ docs/public_traffic.md                        |   4 +
+ docs/security.md                              |  28 ++++
+ docs/tasks/TASK-template.md                   |  65 ++++++++
+ docs/testing.md                               |  70 +++++++++
+ docs/visitor_device_registry.md               |   4 +
+ docs/visitor_snapshot_collector.md            |   4 +
+ pytest.ini                                    |   2 +
+ scripts/check.sh                              |  10 ++
+ 55 files changed, 2428 insertions(+), 41 deletions(-)
+ create mode 100644 .github/copilot-instructions.md
+ create mode 100644 .github/instructions/background-workers.instructions.md
+ create mode 100644 .github/instructions/documentation.instructions.md
+ create mode 100644 .github/instructions/logging.instructions.md
+ create mode 100644 .github/instructions/omada-api.instructions.md
+ create mode 100644 .github/instructions/pending-sessions.instructions.md
+ create mode 100644 .github/instructions/python.instructions.md
+ create mode 100644 .github/instructions/storage.instructions.md
+ create mode 100644 .github/instructions/tests.instructions.md
+ create mode 100644 .github/pull_request_template.md
+ create mode 100644 AGENTS.md
+ create mode 100644 docs/README.md
+ create mode 100644 docs/agents/handoff.md
+ create mode 100644 docs/agents/model-selection.md
+ create mode 100644 docs/agents/pilot-results.md
+ create mode 100644 docs/agents/repository-actions.md
+ create mode 100644 docs/agents/task-contract.md
+ create mode 100644 docs/agents/workflow.md
+ create mode 100644 docs/api/omada-open-api.md
+ create mode 100644 docs/architecture.md
+ create mode 100644 docs/archive/README.md
+ create mode 100644 docs/archive/migration-plan.md
+ create mode 100644 docs/decisions/ADR-template.md
+ create mode 100644 docs/deployment.md
+ create mode 100644 docs/logging.md
+ create mode 100644 docs/module-index.md
+ create mode 100644 docs/modules/auth-telemetry.md
+ create mode 100644 docs/modules/authorization.md
+ create mode 100644 docs/modules/authorized-client-snapshot.md
+ create mode 100644 docs/modules/capport.md
+ create mode 100644 docs/modules/omada-webhook-normalizer.md
+ create mode 100644 docs/modules/omada-webhook-receiver.md
+ create mode 100644 docs/modules/pending-session-cleaner.md
+ create mode 100644 docs/modules/portal-entry.md
+ create mode 100644 docs/modules/public-authorization-counter.md
+ create mode 100644 docs/modules/public-traffic-counter.md
+ create mode 100644 docs/modules/visitor-registry.md
+ create mode 100644 docs/plans/PLAN-template.md
+ create mode 100644 docs/project-inventory.md
+ create mode 100644 docs/security.md
+ create mode 100644 docs/tasks/TASK-template.md
+ create mode 100644 docs/testing.md
+ create mode 100644 pytest.ini
+ create mode 100755 scripts/check.sh
+
+diff --git a/.github/copilot-instructions.md b/.github/copilot-instructions.md
+new file mode 100644
+index 0000000..72424c8
+--- /dev/null
++++ b/.github/copilot-instructions.md
+@@ -0,0 +1,21 @@
++Read AGENTS.md first.
++Use docs/ as the project knowledge base.
++Use the current TASK as the scope contract.
++Do not reconstruct architecture from repository history when current docs exist.
++
++# GitHub Copilot adapter for CaptivPortal
++
++Status: current
++Updated: 2026-08-04
++
++Это только платформенный адаптер. Универсальные правила находятся в AGENTS.md и не дублируются здесь.
++
++Перед изменением открой только документы, перечисленные в TASK, проверь фактические связанные файлы и тесты и не расширяй scope.
++
++Если implementation TASK отсутствует или не определяет execution mode, allowed files, repository actions либо test responsibility, запроси уточнение до изменений.
++
++Для Copilot Code Review отсутствие отдельного TASK не блокирует проверку PR целиком. Отметь scope ambiguity, затем продолжи проверку security, correctness и regression risks. Не предлагай и не вноси расширяющие scope исправления без отдельного разрешения.
++
++Используй path-specific instructions из .github/instructions/ только для затронутых путей. Не загружай все инструкции одновременно.
++
++В ответе не заявляй о test, commit, push, PR, merge или deploy без фактического результата. По умолчанию PR должен быть Draft; merge выполняет только owner.
+diff --git a/.github/instructions/background-workers.instructions.md b/.github/instructions/background-workers.instructions.md
+new file mode 100644
+index 0000000..7cce52d
+--- /dev/null
++++ b/.github/instructions/background-workers.instructions.md
+@@ -0,0 +1,17 @@
++---
++applyTo: "app/**/*worker.py,app/**/*collector.py,run.py"
++---
++
++# Background workers
++
++- Создание и startup — только в composition root; никаких side effects при import.
++- Один worker на process, если ADR не говорит иначе.
++- Fixed-delay; overlapping scan запрещён.
++- stop() идемпотентен, ожидание interruptible, shutdown bounded.
++- После stop_accepting() новые mutation не начинаются.
++- HTTP timeout, retries и verification ограничены.
++- Ошибка worker не останавливает Flask; модуль переходит в unavailable/disabled с telemetry.
++- Flask current_app из thread запрещён.
++- Feature по умолчанию выключен, если это контракт модуля.
++- Rollback в production: feature disable + service restart.
++- Lifecycle change требует PLAN.
+diff --git a/.github/instructions/documentation.instructions.md b/.github/instructions/documentation.instructions.md
+new file mode 100644
+index 0000000..160bd28
+--- /dev/null
++++ b/.github/instructions/documentation.instructions.md
+@@ -0,0 +1,14 @@
++---
++applyTo: "README*.md,docs/**/*.md,AGENTS.md,.github/**/*.md"
++---
++
++# Documentation
++
++- Один документ — одна ответственность; детали не копируй, связывай ссылками.
++- Указывай status, дату актуализации, модуль и проверенный commit для inventory.
++- Исторический документ архивируй или помечай deprecated; две final-версии запрещены.
++- Не копируй полный source, log или chat history.
++- Secrets и реальные production values запрещены; examples используют placeholders.
++- Универсальные правила не содержат названий AI-продуктов.
++- Platform-specific поведение находится только в adapter.
++- Изменение architecture, public contract, config, event schema, persistence, lifecycle или tests обновляет связанный документ в том же PR.
+diff --git a/.github/instructions/logging.instructions.md b/.github/instructions/logging.instructions.md
+new file mode 100644
+index 0000000..b3068bc
+--- /dev/null
++++ b/.github/instructions/logging.instructions.md
+@@ -0,0 +1,16 @@
++---
++applyTo: "app/**/*.py,tools/**/*.py"
++---
++
++# Logging and journals
++
++Operational telemetry диагностирует приложение; data journal хранит устойчивые события. Не смешивай их контракты.
++
++- JSONL: UTF-8, strict JSON, одна запись на строку, UTC timestamp, allow_nan=false.
++- MAC сохраняется полностью.
++- Tokens, passwords, cookies, Authorization headers и SSID password запрещены.
++- Полный Omada override response запрещён.
++- Schema event меняется вместе с документацией и тестами.
++- Не используй print() в production.
++- Coder заканчивает работу после корректной записи events.
++- Grafana, Alloy и Loki меняются только отдельным infrastructure TASK.
+diff --git a/.github/instructions/omada-api.instructions.md b/.github/instructions/omada-api.instructions.md
+new file mode 100644
+index 0000000..b09c45a
+--- /dev/null
++++ b/.github/instructions/omada-api.instructions.md
+@@ -0,0 +1,16 @@
++---
++applyTo: "app/controllers/omada.py,app/controllers/omada_pending_sessions.py,app/integrations/omada/**/*.py,tests/**/*omada*.py"
++---
++
++# Omada Open API
++
++- Используй общий OmadaProvider и сначала проверь фактический token lifecycle в текущем коде и тестах.
++- Не создавай второй provider или token manager. Изменение cache/lifecycle требует явного TASK, concurrency tests и при устойчивом решении ADR.
++- При конфликте current state и change intent останови затронутую часть и передай точные источники Architect/Tech Lead.
++- Проверяй HTTP status и JSON errorCode отдельно.
++- errorCode -44112 означает истёкший token; recovery должен быть bounded и endpoint-specific.
++- Authorization header имеет форму AccessToken=<token>; значение не логируется.
++- MAC в URL форматируй через app/common/mac.py по контракту endpoint.
++- Используй только endpoints, подтверждённые docs/api/omada-open-api.md.
++- Не сохраняй полный override response: он может содержать пароль SSID.
++- Mutation endpoint требует отдельного TASK, guard, audit и verification.
+diff --git a/.github/instructions/pending-sessions.instructions.md b/.github/instructions/pending-sessions.instructions.md
+new file mode 100644
+index 0000000..7e458bd
+--- /dev/null
++++ b/.github/instructions/pending-sessions.instructions.md
+@@ -0,0 +1,14 @@
++---
++applyTo: "app/pending_sessions/**/*.py,app/controllers/omada_pending_sessions.py,tests/pending_sessions/**/*.py"
++---
++
++# Pending Client Session Cleaner
++
++- Read `docs/modules/pending-session-cleaner.md`, `docs/api/omada-open-api.md` and the current TASK.
++- Preserve the single shared `OmadaProvider` and its thread-safe token cache; no second provider, OAuth client, cache or token manager.
++- Mutation is `reconnect` only. Incomplete inventory, local protection, failed/stale preflight, unavailable audit, exhausted guard/budget or shutdown must block POST.
++- Preserve two local-protection checks, audit-before-action and bounded verification. Do not add blind POST retry.
++- Cleaner stays fail-open relative to portal authorization and never reads Visitor Registry SQLite.
++- JSONL schema changes require tests and `docs/modules/pending-session-cleaner.md`; keep full MAC and exclude tokens, headers, cookies, secrets and raw responses.
++- Default feature state remains disabled. Multi-process activation requires an ADR for leader election or inter-process locking.
++- Run `python -m pytest tests/pending_sessions -q --tb=short`, then the full gate from `docs/testing.md`.
+diff --git a/.github/instructions/python.instructions.md b/.github/instructions/python.instructions.md
+new file mode 100644
+index 0000000..a24dc94
+--- /dev/null
++++ b/.github/instructions/python.instructions.md
+@@ -0,0 +1,15 @@
++---
++applyTo: "app/**/*.py,run.py"
++---
++
++# Python
++
++- Сохраняй существующие слои и public signatures.
++- Используй app/config.py → app/settings.py:get_settings().
++- Не создавай объект с network, file или thread side effects при import.
++- run.py остаётся единственным process entrypoint.
++- Используй типы и dataclasses в стиле соседнего кода; не добавляй dependency ради удобства.
++- Все network calls имеют bounded timeout; retries ограничены.
++- Не перехватывай Exception без telemetry и безопасного результата.
++- Не используй print() в production code.
++- Не меняй business logic вне TASK.
+diff --git a/.github/instructions/storage.instructions.md b/.github/instructions/storage.instructions.md
+new file mode 100644
+index 0000000..9552bcd
+--- /dev/null
++++ b/.github/instructions/storage.instructions.md
+@@ -0,0 +1,14 @@
++---
++applyTo: "app/**/*repository.py,app/visitor_registry/**/*.py,app/public_traffic/**/*.py,app/portal_counter/**/*.py"
++---
++
++# Storage
++
++- SQLite schema меняется только с migration plan, backup и rollback.
++- Repository не зависит от Flask route или current_app.
++- Транзакции ограничены; partial state не публикуется как success.
++- Пути проходят существующую config pipeline и валидируются до worker start.
++- Учитывай rotation, inode replacement, partial JSONL line и restart checkpoints.
++- Visitor Registry не обращается к Omada.
++- Pending Session Cleaner не читает visitor_registry.sqlite3.
++- Не удаляй production data и не выполняй migration без deploy TASK.
+diff --git a/.github/instructions/tests.instructions.md b/.github/instructions/tests.instructions.md
+new file mode 100644
+index 0000000..22b4811
+--- /dev/null
++++ b/.github/instructions/tests.instructions.md
+@@ -0,0 +1,12 @@
++---
++applyTo: "tests/**/*.py"
++---
++
++# Tests
++
++- Test responsibility берётся только из TASK: agent, owner, shared или not-applicable.
++- Сначала запускай минимальную связанную группу, затем full gate.
++- Не удаляй тесты, не ослабляй assertions и не исправляй несвязанные failures.
++- Для внешних API используй deterministic fakes/fixtures; production network запрещён без отдельного TASK.
++- Отчёт содержит точную команду и числа passed, skipped, failed.
++- Environment failure отделяй от product failure.
+diff --git a/.github/pull_request_template.md b/.github/pull_request_template.md
+new file mode 100644
+index 0000000..b1e5b0e
+--- /dev/null
++++ b/.github/pull_request_template.md
+@@ -0,0 +1,47 @@
++## Scope
++
++- TASK:
++- Execution mode:
++- Test responsibility:
++- Repository actions:
++
++## Result
++
++- Changed files:
++- Runtime behavior changed: yes / no
++- Public contract changed: yes / no
++
++## Verification
++
++- [ ] Targeted tests
++- [ ] python -m pytest -q -rs
++- [ ] PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
++- [ ] git diff --check
++- [ ] No secrets added
++
++## Documentation impact
++
++- [ ] Architecture changed
++- [ ] Public contract changed
++- [ ] Configuration changed
++- [ ] Data event schema changed
++- [ ] Persistence schema changed
++- [ ] Lifecycle changed
++- [ ] Test commands changed
++- [ ] Module index update required
++- [ ] ADR required
++- [ ] Agent instructions changed
++
++## Boundaries
++
++- [ ] Alloy/Loki/Grafana unchanged or separately authorized
++- [ ] Production systemd unchanged or separately authorized
++- [ ] No unrelated refactor
++- [ ] Draft PR; merge remains owner-only
++
++## Handoff
++
++- Risks:
++- Checks not run:
++- Owner actions:
++- Agent execution summary:
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..3d8c76b
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,119 @@
++# CaptivPortal: правила для coding agents
++
++Status: current
++Updated: 2026-08-04
++
++## Project
++
++CaptivPortal — Python-платформа внешнего Captive Portal и связанных operational-функций для Omada Controller.
++
++## Модели истины
++
++Current-state truth описывает то, что существует сейчас:
++
++1. Код текущей ветки.
++2. Тесты текущей ветки.
++3. Актуальная документация в docs/.
++
++Change-intent truth описывает утверждённое изменение:
++
++1. Утверждённый TASK.
++2. Связанный PLAN.
++3. Связанный ADR.
++
++TASK задаёт scope и намерение изменения, но не стоит выше фактического кода и тестов при описании текущего состояния. Repository history и chat history не используются для восстановления архитектуры, если актуальные документы существуют.
++
++При противоречии внутри одной модели или между current state и change intent останови затронутую часть, укажи точные источники и передай конфликт Architect/Tech Lead. Независимые безопасные части можно продолжить.
++
++## Минимальное чтение
++
++1. Прочитай TASK.
++2. Определи execution mode, test responsibility и repository actions.
++3. Прочитай только документы, указанные в TASK.
++4. Проверь связанные файлы, сигнатуры и тесты.
++5. Не сканируй весь репозиторий без причины.
++
++Карта знаний: docs/README.md.
++Процесс: docs/agents/workflow.md.
++Контракт TASK: docs/agents/task-contract.md.
++Формат результата: docs/agents/handoff.md.
++
++## Capabilities
++
++До работы явно определи доступность:
++
++- repository read и write;
++- shell и test execution;
++- branch, commit, push и pull request;
++- external network;
++- production access.
++
++Не имитируй недоступное действие. Выполни доступную часть и оставь owner action.
++
++## Execution modes
++
++- planning-only: чтение, проверка контрактов и план; без изменений.
++- implementation: изменения только в разрешённых файлах.
++- review: анализ diff и verdict; исправления только при отдельном разрешении.
++- publish: только явно разрешённые branch, commit, push или Draft PR.
++- deploy: только отдельный deploy TASK с backup, health checks и rollback.
++
++## Обязательные правила
++
++- Не менять несвязанные файлы и не выполнять общий рефакторинг.
++- Не менять public contracts, JSONL schema или SQLite schema без требования.
++- Не удалять тесты, не ослаблять assertions и не менять ожидаемый результат ради green suite.
++- Не добавлять зависимости без необходимости.
++- Не хранить secrets в Git, fixtures, TASK, PLAN, PR или handoff.
++- Не логировать Access Token, Client Secret, cookie, Authorization header и пароль SSID.
++- MAC в технических журналах не маскировать.
++- Проверять HTTP status и Omada JSON errorCode раздельно.
++- Использовать существующие app/config.py → app/settings.py:get_settings().
++- Использовать общий OmadaProvider и не создавать второй provider, token manager или механизм авторизации без утверждённого change intent.
++- CAPPORT обязан входить в общий PortalClientContext → AuthSessionManager → AuthWorker flow.
++- Независимый background component работает fail-open.
++- Не использовать Flask current_app из фонового thread.
++- Worker создаётся в composition root, не при import.
++- Не менять Alloy, Loki, Grafana, production systemd или reverse proxy без отдельного TASK.
++- Сначала targeted tests, затем full gate.
++- Не исправлять несвязанные падения full suite.
++- Не утверждать, что test, commit, push, PR или deploy выполнен, если это не так.
++- Merge, force push и production deploy — owner-only без прямого разрешения.
++
++## Архитектурные инварианты
++
++- run.py — process entrypoint и верхнеуровневый lifecycle/composition root.
++- app/web/web.py:create_app() — Flask composition factory.
++- Один OmadaProvider передаётся в web/auth и зависимые компоненты процесса.
++- AuthSessionManager и auth executor находятся в памяти процесса; production предполагает один WSGI process.
++- Visitor Registry читает visitor snapshot journal и не обращается к Omada.
++- Ошибка независимого operational component не должна ломать основной portal authorization flow.
++
++## Проверки
++
++Targeted command определяет TASK. Полный gate:
++
++    python -m pytest -q -rs
++    PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
++    git diff --check
++
++Если environment запрещает проверку, укажи команду, причину и owner action.
++
++## Stop conditions
++
++Останови затронутую часть, если:
++
++- TASK противоречит архитектуре или фактическому контракту;
++- endpoint не подтверждён;
++- нужен secret или запрещённый файл;
++- требуется инфраструктура вне scope;
++- безопасное поведение не определено;
++- нужен отсутствующий ADR;
++- требуется необратимое repository action без разрешения;
++- production operation запрошена без deploy TASK.
++
++Независимые безопасные части продолжай.
++
++## Handoff
++
++Верни: цель и результат; изменённые файлы; targeted/full checks с числами passed, skipped и failed; не выполненные проверки; риски; repository actions, выполненные фактически; owner actions; Agent execution summary.
+diff --git a/README.md b/README.md
+index afe1cfa..ea5f396 100644
+--- a/README.md
++++ b/README.md
+@@ -30,6 +30,12 @@ The project is intended for environments such as:
+ 
+ The platform separates the user-facing portal from controller-specific authorization logic. This allows the portal, session model, telemetry, and monitoring components to remain reusable when integrating with another Wi-Fi controller or network access platform.
+ 
++## Project knowledge base
++
++- Architecture, module status and operations: [docs/README.md](docs/README.md)
++- Instructions for developers and coding agents: [AGENTS.md](AGENTS.md)
++- Current main snapshot: [docs/project-inventory.md](docs/project-inventory.md)
++
+ ---
+ 
+ ## Current Integration
+@@ -234,27 +240,9 @@ Reserved for incoming events and external systems, including:
+ 
+ ## Repository Structure
+ 
+-The exact structure may evolve as the project grows.
+-
+-```text
+-CaptivePortal/
+-├── app/
+-│   ├── __init__.py
+-│   ├── config.py
+-│   ├── exceptions.py
+-│   ├── logger.py
+-│   ├── settings.py
+-│   └── integrations/
+-│       └── omada/
+-├── logs/
+-├── tests/
+-├── run.py
+-├── requirements.txt
+-├── .gitignore
+-└── README.md
+-```
++The repository changes frequently as modules are added. The verified structure, entrypoints, feature flags, persistence paths and test groups are maintained in [docs/project-inventory.md](docs/project-inventory.md).
+ 
+-Controller-specific functionality should remain inside the corresponding integration module rather than being mixed with the core portal logic.
++Controller-specific functionality remains inside the corresponding integration module rather than being mixed with the core portal logic. See [docs/architecture.md](docs/architecture.md) for the dependency boundaries.
+ 
+ ---
+ 
+diff --git a/README_RU.md b/README_RU.md
+index 52df3c0..460ae3f 100644
+--- a/README_RU.md
++++ b/README_RU.md
+@@ -29,6 +29,12 @@ CaptivePortal начинался как пользовательский пор
+ 
+ Пользовательский портал отделён от логики конкретного сетевого контроллера. Благодаря этому интерфейс, управление сессиями, телеметрия и мониторинг могут использоваться повторно при интеграции с другим контроллером Wi-Fi или системой управления доступом.
+ 
++## База знаний проекта
++
++- Архитектура, статусы модулей и эксплуатация: [docs/README.md](docs/README.md)
++- Правила для разработчиков и coding agents: [AGENTS.md](AGENTS.md)
++- Фактический снимок main: [docs/project-inventory.md](docs/project-inventory.md)
++
+ ---
+ 
+ ## Текущая интеграция
+@@ -233,28 +239,9 @@ Grafana
+ 
+ ## Структура репозитория
+ 
+-Фактическая структура может изменяться по мере развития проекта.
+-
+-```text
+-CaptivePortal/
+-├── app/
+-│   ├── __init__.py
+-│   ├── config.py
+-│   ├── exceptions.py
+-│   ├── logger.py
+-│   ├── settings.py
+-│   └── integrations/
+-│       └── omada/
+-├── logs/
+-├── tests/
+-├── run.py
+-├── requirements.txt
+-├── .gitignore
+-├── README.md
+-└── README_RU.md
+-```
++Структура repository меняется по мере добавления модулей. Проверенные пути, entrypoints, feature flags, persistence и test groups поддерживаются в [docs/project-inventory.md](docs/project-inventory.md).
+ 
+-Функции, относящиеся к конкретному контроллеру, должны находиться внутри соответствующего интеграционного модуля и не смешиваться с ядром портала.
++Функции конкретного контроллера остаются внутри соответствующего integration module и не смешиваются с ядром портала. Границы зависимостей описаны в [docs/architecture.md](docs/architecture.md).
+ 
+ ---
+ 
+diff --git a/docs/CAPPORT.md b/docs/CAPPORT.md
+index 1e27da8..ec7c6c2 100644
+--- a/docs/CAPPORT.md
++++ b/docs/CAPPORT.md
+@@ -1,5 +1,9 @@
+ # CAPPORT API
+ 
++Status: superseded as normative contract
++Current contract: [modules/capport.md](modules/capport.md)
++Historical implementation details below are retained for reference.
++
+ This module adds RFC 8908 captive-state discovery while preserving the
+ existing Omada External Portal authorization flow.
+ 
+diff --git a/docs/README.md b/docs/README.md
+new file mode 100644
+index 0000000..81f74a7
+--- /dev/null
++++ b/docs/README.md
+@@ -0,0 +1,51 @@
++# CaptivPortal knowledge base
++
++Status: current
++Updated: 2026-08-04
++
++Это навигация, а не ещё одно описание архитектуры.
++
++## Для новой задачи
++
++1. Создайте TASK по docs/tasks/TASK-template.md.
++2. Передайте агенту TASK, execution mode и 1–3 связанных документа.
++3. Агент читает AGENTS.md, затем текущий TASK и только указанные документы.
++4. Агент сверяет код, тесты и актуальную документацию до планирования изменения.
++5. Результат возвращается по docs/agents/handoff.md.
++
++## Модели истины
++
++Current-state truth: код → тесты → актуальная документация.
++
++Change-intent truth: утверждённый TASK → PLAN → ADR.
++
++TASK является scope contract изменения, но не подменяет фактическое состояние. При конфликте затронутая часть останавливается, источники фиксируются и передаются Architect/Tech Lead.
++
++## Карта знаний
++
++| Нужно понять | Документ |
++|---|---|
++| Фактический снимок main | project-inventory.md |
++| Архитектура и границы | architecture.md |
++| Статусы и маршрутизация по модулям | module-index.md |
++| Omada Open API | api/omada-open-api.md |
++| Тесты | testing.md |
++| Журналы и telemetry | logging.md |
++| Deployment и rollback | deployment.md |
++| Security | security.md |
++| Процесс coding agent | agents/workflow.md |
++| Контракт задачи | agents/task-contract.md |
++| Repository permissions | agents/repository-actions.md |
++| Формат результата | agents/handoff.md |
++| Выбор класса модели | agents/model-selection.md |
++| Предварительные материалы pilots | agents/pilot-results.md |
++| Устойчивые решения | decisions/ |
++| История | archive/ |
++
++## Модульные документы
++
++Текущий список и status находятся только в module-index.md. Открывайте документ модуля, если TASK затрагивает его код, контракт, persistence, events или lifecycle.
++
++## Принцип экономии контекста
++
++AGENTS.md содержит только стабильные инварианты. TASK выбирает минимальный набор документов. Подробности хранятся один раз и связываются ссылками. Полные журналы, исходники, история чатов и несвязанные модули в prompt не передаются.
+diff --git a/docs/agents/handoff.md b/docs/agents/handoff.md
+new file mode 100644
+index 0000000..2261d82
+--- /dev/null
++++ b/docs/agents/handoff.md
+@@ -0,0 +1,52 @@
++# Handoff contract
++
++Status: current
++Updated: 2026-08-04
++
++## Обязательный итог
++
++### Цель и результат
++
++Что требовалось и что фактически сделано.
++
++### Изменённые файлы
++
++Каждый файл и краткая причина. Если изменений нет — сказать явно.
++
++### Контракты
++
++Изменились ли public API, config, events, persistence, lifecycle, security или architecture.
++
++### Проверки
++
++Точная команда и результат: passed, skipped, failed. Не выполненные проверки с причиной.
++
++### Риски и ограничения
++
++Известные defects, environment limits, incomplete gates и assumptions.
++
++### Repository actions
++
++Фактически выполненные branch, commit, push и PR; идентификаторы только если реально получены. Отдельно forbidden/not executed.
++
++### Owner actions
++
++Минимальные следующие действия с ответственным.
++
++### Agent execution summary
++
++    Agent/platform:
++    Model:
++    Task type:
++    Execution mode:
++    Files inspected:
++    Files changed:
++    Targeted tests:
++    Full tests:
++    Unexpected rework:
++    Reason for additional context:
++    Repository actions:
++
++## Запрещено
++
++Не прикладывать полную command history, многотысячные logs, secrets или неподтверждённые claims.
+diff --git a/docs/agents/model-selection.md b/docs/agents/model-selection.md
+new file mode 100644
+index 0000000..1f21d46
+--- /dev/null
++++ b/docs/agents/model-selection.md
+@@ -0,0 +1,33 @@
++# Выбор класса модели и контроль AI-расходов
++
++Status: current
++Updated: 2026-08-04
++
++Документ не привязан к конкретному AI vendor или названию модели.
++
++| Тип задачи | Рекомендуемый класс |
++|---|---|
++| Документация, форматирование, fixture | лёгкий |
++| Локальный test или простой defect | лёгкий или средний |
++| Реализация точного TASK | средний |
++| Архитектура, concurrency, persistence, сложный defect | сильный reasoning |
++| Критическое финальное review | средний или сильный |
++
++Для сложной задачи: сильная модель готовит PLAN и критические решения; средняя реализует утверждённый PLAN.
++
++Сильную модель не использовать автоматически для rename, formatting, fixtures, текста или локальной проверки.
++
++## Контроль расхода
++
++Техлид оценивает:
++
++- ширину scope;
++- число прочитанных файлов;
++- объём переданных logs;
++- число переделок;
++- выбор класса модели;
++- отсутствие targeted tests;
++- повторное восстановление уже документированной архитектуры;
++- ложные repository-action claims.
++
++Не требуется считать каждый token. Обязателен Agent execution summary из handoff.md.
+diff --git a/docs/agents/pilot-results.md b/docs/agents/pilot-results.md
+new file mode 100644
+index 0000000..e2e6625
+--- /dev/null
++++ b/docs/agents/pilot-results.md
+@@ -0,0 +1,81 @@
++# Repository instruction pilots
++
++Status: passed for one repository-aware agent; cross-agent validation pending
++Updated: 2026-08-04
++Runtime baseline: main `227ebe93831447d16b78f277ee3052ddd06e15a3`
++Knowledge-base branch: `agent/knowledge-base-integration`
++
++## Ограничение
++
++Оба pilot выполнены одним repository-aware Codex agent после размещения `AGENTS.md`, `.github/copilot-instructions.md` и path-specific instructions внутри рабочей ветки. Второй независимый coding agent и GitHub Copilot не запускались. Автоматическая path activation платформой не наблюдаема изнутри этой сессии, поэтому проверены presence/applyTo, ручная маршрутизация и фактическое соблюдение правил.
++
++Эта граница не выдаётся за cross-agent universality.
++
++## Pilot A — simple documentation implementation
++
++Input:
++
++- task: актуализировать базу знаний после merge Cleaner;
++- mode: implementation/publish;
++- allowed scope: documentation, instructions, templates, README и pytest discovery config;
++- runtime, API implementation, events, databases и infrastructure запрещены;
++- test responsibility: agent where environment permits.
++
++Прочитано:
++
++- `AGENTS.md`;
++- `.github/instructions/documentation.instructions.md`;
++- `docs/project-inventory.md`;
++- `docs/module-index.md`;
++- `docs/modules/pending-session-cleaner.md`;
++- связанные architecture/API/testing/logging/deployment contracts.
++
++Observed result:
++
++- scope остался documentation-only;
++- runtime commit сначала обновлён и инвентаризирован;
++- unmerged TASK intent не выдан за current state;
++- token-cache противоречие разрешено только после проверки merged code/tests;
++- Cleaner status разделяет repository default и owner-confirmed production activation;
++- невозможный pytest gate отмечен как environment limitation, а не passed;
++- handoff требует точных repository actions.
++
++Verdict: `passed for current agent`.
++
++## Pilot B — complex planning-only mutation conflict
++
++Input:
++
++- hypothetical task: рассмотреть `block/unblock` как fallback после неуспешного Cleaner reconnect;
++- mode: planning-only;
++- repository writes, network mutation, Grafana/Alloy/Loki/systemd запрещены.
++
++Прочитано:
++
++- `AGENTS.md`;
++- `.github/instructions/pending-sessions.instructions.md`;
++- `.github/instructions/omada-api.instructions.md`;
++- `docs/modules/pending-session-cleaner.md`;
++- `docs/api/omada-open-api.md`;
++- `docs/architecture.md`.
++
++Observed result:
++
++- current Cleaner action path определён как reconnect-only;
++- `block/unblock` распознаны как schema-confirmed, но rejected для Cleaner v1;
++- fallback меняет mutation/action policy и требует отдельного TASK, PLAN, ADR, guards, audit, verification и tests;
++- план останавливается до изменения кода;
++- Visitor Registry DB и infrastructure остаются вне scope.
++
++Verdict: `passed stop-condition pilot`.
++
++## Path-specific instruction audit
++
++- восемь `.github/instructions/*.instructions.md` содержат `applyTo`;
++- Cleaner paths покрыты отдельным adapter;
++- Omada adapter включает `app/controllers/omada_pending_sessions.py`;
++- documentation, tests, logging, background-worker и Python rules покрывают связанные файлы без дублирования полного `AGENTS.md`.
++
++## Rerun condition
++
++Повторить pilots при изменении universal rules, platform adapter, `applyTo` routing или TASK/handoff contract. Для cross-agent claim нужен отдельный запуск вторым coding agent с фиксацией model/version, прочитанных files, deviations и verdict.
+diff --git a/docs/agents/repository-actions.md b/docs/agents/repository-actions.md
+new file mode 100644
+index 0000000..9b89510
+--- /dev/null
++++ b/docs/agents/repository-actions.md
+@@ -0,0 +1,46 @@
++# Repository actions
++
++Status: current
++Updated: 2026-08-04
++
++TASK перечисляет allowed, forbidden и owner-only operations. Отсутствующее разрешение означает запрет.
++
++## Read-only
++
++- read files и history;
++- inspect issues, pull requests и checks;
++- run non-mutating diagnostics.
++
++## Write branch
++
++- create feature branch;
++- modify allowed files;
++- create intentional commits;
++- push feature branch.
++
++Каждое действие разрешается отдельно; write permission не означает push.
++
++## Pull request
++
++- open Draft PR;
++- update Draft PR;
++- respond to review.
++
++PR по умолчанию Draft. Merge не следует из PR permission.
++
++## Protected
++
++Требуют отдельного прямого разрешения owner:
++
++- merge;
++- force push или rewrite history;
++- delete branch;
++- branch protection;
++- release и production tag;
++- deploy;
++- production secrets;
++- destructive data operation.
++
++## Truthfulness
++
++Запланированное действие не считается выполненным. Handoff различает proposed, attempted, completed и blocked.
+diff --git a/docs/agents/task-contract.md b/docs/agents/task-contract.md
+new file mode 100644
+index 0000000..dafa0bc
+--- /dev/null
++++ b/docs/agents/task-contract.md
+@@ -0,0 +1,65 @@
++# Контракт TASK
++
++Status: current
++Updated: 2026-08-04
++
++TASK — высший источник change intent конкретной задачи и её scope contract. Он не является источником фактов о текущей реализации и не может молча отменить security или необратимые owner-only ограничения.
++
++## Две модели истины
++
++Current-state truth:
++
++1. код;
++2. тесты;
++3. актуальная документация.
++
++Change-intent truth:
++
++1. утверждённый TASK;
++2. PLAN;
++3. ADR.
++
++TASK определяет требуемое изменение относительно подтверждённого current state. PLAN описывает способ выполнения TASK. ADR фиксирует устойчивое архитектурное решение, но не подменяет фактическую проверку кода и тестов.
++
++## Обязательные поля
++
++- цель и требуемое поведение;
++- execution mode;
++- исполнитель/platform;
++- capability assumptions;
++- test responsibility: agent, owner, shared или not-applicable;
++- текущее фактическое состояние;
++- out of scope;
++- 1–3 связанных документа;
++- allowed и forbidden files;
++- allowed, forbidden и owner-only repository actions;
++- входные и выходные contracts;
++- fail-open/fail-closed;
++- logging, persistence, lifecycle и security;
++- targeted tests и full gate;
++- acceptance и stop conditions;
++- handoff и PR requirements.
++
++## Scope rule
++
++Файл не становится разрешённым только потому, что его удобно отрефакторить. Если необходимый файл отсутствует в allowed list, агент останавливает эту часть и объясняет минимальное расширение.
++
++## Conflicts
++
++При противоречии внутри current-state truth, внутри change-intent truth или между ними агент:
++
++1. приводит точные факты;
++2. не выбирает молча одну сторону;
++3. продолжает независимые безопасные части;
++4. передаёт конфликт Architect/Tech Lead.
++
++## Test responsibility
++
++- agent: агент создаёт/обновляет и запускает назначенные tests.
++- owner: агент не добавляет tests, но описывает необходимые cases.
++- shared: TASK делит конкретные cases/actions.
++- not-applicable: TASK объясняет почему.
++
++## Repository permissions
++
++Implementation mode не означает автоматический commit или push. Publish permissions всегда перечисляются явно.
+diff --git a/docs/agents/workflow.md b/docs/agents/workflow.md
+new file mode 100644
+index 0000000..7f21241
+--- /dev/null
++++ b/docs/agents/workflow.md
+@@ -0,0 +1,83 @@
++# Workflow coding agent
++
++Status: current
++Updated: 2026-08-04
++
++## 1. Intake
++
++1. Прочитать AGENTS.md.
++2. Прочитать текущий TASK как scope contract.
++3. Определить execution mode.
++4. Заявить capabilities.
++5. Прочитать только документы из TASK.
++6. Проверить current-state truth: код, затем тесты, затем актуальную документацию.
++
++Если TASK отсутствует или неоднозначен, не восстанавливать задачу из chat history.
++
++Current-state truth: код → тесты → актуальная документация. Change-intent truth: утверждённый TASK → PLAN → ADR. TASK описывает требуемое изменение, а не переписывает факты о текущем состоянии. При конфликте остановить затронутую часть, зафиксировать источники и передать Architect/Tech Lead; независимые безопасные части продолжить.
++
++## 2. Modes
++
++### planning-only
++
++Разрешены чтение, проверка контрактов, короткий PLAN, список файлов и рисков. Изменения, branch, commit, push, PR и production запрещены.
++
++### implementation
++
++Разрешены только allowed files и проверки TASK. Repository actions назначаются отдельно.
++
++### review
++
++Разрешены diff, contracts, tests и verdict. Исправления только при прямом разрешении.
++
++### publish
++
++Разрешены только перечисленные branch/commit/push/Draft PR. Merge owner-only.
++
++### deploy
++
++Требует target, backup, flag, restart, health checks, rollback, owner и разрешённых production commands.
++
++## 3. Plan
++
++PLAN обязателен для нового модуля, нескольких подсистем, persistence, shared provider, concurrency, lifecycle, public contract или deploy. Для простой локальной правки достаточно 2–5 шагов в ответе.
++
++## 4. Implementation
++
++1. Изменять только allowed files.
++2. Реализовать минимально достаточное поведение.
++3. Не добавлять функции вне TASK.
++4. Сохранять архитектурные инварианты.
++5. Обновлять tests только по test responsibility.
++6. Обновлять связанный knowledge document при изменении контракта.
++
++## 5. Verification
++
++1. Targeted tests.
++2. Full pytest gate.
++3. compileall.
++4. git diff --check.
++5. Проверка diff на secrets и unrelated changes.
++
++Неисправимый environment limit или unrelated failure фиксируется в handoff.
++
++## 6. Repository actions
++
++Перед каждым write/publish action свериться с TASK и docs/agents/repository-actions.md. По умолчанию разрешено только read-only. PR по умолчанию Draft.
++
++## 7. Handoff
++
++Использовать docs/agents/handoff.md. Сохранять решения и факты, не transcript команд.
++
++## 8. Session boundaries
++
++Одна связанная сессия — один TASK. Новая сессия нужна при новом модуле, заменённом TASK, смене mode или загрязнённом/устаревшем контексте.
++
++## 9. Token economy
++
++- TASK содержит 1–3 knowledge links.
++- rg и targeted reads предшествуют broad scan.
++- В prompt передаются schema/contract, а не полный source.
++- Logs ограничиваются релевантным диапазоном.
++- Повторно не объясняется то, что стабильно записано в knowledge base.
++- Agent execution summary позволяет техлиду выявить лишний context и rework.
+diff --git a/docs/api/omada-open-api.md b/docs/api/omada-open-api.md
+new file mode 100644
+index 0000000..bbd9f65
+--- /dev/null
++++ b/docs/api/omada-open-api.md
+@@ -0,0 +1,119 @@
++# Omada Open API: уровни подтверждения
++
++Status: current
++Updated: 2026-08-04
++Sources: runtime baseline `227ebe9…`, local Swagger research и переданные live-test reports для Omada Controller 5.14.31
++
++Этот документ разделяет доказательства, а не объединяет их словом «confirmed». Один endpoint может одновременно находиться в разделе live-tested, быть описан Swagger и использоваться текущим кодом. Наличие endpoint в Swagger без live-выполнения не подтверждает его runtime behavior и не разрешает новую mutation.
++
++## OAuth и общая проверка ответа
++
++    POST /openapi/authorize/token?grant_type=client_credentials
++
++Body содержит `omadacId`, `client_id` и `client_secret`. Последующие запросы используют:
++
++    Authorization: AccessToken=<token>
++
++Значение header и credentials не логируются.
++
++Ответ проверяется по отдельным уровням:
++
++1. network/timeout;
++2. HTTP status;
++3. наличие JSON object;
++4. Omada `errorCode`;
++5. endpoint-specific result shape.
++
++HTTP 200 не означает успех при `errorCode != 0`.
++
++## 1. Live-tested endpoints
++
++Live-tested означает, что запрос был выполнен против реального проверенного контроллера и результат зафиксирован в research report. Ошибка 404 тоже является live-tested результатом, но не доказательством поддержки операции.
++
++### Общие и клиентские операции
++
++| Endpoint | Наблюдавшийся результат |
++|---|---|
++| `POST /openapi/authorize/token?grant_type=client_credentials` | token получен и использован в последующих live-запросах |
++| `GET /openapi/v1/{omadacId}/sites` | успешный ответ |
++| `GET /openapi/v1/{omadacId}/sites/{siteId}/devices` | успешный ответ |
++| `GET /openapi/v1/{omadacId}/sites/{siteId}/clients` | успешный paginated client inventory |
++| `GET /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}` | карточка клиента получена до и после операции |
++| `POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/reconnect` | успешное завершение pending session; после операции `active=false`, клиент исчез из active list |
++| `POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/disconnect` | live-tested как HTTP 404 на Omada 5.14.31; операция не поддержана |
++| `GET /openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}` | live-tested как HTTP 404; для общей карточки используется `/devices` с выбором по MAC |
++
++### AP read-only operations
++
++Следующие endpoints выполнены live на реальном EAP613/Omada 5.14.31:
++
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/available-channel
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/general-config
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ip-setting
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/lan-traffic-info
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ofdma
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/override
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/power-saving
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radios
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result
++    GET /openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/wired-uplink
++    GET /openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/override
++    GET /openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result
++
++`power-saving` был обработан endpoint router, но для проверенной модели/конфигурации не вернул объект настроек. Override response может содержать пароль SSID и не должен сохраняться целиком.
++
++## 2. Schema-confirmed endpoints
++
++Присутствие следующих endpoints подтверждено локальным Swagger. Для `reconnect` дополнительно существует live-tested доказательство. Для остальных перечисленных mutations рассмотренные отчёты не содержат отдельного подтверждения успешного live-выполнения:
++
++    POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/block
++    POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/reconnect
++    POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/unblock
++    POST /openapi/v1/{omadacId}/sites/{siteId}/hotspot/clients/{clientMac}/auth
++    POST /openapi/v1/{omadacId}/sites/{siteId}/hotspot/clients/{clientMac}/unauth
++    POST /openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}/forget
++
++Для `unauth`, `block` и `unblock` schema presence не следует называть live confirmation без отдельного отчёта выполнения.
++
++## 3. Endpoints used by current code
++
++Runtime baseline `227ebe9…` использует `app/controllers/omada.py` и pending-session adapter `app/controllers/omada_pending_sessions.py`. Один `OmadaProvider` вызывает:
++
++    POST /openapi/authorize/token?grant_type=client_credentials
++    GET  /openapi/v1/{omadacId}/sites
++    GET  /openapi/v1/{omadacId}/sites/{siteId}/clients
++    GET  /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}
++    POST /openapi/v1/{omadacId}/sites/{siteId}/hotspot/clients/{clientMac}/auth
++    POST /openapi/v1/{omadacId}/sites/{siteId}/hotspot/clients/{clientMac}/unauth
++    POST /openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}/reconnect
++
++Использование endpoint кодом не доказывает live success само по себе. В частности, рассмотренные research reports подтверждают `unauth` по Swagger, но не содержат отдельного live execution proof.
++
++`list_active_clients()` использует query `page`/`pageSize`; `get_pending_client_state()` и `reconnect_client()` форматируют MAC через общую utility и возвращают defensive/safe contracts без token, Authorization header или raw response. Pending-session methods подключаются к существующему provider class, а не создают отдельный client.
++
++Current code не вызывает `block`, `unblock`, `forget` или AP read-only endpoints из application provider. `disconnect` и client `DELETE` отсутствуют в action path. Текущий shared token-cache lifecycle фиксируется в `docs/project-inventory.md` и module contract Cleaner.
++
++## 4. Unsupported or rejected operations
++
++| Операция | Статус | Причина |
++|---|---|---|
++| `POST /clients/{clientMac}/disconnect` | unsupported on tested controller | live HTTP 404; отсутствует в локальном Swagger |
++| `DELETE /clients/{clientMac}` | unsupported/unverified | отсутствует в локальном Swagger; не использовать |
++| `GET /devices/{deviceMac}` | unsupported on tested controller | live HTTP 404; использовать list `/devices` и exact MAC match |
++| `POST /hotspot/clients/{clientMac}/unauth` | rejected for Cleaner v1 | schema-confirmed и используется другим current-code contract, но не подтверждён как безопасная замена reconnect для pending session |
++| `POST /clients/{clientMac}/block` и `/unblock` | rejected for Cleaner v1 | schema-confirmed, но block запрещает повторное подключение и не соответствует action policy Cleaner |
++| `POST /devices/{deviceMac}/forget` | rejected for Cleaner v1 | относится к device removal, а не к guarded завершению pending session |
++
++Rejected for Cleaner не означает глобально unsupported: это ограничение конкретного change intent.
++
++## Pagination, identity и MAC
++
++Client list пагинируется. Неполный inventory запрещает batch mutation. Fresh exact client card обязателен перед `reconnect`.
++
++MAC normalization находится в `app/common/mac.py`. Формат URL выбирается по endpoint contract; client snapshot использует hyphen format. Не реализовывать ad-hoc `replace` в новом модуле.
++
++## Mutation safety
++
++Любой новый mutation endpoint требует отдельного TASK, audit-before-action, bounded retry, protection against stale identity/session и verification. Успешный POST без последующей проверки не объявляется подтверждённым результатом.
+diff --git a/docs/architecture.md b/docs/architecture.md
+new file mode 100644
+index 0000000..4706740
+--- /dev/null
++++ b/docs/architecture.md
+@@ -0,0 +1,97 @@
++# Архитектура CaptivPortal
++
++Status: current
++Updated: 2026-08-04
++Runtime baseline: main commit `227ebe93831447d16b78f277ee3052ddd06e15a3`
++
++## Назначение
++
++CaptivPortal обеспечивает внешний Captive Portal и связанные operational-функции для Omada Controller.
++
++## Основной поток авторизации
++
++~~~mermaid
++flowchart TD
++    A["Omada External Portal или CAPPORT login"] --> B["PortalClientContext"]
++    B --> C["AuthSessionManager"]
++    C --> D["AuthWorker"]
++    D --> E["Shared OmadaProvider"]
++    E --> F["AUTHORIZED / FAILED / RESET"]
++~~~
++
++CAPPORT разрешает client identity и направляет login в PortalEntryHandler. Независимый CAPPORT authorization worker или второй provider запрещены.
++
++## Composition root
++
++run.py управляет process lifecycle:
++
++- загружает settings;
++- создаёт общий OmadaProvider;
++- создаёт snapshot collector;
++- вызывает create_app();
++- создаёт Pending Session Cleaner с общим provider и AuthSessionManager;
++- запускает и останавливает background components;
++- запускает Flask development server в текущей реализации.
++
++app/web/web.py:create_app() собирает Flask application: AuthSessionManager, auth executor, AuthWorker, PortalEntryHandler, routes, counters, telemetry и webhook components. Это Flask composition factory, но не отдельный process entrypoint.
++
++## Dependency direction
++
++~~~mermaid
++flowchart TD
++    A["Web routes"] --> B["Application services"]
++    B --> C["Provider / repository interfaces"]
++    C --> D["Omada API / JSONL / SQLite"]
++~~~
++
++Запрещено:
++
++- repository → Flask route;
++- Visitor Registry → Omada API;
++- Pending Session Cleaner → Visitor Registry database;
++- CAPPORT → отдельный authorization mechanism;
++- worker thread → Flask current_app.
++
++## Подсистемы
++
++- Configuration: app/config.py и app/settings.py.
++- Omada: ControllerInterface, factory и OmadaProvider.
++- Portal/Auth: PortalClientContext, AuthSessionManager, AuthWorker.
++- CAPPORT: RFC 8908/8910 API, client lookup и общий login flow.
++- Counters: portal open counter и completed-session public traffic.
++- Authorized Snapshot: асинхронная фиксация карточки после AUTHORIZED.
++- Visitor Registry: последовательное чтение snapshot journal в SQLite.
++- Pending Cleaner: `app/pending_sessions/`, implemented-disabled по repository default; guarded reconnect operational module.
++- Webhook: raw receiver, normalization и journals.
++- Observability: operational telemetry отдельно от data journals.
++
++## Shared OmadaProvider
++
++Один экземпляр на process создаётся в `run.py` и передаётся зависимым компонентам. Provider содержит единый thread-safe token cache на `Condition(RLock)` с одним concurrent refresh и guarded invalidation. Pending-session API methods устанавливаются на тот же класс через `app/controllers/omada_pending_sessions.py`; второй provider или token manager отсутствует.
++
++Фактический lifecycle фиксируется в `docs/project-inventory.md`. Новое изменение cache/provider contract требует явного TASK, regression/concurrency tests и ADR при устойчивом архитектурном решении.
++
++## State и single-process
++
++Auth sessions, retry guards, executor и worker locks находятся в памяти. Несколько WSGI processes создали бы независимые session maps и workers. До отдельного ADR production topology — один application process.
++
++## Fail-open
++
++Независимый модуль при ошибке становится unavailable/disabled, пишет telemetry и не блокирует portal:
++
++- telemetry и counters;
++- webhook receiver/normalizer;
++- snapshot collector;
++- visitor registry;
++- public traffic worker;
++- pending session cleaner.
++
++Auth failure самого клиента остаётся fail-closed для выдачи доступа, но не валит process.
++
++## Lifecycle
++
++Worker создаётся в composition root, не при import. Cleaner использует fixed-delay и non-blocking scan lock; incomplete inventory, local protection, failed preflight/audit, exhausted budget или shutdown запрещают reconnect. `stop()` идемпотентен, HTTP/retries/verification/shutdown ограничены. Cleaner останавливается первым и после `stopping` не начинает новый POST.
++
++## Infrastructure boundary
++
++Application repository отвечает за код, tests, structured events и документацию контрактов. Alloy, Loki, Grafana, systemd, reverse proxy, OS permissions и production deployment меняются только отдельными infrastructure/deploy TASK.
+diff --git a/docs/archive/README.md b/docs/archive/README.md
+new file mode 100644
+index 0000000..e5db3e3
+--- /dev/null
++++ b/docs/archive/README.md
+@@ -0,0 +1,11 @@
++# Archive
++
++Исторические материалы сохраняются для аудита, но не используются как текущий contract.
++
++Каждый archived документ начинается с:
++
++    Status: archived
++    Superseded by: <path>
++    Do not use for new implementation.
++
++Удаление возможно только после отдельного review ценности и Git history.
+diff --git a/docs/archive/migration-plan.md b/docs/archive/migration-plan.md
+new file mode 100644
+index 0000000..5e500b3
+--- /dev/null
++++ b/docs/archive/migration-plan.md
+@@ -0,0 +1,56 @@
++# План миграции существующих документов
++
++Status: current migration map; archive operations require separate approval
++Updated: 2026-08-04
++Runtime baseline: main `227ebe93831447d16b78f277ee3052ddd06e15a3`
++
++## Значение действий
++
++- `keep` — оставить файл на текущем пути; он сохраняет собственную роль.
++- `supersede` — передать нормативную роль новому источнику истины, но не удалять и не перемещать старый файл без отдельного approval.
++- `archive` — переместить в `docs/archive/` только после отдельного пофайлового approval, сохранив содержимое и header с новым источником истины.
++
++Merge knowledge base передаёт нормативную роль новым module contracts для строк `supersede`; прежние документы получают короткий status/header со ссылкой на current contract, но не удаляются и не перемещаются. Любой `archive` остаётся отдельным repository action.
++
++## Repository files
++
++| Текущий путь | Действие | Новый источник истины | Причина |
++|---|---|---|---|
++| README.md | keep | README.md + docs/README.md для глубокой навигации | Англоязычный public overview остаётся самостоятельной точкой входа |
++| README_RU.md | keep | README_RU.md + docs/README.md для глубокой навигации | Русскоязычный public overview остаётся самостоятельной точкой входа |
++| .env.example | keep | .env.example; семантика параметров сверяется с app/config.py и app/settings.py | Действующий configuration example, не исторический документ |
++| docs/CAPPORT.md | supersede | docs/modules/capport.md | Новый module contract объединяет границы, lifecycle, tests и запрещённые изменения |
++| docs/auth_retry.md | supersede | docs/modules/authorization.md | Retry является частью единого authorization contract |
++| docs/auth_telemetry.md | supersede | docs/modules/auth-telemetry.md | Нормативный module contract переносится в единый формат |
++| docs/portal_counter.md | supersede | docs/modules/public-authorization-counter.md | Нормативный module contract переносится в единый формат |
++| docs/public_traffic.md | supersede | docs/modules/public-traffic-counter.md | Нормативный module contract переносится в единый формат |
++| docs/public_traffic.env.example | keep | docs/public_traffic.env.example; значения и имена сверяются с фактическим config code | Это configuration example, а не архитектурный источник |
++| docs/visitor_snapshot_collector.md | supersede | docs/modules/authorized-client-snapshot.md | Новый module contract становится навигационным источником истины |
++| docs/visitor_device_registry.md | supersede | docs/modules/visitor-registry.md | Новый module contract становится навигационным источником истины |
++| docs/omada_webhook_receiver.md | supersede | docs/modules/omada-webhook-receiver.md | Новый contract отделяет application boundary от infrastructure |
++| docs/omada_webhook_normalizer.md | supersede | docs/modules/omada-webhook-normalizer.md | Новый contract отделяет schema/normalization от transport setup |
++| docs/omada_webhook_alloy.md | keep | docs/omada_webhook_alloy.md; docs/deployment.md задаёт только ownership boundary | Это конкретный infrastructure reference, не заменяемый общим deployment overview |
++| outputs/omada-webhook-normalized.alloy | keep | файл остаётся infrastructure artifact; ownership решается отдельным TASK | Documentation migration не меняет Alloy configuration |
++
++На текущем этапе действие `archive` не назначено ни одному repository file. Девять строк `supersede` помечены в исходных документах ссылкой на current contract. После Architect/Tech Lead review для конкретного старого файла может быть отдельно одобрен переход `supersede → archive`.
++
++## Внешние Omada research reports
++
++Эти источники не находятся в snapshot repository, но использовались при подготовке curated API contract. Они не являются «устаревшей документацией» и не архивируются автоматически.
++
++| Текущий путь/источник | Действие | Новый источник истины | Причина |
++|---|---|---|---|
++| Отчёт об исследовании Omada Open API.docx | keep | исходный отчёт остаётся evidence; docs/api/omada-open-api.md — curated usage contract | Curated contract не заменяет экспериментальные наблюдения и raw research context |
++| Отчёт об исследовании Omada Open API (1).docx | keep | исходный отчёт остаётся evidence; docs/api/omada-open-api.md — curated usage contract | Дополнительное исследование сохраняет доказательную ценность |
++| Отчёт об исследовании сброса сессии Omada.docx | keep | исходный отчёт остаётся evidence; docs/api/omada-open-api.md — curated reconnect contract | Live результаты reconnect/disconnect/delete нужны для повторной архитектурной проверки |
++| Pending Client Session Cleaner v1.0.docx | keep | исходное ТЗ Cleaner; current truth — merged code/tests + docs/modules/pending-session-cleaner.md | ТЗ сохраняет change-intent и acceptance evidence, но не подменяет merged implementation |
++
++## Порядок будущей миграции
++
++1. Сравнить каждый `supersede`-файл с current module contract по фактам и примерам.
++2. Исправить current contract, если в нём потеряна актуальная информация.
++3. Получить пофайловое решение Architect/Tech Lead для возможного archive.
++4. Только затем переместить отдельно одобренный файл в `docs/archive/` с header `Superseded by`.
++5. Ничего не удалять автоматически; research reports сохранять как evidence.
++
++Pending-session probe/test artifacts не входят в таблицу: они уже удалены из main PR #28 до knowledge-base integration.
+diff --git a/docs/auth_retry.md b/docs/auth_retry.md
+index 13ff3e4..ab39dba 100644
+--- a/docs/auth_retry.md
++++ b/docs/auth_retry.md
+@@ -1,5 +1,9 @@
+ # Auth session retry
+ 
++Status: superseded as normative contract
++Current contract: [modules/authorization.md](modules/authorization.md)
++Historical implementation details below are retained for reference.
++
+ The portal keeps one `session_id` for the original authorization and all
+ manual retries. Each worker execution has its own `run_number` and internal
+ `run_token`; each manual retry also has a client-generated
+diff --git a/docs/auth_telemetry.md b/docs/auth_telemetry.md
+index 5068e1e..c964594 100644
+--- a/docs/auth_telemetry.md
++++ b/docs/auth_telemetry.md
+@@ -1,5 +1,9 @@
+ # Authorization Technical Logging v1.0
+ 
++Status: superseded as normative contract
++Current contract: [modules/auth-telemetry.md](modules/auth-telemetry.md)
++Historical implementation details below are retained for reference.
++
+ ## Назначение
+ 
+ Модуль пишет независимый технический журнал жизненного цикла `AuthSession`.
+diff --git a/docs/decisions/ADR-template.md b/docs/decisions/ADR-template.md
+new file mode 100644
+index 0000000..e886059
+--- /dev/null
++++ b/docs/decisions/ADR-template.md
+@@ -0,0 +1,22 @@
++# ADR-XXX — Название
++
++Status: proposed / accepted / superseded
++Date: YYYY-MM-DD
++
++## Context
++
++## Decision
++
++## Alternatives
++
++## Consequences
++
++## Compatibility and migration
++
++## Tests and observability
++
++## Rollback
++
++## Related TASK and documents
++
++ADR применяется для устойчивых решений: shared provider, token lifecycle, concurrency, persistence boundary, single-process, feature activation или infrastructure boundary. Мелкие детали реализации в ADR не записываются.
+diff --git a/docs/deployment.md b/docs/deployment.md
+new file mode 100644
+index 0000000..6c4aab6
+--- /dev/null
++++ b/docs/deployment.md
+@@ -0,0 +1,73 @@
++# Deployment
++
++Status: current contract; exact production unit remains host-verified
++Updated: 2026-08-04
++
++## Подтверждённая основа
++
++- Repository docs используют /opt/CaptivePortal.
++- Repository docs называют service captive-portal.service.
++- Сам unit file отсутствует в repository, поэтому точный ExecStart и user/group требуют проверки на target host.
++- Код не загружает .env автоматически. Environment должен передаваться process manager, например systemd EnvironmentFile.
++
++## Обязательный deploy TASK
++
++Deploy требует target environment, owner, backup, feature flag, разрешённых команд, health checks и rollback. Coding TASK без deploy mode production не меняет.
++
++## Стадия 1: deployment с feature disabled
++
++1. Зафиксировать approved commit и clean working tree.
++2. Создать backup изменяемых config/data согласно модулю.
++3. Доставить код, сохранив новый feature disabled.
++4. Сравнить requirements с развёрнутой версией. Устанавливать dependencies в существующий venv только если requirements изменились.
++5. Выполнить Linux gate и module-specific checks.
++6. Проверить EnvironmentFile без вывода secrets и убедиться, что feature flag выключен.
++7. Restart captive-portal.service.
++8. Проверить service status, portal/auth endpoint health, startup logs, process topology и отсутствие запуска disabled feature.
++
++Стадия 1 завершается отдельным health-check verdict. Она не означает разрешение activation.
++
++## Стадия 2: отдельная activation
++
++1. Получить разрешение на activation после успешной стадии 1.
++2. Изменить feature flag в environment, не выводя secrets.
++3. Обязательно restart captive-portal.service: изменение environment не применяется к уже запущенному process.
++4. Повторно проверить service status, portal/auth endpoint health, startup logs и process topology.
++5. Проверить module start/events, storage permissions, bounded operational logs и fail-open основного портала.
++6. Зафиксировать activation verdict и готовность rollback.
++
++## Health checks
++
++- service active, один application process;
++- portal route и auth session endpoints отвечают;
++- нет startup exception;
++- shared provider не дублирован;
++- background component start/stop events корректны;
++- storage/journal writable с ожидаемыми permissions.
++
++## Pending Session Cleaner activation
++
++Repository default — `PENDING_SESSION_CLEANER_ENABLED=false`. Disabled deployment обязан подтвердить отсутствие worker, Omada polling и Cleaner journal creation.
++
++После отдельного разрешения activation:
++
++1. установить `PENDING_SESSION_CLEANER_ENABLED=true` в process environment;
++2. сохранить `PENDING_SESSION_CLEANER_MAX_ACTIONS_PER_SCAN=1` для v1;
++3. выполнить обязательный restart;
++4. проверить startup/state telemetry и появление `pending_session.scan.completed`;
++5. на одном живом кандидате проверить две local-protection проверки, fresh preflight, `action.planned` до POST, bounded verification и `action.completed`;
++6. убедиться, что основной portal остаётся доступен при Cleaner error.
++
++Owner сообщил об успешной production activation 2026-08-04. Это эксплуатационное подтверждение не заменяет повторяемый Linux regression gate и не раскрывает EnvironmentFile.
++
++## Rollback
++
++Сначала выключить feature в environment, обязательно restart service и повторить health checks. Для Cleaner journal сохраняется; удалять audit при rollback нельзя. Если недостаточно — вернуть approved code version и совместимый config/data backup. Migration rollback определяется отдельным PLAN.
++
++## Shutdown
++
++Соблюдать порядок run.py и bounded timeout. SIGTERM не должен запускать новые mutation.
++
++## Запрет
++
++Ручное production-изменение, которое не переносится в Git и документацию, запрещено. Alloy, Loki, Grafana, reverse proxy и systemd меняются отдельными tasks.
+diff --git a/docs/logging.md b/docs/logging.md
+new file mode 100644
+index 0000000..9704291
+--- /dev/null
++++ b/docs/logging.md
+@@ -0,0 +1,51 @@
++# Logging, telemetry и data journals
++
++Status: current
++Updated: 2026-08-04
++
++## Разделение
++
++Operational telemetry отвечает на вопрос «в каком состоянии компонент и почему он отказал». Data journal хранит устойчивые структурированные факты для последующего чтения и аналитики. Один event contract не подменяет другой.
++
++## Общий контракт
++
++- JSONL, UTF-8, strict JSON, одна запись на строку.
++- UTC timestamp и явная schema version.
++- JSON serialization с allow_nan=false.
++- Полный нормализованный MAC; MAC не считается secret.
++- Access Token, Client Secret, cookies, Authorization header и SSID password запрещены.
++- Полный Omada override response запрещён.
++- Rotation и file permissions учитываются writer и deployment.
++- Event name или schema меняются вместе с tests и связанной документацией.
++
++## Current journals
++
++| Файл | Роль | Owner |
++|---|---|---|
++| auth_telemetry.log | operational authorization telemetry | app/auth_telemetry |
++| visitor_snapshots.log | authorized client data journal | snapshot collector |
++| omada_webhook.log | raw redacted webhook journal | webhook receiver |
++| omada_webhook_normalized.log | normalized data journal | webhook normalizer |
++| pending_session_cleaner.log | Cleaner scan/action audit; rotating JSONL, mode 0640 | app/pending_sessions/journal.py |
++
++SQLite files не являются logs.
++
++## Pending Session Cleaner
++
++Cleaner реализует три schema-versioned data events:
++
++- `pending_session.scan.completed`;
++- `pending_session.action.planned`;
++- `pending_session.action.completed`.
++
++`action.planned` должен быть успешно записан и flush-нут до POST; ошибка блокирует reconnect. `action.completed` фиксирует выполненное действие или deterministic skip первоначального кандидата. MAC сохраняется полностью; token, Authorization header, cookie, Client Secret и raw controller response не записываются.
++
++Operational events `pending_session_cleaner_*` передаются отдельно через AuthorizationTelemetry adapter и не заменяют audit journal.
++
++## Coder boundary
++
++Coder реализует корректную запись предусмотренных events и tests. Он не настраивает Grafana, не изменяет Alloy и не изменяет Loki без отдельного infrastructure TASK.
++
++## Передача логов агенту
++
++Передавайте временной диапазон, component, event, correlation id, MAC и ограниченное окружение ошибки. Используйте tail/journalctl с лимитом; не передавайте rotated journals или многодневный verbose output целиком.
+diff --git a/docs/module-index.md b/docs/module-index.md
+new file mode 100644
+index 0000000..bab22dc
+--- /dev/null
++++ b/docs/module-index.md
+@@ -0,0 +1,23 @@
++# Индекс модулей
++
++Status: current
++Updated: 2026-08-04
++Runtime baseline: main 227ebe9
++
++Status отражает код и default configuration этого commit, не production.
++
++| Модуль | Статус | Код | Документ | Feature flag | Источник | Хранилище | Events | Fail-open | Внешнее | Тесты |
++|---|---|---|---|---|---|---|---|---|---|---|
++| Portal authorization | active | app/auth/, app/web/ | modules/authorization.md | нет | portal request | in-memory | auth telemetry | нет для решения доступа | Omada | tests/test_auth_*, test_portal_entry.py |
++| Portal entry | active | app/web/ | modules/portal-entry.md | нет | Omada redirect | in-memory | auth telemetry | нет | Flask, Omada | tests/test_portal_*.py |
++| CAPPORT | active | app/capport/ | modules/capport.md | CAPPORT_ENABLED | client IP, Omada | cache in-memory | auth telemetry | controlled errors | Omada | tests/test_capport_*.py |
++| Auth telemetry | active | app/auth_telemetry/ | modules/auth-telemetry.md | AUTH_TELEMETRY_ENABLED | auth flow | auth_telemetry.log | JSONL telemetry | да | filesystem | tests/test_auth_telemetry.py |
++| Public authorization counter | active | app/portal_counter/ | modules/public-authorization-counter.md | PORTAL_COUNTER_ENABLED | accepted portal open | portal_counter.db | operational log | да | SQLite | tests/test_portal_counter.py |
++| Public traffic counter | active | app/public_traffic/ | modules/public-traffic-counter.md | PUBLIC_TRAFFIC_COUNTER_ENABLED | normalized webhook journal | public_traffic.sqlite3 | operational log | да | SQLite, journal | tests/test_public_traffic*.py |
++| Authorized client snapshot | implemented-disabled | app/visitor_registry/snapshot_* | modules/authorized-client-snapshot.md | VISITOR_SNAPSHOT_ENABLED | AUTHORIZED event + Omada | visitor_snapshots.log | JSONL journal/telemetry | да | Omada, filesystem | tests/visitor_registry/test_snapshot_*.py |
++| Visitor registry | implemented-disabled | app/visitor_registry/registry_* | modules/visitor-registry.md | VISITOR_REGISTRY_ENABLED | visitor_snapshots.log | visitor_registry.sqlite3 | telemetry | да | filesystem, SQLite | tests/visitor_registry/test_device_registry*.py |
++| Pending session cleaner | implemented-disabled | app/pending_sessions/, app/controllers/omada_pending_sessions.py | modules/pending-session-cleaner.md | PENDING_SESSION_CLEANER_ENABLED | Omada inventory + local Auth protection | pending_session_cleaner.log + in-memory guard | JSONL data + operational telemetry | да; uncertainty blocks action | Omada, filesystem | tests/pending_sessions/ |
++| Omada webhook receiver | implemented-disabled | app/integrations/omada/webhook_* | modules/omada-webhook-receiver.md | OMADA_WEBHOOK_ENABLED | HTTP webhook | omada_webhook.log | JSONL | да | Omada, Flask | tests/integrations/omada/test_webhook_receiver.py |
++| Omada webhook normalizer | implemented-disabled | app/integrations/omada/webhook_normalizer.py | modules/omada-webhook-normalizer.md | OMADA_WEBHOOK_ENABLED | raw webhook | omada_webhook_normalized.log | JSONL | да | filesystem | tests/integrations/omada/test_webhook_*.py |
++
++Repository status отражает default `false`; owner отдельно подтвердил production activation Cleaner 2026-08-04.
+diff --git a/docs/modules/auth-telemetry.md b/docs/modules/auth-telemetry.md
+new file mode 100644
+index 0000000..37b0e9d
+--- /dev/null
++++ b/docs/modules/auth-telemetry.md
+@@ -0,0 +1,72 @@
++# Authorization telemetry
++
++Status: active
++Updated: 2026-08-04
++
++## 1. Назначение
++
++Техническая диагностика authorization и CAPPORT без влияния на доступ.
++
++## 2. Статус
++
++Реализована и default enabled.
++
++## 3. Граница ответственности
++
++Sanitize, JSONL formatting, rotation и safe emit. Не является analytics data journal.
++
++## 4. Входные данные
++
++Event name, session/context identifiers, state, reason, timing и safe error text.
++
++## 5. Выходные данные
++
++Одна strict JSON запись на строку.
++
++## 6. Основные модели
++
++AuthorizationTelemetry, JsonLineFormatter, schema helpers и event constants.
++
++## 7. Зависимости
++
++Filesystem и Python logging.
++
++## 8. Fail-open
++
++Любая ошибка emit не ломает authorization.
++
++## 9. Конфигурация
++
++AUTH_TELEMETRY_ENABLED, LOG_PATH, LEVEL, SCHEMA_VERSION, rotation size/count.
++
++## 10. Data events
++
++Не применимо: события operational.
++
++## 11. Operational telemetry
++
++auth.* и capport.* из app/auth_telemetry/events.py.
++
++## 12. Persistence
++
++/opt/CaptivePortal/logs/auth_telemetry.log с rotation.
++
++## 13. Lifecycle
++
++Configure в create_app(); writer не создаёт worker.
++
++## 14. Тесты
++
++tests/test_auth_telemetry.py и capport telemetry tests.
++
++## 15. Запрещённые изменения
++
++Secrets, masked MAC, unbounded error text, telemetry exception в business flow.
++
++## 16. Связанные TASK
++
++Module/event TASK с documentation update.
++
++## 17. Связанные ADR
++
++Нужен при превращении telemetry в persistent business journal.
+diff --git a/docs/modules/authorization.md b/docs/modules/authorization.md
+new file mode 100644
+index 0000000..a0f0ff0
+--- /dev/null
++++ b/docs/modules/authorization.md
+@@ -0,0 +1,72 @@
++# Portal authorization
++
++Status: active
++Updated: 2026-08-04
++
++## 1. Назначение
++
++Единый асинхронный authorization flow для Omada External Portal и CAPPORT login.
++
++## 2. Статус
++
++Код присутствует в main; in-memory single-process contract.
++
++## 3. Граница ответственности
++
++PortalClientContext → AuthSessionManager → AuthWorker → shared OmadaProvider. CAPPORT не авторизует независимо.
++
++## 4. Входные данные
++
++site_id, client MAC/IP, AP/SSID/redirect metadata и retry_request_id.
++
++## 5. Выходные данные
++
++AuthSession snapshot со state/status, progress, retryability, reason и terminal flag.
++
++## 6. Основные модели
++
++AuthSession, AuthRun, AuthStatus, RetryPreparation, PortalClientContext.
++
++## 7. Зависимости
++
++OmadaProvider, auth telemetry, executor, optional snapshot collector и portal counter.
++
++## 8. Fail-open
++
++Отказ optional telemetry/counter/snapshot не ломает authorization. Отказ Omada завершает client session как controlled FAILED.
++
++## 9. Конфигурация
++
++Session TTL 35 s, retry cooldown 5 s, retention 300 s; worker attempts/delays заданы в app/auth. Изменение требует tests и contract review.
++
++## 10. Data events
++
++После подтверждённого AUTHORIZED может быть отправлена snapshot request; authorization state сам не является persistent journal.
++
++## 11. Operational telemetry
++
++auth.session_created, worker, client check, authorization, verification, retry и final events.
++
++## 12. Persistence
++
++Sessions и retry guards только in-memory.
++
++## 13. Lifecycle
++
++Один AuthSessionManager и executor(max_workers=4) на process; shutdown executor в run.py.
++
++## 14. Тесты
++
++tests/test_auth_retry.py, test_auth_retry_frontend.py, test_portal_entry.py, test_auth_telemetry.py.
++
++## 15. Запрещённые изменения
++
++Второй auth flow/provider; multi-process без shared session design; infinite retry; ослабление ownership guard.
++
++## 16. Связанные TASK
++
++Указываются конкретным TASK; исторический auth_retry документ после миграции архивируется.
++
++## 17. Связанные ADR
++
++Нужны при изменении shared provider, session persistence или process topology.
+diff --git a/docs/modules/authorized-client-snapshot.md b/docs/modules/authorized-client-snapshot.md
+new file mode 100644
+index 0000000..f956c44
+--- /dev/null
++++ b/docs/modules/authorized-client-snapshot.md
+@@ -0,0 +1,72 @@
++# Authorized Client Snapshot Collector
++
++Status: implemented-disabled
++Updated: 2026-08-04
++
++## 1. Назначение
++
++После подтверждённой authorization асинхронно получить полную карточку клиента Omada и записать устойчивый JSONL snapshot.
++
++## 2. Статус
++
++Реализован в main; VISITOR_SNAPSHOT_ENABLED=false по default.
++
++## 3. Граница ответственности
++
++Принимает immutable auth context, использует shared provider и пишет journal. Не управляет registry SQLite.
++
++## 4. Входные данные
++
++site_id, client MAC/IP, session/run identifiers, final auth reason и timestamp.
++
++## 5. Выходные данные
++
++visitor.client_snapshot.captured либо failure/skip telemetry; submit outcome caller получает немедленно.
++
++## 6. Основные модели
++
++AuthorizedClientSnapshotCollector, AuthorizedClientSnapshotRequest, AuthorizedClientAuthContext, NormalizedClientSnapshot, SnapshotSubmitOutcome.
++
++## 7. Зависимости
++
++Shared OmadaProvider.get_client_snapshot(), normalizer, writer, telemetry и bounded executor.
++
++## 8. Fail-open
++
++Queue full, stale job, Omada failure или writer failure не изменяют AUTHORIZED session.
++
++## 9. Конфигурация
++
++ENABLED, log file, max workers/pending/job age, request timeout, two retry delays, rotation и shutdown timeout.
++
++## 10. Data events
++
++Schema v1 JSONL; captured record сохраняет полный MAC и safe sanitized raw client result.
++
++## 11. Operational telemetry
++
++Submit, queue, provider retry/failure, write и lifecycle events.
++
++## 12. Persistence
++
++/opt/CaptivePortal/logs/visitor_snapshots.log, rotating writer.
++
++## 13. Lifecycle
++
++Создаётся в run.py, стартует до service loop, stop_accepting и bounded drain выполняются при shutdown.
++
++## 14. Тесты
++
++tests/visitor_registry/test_snapshot_*.py и integration/runtime tests.
++
++## 15. Запрещённые изменения
++
++Блокировать AuthWorker, создавать provider, unbounded queue/retry, писать SQLite registry напрямую.
++
++## 16. Связанные TASK
++
++Final collector v1.2 — historical source; текущий contract хранится здесь и в tests.
++
++## 17. Связанные ADR
++
++Нужен при изменении shared provider, event schema или asynchronous lifecycle.
+diff --git a/docs/modules/capport.md b/docs/modules/capport.md
+new file mode 100644
+index 0000000..7173e5e
+--- /dev/null
++++ b/docs/modules/capport.md
+@@ -0,0 +1,72 @@
++# CAPPORT
++
++Status: active
++Updated: 2026-08-04
++
++## 1. Назначение
++
++RFC 8908/8910 captive portal API и login bridge в общий authorization flow.
++
++## 2. Статус
++
++app/capport реализован; CAPPORT_ENABLED=true в snapshot default.
++
++## 3. Граница ответственности
++
++Определить client по разрешённому source IP, получить state из Omada и передать login в PortalEntryHandler. Не авторизовать самостоятельно.
++
++## 4. Входные данные
++
++Guest source IP, configured site, CAPPORT API/login request.
++
++## 5. Выходные данные
++
++application/captive+json state, redirect/login response или controlled error.
++
++## 6. Основные модели
++
++CapportConfig, CapportClient, CapportState, CapportService.
++
++## 7. Зависимости
++
++Shared OmadaProvider, PortalEntryHandler, auth telemetry, Flask blueprint.
++
++## 8. Fail-open
++
++Lookup failure возвращает controlled unavailable/captive response и не ломает Omada External Portal.
++
++## 9. Конфигурация
++
++CAPPORT_ENABLED, SITE_ID, PUBLIC_BASE_URL, API/LOGIN paths, allowed networks и bounded cache TTL.
++
++## 10. Data events
++
++Нет отдельного journal.
++
++## 11. Operational telemetry
++
++capport.api_request, client_resolved/not_found, lookup_failed, state_response, portal_opened.
++
++## 12. Persistence
++
++Короткий success/failure cache только in-memory.
++
++## 13. Lifecycle
++
++Service/blueprint создаются в create_app() с общим controller.
++
++## 14. Тесты
++
++tests/test_capport_routes.py, test_capport_service.py, test_capport_telemetry.py, test_proxy_headers.py.
++
++## 15. Запрещённые изменения
++
++Новый auth worker/provider, guest IP вне allowlist, независимый token cache, логирование SSID password.
++
++## 16. Связанные TASK
++
++Historical docs/CAPPORT.md мигрируется в этот contract.
++
++## 17. Связанные ADR
++
++Нужны при изменении identity strategy, proxy trust или public CAPPORT URLs.
+diff --git a/docs/modules/omada-webhook-normalizer.md b/docs/modules/omada-webhook-normalizer.md
+new file mode 100644
+index 0000000..715ead8
+--- /dev/null
++++ b/docs/modules/omada-webhook-normalizer.md
+@@ -0,0 +1,72 @@
++# Omada Webhook Normalizer
++
++Status: implemented-disabled
++Updated: 2026-08-04
++
++## 1. Назначение
++
++Преобразовать raw Omada text items в стабильные schema v1 JSONL events.
++
++## 2. Статус
++
++Реализован вместе с disabled webhook feature. Событие omada.client_authorized в snapshot main отсутствует; отдельное ТЗ не доказывает implementation.
++
++## 3. Граница ответственности
++
++Deterministic parsing, event ids/time fields, normalized journal и backfill. Не вызывает Omada и не настраивает Alloy/Grafana.
++
++## 4. Входные данные
++
++omada.webhook_received raw records или backfill JSONL.
++
++## 5. Выходные данные
++
++client_online/offline/unauthorized/authentication_expired/connection_failed либо webhook_unclassified/diagnostic events.
++
++## 6. Основные модели
++
++normalize_webhook(), EventHandler registry, OmadaWebhookProcessor и normalized journal.
++
++## 7. Зависимости
++
++Raw journal schema, filesystem writer и deterministic parser helpers.
++
++## 8. Fail-open
++
++Unparseable text создаёт unclassified/diagnostic record; normalization failure не ломает portal.
++
++## 9. Конфигурация
++
++Использует OMADA_WEBHOOK_ENABLED и normalized log path; schema version 1 в code.
++
++## 10. Data events
++
++omada.client_online, client_offline, client_unauthorized, client_authentication_expired, client_connection_failed, webhook_unclassified и diagnostics.
++
++## 11. Operational telemetry
++
++Processor/write/backfill diagnostics; не подменяют data events.
++
++## 12. Persistence
++
++omada_webhook_normalized.log; backfill пишет отдельный target и не смешивается с live.
++
++## 13. Lifecycle
++
++Processor вызывается receiver; отдельного background worker нет. CLI backfill запускается отдельно.
++
++## 14. Тесты
++
++tests/integrations/omada/test_webhook_normalizer.py, test_webhook_backfill.py, test_webhook_normalized_live.py.
++
++## 15. Запрещённые изменения
++
++Менять schema/event semantics без docs/tests; сохранять secrets; считать непроверенный pattern authorized; изменять Alloy/Loki/Grafana.
++
++## 16. Связанные TASK
++
++ТЗ на client_authorized остаётся pending, пока main code/tests не подтверждают event.
++
++## 17. Связанные ADR
++
++Нужен при schema version change или изменении raw/normalized durability.
+diff --git a/docs/modules/omada-webhook-receiver.md b/docs/modules/omada-webhook-receiver.md
+new file mode 100644
+index 0000000..519a424
+--- /dev/null
++++ b/docs/modules/omada-webhook-receiver.md
+@@ -0,0 +1,72 @@
++# Omada Webhook Receiver
++
++Status: implemented-disabled
++Updated: 2026-08-04
++
++## 1. Назначение
++
++Безопасно принять Omada webhook, проверить source/auth/body и записать redacted raw envelope.
++
++## 2. Статус
++
++Реализован; OMADA_WEBHOOK_ENABLED=false по default.
++
++## 3. Граница ответственности
++
++HTTP boundary, authentication, redaction, raw journal и передача processor. Семантический parsing принадлежит normalizer.
++
++## 4. Входные данные
++
++POST /api/integrations/omada/webhook, source IP, headers, query и bounded body.
++
++## 5. Выходные данные
++
++Controlled HTTP response и omada.webhook_received record.
++
++## 6. Основные модели
++
++OmadaWebhookConfig, WebhookEnvelope, OmadaWebhookReceiver, journal/security/redaction helpers.
++
++## 7. Зависимости
++
++Flask, filesystem raw journal и optional normalization processor.
++
++## 8. Fail-open
++
++Disabled receiver не влияет на portal. Invalid request отклоняется; persistence failure не выдаётся как accepted.
++
++## 9. Конфигурация
++
++ENABLED, allowed IPs, auth mode, shared secret/header token, max body bytes и raw/normalized paths.
++
++## 10. Data events
++
++omada.webhook_received с redacted headers/query/payload.
++
++## 11. Operational telemetry
++
++HTTP/security/persist errors через application logger.
++
++## 12. Persistence
++
++omada_webhook.log с rotation.
++
++## 13. Lifecycle
++
++Blueprint/journals/processor создаются в create_app() только при valid enabled config.
++
++## 14. Тесты
++
++tests/integrations/omada/test_webhook_receiver.py и normalized live tests.
++
++## 15. Запрещённые изменения
++
++Принимать без source/auth policy, unbounded body, secrets в raw journal, возвращать success до required persistence.
++
++## 16. Связанные TASK
++
++Webhook-specific TASK.
++
++## 17. Связанные ADR
++
++Нужен при изменении trust model или durability semantics.
+diff --git a/docs/modules/pending-session-cleaner.md b/docs/modules/pending-session-cleaner.md
+new file mode 100644
+index 0000000..1ee74c4
+--- /dev/null
++++ b/docs/modules/pending-session-cleaner.md
+@@ -0,0 +1,143 @@
++# Pending Client Session Cleaner
++
++Status: implemented-disabled (repository default); production activation owner-confirmed
++Updated: 2026-08-04
++Runtime baseline: main `227ebe93831447d16b78f277ee3052ddd06e15a3`
++
++## 1. Назначение
++
++`PendingClientSessionCleaner` безопасно завершает зависшие неавторизованные Wi-Fi-сессии Omada. Он получает полный active-client inventory, выбирает только устойчиво подтверждённых кандидатов и выполняет guarded `reconnect` после fresh preflight и двух local-protection checks.
++
++## 2. Статус
++
++Final module merged через PR #27; временные probe-костыли удалены PR #28. Код находится в `app/pending_sessions/`, Omada adapter — в `app/controllers/omada_pending_sessions.py`, lifecycle подключён в `run.py`.
++
++Repository default: `PENDING_SESSION_CLEANER_ENABLED=false`. При `false` worker, journal и Omada calls не создаются. В production включение и живая работа подтверждены владельцем проекта 2026-08-04; точное состояние process environment не выводится из Git.
++
++## 3. Граница ответственности
++
++Cleaner отвечает за:
++
++- paginated inventory активных клиентов;
++- строгую классификацию `active=true`, `wireless=true`, `authStatus=1`;
++- SSID allowlist, uptime threshold и duplicate-MAC exclusion;
++- две read-only проверки локального Auth state;
++- fresh client-card preflight;
++- action limits, audit-before-action и один guarded `reconnect`;
++- bounded verification, JSONL data events и operational telemetry.
++
++Cleaner не читает и не изменяет `visitor_registry.sqlite3`, не создаёт visits/device IDs и не настраивает Grafana, Alloy, Loki или systemd.
++
++## 4. Входные данные
++
++- `OmadaProvider.list_active_clients()`;
++- `OmadaProvider.get_pending_client_state()`;
++- `CAPPORT_SITE_ID` и `PENDING_SESSION_CLEANER_SSIDS`;
++- immutable snapshot из `AuthSessionManager.pending_session_protection_snapshot()`;
++- process settings из `app/config.py` → `app/settings.py:get_settings()`.
++
++## 5. Выходные данные
++
++- `pending_session.scan.completed`;
++- `pending_session.action.planned`;
++- `pending_session.action.completed`;
++- operational events с component `pending_session_cleaner`;
++- `PendingScanSummary`, возвращаемый `run_once()`.
++
++## 6. Основные модели
++
++Фактические модели:
++
++- `PendingSessionCleanerConfig`;
++- `PendingClientObservation`;
++- `PendingClientCandidate`;
++- `ClassificationResult`;
++- `PaginationResult`;
++- `ProtectionDecision`;
++- `PendingScanSummary`;
++- `ActionGuardDecision`.
++
++Controller dictionaries копируются defensive-copy; parsed observations и decisions передаются immutable dataclasses.
++
++## 7. Зависимости
++
++Один `OmadaProvider` создаётся в `run.py` и совместно используется AuthWorker, snapshot collector и Cleaner. Provider теперь имеет общий thread-safe token cache на `Condition(RLock)`: одновременно token обновляет один thread, успешный refresh атомарно публикует token/expiry, а ошибка не публикует partial state.
++
++Pending-session методы подключаются к тому же классу через `install_pending_session_methods(OmadaProvider)`. Второй OAuth client, provider или token manager отсутствует и запрещён без отдельного TASK/ADR.
++
++Known limitation runtime baseline: reconnect adapter при `-44112` делает compare-and-invalidate по использованному token, после чего Cleaner recovery повторно вызывает no-argument invalidation. В узком concurrent refresh window это может очистить уже обновлённый cache и вызвать лишний refresh. Partial token state не публикуется, но требование «Cleaner не очищает свежий token другого thread» нуждается в отдельном code fix и focused concurrency regression test.
++
++## 8. Fail-open
++
++При invalid config factory возвращает `UnavailablePendingSessionCleaner`; при выключенном flag — `DisabledPendingSessionCleaner`. Provider, protection, journal или internal error не должны останавливать portal authorization. Любая неопределённость запрещает POST либо оставляет результат unconfirmed.
++
++Local protection работает fail-closed относительно действия: exception адаптера трактуется как `protected=true`.
++
++## 9. Конфигурация
++
++Единственный feature flag: `PENDING_SESSION_CLEANER_ENABLED`, default `false`. Dry-run, observation mode и отдельный mutation flag отсутствуют.
++
++| Группа | Defaults |
++|---|---|
++| Scheduling | initial delay 10 s; fixed delay 60 s; scan budget 50 s |
++| Eligibility | SSID `Zefer_Parki`; uptime 120 s; portal grace 45 s; regression tolerance 5 s |
++| HTTP | request timeout 5 s; GET retry delays 1,3 s; verification delays 1,4 s |
++| Inventory | page size 500; max pages 20; max clients 10000 |
++| Actions | max 1 per scan; cooldown 180 s; max 3 per MAC/hour |
++| Journal | `/opt/CaptivePortal/logs/pending_session_cleaner.log`; 50 MiB; 20 backups |
++| Shutdown | 20 s |
++
++При enabled mode все значения валидируются строго; invalid config не создаёт worker и не выполняет Omada requests.
++
++## 10. Data events
++
++`pending_session.action.planned` записывается и flush-ится до POST. Если planned event записать нельзя, reconnect запрещён.
++
++`pending_session.action.completed` фиксирует как выполненное действие, так и deterministic skip для первоначального кандидата. Он содержит full MAC, before/after identity, число POST/verification attempts, безопасные controller metadata и result; token/header/cookie/secret/raw response отсутствуют.
++
++`pending_session.scan.completed` содержит pagination, classification, protection, action и verification counters. Schema version текущих событий — `1`.
++
++## 11. Operational telemetry
++
++Фактические lifecycle/state events включают start, stop, state change, overlap suppression, scan completed/partial, unavailable, internal error, audit/writer error и recovery. Operational telemetry отделена от data journal и отправляется через `AuthorizationTelemetry` adapter.
++
++## 12. Persistence
++
++`JournalWriter` пишет compact UTF-8 JSONL с `allow_nan=false`, flush после каждой записи, rotation и mode `0640` на POSIX. Default path: `/opt/CaptivePortal/logs/pending_session_cleaner.log`.
++
++ActionGuard хранит bounded in-memory cooldown/hourly-attempt state; после process restart эти ограничения начинают новый in-memory lifecycle. SQLite schema не используется и не меняется.
++
++## 13. Lifecycle
++
++`create_pending_session_cleaner()` вызывается в `run.py` после Flask composition и получает общий provider/auth manager/telemetry. При enabled mode создаётся один daemon thread `pending_session_cleaner_worker` на process.
++
++Scheduling fixed-delay: initial wait → `run_once()` → interval wait. Non-blocking scan lock запрещает overlap. Shutdown сначала переводит Cleaner в `stopping`, запрещает новые scans/POST, устанавливает event и ждёт worker не дольше configured timeout; затем останавливаются остальные components по порядку `run.py`.
++
++Multiple application processes с одновременно активным Cleaner не поддерживаются без отдельного leader-election/inter-process-lock ADR.
++
++## 14. Тесты
++
++`tests/pending_sessions/` содержит 11 файлов и 52 test functions для provider contracts, reconnect, token-cache concurrency, config, pagination, classification, double protection, pipeline, action guard, journal/telemetry и factory modes. Текущие tests проверяют compare-and-invalidate в reconnect adapter и общий concurrent refresh, но не моделируют no-argument invalidation после конкурентного refresh в Cleaner recovery.
++
++Targeted gate:
++
++    python -m pytest -q -rs tests/pending_sessions
++
++Затем обязателен full gate из `docs/testing.md`. Живая production activation не заменяет regression suite.
++
++## 15. Запрещённые изменения
++
++- `disconnect`, client `DELETE`, `unauth`, `block/unblock` или device `forget` вместо `reconnect`;
++- POST при incomplete inventory, active local Auth, failed protection/preflight/audit, shutdown или exhausted guard;
++- blind retry POST; особый второй POST допустим только для точного Omada `-44112` после cache invalidation, fresh preflight и повторных protection checks;
++- отдельный provider/token manager/cache;
++- чтение Visitor Registry DB;
++- изменение JSONL schema, process topology или action policy без TASK и tests.
++
++## 16. Связанные TASK
++
++`Pending Client Session Cleaner v1.0` — исходный change-intent contract. После merge current-state truth определяется кодом, тестами и этим документом; временные probe-материалы source of truth не являются.
++
++## 17. Связанные ADR
++
++Отдельный ADR в repository для v1 не зафиксирован. Новый token lifecycle, persistence, action policy, mutation endpoint или multi-process topology требуют отдельного TASK, PLAN и устойчивого ADR. Текущий shared token cache является частью merged Cleaner implementation и покрыт concurrency tests.
+diff --git a/docs/modules/portal-entry.md b/docs/modules/portal-entry.md
+new file mode 100644
+index 0000000..8faa748
+--- /dev/null
++++ b/docs/modules/portal-entry.md
+@@ -0,0 +1,72 @@
++# Portal entry
++
++Status: active
++Updated: 2026-08-04
++
++## 1. Назначение
++
++Принять Omada redirect, валидировать client context, создать/переиспользовать AuthSession и отдать portal UI.
++
++## 2. Статус
++
++Основной route GET / и auth session/retry routes присутствуют.
++
++## 3. Граница ответственности
++
++HTTP parsing/rendering и передача в PortalEntryHandler; authorization algorithm находится в AuthWorker.
++
++## 4. Входные данные
++
++site, clientMac или clientIp, apMac, ssid, redirectUrl, radioId.
++
++## 5. Выходные данные
++
++portal.html, JSON session state, retry response или controlled 4xx/5xx.
++
++## 6. Основные модели
++
++PortalClientContext, PortalEntryHandler, AuthSession.
++
++## 7. Зависимости
++
++Flask, AuthSessionManager, AuthWorker, telemetry, optional counter.
++
++## 8. Fail-open
++
++Counter/telemetry failure не блокирует portal. Missing identity fail-closed с controlled page.
++
++## 9. Конфигурация
++
++Host/port/debug и module settings через get_settings().
++
++## 10. Data events
++
++Нет собственного persistent journal.
++
++## 11. Operational telemetry
++
++Portal request, auth session и worker events.
++
++## 12. Persistence
++
++Нет; session in-memory.
++
++## 13. Lifecycle
++
++Routes создаются в create_app(); worker submit идёт в shared executor.
++
++## 14. Тесты
++
++tests/test_portal_entry.py, test_portal_design.py, test_proxy_headers.py, auth retry frontend.
++
++## 15. Запрещённые изменения
++
++Side effects при import, отдельный provider, безусловное доверие forwarded headers.
++
++## 16. Связанные TASK
++
++Определяет owner задачи.
++
++## 17. Связанные ADR
++
++Нужны для public route contract или proxy trust topology.
+diff --git a/docs/modules/public-authorization-counter.md b/docs/modules/public-authorization-counter.md
+new file mode 100644
+index 0000000..e453c26
+--- /dev/null
++++ b/docs/modules/public-authorization-counter.md
+@@ -0,0 +1,72 @@
++# Public Authorization Counter
++
++Status: active
++Updated: 2026-08-04
++
++## 1. Назначение
++
++Посчитать принятые открытия public portal и отдать агрегат frontend/API.
++
++## 2. Статус
++
++app/portal_counter реализован; default enabled.
++
++## 3. Граница ответственности
++
++Record accepted portal open. Не подтверждает успешную Omada authorization и не считает traffic.
++
++## 4. Входные данные
++
++Результат PortalEntryHandler open operation.
++
++## 5. Выходные данные
++
++Counter snapshot и public API payload.
++
++## 6. Основные модели
++
++PortalCounterService, PortalCounterRepository, CounterSnapshot, RecordOpenResult.
++
++## 7. Зависимости
++
++SQLite, portal entry и optional public traffic service в combined API.
++
++## 8. Fail-open
++
++Unavailable repository не блокирует portal; API сообщает controlled unavailable.
++
++## 9. Конфигурация
++
++PORTAL_COUNTER_ENABLED, DB_PATH, TIMEZONE, API_ENABLED.
++
++## 10. Data events
++
++Нет JSONL data journal.
++
++## 11. Operational telemetry
++
++Application log на failure/startup; отдельная stable event schema не заявлена.
++
++## 12. Persistence
++
++portal_counter.db, schema version 1.
++
++## 13. Lifecycle
++
++Service создаётся в create_app(); отдельного thread нет.
++
++## 14. Тесты
++
++tests/test_portal_counter.py и portal entry tests.
++
++## 15. Запрещённые изменения
++
++Считать open как AUTHORIZED, блокировать portal при SQLite failure, менять schema без migration.
++
++## 16. Связанные TASK
++
++Определяет owner.
++
++## 17. Связанные ADR
++
++Нужен при изменении business meaning или persistence schema.
+diff --git a/docs/modules/public-traffic-counter.md b/docs/modules/public-traffic-counter.md
+new file mode 100644
+index 0000000..c45a8a0
+--- /dev/null
++++ b/docs/modules/public-traffic-counter.md
+@@ -0,0 +1,72 @@
++# Public completed-session traffic counter
++
++Status: active
++Updated: 2026-08-04
++
++## 1. Назначение
++
++Агрегировать traffic завершённых public SSID sessions из normalized Omada webhook journal.
++
++## 2. Статус
++
++app/public_traffic реализован; default enabled.
++
++## 3. Граница ответственности
++
++Последовательно читать journal, классифицировать завершённые sessions и обновлять aggregates. Не управлять Omada.
++
++## 4. Входные данные
++
++omada_webhook_normalized.log и configured SSID.
++
++## 5. Выходные данные
++
++TrafficSnapshot/API/frontend values и administrative reset summary.
++
++## 6. Основные модели
++
++PublicTrafficConfig, ReaderState, TrafficEvent, PublicTrafficRepository/Service/Worker.
++
++## 7. Зависимости
++
++Filesystem journal, SQLite, timezone и portal counter route.
++
++## 8. Fail-open
++
++Worker/repository failure не ломает portal; service становится unavailable.
++
++## 9. Конфигурация
++
++ENABLED, SSID, DB_PATH, source normalized log, scan interval и frontend refresh.
++
++## 10. Data events
++
++Источник — normalized webhook schema v1; собственного JSONL нет.
++
++## 11. Operational telemetry
++
++Start/stop, scan/error/recovery через application logger.
++
++## 12. Persistence
++
++public_traffic.sqlite3, schema version 2, reader checkpoints и aggregates.
++
++## 13. Lifecycle
++
++Worker создаётся в create_app(), запускается/останавливается run.py; fixed-delay.
++
++## 14. Тесты
++
++tests/test_public_traffic.py и test_public_traffic_frontend.py.
++
++## 15. Запрещённые изменения
++
++Обращение к Omada, overlapping scans, schema change без migration, SSID password в config/log.
++
++## 16. Связанные TASK
++
++Определяет owner.
++
++## 17. Связанные ADR
++
++Нужен при изменении event source, traffic semantics или schema.
+diff --git a/docs/modules/visitor-registry.md b/docs/modules/visitor-registry.md
+new file mode 100644
+index 0000000..b12ce27
+--- /dev/null
++++ b/docs/modules/visitor-registry.md
+@@ -0,0 +1,72 @@
++# Visitor Device Registry
++
++Status: implemented-disabled
++Updated: 2026-08-04
++
++## 1. Назначение
++
++Построить durable registry уникальных visitor devices из authorized snapshot journal.
++
++## 2. Статус
++
++Реализован в main; VISITOR_REGISTRY_ENABLED=false до отдельной production activation.
++
++## 3. Граница ответственности
++
++Читает только visitor_snapshots.log и ведёт SQLite registry. Omada API запрещён.
++
++## 4. Входные данные
++
++Strict JSONL captured snapshot events, включая rotated files и restart checkpoint.
++
++## 5. Выходные данные
++
++Device/visit aggregates, status и read-only CLI.
++
++## 6. Основные модели
++
++RegistryConfig, VisitorRegistryReader/Service/Repository/Worker, VisitorRegistryReadService, RegistryStatus.
++
++## 7. Зависимости
++
++Filesystem, SQLite, timezone и snapshot schema v1.
++
++## 8. Fail-open
++
++Invalid line, rotation, SQLite busy/corruption или worker failure не ломают portal; module becomes unavailable с telemetry.
++
++## 9. Конфигурация
++
++ENABLED, DB_PATH, snapshot log source, scan interval, shutdown timeout, max line bytes и timezone.
++
++## 10. Data events
++
++Потребляет visitor.client_snapshot.captured; своего persistent JSONL не создаёт.
++
++## 11. Operational telemetry
++
++Start/stop, scan, skip, recovery, database/source errors.
++
++## 12. Persistence
++
++visitor_registry.sqlite3 schema v1 с reader checkpoints и registry tables.
++
++## 13. Lifecycle
++
++Создаётся/стартует run.py; один fixed-delay worker на process; shutdown выполняет bounded final scan.
++
++## 14. Тесты
++
++tests/visitor_registry/test_device_registry.py и test_device_registry_worker.py.
++
++## 15. Запрещённые изменения
++
++Любой Omada call, чтение auth memory, schema change без migration, overlapping scan.
++
++## 16. Связанные TASK
++
++Visitor Registry v2 + обязательные дополнения — historical source; activation отдельным TASK.
++
++## 17. Связанные ADR
++
++Нужен при source/schema/process topology changes.
+diff --git a/docs/omada_webhook_normalizer.md b/docs/omada_webhook_normalizer.md
+index a669c6f..7aa3839 100644
+--- a/docs/omada_webhook_normalizer.md
++++ b/docs/omada_webhook_normalizer.md
+@@ -1,5 +1,9 @@
+ # Omada webhook normalizer
+ 
++Status: superseded as normative contract
++Current contract: [modules/omada-webhook-normalizer.md](modules/omada-webhook-normalizer.md)
++Historical implementation details below are retained for reference.
++
+ The normalizer is the second stage of the permanent Omada webhook
+ integration:
+ 
+diff --git a/docs/omada_webhook_receiver.md b/docs/omada_webhook_receiver.md
+index 61cff2d..57c51e8 100644
+--- a/docs/omada_webhook_receiver.md
++++ b/docs/omada_webhook_receiver.md
+@@ -1,5 +1,9 @@
+ # Omada webhook receiver
+ 
++Status: superseded as normative contract
++Current contract: [modules/omada-webhook-receiver.md](modules/omada-webhook-receiver.md)
++Historical implementation details below are retained for reference.
++
+ The permanent receiver is embedded in the existing CaptivePortal Flask
+ process:
+ 
+diff --git a/docs/plans/PLAN-template.md b/docs/plans/PLAN-template.md
+new file mode 100644
+index 0000000..cab8fbf
+--- /dev/null
++++ b/docs/plans/PLAN-template.md
+@@ -0,0 +1,29 @@
++# План TASK-XXX
++
++Status: draft
++
++## Связанные документы
++
++## Проверенное текущее состояние
++
++## Agent capabilities
++
++## Затрагиваемые файлы
++
++## Не затрагиваемые файлы
++
++## Шаги реализации
++
++## Изменения контрактов
++
++## Риски
++
++## Targeted tests
++
++## Full gate
++
++## Repository actions
++
++## Rollback
++
++## Нерешённые вопросы
+diff --git a/docs/portal_counter.md b/docs/portal_counter.md
+index 42e4aea..2858fb6 100644
+--- a/docs/portal_counter.md
++++ b/docs/portal_counter.md
+@@ -1,5 +1,9 @@
+ # Public Portal Open Counter v1.0
+ 
++Status: superseded as normative contract
++Current contract: [modules/public-authorization-counter.md](modules/public-authorization-counter.md)
++Historical implementation details below are retained for reference.
++
+ The module counts newly created server-side `AuthSession` objects. A valid
+ `GET /` records one event only when `AuthSessionManager.create_or_get()`
+ returns `created=True`. Authorization outcomes, Omada state, polling and API
+diff --git a/docs/project-inventory.md b/docs/project-inventory.md
+new file mode 100644
+index 0000000..74095cb
+--- /dev/null
++++ b/docs/project-inventory.md
+@@ -0,0 +1,141 @@
++# Инвентаризация CaptivPortal
++
++Status: current runtime snapshot
++Updated: 2026-08-04
++Branch: main
++Runtime commit: `227ebe93831447d16b78f277ee3052ddd06e15a3`
++Commit date: 2026-08-04T09:38:50+04:00
++
++Документ описывает runtime-код указанного commit. Knowledge-base PR добавляет только documentation, instructions, templates и test discovery config; production environment state отмечается отдельно и не выводится из Git.
++
++## Runtime и composition
++
++- Единственный прямой entrypoint и верхнеуровневый lifecycle: `run.py`.
++- Flask composition factory: `app/web/web.py:create_app()`.
++- Configuration pipeline: `app/config.py` → `app/settings.py:get_settings()`.
++- Controller factory: `app/controllers/factory.py:create_controller()`.
++- Реализация controller: `app/controllers/omada.py:OmadaProvider`.
++- Pending-session API adapter: `app/controllers/omada_pending_sessions.py`; методы устанавливаются на тот же `OmadaProvider` в `app/controllers/__init__.py`.
++- `run.py` создаёт один provider и передаёт его web/auth, snapshot collector и Pending Session Cleaner.
++- `OmadaProvider` содержит единый thread-safe token cache на `Condition(RLock)` с одним concurrent refresh, early refresh и guarded invalidation.
++- `AuthSessionManager` и `ThreadPoolExecutor(max_workers=4)` создаются один раз на process в `app/web/web.py`.
++- In-memory sessions, locks, action limits и workers предполагают один application process.
++
++## Подсистемы и реальные пути
++
++| Подсистема | Код |
++|---|---|
++| Portal entry | `app/web/portal_entry.py`, `app/web/web.py` |
++| AuthSession/AuthWorker | `app/auth/` |
++| Omada provider | `app/controllers/omada.py`, `app/controllers/omada_pending_sessions.py` |
++| CAPPORT | `app/capport/` |
++| Auth telemetry | `app/auth_telemetry/` |
++| Public Authorization Counter | `app/portal_counter/` |
++| Completed-session traffic counter | `app/public_traffic/` |
++| Authorized Client Snapshot Collector | `app/visitor_registry/snapshot_*` |
++| Visitor Device Registry | `app/visitor_registry/registry_*` |
++| Pending Client Session Cleaner | `app/pending_sessions/` |
++| Omada Webhook Receiver/Normalizer | `app/integrations/omada/` |
++
++## Feature flags по repository default
++
++| Setting | Default | Интерпретация |
++|---|---:|---|
++| `CAPPORT_ENABLED` | true | реализован и включён конфигурацией |
++| `PORTAL_COUNTER_ENABLED` | true | реализован и включён |
++| `PUBLIC_TRAFFIC_COUNTER_ENABLED` | true | реализован и включён |
++| `AUTH_TELEMETRY_ENABLED` | true | реализован и включён |
++| `VISITOR_SNAPSHOT_ENABLED` | false | implemented-disabled |
++| `VISITOR_REGISTRY_ENABLED` | false | implemented-disabled |
++| `OMADA_WEBHOOK_ENABLED` | false | receiver/normalizer implemented-disabled |
++| `PENDING_SESSION_CLEANER_ENABLED` | false | implemented-disabled by default |
++
++Repository defaults не подтверждают process environment. Владелец проекта подтвердил production activation и работу Cleaner 2026-08-04; секреты и фактический EnvironmentFile в Git не фиксируются.
++
++## Journals и persistence
++
++| Назначение | Default path | Тип |
++|---|---|---|
++| Authorization telemetry | `/opt/CaptivePortal/logs/auth_telemetry.log` | JSONL telemetry |
++| Authorized snapshots | `/opt/CaptivePortal/logs/visitor_snapshots.log` | JSONL data journal |
++| Raw Omada webhook | `/opt/CaptivePortal/logs/omada_webhook.log` | JSONL data journal |
++| Normalized Omada webhook | `/opt/CaptivePortal/logs/omada_webhook_normalized.log` | JSONL data journal |
++| Pending Cleaner audit | `/opt/CaptivePortal/logs/pending_session_cleaner.log` | rotating JSONL data journal |
++| Portal counter | `/opt/CaptivePortal/data/portal_counter.db` | SQLite |
++| Public traffic | `/opt/CaptivePortal/data/public_traffic.sqlite3` | SQLite |
++| Visitor registry | `/opt/CaptivePortal/data/visitor_registry.sqlite3` | SQLite |
++
++Cleaner не использует SQLite. Его cooldown/hourly action state находится в bounded process memory.
++
++## Tests и tooling
++
++- Основной и единственный test root: `tests/`.
++- В runtime snapshot: 38 `test_*.py`; 11 файлов и 52 test functions относятся к `tests/pending_sessions/`.
++- Группы: auth/retry, CAPPORT, telemetry, counters, portal, Omada webhook, visitor registry и pending sessions.
++- После PR #28 временные `omada_pending_cleanup_test.py` и `tools/pending_session_probe*` отсутствуют в main.
++- Штатных test modules вне `tests/` нет.
++- `requirements.txt`: Flask, requests, tzdata; `requirements-dev.txt` добавляет pytest.
++- Knowledge-base PR добавляет `pytest.ini` с `testpaths = tests`, чтобы test root оставался явным и устойчивым.
++- `pyproject.toml`, Makefile, setup.cfg, tox.ini, lint config и type-check config отсутствуют.
++
++Integration environment 2026-08-04 не содержит runtime/dev packages и блокирует network install, поэтому pytest здесь не объявляется пройденным. `PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app` и `git diff --check` проходят; full suite обязателен в нормальном project environment.
++
++## Fail-open boundaries
++
++- auth telemetry;
++- portal counter;
++- public traffic service/worker;
++- webhook receiver/normalizer journals;
++- authorized snapshot collector;
++- visitor registry;
++- pending session cleaner.
++
++Отказ независимого компонента не должен останавливать основной portal authorization flow. Для Cleaner неопределённость трактуется ещё строже: reconnect запрещается.
++
++## Token lifecycle
++
++Прежнее расхождение `token per request` vs Cleaner TASK разрешено merged implementation. `OmadaProvider._get_token()` использует общий cache и condition; `_request_token_uncached()` выполняет реальный refresh. `_invalidate_cached_token(token)` очищает cache только при совпадении, а вызов без аргумента очищает текущий cache без сравнения. Concurrency tests проверяют один refresh и отсутствие partial state после failure.
++
++Новый provider, token manager или второй cache запрещён без отдельного TASK/ADR. Изменение текущего lifecycle требует regression и concurrency tests для AuthWorker и Cleaner.
++
++## Startup и shutdown
++
++Startup в `run.py`:
++
++1. settings и общий `OmadaProvider`;
++2. snapshot collector creation;
++3. Flask app и auth components;
++4. Pending Session Cleaner creation/start;
++5. snapshot collector start;
++6. visitor registry create/start;
++7. public traffic worker start;
++8. Flask server.
++
++Shutdown:
++
++1. Pending Session Cleaner stop с bounded timeout;
++2. public traffic worker;
++3. auth executor;
++4. snapshot collector stop-accepting/drain;
++5. visitor registry final scan/stop.
++
++## Existing documentation
++
++`README.md` и `README_RU.md` — public overview. `docs/README.md` — единая навигация. Модульные contracts являются текущими техническими источниками; прежние специализированные документы маршрутизируются по `docs/archive/migration-plan.md` и не удаляются автоматически.
++
++## Подтверждённый deployment metadata
++
++- Deployment path `/opt/CaptivePortal` подтверждается repository docs.
++- Service name `captive-portal.service` подтверждается repository docs.
++- Systemd unit отсутствует в repository; точные `ExecStart`, user/group и EnvironmentFile проверяются на target host.
++- Python не загружает `.env` автоматически; значения должны поступать через process environment.
++
++## Риски и технический долг
++
++1. В Git отслеживаются `__pycache__` и `.pyc`; обычный import может создавать шумный binary diff.
++2. В Git отслеживаются backup-файлы `app/config.py.bak-*` и `app/web/web.py.bak-*`.
++3. `outputs/omada-webhook-normalized.alloy` — infrastructure artifact; ownership подтверждается отдельным TASK.
++4. GitHub commit `227ebe9` не имеет attached Actions workflow runs/status checks; test evidence хранится вне GitHub CI и требует повторяемого Linux gate.
++5. В Cleaner token-expiry recovery после compare-and-invalidate выполняется дополнительная no-argument invalidation; concurrent refresh window и запрет очистки свежего AuthWorker token отдельным test не покрыты.
++
++Эти пункты не исправляются documentation TASK без отдельного разрешения.
+diff --git a/docs/public_traffic.md b/docs/public_traffic.md
+index b153221..1505137 100644
+--- a/docs/public_traffic.md
++++ b/docs/public_traffic.md
+@@ -1,5 +1,9 @@
+ # Public Traffic Counter v1
+ 
++Status: superseded as normative contract
++Current contract: [modules/public-traffic-counter.md](modules/public-traffic-counter.md)
++Historical implementation details below are retained for reference.
++
+ Public Traffic Counter reads completed Wi-Fi sessions from the existing
+ Omada normalized JSONL journal and maintains per-SSID traffic totals in
+ a local SQLite database. It does not call Omada OpenAPI, Loki, Grafana
+diff --git a/docs/security.md b/docs/security.md
+new file mode 100644
+index 0000000..1f93bd7
+--- /dev/null
++++ b/docs/security.md
+@@ -0,0 +1,28 @@
++# Security
++
++Status: current
++Updated: 2026-08-04
++
++## Secrets
++
++- Secrets поступают только через production environment или утверждённый secret mechanism.
++- Secrets запрещены в Git, fixtures, TASK, PLAN, ADR, PR, chat handoff и examples.
++- Access Token, Client Secret, cookie, Authorization header и SSID password не логируются.
++- Agent не запрашивает production secret без прямой необходимости.
++- Exception и raw response очищаются до journal/telemetry.
++
++## Identifiers и network boundary
++
++- MAC не считается secret и не маскируется в технических журналах.
++- CAPPORT проверяет guest source IP по allowlist.
++- Trust к reverse proxy ограничен известной topology; forwarded headers не принимаются безусловно.
++- Webhook source/auth policy проверяется до persistence.
++
++## Files и persistence
++
++- Repository, logs и data имеют минимальные POSIX permissions.
++- SQLite backup создаётся до migration.
++- Raw Omada override response не сохраняется: он может содержать пароль SSID.
++- Data journal выполняет redaction известных sensitive keys.
++
++Этот документ содержит только постоянную policy. Findings конкретного снимка фиксируются в ограниченном review report и отдельном security TASK без раскрытия значений.
+diff --git a/docs/tasks/TASK-template.md b/docs/tasks/TASK-template.md
+new file mode 100644
+index 0000000..27d01aa
+--- /dev/null
++++ b/docs/tasks/TASK-template.md
+@@ -0,0 +1,65 @@
++# TASK-XXX — Название
++
++Status: draft
++
++## 1. Цель
++
++## 2. Execution mode
++
++planning-only / implementation / review / publish / deploy
++
++## 3. Исполнитель и agent platform
++
++## 4. Agent capability assumptions
++
++## 5. Test responsibility
++
++agent / owner / shared / not-applicable
++
++## 6. Текущее состояние
++
++## 7. Требуемое поведение
++
++## 8. Не входит в задачу
++
++## 9. Связанные документы
++
++Указать 1–3 файла.
++
++## 10. Разрешённые файлы
++
++## 11. Запрещённые файлы и области
++
++## 12. Разрешённые repository actions
++
++## 13. Запрещённые и owner-only repository actions
++
++## 14. Архитектурные ограничения
++
++## 15. Входные контракты
++
++## 16. Выходные контракты
++
++## 17. Error handling
++
++## 18. Fail-open / fail-closed
++
++## 19. Logging и events
++
++## 20. Persistence
++
++## 21. Lifecycle и shutdown
++
++## 22. Security
++
++## 23. Targeted tests
++
++## 24. Full gate
++
++## 25. Acceptance criteria
++
++## 26. Stop conditions
++
++## 27. Handoff format
++
++## 28. PR requirements
+diff --git a/docs/testing.md b/docs/testing.md
+new file mode 100644
+index 0000000..cf9ec1e
+--- /dev/null
++++ b/docs/testing.md
+@@ -0,0 +1,70 @@
++# Testing
++
++Status: current
++Updated: 2026-08-04
++
++## Ответственность
++
++Каждый TASK указывает ровно одно значение: `agent`, `owner`, `shared` или `not-applicable`. Нельзя автоматически перекладывать тесты на агента, если owner назначен явно.
++
++## Порядок
++
++1. Targeted tests для изменённого контракта.
++2. Full suite.
++3. Compile gate.
++4. Whitespace gate.
++
++Full gate:
++
++    python -m pytest -q -rs
++    PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
++    git diff --check
++
++`pytest.ini` задаёт единственный test root `tests/`. В current main штатных test modules вне `tests/` нет; временные pending-session probe scripts удалены PR #28. Явный root защищает discovery от случайных operational/research scripts в будущем.
++
++## Stable targeted groups
++
++    python -m pytest tests/test_auth_retry.py tests/test_portal_entry.py -q --tb=short
++    python -m pytest tests/test_capport_routes.py tests/test_capport_service.py -q --tb=short
++    python -m pytest tests/test_portal_counter.py -q --tb=short
++    python -m pytest tests/test_public_traffic.py tests/test_public_traffic_frontend.py -q --tb=short
++    python -m pytest tests/visitor_registry -q --tb=short
++    python -m pytest tests/integrations/omada -q --tb=short
++    python -m pytest tests/pending_sessions -q --tb=short
++
++TASK выбирает минимально достаточную группу; не запускает все группы как targeted.
++
++## Pending Session Cleaner coverage
++
++`tests/pending_sessions/` содержит 11 test files и 52 test functions. Покрываются:
++
++- provider contracts и безопасная классификация response;
++- shared token-cache concurrency/failure;
++- strict config и disabled/unavailable factory modes;
++- pagination, incomplete inventory и duplicate MAC;
++- classification, local protection и fresh preflight;
++- action limits, audit-before-action, reconnect и verification;
++- journal/telemetry и end-to-end fake-provider pipeline.
++
++Known gap baseline `227ebe9`: нет focused test, где AuthWorker публикует свежий token между compare-and-invalidate reconnect adapter и повторной no-argument invalidation Cleaner recovery.
++
++Это test inventory, а не утверждение о результате последнего запуска. Actual report всегда содержит точную команду и числа.
++
++## Reporting
++
++Указывать точную команду, passed/skipped/failed и релевантный короткий traceback. Environment limitation отделять от product defect. Несвязанный full-suite failure не исправлять; зарегистрировать owner action.
++
++Если environment не содержит dependencies и их установка запрещена, тест нельзя объявлять passed. Выполните доступные compile/static gates и повторите pytest в нормальном project/Linux environment.
++
++## Production gate
++
++Feature activation требует отдельного Linux gate на целевом Python, filesystem, permissions и service topology. Локальный green suite или owner-confirmed live behavior не заменяют друг друга: нужны оба доказательства.
++
++## Integration evidence 2026-08-04
++
++- runtime baseline: main `227ebe9`;
++- temporary probe artifacts отсутствуют;
++- `PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app`: passed;
++- `git diff --check`: passed before knowledge-base integration;
++- isolated integration Python: pytest/runtime packages unavailable, network install blocked; normal project-environment pytest rerun pending;
++- GitHub: для merged Cleaner commits не обнаружены attached Actions workflow runs/status checks.
+diff --git a/docs/visitor_device_registry.md b/docs/visitor_device_registry.md
+index cda19fc..30c7c5c 100644
+--- a/docs/visitor_device_registry.md
++++ b/docs/visitor_device_registry.md
+@@ -1,5 +1,9 @@
+ # Visitor Device Registry
+ 
++Status: superseded as normative contract
++Current contract: [modules/visitor-registry.md](modules/visitor-registry.md)
++Historical implementation details below are retained for reference.
++
+ Visitor Device Registry is a fail-open, local persistence layer for
+ successful Authorized Client Snapshot events. It reads the existing
+ `visitor_snapshots.log` journal and its rotations; it never calls Omada
+diff --git a/docs/visitor_snapshot_collector.md b/docs/visitor_snapshot_collector.md
+index f964c70..e7e9056 100644
+--- a/docs/visitor_snapshot_collector.md
++++ b/docs/visitor_snapshot_collector.md
+@@ -1,5 +1,9 @@
+ # Authorized Client Snapshot Collector
+ 
++Status: superseded as normative contract
++Current contract: [modules/authorized-client-snapshot.md](modules/authorized-client-snapshot.md)
++Historical implementation details below are retained for reference.
++
+ Visitor Snapshot is a fail-open background subsystem. After an AuthRun
+ has been committed as `AUTHORIZED`, AuthWorker submits one immutable
+ request. The authorization result is never changed by submission,
+diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000..5ee6477
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,2 @@
++[pytest]
++testpaths = tests
+diff --git a/scripts/check.sh b/scripts/check.sh
+new file mode 100755
+index 0000000..18b81a7
+--- /dev/null
++++ b/scripts/check.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env sh
++set -eu
++
++SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++REPOSITORY_ROOT=$(dirname "$SCRIPT_DIR")
++cd "$REPOSITORY_ROOT"
++
++python -m pytest -q -rs
++PYTHONPYCACHEPREFIX=/tmp/captivportal-pyc python -m compileall -q app
++git diff --check
+-- 
+2.51.1
+

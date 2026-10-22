@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import fields
 from pathlib import Path
 import os
+from app.operations_verification import startup_check
 import sqlite3
 import uuid
 
@@ -67,6 +68,7 @@ class IntegrationRepository:
                     conn.rollback()
                 conn.close()
 
+    @startup_check('fingerprint_integration',lambda self:self.path,('schema_version','schema_signature'))
     def initialize(self):
         if not self.path.parent.is_dir() or self.path.is_symlink():
             raise IntegrationError("integration_unavailable")

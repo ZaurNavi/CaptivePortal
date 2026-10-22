@@ -60,8 +60,6 @@ def enqueue_binding_changes(repository, generation_id, after_change_seq, changes
                     "from_utc,to_utc,cursor_event_at,cursor_edge_id,state) "
                     "VALUES(?,?,?,?,?,?,?,?,NULL,NULL,'pending')",
                     (job_id, *frozen.values(), from_utc, to_utc))
-                repository.append_visit_delivery('binding',evaluated_at_utc,site_id=frozen['site_id'],
-                    device_id=frozen['device_id'],client_mac=frozen['client_mac'],binding_seq=frozen['binding_change_seq'])
             repository.crash_point("binding_job_enqueued")
         connection.execute(
             "UPDATE service_materialization_checkpoints SET last_binding_change_seq=?,updated_at_utc=? "

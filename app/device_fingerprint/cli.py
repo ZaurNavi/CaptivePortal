@@ -27,12 +27,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="device-fingerprint")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("run")
+    commands.add_parser("provision-empty-v2")
     migration = commands.add_parser("migrate-v1-to-v2")
     migration.add_argument("--backup-path", required=True)
     recovery = commands.add_parser("recover-generation")
     recovery.add_argument("--trigger", required=True, choices=sorted(RECOVERY_TRIGGERS))
     args = parser.parse_args(argv)
     settings = get_settings()
+    if args.command == "provision-empty-v2":
+        from .provisioning import ProvisionResult, provision_empty_v2
+        try:
+            identity = capture_loaded_artifact_identity("fingerprint-evidence-provision-empty-v2")
+            result = provision_empty_v2(settings, artifact_identity=identity)
+        except Exception:
+            result = ProvisionResult("HOLD_SOURCE_IDENTITY")
+        print(json.dumps(asdict(result), sort_keys=True))
+        return 0 if result.code == "PROVISIONED" else 1
     if args.command != "run":
         try:
             config = device_fingerprint_config_from_settings(settings)

@@ -130,7 +130,7 @@ def test_repository_bpf_artifact_is_exact_frozen_expression():
 
 
 @pytest.mark.parametrize("interface", ["enp8s0", "enp1s0"])
-def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(monkeypatch, interface):
+def test_raw_socket_protocol_zero_then_filter_before_eth_p_all_configured_bind(monkeypatch, interface):
     from app.device_fingerprint_sensor import capture as module
     calls = []
     class Socket:
@@ -138,15 +138,16 @@ def test_raw_socket_uses_eth_p_all_and_filter_before_configured_interface_bind(m
         def setsockopt(self, *_args): calls.append("timestamp")
         def bind(self, value): calls.append(("bind", value))
         def close(self): calls.append("close")
-    monkeypatch.setattr(module, "attach_frozen_filter", lambda _socket: calls.append("filter"))
+    monkeypatch.setattr(module, "load_deployed_filter", lambda networks: module.render_raw_capture_filter(networks))
+    monkeypatch.setattr(module, "attach_frozen_filter", lambda _socket, networks: calls.append("filter"))
     monkeypatch.setattr(module.socket, "AF_PACKET", 17, raising=False)
     raw = module.RawCapture(interface, socket_factory=lambda *args: (calls.append(("socket", args)) or Socket()))
     raw.open()
     assert calls[0] == (
         "socket",
-        (module.socket.AF_PACKET, module.socket.SOCK_RAW, module.socket.htons(0x0003)),
+        (module.socket.AF_PACKET, module.socket.SOCK_RAW, 0),
     )
-    assert ("bind", (interface, 0)) in calls
+    assert ("bind", (interface, 0x0003)) in calls
     assert calls.index("filter") < next(index for index, item in enumerate(calls) if isinstance(item, tuple) and item[0] == "bind")
 
 
@@ -267,3 +268,53 @@ def test_suricata_service_checks_capture_interface_without_mutating_it():
     service = (root / "deploy/device-fingerprint/fingerprint-suricata.service").read_text(encoding="ascii")
     assert "ExecStartPre=/usr/bin/test -e /sys/class/net/enp8s0" in service
     assert "ip link" not in service and "ip addr" not in service
+
+
+@pytest.mark.parametrize("gate", [False, True])
+def test_QIO05_T06_existing_evidence_list_is_durable_before_health_barrier(tmp_path, gate):
+    import sqlite3
+    from tests.device_fingerprint_sensor.test_spool import Clock, _qio05_spool, event
+
+    config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true",
+        "DEVICE_FINGERPRINT_SENSOR_IO_STALE_PURGE_GATE_ENABLED": str(gate).lower()})
+    clock = Clock()
+    spool = _qio05_spool(tmp_path, gate=gate)
+    runtime = SensorRuntime(config, telemetry=SensorTelemetry(Log()), now=clock,
+        monotonic=lambda: 0.0, preflight=Preflight(), capture=Capture(), eve=Eve(),
+        spool=spool, producer=Producer())
+    try:
+        assert runtime._ingress is None and not config.io_ingress_coalesce_enabled
+        assert runtime._attribution is None and runtime.threads == []
+        assert runtime._submit([event(1), event(2)]) == 2
+        with sqlite3.connect(str(spool.path)) as reader:
+            assert reader.execute("SELECT event_id FROM sensor_spool ORDER BY sequence").fetchall() == [(event(1).event_id,), (event(2).event_id,)]
+        health = runtime.health.all("available", None)
+        assert len(health) == 4 and runtime._submit_health(health) == 4
+        with sqlite3.connect(str(spool.path)) as reader:
+            assert reader.execute("SELECT endpoint FROM sensor_spool ORDER BY sequence").fetchall() == [("evidence",)] * 2 + [("source_health",)] * 4
+        trace = []
+        spool.connection.set_trace_callback(trace.append)
+        empty = runtime.health.all("available", None)
+        assert empty == [] and runtime._submit_health(empty) == 0 and trace == []
+        assert runtime.threads == [] and runtime._ingress is None
+    finally:
+        spool.close()
+
+
+def test_QIO05_T06_failed_evidence_submission_has_no_durable_success_or_health(tmp_path):
+    import sqlite3
+    from tests.device_fingerprint_sensor.test_spool import Clock, _qio05_spool, event
+    from app.device_fingerprint_sensor.models import SensorSpoolError
+
+    config = sensor_config_from_env({"DEVICE_FINGERPRINT_SENSOR_ENABLED": "true"})
+    spool = _qio05_spool(tmp_path, gate=False)
+    runtime = SensorRuntime(config, telemetry=SensorTelemetry(Log()), now=Clock(),
+        preflight=Preflight(), capture=Capture(), eve=Eve(), spool=spool, producer=Producer())
+    try:
+        spool.connection.execute("CREATE TRIGGER qio05_abort BEFORE INSERT ON sensor_spool WHEN NEW.event_id='%s' BEGIN SELECT RAISE(ABORT,'synthetic fault'); END" % event(2).event_id)
+        with pytest.raises(SensorSpoolError): runtime._submit([event(1), event(2)])
+        with sqlite3.connect(str(spool.path)) as reader:
+            assert reader.execute("SELECT COUNT(*) FROM sensor_spool").fetchone()[0] == 0
+        assert runtime.state == "initializing" and runtime._ingress is None and runtime.threads == []
+    finally:
+        spool.close()

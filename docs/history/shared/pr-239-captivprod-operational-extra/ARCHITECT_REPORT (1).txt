@@ -1,0 +1,61 @@
+TASK=TASK-CAPTIVPROD-NET01-IMPLEMENTATION-03
+DATE=2026-10-14
+EXECUTOR=Captiv-Prod SysAdmin
+SCOPE=OFFLINE_IMPLEMENTATION_PACKAGE_ONLY
+PART_A_REVISION=2
+PART_A=READY_FOR_INDEPENDENT_REVIEW
+PART_B=NOT_AUTHORIZED
+
+FIREWALL_GUARD_EXACT_MATCH=PASS
+  - First IPv4 INPUT hook normalized EXACT option/value set; no scope narrowing
+  - First IPv6 TCP 18089 REJECT normalized EXACT option/value set
+  - Dedicated IPv4 allow/terminal REJECT checked as exactly two full rules
+  - Unexpected source/dest/interface/inversion/extra matcher => HOLD
+NEGATIVE_GUARD_FIXTURE_TESTS=PASS
+  - positive firewall=1, negative firewall=15
+
+DOCKER_MANIFEST_VS_IMAGE_ID=VERIFIED
+  - local OCI Descriptor.digest, image Id, container .Image and .Config.Image observed separately
+  - observed values coincide on current Docker 29, no equivalence assumption in code
+COMPOSE_IMAGE_REFERENCE=VERIFIED
+  - unchanged pinned registry image@digest from actual production Compose
+  - no Docker pull/recreate during rev2
+
+RUNTIME_DRIFT_DESIGN=PASS_FOR_REVIEW
+DRIFT_RESPONSE=STOP_FLASK/HOLD
+  - watchdog periodic 2 seconds, check timeout 15 seconds, immediate first check
+  - unavailable Docker => HOLD, durable marker and stop only new Flask
+  - systemd watchdog OnFailure => independent failsafe, restart=no for Flask
+  - marker clearance manual after full verification, no automatic restart
+  - detection is NOT instantaneous; privileged tampering remains residual risk
+
+BOOT_ORDER_DESIGN=PASS_FOR_REVIEW
+  - Docker daemon active is insufficient; NPM identity must exist/run
+  - root-owned state dir; firewall guard, then Flask ExecStartPre
+  - delayed NPM => Flask remains stopped; operator-controlled retry only
+NEGATIVE_TEST_COMPATIBILITY=PASS_FOR_REVIEW
+  - NO added Docker container to production NPM network while guard checks membership==1
+  - same-bridge negative source via temporary network namespace/veth after separate GO
+  - unauthorized container on DIFFERENT Docker bridge permitted as separate test
+  - real extra-container-on-same-bridge acceptance remains NOT_TESTED in production
+
+OFFLINE_TESTS=PASS: firewall 1+15; identity 2+8; watchdog 1+4; Bash/Python syntax
+OFFLINE_COMPOSE_VALIDATION=PASS_PREVIOUS_REVISION_UNCHANGED
+OFFLINE_SYSTEMD_UNIT_RUNTIME=NOT_TESTED
+DOCKER_NETWORK_RECREATE_REQUIRED=NO
+NPM_CONTAINER_RECREATE_REQUIRED=LIKELY_AFTER_OWNER_GO
+
+REAL_FIREWALL_ENFORCEMENT=NOT_TESTED
+REAL_WATCHDOG_DRIFT_STOP=NOT_TESTED
+REAL_DOCKER_IDENTITY_AFTER_RECREATE=NOT_TESTED
+NPM_TO_FLASK_CONNECTIVITY=NOT_TESTED
+NON_NPM_ACCESS_DENIED=NOT_TESTED
+PROXY_HEADERS=NOT_TESTED
+ROLLBACK_VERIFIED=NOT_TESTED
+
+OPEN_P0=NONE_IDENTIFIED_IN_OFFLINE_FIXTURES
+OPEN_P1=NONE_IDENTIFIED_IN_STATIC_REV2_TESTS; INDEPENDENT_REVIEW_REQUIRED
+OPEN_GATES=EXPLICIT_OWNER_GO; ACCEPTED_GIT_HOST_PORT_AND_CAPPORT_SITE_FQDN; LIVE_FAIL_CLOSED_TESTS; NPM_RECREATE_WINDOW
+PRODUCTION_MODIFICATIONS=NONE
+OWNER_GO_REQUIRED=YES
+NEXT_ACTION=ARCHITECT_INDEPENDENT_REVIEW_OF_REV2; PART_B_REMAINS_HOLD

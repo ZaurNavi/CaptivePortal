@@ -1,0 +1,177 @@
+diff --git a/tests/device_fingerprint_matrix/__init__.py b/tests/device_fingerprint_matrix/__init__.py
+index 668dd4aa10282164c7f9fcb17ce2d15bd1b23787..74906bc8ebe2080bdb28c66c9da19ab332512daf 100644
+--- a/tests/device_fingerprint_matrix/__init__.py
++++ b/tests/device_fingerprint_matrix/__init__.py
+@@ -265,21 +265,31 @@ def write_matrix(directory: Path, *, devices=None, states=None, samples=None, ev
+ def create_source_database(path: Path, evidence_rows, health_rows=()):
+     connection = sqlite3.connect(path)
+     connection.executescript(SCHEMA_SQL)
++    ingest_sequence = 0
+     for row in evidence_rows:
++        ingest_sequence += 1
+         normalized = row["payload"]
+         payload_json = canonical_json(normalized)
+         connection.execute(
+-            "INSERT INTO device_fingerprint_evidence VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++            """INSERT INTO device_fingerprint_evidence (
++                evidence_id, producer_id, source_event_id, source_kind,
++                source_subtype, extractor_name, extractor_version,
++                feature_schema_version, rule_version, site_id, capture_source_id,
++                observed_at, observed_mac, observed_ip, privacy_class,
++                quality_state, payload_json, payload_sha256, ingested_at,
++                ingest_sequence
++            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             (
+                 row["evidence_id"], row["producer_id"], row["source_event_id"], row["source_kind"],
+                 row["source_subtype"], row["extractor_name"], row["extractor_version"],
+                 row["feature_schema_version"], row["rule_version"], row["site_id"],
+                 row["capture_source_id"], row["observed_at"], row.get("observed_mac", "AA:BB:CC:DD:EE:01"),
+                 row.get("observed_ip", "192.168.8.10"), row["privacy_class"], row["quality_state"],
+-                payload_json, canonical_sha256(payload_json), row["ingested_at"],
++                payload_json, canonical_sha256(payload_json), row["ingested_at"], ingest_sequence,
+             ),
+         )
+     for row in health_rows:
++        ingest_sequence += 1
+         content = canonical_json({
+             "capture_source_id": row["capture_source_id"],
+             "observed_at": row["observed_at"],
+@@ -290,12 +300,23 @@ def create_source_database(path: Path, evidence_rows, health_rows=()):
+             "status": row["status"],
+         })
+         connection.execute(
+-            "INSERT INTO device_fingerprint_source_health_events VALUES (?,?,?,?,?,?,?,?,?,?,?)",
++            """INSERT INTO device_fingerprint_source_health_events (
++                source_health_id, producer_id, source_health_event_id,
++                site_id, capture_source_id, source_kind, status, reason_code,
++                observed_at, content_sha256, ingested_at, ingest_sequence
++            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+             (
+                 row["source_health_id"], row["producer_id"], row["source_health_event_id"],
+                 row["site_id"], row["capture_source_id"], row["source_kind"], row["status"],
+                 row["reason_code"], row["observed_at"], canonical_sha256(content), row["ingested_at"],
++                ingest_sequence,
+             ),
+         )
++    connection.execute(
++        """INSERT INTO device_fingerprint_storage_state (
++            singleton_id, database_generation_id, last_ingest_sequence
++        ) VALUES (?, ?, ?)""",
++        (1, uid(701), ingest_sequence),
++    )
+     connection.commit()
+     connection.close()
+diff --git a/tests/device_fingerprint_matrix/test_exporter.py b/tests/device_fingerprint_matrix/test_exporter.py
+index fec046856c0e9d4909b1b54def3a48f6363c4511..28bf5bd132e3fbdfef858f48907a766bd50c1128 100644
+--- a/tests/device_fingerprint_matrix/test_exporter.py
++++ b/tests/device_fingerprint_matrix/test_exporter.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+ 
+ import hashlib
++import sqlite3
++import uuid
+ from pathlib import Path
+ 
+ import pytest
+@@ -63,6 +65,41 @@ def _export(tmp_path, *, evidence_rows=None, health_rows=None, samples=None, bin
+     return database, output, result
+ 
+ 
++def test_synthetic_v2_database_has_shared_deterministic_watermark_and_generation(tmp_path):
++    database = tmp_path / "mixed.sqlite3"
++    create_source_database(
++        database,
++        [sealed_evidence(identity=501), sealed_evidence(identity=502)],
++        [source_health(identity=601), source_health(identity=602)],
++    )
++    with sqlite3.connect(database) as connection:
++        evidence_sequences = [row[0] for row in connection.execute(
++            "SELECT ingest_sequence FROM device_fingerprint_evidence ORDER BY ingest_sequence"
++        )]
++        health_sequences = [row[0] for row in connection.execute(
++            "SELECT ingest_sequence FROM device_fingerprint_source_health_events ORDER BY ingest_sequence"
++        )]
++        generation, watermark = connection.execute(
++            "SELECT database_generation_id, last_ingest_sequence "
++            "FROM device_fingerprint_storage_state WHERE singleton_id=1"
++        ).fetchone()
++    assert evidence_sequences == [1, 2]
++    assert health_sequences == [3, 4]
++    assert len(set(evidence_sequences + health_sequences)) == 4
++    assert uuid.UUID(generation).version == 4
++    assert watermark == 4
++
++    empty = tmp_path / "empty.sqlite3"
++    create_source_database(empty, [], [])
++    with sqlite3.connect(empty) as connection:
++        empty_generation, empty_watermark = connection.execute(
++            "SELECT database_generation_id, last_ingest_sequence "
++            "FROM device_fingerprint_storage_state WHERE singleton_id=1"
++        ).fetchone()
++    assert empty_generation == generation
++    assert empty_watermark == 0
++
++
+ def test_staging_requires_exact_relationships_and_private_binding(tmp_path):
+     staging = tmp_path / "staging"
+     write_staging(staging)
+diff --git a/tests/device_fingerprint_matrix/test_privacy.py b/tests/device_fingerprint_matrix/test_privacy.py
+index 828562b11a36c890f80f95944b43d5da0ed828f6..9fb317713fe4a55d94ac3e9da1932c3baf24dde7 100644
+--- a/tests/device_fingerprint_matrix/test_privacy.py
++++ b/tests/device_fingerprint_matrix/test_privacy.py
+@@ -105,17 +105,51 @@ def test_research_namespace_is_not_imported_by_production_runtime():
+ 
+ def test_repository_contains_no_collected_matrix_artifact():
+     repository = Path(__file__).resolve().parents[2]
++    assert _forbidden_repository_artifacts(repository) == []
++
++
++_APPROVED_NON_MATRIX_JSONL = frozenset({
++    "research/device_fingerprint_k2a/evidence/conformance_manifest.jsonl",
++})
++
++
++def _forbidden_repository_artifacts(repository: Path) -> list[str]:
+     forbidden = []
+     for root_name in ("research", "docs"):
+         forbidden.extend(
+-            str(path.relative_to(repository))
++            path.relative_to(repository).as_posix()
+             for path in (repository / root_name).rglob("*.jsonl")
++            if path.relative_to(repository).as_posix() not in _APPROVED_NON_MATRIX_JSONL
+         )
+         forbidden.extend(
+-            str(path.relative_to(repository))
++            path.relative_to(repository).as_posix()
+             for path in (repository / root_name).rglob("checksums.sha256")
+         )
+-    assert forbidden == []
++    return sorted(forbidden)
++
++
++def test_only_exact_k2a_manifest_is_exempt_from_matrix_artifact_policy(tmp_path):
++    approved = tmp_path / "research/device_fingerprint_k2a/evidence/conformance_manifest.jsonl"
++    approved.parent.mkdir(parents=True)
++    approved.write_text("{}\n", encoding="utf-8")
++    assert _forbidden_repository_artifacts(tmp_path) == []
++
++    other_k2a = approved.with_name("other.jsonl")
++    other_k2a.write_text("{}\n", encoding="utf-8")
++    research_other = tmp_path / "research/other/collected.jsonl"
++    research_other.parent.mkdir()
++    research_other.write_text("{}\n", encoding="utf-8")
++    docs_other = tmp_path / "docs/collected.jsonl"
++    docs_other.parent.mkdir()
++    docs_other.write_text("{}\n", encoding="utf-8")
++    checksum = approved.with_name("checksums.sha256")
++    checksum.write_text("hash\n", encoding="utf-8")
++    assert _forbidden_repository_artifacts(tmp_path) == [
++        "docs/collected.jsonl",
++        "research/device_fingerprint_k2a/evidence/checksums.sha256",
++        "research/device_fingerprint_k2a/evidence/other.jsonl",
++        "research/other/collected.jsonl",
++    ]
+ 
+ 
+ def test_validator_output_contains_no_classifier_or_training_contract(tmp_path):

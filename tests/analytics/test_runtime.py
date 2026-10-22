@@ -10,7 +10,6 @@ import run as process_runtime
 from app.analytics.runtime import create_analytics_runtime as _create_analytics_runtime
 from app.settings_control.features import AdminFeaturePlanV1
 from app.settings_control.models import ResolvedSettingsSnapshot
-from app.visit_lifecycle.models import SCHEMA_VERSION as VISIT_SCHEMA_VERSION
 
 
 def create_analytics_runtime(settings, *args, **kwargs):
@@ -84,7 +83,7 @@ def test_active_runtime_reuses_existing_read_boundaries(analytics_stack):
     assert {
         name: item.actual_schema_version
         for name, item in runtime.source_health.items()
-    } == {"observations": 1, "visits": VISIT_SCHEMA_VERSION, "registry": 1}
+    } == {"observations": 1, "visits": 2, "registry": 1}
     assert tuple(thread.ident for thread in threading.enumerate()) == threads_before
 
 
